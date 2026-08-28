@@ -140,7 +140,14 @@ jobs:
           fi
 
       - name: Install build + release tools
-        run: uv tool install python-semantic-release && uv tool install twine
+        # Pinned: python-semantic-release declares gitpython~=3.0, so an
+        # unpinned install can resolve GitPython 3.1.60+, which removed
+        # git.Actor.name_email_regex and breaks semantic-release's `version`
+        # command outright ("type object 'Actor' has no attribute
+        # 'name_email_regex'"). Pin both explicitly until upstream adapts.
+        run: |
+          uv tool install python-semantic-release==10.6.1 --with gitpython==3.1.59
+          uv tool install twine
 
       - name: Run semantic-release (bump + tag, no push yet)
         id: release
@@ -157,7 +164,7 @@ jobs:
           # version to pyproject.toml + __init__.py, tags it, and regenerates the
           # changelog, but does not push yet (--no-push) so we can regenerate
           # uv.lock and amend before sending.
-          PSR="uv tool run --from python-semantic-release semantic-release"
+          PSR="uv tool run --from python-semantic-release==10.6.1 --with gitpython==3.1.59 semantic-release"
           $PSR version "--$BUMP" --no-vcs-release --no-push --changelog
           # A dispatch always cuts a release; report the just-published version.
           echo "version=$($PSR version --print)" >> "$GITHUB_OUTPUT"
@@ -383,7 +390,7 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # v1.13.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           # Trusted Publisher is configured on pypi.org for this repo +
           # workflow (release.yml) + environment (pypi); no password needed.
@@ -447,7 +454,16 @@ jobs:
               sys.exit(0)
 
           remote = {u["filename"]: (u.get("digests") or {}).get("sha256") for u in payload.get("urls") or []}
-          local = sorted(p for p in pathlib.Path("dist").iterdir() if p.is_file())
+          # gh-action-pypi-publish v1.14+ writes `<dist>.publish.attestation`
+          # sidecars into packages-dir before upload. PyPI serves attestations
+          # via the integrity API, never as distribution files, so the sidecars
+          # must not enter the set-equality comparison below -- with them, this
+          # assert fails on every release even when the publish is complete and
+          # attested (observed on the v0.10.1 run).
+          local = sorted(
+              p for p in pathlib.Path("dist").iterdir()
+              if p.is_file() and not p.name.endswith(".publish.attestation")
+          )
           if not local:
               print("::error::no files in dist/ to compare -- the download-artifact step produced nothing")
               sys.exit(1)

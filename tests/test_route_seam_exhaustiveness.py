@@ -29,8 +29,8 @@ from coder_eval.orchestrator import Orchestrator, _format_routing
 # forces this dict to grow whenever the union does.
 _INSTANCES: list[object] = [
     DirectRoute(),
-    BedrockRoute(bearer_token="t", region="eu-north-1", model="x"),
-    LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="m"),
+    BedrockRoute(region="eu-north-1", model="x"),
+    LiteLLMRoute(model="m"),
 ]
 
 
@@ -69,13 +69,17 @@ async def test_invoke_tool_channel_handles_every_route(monkeypatch):
     async def _stub_anthropic(**_: object) -> dict[str, object]:
         return {}
 
+    async def _stub_litellm(**_: object) -> dict[str, object]:
+        return {}
+
     monkeypatch.setattr(llm_judge, "invoke_bedrock_judge_async", _stub_bedrock)
     monkeypatch.setattr(llm_judge, "invoke_anthropic_judge_async", _stub_anthropic)
+    monkeypatch.setattr(llm_judge, "invoke_litellm_judge_async", _stub_litellm)
     monkeypatch.setattr(llm_judge, "extract_verdict_from_anthropic_response", lambda _resp: (None, "stub"))
     monkeypatch.setattr(llm_judge, "token_usage_from_anthropic_dict", lambda _resp, **_kwargs: None)
     criterion = MagicMock()
     for r in _INSTANCES:
-        result = await _invoke_tool_channel(criterion=criterion, route=r, system_msg="s", user_msg="u")  # type: ignore[arg-type]
+        result = await _invoke_tool_channel(criterion=criterion, model="m", route=r, system_msg="s", user_msg="u")  # type: ignore[arg-type]
         # (verdict, parse_error, raw_text, response_usage) — a 4-tuple means the
         # route matched an explicit arm rather than falling through.
         assert isinstance(result, tuple) and len(result) == 4

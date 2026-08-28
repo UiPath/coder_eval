@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import itertools
 from abc import ABC, abstractmethod
+from pathlib import PurePosixPath
 from typing import Annotated, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.enums import AgentKind
@@ -128,6 +130,9 @@ class BaseSuccessCriterion(BaseModel, ABC):
 
     requires_agent: ClassVar[bool] = False
     """True if this criterion requires agent turn records to evaluate correctly."""
+
+    supports_post_failure_evaluation: ClassVar[bool] = False
+    """True for deterministic, read-only artifact checks safe to run after agent failure."""
 
     @property
     def is_stop_armed(self) -> bool:
@@ -320,6 +325,7 @@ class FileExistsCriterion(BaseSuccessCriterion):
     Pure data model - checking logic in SuccessChecker._check_file_exists()
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_exists"] = "file_exists"
     path: str = Field(
         description="Path to the file that must exist; a glob pattern passes when it matches at least one file"
@@ -332,6 +338,7 @@ class FileContainsCriterion(BaseSuccessCriterion):
     Pure data model - checking logic in SuccessChecker._check_file_contains()
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_contains"] = "file_contains"
     path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     includes: list[str] = Field(description="List of strings that must be present in the file")
@@ -405,6 +412,7 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     Pure data model - checking logic in SuccessChecker._check_file_matches_regex()
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_matches_regex"] = "file_matches_regex"
     path: str = Field(description="Path to the file to check; may be a glob matching exactly one file")
     pattern: str = Field(description="Regex pattern that must match somewhere in the file")
@@ -578,11 +586,23 @@ class CliCalledCriterion(BaseSuccessCriterion):
     )
     verb: str | None = Field(
         default=None,
-        min_length=1,
         description=(
             "Whitespace-separated subcommand chain that must be an ORDERED PREFIX of the invocation's "
-            "non-flag arguments. Order matters, so 'labellings confirm' never matches "
-            "'labellings unconfirm'"
+            "non-flag arguments, compared token by token (so 'projects list' never matches "
+            "'projects lists'). Order matters, so 'labellings confirm' never matches "
+            "'labellings unconfirm'. Prefer the full verb over a short one: the tokens after it are "
+            "unconstrained, which is safe for a max_count 0 guard (it fires on more) but NOT for a "
+            "positive assertion, where 'projects' credits 'projects delete' as readily as "
+            "'projects get'. When one operation has several spellings, use verb_any_of"
+        ),
+    )
+    verb_any_of: list[str] | None = Field(
+        default=None,
+        description=(
+            "Alternative whole verbs; matches if ANY of them does, e.g. ['projects list', "
+            "'projects get']. Each entry is a complete verb in the same form `verb` takes, NOT one "
+            "token of a chain — a chain belongs in `verb` as a single string. Mutually exclusive "
+            "with `verb`"
         ),
     )
     tool: str | None = Field(
@@ -591,7 +611,12 @@ class CliCalledCriterion(BaseSuccessCriterion):
     )
     positional: list[str] | None = Field(
         default=None,
-        description="Non-flag arguments that must follow the verb, in order",
+        description=(
+            "Non-flag arguments that must follow the verb, in order. A PREFIX of what followed, so "
+            "anything past them is unconstrained: ['proj-1'] also matches 'get proj-1 dummy'. To "
+            "require a specific tail, name every argument in it. Depends on value_flags being "
+            "complete — an undeclared flag's value stays non-flag and shifts these slots"
+        ),
     )
     flags: dict[str, FlagMatch] | None = Field(
         default=None,
@@ -632,6 +657,49 @@ class CliCalledCriterion(BaseSuccessCriterion):
         ),
     )
 
+    @property
+    def verb_spellings(self) -> list[list[str]]:
+        """Each accepted verb as its token list; empty when there is no verb constraint.
+
+        The only place either verb field is split, so the validators, the matcher and
+        the failure detail cannot disagree.
+        """
+        if self.verb is not None:
+            return [self.verb.split()]
+        if self.verb_any_of is not None:
+            return [spelling.split() for spelling in self.verb_any_of]
+        return []
+
+    @model_validator(mode="after")
+    def _validate_verb(self) -> CliCalledCriterion:
+        """Verb rules, kept off _validate_bounds so neither grows unreadable."""
+        if self.verb is not None and self.verb_any_of is not None:
+            msg = "cli_called accepts verb or verb_any_of, not both"
+            raise ValueError(msg)
+        # Falsy, so the at-least-one-facet check below would read it as "no verb".
+        if self.verb_any_of is not None and not self.verb_any_of:
+            msg = "cli_called verb_any_of must not be empty: drop the field to match any verb"
+            raise ValueError(msg)
+        # A character count would pass "   ", whose split() is an empty prefix.
+        if any(not tokens for tokens in self.verb_spellings):
+            msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
+            raise ValueError(msg)
+        for first, second in itertools.combinations(self.verb_spellings, 2):
+            if first == second:
+                msg = f"cli_called verb_any_of lists {' '.join(first)!r} twice"
+                raise ValueError(msg)
+            # Sorting by length is total here: two DISTINCT entries of equal length
+            # cannot prefix each other, since an equal-length prefix is the same list.
+            shorter, longer = sorted((first, second), key=len)
+            if longer[: len(shorter)] == shorter:
+                msg = (
+                    f"cli_called verb_any_of entry {' '.join(shorter)!r} is a prefix of "
+                    f"{' '.join(longer)!r}; the shorter one already accepts every invocation the "
+                    "longer one does, so drop the longer entry or list only the verbs you mean."
+                )
+                raise ValueError(msg)
+        return self
+
     @model_validator(mode="after")
     def _validate_bounds(self) -> CliCalledCriterion:
         # min_count 0 with no upper bound is satisfied by every possible log, so
@@ -645,15 +713,18 @@ class CliCalledCriterion(BaseSuccessCriterion):
         if self.max_count is not None and self.max_count < self.min_count:
             msg = f"max_count ({self.max_count}) must be >= min_count ({self.min_count})"
             raise ValueError(msg)
-        # min_length=1 counts characters, so "   " passes it — and `"   ".split()`
-        # is `[]`, an empty prefix that matches every record.
-        if self.verb is not None and not self.verb.strip():
-            msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
+        # Matching slices an empty expectation and compares it to itself, so this reads
+        # as "took no arguments" while asserting nothing.
+        if self.positional is not None and not self.positional:
+            msg = (
+                "cli_called positional must not be empty: an empty list asserts nothing. List the "
+                "arguments you expect, or drop the field."
+            )
             raise ValueError(msg)
-        # Falsiness-symmetric on purpose: `verb: ""` used to slip past an `is None`
-        # check here and then match EVERY record (empty prefix), silently scoring 1.0.
-        if not self.verb and not self.positional and not self.flags and not self.tool:
-            msg = "cli_called requires at least one of verb / positional / flags / tool to match on"
+        # Falsiness, not `is None`: `verb: ""` slipped past an `is None` check here and
+        # then matched every record, scoring 1.0.
+        if not self.verb and not self.verb_any_of and not self.positional and not self.flags and not self.tool:
+            msg = "cli_called requires at least one of verb / verb_any_of / positional / flags / tool to match on"
             raise ValueError(msg)
         # A predicate on an ignored flag can never be evaluated: ignore_flags drops
         # the flag before any predicate runs, so `absent` would pass vacuously and
@@ -778,6 +849,7 @@ class JsonCheckCriterion(BaseSuccessCriterion):
     Only active categories (schema, assertions) contribute to the average.
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["json_check"] = "json_check"
     path: str = Field(
         description="Path to the JSON file (relative to sandbox root); may be a glob matching exactly one file"
@@ -815,6 +887,7 @@ class FileCheckCriterion(BaseSuccessCriterion):
             description: "main.py exists with correct imports and structure"
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["file_check"] = "file_check"
     path: str = Field(
         description="Path to the file to check (relative to sandbox root); may be a glob matching exactly one file"
@@ -827,18 +900,20 @@ class FileCheckCriterion(BaseSuccessCriterion):
 
 
 class ReferenceComparisonCriterion(BaseSuccessCriterion):
-    """Compare agent code against reference solution.
+    """Compare agent code against one file of the reference solution.
 
-    Uses the top-level `reference` block from TaskDefinition.
-    The reference code is loaded by the orchestrator and passed to the success checker.
+    Requires the top-level `reference` block on TaskDefinition. `reference_file`
+    names the file to compare against *inside* `reference.directory` — the same
+    place judges address as `$REFERENCE_DIR/<path>`.
 
-    Pure data model - checking logic in SuccessChecker._check_reference_comparison()
+    Pure data model - checking logic in ReferenceComparisonChecker.
 
     Example YAML:
         success_criteria:
           - type: "reference_comparison"
             description: "Code structure matches reference"
             agent_file: "solution.py"
+            reference_file: "solution.py"
             comparison_method: "ast"
             similarity_threshold: 0.8
             weight: 1.0
@@ -846,6 +921,7 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     """
 
     requires_agent: ClassVar[bool] = True
+    supports_post_failure_evaluation: ClassVar[bool] = True
 
     type: Literal["reference_comparison"] = "reference_comparison"
 
@@ -853,6 +929,36 @@ class ReferenceComparisonCriterion(BaseSuccessCriterion):
     agent_file: str = Field(
         description="Path to agent's generated file (relative to sandbox root); may be a glob matching exactly one file"
     )
+
+    reference_file: str = Field(
+        description=(
+            "Path to the reference file to compare against, relative to the task's "
+            "reference.directory (i.e. $REFERENCE_DIR/<this path>). Must stay inside "
+            "that directory."
+        )
+    )
+
+    @field_validator("reference_file")
+    @classmethod
+    def _confined_reference_file(cls, v: str) -> str:
+        """Enforce the "must stay inside that directory" contract at LOAD time.
+
+        Mirrors ``ReferenceSource._non_empty_directory`` on the sibling field.
+        Left to check time, an empty/absolute/``..`` value surfaced as a config
+        error dressed up as an agent failure — the checker raises
+        ``CheckerMisuseError`` for that now, but a schema error at load is
+        earlier still and costs no tokens.
+        """
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("reference_comparison.reference_file must be a non-empty path.")
+        candidate = PurePosixPath(cleaned.replace("\\", "/"))
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(
+                "reference_comparison.reference_file must be RELATIVE to the task's reference.directory "
+                + f"and must not escape it (no leading '/', no '..' component); got {v!r}."
+            )
+        return cleaned
 
     comparison_method: Literal["ast", "token", "complexity"] = Field(
         default="ast",
@@ -1043,6 +1149,7 @@ class ClassificationMatchCriterion(BaseSuccessCriterion):
             description: "Sentiment label matches ground truth"
     """
 
+    supports_post_failure_evaluation: ClassVar[bool] = True
     type: Literal["classification_match"] = "classification_match"
     path: str = Field(
         description=(
@@ -1169,7 +1276,7 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
         default_factory=list,
         description=(
             "Paths whose contents are shown to the judge. Plain entries are sandbox-relative; "
-            "entries prefixed with '$TASK_DIR/' are read from the host filesystem relative to "
+            "entries prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host filesystem relative to "
             "the task YAML's parent directory (useful for shared rubrics outside the sandbox). "
             "Missing files are rendered as '<file not found>' so the rubric can penalize them."
         ),
@@ -1177,10 +1284,11 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     include_reference: bool = Field(
         default=True,
         description=(
-            "When true (default) and task.reference is set, include the reference solution in "
-            "the judge prompt. Silently omitted if no reference is configured. Never shown to "
-            "the agent. Set to false if you want the reference to drive a non-judge consumer "
-            "(e.g. ``reference_comparison``) without showing it to the LLM grader."
+            "When true (default) and task.reference is set, inline the WHOLE reference "
+            "directory into the judge prompt (one labelled block per file). Silently omitted "
+            "if no reference is configured. Never shown to the agent. Set to false to attach "
+            "only specific assets via ``$REFERENCE_DIR/<path>`` entries in ``files``, or to "
+            "let the reference drive ``reference_comparison`` without showing it to the grader."
         ),
     )
     include_agent_output: bool = Field(
@@ -1219,10 +1327,13 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
             "aggregate budget is exceeded (a degraded note is recorded)."
         ),
     )
-    model: str = Field(
-        default=DEFAULT_JUDGE_MODEL,
+    model: str | None = Field(
+        default=None,
         description=(
-            "Judge model id (e.g. 'anthropic.claude-sonnet-4-6'). "
+            "Judge model id (e.g. 'anthropic.claude-sonnet-4-6'). Leave unset to fall back to "
+            "checker_context.api_route.model when set, else the built-in default "
+            f"({DEFAULT_JUDGE_MODEL!r}) — the fallback is never the agent's own model, so an "
+            "unpinned judge grades identically across agent-model A/Bs. "
             "On a BedrockRoute / DirectRoute the value is auto-translated: "
             "trailing '-vN[:M]' suffixes and the 'anthropic.' prefix are stripped where "
             "the backend doesn't accept them; on Bedrock the cross-region inference-profile "
@@ -1336,7 +1447,7 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         default_factory=list,
         description=(
             "Paths whose contents are pre-attached to the judge prompt. Plain entries are "
-            "sandbox-relative; entries prefixed with '$TASK_DIR/' are read from the host "
+            "sandbox-relative; entries prefixed with '$TASK_DIR/' or '$REFERENCE_DIR/' are read from the host "
             "filesystem relative to the task YAML's parent directory (useful for shared rubrics "
             "outside the sandbox). Missing files are rendered as '<file not found>' so the "
             "rubric can penalize them. Empty by default — without entries, the judge inspects "
@@ -1346,12 +1457,12 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     include_reference: bool = Field(
         default=True,
         description=(
-            "When true (default) and task.reference is set, mount the reference for the judge. "
-            "For ``code`` / ``file`` references, the content is inlined into the prompt. For "
-            "``directory`` references, the tree is copied into ``_reference/`` in the judge's "
-            "working dir for Read/Glob browsing. Silently omitted if no reference is configured. "
-            "Set to false if a reference is configured for ``reference_comparison`` only and "
-            "should NOT be visible to the LLM grader."
+            "When true (default) and task.reference is set, copy the reference tree into "
+            "``_reference/`` in the judge's working dir for Read/Glob browsing. It is MOUNTED, "
+            "not inlined into the prompt — use ``$REFERENCE_DIR/<path>`` entries in ``files`` "
+            "to pre-attach specific assets as text. Silently omitted if no reference is "
+            "configured. Set to false if a reference is configured for ``reference_comparison`` "
+            "only and should NOT be visible to the judge."
         ),
     )
     include_agent_output: bool = Field(

@@ -22,6 +22,10 @@ def _make_task(criteria: list[dict]) -> TaskDefinition:
             "description": "d",
             "initial_prompt": "do the thing",
             "success_criteria": criteria,
+            # Always present so the reference-consuming variants (reference_comparison,
+            # anything using $REFERENCE_DIR) satisfy TaskDefinition's load-time check.
+            # Harmless for the other variants — nothing resolves the path here.
+            "reference": {"directory": "reference/"},
         }
     )
 
@@ -35,7 +39,7 @@ MINIMAL_PAYLOADS: dict[str, dict] = {
     "file_matches_regex": {"description": "d", "path": "f.txt", "pattern": "x"},
     "file_check": {"description": "d", "path": "f.txt"},
     "json_check": {"description": "d", "path": "f.json"},
-    "reference_comparison": {"description": "d", "agent_file": "f.py"},
+    "reference_comparison": {"description": "d", "agent_file": "f.py", "reference_file": "f.py"},
     "command_executed": {"description": "d"},
     "cli_called": {"description": "d", "log": "calls.jsonl", "verb": "ixp projects get"},
     "commands_efficiency": {"description": "d", "expected_commands": 3},

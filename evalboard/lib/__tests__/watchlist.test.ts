@@ -15,6 +15,7 @@ function task(overrides: Partial<RunOverviewTask>): RunOverviewTask {
         actualCommands: null,
         totalTurns: null,
         expectedTurns: null,
+        expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
         ...overrides,
@@ -210,6 +211,72 @@ describe("turn overage", () => {
     });
 });
 
+describe("time overage", () => {
+    test("ranks skills whose passing tasks run past their expected time", () => {
+        const data = buildWatchlist([
+            perRun("2026-01-01", [
+                task({
+                    taskId: "a",
+                    skill: "slow",
+                    status: "SUCCESS",
+                    durationSeconds: 180,
+                    expectedSeconds: 120,
+                }),
+                task({
+                    taskId: "b",
+                    skill: "ok",
+                    status: "SUCCESS",
+                    durationSeconds: 60,
+                    expectedSeconds: 120,
+                }),
+            ]),
+        ]);
+        expect(data.timeOverage).toEqual([
+            {
+                skill: "slow",
+                avgTimeRatio: 1.5,
+                avgSeconds: 180,
+                avgExpectedSeconds: 120,
+            },
+        ]);
+    });
+
+    test("an unscored task contributes nothing", () => {
+        const data = buildWatchlist([
+            perRun("2026-01-01", [
+                task({
+                    taskId: "a",
+                    skill: "unscored",
+                    status: "SUCCESS",
+                    durationSeconds: 999,
+                    expectedSeconds: null,
+                }),
+            ]),
+        ]);
+        expect(data.timeOverage).toEqual([]);
+    });
+
+    test("time overage stays out of the attention score", () => {
+        // The 50/30/20 fail/regression/turn split is unchanged while both
+        // efficiency signals run, so a slow-but-passing skill with no turn
+        // budget scores 0 and never reaches the attention list.
+        const runs = Array.from({ length: 2 }, (_, i) =>
+            perRun(`2026-01-0${2 - i}`, [
+                task({
+                    taskId: "a",
+                    skill: "slow",
+                    status: "SUCCESS",
+                    durationSeconds: 240,
+                    expectedSeconds: 120,
+                }),
+            ]),
+        );
+        const data = buildWatchlist(runs);
+        expect(data.topAttention).toEqual([]);
+        expect(data.timeOverage[0].avgTimeRatio).toBe(2);
+    });
+});
+
 describe("empty window", () => {
     test("no runs -> every panel empty, no throw", () => {
         const data = buildWatchlist([]);
@@ -221,6 +288,7 @@ describe("empty window", () => {
             streaks: [],
             volatility: [],
             turnOverage: [],
+            timeOverage: [],
         });
     });
 

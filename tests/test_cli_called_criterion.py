@@ -738,6 +738,214 @@ class TestModelValidation:
         with pytest.raises(ValidationError, match="at least one of"):
             CliCalledCriterion(description="d", log=LOG)
 
+    def test_empty_positional_rejected(self):
+        """Reads as "took no arguments" while asserting nothing — a silent no-op."""
+        with pytest.raises(ValidationError, match="positional must not be empty"):
+            CliCalledCriterion(description="d", log=LOG, verb="ixp projects list", positional=[])
+
+    def test_an_undeclared_value_flag_before_a_positional_shifts_it(self, sandbox_with_log):
+        """`positional` depends on `value_flags` being complete, ordering-sensitively.
+
+        An undeclared flag is a switch, so its value stays non-flag and takes the slot
+        the criterion named. Deliberate — guessing let `--yes proj-1` swallow the project
+        and pass a delete guard — but it costs a correct run when the flag comes first.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(
+            sandbox_dir,
+            [_call(["ixp", "projects", "get", "--folder", "Finance", "proj-1"])],
+        )
+        undeclared = CliCalledCriterion(
+            description="read the project", log=LOG, verb="ixp projects get", positional=["proj-1"]
+        )
+        declared = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb="ixp projects get",
+            positional=["proj-1"],
+            value_flags=["output", "folder"],
+        )
+        checker = SuccessChecker(sandbox)
+        assert checker.check(undeclared).score == 0.0
+        assert checker.check(declared).score == 1.0
+
     def test_unknown_field_rejected(self):
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             CliCalledCriterion(description="d", log=LOG, verb="v", pattern="oops")
+
+
+class TestVerbAlternation:
+    """A verb the tool spells several ways, e.g. the old regex's `(list|get)`.
+
+    The alternative was truncating to the common prefix, which on a positive assertion
+    credits `projects delete` as readily as `projects get`.
+    """
+
+    @pytest.mark.parametrize("subcommand", ["list", "get"])
+    def test_any_listed_spelling_matches(self, sandbox_with_log, subcommand):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", subcommand, "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb_any_of=["ixp projects list", "ixp projects get"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_an_unlisted_sibling_does_not_match(self, sandbox_with_log):
+        """The point of the feature: `delete` is not silently admitted."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb_any_of=["ixp projects list", "ixp projects get"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    def test_spelling_is_compared_token_by_token(self, sandbox_with_log):
+        """Prefix is over TOKENS, not a string startswith, so `lists` shares none."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(
+            sandbox_dir,
+            [
+                _call(["ixp", "projects", "lists"]),
+                _call(["ixp", "projects", "list-models"]),
+            ],
+        )
+        criterion = CliCalledCriterion(description="listed", log=LOG, verb_any_of=["ixp projects list"])
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    @pytest.mark.parametrize("subcommand", ["publish", "unpublish"])
+    def test_negative_guard_fires_on_every_listed_spelling(self, sandbox_with_log, subcommand):
+        """The inverse: widening only the positive path would leave a guard silently dead."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", subcommand, "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="did not change published state",
+            log=LOG,
+            verb_any_of=["ixp projects publish", "ixp projects unpublish"],
+            min_count=0,
+            max_count=0,
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["ixp", "projects", "get", "proj-1"],
+            ["ixp", "get", "proj-1"],
+        ],
+        ids=["three-token-spelling", "two-token-spelling"],
+    )
+    def test_positional_offset_follows_the_matched_spelling(self, sandbox_with_log, argv):
+        """Spellings of DIFFERING length each measure `positional` from their own end.
+
+        Equal-length spellings would not discriminate the branch: `len(matched)` would
+        equal `len(spellings[0])` and a wrong derivation still pass.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(argv)])
+        criterion = CliCalledCriterion(
+            description="read the right project",
+            log=LOG,
+            verb_any_of=["ixp projects get", "ixp get"],
+            positional=["proj-1"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_wrong_positional_still_fails_under_the_shorter_spelling(self, sandbox_with_log):
+        """The inverse of the above: the offset must not be so large it skips the check."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "get", "proj-2"])])
+        criterion = CliCalledCriterion(
+            description="read the right project",
+            log=LOG,
+            verb_any_of=["ixp projects get", "ixp get"],
+            positional=["proj-1"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+    def test_score_is_independent_of_spelling_order(self, sandbox_with_log):
+        """The prefix-collision validator's reason for existing, made executable."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "get", "proj-1"])])
+        forward = CliCalledCriterion(
+            description="d", log=LOG, verb_any_of=["ixp projects get", "ixp get"], positional=["proj-1"]
+        )
+        reversed_ = CliCalledCriterion(
+            description="d", log=LOG, verb_any_of=["ixp get", "ixp projects get"], positional=["proj-1"]
+        )
+        checker = SuccessChecker(sandbox)
+        assert checker.check(forward).score == checker.check(reversed_).score == 1.0
+
+    def test_trailing_arguments_stay_unconstrained(self, sandbox_with_log):
+        """`positional` is a prefix under alternation too — a stated property, not an accident."""
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "get", "proj-1", "stray"])])
+        criterion = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb_any_of=["ixp projects get", "ixp get"],
+            positional=["proj-1"],
+        )
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_failure_detail_renders_the_alternatives(self, sandbox_with_log):
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(
+            description="read the project",
+            log=LOG,
+            verb_any_of=["ixp projects list", "ixp projects get"],
+        )
+        result = SuccessChecker(sandbox).check(criterion)
+        assert "ixp projects list | ixp projects get" in (result.details or "")
+
+    @pytest.mark.parametrize("verb", ["ixp projects get", "ixp  projects   get"])
+    def test_detail_renders_the_verb_normalized(self, sandbox_with_log, verb):
+        """Rendering round-trips through split()/join(), so whitespace normalizes.
+
+        Deliberate, but it changed the detail text for every existing single-verb config.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "projects", "delete", "proj-1"])])
+        criterion = CliCalledCriterion(description="read", log=LOG, verb=verb)
+        result = SuccessChecker(sandbox).check(criterion)
+        assert "verb='ixp projects get'" in (result.details or "")
+
+
+class TestVerbAlternationValidation:
+    def test_a_token_chain_in_verb_is_a_type_error(self):
+        """Why alternation is its own key rather than a list arm on `verb`.
+
+        As an alternation, the mistyped chain's bare `ixp` entry is a one-token prefix
+        matching every uip call — it scored 1.0 on `ixp projects delete`. Indistinguishable
+        from a legitimate `["list", "ls"]`, so the schema forbids the shape.
+        """
+        with pytest.raises(ValidationError, match="Input should be a valid string"):
+            CliCalledCriterion(description="d", log=LOG, verb=["ixp", "projects", "list"])
+
+    def test_verb_and_verb_any_of_together_rejected(self):
+        with pytest.raises(ValidationError, match="not both"):
+            CliCalledCriterion(description="d", log=LOG, verb="ixp projects get", verb_any_of=["ixp projects list"])
+
+    def test_empty_list_rejected(self):
+        """`verb_any_of: []` is falsy, so it would slip past the at-least-one-facet check."""
+        with pytest.raises(ValidationError, match="must not be empty"):
+            CliCalledCriterion(description="d", log=LOG, verb_any_of=[], positional=["proj-1"])
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_entry_rejected(self, blank):
+        with pytest.raises(ValidationError, match="must not be blank"):
+            CliCalledCriterion(description="d", log=LOG, verb_any_of=["ixp projects get", blank])
+
+    def test_spelling_that_is_a_prefix_of_another_rejected(self):
+        """The shorter entry already accepts everything the longer one does."""
+        with pytest.raises(ValidationError, match="is a prefix of"):
+            CliCalledCriterion(description="d", log=LOG, verb_any_of=["ixp projects", "ixp projects list"])
+
+    def test_duplicate_spellings_get_their_own_message(self):
+        """ "'a b' is a prefix of 'a b'" read as a validator bug, not a duplicate."""
+        with pytest.raises(ValidationError, match="lists 'ixp projects get' twice"):
+            CliCalledCriterion(description="d", log=LOG, verb_any_of=["ixp projects get", "ixp projects get"])

@@ -38,6 +38,15 @@ plugin-reference:  ## Regenerate the plugin's bundled criteria reference from th
 
 typecheck:  ## Run type checking with pyright
 	uv run pyright
+	# The CE036 contract engine executes checker code and feeds the early-stop
+	# design; it is the one tests/ surface worth type-checking. It needs its own
+	# config: pyproject.toml excludes "tests", and pyright's `exclude` beats BOTH
+	# an explicitly-passed CLI file arg AND an `include` entry naming the file --
+	# either shortcut analyzes ZERO files and exits 0, a gate that checks nothing.
+	# The config below is DERIVED from [tool.pyright] (same rules, only
+	# include/exclude swapped), so the two passes cannot drift apart.
+	uv run python -m tests.lint.pyright_config .pyright-tests.json
+	uv run pyright -p .pyright-tests.json
 
 test:  ## Run test suite (excludes live + lint tests; run `make lint` for those)
 	uv run pytest -n auto -m "not live and not lint" tests/
@@ -86,13 +95,21 @@ clean:  ## Clean build artifacts and cache
 	rm -rf runs/2025-* runs/latest
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+# Task globs. `tasks/*.yaml` does NOT recurse, so every subdirectory holding a
+# task must be listed. Kept identical to the CI e2e-smoke job's globs
+# (.github/workflows/pr-checks.yml) and pinned there by
+# tests/test_tags.py::TestCiSmokePassContract -- when the two drifted, `make
+# test-smoke` silently skipped tasks CI was gating on.
+TASK_GLOBS := tasks/*.yaml tasks/agents/*.yaml tasks/anti_cheat_reference/*.yaml
+SMOKE_GLOBS := tasks/*.yaml tasks/anti_cheat_reference/*.yaml
+
 run:	## Run coder-eval on all tasks with 8 parallel jobs
-	uv run coder-eval run tasks/*.yaml tasks/agents/*.yaml -j 8
+	uv run coder-eval run $(TASK_GLOBS) -j 8
 
 test-smoke:  ## Run e2e smoke tests with real API (mirrors CI "E2E Smoke Tests" job)
-	uv run coder-eval run tasks/*.yaml --tags smoke-pass --model claude-haiku-4-5-20251001
+	uv run coder-eval run $(SMOKE_GLOBS) --tags smoke-pass --model claude-haiku-4-5-20251001
 	@echo "--- now running smoke-fail bucket (expected to exit non-zero) ---"
-	! uv run coder-eval run tasks/*.yaml --tags smoke-fail --model claude-haiku-4-5-20251001
+	! uv run coder-eval run $(SMOKE_GLOBS) --tags smoke-fail --model claude-haiku-4-5-20251001
 
 docker-image:  ## Build the coder-eval-agent image (core + both agents baked in; no creds needed)
 	@VERSION=$$($(VERSION_CMD)); \

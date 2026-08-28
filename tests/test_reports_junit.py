@@ -32,11 +32,15 @@ def _write_task_json(
     task_id: str,
     replicate_index: int,
     criteria: list[dict[str, Any]],
+    post_failure: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write a minimal task.json (plain dict) at the run-layout location."""
     task_dir = run_dir / variant / task_id / f"{replicate_index:02d}"
     task_dir.mkdir(parents=True, exist_ok=True)
-    (task_dir / "task.json").write_text(json.dumps({"success_criteria_results": criteria}), encoding="utf-8")
+    payload: dict[str, Any] = {"success_criteria_results": criteria}
+    if post_failure is not None:
+        payload["post_failure_criteria_results"] = post_failure
+    (task_dir / "task.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _row(
@@ -851,6 +855,43 @@ def test_passing_informational_criterion_is_info_not_pass(write_run_json: Callab
     body = _find_testsuite(fromstring(generate_junit_xml(run_dir)), "v1").find("testcase").find("failure").text or ""
     assert "[INFO]" in body
     assert "[PASS]" not in body
+
+
+def test_error_body_labels_post_failure_evidence_as_diagnostic(
+    write_run_json: Callable[..., Path], tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    rows = [_row("t_error", "ERROR", variant_id="v1", replicate_index=0, weighted_score=0.0)]
+    write_run_json(run_dir, rows)
+    _write_task_json(
+        run_dir,
+        "v1",
+        "t_error",
+        0,
+        [],
+        post_failure=[
+            {
+                "criterion_type": "file_exists",
+                "description": "artifact exists",
+                "score": 1.0,
+                "pass_threshold": 0.9,
+                "evaluation_status": "evaluated",
+            },
+            {
+                "criterion_type": "run_command",
+                "description": "validator runs",
+                "score": 0.0,
+                "pass_threshold": 0.9,
+                "evaluation_status": "not_evaluated",
+            },
+        ],
+    )
+
+    body = _find_testsuite(fromstring(generate_junit_xml(run_dir)), "v1").find("testcase").find("error").text or ""
+    assert "status=ERROR weighted_score=0.00" in body
+    assert "diagnostic only; does not affect status or weighted score" in body
+    assert "[DIAGNOSTIC PASS] file_exists" in body
+    assert "[NOT EVALUATED] run_command" in body
 
 
 def test_windows_drive_task_id_degrades_to_status_body(write_run_json: Callable[..., Path], tmp_path: Path) -> None:

@@ -187,11 +187,15 @@ class TestLLMJudgeCriterion:
 
     def test_llm_judge_criterion_defaults(self):
         """Constructing with the minimum required fields yields documented defaults."""
-        from coder_eval.models import DEFAULT_JUDGE_MODEL, LLMJudgeCriterion
+        from coder_eval.models import LLMJudgeCriterion
 
         criterion = LLMJudgeCriterion(description="x", prompt="grade this code")
         assert criterion.type == "llm_judge"
-        assert criterion.model == DEFAULT_JUDGE_MODEL
+        # Unset by default (not a materialized DEFAULT_JUDGE_MODEL default) so an
+        # unset per-criterion model survives a JSON round trip as None — see
+        # LLMJudgeChecker's precedence: criterion.model or route.model or
+        # DEFAULT_JUDGE_MODEL, applied at check time.
+        assert criterion.model is None
         assert criterion.temperature == 0.0
         # Bumped from 1000 → 2000 when verbose verdict (findings) was added,
         # so output budgets fit the bullet evidence a typical judge emits.

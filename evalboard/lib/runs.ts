@@ -86,6 +86,11 @@ export interface TaskResultSummary {
     actualCommands: number | null;
     totalTurns: number | null;
     expectedTurns: number | null;
+    // Wall clock this task is expected to need, derived per harness from run
+    // history and stamped into run.json by the eval runner. Null = unscored
+    // (too little history, or a run predating the stamp) — never "on target".
+    // Runs alongside expectedTurns while the turn budget is still reported.
+    expectedSeconds: number | null;
     // True when the agent's final iteration emitted a text reply
     // (i.e. ResultMessage.result was non-empty). Lets grid/trends
     // Turns cells inflate by +1 on legacy runs that lack total_turns.
@@ -118,12 +123,39 @@ export interface CriterionResult {
     score: number | null;
     details: string | null;
     error: string | null;
+    evaluationStatus: "evaluated" | "not_evaluated";
     // Mirrors the Python CriterionResult fields. `gating: false` (weight: 0) means
     // the criterion is informational — measured, but excluded from the score and
     // the pass/fail gate, so it must not render as PASS/FAIL. Both default the way
     // pre-existing task.json files behave: gating, threshold 0.9.
     passThreshold: number;
     gating: boolean;
+}
+
+interface RawCriterionResult {
+    criterion_type?: string;
+    description?: string;
+    score?: number;
+    details?: string;
+    error?: string | null;
+    evaluation_status?: "evaluated" | "not_evaluated";
+    pass_threshold?: number;
+    gating?: boolean;
+}
+
+export function parseCriterionResults(
+    criteria: RawCriterionResult[] | undefined,
+): CriterionResult[] {
+    return (criteria ?? []).map((criterion) => ({
+        criterionType: criterion.criterion_type ?? null,
+        description: criterion.description ?? null,
+        score: criterion.score ?? null,
+        details: criterion.details ?? null,
+        error: criterion.error ?? null,
+        evaluationStatus: criterion.evaluation_status ?? "evaluated",
+        passThreshold: criterion.pass_threshold ?? 0.9,
+        gating: criterion.gating ?? true,
+    }));
 }
 
 export interface ElementExecution {
@@ -267,6 +299,7 @@ export interface TaskDetail extends TaskResultSummary {
     errorMessage: string | null;
     taskDescription: string | null;
     criteria: CriterionResult[];
+    postFailureCriteria: CriterionResult[];
     artifacts: ArtifactRef[];
     flowDebug: FlowDebugResult | null;
     toolCalls: ToolCall[];
@@ -372,6 +405,10 @@ interface RawTaskResult {
     // null-fallback through the cell helpers in lib/turns.ts.
     total_turns?: number;
     expected_turns?: number | null;
+    // Derived expected wall clock for this task, stamped by the eval runner
+    // (see eval_runner/skills/timing.py). Absent on unscored tasks and on every
+    // run predating the stamp, which read as unscored through lib/timing.ts.
+    expected_seconds?: number | null;
     // Documented visible-turn count (tool calls + final reply) — the canonical
     // metric the "within expected turns" chart compares against expected_turns.
     // Absent on runs predating this field; visibleTurnsFromRaw() then reconstructs
@@ -425,6 +462,23 @@ interface RawRunJson {
     // run.json (run_id/activation/run.json), which the dashboard finalizes with
     // compute_activation_rollup. The top-level skills run.json never carries it.
     activation?: RawActivation;
+    // Run-level wall-clock rollup stamped by the eval runner alongside the
+    // per-task expected_seconds. Absent on runs predating it.
+    timing?: RawTiming;
+}
+
+// The `timing` block from run.json. `tolerance` is recorded by the runner so the
+// dashboard can never disagree with the run it is describing about what counted
+// as "within expected".
+interface RawTiming {
+    harness?: string;
+    pool_runs?: number;
+    time_per_passed_task?: number | null;
+    scored_tasks?: number;
+    unscored_tasks?: number;
+    within_expected_time?: number;
+    within_expected_rate?: number | null;
+    tolerance?: number;
 }
 
 interface RawActivation {
@@ -708,6 +762,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         actualCommands: t.actual_commands ?? null,
         totalTurns: t.total_turns ?? null,
         expectedTurns: t.expected_turns ?? null,
+        expectedSeconds: t.expected_seconds ?? null,
         hasFinalReply: t.has_final_reply ?? false,
         inputTokens: t.input_tokens ?? null,
         outputTokens: t.output_tokens ?? null,
@@ -893,6 +948,7 @@ export interface RunOverviewTask {
     actualCommands: number | null;
     totalTurns: number | null;
     expectedTurns: number | null;
+    expectedSeconds: number | null;
     visibleTurns: number | null;
     hasFinalReply: boolean;
     // True when the nightly skipped this mature task and carried it forward as a
@@ -922,6 +978,11 @@ export interface RunOverview {
     // from the date-shaped id; ad-hoc ids carry no date, so the ad-hoc listing
     // orders by this instead. Optional so test factories predating it stay valid.
     startedAt?: string | null;
+    // Seconds of every task that ran, over the number that passed — the headline
+    // efficiency number, as stamped by the runner. Failures are in the numerator
+    // on purpose: a run that spends an hour failing is a worse run. Null when the
+    // run predates stamping (the front page then falls back to the task rows).
+    timePerPassedTask?: number | null;
 }
 
 // Visible-turn count for a task row: the persisted `visible_turns` field when
@@ -1015,6 +1076,7 @@ export async function readRunOverview(
                 actualCommands: t.actual_commands ?? null,
                 totalTurns: t.total_turns ?? null,
                 expectedTurns: t.expected_turns ?? null,
+                expectedSeconds: t.expected_seconds ?? null,
                 visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,
                 matureSkipped: t.mature_skipped ?? false,
@@ -1041,6 +1103,7 @@ export async function readRunOverview(
         componentShas: extractComponentShas(data.environment_info),
         ...extractRunConfig(data),
         startedAt: data.start_time ?? null,
+        timePerPassedTask: data.timing?.time_per_passed_task ?? null,
     };
 }
 
@@ -2003,30 +2066,16 @@ export async function readTaskDetail(
                 initial_prompt?: string;
             };
         };
-        success_criteria_results?: Array<{
-            criterion_type?: string;
-            description?: string;
-            score?: number;
-            details?: string;
-            error?: string | null;
-            pass_threshold?: number;
-            gating?: boolean;
-        }>;
+        success_criteria_results?: RawCriterionResult[];
+        post_failure_criteria_results?: RawCriterionResult[];
         iterations?: TurnEntry[];
         environment_info?: RawRunJson["environment_info"];
     }>(path.join(contentDir, "task.json"));
 
-    const criteria: CriterionResult[] = (
-        task?.success_criteria_results ?? []
-    ).map((c) => ({
-        criterionType: c.criterion_type ?? null,
-        description: c.description ?? null,
-        score: c.score ?? null,
-        details: c.details ?? null,
-        error: c.error ?? null,
-        passThreshold: c.pass_threshold ?? 0.9,
-        gating: c.gating ?? true,
-    }));
+    const criteria = parseCriterionResults(task?.success_criteria_results);
+    const postFailureCriteria = parseCriterionResults(
+        task?.post_failure_criteria_results,
+    );
 
     const artifactRoot = path.join(contentDir, "artifacts");
     // relPath is stored relative to the run root so the /api/file route can
@@ -2093,6 +2142,7 @@ export async function readTaskDetail(
         errorMessage: task?.error_message ?? null,
         taskDescription,
         criteria,
+        postFailureCriteria,
         artifacts,
         flowDebug,
         toolCalls,

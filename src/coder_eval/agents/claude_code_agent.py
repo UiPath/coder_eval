@@ -36,6 +36,7 @@ from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
+from coder_eval.config import settings
 from coder_eval.errors import (
     TurnTimeoutError,
     format_timeout_reason,
@@ -792,9 +793,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         match route:
             case BedrockRoute() as br:
+                # `or ""` rather than asserting non-None here (unlike judge_bedrock.py's
+                # invoke_bedrock_judge_async): reaching a BedrockRoute at all already implies
+                # validate_api_keys()/resolve_route() confirmed the token upstream, and this
+                # is a pure env-dict builder with no error-reporting seam of its own — an
+                # empty token still produces a clear downstream SDK auth failure rather than
+                # a crash here. Kept deliberately lenient; do not "fix" to assert without
+                # also deciding how the resulting AssertionError should surface to the caller.
                 env: dict[str, str] = {
                     "CLAUDE_CODE_USE_BEDROCK": "1",
-                    "AWS_BEARER_TOKEN_BEDROCK": br.bearer_token,
+                    "AWS_BEARER_TOKEN_BEDROCK": settings.aws_bearer_token_bedrock or "",
                     "AWS_REGION": br.region,
                 }
                 if br.disable_attribution_header:
@@ -806,8 +814,21 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     env["ANTHROPIC_SMALL_FAST_MODEL"] = br.small_model
                 return {**base_env, **env}, br.model
 
-            case DirectRoute():
-                return base_env, None
+            case DirectRoute() as dr:
+                # Neutralize inherited Bedrock creds: the CLI auto-selects Bedrock
+                # DIRECT when AWS_BEARER_TOKEN_BEDROCK is present in the inherited
+                # environment (same auto-selection the LiteLLM arm above guards
+                # against), so an explicit `route: direct` (e.g. via
+                # checker_context.api_route.route on a run whose agent is on
+                # Bedrock) would otherwise silently spend the operator's Bedrock
+                # bearer token instead of ANTHROPIC_API_KEY (PR #137 review).
+                env = {
+                    "AWS_BEARER_TOKEN_BEDROCK": "",
+                    "CLAUDE_CODE_USE_BEDROCK": "",
+                }
+                if dr.model:
+                    env["ANTHROPIC_MODEL"] = dr.model
+                return {**base_env, **env}, dr.model
 
             case LiteLLMRoute() as cr:
                 # Point the SDK at the custom Anthropic-compatible endpoint (e.g.
@@ -815,8 +836,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 # merges {**os.environ, ..., **options.env} at spawn, so setting
                 # them here wins over the parent environment.
                 env = {
-                    "ANTHROPIC_BASE_URL": cr.base_url,
-                    "ANTHROPIC_AUTH_TOKEN": cr.auth_token,
+                    "ANTHROPIC_BASE_URL": settings.litellm_base_url or "",
+                    "ANTHROPIC_AUTH_TOKEN": settings.litellm_auth_token or "",
                     # Neutralize any inherited ANTHROPIC_API_KEY: auth on this
                     # route is the bearer ANTHROPIC_AUTH_TOKEN, and a stray
                     # x-api-key (e.g. a real Anthropic key exported from .env)

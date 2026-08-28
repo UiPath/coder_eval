@@ -130,6 +130,7 @@ From `ExperimentVariant` (`coder_eval/models/experiment.py`):
 | `initial_prompt_file` | str                | Prompt replacement loaded from a file                                                  |
 | `run_limits`          | block              | Per-key cap overrides (`max_turns`, `task_timeout`, token/USD budgets)                 |
 | `driver`              | `tempdir`/`docker` | Sandbox driver — enables tempdir-vs-docker arms                                        |
+| `checker_context`     | dict               | Backend/model override for the evaluation side (judge, simulator) — see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context); **not** currently `-D`-reachable |
 
 The `agent` dict is the lever for most A/B tests. Anything on `AgentConfig` is
 fair game: `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`,
@@ -180,7 +181,7 @@ variants:
     agent:
       plugins:
         - type: "local"
-          path: "../skills" # skill available
+          path: ".." # PLUGIN ROOT holding skills/ — see note below
 ```
 
 Notes:
@@ -192,8 +193,14 @@ Notes:
   it. Pair the experiment with a [`skill_triggered`](TASK_DEFINITION_GUIDE.md#skill_triggered)
   criterion to measure _whether it fired_ alongside your real success criteria
   that measure _whether outcomes improved_.
+- **`path` must be a plugin ROOT — a directory holding `skills/`** — so the skill
+  resolves at `<path>/skills/<name>/SKILL.md`. Point one level deeper, at the
+  directory of skill directories, and claude-code loads **nothing**: the `with-skill`
+  arm then silently matches the baseline and the A/B compares two identical arms.
+  Codex and Antigravity accept either depth, so this fails on claude-code alone —
+  see [Harness parity](agents/HARNESS_PARITY.md#agentpluginspath-accepts-different-depths-per-harness).
 - Plugin paths are environment-dependent. The shipped example expects a
-  `$PLUGIN_PATH` env var pointing at your plugin directory. See
+  `$PLUGIN_PATH` env var pointing at your plugin **root**. See
   `experiments/plugin-comparison.yaml`.
 
 Run it:

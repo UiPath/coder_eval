@@ -37,8 +37,16 @@ logger = logging.getLogger(__name__)
 # (early_stop.py::_prev_verdicts) are correct only because both existing
 # implementations (skill_triggered, command_executed) honor this. A non-monotonic or
 # non-deterministic override compiles and passes CE025 (which only checks
-# LiveSuccessCriterion subclassing / live_verdict pairing, not this) but silently corrupts the stop
-# logic — there is currently no automated enforcement beyond this docstring.
+# LiveSuccessCriterion subclassing / live_verdict pairing, not this) but silently corrupts
+# the stop logic.
+#
+# ENFORCEMENT: lint rule CE036 (tests/lint/live_verdict_contract.py) replays every live
+# criterion against every prefix of recorded trajectories and asserts both properties —
+# monotonicity over arbitrary Python is undecidable, so replay is the only sound check.
+# Adding a LiveSuccessCriterion REQUIRES adding ContractCase fixtures for it in the same
+# change (CE036 fails on a live type with no cases, and on a polarity its instances claim
+# decidable but no fixture reaches). Note the limit: CE036 proves the contract on the
+# trajectories an author supplied, not in general — honoring it is still on the author.
 LiveVerdict = Literal["pass", "fail", "undecided"]
 
 
@@ -51,8 +59,16 @@ class CheckContext:
     a live object (the resolved ``route``), so it is NOT a ``coder_eval.models``
     Pydantic model — it never gets serialized into a result record.
 
-    Non-judge checkers receive it too (uniform ``_check_impl`` signature) and
-    ignore it.
+    ``reference_dir`` has a THIRD consumer beyond the two judges:
+    ``reference_comparison`` is entirely dependent on it and scores 0.0 without
+    one. Checkers that consume neither field receive the context anyway (uniform
+    ``_check_impl`` signature) and ignore it.
+
+    A judge model override (``checker_context.api_route.model``) is deliberately
+    NOT a separate field here — it's baked into ``route.model`` by the orchestrator
+    before this object is built (see ``resolve_evaluation_route``), so criteria
+    read one thing (``route.model``) regardless of whether the value came from an
+    env-configured backend default or a task-authored override.
     """
 
     route: "ApiRoute | None" = None
@@ -107,8 +123,8 @@ def handle_criterion_errors(  # noqa: UP047
     This is the CENTRALIZED error handling that was in evaluator.py.
 
     Typed with ``ParamSpec``/``Concatenate`` rather than ``Callable[..., ...]``
-    so the decorated method's parameter list (sandbox, reference_code,
-    turn_records, context) stays visible to callers instead of erasing to
+    so the decorated method's parameter list (sandbox, turn_records,
+    context) stays visible to callers instead of erasing to
     ``(...) -> CriterionResult``.
     """
 
@@ -204,7 +220,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
                 self,
                 criterion: FileExistsCriterion,
                 sandbox: Sandbox,
-                reference_code: str | None = None,
             ) -> CriterionResult:
                 # Implementation here
                 pass
@@ -279,7 +294,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
+        *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
     ) -> CriterionResult:
@@ -291,12 +306,12 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         Args:
             criterion: The specific criterion definition (Pydantic model)
             sandbox: Sandbox instance for file access and command execution
-            reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
-            context: Optional :class:`CheckContext` carrying the live run state
-                (``route`` / ``reference_dir``) that judge criteria
-                (``agent_judge``, ``llm_judge``) consume. Non-judge checkers
-                accept the uniform signature and ignore it.
+            context: Optional :class:`CheckContext` carrying the live run state.
+                ``route`` is consumed by ``agent_judge`` / ``llm_judge``;
+                ``reference_dir`` by those two AND by ``reference_comparison``,
+                which scores 0.0 without it. Other checkers accept the uniform
+                signature and ignore it.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info
@@ -304,7 +319,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         return self._check_impl(
             criterion,
             sandbox,
-            reference_code,
             turn_records=turn_records,
             context=context,
         )
@@ -313,7 +327,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
@@ -328,11 +341,10 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         Args:
             criterion: The specific criterion definition (Pydantic model)
             sandbox: Sandbox instance for file access and command execution
-            reference_code: Optional reference code string for comparison
             turn_records: Optional list of turn records for command inspection
             context: Optional :class:`CheckContext` (route / reference_dir).
-                Consumed by ``llm_judge`` / ``agent_judge``; ignored by
-                the rest.
+                ``route``: ``llm_judge`` / ``agent_judge``. ``reference_dir``:
+                those two plus ``reference_comparison``. Ignored by the rest.
 
         Returns:
             CriterionResult with score (0.0-1.0), details, and error info
@@ -359,7 +371,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             self._check_impl_async(
                 criterion,
                 sandbox,
-                reference_code,
                 turn_records=turn_records,
                 context=context,
             )
@@ -371,7 +382,7 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
+        *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
     ) -> CriterionResult:
@@ -381,7 +392,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         return await self._check_impl_async(
             criterion,
             sandbox,
-            reference_code,
             turn_records=turn_records,
             context=context,
         )
@@ -390,7 +400,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         self,
         criterion: C,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: "CheckContext | None" = None,
@@ -410,7 +419,6 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             self._check_impl,
             criterion,
             sandbox,
-            reference_code,
             turn_records=turn_records,
             context=context,
         )
@@ -438,8 +446,9 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
         source of truth for "is this criterion type live-observable", checked
         by ``validate_early_stop`` / ``EarlyStopWatcher`` and enforced by lint
         rule CE025. An override MUST also satisfy the deterministic + monotonic
-        contract documented on the ``LiveVerdict`` type above (not enforced by
-        CE025 or any other automated check).
+        contract documented on the ``LiveVerdict`` type above, enforced by lint
+        rule CE036 — which requires this criterion type to supply replay fixtures
+        (``tests/lint/live_verdict_contract.py::CASES``) in the same change.
         """
         return "undecided"
 

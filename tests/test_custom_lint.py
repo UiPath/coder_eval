@@ -10,7 +10,9 @@ Run just these tests:
     make lint
 """
 
+import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -58,6 +60,48 @@ class TestCE016NoComputedTokenUsageKwargs:
         # AssistantMessage / ReconciliationMessage DO have a settable input_tokens.
         assert not self._run("AssistantMessage(input_tokens=10)")
         assert not self._run("ReconciliationMessage(input_tokens=-5)")
+
+
+@pytest.mark.lint
+class TestCE043NoCommandOutputTruncation:
+    """CE043 flags truncation of captured command output inside agents/, only."""
+
+    @staticmethod
+    def _run(src: str, *, in_agents: bool = True):
+        import ast
+
+        from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
+
+        path = "src/coder_eval/agents/codex_agent.py" if in_agents else "src/coder_eval/reports_html.py"
+        return NoCommandOutputTruncation(path).check(ast.parse(src))
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            "output[:100]",
+            "aggregated_output[:512]",
+            "command_item.aggregated_output[:100]",
+            "proc_stdout[:80]",
+            "result.stderr[:200]",
+            'f"Output: {output[:100]}"',
+        ],
+    )
+    def test_flags_output_truncation_in_agents(self, expr: str):
+        assert self._run(f"x = {expr}"), f"expected CE043 to flag {expr!r}"
+
+    def test_allows_untruncated_output(self):
+        assert not self._run('summary = f"Output: {output}"')
+        assert not self._run("summary = aggregated_output")
+
+    def test_ignores_non_output_slices(self):
+        # Legit error/orchestration summaries that are NOT captured command output.
+        assert not self._run("detail = summary.result[:200]")
+        assert not self._run("msg = content_str[:200]")
+        assert not self._run("s = '; '.join(messages)[:200]")
+
+    def test_scoped_to_agents_only(self):
+        # The same pattern outside agents/ is not this rule's concern (display code).
+        assert not self._run("preview = output[:100]", in_agents=False)
 
 
 @pytest.mark.lint
@@ -608,7 +652,7 @@ class TestCE025LiveVerdictConsistency:
         class _FakeCheckerNoOverride(BaseCriterion):
             criterion_type = "fake_live_no_override"
 
-            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
                 raise NotImplementedError
 
         violations = self._find_violations({"fake_live_no_override": (_FakeCheckerNoOverride, _FakeLiveModel)})
@@ -628,7 +672,7 @@ class TestCE025LiveVerdictConsistency:
         class _FakeCheckerOverrides(BaseCriterion):
             criterion_type = "fake_non_live_override"
 
-            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+            def _check_impl(self, criterion, sandbox, *, turn_records=None, context=None):
                 raise NotImplementedError
 
             def live_verdict(self, criterion, turn_records) -> LiveVerdict:
@@ -2964,3 +3008,582 @@ class TestCE035WorkflowOutputParity:
         assert len(findings) == 1
         assert findings[0].line == 7, f"expected line 7, got {findings[0].line}"
         assert str(findings[0]).startswith(f"{wf}:7 — ")
+
+
+@pytest.mark.lint
+class TestCE036LiveVerdictContract:
+    """CE036 — every live-observable criterion's `live_verdict` must be deterministic
+    and monotonic (GitHub issue #61 item 2).
+
+    `EarlyStopWatcher` latches verdicts, defers the fail-stop, and attributes pass-stop
+    flips against the previous round — all correct only while `live_verdict` never
+    contradicts an earlier decision and never varies for identical input. That contract
+    was documented on `LiveVerdict`/`BaseCriterion.live_verdict` but unenforced: a third
+    criterion implementing it non-monotonically would type-check, pass CE025, and
+    silently corrupt the stop logic.
+
+    Monotonicity over arbitrary Python is undecidable, so there is no sound static rule
+    to write. This replays each criterion against every prefix of a recorded trajectory
+    and asserts the property directly. The fixture table lives in
+    `tests/lint/live_verdict_contract.py`; the coverage checks below are what stop it
+    from decaying into a vacuous always-"undecided" replay.
+
+    Honest limit (documented on the helper module too): this proves the contract on the
+    trajectories an author supplied, not in general.
+    """
+
+    def test_real_criteria_honor_the_contract(self):
+        """Every case for every live criterion type, replayed prefix by prefix."""
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+        from tests.lint.live_verdict_contract import CASES, contract_violations
+
+        init_criteria(validate=False)
+        violations = [
+            violation
+            for criterion_type, cases in CASES.items()
+            for case in cases
+            for violation in contract_violations(CriterionRegistry.get_checker(criterion_type)(), case)
+        ]
+        assert not violations, "live_verdict contract violations:\n" + "\n".join(f"  {v}" for v in violations)
+
+    def test_every_live_criterion_type_has_cases(self):
+        """A new LiveSuccessCriterion with no fixtures enforces nothing — fail instead."""
+        from tests.lint.live_verdict_contract import missing_case_types
+
+        missing = missing_case_types()
+        assert not missing, (
+            "live-observable criterion types with no live_verdict contract cases: "
+            + ", ".join(missing)
+            + "\n\nAdd ContractCase entries to CASES in tests/lint/live_verdict_contract.py demonstrating "
+            + "every polarity the type's instances can decide."
+        )
+
+    def test_fixtures_exercise_every_decidable_polarity(self):
+        """Claiming a polarity is live-decidable but never demonstrating it is a gap."""
+        from tests.lint.live_verdict_contract import polarity_gaps
+
+        gaps = polarity_gaps()
+        assert not gaps, "untested live_verdict decision paths:\n" + "\n".join(f"  {g}" for g in gaps)
+
+    # --- The harness must actually fire; a green replay proves nothing on its own --- #
+
+    @staticmethod
+    def _positive_case(label: str, reaches: str):
+        from coder_eval.models import SkillTriggeredCriterion
+        from tests.lint.live_verdict_contract import ContractCase, cmd
+
+        return ContractCase(
+            label=label,
+            criterion=SkillTriggeredCriterion(
+                type="skill_triggered",
+                description="synthetic",
+                skill_name="alpha",
+                expected_skill="alpha",
+            ),
+            commands=(
+                cmd("Bash", {"command": "ls"}, sequence_number=0),
+                cmd("Bash", {"command": "pwd"}, sequence_number=1),
+            ),
+            reaches=reaches,
+        )
+
+    @staticmethod
+    def _checker(live_verdict_impl):
+        from coder_eval.criteria.base import BaseCriterion
+
+        class _Synthetic(BaseCriterion):
+            criterion_type = "synthetic_live"
+
+            def _check_impl(self, criterion, sandbox, reference_code=None, *, turn_records=None, context=None):
+                raise NotImplementedError
+
+            def live_verdict(self, criterion, turn_records):
+                return live_verdict_impl(turn_records)
+
+        return _Synthetic()
+
+    def test_detects_a_non_monotonic_live_verdict(self):
+        """Decides "pass" on a short prefix, then contradicts itself on a longer one."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        checker = self._checker(lambda records: "pass" if len(records[0].commands) == 1 else "undecided")
+        violations = contract_violations(checker, self._positive_case("synthetic", "undecided"))
+        assert any("NON-MONOTONIC" in v for v in violations), violations
+
+    def test_detects_a_non_deterministic_live_verdict(self):
+        """Same input, different answer — e.g. a wall-clock or RNG read."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        flips = iter(range(1000))
+        checker = self._checker(lambda _records: "pass" if next(flips) % 2 else "undecided")
+        violations = contract_violations(checker, self._positive_case("synthetic", "undecided"))
+        assert any("NON-DETERMINISTIC" in v for v in violations), violations
+
+    def test_detects_a_raising_live_verdict(self):
+        """A raise mid-walk becomes ONE labeled violation (case + prefix length) and the
+        walk continues — the later prefixes still replay, so the terminal "pass" here is
+        judged normally and the raise is the only breach reported."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        def raises_mid_trajectory(records):
+            n = len(records[0].commands)
+            if n == 1:
+                raise ValueError("boom")
+            return "pass" if n == 2 else "undecided"
+
+        checker = self._checker(raises_mid_trajectory)
+        violations = contract_violations(checker, self._positive_case("synthetic", "pass"))
+        assert len(violations) == 1, violations
+        assert "RAISED" in violations[0] and "prefix length 1" in violations[0], violations
+
+    def test_a_raise_on_the_final_prefix_does_not_stack_a_phantom_reaches_breach(self):
+        """The terminal prefix has no verdict when it raises, so the `reaches` and
+        polarity checks are skipped rather than judging the PREVIOUS prefix's stale
+        verdict — which would report a second, derived breach on top of the real one."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        def raises_at_the_end(records):
+            if len(records[0].commands) == 2:
+                raise ValueError("boom")
+            return "undecided"
+
+        checker = self._checker(raises_at_the_end)
+        # The case declares "pass"; the stale value from prefix 1 is "undecided", so the
+        # unguarded comparison would append a phantom "reaches" violation here.
+        violations = contract_violations(checker, self._positive_case("synthetic", "pass"))
+        assert len(violations) == 1, violations
+        assert "RAISED" in violations[0] and "prefix length 2" in violations[0], violations
+
+    def test_detects_a_fixture_that_stopped_exercising_its_decision_path(self):
+        """Fixture rot: the case claims a decision the trajectory no longer reaches."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        checker = self._checker(lambda _records: "undecided")
+        violations = contract_violations(checker, self._positive_case("synthetic", "pass"))
+        assert any("declares 'pass'" in v for v in violations), violations
+
+    def test_detects_a_verdict_outside_the_instance_declared_polarities(self):
+        """A positive skill_triggered instance can only live-pass; deciding "fail" means
+        the watcher would treat a live trigger as inert."""
+        from tests.lint.live_verdict_contract import contract_violations
+
+        checker = self._checker(lambda _records: "fail")
+        violations = contract_violations(checker, self._positive_case("synthetic", "fail"))
+        assert any("live_decidable_polarities" in v for v in violations), violations
+
+    def test_detects_a_live_type_with_no_cases(self):
+        """The completeness check must fail on an empty table, not pass vacuously.
+
+        Compared against the registry, not a hardcoded list: pinning today's type
+        names would red THIS test the moment someone adds a live criterion — at
+        exactly the moment `test_every_live_criterion_type_has_cases` is already
+        failing them with the actionable message, pointing at the wrong file.
+        """
+        from tests.lint.live_verdict_contract import live_criterion_types, missing_case_types
+
+        expected = sorted(live_criterion_types())
+        assert expected, "the union walk found no live criterion types — the check would pass vacuously"
+        assert missing_case_types({}) == expected
+
+    def test_detects_an_all_undecided_fixture_set(self):
+        """A type whose only case never decides claims coverage it does not have."""
+        from tests.lint.live_verdict_contract import polarity_gaps
+
+        gaps = polarity_gaps({"skill_triggered": (self._positive_case("synthetic", "undecided"),)})
+        assert len(gaps) == 1
+        assert "'pass'" in gaps[0]
+
+    def test_real_criteria_hold_under_permutation(self):
+        """Determinism + monotonicity must survive seeded reorderings of every case."""
+        from coder_eval.criteria import CriterionRegistry, init_criteria
+        from tests.lint.live_verdict_contract import CASES, permuted_violations
+
+        init_criteria(validate=False)
+        violations = [
+            violation
+            for criterion_type, cases in CASES.items()
+            for case in cases
+            for violation in permuted_violations(CriterionRegistry.get_checker(criterion_type)(), case)
+        ]
+        assert not violations, "live_verdict permutation violations:\n" + "\n".join(f"  {v}" for v in violations)
+
+    def test_permutation_layer_detects_an_order_sensitive_verdict(self):
+        """A recency bug (verdict read off the LATEST command) is monotone on an
+        ordering that happens to end with the match — only a reordering exposes it.
+        This is the exact bug shape the counterfactual experiment injected."""
+        from coder_eval.models import SkillTriggeredCriterion
+        from tests.lint.live_verdict_contract import ContractCase, cmd, contract_violations, permuted_violations
+
+        def recency_verdict(records):
+            commands = records[0].commands
+            if commands and commands[-1].parameters.get("command") == "pwd":
+                return "pass"
+            return "undecided"
+
+        checker = self._checker(recency_verdict)
+        case = ContractCase(
+            label="synthetic recency",
+            criterion=SkillTriggeredCriterion(
+                type="skill_triggered",
+                description="synthetic",
+                skill_name="alpha",
+                expected_skill="alpha",
+            ),
+            commands=(
+                cmd("Bash", {"command": "ls"}, sequence_number=0),
+                cmd("Bash", {"command": "cat x"}, sequence_number=1),
+                cmd("Bash", {"command": "pwd"}, sequence_number=2),
+            ),
+            reaches="pass",
+        )
+        # Clean on the authored ordering (it decides only on the final prefix)...
+        assert not [v for v in contract_violations(checker, case) if "NON-MONOTONIC" in v]
+        # ...caught under permutation.
+        violations = permuted_violations(checker, case)
+        assert any("NON-MONOTONIC" in v for v in violations), violations
+
+    def test_permutation_renumbers_so_a_sequence_sorting_checker_is_still_probed(self):
+        """The watcher hands `live_verdict` a trajectory sorted by `sequence_number`
+        (`EarlyStopWatcher._collect_verdicts`), so a checker may legitimately sort by it
+        too. If the shuffle left the original numbers attached, that sort would undo
+        every permutation and this layer would silently probe nothing. Renumbering keeps
+        the same recency bug detectable through the sort."""
+        from coder_eval.models import SkillTriggeredCriterion
+        from tests.lint.live_verdict_contract import ContractCase, cmd, permuted_violations
+
+        def sorted_recency_verdict(records):
+            commands = sorted(records[0].commands, key=lambda c: c.sequence_number)
+            if commands and commands[-1].parameters.get("command") == "pwd":
+                return "pass"
+            return "undecided"
+
+        checker = self._checker(sorted_recency_verdict)
+        case = ContractCase(
+            label="synthetic recency behind a sequence sort",
+            criterion=SkillTriggeredCriterion(
+                type="skill_triggered",
+                description="synthetic",
+                skill_name="alpha",
+                expected_skill="alpha",
+            ),
+            commands=(
+                cmd("Bash", {"command": "ls"}, sequence_number=0),
+                cmd("Bash", {"command": "cat x"}, sequence_number=1),
+                cmd("Bash", {"command": "pwd"}, sequence_number=2),
+            ),
+            reaches="pass",
+        )
+        violations = permuted_violations(checker, case)
+        assert any("NON-MONOTONIC" in v for v in violations), violations
+
+
+@pytest.mark.lint
+class TestCE044PluginManifestParity:
+    """CE044 — the marketplace entry and the plugin manifest it points at are one surface.
+
+    Eight fields are byte-identical duplicates across the two manifests and nothing
+    compared them: the only test that read ``plugin.json`` at all was
+    ``test_action_version_pin.py``, and only its ``version``. A one-sided edit ships
+    two different one-liners — one in the ``/plugin`` browser, one in the installed copy.
+
+    The second half is the motivating defect: the marketplace schema allows both
+    ``keywords`` and a near-synonymous ``tags``, while the plugin-manifest schema has no
+    ``tags`` property at all, so discovery strings parked there are dropped from an
+    installed user's manifest and a future editor has no rule for where a new term goes.
+    An extra key on the entry now fails unless ``MARKETPLACE_ONLY`` records why.
+
+    Reasons over JSON files and a ``source`` path, so it is wired here rather than as a
+    ``BaseRule`` in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_manifests_agree_on_every_shared_field(self):
+        from tests.lint.plugin_manifest_parity import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, "plugin/marketplace manifest parity violations:\n" + "\n".join(f"  {f}" for f in findings)
+
+    def test_catches_a_one_sided_description_edit(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path, entry_extra={"description": "drifted"})
+        findings = check(tmp_path)
+        assert any("`description` differs" in f for f in findings), findings
+
+    def test_catches_a_discovery_key_the_manifest_cannot_mirror(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path, entry_extra={"tags": ["skills", "evals"]})
+        findings = check(tmp_path)
+        assert any("`tags` has no counterpart" in f for f in findings), findings
+
+    def test_catches_a_source_that_resolves_nowhere(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path, entry_extra={"source": "./plugins/gone"})
+        findings = check(tmp_path)
+        assert any("does not resolve" in f for f in findings), findings
+
+    def test_a_matching_pair_is_clean(self, tmp_path: Path):
+        from tests.lint.plugin_manifest_parity import check
+
+        self._write_pair(tmp_path)
+        assert check(tmp_path) == []
+
+    @staticmethod
+    def _write_pair(root: Path, entry_extra: dict | None = None) -> None:
+        """Write a minimal in-parity marketplace/manifest pair, then apply ``entry_extra``."""
+        shared = {
+            "name": "demo",
+            "displayName": "Demo",
+            "description": "a demo plugin",
+            "author": {"name": "UiPath"},
+            "homepage": "https://example.invalid",
+            "repository": "https://example.invalid/repo",
+            "license": "Apache-2.0",
+            "keywords": ["demo"],
+        }
+        entry = {**shared, "source": "./plugins/demo", "category": "testing", **(entry_extra or {})}
+        manifest_dir = root / "plugins" / "demo" / ".claude-plugin"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "plugin.json").write_text(json.dumps({**shared, "version": "1.0.0"}), encoding="utf-8")
+        market_dir = root / ".claude-plugin"
+        market_dir.mkdir(parents=True)
+        (market_dir / "marketplace.json").write_text(json.dumps({"name": "demo", "plugins": [entry]}), encoding="utf-8")
+
+
+@pytest.mark.lint
+class TestCE045PluginPathIsAPluginRoot:
+    """CE045 — a claude-code local plugin path must name a plugin ROOT, not a skills dir.
+
+    `agent.plugins: [{type: local, path: X}]` reaches the Claude Code SDK as a plugin
+    directory, so a skill is found at `X/skills/<name>/SKILL.md`. Point X one level
+    deeper — at the directory that holds the skill directories — and NOTHING loads.
+    Probed against the real CLI, from a cwd that is not the skill's own repo (project
+    discovery would otherwise find it regardless of `--plugin-dir`, and the namespace
+    prefix is the real signal):
+
+        claude --plugin-dir <root>/skills  ->  nothing
+        claude --plugin-dir <root>         ->  `root:probe-beta`
+
+    The cost is invisible and total: every activation suite the plugin generated
+    reported recall 0.0, which the bundled template's own comment calls "reads exactly
+    like a broken skill", and `ci` wrote the same path into users' SCHEDULED workflows,
+    where it renders as a permanent red indistinguishable from the drift the schedule
+    exists to detect.
+
+    INCIDENT RECORD — the corpus below is that record, not this prose. Six wrong-value
+    lines across five files shipped at once: docs/PLUGIN.md, tutorial 07,
+    activation.yaml (comment and example), check-skill, and ci. Nothing held them in
+    agreement, which is why they drifted together.
+
+    The unit under test is the VALUE, not the sentence around it: a path whose last
+    segment is `skills` cannot be a plugin root, whatever the prose claims.
+
+    SCOPE. The rule keys on `SKILL_SOURCE_PATH`, the variable the plugin emits. That is
+    a limit, NOT a statement that other variables may use the deeper form — `$PLUGIN_PATH`
+    feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code, and
+    is unlinted. The guard that reaches every user, including the repos where
+    `/coder-eval:check-skill` actually writes suites, is the runtime warning in
+    `utils.process_plugins`; this rule only keeps THIS repo's shipped strings honest.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    # Verbatim pre-fix lines, one per surface that shipped the wrong value. The mutation
+    # guard replays these through the FULL extract-then-predicate pipeline. An earlier
+    # revision asserted the predicate against hand-written strings the matcher could
+    # never produce, which is how the Actions form below stayed unreachable while the
+    # rule looked covered.
+    KNOWN_BAD_LINES = (
+        'export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"',
+        "#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills",
+        "  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude/skills",
+        "export SKILL_SOURCE_PATH=$HOME/repo/.claude/skills/",
+    )
+
+    # Value runs to end-of-line or a closing quote, NOT to the first space: the GitHub
+    # Actions form `${{ github.workspace }}/.claude/skills` contains spaces INSIDE the
+    # expression, and a whitespace-terminated pattern captured a bare `${{` — silently
+    # exempting the highest-cost surface, the one `ci` writes into users' workflows.
+    _ASSIGNMENT = re.compile(r"""SKILL_SOURCE_PATH\s*=\s*(?:"([^"]*)"|'([^']*)'|([^"'\n]*))""")
+
+    # Every tracked file that can carry the token. Kept in step with the tree by
+    # `test_globs_cover_every_file_naming_the_token`, so "globbed, not enumerated" is
+    # true by construction rather than aspirational.
+    _GLOBS = (
+        "*.md",
+        "docs/**/*.md",
+        "plugins/**/*.md",
+        "plugins/**/*.yaml",
+        "tasks/**/*.yaml",
+        "tasks/**/*.yml",
+        "experiments/**/*.yaml",
+        ".github/workflows/*.yml",
+        ".github/workflows/*.yaml",
+    )
+
+    def _surfaces(self) -> list[Path]:
+        found: set[Path] = set()
+        for pattern in self._GLOBS:
+            found.update(self.REPO_ROOT.glob(pattern))
+        return sorted(found)
+
+    @classmethod
+    def _values(cls, line: str) -> list[str]:
+        """Every SKILL_SOURCE_PATH value on one line, whichever quoting it uses.
+
+        `finditer`, not `findall`: an unmatched alternation group is None here but an
+        empty STRING in findall's tuples, so picking "the first non-None group" off a
+        findall tuple silently selects the empty quoted branch every time.
+        """
+        values = []
+        for match in cls._ASSIGNMENT.finditer(line):
+            captured = next((g for g in match.groups() if g is not None), "")
+            if captured.strip():
+                values.append(captured.strip())
+        return values
+
+    @staticmethod
+    def _is_skills_dir(value: str) -> bool:
+        """Does this path's last segment name a skills directory rather than a plugin root?"""
+        # Drop `${{ ... }}` expressions first: their inner spaces are not path separators,
+        # and what matters is the literal tail written after them.
+        literal = re.sub(r"\$\{\{.*?\}\}", "", value)
+        return literal.rstrip("/").rsplit("/", 1)[-1] == "skills"
+
+    def test_no_surface_points_skill_source_path_at_a_skills_dir(self):
+        offenders: list[str] = []
+        scanned = 0
+        for path in self._surfaces():
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for value in self._values(line):
+                    scanned += 1
+                    if self._is_skills_dir(value):
+                        offenders.append(f"{path.relative_to(self.REPO_ROOT)}:{lineno}: {value}")
+
+        # Non-vacuity: a rule that silently matches nothing passes forever. If the docs
+        # move or the plugin directory is renamed, fail here rather than go quiet.
+        assert scanned, "CE045 found no SKILL_SOURCE_PATH assignment at all — the globs have gone stale"
+        assert not offenders, (
+            "SKILL_SOURCE_PATH must name a PLUGIN ROOT — a directory holding `skills/` — so the "
+            "skill resolves at `<path>/skills/<name>/SKILL.md`. These point one level too deep, "
+            "which loads no skills at all and reports recall 0.0 on every positive row:\n  "
+            + "\n  ".join(offenders)
+            + "\nFor `.claude/skills/my-skill/SKILL.md` the root is `.claude`, not `.claude/skills`."
+        )
+
+    def test_globs_cover_every_file_naming_the_token(self):
+        """The "globbed, not enumerated" claim, made checkable.
+
+        A surface that names the token but sits outside `_GLOBS` is unscanned, and the
+        rule reports success over it. Deriving the expected set from the tracked tree
+        means a new surface either falls inside the globs or fails the build.
+        """
+        tracked = subprocess.run(
+            ["git", "grep", "-l", "SKILL_SOURCE_PATH", "--", "."],
+            cwd=self.REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.split()
+        covered = {p.relative_to(self.REPO_ROOT).as_posix() for p in self._surfaces()}
+        # This file holds the corpus, so it names the token by construction.
+        missed = [f for f in tracked if f not in covered and not f.endswith("tests/test_custom_lint.py")]
+        assert not missed, (
+            "these files name SKILL_SOURCE_PATH but no CE045 glob reaches them, so the rule "
+            f"reports success over them: {missed}. Widen `_GLOBS`."
+        )
+
+    def test_literal_plugin_paths_are_plugin_roots(self):
+        """Config surfaces that write a `path:` literal rather than the env var."""
+        offenders: list[str] = []
+        for pattern in ("tasks/**/*.yaml", "experiments/**/*.yaml"):
+            for path in sorted(self.REPO_ROOT.glob(pattern)):
+                offenders.extend(self._offending_paths_in(path))
+        assert not offenders, (
+            "A local plugin `path` must be a plugin root holding `skills/`, not the skills "
+            "directory itself:\n  " + "\n  ".join(offenders)
+        )
+
+    def _offending_paths_in(self, path: Path) -> list[str]:
+        import yaml
+
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            return []  # malformed YAML is another rule's problem
+        if not isinstance(doc, dict):
+            return []
+        blocks = [doc.get("agent")]
+        blocks.append((doc.get("defaults") or {}).get("agent") if isinstance(doc.get("defaults"), dict) else None)
+        for variant in doc.get("variants") or []:
+            if isinstance(variant, dict):
+                blocks.append(variant.get("agent"))
+
+        found: list[str] = []
+        for agent in blocks:
+            if not isinstance(agent, dict):
+                continue
+            for plugin in agent.get("plugins") or []:
+                if not isinstance(plugin, dict) or plugin.get("type") != "local":
+                    continue
+                value = str(plugin.get("path") or "")
+                # Skip ONLY a bare variable reference, whose value lives elsewhere. A value
+                # that merely STARTS with a variable still has a visible literal tail —
+                # `$REPO_ROOT/.claude/skills` is exactly the bug, and a blanket `$` skip
+                # waved it through.
+                if not value or re.fullmatch(r"\$\{?\w+\}?/?", value):
+                    continue
+                if self._is_skills_dir(value):
+                    # A fixture tree lives outside the repo, so relativize only when it applies.
+                    label = path.relative_to(self.REPO_ROOT) if path.is_relative_to(self.REPO_ROOT) else path
+                    found.append(f"{label}: {value}")
+        return found
+
+    def test_every_known_bad_line_is_caught_end_to_end(self):
+        """The mutation guard: replay the real incident lines through extract + predicate.
+
+        Asserting the predicate alone proved half the rule and hid the other half — the
+        Actions form was structurally unreachable while a companion test wrote its
+        truncated capture down as correct.
+        """
+        for line in self.KNOWN_BAD_LINES:
+            values = self._values(line)
+            assert values, f"matcher extracted nothing from {line!r}"
+            assert any(self._is_skills_dir(v) for v in values), (
+                f"CE045 would NOT flag the historical offender {line!r} (extracted {values!r})"
+            )
+
+    def test_the_fixed_forms_are_accepted(self):
+        for line in (
+            'export SKILL_SOURCE_PATH="$(pwd)/.claude"',
+            "#   export SKILL_SOURCE_PATH=/abs/path/to/.claude",
+            "  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude",
+        ):
+            values = self._values(line)
+            assert values, f"matcher extracted nothing from {line!r}"
+            assert not any(self._is_skills_dir(v) for v in values), f"false positive on {line!r}"
+        # A directory merely CONTAINING the word is a plugin root, not an offender.
+        assert not self._is_skills_dir("my-skills")
+        assert not self._is_skills_dir(".claude/skills/pdf-forms")
+
+    def test_yaml_walk_flags_a_literal_tail_behind_a_variable(self, tmp_path: Path):
+        """The tasks/experiments walk has no offender in-tree, so prove it on a fixture."""
+        for value in (".claude/skills", "$REPO_ROOT/.claude/skills", "${REPO_ROOT}/skills/"):
+            task = tmp_path / "t.yaml"
+            task.write_text(
+                f'task_id: t\nagent:\n  type: claude-code\n  plugins:\n    - type: local\n      path: "{value}"\n',
+                encoding="utf-8",
+            )
+            assert self._offending_paths_in(task), f"walk missed {value!r}"
+
+        # A bare variable reference carries no literal tail to judge.
+        task = tmp_path / "bare.yaml"
+        task.write_text(
+            "task_id: t\nagent:\n  type: claude-code\n  plugins:\n"
+            '    - type: local\n      path: "$SKILL_SOURCE_PATH"\n',
+            encoding="utf-8",
+        )
+        assert not self._offending_paths_in(task)

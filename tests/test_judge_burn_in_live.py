@@ -1,7 +1,7 @@
 """Live burn-in tests for the typed verdict tool channel.
 
 Exercises the ``submit_verdict`` channel against the three real backends:
-Anthropic-direct (Anthropic SDK + native ``tools``), Bedrock (httpx +
+Anthropic-direct (Anthropic SDK + native ``tools``), Bedrock (httpx2 +
 Anthropic-native tools), and the Claude Code SDK (in-process MCP server).
 Each test ``pytest.skip``s when the required credentials are not present, so
 the file is safe to run in CI without a credential set.
@@ -93,7 +93,7 @@ def test_llm_judge_anthropic_direct_tool_channel(hello_sandbox: Sandbox) -> None
 
 
 def test_llm_judge_bedrock_tool_channel(hello_sandbox: Sandbox) -> None:
-    """Bedrock route: httpx POST with Anthropic-native ``tools`` + ``tool_choice``."""
+    """Bedrock route: httpx2 POST with Anthropic-native ``tools`` + ``tool_choice``."""
     bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
     region = os.environ.get("AWS_REGION")
     if not bearer or not region:
@@ -110,7 +110,7 @@ def test_llm_judge_bedrock_tool_channel(hello_sandbox: Sandbox) -> None:
     result = SuccessChecker(
         hello_sandbox,
         init_registry=False,
-        route=BedrockRoute(bearer_token=bearer, region=region),
+        route=BedrockRoute(region=region),
     ).check(criterion)
 
     assert result.error is None, f"Bedrock judge failed: {result.error}\n{result.details}"

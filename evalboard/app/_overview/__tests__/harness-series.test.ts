@@ -12,14 +12,16 @@ function point(
     harness: string,
     timestamp: number,
     successRate: number | null,
-    turnBudgetRate: number | null = null,
+    withinExpectedTimeRate: number | null = null,
 ): RunPoint {
     return {
         runId: `run-${timestamp}`,
         timestamp,
         harness,
         successRate,
-        turnBudgetRate,
+        turnBudgetRate: null,
+        withinExpectedTimeRate,
+        timePerPassedTask: null,
     };
 }
 
@@ -99,7 +101,7 @@ describe("pivotByHarness", () => {
             timestamp: 100,
             [key]: 90,
         });
-        expect(pivotByHarness(pts, ["codex"], "turnBudgetRate").rows[0]).toEqual(
+        expect(pivotByHarness(pts, ["codex"], "withinExpectedTimeRate").rows[0]).toEqual(
             { timestamp: 100, [key]: 40 },
         );
     });
@@ -111,7 +113,7 @@ describe("pivotByHarness", () => {
         const { rows } = pivotByHarness(
             [point("codex", 100, 90, null)],
             ["codex"],
-            "turnBudgetRate",
+            "withinExpectedTimeRate",
         );
         expect(rows).toEqual([]);
     });

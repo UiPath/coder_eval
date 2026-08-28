@@ -57,6 +57,8 @@ export function HarnessTooltip({
     series,
     suffix,
     emptyText,
+    format = (v) => `${v.toFixed(1)}%`,
+    secondary,
 }: {
     active?: boolean;
     payload?: TooltipEntry[];
@@ -67,6 +69,12 @@ export function HarnessTooltip({
     suffix: string;
     // Shown when the hovered run produced no value for this metric at all.
     emptyText: string;
+    // How to render the value. Defaults to a percentage; a seconds chart passes
+    // its own duration formatter.
+    format?: (value: number) => string;
+    // Optional second line for a row, e.g. a companion rate the chart doesn't
+    // plot. Returning null omits it for that point.
+    secondary?: (harness: string, timestamp: number) => string | null;
 }) {
     if (!active || !payload?.length) return null;
     const byKey = new Map(series.map((s) => [s.dataKey, s]));
@@ -86,22 +94,27 @@ export function HarnessTooltip({
             ) : (
                 rows.map((e) => {
                     const s = byKey.get(String(e.dataKey))!;
+                    const sub = secondary?.(s.harness, ms) ?? null;
                     return (
-                        <div
-                            key={s.harness}
-                            className="flex items-center gap-1.5 text-gray-600 tabular-nums"
-                        >
-                            <span
-                                aria-hidden
-                                className="inline-block h-0.5 w-3 rounded-full shrink-0"
-                                style={{ backgroundColor: s.color }}
-                            />
-                            <span className="text-gray-700">
-                                {harnessShortLabel(s.harness)}
-                            </span>
-                            <span>
-                                {(e.value as number).toFixed(1)}% {suffix}
-                            </span>
+                        <div key={s.harness} className="tabular-nums">
+                            <div className="flex items-center gap-1.5 text-gray-600">
+                                <span
+                                    aria-hidden
+                                    className="inline-block h-0.5 w-3 rounded-full shrink-0"
+                                    style={{ backgroundColor: s.color }}
+                                />
+                                <span className="text-gray-700">
+                                    {harnessShortLabel(s.harness)}
+                                </span>
+                                <span>
+                                    {format(e.value as number)} {suffix}
+                                </span>
+                            </div>
+                            {sub && (
+                                <div className="pl-[1.125rem] text-gray-500">
+                                    {sub}
+                                </div>
+                            )}
                         </div>
                     );
                 })

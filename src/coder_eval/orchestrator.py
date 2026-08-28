@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from .agent import Agent
@@ -22,6 +23,7 @@ from .criteria.commands_efficiency import compute_commands_efficiency
 from .errors import (
     AgentCrashError,
     BudgetExceededError,
+    ReferenceTamperedError,
     TaskTimeoutError,
     TurnTimeoutError,
 )
@@ -30,12 +32,15 @@ from .errors.retry import create_error_context
 from .evaluation.checker import SuccessChecker, _short_failure_reason
 from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
+    CONTAINER_REFERENCE_DIR,
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ROUTE_NAMES,
+    AgentJudgeCriterion,
     AgentKind,
     ApiRoute,
     BedrockRoute,
     ConfigLineageEntry,
+    CriteriaResults,
     CriterionResult,
     DirectRoute,
     EvaluationResult,
@@ -46,8 +51,10 @@ from .models import (
     PostRunResult,
     PreRunCommand,
     PreservationMode,
+    ReferenceComparisonCriterion,
     SimulationConfig,
     SimulationTelemetry,
+    SuccessCriterion,
     TaskConfigRecord,
     TaskDefinition,
     TokenUsage,
@@ -57,8 +64,9 @@ from .models import (
     resolve_route,
 )
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
-from .orchestration.evaluation import load_reference
-from .path_utils import format_task_log_id, task_log_path
+from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
+from .orchestration.run_limits import validate_run_limits
+from .path_utils import digest_tree, format_task_log_id, rmtree_restrictive, task_log_path
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -141,6 +149,17 @@ async def _pump_stream(
 # ``ClaudeCodeAgent._format_messages``; this regex is telemetry-only (utterance
 # extraction for the per-task log), not a correctness-critical parser.
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
+
+
+class EvalRouteOverrides(NamedTuple):
+    """``checker_context.api_route``'s override fields. Named fields (rather than
+    a bare tuple) so a future transposition at a call site is a typo'd attribute,
+    not a silent positional swap."""
+
+    backend: str | None
+    model: str | None
+    params: dict[str, Any] | None
+    env_params: dict[str, str] | None
 
 
 def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
@@ -409,8 +428,28 @@ class Orchestrator:
         # Result tracking
         self.result: EvaluationResult | None = None
 
-        # Reference solution cache (loaded on-demand)
-        self._reference_code: str | None = None
+        # Per-run private copy of task.reference.directory, staged in _setup and
+        # removed in _cleanup. Criteria address it as $REFERENCE_DIR / REFERENCE_DIR.
+        # It is a COPY, not the checked-out path, so the mode-000 anti-cheat window
+        # around each agent turn can't block a sibling task's judge mid-read, and a
+        # crashed run can only leave a throwaway directory unreadable.
+        self._reference_dir: Path | None = None
+
+        # The mkdtemp root that holds ``_reference_dir``, recorded the moment it
+        # is created and BEFORE the copy runs, so a copy that raises part-way
+        # (unreadable source file, ENOSPC) still gets cleaned up. Keying cleanup
+        # on ``_reference_dir.parent`` instead would leak the partial copy of the
+        # reference solution, because ``_reference_dir`` is only assigned on the
+        # success path. None under docker, where the reference is a host-owned
+        # bind mount rather than a tempdir of ours.
+        self._reference_staging_root: Path | None = None
+
+        # SHA-256 of the staged reference tree, taken right after staging and
+        # re-verified before grading. The window is per-turn, so between turns
+        # the (necessarily writable) docker mount is back at its normal mode; an
+        # agent-backgrounded process could overwrite the reference and drive
+        # ``reference_comparison`` to 1.0. See _verify_reference_integrity.
+        self._reference_digest: str | None = None
 
         # Early-stop watcher (created in _setup only when a criterion carries a
         # stop_early: block and the kill switch is not thrown; None otherwise,
@@ -424,6 +463,10 @@ class Orchestrator:
         # One-shot flag: emit the expected_turns rollup warning exactly once per
         # task run even though _check_expected_turns is called after every turn.
         self._expected_turns_warning_emitted: bool = False
+
+        # One-shot flag: a resolved task may be inspected more than once during
+        # setup, but its ineffective timeout relationship should be logged once.
+        self._run_limits_warning_emitted: bool = False
 
         # Canonical id shared with run_dir layout, tqdm label, and streaming events.
         self._log_task_id = format_task_log_id(variant_id, task.task_id, replicate_index)
@@ -516,16 +559,11 @@ class Orchestrator:
                     asyncio_task_to_cancel=asyncio.current_task(),
                     label=f"task_timeout ({self.task.task_id})",
                 ) as wd:
-                    try:
-                        success = await self._evaluation_loop()
-                    except asyncio.CancelledError:
-                        if wd.fired:
-                            raise TaskTimeoutError(
-                                task_timeout or 0,
-                                task_id=self.task.task_id,
-                                elapsed_seconds=time.time() - start_time,
-                            ) from None
-                        raise
+                    success = await self._run_evaluation_with_failure_evidence(
+                        watchdog=wd,
+                        task_timeout=task_timeout,
+                        start_time=start_time,
+                    )
                 # Belt-and-suspenders: if the loop returned normally but the
                 # watchdog fired during post-loop work or the inner coro
                 # swallowed the cancel, still classify as TIMEOUT.
@@ -649,6 +687,133 @@ class Orchestrator:
                     raise teardown_interrupt
 
         return self.result
+
+    async def _run_evaluation_with_failure_evidence(
+        self,
+        *,
+        watchdog: ThreadedWatchdog,
+        task_timeout: int | None,
+        start_time: float,
+    ) -> bool:
+        """Run the loop and collect diagnostics before its watchdog closes."""
+        try:
+            return await self._evaluation_loop()
+        except asyncio.CancelledError:
+            if watchdog.fired:
+                self._record_post_failure_not_evaluated(
+                    "the task_timeout budget was exhausted before post-failure grading could run"
+                )
+                raise TaskTimeoutError(
+                    task_timeout or 0,
+                    task_id=self.task.task_id,
+                    elapsed_seconds=time.time() - start_time,
+                ) from None
+            raise
+        except (AgentCrashError, TurnTimeoutError, BudgetExceededError) as terminal_error:
+            if (
+                isinstance(terminal_error, BudgetExceededError)
+                and self.result is not None
+                and len(self.result.success_criteria_results) == len(self.task.success_criteria)
+            ):
+                raise
+            try:
+                await self._evaluate_post_failure_criteria()
+            except asyncio.CancelledError:
+                if watchdog.fired:
+                    self._record_post_failure_not_evaluated(
+                        "the task_timeout budget expired during post-failure grading"
+                    )
+                    logger.warning(
+                        "[%s] Task timeout stopped post-failure grading; preserving %s",
+                        self.task.task_id,
+                        type(terminal_error).__name__,
+                    )
+                else:
+                    raise
+            except Exception as recovery_error:
+                self._record_post_failure_not_evaluated(self._post_failure_exception_reason(recovery_error))
+                logger.warning(
+                    "[%s] Post-failure criteria evaluation failed; preserving the original terminal error",
+                    self.task.task_id,
+                    exc_info=True,
+                )
+            raise
+
+    @staticmethod
+    def _post_failure_exception_reason(error: Exception) -> str:
+        message = " ".join(str(error).split())
+        if len(message) > 200:
+            message = message[:199] + "…"
+        suffix = f": {message}" if message else ""
+        return f"post-failure grading could not complete ({type(error).__name__}{suffix})"
+
+    @staticmethod
+    def _not_evaluated_result(criterion: SuccessCriterion, reason: str) -> CriterionResult:
+        return CriterionResult(
+            criterion_type=criterion.type,
+            description=criterion.description,
+            score=0.0,
+            details=f"Not evaluated after terminal agent failure: {reason}.",
+            evaluation_status="not_evaluated",
+            pass_threshold=criterion.pass_threshold,
+            gating=criterion.is_gating,
+        )
+
+    def _record_post_failure_not_evaluated(self, reason: str) -> None:
+        """Record a full diagnostic result vector when recovery cannot run."""
+        if self.result is None:
+            return
+        self.result.post_failure_criteria_results = [
+            self._not_evaluated_result(criterion, reason) for criterion in self.task.success_criteria
+        ]
+
+    async def _evaluate_post_failure_criteria(self) -> None:
+        """Evaluate diagnostic criteria before the live sandbox is torn down.
+
+        Results stay outside the canonical scored list. Only criteria that
+        declare themselves deterministic and read-only run on this path. This
+        excludes judges and checks that execute sandbox commands.
+        """
+        if self.result is None:
+            return
+        if self.success_checker is None or self.sandbox is None:
+            self._record_post_failure_not_evaluated("the sandbox or success checker was unavailable")
+            return
+
+        runnable: list[SuccessCriterion] = []
+        unavailable_positions: set[int] = set()
+        for position, criterion in enumerate(self.task.success_criteria):
+            if not criterion.supports_post_failure_evaluation:
+                unavailable_positions.add(position)
+            else:
+                runnable.append(criterion)
+
+        checked: CriteriaResults = []
+        if runnable:
+            checked = await self.success_checker.check_all_async(
+                runnable,
+                reference_dir=self._reference_dir,
+                turn_records=self.result.iterations,
+            )
+
+        if len(checked) != len(runnable):
+            raise ValueError(
+                f"Post-failure checker returned {len(checked)} results for {len(runnable)} runnable criteria"
+            )
+
+        checked_iter = iter(checked)
+        recovered: CriteriaResults = []
+        for position, criterion in enumerate(self.task.success_criteria):
+            if position in unavailable_positions:
+                recovered.append(
+                    self._not_evaluated_result(
+                        criterion,
+                        "the criterion is not a deterministic, read-only artifact check",
+                    )
+                )
+            else:
+                recovered.append(next(checked_iter))
+        self.result.post_failure_criteria_results = recovered
 
     async def _drain_killed_turn(self) -> None:
         """Move a hard-killed turn's partial record from the agent onto the result.
@@ -795,11 +960,11 @@ class Orchestrator:
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
-        # Spill any judge transcripts to sibling judge-<idx>.yaml files BEFORE
+        # Spill any judge transcripts to sibling YAML files BEFORE
         # we dump task.json, so transcript_path is set on each judge result.
         # The inline `transcript` field stays in memory — HTML rendering below
         # uses it directly. We strip it from the JSON dump via `exclude=...`.
-        from .evaluation.judge_persistence import spill_judge_transcripts
+        from .evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE, spill_judge_transcripts
 
         spill_judge_transcripts(self.result, self.report_path.parent)
 
@@ -813,11 +978,11 @@ class Orchestrator:
         report_tmp.write_text(  # noqa: CE002 — small JSON write at end of run
             self.result.model_dump_json(
                 indent=2,
-                # Strip inline transcripts: they live in sibling judge-<idx>.yaml
+                # Strip inline transcripts: they live in sibling YAML files
                 # next to task.json, referenced by transcript_path. Excluding
                 # `transcript` here avoids ~20-100 KB of bloat per judge result
                 # in the row record without losing any data.
-                exclude={"success_criteria_results": {"__all__": {"transcript"}}},
+                exclude=TASK_JSON_TRANSCRIPT_EXCLUDE,
             ),
             encoding="utf-8",
         )
@@ -929,6 +1094,16 @@ class Orchestrator:
             )
             self._expected_turns_warning_emitted = True
 
+    def _warn_on_ineffective_task_timeout(self) -> None:
+        """Log resolved cross-field run-limit warnings once per task run."""
+        if self._run_limits_warning_emitted:
+            return
+        messages = validate_run_limits(self.task)
+        for message in messages:
+            logger.warning("[%s] %s", self.task.task_id, message)
+        if messages:
+            self._run_limits_warning_emitted = True
+
     @property
     def _cost_correlation_run_id(self) -> str:
         """The LiteLLM cost-log correlation run id — a stable hash of the run dir.
@@ -1000,6 +1175,88 @@ class Orchestrator:
                     total_cost_usd=sum(costs) if costs else None,
                 )
 
+    async def _stage_reference(self) -> None:
+        """Resolve the reference directory this run will expose as REFERENCE_DIR.
+
+        No-op when the task declares no reference. What the anti-cheat window
+        chmods is whatever this sets, so it MUST be the same path the agent can
+        reach — otherwise the window shields a decoy while the agent reads the
+        real thing (exactly the leak ``tasks/anti_cheat_reference`` caught).
+
+        Under ``driver: docker`` that path is the ``/work/references`` mount
+        itself: the host already bind-mounts a throwaway COPY there read-write
+        (``DockerRunner._prepare_reference_mount``) precisely so this process can
+        chmod it. Re-copying it here would be worse than pointless — it would
+        move the shielded path off the one the agent attacks.
+
+        On the host there is no container boundary and the window is a no-op
+        (see ``Sandbox.enforces_permission_windows``), but we still stage a
+        private copy: it strips symlinks and keeps ``$REFERENCE_DIR`` semantics
+        identical across drivers.
+        """
+        source = resolve_reference_dir(self.task, self.task_file)
+        if source is None:
+            return
+        if source == Path(CONTAINER_REFERENCE_DIR):
+            self._reference_dir = source
+        else:
+            # Record the root BEFORE the copy: _cleanup keys on this field, so a
+            # copytree that raises part-way must still leave something to remove.
+            staging = Path(tempfile.mkdtemp(prefix="coder_eval_reference_"))
+            self._reference_staging_root = staging
+            # copytree needs a non-existent leaf; mkdtemp already made the parent.
+            destination = staging / "reference"
+            self._reference_dir = await asyncio.to_thread(stage_reference_dir, source, destination)
+        self._reference_digest = await asyncio.to_thread(digest_tree, self._reference_dir)
+        self._validate_reference_consumers()
+
+    def _validate_reference_consumers(self) -> None:
+        """Fail fast on a criterion that names a reference file which isn't there.
+
+        A typo in ``reference_comparison.reference_file`` is an EVAL-CONFIG error,
+        not an agent failure. Left to check time it surfaces as a gating
+        ``score=0.0`` → ``FinalStatus.FAILURE``, i.e. counted against the agent's
+        pass rate — and on a dataset-fanned suite it zeroes every row silently.
+        Raising here routes it to ``FinalStatus.ERROR`` instead, and does so
+        before the agent burns a single token.
+        """
+        reference_dir = self._reference_dir
+        if reference_dir is None:
+            return
+        for criterion in self.task.success_criteria:
+            if not isinstance(criterion, ReferenceComparisonCriterion):
+                continue
+            candidate = (reference_dir / criterion.reference_file).resolve()
+            if not candidate.is_relative_to(reference_dir.resolve()) or not candidate.is_file():
+                raise ValueError(
+                    f"reference_comparison.reference_file {criterion.reference_file!r} does not name a "
+                    + f"readable file inside the task's reference directory ({self.task.reference.directory!r} "  # type: ignore[union-attr]
+                    + "— task.reference is guaranteed set here by the load-time validator). "
+                    + "This is a task-definition error, not an agent failure."
+                )
+
+    async def _verify_reference_integrity(self) -> None:
+        """Re-hash the reference before grading and hard-fail on a mismatch.
+
+        The mode-000 window spans ``agent.communicate`` only, and nothing reaps
+        the agent's child processes at turn end — so a backgrounded writer can
+        modify the reference once the window closes. Under docker the mount MUST
+        be writable (chmod on a ``:ro`` bind fails with EROFS), so this is the
+        control that stops an agent from overwriting the solution with its own
+        file and scoring ``reference_comparison`` 1.0.
+
+        Read-back is not covered by this; see the KNOWN GAP in ``fs_permissions``.
+        """
+        if self._reference_dir is None or self._reference_digest is None:
+            return
+        current = await asyncio.to_thread(digest_tree, self._reference_dir)
+        if current != self._reference_digest:
+            raise ReferenceTamperedError(
+                "The reference solution changed during the run: its content hash before the agent ran "
+                + f"({self._reference_digest[:12]}...) does not match the hash at grading time "
+                + f"({current[:12]}...). Refusing to grade against a reference the agent may have written."
+            )
+
     async def _setup(self) -> None:
         """Set up all components for evaluation.
 
@@ -1010,6 +1267,7 @@ class Orchestrator:
         # paths (the CLI already validated during resolution). No-op unless
         # some criterion carries a stop_early: block.
         validate_early_stop(self.task)
+        self._warn_on_ineffective_task_timeout()
 
         # Build the early-stop watcher once, up front, when armed (>= 1 criterion
         # with a stop_early: block and the run_limits.stop_early kill switch not
@@ -1019,17 +1277,18 @@ class Orchestrator:
         if early_stop_active(self.task):
             self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
 
+        # Stage the reference BEFORE either branch returns: judge criteria with
+        # include_reference=true (and any $REFERENCE_DIR/... file entry) expect it
+        # populated in evaluate-only re-grades too, where no agent ever runs.
+        await self._stage_reference()
+
         if self.sandbox is not None:
             # evaluate-only mode: sandbox already set up, skip agent
             assert self.result is not None
+            self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
-            self.route = resolve_route(settings)
-            self.eval_route = resolve_evaluation_route(settings, self.route)
-            logger.info(
-                "API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None)
-            )
-            self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+            self._resolve_routes()
             self._record_route_environment_info()
             return
 
@@ -1042,6 +1301,7 @@ class Orchestrator:
         # Create sandbox with retry logic
         task_dir = self.task_file.parent.resolve() if self.task_file else None
         self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id, task_dir=task_dir)
+        self.sandbox.reference_dir = self._reference_dir
 
         # workspace_dir (docker WORKDIR alignment) wins: run the agent in-place at
         # the image's own WORKDIR so its inputs/verifier paths line up, then copy
@@ -1094,10 +1354,7 @@ class Orchestrator:
         self.result.sandbox_path = str(sandbox_dir)
 
         # Determine API routing from settings.api_backend enum
-        self.route = resolve_route(settings)
-        self.eval_route = resolve_evaluation_route(settings, self.route)
-        logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
-        self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+        self._resolve_routes()
 
         # Create and start the agent. For a no-op (type: none) task this dispatches
         # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
@@ -1203,6 +1460,81 @@ class Orchestrator:
         if isinstance(path, str) and path:
             self.sandbox.set_command_base_path(path)
 
+    def _eval_route_overrides(self) -> EvalRouteOverrides:
+        """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
+
+        A task/variant-authored choice for the WHOLE evaluation side (``llm_judge``,
+        ``agent_judge``, the simulator all share one ``eval_route``), decoupled from
+        the agent's own route/model — resolved into a credentialed ``ApiRoute`` (from
+        env vars) by ``resolve_evaluation_route``, which bakes ``model`` into the
+        resolved route's own ``model`` field. Reserved under one ``api_route``
+        namespace (not per-criterion-type): there is exactly one eval route per run,
+        not one per criterion. Either element is ``None`` when unset, in which case
+        ``resolve_evaluation_route`` falls back to its existing pin-to-Claude /
+        env-configured-default behavior. NOT currently ``-D``-reachable — task/variant
+        YAML only.
+        """
+        api_route = self.task.checker_context.api_route if self.task.checker_context else None
+        if api_route is None:
+            return EvalRouteOverrides(backend=None, model=None, params=None, env_params=None)
+        return EvalRouteOverrides(
+            backend=api_route.route.value if api_route.route is not None else None,
+            model=api_route.model,
+            params=api_route.params,
+            env_params=api_route.env_params,
+        )
+
+    def _resolve_routes(self) -> None:
+        """Resolve ``self.route``/``self.eval_route``, log routing, and build
+        ``self.success_checker``. Shared by the evaluate-only and normal setup
+        paths in ``_setup`` — identical logic, previously duplicated at each call
+        site. Requires ``self.sandbox`` to already be set.
+        """
+        assert self.sandbox is not None
+        self.route = resolve_route(settings)
+        overrides = self._eval_route_overrides()
+        self.eval_route = resolve_evaluation_route(
+            settings,
+            self.route,
+            backend_override=overrides.backend,
+            model_override=overrides.model,
+            params_override=overrides.params,
+            env_params_override=overrides.env_params,
+        )
+        self._reject_litellm_eval_route_if_unsupported()
+        logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
+        self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
+
+    def _reject_litellm_eval_route_if_unsupported(self) -> None:
+        """``checker_context.api_route.route: litellm`` dispatches ``llm_judge``
+        through the ``litellm`` library (protocol-agnostic — see
+        ``invoke_litellm_judge_async``'s module docstring), but ``agent_judge``
+        and the simulator run as real Claude Code CLI subprocesses that speak
+        the Anthropic Messages protocol only. Handing them a ``LiteLLMRoute``
+        built from arbitrary ``params``/``env_params`` (which may front an
+        OpenAI-/Vertex-shaped gateway with no Anthropic-compatible endpoint at
+        all) would either misroute onto the AGENT's own unrelated LiteLLM
+        settings or fail with a confusing SDK-level error — the exact
+        misrouting ``LiteLLMRoute``'s own docstring says must never happen.
+        Reject the combination loudly at resolution time instead.
+        """
+        if not isinstance(self.eval_route, LiteLLMRoute):
+            return
+        offenders: list[str] = []
+        if any(isinstance(c, AgentJudgeCriterion) and c.enabled for c in self.task.success_criteria):
+            offenders.append("an enabled agent_judge criterion")
+        if self.task.simulation is not None and self.task.simulation.enabled:
+            offenders.append("simulation.enabled")
+        if offenders:
+            named = " and ".join(offenders)
+            msg = (
+                f"checker_context.api_route.route: litellm is llm_judge-only (it dispatches through the "
+                f"litellm library in-process, not a real Claude Code subprocess), but this task also has "
+                f"{named}, which run as Claude Code sub-agents requiring an Anthropic-compatible endpoint. "
+                f"Use route: bedrock/direct instead, or remove/disable {named}."
+            )
+            raise ValueError(msg)
+
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.
 
@@ -1219,6 +1551,13 @@ class Orchestrator:
         # it, distinct from the agent's api_routing.
         if self.eval_route is not None:
             self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
+            # bedrock_model/litellm_model below are sourced from self.route (the
+            # AGENT's route) — record the judge/simulator's own model separately so
+            # a checker_context.api_route.model override (or the LiteLLM-agent
+            # pinned-to-Bedrock default) is visible in run artifacts, not just
+            # inferable from the agent's model.
+            if self.eval_route.model:
+                self.result.environment_info["eval_model"] = self.eval_route.model
         if isinstance(self.route, BedrockRoute):
             self.result.environment_info["aws_region"] = self.route.region
             if self.route.model:
@@ -1230,7 +1569,9 @@ class Orchestrator:
         elif isinstance(self.route, LiteLLMRoute):
             # Host only (never the base_url or auth token) — mirrors the Codex
             # agent's host-only recording so secrets stay out of run artifacts.
-            self.result.environment_info["litellm_base_url_host"] = urlparse(self.route.base_url).hostname or ""
+            self.result.environment_info["litellm_base_url_host"] = (
+                urlparse(settings.litellm_base_url or "").hostname or ""
+            )
             if self.route.model:
                 self.result.environment_info["litellm_model"] = self.route.model
         # Agent-specific routing (e.g. Codex custom-endpoint / Azure). No-op for
@@ -1434,16 +1775,41 @@ class Orchestrator:
                     iteration=iteration,
                 ) from None
 
-        turn_record = await execute_with_retry(
-            operation=_communicate_attempt,
-            operation_name=operation_label,
-            context={
-                "task_id": self.task.task_id,
-                "component": "agent",
-                "agent_name": self._agent_name,
-            },
-            on_attempt_error=_on_attempt_failure,
-        )
+        # ANTI-CHEAT WINDOW. The agent shares a filesystem with the harness, so
+        # without this it can simply read the reference solution (and the task YAML
+        # with its criteria) instead of solving the task. Both directories sit at
+        # mode 000 for the whole of every communicate attempt — including retries,
+        # since the wrapper is outside execute_with_retry — and are restored on
+        # every exit path, so criteria and judges that run afterwards read normally.
+        #
+        # Routed through the SANDBOX, which owns whether a chmod window means
+        # anything for its driver.
+        #
+        # task_dir is shielded ALONGSIDE reference_dir. It previously was not,
+        # because under docker it was bind-mounted `:ro` and the chmod returned
+        # EROFS -- producing only a per-turn "could not chmod" warning. It is now
+        # a read-write throwaway copy (docker_runner._prepare_task_dir_mount), so
+        # the window applies. That matters because the task dir holds grading
+        # material beyond the reference: run_command fixtures, expected outputs,
+        # and -- for a task laid out flat, whose parent is the whole `tasks/`
+        # tree -- every SIBLING task's reference solution.
+        #
+        # What this does NOT do is hide the task DEFINITION. `task.yaml` is also
+        # staged at /work/input for the in-container orchestrator to read, and
+        # that mount is untouched by this window. Hiding the criteria from the
+        # agent remains a separate, unsolved problem.
+        assert self.sandbox is not None
+        async with self.sandbox.set_permissions([self._reference_dir, self.sandbox.task_dir]):
+            turn_record = await execute_with_retry(
+                operation=_communicate_attempt,
+                operation_name=operation_label,
+                context={
+                    "task_id": self.task.task_id,
+                    "component": "agent",
+                    "agent_name": self._agent_name,
+                },
+                on_attempt_error=_on_attempt_failure,
+            )
         assert turn_record is not None  # execute_with_retry returns the turn or raises
         return turn_record
 
@@ -1515,15 +1881,9 @@ class Orchestrator:
             # Load reference in evaluate-only mode too: judge criteria with
             # include_reference=true expect this populated even when no agent
             # runs. The agent-driven branch below has the same call.
-            reference_code, reference_dir, self._reference_code = load_reference(
-                task=self.task,
-                task_file=self.task_file,
-                cached_reference=self._reference_code,
-            )
             criteria_results = await self.success_checker.check_all_async(
                 self.task.success_criteria,
-                reference_code=reference_code,
-                reference_dir=reference_dir,
+                reference_dir=self._reference_dir,
                 turn_records=self.result.iterations,
             )
             self.result.success_criteria_results = criteria_results
@@ -1571,17 +1931,12 @@ class Orchestrator:
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
-        # Check success criteria (pass reference code for reference_comparison criterion)
+        # Check success criteria (reference_dir feeds reference_comparison + judges)
         logger.debug("Checking success criteria")
-        reference_code, reference_dir, self._reference_code = load_reference(
-            task=self.task,
-            task_file=self.task_file,
-            cached_reference=self._reference_code,
-        )
+        await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
-            reference_code=reference_code,
-            reference_dir=reference_dir,
+            reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
         )
         self.result.success_criteria_results = criteria_results
@@ -1694,15 +2049,10 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
-        reference_code, reference_dir, self._reference_code = load_reference(
-            task=self.task,
-            task_file=self.task_file,
-            cached_reference=self._reference_code,
-        )
+        await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
-            reference_code=reference_code,
-            reference_dir=reference_dir,
+            reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
         )
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
@@ -2204,7 +2554,15 @@ class Orchestrator:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=self._POST_RUN_STREAM_LIMIT,
-                )  # nosec B602,B604 - commands come from task YAML, not user input
+                )
+                # No `# nosec` here: bandit does not flag
+                # asyncio.create_subprocess_shell at all (B602 is
+                # subprocess.Popen(shell=True)), so the suppression this line
+                # used to carry was inert -- and an inert id silently
+                # pre-suppresses a real finding if a flagged construct is ever
+                # added here. The shell IS intentional: pre/post_run commands are
+                # authored in the task YAML, which is already a trusted artifact
+                # (it can run anything via a run_command criterion).
 
                 stdout_chunks: list[str] = []
                 stderr_chunks: list[str] = []
@@ -2311,6 +2669,30 @@ class Orchestrator:
                 await self.agent.stop()
             except Exception as e:
                 logger.warning(f"Failed to stop agent: {e}")
+
+        # Drop the staged reference copy. Deliberately NOT preserved into
+        # run_dir/artifacts: run directories get archived, uploaded, and shared,
+        # and the reference solution must not ride along.
+        #
+        # Keyed on _reference_staging_root, recorded before the copy — NOT on
+        # _reference_dir.parent, which is only set once the copy succeeds and so
+        # would leak a half-written reference when copytree raises. The field is
+        # None under docker, where the reference is the host-owned bind mount:
+        # that one is not ours to delete, and rmtree'ing its parent would take
+        # /work with it.
+        #
+        # rmtree_restrictive, not rmtree(ignore_errors=True): a run killed
+        # mid-turn leaves the tree at mode 000, where scandir raises
+        # PermissionError and plain rmtree silently declines — orphaning a
+        # tempdir that holds the reference solution, with no log line.
+        staging_root = self._reference_staging_root
+        self._reference_dir = None
+        self._reference_staging_root = None
+        if staging_root is not None:
+            try:
+                await asyncio.to_thread(rmtree_restrictive, staging_root)
+            except Exception as e:
+                logger.warning("Failed to remove staged reference dir %s: %s", staging_root, e)
 
         # Cleanup sandbox. Preservation and cleanup() are SIBLING try blocks:
         # a preservation failure (e.g. disk full during preserve_to) must never

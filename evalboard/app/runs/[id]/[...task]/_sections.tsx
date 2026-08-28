@@ -20,11 +20,7 @@ import {
 } from "@/lib/thinkingSim";
 import { fmtCompact, fmtUsd } from "@/lib/format";
 import { tokenBucketUsd, type TokenKind } from "@/lib/pricing";
-import {
-    type ColHelp,
-    ColHelpIcon,
-    TOKEN_COLUMN_HELP,
-} from "@/app/_components/col-help";
+import { TOKEN_COLUMN_HELP } from "@/app/_components/col-help";
 import { type Unit, UnitToggle } from "@/app/_components/unit-toggle";
 import { withSource } from "@/app/_lib/source-param";
 import { TableScroll } from "@/app/_components/scroll-table";
@@ -105,39 +101,62 @@ export function FlowDebugSection({ flowDebug }: { flowDebug: FlowDebugResult }) 
     );
 }
 
-export function CriteriaSection({ criteria }: { criteria: CriterionResult[] }) {
+export function CriteriaSection({
+    criteria,
+    title = "Success criteria",
+    diagnostic = false,
+}: {
+    criteria: CriterionResult[];
+    title?: string;
+    diagnostic?: boolean;
+}) {
     return (
         <section className="space-y-2">
             <h2 className="text-sm font-semibold text-gray-900">
-                Success criteria ({criteria.length})
-                {criteria.some((c) => !c.gating) && (
+                {title} ({criteria.length})
+                {!diagnostic && criteria.some((c) => !c.gating) && (
                     <span className="ml-2 font-normal text-gray-500">
                         {criteria.filter((c) => !c.gating).length}{" "}
                         informational
                     </span>
                 )}
             </h2>
+            {diagnostic && (
+                <p className="text-xs text-gray-500">
+                    Diagnostic evidence collected after the agent failed. It
+                    does not affect status, score, or pass/fail gating.
+                </p>
+            )}
             <div className="space-y-2">
                 {criteria.map((c, i) => {
                     // Compare against the criterion's own threshold, not === 1:
                     // fractional criteria pass below 1.0 (default threshold 0.9).
                     const passed = (c.score ?? 0) >= c.passThreshold;
+                    const evaluated = c.evaluationStatus === "evaluated";
                     return (
                         <Expandable
                             key={i}
                             header={
                                 <div className="flex items-center gap-3">
-                                    <ResultPill
-                                        passed={passed}
-                                        gating={c.gating}
-                                    />
+                                    {evaluated ? (
+                                        <ResultPill
+                                            passed={passed}
+                                            gating={c.gating}
+                                        />
+                                    ) : (
+                                        <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                                            NOT EVALUATED
+                                        </span>
+                                    )}
                                     <span className="text-sm text-gray-900">
                                         {c.description ??
                                             c.criterionType ??
                                             `criterion ${i + 1}`}
                                     </span>
                                     <span className="ml-auto text-xs text-gray-500 tabular-nums">
-                                        score {c.score ?? "—"}
+                                        {evaluated
+                                            ? `score ${c.score ?? "—"}`
+                                            : "no score"}
                                     </span>
                                 </div>
                             }
@@ -256,25 +275,11 @@ const MSG_GRID =
     "grid items-center gap-2 px-2 py-1 " +
     "grid-cols-[1.5rem_2.5rem_3.5rem_3.5rem_minmax(0,1fr)_3.5rem_3.5rem_3.5rem_3.5rem_4.5rem]";
 
-// Per-message Cost help (grid-specific: this is a rate-derived per-call figure,
-// not the SDK's cumulative per-turn cost). Token-column help is shared via
-// TOKEN_COLUMN_HELP so the timeline and the run grid stay consistent.
-const MESSAGE_COST_HELP: ColHelp = {
-    title: "Per-message cost",
-    body: "This message's recorded tokens priced at list rates — the cost of this single API call. The SDK reports only a cumulative per-turn figure, so these need not sum exactly to the task's total cost (the authoritative SDK number) shown above. Blank when the model is unpriced or no per-message tokens were recorded.",
-};
-
-// A right-aligned message-timeline header cell with an ⓘ help bubble. Label sits
-// at the right edge with the icon to its left (flex-row-reverse), matching the
-// run-grid headers.
-function MsgHeadHelp({ label, help }: { label: string; help: ColHelp }) {
-    return (
-        <span className="inline-flex items-center justify-end gap-1 flex-row-reverse">
-            {label}
-            <ColHelpIcon help={help} align="right" />
-        </span>
-    );
-}
+// Per-message Cost tooltip (grid-specific: this is a rate-derived per-call
+// figure, not the SDK's cumulative per-turn cost). Token-column copy is shared
+// via TOKEN_COLUMN_HELP so the timeline and the run grid stay consistent.
+const MESSAGE_COST_HELP =
+    "Per-message cost: this message's recorded tokens priced at list rates — the cost of this single API call. The SDK reports only a cumulative per-turn figure, so these need not sum exactly to the task's total cost (the authoritative SDK number) shown above. Blank when the model is unpriced or no per-message tokens were recorded.";
 
 function messageKind(blockTypes: MessageEvent["blockTypes"]): string {
     const set = new Set(blockTypes);
@@ -473,32 +478,20 @@ export function MessageTimelineSection({
                     <span className="text-right">Gen</span>
                     <span className="text-right">Exec</span>
                     <span>Content</span>
-                    <span className="text-right">
-                        <MsgHeadHelp
-                            label="In"
-                            help={TOKEN_COLUMN_HELP.input}
-                        />
+                    <span className="text-right" title={TOKEN_COLUMN_HELP.input}>
+                        In
                     </span>
-                    <span className="text-right">
-                        <MsgHeadHelp
-                            label="Cache R"
-                            help={TOKEN_COLUMN_HELP.cr}
-                        />
+                    <span className="text-right" title={TOKEN_COLUMN_HELP.cr}>
+                        Cache R
                     </span>
-                    <span className="text-right">
-                        <MsgHeadHelp
-                            label="Cache W"
-                            help={TOKEN_COLUMN_HELP.cw}
-                        />
+                    <span className="text-right" title={TOKEN_COLUMN_HELP.cw}>
+                        Cache W
                     </span>
-                    <span className="text-right">
-                        <MsgHeadHelp
-                            label="Out"
-                            help={TOKEN_COLUMN_HELP.output}
-                        />
+                    <span className="text-right" title={TOKEN_COLUMN_HELP.output}>
+                        Out
                     </span>
-                    <span className="text-right">
-                        <MsgHeadHelp label="Cost" help={MESSAGE_COST_HELP} />
+                    <span className="text-right" title={MESSAGE_COST_HELP}>
+                        Cost
                     </span>
                 </div>
                 <ol>

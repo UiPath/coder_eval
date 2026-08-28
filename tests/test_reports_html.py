@@ -269,6 +269,36 @@ def test_task_html_error_case_with_empty_turns():
     assert "<summary>Logs</summary>" not in html
 
 
+def test_task_html_renders_post_failure_evidence_as_diagnostic() -> None:
+    result = _make_result(
+        final_status=FinalStatus.ERROR,
+        error_message="Agent turn timed out",
+    )
+    result.weighted_score = 0.0
+    result.post_failure_criteria_results = [
+        CriterionResult(
+            criterion_type="file_exists",
+            description="artifact exists",
+            score=1.0,
+        ),
+        CriterionResult(
+            criterion_type="run_command",
+            description="validator runs",
+            score=0.0,
+            evaluation_status="not_evaluated",
+            details="Not evaluated after terminal agent failure: unsafe recovery check.",
+        ),
+    ]
+
+    html = HTMLReportGenerator.generate_task_html(result)
+
+    assert "Post-failure Artifact Evidence" in html
+    assert "1/1 evaluated checks passed · 1 not evaluated" in html
+    assert "NOT EVALUATED" in html
+    assert "does not change the terminal status, canonical score, or pass/fail gate" in html
+    assert "ERROR" in html
+
+
 def test_task_html_error_renders_error_log_tail():
     """``error_log_tail`` on the result drives the Logs disclosure."""
     result = _make_result(

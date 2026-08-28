@@ -45,11 +45,11 @@ def test_format_routing_direct_judge_transport_none_renders_as_none():
 
 def test_format_routing_non_direct_routes_unchanged():
     """BedrockRoute keeps the original bare-name format — judge transport is a Direct-only concern."""
-    assert _format_routing(BedrockRoute(bearer_token="t", region="us-east-1")) == "aws_bedrock"
+    assert _format_routing(BedrockRoute(region="us-east-1")) == "aws_bedrock"
 
 
 def test_format_routing_litellm_shows_model():
-    out = _format_routing(LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="zai.glm-5"))
+    out = _format_routing(LiteLLMRoute(model="zai.glm-5"))
     assert out.startswith("litellm")
     assert "zai.glm-5" in out
 
@@ -57,7 +57,7 @@ def test_format_routing_litellm_shows_model():
 def test_format_routing_litellm_effective_model_wins_over_route_default():
     """The --model override (effective_model) must be logged, not the route's LITELLM_MODEL default."""
     out = _format_routing(
-        LiteLLMRoute(base_url="http://localhost:4000", auth_token="k", model="zai.glm-5"),
+        LiteLLMRoute(model="zai.glm-5"),
         effective_model="deepseek.v3.2",
     )
     assert "deepseek.v3.2" in out
@@ -105,9 +105,80 @@ def test_record_route_environment_info_direct_none_serialized_as_string(tmp_path
     assert orchestrator.result.environment_info["judge_transport"] == "none"
 
 
+class TestRejectLitellmEvalRouteIfUnsupported:
+    """checker_context.api_route.route: litellm dispatches llm_judge through the
+    litellm library in-process, but agent_judge and the simulator are real
+    Claude Code CLI subprocesses that speak Anthropic Messages only — handing
+    them an arbitrary litellm-fronted route would misroute or fail silently.
+    PR #137 review: 'route: litellm breaks the simulator and agent_judge.'"""
+
+    @staticmethod
+    def _orchestrator_with_criteria(tmp_path: Path, success_criteria, simulation=None) -> Orchestrator:
+        task_file = Path("tasks/hello_date.yaml")
+        task, _ = load_task(task_file)
+        task = task.model_copy(update={"success_criteria": success_criteria, "simulation": simulation})
+        orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
+        orchestrator.eval_route = LiteLLMRoute(model="gpt-5.6-luna")
+        return orchestrator
+
+    def test_llm_judge_only_is_fine(self, tmp_path):
+        from coder_eval.models import LLMJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(tmp_path, [LLMJudgeCriterion(description="x", prompt="grade")])
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+    def test_rejects_enabled_agent_judge(self, tmp_path):
+        from coder_eval.models import AgentJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")]
+        )
+        with pytest.raises(ValueError, match="agent_judge"):
+            orchestrator._reject_litellm_eval_route_if_unsupported()
+
+    def test_allows_disabled_agent_judge(self, tmp_path):
+        from coder_eval.models import AgentJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade", enabled=False)]
+        )
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+    def test_rejects_enabled_simulation(self, tmp_path):
+        from coder_eval.models import LLMJudgeCriterion, SimulationConfig
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path,
+            [LLMJudgeCriterion(description="x", prompt="grade")],
+            simulation=SimulationConfig(enabled=True, persona="p", goal="g"),
+        )
+        with pytest.raises(ValueError, match=r"simulation\.enabled"):
+            orchestrator._reject_litellm_eval_route_if_unsupported()
+
+    def test_allows_disabled_simulation(self, tmp_path):
+        from coder_eval.models import LLMJudgeCriterion, SimulationConfig
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path,
+            [LLMJudgeCriterion(description="x", prompt="grade")],
+            simulation=SimulationConfig(enabled=False, persona="p", goal="g"),
+        )
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+    def test_non_litellm_eval_route_is_never_checked(self, tmp_path):
+        """Bedrock/Direct eval routes are always fine with agent_judge/simulation."""
+        from coder_eval.models import AgentJudgeCriterion
+
+        orchestrator = self._orchestrator_with_criteria(
+            tmp_path, [AgentJudgeCriterion(description="x", prompt="grade")]
+        )
+        orchestrator.eval_route = BedrockRoute(region="eu-north-1")
+        orchestrator._reject_litellm_eval_route_if_unsupported()  # no raise
+
+
 def test_record_route_environment_info_bedrock(tmp_path):
     orchestrator = _make_orchestrator_with_route(
-        tmp_path, BedrockRoute(bearer_token="t", region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
+        tmp_path, BedrockRoute(region="eu-north-1", model="eu.anthropic.claude-sonnet-4-6")
     )
     orchestrator._record_route_environment_info()
     assert orchestrator.result is not None
@@ -117,11 +188,15 @@ def test_record_route_environment_info_bedrock(tmp_path):
     assert info["bedrock_model"] == "eu.anthropic.claude-sonnet-4-6"
 
 
-def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_path):
+def test_record_route_environment_info_litellm_records_host_only_no_secret(tmp_path, monkeypatch):
     """LiteLLM route records host + model, but NEVER the auth token or full base_url."""
+    from coder_eval.config import settings
+
+    monkeypatch.setattr(settings, "litellm_base_url", "http://localhost:4000")
+    monkeypatch.setattr(settings, "litellm_auth_token", "sk-super-secret")
     orchestrator = _make_orchestrator_with_route(
         tmp_path,
-        LiteLLMRoute(base_url="http://localhost:4000", auth_token="sk-super-secret", model="zai.glm-5"),
+        LiteLLMRoute(model="zai.glm-5"),
     )
     orchestrator._record_route_environment_info()
     assert orchestrator.result is not None
@@ -1670,7 +1745,7 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
     )
     orchestrator.success_checker = mock_checker
 
-    with patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)):
+    with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
         success = await orchestrator._evaluation_loop()
 
     # Should NOT succeed
@@ -1788,7 +1863,7 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     orchestrator.success_checker = mock_checker
 
     with (
-        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
         success = await orchestrator._evaluation_loop()
@@ -1891,7 +1966,7 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     orchestrator.success_checker = mock_checker
 
     with (
-        patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
         # TurnTimeoutError is non-retryable, so the loop re-raises after the
         # on_attempt_error callback has already stamped + appended the partial.
@@ -2108,10 +2183,10 @@ def test_finalize_result_logs_zero_score_when_no_criteria(tmp_path, caplog):
 
 @pytest.mark.asyncio
 async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
-    """Evaluate-only branch (agent is None) must call load_reference_code and
-    forward the resolved reference to SuccessChecker.check_all.
+    """Evaluate-only branch (agent is None) must still stage the reference and
+    forward it to SuccessChecker.check_all_async.
 
-    Regression: previously this branch called check_all without reference_code,
+    Regression: previously this branch called check_all without the reference,
     so judge-style criteria (llm_judge / agent_judge) silently saw no
     reference even when task.reference was set — surfaced as
     "include_reference=True but reference not set" in the judge_context log.
@@ -2126,8 +2201,9 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
         SandboxConfig,
     )
 
-    ref_path = tmp_path / "reference.txt"
-    ref_path.write_text("REFERENCE_CONTENT")
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir()
+    (ref_dir / "solution.txt").write_text("REFERENCE_CONTENT")
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
@@ -2147,13 +2223,13 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="x", description="x")],
         task_timeout=None,
-        reference=ReferenceSource(file="reference.txt"),
+        reference=ReferenceSource(directory="reference"),
     )
 
     run_dir = tmp_path / "run" / "evaluate_only_ref"
     run_dir.mkdir(parents=True)
 
-    # task_file is what load_reference_code resolves the reference path against.
+    # task_file is what the reference directory path resolves against.
     task_yaml = tmp_path / "task.yaml"
     task_yaml.write_text("# placeholder")
 
@@ -2182,11 +2258,18 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
     )
     orchestrator.success_checker = mock_checker
 
+    # _setup() normally does this; the test drives _evaluation_loop directly.
+    await orchestrator._stage_reference()
     await orchestrator._evaluation_loop()
 
     mock_checker.check_all_async.assert_called_once()
     kwargs = mock_checker.check_all_async.call_args.kwargs
-    assert kwargs["reference_code"] == "REFERENCE_CONTENT"
+    staged = kwargs["reference_dir"]
+    assert staged is not None
+    # A per-run COPY, never the checked-out source — that is what makes the
+    # mode-000 window safe to apply under a parallel batch.
+    assert staged != ref_dir
+    assert (staged / "solution.txt").read_text() == "REFERENCE_CONTENT"
     # turn_records is empty in evaluate-only mode but the kwarg should still be wired.
     assert kwargs["turn_records"] == []
 

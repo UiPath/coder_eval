@@ -10,9 +10,13 @@
 import { harnessColor } from "@/lib/harness";
 import type { RunPoint } from "@/lib/overview";
 
-// Which per-run rate to plot. Both metrics live on the same RunPoint, so the
-// two overview charts share this module and differ only by this key.
-export type HarnessMetric = "successRate" | "turnBudgetRate";
+// Which per-run metric to plot. All of them live on the same RunPoint, so the
+// overview charts share this module and differ only by this key.
+export type HarnessMetric =
+    | "successRate"
+    | "turnBudgetRate"
+    | "withinExpectedTimeRate"
+    | "timePerPassedTask";
 
 export interface HarnessSeries {
     harness: string;

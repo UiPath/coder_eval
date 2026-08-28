@@ -24,9 +24,14 @@ from coder_eval.models.agent_config import (
 from coder_eval.models.container_paths import (
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
+    CONTAINER_REFERENCE_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
+    REFERENCE_DIR_TOKEN,
     RESERVED_CONTAINER_DIRS,
+    TASK_DIR_TOKEN,
+    command_uses_token,
+    path_uses_token,
 )
 
 # Enums
@@ -176,6 +181,8 @@ from coder_eval.models.tasks import (
     DEFAULT_SIMULATOR_MODEL,
     NORMALIZED_CRITERION_ALIASES,
     REMOVED_CRITERION_TYPES,
+    ApiRouteContext,
+    CheckerContext,
     CriteriaCheckTiming,
     Dataset,
     PostRunCommand,
@@ -276,7 +283,12 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DockerBuildConfig",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
+    "CONTAINER_REFERENCE_DIR",
     "CONTAINER_TASK_DIR",
+    "REFERENCE_DIR_TOKEN",
+    "TASK_DIR_TOKEN",
+    "command_uses_token",
+    "path_uses_token",
     "CONTAINER_WORK_DIR",
     "RESERVED_CONTAINER_DIRS",
     "DockerDriverConfig",
@@ -350,6 +362,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "merge_strategy_of",
     # Tasks
     "TaskDefinition",
+    "ApiRouteContext",
+    "CheckerContext",
     "DEFAULT_SIMULATION_STOP_TOKEN",
     "DEFAULT_SIMULATOR_MODEL",
     "NORMALIZED_CRITERION_ALIASES",

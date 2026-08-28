@@ -7,11 +7,11 @@
 # dedicated GitHub team (e.g. @UiPath/coder-eval-maintainers) once one exists.
 
 # Default owners for everything in the repo.
-*       @akshaylive @tmatup @uipreliga @bai-uipath
+*       @akshaylive @tmatup @uipreliga @bai-uipath @CarlesUIPath
 
 # Community-health, license, and security files warrant extra scrutiny.
-/LICENSE            @akshaylive @tmatup @uipreliga @bai-uipath
-/NOTICE             @akshaylive @tmatup @uipreliga @bai-uipath
-/SECURITY.md        @akshaylive @tmatup @uipreliga @bai-uipath
-/CODE_OF_CONDUCT.md @akshaylive @tmatup @uipreliga @bai-uipath
-/.github/           @akshaylive @tmatup @uipreliga @bai-uipath
+/LICENSE            @akshaylive @tmatup @uipreliga @bai-uipath @CarlesUIPath
+/NOTICE             @akshaylive @tmatup @uipreliga @bai-uipath @CarlesUIPath
+/SECURITY.md        @akshaylive @tmatup @uipreliga @bai-uipath @CarlesUIPath
+/CODE_OF_CONDUCT.md @akshaylive @tmatup @uipreliga @bai-uipath @CarlesUIPath
+/.github/           @akshaylive @tmatup @uipreliga @bai-uipath @CarlesUIPath

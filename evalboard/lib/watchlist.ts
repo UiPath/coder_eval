@@ -11,6 +11,7 @@
 
 import type { PerRun } from "./overview";
 import type { RunOverviewTask } from "./runs";
+import { timeRatio } from "./timing";
 import { turnRatio } from "./turns";
 
 export const FAIL_WEIGHT = 50;
@@ -62,6 +63,12 @@ export interface TurnOverageRow {
     avgTurns: number;
     avgExpected: number;
 }
+export interface TimeOverageRow {
+    skill: string;
+    avgTimeRatio: number;
+    avgSeconds: number;
+    avgExpectedSeconds: number;
+}
 export interface WatchlistData {
     windowSize: number;
     topAttention: AttentionRow[];
@@ -70,6 +77,13 @@ export interface WatchlistData {
     streaks: StreakRow[];
     volatility: VolatilityRow[];
     turnOverage: TurnOverageRow[];
+    // Wall-clock sibling of turnOverage, reported alongside it while both
+    // efficiency signals run. Deliberately NOT folded into the attention score:
+    // the 50/30/20 fail/regression/turn split stays put so the ranking does not
+    // move while the derived expected-time line is still being watched. When the
+    // turn budget goes, attention() switches its third term to this ratio and
+    // this becomes the only overage list.
+    timeOverage: TimeOverageRow[];
 }
 
 // Runs newest-first, dropping any with a null overview.
@@ -361,6 +375,45 @@ export function turnOverage(runs: LoadedRun[]): TurnOverageRow[] {
     );
 }
 
+// Skills whose passing tasks run past the wall clock they are expected to need.
+// Same shape as turnOverage, over `expected_seconds` (derived per task per
+// harness by the eval runner) instead of a hand-written turn budget.
+export function timeOverage(runs: LoadedRun[]): TimeOverageRow[] {
+    const ratios = new Map<string, number[]>();
+    const seconds = new Map<string, number[]>();
+    const expected = new Map<string, number[]>();
+    const push = (m: Map<string, number[]>, k: string, v: number) => {
+        const arr = m.get(k);
+        if (arr) arr.push(v);
+        else m.set(k, [v]);
+    };
+    for (const run of runs) {
+        for (const t of run.tasks) {
+            if (!t.skill) continue;
+            const r = timeRatio(t.durationSeconds, t.expectedSeconds);
+            if (r == null) continue;
+            push(ratios, t.skill, r);
+            push(seconds, t.skill, t.durationSeconds!);
+            push(expected, t.skill, t.expectedSeconds!);
+        }
+    }
+    const rows: TimeOverageRow[] = [];
+    for (const [skill, rs] of ratios) {
+        const avgTimeRatio = mean(rs);
+        if (avgTimeRatio <= 1) continue;
+        rows.push({
+            skill,
+            avgTimeRatio,
+            avgSeconds: mean(seconds.get(skill)!),
+            avgExpectedSeconds: mean(expected.get(skill)!),
+        });
+    }
+    return rows.sort(
+        (a, b) =>
+            b.avgTimeRatio - a.avgTimeRatio || a.skill.localeCompare(b.skill),
+    );
+}
+
 export function buildWatchlist(perRun: PerRun[]): WatchlistData {
     const runs = runsNewestFirst(perRun);
     return {
@@ -371,5 +424,6 @@ export function buildWatchlist(perRun: PerRun[]): WatchlistData {
         streaks: streaks(runs),
         volatility: volatility(runs),
         turnOverage: turnOverage(runs),
+        timeOverage: timeOverage(runs),
     };
 }

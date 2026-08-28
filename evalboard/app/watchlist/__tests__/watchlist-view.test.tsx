@@ -36,6 +36,7 @@ function task(o: Partial<RunOverviewTask>): RunOverviewTask {
         actualCommands: null,
         totalTurns: null,
         expectedTurns: null,
+        expectedSeconds: null,
         visibleTurns: null,
         hasFinalReply: false,
         ...o,

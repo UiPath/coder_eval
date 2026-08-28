@@ -161,8 +161,11 @@ from coder_eval.models import CriterionResult
 class MyChecker(BaseCriterion[MyCriterion]):
     criterion_type = "my_criterion"          # must match the model discriminator
 
-    def _check_impl(self, criterion, sandbox, reference_code=None, *,
+    def _check_impl(self, criterion, sandbox, *,
                     turn_records=None, context=None) -> CriterionResult:
+        # `context` carries the live run state: `context.route` (for criteria
+        # that call a model) and `context.reference_dir` (the staged reference
+        # copy, for criteria that grade against a reference solution).
         ok = ...  # your logic
         return CriterionResult(
             criterion_type=self.criterion_type,
@@ -220,6 +223,21 @@ Notes:
   LiveSuccessCriterion)` directly, no separate checker-side flag. A lint rule
   (`tests/test_custom_lint.py::TestCE025LiveVerdictConsistency`) keeps the
   model subclassing and the checker's `live_verdict` override paired.
+- Your `live_verdict` must be **deterministic** (a pure function of the
+  `turn_records` prefix — no wall-clock, randomness, or hidden instance state)
+  and **monotonic** (once it returns `"pass"`/`"fail"` for some prefix, every
+  longer prefix returns that same verdict) — `EarlyStopWatcher`'s verdict
+  latching and deferred stops silently depend on both. Lint rule CE036
+  (`tests/lint/live_verdict_contract.py`) enforces this by replaying each live
+  criterion against every prefix of recorded trajectories, and **fails until
+  you add `ContractCase` fixtures** for the new type in the same change,
+  reaching every polarity its instances claim via
+  `live_decidable_polarities()`. An out-of-tree plugin criterion is invisible
+  to CE036's union walk — and the module lives under `tests/`, which is not
+  shipped in the PyPI wheel — so copy the replay pattern (a `ContractCase`-style
+  fixture plus the prefix-by-prefix determinism/monotonicity walk) into your
+  plugin's own test suite, using `tests/lint/live_verdict_contract.py` in this
+  repo as the reference implementation.
 
 > A duplicate `criterion_type` **overwrites** the earlier checker with a warning (not
 > a hard error, unlike agents) — keep type strings unique.

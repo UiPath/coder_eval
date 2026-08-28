@@ -1,5 +1,5 @@
 ---
-description: Review coder-eval task YAML that already exists — find criteria that cannot fail, prompts that give away the answer, fixtures with no cleanup, and near-duplicate tasks, each with a severity and a concrete fix. Read-only. Use when the user wants existing tasks reviewed, linted, audited, or checked for gaps.
+description: Review existing coder-eval task YAML — find criteria that cannot fail, prompts that leak the answer, and near-duplicate tasks, each with a fix. Read-only. Use when the user wants existing tasks reviewed, linted, audited, or checked for gaps.
 allowed-tools: ["Read", "Glob", "Grep"]
 disallowed-tools: ["Write", "Edit", "NotebookEdit"]
 ---

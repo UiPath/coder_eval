@@ -15,14 +15,18 @@ from coder_eval.evaluation.judge_context import (
     format_details,
     scrub_reference,
 )
+from coder_eval.evaluation.judge_litellm import invoke_litellm_judge_async
 from coder_eval.evaluation.judge_usage import (
     token_usage_from_anthropic_dict,
+    token_usage_from_openai_dict,
 )
 from coder_eval.evaluation.verdict_tool import (
     SUBMIT_VERDICT_ANTHROPIC_TOOL,
     extract_verdict_from_anthropic_response,
+    extract_verdict_from_openai_response,
 )
 from coder_eval.models import (
+    DEFAULT_JUDGE_MODEL,
     BedrockRoute,
     CriterionResult,
     DirectRoute,
@@ -63,13 +67,21 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         self,
         criterion: LLMJudgeCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: "list[TurnRecord] | None" = None,
         context: CheckContext | None = None,
     ) -> CriterionResult:
         ctx = context or CheckContext()
         route = ctx.route
+        reference_dir = ctx.reference_dir
+        # Precedence: an explicit per-criterion `model:` always wins; otherwise fall
+        # back to `checker_context.api_route.model` (baked into route.model by
+        # resolve_evaluation_route — set only when a real override was given, never
+        # the agent's own model); otherwise DEFAULT_JUDGE_MODEL. `criterion.model` is
+        # `None` (not a materialized default) when unset, so this precedence survives
+        # a `model_dump(mode="json")` / reload round trip (e.g. the docker driver's
+        # task-serialization step) unlike a `model_fields_set` check would.
+        judge_model = criterion.model or (route.model if route is not None else None) or DEFAULT_JUDGE_MODEL
 
         # Master enablement gate. Skipped criteria don't make an LLM call and don't
         # affect cost; weighted score includes them as 1.0 so they don't penalize.
@@ -97,7 +109,7 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 max_file_chars=criterion.max_file_chars,
             ).build,
             sandbox,
-            reference_code,
+            reference_dir,
             turn_records,
         )
 
@@ -121,12 +133,24 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 ),
             )
 
-        scrub_key = reference_code if criterion.include_reference else None
+        # Scrub keys are the per-FILE contents of the reference directory, not the
+        # single rendered block: the model is far more likely to echo one file back
+        # than to reproduce the whole concatenation verbatim, and a whole-block key
+        # would never match.
+        #
+        # Taken from the CONTEXT, not recomputed from `criterion.include_reference`:
+        # the builder records every reference-derived byte it actually attached,
+        # which includes `$REFERENCE_DIR/...` entries in `files:` — the documented
+        # way to show a judge one reference asset with include_reference=false.
+        # Gating on the flag left exactly that combination unscrubbed, persisting
+        # the solution verbatim into the archived judge transcript.
+        scrub_key = judge_ctx.reference_secrets or None
 
         # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
         # from the usage the backend reported in its response.
         verdict, parse_error, raw_verdict_text, response_usage = await _invoke_tool_channel(
             criterion=criterion,
+            model=judge_model,
             route=route,
             system_msg=_SYSTEM_PROMPT,
             user_msg=user_msg,
@@ -175,11 +199,17 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 async def _invoke_tool_channel(
     *,
     criterion: LLMJudgeCriterion,
+    model: str,
     route: "ApiRoute | None",
     system_msg: str,
     user_msg: str,
 ) -> tuple[JudgeVerdict | None, str | None, str, TokenUsage | None]:
     """Dispatch the tool-channel invocation by route, via non-blocking async clients.
+
+    ``model`` is the resolved judge model — ``criterion.model`` unless the task
+    left it unset and ``route.model`` (from ``checker_context.api_route.model``)
+    supplied a default (see ``_check_impl_async``); every backend call below
+    uses ``model``, never ``criterion.model`` directly.
 
     Returns ``(verdict, parse_error, raw_verdict_text, response_usage)``.
     ``raw_verdict_text`` is the JSON-dumped verdict for the transcript when
@@ -193,7 +223,7 @@ async def _invoke_tool_channel(
         case BedrockRoute():
             response = await invoke_bedrock_judge_async(
                 route=route,
-                model=criterion.model,
+                model=model,
                 system=system_msg,
                 user=user_msg,
                 temperature=criterion.temperature,
@@ -201,10 +231,10 @@ async def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(response)
-            response_usage = token_usage_from_anthropic_dict(response, model=criterion.model)
+            response_usage = token_usage_from_anthropic_dict(response, model=model)
         case DirectRoute():
             anthropic_response = await invoke_anthropic_judge_async(
-                model=criterion.model,
+                model=model,
                 system=system_msg,
                 user=user_msg,
                 temperature=criterion.temperature,
@@ -212,13 +242,23 @@ async def _invoke_tool_channel(
                 tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
             )
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
-            response_usage = token_usage_from_anthropic_dict(anthropic_response, model=criterion.model)
+            response_usage = token_usage_from_anthropic_dict(anthropic_response, model=model)
         case LiteLLMRoute():
-            # Defensive: the evaluation route is pinned to Bedrock/Direct by
-            # resolve_evaluation_route, so a LiteLLM route should never reach the
-            # judge. Fail loudly rather than silently scoring 0.0. (Explicit arm
-            # keeps the match exhaustive so pyright flags any future route member.)
-            return None, "llm_judge: evaluation route must be Bedrock/Direct, got LiteLLM", "(litellm route)", None
+            # Reachable via an explicit `checker_context.api_route.route: litellm`
+            # override (see resolve_evaluation_route). Dispatches through the
+            # `litellm` library (see invoke_litellm_judge_async's module docstring)
+            # rather than assuming one wire protocol — task authors point this at
+            # whatever gateway their judge model actually lives behind.
+            litellm_response = await invoke_litellm_judge_async(
+                route=route,
+                model=model,
+                system=system_msg,
+                user=user_msg,
+                max_tokens=criterion.max_tokens,
+                tool_spec=SUBMIT_VERDICT_ANTHROPIC_TOOL,
+            )
+            verdict, err = extract_verdict_from_openai_response(litellm_response)
+            response_usage = token_usage_from_openai_dict(litellm_response, model=model)
         case None:
             # Handled by the unconfigured-arm guard in _check_impl_async before
             # dispatch; defensive only.

@@ -76,11 +76,11 @@ jobs:
 
       - name: Install uv
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -95,6 +95,15 @@ jobs:
       # PHASE 2: Type checking
       - name: Type check with pyright
         run: .venv/bin/pyright
+
+      # The CE036 contract engine lives under tests/, which [tool.pyright] excludes
+      # -- and `exclude` beats both a CLI file arg and an `include` entry, so it can
+      # only be reached through a config of its own, derived from [tool.pyright] so
+      # the two passes cannot drift. Mirrors `make typecheck`.
+      - name: Type check the CE036 contract engine
+        run: |
+          .venv/bin/python -m tests.lint.pyright_config .pyright-tests.json
+          .venv/bin/pyright -p .pyright-tests.json
 
       # PHASE 3: Security scanning
       - name: Security - Dependency vulnerabilities (pip-audit)
@@ -288,7 +297,7 @@ jobs:
 
       - name: Install uv
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
       - name: Install project without [uipath] extra
@@ -372,11 +381,11 @@ jobs:
 
       - name: Install uv
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
@@ -386,6 +395,11 @@ jobs:
 
       - name: Type check with pyright
         run: .venv/Scripts/pyright
+
+      - name: Type check the CE036 contract engine
+        run: |
+          .venv/Scripts/python -m tests.lint.pyright_config .pyright-tests.json
+          .venv/Scripts/pyright -p .pyright-tests.json
 
       - name: Run test suite
         run: .venv/Scripts/pytest tests/ -v -m "not live and not lint"
@@ -438,7 +452,10 @@ jobs:
   e2e-smoke:
     name: E2E Smoke Tests (Real API)
     runs-on: uipath-ubuntu-latest
-    timeout-minutes: 10
+    # 15 (was 10): the bucket now includes anti_cheat_reference, a driver: docker
+    # task that spins its own container on top of the two image builds this job
+    # already does. Headroom, not an expected duration.
+    timeout-minutes: 15
     # Skip on fork PRs where secrets aren't available
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
@@ -452,12 +469,16 @@ jobs:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
-      # tasks_run for --tags smoke-pass. 6 task files (hello_date, dataset_example,
-      # smoke_llm_judge, smoke_agent_judge, byod_smoke_test, agentless_smoke_test);
-      # dataset_example fans out to 2 inline rows, so 7 sub-tasks. If you add/remove a
-      # smoke-pass task or change the dataset row count, bump these.
-      EXPECTED_SMOKE_PASS_RUN: "7"
-      EXPECTED_SMOKE_PASS_SUCCEEDED: "7"
+      # tasks_run for --tags smoke-pass. 7 task files (hello_date, dataset_example,
+      # smoke_llm_judge, smoke_agent_judge, byod_smoke_test, agentless_smoke_test,
+      # anti_cheat_reference); dataset_example fans out to 2 inline rows, so 8
+      # sub-tasks. If you add/remove a smoke-pass task or change the dataset row
+      # count, bump these.
+      #
+      # anti_cheat_reference lives in a SUBDIRECTORY, which `tasks/*.yaml` does not
+      # match — the smoke-pass step names its path explicitly. Keep that in sync.
+      EXPECTED_SMOKE_PASS_RUN: "8"
+      EXPECTED_SMOKE_PASS_SUCCEEDED: "8"
       # smoke-fail bucket: three tasks expected to fail.
       #   1. smoke_negative_path: file_contains criterion is unsatisfiable
       #      (sentinel-string regression detection for success-checker).
@@ -506,7 +527,7 @@ jobs:
 
       - name: Install uv
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
@@ -524,9 +545,13 @@ jobs:
       # that Bedrock rejects with 400 (no such cross-region profile). Falling
       # back to BEDROCK_MODEL — a valid pre-formatted Bedrock profile id — is
       # the same pattern live-tests uses (see test_claude_settings_enforcement_live._model_for_env).
+      # `tasks/*.yaml` is NOT recursive, so subdirectory tasks are listed
+      # explicitly. anti_cheat_reference is the adversarial probe that the agent
+      # cannot read the reference solution during its turn; it needs the
+      # coder-eval-agent image built above (it is a driver: docker task).
       - name: Run smoke-pass bucket (expect all to succeed)
         run: |
-          .venv/bin/coder-eval run tasks/*.yaml \
+          .venv/bin/coder-eval run tasks/*.yaml tasks/anti_cheat_reference/*.yaml \
             --tags smoke-pass \
             --run-dir runs/ci-smoke-pass
 
@@ -672,7 +697,7 @@ jobs:
 
       - name: Install uv
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
@@ -815,11 +840,11 @@ jobs:
 
       - name: Install uv
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
-      - name: Install project dependencies (with codex extra)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex
+      - name: Install project dependencies (with codex + litellm extras)
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
 
       - name: Verify required secrets are present
         run: |
@@ -829,14 +854,17 @@ jobs:
           fi
           echo "CODEX_API_KEY present."
 
-      - name: Run Codex live tests
+      - name: Run Codex + litellm-judge live tests
         run: |
           mkdir -p tmp
           # Run serially: `-n0` overrides the global `-n auto` (addopts).
           # Parallel xdist workers share ~/.codex and race the Codex SQLite
           # state migration (`duplicate column name: thread_id`); serial init
-          # migrates the fresh DB exactly once.
-          .venv/bin/pytest tests/test_codex_agent_live.py \
+          # migrates the fresh DB exactly once. test_litellm_judge_live.py
+          # reuses these same CODEX_* secrets to exercise
+          # checker_context.api_route.route: litellm end-to-end (PR #137
+          # review: "nothing in the repo exercises the feature").
+          .venv/bin/pytest tests/test_codex_agent_live.py tests/test_litellm_judge_live.py \
             -m live -n0 -v --tb=short --strict-markers -ra \
             --junit-xml=tmp/junit-codex-live.xml
 
@@ -853,7 +881,7 @@ jobs:
           passed = total - skipped - errors - failures
           print(f"codex-live passed={passed} skipped={skipped} errors={errors} failures={failures}")
           if passed < 1:
-              sys.exit("test_codex_agent_live.py reported zero PASSED tests (missing API key / silent skip?)")
+              sys.exit("Live Codex/litellm-judge tests reported zero PASSED tests (missing API key / silent skip?)")
           PY
 
       - name: Upload Codex live-test artifacts on failure
@@ -894,7 +922,7 @@ jobs:
 
       - name: Install uv
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)

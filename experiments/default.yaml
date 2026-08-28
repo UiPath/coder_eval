@@ -18,9 +18,11 @@ defaults:
   # Per-row dataset multiplication: a 100-row task with max_usd: 0.10 permits up to
   # $10 cumulative spend.
   run_limits:
-    # Maximum agent inner-loop turns per iteration (null = SDK default).
-    # Typical range in tasks: 3-18 depending on complexity.
-    max_turns: 20
+    # Hard safety ceiling on agent inner-loop turns per iteration (null = SDK
+    # default). Set well above the typical 3-18 turns a task needs so it only
+    # trips on runaway loops; task_timeout / turn_timeout below are the practical
+    # guards. Override per-task when a task legitimately needs more.
+    max_turns: 100
     # Soft target: when cumulative SDK turns across all iterations of a task
     # exceed this, the orchestrator logs a one-shot warning and the report
     # surfaces a badge. Does NOT abort the run (max_turns is the hard cap).
@@ -57,7 +59,9 @@ defaults:
     allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
 
     # Claude Code plugins to load (null = none)
-    # Example: [{"type": "local", "path": "/path/to/skills"}]
+    # `path` must be a PLUGIN ROOT: a directory holding skills/, so the skill sits at
+    # <path>/skills/<name>/SKILL.md. One level deeper loads nothing on claude-code.
+    # Example: [{"type": "local", "path": "/path/to/plugin-root"}]
     plugins: null
 
     # Additional patterns to ignore during file change detection (beyond defaults)

@@ -150,14 +150,17 @@ def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict
     )
 
     offset = 0
-    if criterion.verb is not None:
-        verb_tokens = criterion.verb.split()
-        # ORDERED prefix, not a token subset: `labellings confirm` must never be
-        # satisfied by `labellings unconfirm`, and a project name that happens to
-        # equal a subcommand must not stand in for the subcommand.
-        if positional[: len(verb_tokens)] != verb_tokens:
+    spellings = criterion.verb_spellings
+    if spellings:
+        # Token-wise, not a subset and not a string startswith: `labellings confirm`
+        # must never be satisfied by `labellings unconfirm`. Taking the first match is
+        # safe because validation rejects one spelling prefixing another, so no argv
+        # can match two.
+        matched = next((tokens for tokens in spellings if positional[: len(tokens)] == tokens), None)
+        if matched is None:
             return False
-        offset = len(verb_tokens)
+        # Measured from the spelling that matched, since spellings can differ in length.
+        offset = len(matched)
 
     if criterion.positional is not None:
         expected = criterion.positional
@@ -185,7 +188,6 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         self,
         criterion: CliCalledCriterion,
         sandbox: "Sandbox",
-        reference_code: str | None = None,
         *,
         turn_records: list["TurnRecord"] | None = None,
         context: CheckContext | None = None,
@@ -195,7 +197,6 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         Args:
             criterion: CLI-called criterion
             sandbox: Sandbox instance for file access
-            reference_code: Not used for this criterion
 
         Returns:
             Result with binary score (1.0 when the match count is within
@@ -278,8 +279,10 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         facets = []
         if criterion.tool is not None:
             facets.append(f"tool={criterion.tool!r}")
-        if criterion.verb is not None:
-            facets.append(f"verb={criterion.verb!r}")
+        # Reading `criterion.verb` here would print no verb at all for a `verb_any_of`
+        # criterion, hiding the constraint that caused the failure.
+        if spellings := criterion.verb_spellings:
+            facets.append(f"verb={' | '.join(' '.join(t) for t in spellings)!r}")
         if criterion.positional is not None:
             facets.append(f"positional={criterion.positional!r}")
         if criterion.flags:

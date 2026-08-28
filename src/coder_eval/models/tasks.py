@@ -9,8 +9,15 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import ResolvedAgentConfig
-from coder_eval.models.criteria import SuccessCriterion
-from coder_eval.models.enums import AgentKind
+from coder_eval.models.container_paths import REFERENCE_DIR_TOKEN, command_uses_token, path_uses_token
+from coder_eval.models.criteria import (
+    AgentJudgeCriterion,
+    LLMJudgeCriterion,
+    ReferenceComparisonCriterion,
+    RunCommandCriterion,
+    SuccessCriterion,
+)
+from coder_eval.models.enums import AgentKind, ApiBackend
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.merge_strategy import MergeField
@@ -69,6 +76,54 @@ REMOVED_CRITERION_TYPES: dict[str, str] = {
 """Criterion ``type:`` values that were removed, mapped to the migration hint the
 resulting error carries. Module-level for the same reason as
 :data:`NORMALIZED_CRITERION_ALIASES`."""
+
+
+class ApiRouteContext(BaseModel):
+    """``checker_context.api_route`` — see ``TaskDefinition.checker_context`` for
+    the full picture. A typed replacement for what used to be a hand-validated
+    open dict: ``extra="forbid"`` catches an unknown key (e.g. a misspelled
+    ``rotue:``) at load time for free, and ``model``/``params``/``env_params``
+    are now real types instead of ``Any`` — a YAML ``model: 5`` is rejected here
+    rather than silently ``str()``-ified into a model id downstream.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    route: ApiBackend | None = Field(
+        default=None,
+        description="Backend the WHOLE evaluation side (llm_judge/agent_judge/simulator) calls.",
+    )
+    model: str | None = Field(default=None, description="Model override for the resolved route.")
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description="`route: litellm` only — arbitrary passthrough kwargs to litellm.acompletion.",
+    )
+    env_params: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "`route: litellm` only — maps a litellm.acompletion kwarg name to the ENV VAR NAME "
+            "(never the value) to resolve it from at call time."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_litellm_only_fields(self) -> Self:
+        """``params``/``env_params`` only ever reach the litellm judge transport
+        (see ``invoke_litellm_judge_async``) — on any other backend they'd be
+        silently dropped, which is worse than a load-time error."""
+        if (self.params is not None or self.env_params is not None) and self.route != ApiBackend.LITELLM:
+            raise ValueError("checker_context.api_route.params/env_params require route: litellm")
+        return self
+
+
+class CheckerContext(BaseModel):
+    """Task-authored config for the success-checking side. See
+    ``TaskDefinition.checker_context``'s field description for the full picture.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_route: ApiRouteContext | None = None
 
 
 class SimulationConfig(BaseModel):
@@ -191,45 +246,67 @@ class SimulationConfig(BaseModel):
 
 
 class ReferenceSource(BaseModel):
-    """Defines the source for the reference solution.
+    """Defines the source for the reference solution — always a directory.
 
-    The reference is NEVER shown to the agent being evaluated. It is used by:
+    The reference is NEVER shown to the agent being evaluated. The whole
+    directory is staged into a per-run private copy and kept at mode ``000``
+    for the duration of every agent turn (see
+    ``fs_permissions.py``), so an agent cannot read the solution
+    even though it shares a filesystem with the harness.
 
-    - ``LLMJudgeCriterion``: inlines the reference content into the judge prompt
-      (string forms only — ``code`` or ``file``).
-    - ``ReferenceComparisonCriterion``: computes AST/token similarity (string forms only).
-    - ``AgentJudgeCriterion``: with ``include_reference=true``, the reference is
-      copied into the judge sub-agent's working directory (single file inlined
-      into the prompt for ``code``/``file``; ``directory`` is mounted at
-      ``_reference/`` for the judge to ``Glob``/``Read`` over).
+    Criteria address files inside it with the ``$REFERENCE_DIR`` token:
 
-    Exactly one of ``code``, ``file``, or ``directory`` must be provided.
-    Security: reference solutions must never leak into agent prompts or logs.
+    - ``LLMJudgeCriterion`` / ``AgentJudgeCriterion``: list specific files in
+      ``files:`` as ``$REFERENCE_DIR/rubric.md``, or set ``include_reference:
+      true`` to attach the whole reference (inlined for ``llm_judge``, mounted
+      at ``_reference/`` for ``agent_judge`` to ``Glob``/``Read``).
+    - ``ReferenceComparisonCriterion``: names one file via ``reference_file``,
+      resolved inside this directory.
+
+    Inline ``code`` and single-file ``file`` forms were removed: a directory is
+    the only form that can be permission-gated as a unit, and a one-file
+    reference is expressible as a directory containing one file.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    code: str | None = Field(default=None, description="Inline reference code (for simple, short solutions)")
-    file: str | None = Field(default=None, description="Path to file containing reference code (relative to task YAML)")
-    directory: str | None = Field(
-        default=None,
+    directory: str = Field(
         description=(
-            "Path to a directory containing the reference solution (relative to task YAML). "
-            "Only consumed by agent_judge — the judge gets a read-only copy at "
-            "``_reference/`` in its working directory and can browse it with Glob/Read. "
-            "llm_judge and reference_comparison only accept string forms (code/file)."
+            "Path to a directory containing the reference solution, relative to the "
+            "task YAML's own directory. Exposed to criteria as the REFERENCE_DIR env "
+            "var and the $REFERENCE_DIR token; mounted at /work/references under "
+            "driver: docker. Never readable by the agent under evaluation."
         ),
     )
 
-    @model_validator(mode="after")
-    def check_exclusive_source(self) -> Self:
-        """Ensure exactly one of code / file / directory is provided."""
-        provided = sum(1 for v in (self.code, self.file, self.directory) if v is not None)
-        if provided > 1:
-            raise ValueError("Only one of 'code', 'file', or 'directory' can be provided for reference.")
-        if provided == 0:
-            raise ValueError("One of 'code', 'file', or 'directory' must be provided for reference.")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_string_forms(cls, data: Any) -> Any:
+        """Give the removed ``code:`` / ``file:`` forms an actionable error.
+
+        Without this they surface as a bare pair of pydantic errors ("directory
+        Field required" + "file Extra inputs are not permitted") that names
+        neither the replacement nor the reason. Mirrors the treatment the removed
+        ``run_limits.stop_early: true`` key gets.
+        """
+        if isinstance(data, dict):
+            removed = [k for k in ("code", "file") if k in data]
+            if removed:
+                raise ValueError(
+                    f"reference.{'/'.join(removed)} was removed — a reference is now always a DIRECTORY. "
+                    + "Move the solution into a directory and use `reference: {directory: <dir>}` "
+                    + "(a single-file reference is a directory containing one file). "
+                    + "See docs/TASK_DEFINITION_GUIDE.md#reference-solutions."
+                )
+        return data
+
+    @field_validator("directory")
+    @classmethod
+    def _non_empty_directory(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("reference.directory must be a non-empty path relative to the task YAML directory.")
+        return cleaned
 
 
 class Dataset(BaseModel):
@@ -409,6 +486,28 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         strategy="replace",  # not layer-merged today; replace = the engine default if it ever is
         description="List of criteria that must all pass for task success",
     )
+    checker_context: CheckerContext | None = Field(
+        default=None,
+        description=(
+            "Task-authored config for the success-checking side. Currently carries only `api_route` "
+            "(see ApiRouteContext), e.g. `{api_route: {route: litellm, model: gpt-5}}`: `route` selects "
+            "the backend the WHOLE evaluation side (llm_judge, agent_judge, the simulator) calls, "
+            "decoupled from the agent's own route; `model` overrides the model that route uses. Both "
+            "are consumed by the orchestrator (`resolve_evaluation_route`) BEFORE `CheckContext` is "
+            "built and baked into the resolved route's own `model` field — no criterion ever reads "
+            "`checker_context` directly, only `CheckContext.route.model`. Credentials are always "
+            "resolved from environment variables, never from this field — EXCEPT `route: litellm`, "
+            "whose call is built entirely from `params`/`env_params` (no implicit fallback to the "
+            "agent's own LITELLM_BASE_URL/LITELLM_AUTH_TOKEN): `params` is an arbitrary passthrough "
+            "dict of extra kwargs to the underlying `litellm.acompletion` call (e.g. `{api_base: "
+            "https://my-gateway/v1}`), and `env_params` maps a kwarg name to the ENV VAR NAME (not "
+            "the value!) to resolve it from at call time (e.g. `{api_key: MY_GATEWAY_TOKEN, "
+            "aws_access_key_id: AWS_ACCESS_KEY_ID}`) — so an arbitrary provider's config, including "
+            "secrets, is representable without ever putting one in the task YAML. `model` is required "
+            "when `route: litellm` (no default open-weight/gateway model). Merged field-by-field "
+            "across default -> experiment-defaults -> task -> variant (same engine as `agent`/`simulation`)."
+        ),
+    )
     run_limits: RunLimits | None = Field(
         default=None,
         description=(
@@ -578,29 +677,46 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         return self
 
     @model_validator(mode="after")
-    def check_directory_reference_compatibility(self) -> Self:
-        """Reject ``reference.directory`` paired with criteria that need a string reference.
+    def check_reference_consumers_have_a_reference(self) -> Self:
+        """Reject criteria that DEMAND the reference when no ``reference:`` block is set.
 
-        ``reference_comparison`` and ``llm_judge`` only consume ``reference_code``
-        (the string forms ``code`` / ``file``). When ``reference.directory`` is
-        the only form set, those criteria silently degrade — ``reference_comparison``
-        deterministically scores 0.0 ("No reference code provided") and
-        ``llm_judge`` runs without the reference even when ``include_reference=True``.
-        Catch the misconfiguration at load time instead of at run time.
+        These degrade silently otherwise — ``reference_comparison``
+        deterministically scores 0.0, and a ``$REFERENCE_DIR/...`` entry in
+        ``files:`` records a missing file. Catch it at load time instead.
+
+        ``include_reference`` is deliberately NOT an offender, even when true: its
+        documented contract is "silently omitted if no reference is configured", it
+        DEFAULTS to true, and most judge tasks legitimately run without a reference.
+        (Keying on ``model_fields_set`` to catch only an explicit ``true`` doesn't
+        work either — a ``model_dump()`` round-trip marks every field as set.)
         """
-        if self.reference is None or self.reference.directory is None:
+        if self.reference is not None:
             return self
         offenders: list[str] = []
         for c in self.success_criteria:
-            ctype = c.type
-            if ctype == "reference_comparison":
-                offenders.append("reference_comparison")
-            elif ctype == "llm_judge" and getattr(c, "include_reference", False):
-                offenders.append("llm_judge (include_reference=true)")
+            # isinstance narrowing, NOT getattr(c, "files"/"command"): with an
+            # untyped string probe, renaming LLMJudgeCriterion.files or
+            # RunCommandCriterion.command turns this load-time guard into a
+            # silent no-op that pyright cannot see. The union members are
+            # imported here already.
+            if isinstance(c, ReferenceComparisonCriterion):
+                offenders.append(f"{c.type} (needs a reference to compare against)")
+            elif isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) and any(
+                path_uses_token(f, REFERENCE_DIR_TOKEN) for f in c.files
+            ):
+                offenders.append(f"{c.type} (files: uses {REFERENCE_DIR_TOKEN})")
+            elif isinstance(c, RunCommandCriterion) and command_uses_token(c.command, REFERENCE_DIR_TOKEN):
+                # run_command is the third documented consumer: with no reference
+                # the env var is simply absent, so `diff -r "$REFERENCE_DIR" out/`
+                # expands to an empty argument and misbehaves instead of failing.
+                # command_uses_token, not a raw `in`: the brace form
+                # `${REFERENCE_DIR}` is standard shell and slipped straight past
+                # a substring test, while `$REFERENCE_DIRECTORY` false-positived.
+                offenders.append(f"{c.type} (command: uses {REFERENCE_DIR_TOKEN})")
         if offenders:
             raise ValueError(
-                "reference.directory is only consumed by agent_judge; the following "
-                + f"criteria require a string reference (use 'code' or 'file' instead): {offenders}"
+                "These criteria consume the reference solution but the task defines no "
+                + f"'reference:' block: {offenders}. Add `reference: {{directory: <path>}}`."
             )
         return self
 

@@ -1,5 +1,6 @@
 """Sandbox manager for isolated execution environments."""
 
+import contextlib
 import fnmatch
 import json
 import logging
@@ -8,8 +9,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
+from .fs_permissions import RESTRICTED_MODE, set_permissions
 from .invocation_log import render_recorder
 from .models import (
     RECORD_CLI_DIR,
@@ -129,17 +133,33 @@ class Sandbox:
     REMEDIATE_HOME_PLUGINS_ENV = "CODER_EVAL_REMEDIATE_HOME_PLUGINS"
     """Env-var flag gating destructive ``$HOME/node_modules/@uipath`` cleanup."""
 
-    def __init__(self, config: SandboxConfig, task_id: str, task_dir: Path | None = None):
+    def __init__(
+        self,
+        config: SandboxConfig,
+        task_id: str,
+        task_dir: Path | None = None,
+        reference_dir: Path | None = None,
+    ):
         """Initialize the sandbox.
 
         Args:
             config: Sandbox configuration
             task_id: Unique identifier for this task (used in paths)
             task_dir: Directory containing the task YAML file (exposed as TASK_DIR env var in run_command)
+            reference_dir: Per-run staged copy of ``task.reference.directory``
+                (exposed as the REFERENCE_DIR env var in run_command). A
+                constructor argument for the same reason ``task_dir`` is: both
+                feed host-directory env vars seven lines apart in
+                ``_build_run_command_env``, and a construction site that set one
+                but not the other produced a ``$REFERENCE_DIR`` that expanded to
+                nothing and a criterion scored 0.0 with no diagnostic. The
+                orchestrator still re-assigns the attribute after
+                ``_stage_reference``, which runs later than construction.
         """
         self.config = config
         self.task_id = task_id
         self.task_dir = task_dir
+        self.reference_dir: Path | None = reference_dir
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
@@ -148,6 +168,56 @@ class Sandbox:
         # Cached canonical `node_modules/@uipath`; pins UiPath CLI plugin discovery
         # via PLUGIN_TOOLS_DIR to bypass CWD-walk contamination.
         self._plugin_tools_dir: str | None = None
+
+    @property
+    def enforces_permission_windows(self) -> bool:
+        """Whether a chmod window is a real, safe control in this sandbox.
+
+        True only inside a ``driver: docker`` container, where the filesystem is
+        private to this one task: chmod-ing the reference and task directories
+        there affects nothing else, and the container drops ``DAC_OVERRIDE`` /
+        ``DAC_READ_SEARCH`` so the mode actually binds against its root user.
+
+        On the host (``driver: tempdir``) it is a deliberate no-op. Parallel
+        tasks in one batch share the checked-out ``tasks/<name>/`` tree, so
+        chmod-ing it is a cross-task side effect on the user's own working copy
+        for no isolation benefit -- there is no boundary to enforce when the
+        agent is just another process with the same uid.
+
+        NOTE the predicate is the ``CODER_EVAL_IN_CONTAINER`` env var, NOT
+        ``config.driver``. The in-container entry point rewrites
+        ``driver: docker`` to ``tempdir`` before constructing the Orchestrator
+        (nested docker is impossible in the image), so keying on the driver
+        would read "tempdir" inside the container and silently disable the
+        anti-cheat window on exactly the path that needs it.
+        """
+        return os.environ.get("CODER_EVAL_IN_CONTAINER") == "1"
+
+    def set_permissions(
+        self,
+        paths: Iterable[Path | None],
+        *,
+        mode: int = RESTRICTED_MODE,
+    ) -> AbstractAsyncContextManager[None]:
+        """Chmod ``paths`` to ``mode`` for the block, if this sandbox enforces that.
+
+        The driver-aware wrapper around
+        :func:`coder_eval.fs_permissions.set_permissions`: a no-op
+        context manager when :attr:`enforces_permission_windows` is False, so
+        callers can wrap unconditionally without branching on the driver.
+
+        Windows stack -- see the underlying function for the nesting contract.
+
+        ``strict=True`` whenever the window IS enforced: a chmod that fails on a
+        path that exists (foreign owner, read-only mount, missing capability)
+        means the agent can read the reference for the whole turn. Left as a
+        warning, that run completes and is scored exactly like a protected one,
+        so a broken anti-cheat control is indistinguishable from a working one
+        in every downstream consumer. Fail the run instead.
+        """
+        if not self.enforces_permission_windows:
+            return contextlib.nullcontext()
+        return set_permissions(paths, mode=mode, strict=True)
 
     @property
     def _venv_scripts_dir(self) -> Path | None:
@@ -967,6 +1037,7 @@ class Sandbox:
            ``$HOME/node_modules`` where concurrent sandboxes would shadow
            each other.
         7. Expose ``TASK_DIR`` for criterion scripts.
+        8. Expose ``REFERENCE_DIR`` (staged reference copy) for criterion scripts.
         """
         assert self.sandbox_dir is not None
         env = os.environ.copy()
@@ -988,6 +1059,13 @@ class Sandbox:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         if self.task_dir:
             env["TASK_DIR"] = str(self.task_dir)
+        # 8. Expose ``REFERENCE_DIR`` (the per-run staged copy of the reference
+        #    solution) for criterion scripts. Set by the orchestrator once the
+        #    reference is staged; absent for tasks with no `reference:` block.
+        #    Safe to expose here because `run_command` criteria execute AFTER the
+        #    agent's turn, outside the mode-000 anti-cheat window.
+        if self.reference_dir:
+            env["REFERENCE_DIR"] = str(self.reference_dir)
         return env
 
     def _check_parent_node_modules_contamination(self) -> list[Path]:

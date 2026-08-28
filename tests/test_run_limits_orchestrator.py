@@ -232,7 +232,7 @@ class TestSingleShotEnforcement:
         orch.success_checker = mock_checker
 
         with (
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             contextlib.suppress(BudgetExceededError),
         ):
             await orch._evaluation_loop()
@@ -251,6 +251,30 @@ class TestSingleShotEnforcement:
         result = await self._run_eval_loop_with_turn(task, tmp_path, turn)
         # Criteria still ran before budget check (single-shot order).
         assert len(result.success_criteria_results) == 1
+
+    async def test_complete_canonical_results_skip_post_failure_regrade(self, tmp_path):
+        task = _make_task(run_limits=RunLimits(max_input_tokens=10))
+        run_dir = tmp_path / "run" / "complete_budget_result"
+        run_dir.mkdir(parents=True)
+        orch = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
+        orch._setup = AsyncMock()  # type: ignore[method-assign]
+        orch._cleanup = AsyncMock()  # type: ignore[method-assign]
+        orch._refresh_runtime_tool_versions = MagicMock()  # type: ignore[method-assign]
+        err = BudgetExceededError("input_tokens", actual=100, limit=10, task_id=task.task_id, iteration=1)
+
+        async def loop() -> bool:
+            assert orch.result is not None
+            orch.result.success_criteria_results = [
+                CriterionResult(criterion_type="file_exists", description="x", score=1.0)
+            ]
+            raise err
+
+        orch._evaluation_loop = loop  # type: ignore[method-assign]
+        result = await orch.run()
+
+        assert result.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED
+        assert len(result.success_criteria_results) == 1
+        assert result.post_failure_criteria_results == []
 
     @pytest.mark.parametrize(
         "budget_name,expected_status,expected_component",
@@ -281,6 +305,8 @@ class TestSingleShotEnforcement:
         assert "budget exceeded" in (result.error_message or "")
         # Captured error_log_tail key allowlist must include both new statuses.
         assert result.error_details == {}
+        assert len(result.post_failure_criteria_results) == 1
+        assert result.post_failure_criteria_results[0].evaluation_status == "not_evaluated"
         # Inspect the actual create_error_context call to confirm the component label.
         assert mock_ctx.call_args.kwargs["component"] == expected_component
 
@@ -379,7 +405,7 @@ class TestSimulationBudgetAbort:
 
         with (
             patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             pytest.raises(BudgetExceededError),
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
@@ -485,7 +511,7 @@ class TestExpectedTurnsSingleShot:
         orch.success_checker = mock_checker
 
         with (
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             caplog.at_level(logging.WARNING),
         ):
             all_passed = await orch._evaluation_loop()
@@ -544,7 +570,7 @@ class TestExpectedTurnsSimulation:
 
         with (
             patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             caplog.at_level(logging.WARNING),
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
@@ -598,7 +624,7 @@ class TestExpectedTurnsSimulation:
 
         with (
             patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
-            patch("coder_eval.orchestrator.load_reference", return_value=(None, None, None)),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
             caplog.at_level(logging.WARNING),
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")

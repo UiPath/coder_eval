@@ -105,16 +105,15 @@ describe("MessageTimelineSection — table layout", () => {
         expect(screen.getByText("$0.0123")).toBeInTheDocument();
     });
 
-    test("Cost header has an ⓘ help bubble explaining per-message cost", () => {
+    test("Cost header explains per-message cost in its title, no ⓘ bubble", () => {
         render(<MessageTimelineSection messages={[makeMessage()]} />);
-        const trigger = screen.getByRole("button", {
-            name: /What is Per-message cost/i,
-        });
-        expect(screen.queryByRole("tooltip")).toBeNull();
-        fireEvent.click(trigger);
-        const card = screen.getByRole("tooltip");
-        expect(card).toHaveTextContent("Per-message cost");
-        expect(card).toHaveTextContent("authoritative SDK number");
+        expect(screen.getByText("Cost")).toHaveAttribute(
+            "title",
+            expect.stringContaining("authoritative SDK number"),
+        );
+        expect(
+            screen.queryByRole("button", { name: /What is/i }),
+        ).toBeNull();
     });
 
     test("unpriced message shows an em-dash for cost, not $0.00", () => {
