@@ -2,6 +2,121 @@
 
 <!-- version list -->
 
+## v0.11.5 (2026-08-28)
+
+### Bug Fixes
+
+- **opencode**: Bound the post-EOF reap, reap the whole process group, test every failure path
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Close the remaining review findings on the harness
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Gate on captured tokens, canonicalize tool args, pin max_turns
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Inject plugin skills so skill suites measure the skills
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Keep the smoke task out of the CI smoke-pass bucket
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Map apply_patch to Write so GPT-family edits are seen by criteria
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Reap the CLI on every turn exit, test the sandbox env contract
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Spread super() in get_environment_info; guard with CE046
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Typecheck on Windows, satisfy both CodeQL findings
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **plugin**: Close the review's verified gaps — regex blind spot, parallel surfaces, runtime guard
+  ([#143](https://github.com/UiPath/coder_eval/pull/143),
+  [`c565ebb`](https://github.com/UiPath/coder_eval/commit/c565ebb8c8c7d895489d2ae6e244959ba12470af))
+
+- **plugin**: Correct the skill-reachability path — every generated activation suite reports recall
+  0.0 ([#143](https://github.com/UiPath/coder_eval/pull/143),
+  [`c565ebb`](https://github.com/UiPath/coder_eval/commit/c565ebb8c8c7d895489d2ae6e244959ba12470af))
+
+- **plugin**: Correct the skill-reachability path, and reuse PR #109's measured descriptions
+  ([#143](https://github.com/UiPath/coder_eval/pull/143),
+  [`c565ebb`](https://github.com/UiPath/coder_eval/commit/c565ebb8c8c7d895489d2ae6e244959ba12470af))
+
+- **routing**: Decouple simulator route from checker_context.api_route
+  ([#144](https://github.com/UiPath/coder_eval/pull/144),
+  [`88ff0f0`](https://github.com/UiPath/coder_eval/commit/88ff0f0ff910f4c3d9c6b81c5b2b88356240a3c4))
+
+- **routing**: Reinstate litellm+agent_judge rejection guard
+  ([#144](https://github.com/UiPath/coder_eval/pull/144),
+  [`88ff0f0`](https://github.com/UiPath/coder_eval/commit/88ff0f0ff910f4c3d9c6b81c5b2b88356240a3c4))
+
+- **routing**: Restore LiteLLM->Claude pin on simulator_route
+  ([#144](https://github.com/UiPath/coder_eval/pull/144),
+  [`88ff0f0`](https://github.com/UiPath/coder_eval/commit/88ff0f0ff910f4c3d9c6b81c5b2b88356240a3c4))
+
+- **test**: Add CE045, document the plugin-path divergence, unpin a test from ordering
+  ([#143](https://github.com/UiPath/coder_eval/pull/143),
+  [`c565ebb`](https://github.com/UiPath/coder_eval/commit/c565ebb8c8c7d895489d2ae6e244959ba12470af))
+
+- **utils**: Use explicit concatenation in the plugin-root warning
+  ([#143](https://github.com/UiPath/coder_eval/pull/143),
+  [`c565ebb`](https://github.com/UiPath/coder_eval/commit/c565ebb8c8c7d895489d2ae6e244959ba12470af))
+
+### Chores
+
+- **opencode**: Standardize on deepseek-v4-pro, drop the flash-0731 rate entry
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **plugin**: Answer "skills only?", fold tags into keywords, add CE044
+  ([#141](https://github.com/UiPath/coder_eval/pull/141),
+  [`2ae9b7b`](https://github.com/UiPath/coder_eval/commit/2ae9b7badb10831a11d81e703aa5e7a981616ace))
+
+- **plugin**: Give both author objects the same contact address
+  ([#141](https://github.com/UiPath/coder_eval/pull/141),
+  [`2ae9b7b`](https://github.com/UiPath/coder_eval/commit/2ae9b7badb10831a11d81e703aa5e7a981616ace))
+
+- **plugin**: Give the marketplace owner a contact address
+  ([#141](https://github.com/UiPath/coder_eval/pull/141),
+  [`2ae9b7b`](https://github.com/UiPath/coder_eval/commit/2ae9b7badb10831a11d81e703aa5e7a981616ace))
+
+- **plugin**: Lead both manifests with skill evaluation, add discovery metadata
+  ([#141](https://github.com/UiPath/coder_eval/pull/141),
+  [`2ae9b7b`](https://github.com/UiPath/coder_eval/commit/2ae9b7badb10831a11d81e703aa5e7a981616ace))
+
+- **plugin**: Pin both manifests to their published JSON schemas
+  ([#141](https://github.com/UiPath/coder_eval/pull/141),
+  [`2ae9b7b`](https://github.com/UiPath/coder_eval/commit/2ae9b7badb10831a11d81e703aa5e7a981616ace))
+
+### Documentation
+
+- **opencode**: Note _TERM_GRACE_SECONDS's second role as the post-EOF exit grace
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+### Features
+
+- **agents**: Add OpenCode harness with opt-in [opencode] extra
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+- **opencode**: Add require_token_telemetry, an escape hatch for the zero-token guard
+  ([#115](https://github.com/UiPath/coder_eval/pull/115),
+  [`5532b87`](https://github.com/UiPath/coder_eval/commit/5532b87ac218f6e413479ad7e2eb8d11d89686b9))
+
+
 ## v0.11.4 (2026-08-27)
 
 ### Chores
