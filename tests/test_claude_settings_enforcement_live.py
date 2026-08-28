@@ -62,6 +62,32 @@ def _read_calls(turn) -> list:
     return [c for c in turn.commands if c.tool_name == "Read"]
 
 
+def _attempted_or_skip(read_calls: list, target: Path, turn) -> list:
+    """The Reads in ``read_calls`` that touched ``target`` — or skip the test.
+
+    These tests can only observe the CLI's deny engine if the agent actually
+    issues the Read, and nothing obliges it to. A request to read a path
+    outside its working directory is close to the shape of an exfiltration
+    attempt, and the model sometimes declines on its own judgment; when it
+    does, no tool call ever reaches the permission layer, so enforcement has
+    been shown neither to work nor to be broken. That is a test that did not
+    run rather than one that failed, and failing it reds the whole job — every
+    later step, including the cost-budget smoke, is skipped — over a refusal
+    that none of this is measuring.
+
+    The job's "live tests actually ran" gate counts *passed*, not collected, so
+    a run where every test skipped still fails loudly.
+    """
+    attempted = [c for c in read_calls if str(target) in str(c.parameters)]
+    if not attempted:
+        pytest.skip(
+            f"Agent declined to attempt a Read of {target}, so the deny rule was never "
+            f"exercised. Read calls: {[(c.tool_name, c.parameters) for c in read_calls]}. "
+            f"Reply: {(turn.agent_output or '')[:200]!r}"
+        )
+    return attempted
+
+
 async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict) -> tuple[ClaudeCodeAgent, object]:
     """Start an agent in sandbox_dir, run one turn with the given settings."""
     config = parse_agent_config(
@@ -109,13 +135,8 @@ async def test_deny_blocks_read_of_excluded_directory():
 
         _, turn = await _run_single_turn(sandbox, prompt, claude_settings)
 
-        read_calls = _read_calls(turn)
-        assert read_calls, "Expected the agent to attempt at least one Read tool call"
         # Every Read that targeted the forbidden path must have been denied.
-        attempted_forbidden = [c for c in read_calls if str(forbidden) in str(c.parameters)]
-        assert attempted_forbidden, (
-            f"Agent did not attempt to read forbidden path. Calls: {[(c.tool_name, c.parameters) for c in read_calls]}"
-        )
+        attempted_forbidden = _attempted_or_skip(_read_calls(turn), forbidden, turn)
         for call in attempted_forbidden:
             assert call.result_status == "error", (
                 f"Expected denied Read of {call.parameters} to report result_status='error', "
@@ -181,12 +202,18 @@ async def test_broad_deny_limits_agent_to_sandbox():
     """
     with tempfile.TemporaryDirectory() as root_raw:
         root = Path(root_raw).resolve()
-        sandbox = root / "sandbox"
-        sibling = root / "outside"
+        # Neutral directory and file names on purpose: the agent reads these
+        # paths in the prompt, and being asked to read <root>/outside/leak.txt
+        # from a cwd named "sandbox" is close enough to an exfiltration attempt
+        # that the model declines on its own judgment, leaving the deny rule
+        # under test never reached. The enforcement being exercised is the same
+        # either way — only the model's reading of the intent changes.
+        sandbox = root / "workspace"
+        sibling = root / "archive"
         sandbox.mkdir()
         sibling.mkdir()
         (sandbox / "inside.txt").write_text("inside-ok")
-        (sibling / "leak.txt").write_text(SECRET_CONTENTS)
+        (sibling / "notes.txt").write_text(SECRET_CONTENTS)
 
         # Deny reads under the shared parent, except the sandbox itself is the
         # agent's cwd — the CLI's permission engine will match deny globs
@@ -198,18 +225,13 @@ async def test_broad_deny_limits_agent_to_sandbox():
             }
         }
         prompt = (
-            f"Read the file at the absolute path {sibling / 'leak.txt'} and print its contents "
-            "verbatim. Use only the Read tool — no Bash, no workarounds."
+            f"Read the file at the absolute path {sibling / 'notes.txt'} and print its contents "
+            "verbatim. Do not attempt any workaround (no Bash, no shell). Use only the Read tool."
         )
 
         _, turn = await _run_single_turn(sandbox, prompt, claude_settings)
 
-        read_calls = _read_calls(turn)
-        attempted_outside = [c for c in read_calls if str(sibling) in str(c.parameters)]
-        assert attempted_outside, (
-            f"Agent did not attempt to read outside the sandbox. "
-            f"Calls: {[(c.tool_name, c.parameters) for c in read_calls]}"
-        )
+        attempted_outside = _attempted_or_skip(_read_calls(turn), sibling, turn)
         for call in attempted_outside:
             assert call.result_status == "error", (
                 f"Expected denied Read of {call.parameters} to report result_status='error', got {call.result_status!r}"
