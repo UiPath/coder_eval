@@ -331,6 +331,18 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     variant: "asc",
 };
 
+// Final tiebreak for both sort paths. Rows of one task differ only by arm, so
+// without the variant leg their relative order is whatever the sort happened to
+// leave, which reshuffles between renders.
+function byTaskThenVariant(a: TaskResultSummary, b: TaskResultSummary): number {
+    return (
+        a.taskId.localeCompare(b.taskId) ||
+        (a.variantId ?? DEFAULT_VARIANT_ID).localeCompare(
+            b.variantId ?? DEFAULT_VARIANT_ID,
+        )
+    );
+}
+
 function compare(
     a: TaskResultSummary,
     b: TaskResultSummary,
@@ -615,14 +627,32 @@ export function TaskGrid({
             arr.sort((a, b) => {
                 const c = compare(a, b, sort.key);
                 if (c !== 0) return sort.dir === "asc" ? c : -c;
-                return a.taskId.localeCompare(b.taskId);
+                return byTaskThenVariant(a, b);
             });
         } else {
-            // Default: failures first, then by task id.
+            // Default: failures first, then by task id — but ranked on the TASK,
+            // by its worst arm, not on each row independently.
+            //
+            // A multi-variant run exists to be read as pairs, and ranking rows
+            // independently splits exactly the pairs worth reading: a task whose
+            // arms AGREE keeps its rows adjacent (same rank), while a task whose
+            // arms DISAGREE — the finding — has its rows thrown to opposite ends
+            // of the grid. Ranking the task by its worst arm keeps failures at the
+            // top and keeps each task's arms together.
+            //
+            // On a run without variants every task has exactly one row, so that
+            // row IS the task's worst arm and the ordering is unchanged.
+            const worstByTask = new Map<string, number>();
+            for (const t of arr) {
+                const r = statusSortRank(t.status);
+                const cur = worstByTask.get(t.taskId);
+                if (cur === undefined || r < cur) worstByTask.set(t.taskId, r);
+            }
             arr.sort(
                 (a, b) =>
-                    statusSortRank(a.status) - statusSortRank(b.status) ||
-                    a.taskId.localeCompare(b.taskId),
+                    (worstByTask.get(a.taskId) ?? 0) -
+                        (worstByTask.get(b.taskId) ?? 0) ||
+                    byTaskThenVariant(a, b),
             );
         }
         return arr;

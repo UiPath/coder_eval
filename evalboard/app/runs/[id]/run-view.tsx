@@ -182,40 +182,56 @@ function Metric({
 // a run: the arms are configurations that were deliberately made to differ, so a
 // blended rate averages two things nobody wants averaged, and it moves when the
 // arms are merely reordered. Spend and elapsed time keep their pooled totals —
-// "this run cost $0.40" stays true and useful however many arms produced it —
+// "this run cost $0.48" stays true and useful however many arms produced it —
 // and carry the per-arm split on their sub-line instead.
+//
+// The arms sit SIDE BY SIDE rather than stacked. The tile is already double
+// width, and stacking made it the tallest thing in the row, which stretched the
+// three single-value tiles beside it into mostly empty boxes. Laid out across
+// the width it already has, the tile keeps the height of the single-arm version
+// (label, one text-2xl value row, one meter) and the row stays even.
 //
 // Deliberately no significance test: whether a gap between arms is real is a
 // question about variance, and coder_eval already answers it in the experiment
 // report it writes beside run.json (paired comparison, Welch t-test, bootstrap
 // CIs). "spread" states the observed gap and claims nothing about it.
+
+// Per-TASK rate, matching the single-arm tile's rule (a task passes if any of
+// its replicates passed); on a run without repeats this equals the plain
+// per-row rate.
+const variantRate = (m: RunMetrics) =>
+    m.taskTotal ? (m.taskPassed / m.taskTotal) * 100 : 0;
+
+// Rides on the tile's label row rather than taking a line of its own, which is
+// the other half of keeping the tile short.
+export function variantSpreadLabel(
+    rows: { variantId: string; metrics: RunMetrics }[],
+): string {
+    const rates = rows.map((r) => variantRate(r.metrics));
+    const spread = Math.max(...rates) - Math.min(...rates);
+    return `${rows.length} arms · spread ${spread.toFixed(0)} pts`;
+}
+
 function PassRateByVariant({
     rows,
 }: {
     rows: { variantId: string; metrics: RunMetrics }[];
 }) {
-    // Per-TASK rate, matching the single-arm tile's rule (a task passes if any
-    // of its replicates passed); on a run without repeats this equals the plain
-    // per-row rate.
-    const rate = (m: RunMetrics) =>
-        m.taskTotal ? (m.taskPassed / m.taskTotal) * 100 : 0;
-    const rates = rows.map((r) => rate(r.metrics));
-    const spread = Math.max(...rates) - Math.min(...rates);
     return (
-        <div className="mt-2 space-y-2.5">
+        <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
             {rows.map(({ variantId, metrics: m }) => {
-                const pct = rate(m);
+                const pct = variantRate(m);
                 // null when the arm ran nothing, so it reads neutral rather
                 // than as a measured 0%.
                 const tone = m.taskTotal > 0 ? pct : null;
                 return (
                     <div key={variantId}>
-                        <div className="flex items-baseline gap-2 flex-wrap">
-                            <span className="font-mono text-xs text-gray-700">
+                        <div className="flex items-baseline gap-2">
+                            <span className="font-mono text-xs text-gray-500 shrink-0">
                                 {variantId}
                             </span>
                             <span
-                                className={`text-xl font-semibold tabular-nums ${passClass(tone)}`}
+                                className={`text-2xl font-semibold tabular-nums ${passClass(tone)}`}
                             >
                                 {pct.toFixed(0)}%
                             </span>
@@ -223,7 +239,7 @@ function PassRateByVariant({
                                 {m.taskPassed} / {m.taskTotal}
                             </span>
                         </div>
-                        <div className="mt-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                        <div className="mt-2 h-2 bg-gray-100 rounded-full overflow-hidden">
                             <div
                                 className={`h-full ${passBarClass(tone)}`}
                                 style={{ width: `${pct}%` }}
@@ -232,9 +248,6 @@ function PassRateByVariant({
                     </div>
                 );
             })}
-            <div className="text-xs text-gray-500 tabular-nums pt-0.5">
-                {rows.length} arms · spread {spread.toFixed(0)} pts
-            </div>
         </div>
     );
 }
@@ -511,6 +524,11 @@ export function RunView({
                         {isFiltered && (
                             <span className="ml-2 text-studio-blue normal-case tracking-normal">
                                 · filtered
+                            </span>
+                        )}
+                        {hasVariants && (
+                            <span className="ml-2 text-gray-400 normal-case tracking-normal">
+                                {variantSpreadLabel(variantMetrics)}
                             </span>
                         )}
                     </div>

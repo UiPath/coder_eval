@@ -1,8 +1,10 @@
 import { describe, expect, test } from "vitest";
 import type { TaskResultSummary } from "@/lib/runs";
+import type { RunMetrics as RunMetricsShape } from "../run-view";
 import {
     computeRunMetrics,
     computeVariantMetrics,
+    variantSpreadLabel,
     variantSub,
 } from "../run-view";
 
@@ -204,5 +206,31 @@ describe("variantSub", () => {
                 m.cost != null ? `$${m.cost.toFixed(2)}` : null,
             ),
         ).toBeUndefined();
+    });
+});
+
+describe("variantSpreadLabel", () => {
+    const arm = (variantId: string, taskPassed: number, taskTotal: number) => ({
+        variantId,
+        metrics: { taskPassed, taskTotal } as never as RunMetricsShape,
+    });
+
+    test("states the arm count and the observed gap in points", () => {
+        expect(variantSpreadLabel([arm("A", 3, 6), arm("B", 4, 6)])).toBe(
+            "2 arms · spread 17 pts",
+        );
+    });
+
+    test("spread is max minus min, not first minus last", () => {
+        expect(
+            variantSpreadLabel([arm("A", 1, 2), arm("B", 2, 2), arm("C", 0, 2)]),
+        ).toBe("3 arms · spread 100 pts");
+    });
+
+    // An arm that ran nothing scores 0 rather than dividing by zero.
+    test("an empty arm does not produce NaN", () => {
+        expect(variantSpreadLabel([arm("A", 0, 0), arm("B", 2, 2)])).toBe(
+            "2 arms · spread 100 pts",
+        );
     });
 });

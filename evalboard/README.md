@@ -69,8 +69,9 @@ multi-arm run have the same shape on disk.
 
 Evalboard reads that directly:
 
-- The run page's **Pass rate tile reports one row per arm**, and reports no
-  pooled rate at all. A blended rate would average configurations that were
+- The run page's **Pass rate tile reports one entry per arm** (side by side, so
+  the tile keeps the height of the single-arm version and the tiles beside it are
+  not stretched), and reports no pooled rate at all. A blended rate would average configurations that were
   deliberately made to differ (and would move when the arms are merely
   reordered), so on a variant run it is not a number anyone wants. The tile
   states the observed `spread` between arms and nothing more.
@@ -79,7 +80,12 @@ Evalboard reads that directly:
   number however many arms produced it, in a way a run's pass rate is not.
 - The task grid gains a **Variant** column and keeps one row per (task, arm).
   Replicates of one arm still collapse into a single row; **arms never collapse
-  into each other** — that difference is the measurement.
+  into each other** — that difference is the measurement. The default ordering
+  ranks a *task* by its worst arm rather than ranking each row on its own, so
+  failures still sort to the top while a task's arms stay adjacent. Ranking rows
+  independently splits exactly the pairs worth reading: a task whose arms
+  disagree ends up with one row at the top of the grid and the other at the
+  bottom.
 - Task detail is addressed by `?v=<variant-id>` alongside `?r=<replicate>`, so
   each arm opens its own transcript, log, criteria and artifacts.
 
