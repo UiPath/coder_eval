@@ -93,9 +93,9 @@ def process_plugins(
             if plugin.get("type") == "local" and resolved.is_dir() and not (resolved / "skills").is_dir():
                 log.warning(
                     f"Plugin path has no skills/ subdirectory, so it loads no skills: {resolved}. "
-                    "A local plugin path must be a PLUGIN ROOT holding skills/ "
-                    "(for .claude/skills/my-skill/SKILL.md that is .claude, not .claude/skills). "
-                    "See docs/agents/HARNESS_PARITY.md."
+                    + "A local plugin path must be a PLUGIN ROOT holding skills/ "
+                    + "(for .claude/skills/my-skill/SKILL.md that is .claude, not .claude/skills). "
+                    + "See docs/agents/HARNESS_PARITY.md."
                 )
 
         processed.append(processed_plugin)
