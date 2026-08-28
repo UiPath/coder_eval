@@ -419,7 +419,16 @@ class Orchestrator:
 
         # API routing (initialized in _setup)
         self.route: ApiRoute | None = None
-        # Route for the evaluation side (llm_judge / agent_judge / simulated user):
+        # Route for the simulated user, a real Claude Code CLI subprocess like
+        # the agent under test. Resolved via resolve_evaluation_route(settings,
+        # self.route) with NO checker_context overrides — decoupled from
+        # checker_context.api_route (that override is llm_judge-only and has no
+        # bearing on the simulator) while still inheriting the LiteLLM-agent ->
+        # pinned-Claude-backend guard, since the simulated user is part of the
+        # measuring instrument and must not run on the agent's own open-weight
+        # gateway either. Equals self.route for the Direct/Bedrock backends.
+        self.simulator_route: ApiRoute | None = None
+        # Route for the evaluation side (llm_judge / agent_judge):
         # pinned to a constant Claude backend so grading stays comparable when the
         # agent runs on an open-weight (LiteLLM) model. Equals self.route for the
         # Direct/Bedrock backends.
@@ -1463,8 +1472,9 @@ class Orchestrator:
     def _eval_route_overrides(self) -> EvalRouteOverrides:
         """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
 
-        A task/variant-authored choice for the WHOLE evaluation side (``llm_judge``,
-        ``agent_judge``, the simulator all share one ``eval_route``), decoupled from
+        A task/variant-authored choice for the judge side (``llm_judge``,
+        ``agent_judge`` share one ``eval_route``; the simulator does NOT — see
+        ``simulator_route``), decoupled from
         the agent's own route/model — resolved into a credentialed ``ApiRoute`` (from
         env vars) by ``resolve_evaluation_route``, which bakes ``model`` into the
         resolved route's own ``model`` field. Reserved under one ``api_route``
@@ -1485,14 +1495,22 @@ class Orchestrator:
         )
 
     def _resolve_routes(self) -> None:
-        """Resolve ``self.route``/``self.eval_route``, log routing, and build
-        ``self.success_checker``. Shared by the evaluate-only and normal setup
-        paths in ``_setup`` — identical logic, previously duplicated at each call
-        site. Requires ``self.sandbox`` to already be set.
+        """Resolve ``self.route``/``self.eval_route``/``self.simulator_route``,
+        log routing, and build ``self.success_checker``. Shared by the
+        evaluate-only and normal setup paths in ``_setup`` — identical logic,
+        previously duplicated at each call site. Requires ``self.sandbox`` to
+        already be set.
         """
         assert self.sandbox is not None
         self.route = resolve_route(settings)
         overrides = self._eval_route_overrides()
+        # Decoupled from checker_context.api_route (no overrides passed) so the
+        # simulator never reads the litellm-judge-only knob, but still routed
+        # through resolve_evaluation_route (not aliased to self.route) so the
+        # LiteLLM-agent -> pinned-Claude-backend guard still applies to it: the
+        # simulated user is part of the measuring instrument and must not run on
+        # the agent's own open-weight gateway either.
+        self.simulator_route = resolve_evaluation_route(settings, self.route)
         self.eval_route = resolve_evaluation_route(
             settings,
             self.route,
@@ -1501,37 +1519,34 @@ class Orchestrator:
             params_override=overrides.params,
             env_params_override=overrides.env_params,
         )
-        self._reject_litellm_eval_route_if_unsupported()
+        self._reject_litellm_agent_judge_if_unsupported()
         logger.info("API routing: %s", _format_routing(self.route, self.task.agent.model if self.task.agent else None))
         self.success_checker = SuccessChecker(self.sandbox, route=self.eval_route)
 
-    def _reject_litellm_eval_route_if_unsupported(self) -> None:
+    def _reject_litellm_agent_judge_if_unsupported(self) -> None:
         """``checker_context.api_route.route: litellm`` dispatches ``llm_judge``
         through the ``litellm`` library (protocol-agnostic — see
         ``invoke_litellm_judge_async``'s module docstring), but ``agent_judge``
-        and the simulator run as real Claude Code CLI subprocesses that speak
-        the Anthropic Messages protocol only. Handing them a ``LiteLLMRoute``
-        built from arbitrary ``params``/``env_params`` (which may front an
-        OpenAI-/Vertex-shaped gateway with no Anthropic-compatible endpoint at
-        all) would either misroute onto the AGENT's own unrelated LiteLLM
-        settings or fail with a confusing SDK-level error — the exact
-        misrouting ``LiteLLMRoute``'s own docstring says must never happen.
-        Reject the combination loudly at resolution time instead.
+        runs as a real Claude Code CLI subprocess that speaks the Anthropic
+        Messages protocol only. Handing it a ``LiteLLMRoute`` built from
+        arbitrary ``params``/``env_params`` would silently misroute it onto the
+        AGENT's own unrelated ambient LiteLLM proxy settings (``ClaudeCodeAgent``
+        ignores ``LiteLLMRoute.params``/``env_params`` entirely and falls back
+        to ``settings.litellm_base_url``/``litellm_auth_token``) rather than
+        raising — the exact misrouting ``LiteLLMRoute``'s own docstring says
+        must never happen. Reject the combination loudly at resolution time
+        instead. The simulator doesn't need this check: ``simulator_route``
+        never derives from ``checker_context.api_route`` in the first place.
         """
         if not isinstance(self.eval_route, LiteLLMRoute):
             return
-        offenders: list[str] = []
         if any(isinstance(c, AgentJudgeCriterion) and c.enabled for c in self.task.success_criteria):
-            offenders.append("an enabled agent_judge criterion")
-        if self.task.simulation is not None and self.task.simulation.enabled:
-            offenders.append("simulation.enabled")
-        if offenders:
-            named = " and ".join(offenders)
             msg = (
-                f"checker_context.api_route.route: litellm is llm_judge-only (it dispatches through the "
-                f"litellm library in-process, not a real Claude Code subprocess), but this task also has "
-                f"{named}, which run as Claude Code sub-agents requiring an Anthropic-compatible endpoint. "
-                f"Use route: bedrock/direct instead, or remove/disable {named}."
+                "checker_context.api_route.route: litellm is llm_judge-only (it dispatches through the "
+                "litellm library in-process, not a real Claude Code subprocess), but this task also has "
+                "an enabled agent_judge criterion, which runs as a Claude Code sub-agent requiring an "
+                "Anthropic-compatible endpoint. Use route: bedrock/direct instead, or remove/disable the "
+                "agent_judge criterion."
             )
             raise ValueError(msg)
 
@@ -1545,19 +1560,28 @@ class Orchestrator:
         assert self.result is not None
         assert self.route is not None
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
-        # The evaluation side (llm_judge / agent_judge / simulated user) may run on
-        # a different, constant backend — pinned to Claude when the agent is on
-        # LiteLLM — so record it: a run then shows what actually graded/simulated
-        # it, distinct from the agent's api_routing.
+        # The judge side (llm_judge / agent_judge) may run on a different,
+        # constant backend — pinned to Claude when the agent is on LiteLLM — so
+        # record it: a run then shows what actually graded it, distinct from the
+        # agent's api_routing.
         if self.eval_route is not None:
             self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
             # bedrock_model/litellm_model below are sourced from self.route (the
-            # AGENT's route) — record the judge/simulator's own model separately so
-            # a checker_context.api_route.model override (or the LiteLLM-agent
+            # AGENT's route) — record the judge's own model separately so a
+            # checker_context.api_route.model override (or the LiteLLM-agent
             # pinned-to-Bedrock default) is visible in run artifacts, not just
             # inferable from the agent's model.
             if self.eval_route.model:
                 self.result.environment_info["eval_model"] = self.eval_route.model
+        # The simulator is pinned the same way eval_route is (LiteLLM agent ->
+        # constant Claude backend) but resolved independently of
+        # checker_context.api_route — record it separately so a run shows what
+        # the simulated user actually talked to, distinct from both api_routing
+        # and eval_routing above.
+        if self.simulator_route is not None:
+            self.result.environment_info["simulator_routing"] = ROUTE_NAMES[type(self.simulator_route)]
+            if self.simulator_route.model:
+                self.result.environment_info["simulator_model"] = self.simulator_route.model
         if isinstance(self.route, BedrockRoute):
             self.result.environment_info["aws_region"] = self.route.region
             if self.route.model:
@@ -2212,10 +2236,11 @@ class Orchestrator:
             config=sim_config,
             task_description=self.task.description,
             initial_prompt=initial_prompt,
-            # Pin the simulated user to the constant Claude eval route, not the
-            # agent's (possibly open-weight) route, so the simulator behaves
-            # identically across the models under test.
-            route=self.eval_route,
+            # simulator_route is resolved independently of eval_route/
+            # checker_context.api_route (see _resolve_routes) — the simulator
+            # is a real Claude Code CLI subprocess, same as the agent under
+            # test, not a checker/judge concern.
+            route=self.simulator_route,
         )
         await simulator.start()
 
