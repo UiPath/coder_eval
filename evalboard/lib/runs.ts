@@ -13,6 +13,7 @@ import {
     listRunIdsLocal,
     listRunIdsRemote,
 } from "./blob";
+import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
 import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
 import { messageCostUsd } from "./pricing";
@@ -75,6 +76,13 @@ export interface RunSummary {
 
 export interface TaskResultSummary {
     taskId: string;
+    // Experiment arm this row belongs to. A run with variants writes one row per
+    // (task, variant, replicate) and stores each arm's content under its own
+    // <runId>/<variantId>/ subtree, so this — not taskId alone — is what tells
+    // two arms of the same task apart. Null on runs whose run.json predates the
+    // field; every reader falls back to DEFAULT_VARIANT_ID, which is the segment
+    // a single-arm run writes anyway.
+    variantId: string | null;
     // Replicate index of this row, or null when repeats are disabled / on legacy
     // runs. Repeated runs share taskId, so this disambiguates sibling rows and is
     // carried in the per-task link (?r=NN) so each replicate opens its own detail.
@@ -387,6 +395,10 @@ export function aggregateSubAgentUsage(
 
 interface RawTaskResult {
     task_id?: string;
+    // Experiment arm that produced this row (the <variant> sub-dir). Written by
+    // reports_experiment.py on every run; absent on runs that predate it, which
+    // read as DEFAULT_VARIANT_ID.
+    variant_id?: string | null;
     // Replicate index of this row (the <variant>/<task>/<NN> sub-dir). Repeated
     // runs of one task share a task_id; this is what tells the rows apart. Null
     // on runs that didn't track replicates (repeats disabled / legacy run.json).
@@ -713,16 +725,24 @@ function isActivationTaskId(taskId: string): boolean {
 
 // Filesystem base for a task's content (before the optional `00` replicate dir):
 // activation cases under <id>/activation/default/<taskId>, skills tasks under
-// <id>/default/<taskId>.
+// <id>/<variantId>/<taskId>.
+//
+// `variantId` is the experiment arm — coder_eval's path_utils.build_task_run_dir
+// writes <run_dir>/<variant_id>/<task_id>/<NN>/ for every run, using "default"
+// when the experiment declares no variants. Defaulting here therefore reproduces
+// the old hardcoded path exactly for every single-arm run.
 function taskContentBase(
     runId: string,
     taskId: string,
+    variantId: string = DEFAULT_VARIANT_ID,
     source: Source = DEFAULT_SOURCE,
 ): string {
     const dir = runsDirFor(RUNS_DIR, source);
+    // The activation sub-run is a nested single-variant run, so its cases always
+    // sit under `default` regardless of the outer run's arms.
     return isActivationTaskId(taskId)
-        ? path.join(dir, runId, "activation", "default", taskId)
-        : path.join(dir, runId, "default", taskId);
+        ? path.join(dir, runId, "activation", DEFAULT_VARIANT_ID, taskId)
+        : path.join(dir, runId, variantId, taskId);
 }
 
 // Resolve the skill (primary grouping axis) for a task. Two-stage fallback:
@@ -754,6 +774,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
     const tags = t.tags ?? [];
     return {
         taskId: t.task_id ?? "",
+        variantId: t.variant_id ?? null,
         replicateIndex: t.replicate_index ?? null,
         status: t.status ?? null,
         weightedScore: t.weighted_score ?? null,
@@ -2009,6 +2030,49 @@ async function resolveTaskContentDir(
     }
 }
 
+// Row matcher shared by every per-task reader: a row belongs to (taskId,
+// variantId) iff both match, with a missing variant_id reading as the default
+// arm. Keeping it in one place is what stops the two arms of a multi-variant run
+// from resolving to each other's transcript.
+function rowMatches(
+    t: RawTaskResult,
+    taskId: string,
+    variantId: string,
+): boolean {
+    return (
+        t.task_id === taskId && (t.variant_id ?? DEFAULT_VARIANT_ID) === variantId
+    );
+}
+
+// The arm a task URL resolves to when it names none. Only `experiments/
+// default.yaml` calls its arm `default`; every other experiment names its own
+// (`sonnet`/`opus`, `baseline`, `e2e`/`smoke`), so an experiment run has no
+// `default` row at all and a bare /runs/<id>/<task> would match nothing and
+// 404. Trends, the watchlist and every pre-variant bookmark still emit exactly
+// that form, so an unnamed arm resolves to the task's first arm in the order
+// the grid lists them. An explicitly named arm is returned untouched — a URL
+// asking for an arm the run does not have still 404s downstream rather than
+// quietly rendering a different one.
+export async function resolveVariantId(
+    runId: string,
+    taskId: string,
+    requested: string | null,
+    source: Source = DEFAULT_SOURCE,
+): Promise<string> {
+    if (requested != null) return requested;
+    const data = isActivationTaskId(taskId)
+        ? await readActivationRunJson(runId, source)
+        : await readRunJson(runId, source);
+    const arms = new Set<string>();
+    for (const t of data?.task_results ?? []) {
+        if (t.task_id === taskId) arms.add(t.variant_id ?? DEFAULT_VARIANT_ID);
+    }
+    // No rows (unknown task, unreadable run.json) keeps the default arm, so the
+    // caller still 404s the way it did before variants were addressable.
+    if (arms.size === 0 || arms.has(DEFAULT_VARIANT_ID)) return DEFAULT_VARIANT_ID;
+    return [...arms].sort()[0];
+}
+
 // Replicate indices present for a task in this run, ascending (e.g. [0, 1, 2]
 // for a task run 3×). Drives the task page's run selector. A non-repeated or
 // legacy run yields [0] (rows carry no replicate_index → treated as 0); an
@@ -2017,12 +2081,13 @@ export async function readTaskReplicates(
     runId: string,
     taskId: string,
     source: Source = DEFAULT_SOURCE,
+    variantId: string = DEFAULT_VARIANT_ID,
 ): Promise<number[]> {
     const data = isActivationTaskId(taskId)
         ? await readActivationRunJson(runId, source)
         : await readRunJson(runId, source);
     const indices = (data?.task_results ?? [])
-        .filter((t) => t.task_id === taskId)
+        .filter((t) => rowMatches(t, taskId, variantId))
         .map((t) => t.replicate_index ?? 0);
     return [...new Set(indices)].sort((a, b) => a - b);
 }
@@ -2032,9 +2097,10 @@ export async function readTaskDetail(
     taskId: string,
     replicate = 0,
     source: Source = DEFAULT_SOURCE,
+    variantId: string = DEFAULT_VARIANT_ID,
 ): Promise<TaskDetail | null> {
     const dir = runsDirFor(RUNS_DIR, source);
-    await ensureTaskDir(source.container, runId, taskId, dir);
+    await ensureTaskDir(source.container, runId, taskId, dir, variantId);
 
     // Activation cases live in the nested activation sub-run; skills tasks in the
     // top-level run. Read the row from whichever run.json owns this task so the
@@ -2042,11 +2108,13 @@ export async function readTaskDetail(
     const data = isActivationTaskId(taskId)
         ? await readActivationRunJson(runId, source)
         : await readRunJson(runId, source);
-    // Repeated runs share a task_id, so match on (task_id, replicate_index).
-    // Legacy rows carry no replicate_index (null) → treated as replicate 0, so
-    // an old single-result run still resolves at replicate 0.
-    const matches = (data?.task_results ?? []).filter(
-        (t) => t.task_id === taskId,
+    // A run with variants repeats a task_id once per arm and a repeated run
+    // repeats it once per replicate, so the row is only identified by all three
+    // of (task_id, variant_id, replicate_index). Legacy rows carry neither
+    // variant_id nor replicate_index (null) → treated as the default arm at
+    // replicate 0, so an old single-result run still resolves.
+    const matches = (data?.task_results ?? []).filter((t) =>
+        rowMatches(t, taskId, variantId),
     );
     const rawTask =
         matches.find((t) => (t.replicate_index ?? 0) === replicate) ??
@@ -2054,7 +2122,7 @@ export async function readTaskDetail(
     if (!rawTask) return null;
     const row = toTaskRow(rawTask);
 
-    const taskDir = taskContentBase(runId, taskId, source);
+    const taskDir = taskContentBase(runId, taskId, variantId, source);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const task = await readJson<{
         final_status?: string;
@@ -2286,14 +2354,16 @@ export async function readLogTail(
     replicate = 0,
     maxBytes = 200_000,
     source: Source = DEFAULT_SOURCE,
+    variantId: string = DEFAULT_VARIANT_ID,
 ): Promise<string> {
     await ensureTaskDir(
         source.container,
         runId,
         taskId,
         runsDirFor(RUNS_DIR, source),
+        variantId,
     );
-    const taskDir = taskContentBase(runId, taskId, source);
+    const taskDir = taskContentBase(runId, taskId, variantId, source);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "task.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
@@ -2317,14 +2387,16 @@ export async function readConversationLog(
     replicate = 0,
     maxBytes = 200_000,
     source: Source = DEFAULT_SOURCE,
+    variantId: string = DEFAULT_VARIANT_ID,
 ): Promise<string> {
     await ensureTaskDir(
         source.container,
         runId,
         taskId,
         runsDirFor(RUNS_DIR, source),
+        variantId,
     );
-    const taskDir = taskContentBase(runId, taskId, source);
+    const taskDir = taskContentBase(runId, taskId, variantId, source);
     const contentDir = await resolveTaskContentDir(taskDir, replicate);
     const logPath = path.join(contentDir, "conversation.log");
     const raw = await fs.readFile(logPath, "utf-8").catch(() => "");
@@ -2363,7 +2435,7 @@ export function parseConversation(raw: string): ConversationTurn[] {
     return turns;
 }
 
-// Collect every file under a task's folder (`default/<taskId>/`) for the
+// Collect every file under a task's folder (`<variantId>/<taskId>/`) for the
 // download-as-zip button on the task page. Reuses walkArtifacts so the same
 // noise filter (`.venv`, `node_modules`, `*.pyc`, lockfiles, secrets) and
 // symlink skip that drive the Artifacts list also shape the zip — plus
@@ -2373,15 +2445,18 @@ export async function collectTaskFiles(
     runId: string,
     taskId: string,
     source: Source = DEFAULT_SOURCE,
+    variantId: string = DEFAULT_VARIANT_ID,
 ): Promise<{ relPath: string; abs: string }[] | null> {
     if (!isValidId(runId) || !isValidTaskId(taskId)) return null;
+    if (!isValidVariantId(variantId)) return null;
     await ensureTaskDir(
         source.container,
         runId,
         taskId,
         runsDirFor(RUNS_DIR, source),
+        variantId,
     );
-    const taskDir = taskContentBase(runId, taskId, source);
+    const taskDir = taskContentBase(runId, taskId, variantId, source);
     const refs = await walkArtifacts(taskDir);
     if (refs.length === 0) return null;
     return refs.map((r) => ({ relPath: r.relPath, abs: path.join(taskDir, r.relPath) }));
@@ -2411,13 +2486,16 @@ export async function resolveSafePath(
 ): Promise<string | null> {
     if (!isValidId(runId)) return null;
     const dir = runsDirFor(RUNS_DIR, source);
-    // Artifact URLs embed the task subdir in relPath
-    // (`default/<task-id>/artifacts/...`) — extract it so the narrow fetch
-    // hits the right blobs without pulling the whole run.
+    // Artifact URLs embed the variant + task subdirs in relPath
+    // (`<variant-id>/<task-id>/artifacts/...`) — extract them so the narrow
+    // fetch hits the right blobs without pulling the whole run. `activation` is
+    // excluded because its prefix nests one level deeper
+    // (`activation/default/<task-id>/…`), so parts[0..1] are not (variant, task)
+    // there; that case falls through to the run-summary fetch as it always did.
     const parts = relPath.split("/");
-    if (parts[0] === "default" && parts[1]) {
+    if (parts[0] !== "activation" && isValidVariantId(parts[0]) && parts[1]) {
         if (!isValidId(parts[1])) return null;
-        await ensureTaskDir(source.container, runId, parts[1], dir);
+        await ensureTaskDir(source.container, runId, parts[1], dir, parts[0]);
     } else {
         await ensureRunSummary(source.container, runId, dir);
     }
