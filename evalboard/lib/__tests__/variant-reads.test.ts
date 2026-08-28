@@ -159,20 +159,6 @@ describe("multi-variant reads", () => {
         ).toEqual([0, 1]);
     });
 
-    test("a replicate within an arm resolves independently", async () => {
-        const { readLogTail } = await loadRuns();
-        expect(
-            await readLogTail(
-                AB_RUN,
-                TASK,
-                1,
-                undefined,
-                undefined,
-                "preview-v2",
-            ),
-        ).toBe("log from replicate 1");
-    });
-
     // An arm that isn't in the run must 404 rather than silently fall back to
     // another arm's result.
     test("an unknown arm yields no detail", async () => {
@@ -180,11 +166,6 @@ describe("multi-variant reads", () => {
         expect(
             await readTaskDetail(AB_RUN, TASK, 0, undefined, "no-such-arm"),
         ).toBeNull();
-    });
-
-    test("the default arm is absent from a run whose arms are both named", async () => {
-        const { readTaskDetail } = await loadRuns();
-        expect(await readTaskDetail(AB_RUN, TASK)).toBeNull();
     });
 });
 

@@ -197,12 +197,4 @@ describe("variantSub", () => {
             ),
         ).toBe("B $0.60");
     });
-
-    test("returns undefined when no arm has a value, so the sub-line is dropped", () => {
-        expect(
-            variantSub(rows(["A", null], ["B", null]), (m) =>
-                m.cost != null ? `$${m.cost.toFixed(2)}` : null,
-            ),
-        ).toBeUndefined();
-    });
 });

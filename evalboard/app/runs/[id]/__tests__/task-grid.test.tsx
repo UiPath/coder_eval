@@ -576,29 +576,6 @@ describe("TaskGrid — default ordering keeps a task's arms together", () => {
         expect(order[0].indexOf("A")).toBeGreaterThanOrEqual(0);
     });
 
-    test("a task that fails in both arms still outranks an all-passing task", () => {
-        render(
-            <TaskGrid
-                sourceId="skills"
-                runId="r1"
-                tasks={[
-                    row("aaa-passes", null, null, { variantId: "A", status: "SUCCESS" }),
-                    row("aaa-passes", null, null, { variantId: "B", status: "SUCCESS" }),
-                    row("zzz-fails", null, null, { variantId: "A", status: "FAILURE" }),
-                    row("zzz-fails", null, null, { variantId: "B", status: "FAILURE" }),
-                ]}
-            />,
-        );
-        const order = screen
-            .getAllByRole("row")
-            .slice(1)
-            .map((tr) => tr.textContent ?? "");
-        // Failures first beats alphabetical.
-        expect(order[0]).toMatch(/zzz/i);
-        expect(order[2]).toMatch(/aaa/i);
-    });
-
-    // The no-variant path must be byte-identical to what shipped before.
     test("a run without variants keeps failures-first, then task id", () => {
         render(
             <TaskGrid

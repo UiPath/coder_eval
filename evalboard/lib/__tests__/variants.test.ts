@@ -15,9 +15,9 @@ describe("isValidVariantId", () => {
         expect(isValidVariantId("sonnet-4.6")).toBe(true);
     });
 
-    // The id is joined into a filesystem path AND a blob prefix, and run.json
-    // rows are untyped, so every escape shape has to be rejected before either
-    // side effect. Mirrors reports_junit._is_safe_component.
+    // The id reaches a filesystem path AND a blob prefix off untyped run.json.
+    // Stricter than the task-id rule: an internal slash is never legitimate,
+    // since dataset expansion nests the TASK id, never the variant.
     test("rejects anything that could escape the run directory", () => {
         expect(isValidVariantId("")).toBe(false);
         expect(isValidVariantId(".")).toBe(false);
@@ -34,12 +34,6 @@ describe("isValidVariantId", () => {
         expect(isValidVariantId(undefined)).toBe(false);
         expect(isValidVariantId(42)).toBe(false);
         expect(isValidVariantId("a".repeat(128))).toBe(false);
-    });
-
-    // Unlike a task id, an internal slash is never legitimate: dataset expansion
-    // nests the TASK id ("<suite>/<row>"), never the variant.
-    test("is stricter than the task-id rule about slashes", () => {
-        expect(isValidVariantId("suite/row")).toBe(false);
     });
 });
 

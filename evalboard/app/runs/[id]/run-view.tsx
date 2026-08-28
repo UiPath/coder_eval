@@ -118,12 +118,8 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
     };
 }
 
-// Per-arm rollup for a run that declares `variants:`. Each arm is an independent
-// measurement of the same task set, so the ONLY honest headline for such a run is
-// one row per arm — a single blended rate would average two configurations that
-// were deliberately made to differ, and would move when the arms are merely
-// reordered. Reuses computeRunMetrics so an arm's numbers are computed by exactly
-// the same code as a single-arm run's.
+// Per-arm rollup for a run that declares `variants:`. Reuses computeRunMetrics so
+// an arm's numbers come from exactly the same code as a single-arm run's.
 export function computeVariantMetrics(
     tasks: TaskResultSummary[],
 ): { variantId: string; metrics: RunMetrics }[] {
@@ -177,28 +173,19 @@ function Metric({
     );
 }
 
-// Per-arm headline for a multi-variant run, rendered INSIDE the Pass rate tile
-// in place of the pooled number. There is no single pass rate to report on such
-// a run: the arms are configurations that were deliberately made to differ, so a
-// blended rate averages two things nobody wants averaged, and it moves when the
-// arms are merely reordered. Spend and elapsed time keep their pooled totals —
-// "this run cost $0.48" stays true and useful however many arms produced it —
-// and carry the per-arm split on their sub-line instead.
+// Replaces the pooled number inside the Pass rate tile: a blended rate averages
+// configurations that were deliberately made to differ, and moves when the arms
+// are merely reordered. Spend and time keep their pooled totals instead, since a
+// run's cost is true however many arms produced it.
 //
-// The arms sit SIDE BY SIDE rather than stacked. The tile is already double
-// width, and stacking made it the tallest thing in the row, which stretched the
-// three single-value tiles beside it into mostly empty boxes. Laid out across
-// the width it already has, the tile keeps the height of the single-arm version
-// (label, one text-2xl value row, one meter) and the row stays even.
+// Arms sit side by side because the tile is already double width; stacking them
+// made it the tallest thing in the row and stretched its neighbours.
 //
-// Deliberately no significance test: whether a gap between arms is real is a
-// question about variance, and coder_eval already answers it in the experiment
-// report it writes beside run.json (paired comparison, Welch t-test, bootstrap
-// CIs). "spread" states the observed gap and claims nothing about it.
+// No significance test on purpose — that lives in experiment.md. "spread" states
+// the observed gap and claims nothing about it.
 
-// Per-TASK rate, matching the single-arm tile's rule (a task passes if any of
-// its replicates passed); on a run without repeats this equals the plain
-// per-row rate.
+// Per-TASK rate, matching the single-arm tile's rule (a task passes if any
+// replicate passed). Equals the per-row rate on a run without repeats.
 const variantRate = (m: RunMetrics) =>
     m.taskTotal ? (m.taskPassed / m.taskTotal) * 100 : 0;
 
@@ -211,8 +198,7 @@ function PassRateByVariant({
         <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
             {rows.map(({ variantId, metrics: m }) => {
                 const pct = variantRate(m);
-                // null when the arm ran nothing, so it reads neutral rather
-                // than as a measured 0%.
+                // null when the arm ran nothing → neutral, not a measured 0%.
                 const tone = m.taskTotal > 0 ? pct : null;
                 return (
                     <div key={variantId}>
@@ -242,9 +228,8 @@ function PassRateByVariant({
     );
 }
 
-// Sub-line for a pooled tile on a multi-variant run: the same quantity, split by
-// arm. Arms the quantity is missing for are dropped rather than rendered as a
-// dash, so a partially-priced run shows what it knows instead of a row of "—".
+// The same quantity split by arm, for a pooled tile's sub-line. Arms missing the
+// value are dropped rather than rendered as a dash.
 export function variantSub(
     rows: { variantId: string; metrics: RunMetrics }[],
     pick: (m: RunMetrics) => string | null,
@@ -444,11 +429,7 @@ export function RunView({
     // differ. When true, the Pass-rate and Failed tiles switch to per-task units
     // (with the per-replicate figures shown as a sub-line) so they never mix.
     const hasRepeats = metrics.taskTotal !== metrics.total;
-    // A run that declares `variants:`; below, the pooled pass rate is
-    // replaced rather than supplemented.
     const hasVariants = variantMetrics.length > 0;
-    // Rides on the tile's label row rather than taking a line of its own,
-    // which is the other half of keeping the tile short.
     const variantRates = variantMetrics.map((r) => variantRate(r.metrics));
 
     // The grid collapses replicates to one row per (task, arm), so the count
@@ -624,9 +605,8 @@ export function RunView({
                             : "—"
                     }
                     sub={
-                        // On a variant run the per-arm split is what the reader
-                        // came for; p50/p90 across pooled arms would describe a
-                        // population that does not exist.
+                        // p50/p90 across pooled arms would describe a population
+                        // that does not exist.
                         hasVariants
                             ? variantSub(variantMetrics, (m) =>
                                   m.cost != null

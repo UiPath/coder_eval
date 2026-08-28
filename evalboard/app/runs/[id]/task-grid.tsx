@@ -250,10 +250,8 @@ function TaskIdCell({
     );
 }
 
-// The arm's id, rendered as a chip. Deliberately ONE neutral style rather than a
-// per-arm colour: the id is already the signal, the run page's Pass rate tile
-// labels its arms the same way, and a colour cycle would have to stay stable
-// across the table and the mobile cards to mean anything.
+// One neutral style, not a per-arm colour: the id is already the signal, and it
+// leaves colour in this column meaning pass/fail (the replicate badge).
 function VariantChip({ variantId }: { variantId: string }) {
     return (
         <span className="inline-block rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 font-mono text-[11px] text-gray-600 whitespace-nowrap">
@@ -311,9 +309,8 @@ const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = {
     variant: "asc",
 };
 
-// Final tiebreak for both sort paths. Rows of one task differ only by arm, so
-// without the variant leg their relative order is whatever the sort happened to
-// leave, which reshuffles between renders.
+// Final tiebreak for both sort paths — without the variant leg, two rows of one
+// task have no defined order and reshuffle between renders.
 function byTaskThenVariant(a: TaskResultSummary, b: TaskResultSummary): number {
     return (
         a.taskId.localeCompare(b.taskId) ||
@@ -610,18 +607,11 @@ export function TaskGrid({
                 return byTaskThenVariant(a, b);
             });
         } else {
-            // Default: failures first, then by task id — but ranked on the TASK,
-            // by its worst arm, not on each row independently.
-            //
-            // A multi-variant run exists to be read as pairs, and ranking rows
-            // independently splits exactly the pairs worth reading: a task whose
-            // arms AGREE keeps its rows adjacent (same rank), while a task whose
-            // arms DISAGREE — the finding — has its rows thrown to opposite ends
-            // of the grid. Ranking the task by its worst arm keeps failures at the
-            // top and keeps each task's arms together.
-            //
-            // On a run without variants every task has exactly one row, so that
-            // row IS the task's worst arm and the ordering is unchanged.
+            // Failures first, then task id — but ranked on the TASK by its worst
+            // arm. Ranking rows independently splits exactly the pairs worth
+            // reading: a task whose arms disagree gets one row at the top of the
+            // grid and the other at the bottom. Unchanged without variants, where
+            // a task's single row IS its worst arm.
             const worstByTask = new Map<string, number>();
             for (const t of arr) {
                 const r = statusSortRank(t.status);
