@@ -551,6 +551,7 @@ describe("TaskGrid — default ordering keeps a task's arms together", () => {
     test("a task whose arms disagree still renders its two rows adjacent", () => {
         render(
             <TaskGrid
+                sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("alpha", null, null, { variantId: "A", status: "FAILURE" }),
@@ -578,6 +579,7 @@ describe("TaskGrid — default ordering keeps a task's arms together", () => {
     test("a task that fails in both arms still outranks an all-passing task", () => {
         render(
             <TaskGrid
+                sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("aaa-passes", null, null, { variantId: "A", status: "SUCCESS" }),
@@ -600,6 +602,7 @@ describe("TaskGrid — default ordering keeps a task's arms together", () => {
     test("a run without variants keeps failures-first, then task id", () => {
         render(
             <TaskGrid
+                sourceId="skills"
                 runId="r1"
                 tasks={[
                     row("aaa", null, null, { status: "SUCCESS" }),

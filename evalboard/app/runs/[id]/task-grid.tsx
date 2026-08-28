@@ -250,33 +250,13 @@ function TaskIdCell({
     );
 }
 
-// Palette for the variant chip. An A/B run is read by scanning for its arms, so
-// each arm needs a stable colour — assigned by position in the run's sorted arm
-// list, which is deterministic for a given run and identical between the table
-// and the mobile cards. Cycles for runs with more arms than colours; the label
-// is always the arm's own id, so the colour is a scanning aid and never the only
-// signal.
-const VARIANT_CHIP_CLASSES = [
-    "bg-indigo-50 border-indigo-200 text-indigo-700",
-    "bg-teal-50 border-teal-200 text-teal-700",
-    "bg-orange-50 border-orange-200 text-orange-700",
-    "bg-fuchsia-50 border-fuchsia-200 text-fuchsia-700",
-];
-
-function VariantChip({
-    variantId,
-    variantIds,
-}: {
-    variantId: string;
-    variantIds: string[];
-}) {
-    const idx = Math.max(0, variantIds.indexOf(variantId));
+// The arm's id, rendered as a chip. Deliberately ONE neutral style rather than a
+// per-arm colour: the id is already the signal, the run page's Pass rate tile
+// labels its arms the same way, and a colour cycle would have to stay stable
+// across the table and the mobile cards to mean anything.
+function VariantChip({ variantId }: { variantId: string }) {
     return (
-        <span
-            className={`inline-block rounded border px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap ${
-                VARIANT_CHIP_CLASSES[idx % VARIANT_CHIP_CLASSES.length]
-            }`}
-        >
+        <span className="inline-block rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 font-mono text-[11px] text-gray-600 whitespace-nowrap">
             {variantId}
         </span>
     );
@@ -803,7 +783,6 @@ export function TaskGrid({
                                         variantId={
                                             t.variantId ?? DEFAULT_VARIANT_ID
                                         }
-                                        variantIds={variantIds}
                                     />
                                 </td>
                             )}
@@ -956,7 +935,6 @@ export function TaskGrid({
                                                 t.variantId ??
                                                 DEFAULT_VARIANT_ID
                                             }
-                                            variantIds={variantIds}
                                         />
                                     )}
                                     {t.matureSkipped ? (

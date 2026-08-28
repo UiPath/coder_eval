@@ -202,16 +202,6 @@ function Metric({
 const variantRate = (m: RunMetrics) =>
     m.taskTotal ? (m.taskPassed / m.taskTotal) * 100 : 0;
 
-// Rides on the tile's label row rather than taking a line of its own, which is
-// the other half of keeping the tile short.
-export function variantSpreadLabel(
-    rows: { variantId: string; metrics: RunMetrics }[],
-): string {
-    const rates = rows.map((r) => variantRate(r.metrics));
-    const spread = Math.max(...rates) - Math.min(...rates);
-    return `${rows.length} arms · spread ${spread.toFixed(0)} pts`;
-}
-
 function PassRateByVariant({
     rows,
 }: {
@@ -457,6 +447,9 @@ export function RunView({
     // A run that declares `variants:`; below, the pooled pass rate is
     // replaced rather than supplemented.
     const hasVariants = variantMetrics.length > 0;
+    // Rides on the tile's label row rather than taking a line of its own,
+    // which is the other half of keeping the tile short.
+    const variantRates = variantMetrics.map((r) => variantRate(r.metrics));
 
     // The grid collapses replicates to one row per (task, arm), so the count
     // beside the "Tasks" header must count the same thing to match it; when a run
@@ -528,7 +521,12 @@ export function RunView({
                         )}
                         {hasVariants && (
                             <span className="ml-2 text-gray-400 normal-case tracking-normal">
-                                {variantSpreadLabel(variantMetrics)}
+                                {variantMetrics.length} arms · spread{" "}
+                                {(
+                                    Math.max(...variantRates) -
+                                    Math.min(...variantRates)
+                                ).toFixed(0)}{" "}
+                                pts
                             </span>
                         )}
                     </div>
