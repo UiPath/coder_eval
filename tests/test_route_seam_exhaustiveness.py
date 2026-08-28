@@ -89,7 +89,8 @@ def test_record_route_environment_info_handles_every_route():
     """Orchestrator._record_route_environment_info records a route-specific
     dimension for every route (not just the generic api_routing key). A new route
     missing from its if/elif would record only api_routing — caught here since
-    pyright can't check the isinstance chain."""
+    pyright can't check the isinstance chain. Also covers the simulator_route ->
+    simulator_routing seam directly (not just via a shared alias with route)."""
     for r in _INSTANCES:
         fake = SimpleNamespace(
             route=r, eval_route=r, simulator_route=r, result=SimpleNamespace(environment_info={}), agent=None
@@ -97,4 +98,5 @@ def test_record_route_environment_info_handles_every_route():
         Orchestrator._record_route_environment_info(fake)  # type: ignore[arg-type]
         env = fake.result.environment_info
         assert env.get("api_routing") == ROUTE_NAMES[type(r)]
+        assert env.get("simulator_routing") == ROUTE_NAMES[type(r)]
         assert len(env) > 1, f"{type(r).__name__} recorded no route-specific env info"

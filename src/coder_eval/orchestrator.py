@@ -420,11 +420,13 @@ class Orchestrator:
         # API routing (initialized in _setup)
         self.route: ApiRoute | None = None
         # Route for the simulated user, a real Claude Code CLI subprocess like
-        # the agent under test. Resolved independently of eval_route /
-        # checker_context.api_route — that override is llm_judge-only and has
-        # no bearing on the simulator. Defaults to the same resolution as
-        # self.route (subprocess-safe by construction); intended to grow its
-        # own override mechanism later, unrelated to checker_context.
+        # the agent under test. Resolved via resolve_evaluation_route(settings,
+        # self.route) with NO checker_context overrides — decoupled from
+        # checker_context.api_route (that override is llm_judge-only and has no
+        # bearing on the simulator) while still inheriting the LiteLLM-agent ->
+        # pinned-Claude-backend guard, since the simulated user is part of the
+        # measuring instrument and must not run on the agent's own open-weight
+        # gateway either. Equals self.route for the Direct/Bedrock backends.
         self.simulator_route: ApiRoute | None = None
         # Route for the evaluation side (llm_judge / agent_judge):
         # pinned to a constant Claude backend so grading stays comparable when the
@@ -1470,8 +1472,9 @@ class Orchestrator:
     def _eval_route_overrides(self) -> EvalRouteOverrides:
         """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
 
-        A task/variant-authored choice for the WHOLE evaluation side (``llm_judge``,
-        ``agent_judge``, the simulator all share one ``eval_route``), decoupled from
+        A task/variant-authored choice for the judge side (``llm_judge``,
+        ``agent_judge`` share one ``eval_route``; the simulator does NOT — see
+        ``simulator_route``), decoupled from
         the agent's own route/model — resolved into a credentialed ``ApiRoute`` (from
         env vars) by ``resolve_evaluation_route``, which bakes ``model`` into the
         resolved route's own ``model`` field. Reserved under one ``api_route``
@@ -1501,10 +1504,13 @@ class Orchestrator:
         assert self.sandbox is not None
         self.route = resolve_route(settings)
         overrides = self._eval_route_overrides()
-        # Same resolution as self.route (subprocess-safe by construction) — not
-        # yet independently overridable, so this is an alias rather than a
-        # second call, until simulator_route grows its own override mechanism.
-        self.simulator_route = self.route
+        # Decoupled from checker_context.api_route (no overrides passed) so the
+        # simulator never reads the litellm-judge-only knob, but still routed
+        # through resolve_evaluation_route (not aliased to self.route) so the
+        # LiteLLM-agent -> pinned-Claude-backend guard still applies to it: the
+        # simulated user is part of the measuring instrument and must not run on
+        # the agent's own open-weight gateway either.
+        self.simulator_route = resolve_evaluation_route(settings, self.route)
         self.eval_route = resolve_evaluation_route(
             settings,
             self.route,
@@ -1554,20 +1560,28 @@ class Orchestrator:
         assert self.result is not None
         assert self.route is not None
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
-        # The evaluation side (llm_judge / agent_judge) may run on a different,
+        # The judge side (llm_judge / agent_judge) may run on a different,
         # constant backend — pinned to Claude when the agent is on LiteLLM — so
         # record it: a run then shows what actually graded it, distinct from the
-        # agent's api_routing. The simulator is NOT part of this: simulator_route
-        # always mirrors self.route, so it never diverges from api_routing above.
+        # agent's api_routing.
         if self.eval_route is not None:
             self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
             # bedrock_model/litellm_model below are sourced from self.route (the
-            # AGENT's route) — record the judge/simulator's own model separately so
-            # a checker_context.api_route.model override (or the LiteLLM-agent
+            # AGENT's route) — record the judge's own model separately so a
+            # checker_context.api_route.model override (or the LiteLLM-agent
             # pinned-to-Bedrock default) is visible in run artifacts, not just
             # inferable from the agent's model.
             if self.eval_route.model:
                 self.result.environment_info["eval_model"] = self.eval_route.model
+        # The simulator is pinned the same way eval_route is (LiteLLM agent ->
+        # constant Claude backend) but resolved independently of
+        # checker_context.api_route — record it separately so a run shows what
+        # the simulated user actually talked to, distinct from both api_routing
+        # and eval_routing above.
+        if self.simulator_route is not None:
+            self.result.environment_info["simulator_routing"] = ROUTE_NAMES[type(self.simulator_route)]
+            if self.simulator_route.model:
+                self.result.environment_info["simulator_model"] = self.simulator_route.model
         if isinstance(self.route, BedrockRoute):
             self.result.environment_info["aws_region"] = self.route.region
             if self.route.model:

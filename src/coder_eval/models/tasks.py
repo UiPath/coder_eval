@@ -91,7 +91,10 @@ class ApiRouteContext(BaseModel):
 
     route: ApiBackend | None = Field(
         default=None,
-        description="Backend the WHOLE evaluation side (llm_judge/agent_judge/simulator) calls.",
+        description=(
+            "Backend the judge side (llm_judge/agent_judge) calls. Has no bearing on the simulator, "
+            "which always resolves its own route independently."
+        ),
     )
     model: str | None = Field(default=None, description="Model override for the resolved route.")
     params: dict[str, Any] | None = Field(
@@ -491,8 +494,9 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         description=(
             "Task-authored config for the success-checking side. Currently carries only `api_route` "
             "(see ApiRouteContext), e.g. `{api_route: {route: litellm, model: gpt-5}}`: `route` selects "
-            "the backend the WHOLE evaluation side (llm_judge, agent_judge, the simulator) calls, "
-            "decoupled from the agent's own route; `model` overrides the model that route uses. Both "
+            "the backend the judge side (llm_judge, agent_judge) calls, decoupled from the agent's own "
+            "route; has no bearing on the simulator, which always resolves its own route independently. "
+            "`model` overrides the model that route uses. Both "
             "are consumed by the orchestrator (`resolve_evaluation_route`) BEFORE `CheckContext` is "
             "built and baked into the resolved route's own `model` field — no criterion ever reads "
             "`checker_context` directly, only `CheckContext.route.model`. Credentials are always "

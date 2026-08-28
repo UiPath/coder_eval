@@ -130,7 +130,7 @@ From `ExperimentVariant` (`coder_eval/models/experiment.py`):
 | `initial_prompt_file` | str                | Prompt replacement loaded from a file                                                  |
 | `run_limits`          | block              | Per-key cap overrides (`max_turns`, `task_timeout`, token/USD budgets)                 |
 | `driver`              | `tempdir`/`docker` | Sandbox driver — enables tempdir-vs-docker arms                                        |
-| `checker_context`     | dict               | Backend/model override for the evaluation side (judge, simulator) — see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context); **not** currently `-D`-reachable |
+| `checker_context`     | dict               | Backend/model override for the judge side (llm_judge, agent_judge) — has no bearing on the simulator; see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context); **not** currently `-D`-reachable |
 
 The `agent` dict is the lever for most A/B tests. Anything on `AgentConfig` is
 fair game: `model`, `permission_mode`, `allowed_tools`, `disallowed_tools`,
