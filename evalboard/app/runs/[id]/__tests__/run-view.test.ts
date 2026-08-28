@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import type { TaskResultSummary } from "@/lib/runs";
-import { computeRunMetrics, computeVariantMetrics } from "../run-view";
+import {
+    computeRunMetrics,
+    computeVariantMetrics,
+    variantSub,
+} from "../run-view";
 
 function row(
     taskId: string,
@@ -166,5 +170,39 @@ describe("computeVariantMetrics", () => {
             row("A", { variantId: "other" }),
         ]);
         expect(rows.map((r) => r.variantId)).toEqual(["default", "other"]);
+    });
+});
+
+describe("variantSub", () => {
+    const rows = (...specs: [string, number | null][]) =>
+        specs.map(([variantId, cost]) => ({
+            variantId,
+            metrics: { cost } as never as import("../run-view").RunMetrics,
+        }));
+
+    test("joins the per-arm values in arm order", () => {
+        expect(
+            variantSub(rows(["A", 0.2], ["B", 0.6]), (m) =>
+                m.cost != null ? `$${m.cost.toFixed(2)}` : null,
+            ),
+        ).toBe("A $0.20 · B $0.60");
+    });
+
+    // An arm with nothing to report is dropped rather than rendered as a dash,
+    // so a partially-priced run shows what it knows.
+    test("arms with no value are omitted", () => {
+        expect(
+            variantSub(rows(["A", null], ["B", 0.6]), (m) =>
+                m.cost != null ? `$${m.cost.toFixed(2)}` : null,
+            ),
+        ).toBe("B $0.60");
+    });
+
+    test("returns undefined when no arm has a value, so the sub-line is dropped", () => {
+        expect(
+            variantSub(rows(["A", null], ["B", null]), (m) =>
+                m.cost != null ? `$${m.cost.toFixed(2)}` : null,
+            ),
+        ).toBeUndefined();
     });
 });

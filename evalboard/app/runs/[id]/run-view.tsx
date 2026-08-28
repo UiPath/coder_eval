@@ -177,69 +177,81 @@ function Metric({
     );
 }
 
-// Per-arm strip for a multi-variant run. Sits directly under the headline tiles,
-// because on such a run the blended tiles are the LESS informative number and
-// this is what the reader came for. Deliberately reports the arms and their
-// spread only: whether a gap is real is a question about variance, and the
-// answer lives in coder_eval's own experiment report (paired comparison, Welch
-// t-test, bootstrap CIs) rather than in a dashboard tile.
-function VariantBreakdown({
+// Per-arm headline for a multi-variant run, rendered INSIDE the Pass rate tile
+// in place of the pooled number. There is no single pass rate to report on such
+// a run: the arms are configurations that were deliberately made to differ, so a
+// blended rate averages two things nobody wants averaged, and it moves when the
+// arms are merely reordered. Spend and elapsed time keep their pooled totals —
+// "this run cost $0.40" stays true and useful however many arms produced it —
+// and carry the per-arm split on their sub-line instead.
+//
+// Deliberately no significance test: whether a gap between arms is real is a
+// question about variance, and coder_eval already answers it in the experiment
+// report it writes beside run.json (paired comparison, Welch t-test, bootstrap
+// CIs). "spread" states the observed gap and claims nothing about it.
+function PassRateByVariant({
     rows,
 }: {
     rows: { variantId: string; metrics: RunMetrics }[];
 }) {
-    // Per-TASK rate, matching the headline tile's rule (a task passes if any of
-    // its replicates passed); on a run without repeats this equals the plain
+    // Per-TASK rate, matching the single-arm tile's rule (a task passes if any
+    // of its replicates passed); on a run without repeats this equals the plain
     // per-row rate.
     const rate = (m: RunMetrics) =>
         m.taskTotal ? (m.taskPassed / m.taskTotal) * 100 : 0;
-    const best = Math.max(...rows.map((r) => rate(r.metrics)));
-    const worst = Math.min(...rows.map((r) => rate(r.metrics)));
+    const rates = rows.map((r) => rate(r.metrics));
+    const spread = Math.max(...rates) - Math.min(...rates);
     return (
-        <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
-            <div className="flex items-baseline gap-2 flex-wrap">
-                <span className="text-xs text-gray-500 uppercase tracking-wide">
-                    By variant
-                </span>
-                <span className="text-xs text-gray-400">
-                    {rows.length} arms · spread {(best - worst).toFixed(0)} pts
-                </span>
-            </div>
-            <div className="space-y-2">
-                {rows.map(({ variantId, metrics: m }) => {
-                    const pct = rate(m);
-                    const tone = m.taskTotal > 0 ? pct : null;
-                    return (
-                        <div key={variantId} className="space-y-1">
-                            <div className="flex items-baseline gap-2 flex-wrap text-sm">
-                                <span className="font-mono text-gray-800">
-                                    {variantId}
-                                </span>
-                                <span
-                                    className={`font-semibold tabular-nums ${passClass(tone)}`}
-                                >
-                                    {pct.toFixed(0)}%
-                                </span>
-                                <span className="text-gray-500 tabular-nums text-xs">
-                                    {m.taskPassed} / {m.taskTotal} tasks
-                                    {m.cost != null &&
-                                        ` · $${m.cost.toFixed(2)}`}
-                                    {m.duration != null &&
-                                        ` · ${fmtDuration(m.duration)}`}
-                                </span>
-                            </div>
-                            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                <div
-                                    className={`h-full ${passBarClass(tone)}`}
-                                    style={{ width: `${pct}%` }}
-                                />
-                            </div>
+        <div className="mt-2 space-y-2.5">
+            {rows.map(({ variantId, metrics: m }) => {
+                const pct = rate(m);
+                // null when the arm ran nothing, so it reads neutral rather
+                // than as a measured 0%.
+                const tone = m.taskTotal > 0 ? pct : null;
+                return (
+                    <div key={variantId}>
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                            <span className="font-mono text-xs text-gray-700">
+                                {variantId}
+                            </span>
+                            <span
+                                className={`text-xl font-semibold tabular-nums ${passClass(tone)}`}
+                            >
+                                {pct.toFixed(0)}%
+                            </span>
+                            <span className="text-xs text-gray-500 tabular-nums">
+                                {m.taskPassed} / {m.taskTotal}
+                            </span>
                         </div>
-                    );
-                })}
+                        <div className="mt-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                            <div
+                                className={`h-full ${passBarClass(tone)}`}
+                                style={{ width: `${pct}%` }}
+                            />
+                        </div>
+                    </div>
+                );
+            })}
+            <div className="text-xs text-gray-500 tabular-nums pt-0.5">
+                {rows.length} arms · spread {spread.toFixed(0)} pts
             </div>
         </div>
     );
+}
+
+// Sub-line for a pooled tile on a multi-variant run: the same quantity, split by
+// arm. Arms the quantity is missing for are dropped rather than rendered as a
+// dash, so a partially-priced run shows what it knows instead of a row of "—".
+export function variantSub(
+    rows: { variantId: string; metrics: RunMetrics }[],
+    pick: (m: RunMetrics) => string | null,
+): string | undefined {
+    const parts: string[] = [];
+    for (const { variantId, metrics } of rows) {
+        const v = pick(metrics);
+        if (v != null) parts.push(`${variantId} ${v}`);
+    }
+    return parts.length ? parts.join(" · ") : undefined;
 }
 
 export function RunView({
@@ -429,6 +441,9 @@ export function RunView({
     // differ. When true, the Pass-rate and Failed tiles switch to per-task units
     // (with the per-replicate figures shown as a sub-line) so they never mix.
     const hasRepeats = metrics.taskTotal !== metrics.total;
+    // A run that declares `variants:`; below, the pooled pass rate is
+    // replaced rather than supplemented.
+    const hasVariants = variantMetrics.length > 0;
 
     // The grid collapses replicates to one row per (task, arm), so the count
     // beside the "Tasks" header must count the same thing to match it; when a run
@@ -499,7 +514,9 @@ export function RunView({
                             </span>
                         )}
                     </div>
-                    {(() => {
+                    {hasVariants ? (
+                        <PassRateByVariant rows={variantMetrics} />
+                    ) : (() => {
                         // With repeats, the headline is the per-TASK rate — a
                         // task counts as passed if any replicate passed — and the
                         // raw per-replicate rate moves to a sub-line. Single-shot
@@ -591,26 +608,37 @@ export function RunView({
                             : "—"
                     }
                     sub={
-                        metrics.costP50 != null && metrics.costP90 != null
-                            ? `p50 $${metrics.costP50.toFixed(2)} · p90 $${metrics.costP90.toFixed(2)}`
-                            : undefined
+                        // On a variant run the per-arm split is what the reader
+                        // came for; p50/p90 across pooled arms would describe a
+                        // population that does not exist.
+                        hasVariants
+                            ? variantSub(variantMetrics, (m) =>
+                                  m.cost != null
+                                      ? `$${m.cost.toFixed(2)}`
+                                      : null,
+                              )
+                            : metrics.costP50 != null && metrics.costP90 != null
+                              ? `p50 $${metrics.costP50.toFixed(2)} · p90 $${metrics.costP90.toFixed(2)}`
+                              : undefined
                     }
                 />
                 <Metric
                     label="Time"
                     value={fmtDuration(metrics.duration)}
                     sub={
-                        metrics.durationP50 != null &&
-                        metrics.durationP90 != null
-                            ? `p50 ${fmtDuration(metrics.durationP50)} · p90 ${fmtDuration(metrics.durationP90)}`
-                            : undefined
+                        hasVariants
+                            ? variantSub(variantMetrics, (m) =>
+                                  m.duration != null
+                                      ? fmtDuration(m.duration)
+                                      : null,
+                              )
+                            : metrics.durationP50 != null &&
+                                metrics.durationP90 != null
+                              ? `p50 ${fmtDuration(metrics.durationP50)} · p90 ${fmtDuration(metrics.durationP90)}`
+                              : undefined
                     }
                 />
             </div>
-
-            {variantMetrics.length > 0 && (
-                <VariantBreakdown rows={variantMetrics} />
-            )}
 
             {/* The colored skill/review/tag filter rail (+ its color legend)
                 is an internal-only surface — see lib/edition.ts. The public OSS

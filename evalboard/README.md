@@ -69,9 +69,14 @@ multi-arm run have the same shape on disk.
 
 Evalboard reads that directly:
 
-- The run page adds a **By variant** strip under the headline tiles: pass rate,
-  task count, cost and time per arm. It appears only when a run has more than one
-  arm.
+- The run page's **Pass rate tile reports one row per arm**, and reports no
+  pooled rate at all. A blended rate would average configurations that were
+  deliberately made to differ (and would move when the arms are merely
+  reordered), so on a variant run it is not a number anyone wants. The tile
+  states the observed `spread` between arms and nothing more.
+- **Total cost and Time keep their pooled totals** and carry the per-arm split on
+  their sub-line, in place of p50/p90. A run's spend is a real operational
+  number however many arms produced it, in a way a run's pass rate is not.
 - The task grid gains a **Variant** column and keeps one row per (task, arm).
   Replicates of one arm still collapse into a single row; **arms never collapse
   into each other** — that difference is the measurement.
@@ -79,8 +84,9 @@ Evalboard reads that directly:
   each arm opens its own transcript, log, criteria and artifacts.
 
 Every one of those is inert on a run without variants: the column is dropped, the
-strip is hidden, and no link carries `?v=`. Cross-run comparison (two separate
-run ids) is a different feature and is not what this does.
+tiles keep their existing pooled numbers and percentiles, and no link carries
+`?v=`. Cross-run comparison (two separate run ids) is a different feature and is
+not what this does.
 
 Statistics are deliberately not computed here. Whether a gap between arms is
 real is a question about variance, and coder_eval already answers it in the
