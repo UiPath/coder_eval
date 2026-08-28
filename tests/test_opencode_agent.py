@@ -966,6 +966,13 @@ class TestArgvConstruction:
 
 
 class TestSessionContinuity:
+    async def test_first_turn_omits_session(self, patch_exec, tmp_path):
+        """The `if self._session_id:` guard must withhold `--session` on the first
+        turn; injecting it (even empty) would fork a fresh session every turn."""
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+        assert "--session" not in captured["argv"]
+
     async def test_second_turn_resumes_session(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()
@@ -976,6 +983,30 @@ class TestSessionContinuity:
         await agent.communicate("follow up")
         argv = captured2["argv"]
         assert argv[argv.index("--session") + 1] == SESSION
+
+
+class TestEnvironmentInfo:
+    def test_carries_the_system_prompt_semantics_marker(self):
+        """The base contract: every agent's env-info records the regime, so a run
+        is never mis-bucketed as pre-marker. OpenCode cannot touch the system
+        prompt, so the honest value is `unknown`."""
+        info = _agent().get_environment_info()
+        assert info["system_prompt_semantics"] == "unknown"
+        assert info["opencode_model"] == "deepseek/deepseek-v4-pro"
+        assert info["opencode_pure"] is True
+
+    def test_variant_recorded_when_set(self):
+        assert _agent(variant="high").get_environment_info()["opencode_variant"] == "high"
+
+    def test_variant_absent_when_unset(self):
+        assert "opencode_variant" not in _agent().get_environment_info()
+
+    async def test_session_id_recorded_after_a_turn(self, patch_exec, tmp_path):
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent()
+        assert "opencode_session_id" not in agent.get_environment_info()
+        await _run(agent, tmp_path)
+        assert agent.get_environment_info()["opencode_session_id"] == SESSION
 
 
 class TestErrorEventShapes:

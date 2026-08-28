@@ -56,6 +56,7 @@ from coder_eval.models import (
     OpenCodeAgentConfig,
     PermissionMode,
     ResultSummary,
+    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -462,7 +463,8 @@ class _OpenCodeTurnState:
         state = part.get("state")
         state = state if isinstance(state, dict) else {}
         call_id = str(part.get("callID") or f"call_{self.sequence + 1}")
-        times = state.get("time") if isinstance(state.get("time"), dict) else {}
+        time_val = state.get("time")
+        times = time_val if isinstance(time_val, dict) else {}
         started = _epoch_ms_to_dt(times.get("start"))
         params = state.get("input")
         params = params if isinstance(params, dict) else {}
@@ -512,7 +514,8 @@ class _OpenCodeTurnState:
             message = None
             status = ToolEndStatus.OK
 
-        times = state.get("time") if isinstance(state.get("time"), dict) else {}
+        time_val = state.get("time")
+        times = time_val if isinstance(time_val, dict) else {}
         self._close_tool(
             call_id,
             status=status,
@@ -723,7 +726,8 @@ class _OpenCodeTurnState:
         self.step_open = False
         tokens = part.get("tokens")
         tokens = tokens if isinstance(tokens, dict) else {}
-        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+        cache_val = tokens.get("cache")
+        cache = cache_val if isinstance(cache_val, dict) else {}
         raw_in = self._as_int("input", tokens.get("input") or 0)
         raw_out = self._as_int("output", tokens.get("output") or 0)
         step_reasoning = self._as_int("reasoning", tokens.get("reasoning") or 0)
@@ -891,6 +895,12 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     # granularity — and honored by terminating the CLI subprocess cleanly.
     supports_cooperative_stop: ClassVar[bool] = True
 
+    # OpenCode neither appends to nor replaces the system prompt — `system_prompt`
+    # is in `_UNSUPPORTED_CONFIG_FIELDS` (no CLI knob), so the honest regime is
+    # `"unknown"` (also the base default). Declared explicitly so the run marker
+    # is deliberate rather than an unset oversight.
+    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "unknown"
+
     def __init__(
         self,
         config: OpenCodeAgentConfig,
@@ -1016,7 +1026,13 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         self._spawned_pgids.clear()
 
     def get_environment_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {"opencode_model": self.config.model, "opencode_pure": self.config.pure}
+        # Spread the base first so the `system_prompt_semantics` run marker is
+        # always present (dashboards read an absent marker as a pre-marker run).
+        info: dict[str, Any] = {
+            **super().get_environment_info(),
+            "opencode_model": self.config.model,
+            "opencode_pure": self.config.pure,
+        }
         if self._skill_dirs:
             # Recorded per task so a run's report can be checked for whether the
             # skills under test actually reached the agent.
