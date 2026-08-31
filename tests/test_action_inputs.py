@@ -111,6 +111,14 @@ def _run(script: str, env: dict[str, str], *, cwd: Path, stub: str) -> tuple[int
         "HOME": str(cwd),
         "GITHUB_OUTPUT": str(cwd / "gh_output"),
         "GITHUB_STEP_SUMMARY": str(cwd / "gh_summary"),
+        # Git Bash (the `shell: bash` of a Windows runner) rewrites arguments
+        # that look like absolute POSIX paths into Windows form on the way to a
+        # native binary, so `/action-checkout` reached the stub as
+        # `C:/Program Files/Git/action-checkout` and the composition assertions
+        # failed for a reason that has nothing to do with the action. These two
+        # switch that conversion off. Harmless on POSIX, where nothing reads them.
+        "MSYS2_ARG_CONV_EXCL": "*",
+        "MSYS_NO_PATHCONV": "1",
         **env,
     }
     (cwd / "gh_output").touch()
