@@ -43,7 +43,35 @@ export const SCRIBE_SOURCE: Source = {
     container: "aria-runs",
 };
 
-export const SOURCES: readonly Source[] = [SKILLS_SOURCE, SCRIBE_SOURCE];
+// Ad-hoc runs uploaded by UiPath/skills' `run-coder-eval` workflow_dispatch, so a
+// debug run has a shareable dashboard link instead of only a downloadable artifact.
+//
+// DELIBERATELY UNLISTED: registered here, but absent from `NAV` in app/layout.tsx,
+// which is a hardcoded array and does not iterate SOURCES. There is no tab, no
+// listing page and no aggregate view — a run is reachable only by its direct link
+// from the GitHub run that produced it. That is why the README's rule about a new
+// source needing its own `getAdhocRunListing` section does not apply: nothing here
+// enumerates, and app/runs/[id] reads by id on demand, so a fresh link resolves
+// without any listing existing.
+//
+// Registration is still MANDATORY: `sourceById` is the only path by which a
+// container becomes reachable, and it COERCES an unknown id to DEFAULT_SOURCE
+// rather than throwing, so without this entry `?src=gha` would silently read the
+// skills nightly's container and 404.
+//
+// Its own container, not `runs` with an `adhoc-` prefix: getAdhocRunListing loads
+// per-run metadata for every non-date-shaped id in a container BEFORE truncating
+// to the front page's limit, so a stream of dispatches would bury the intentional
+// ad-hoc runs and cost a per-run blob load each. A separate container also keeps
+// the 14-day expiry lifecycle rule (`expire-runs-gha-14d` on the storage account)
+// from ever reaching nightly history.
+export const GHA_SOURCE: Source = {
+    id: "gha",
+    label: "Ad-hoc (GH)",
+    container: "runs-gha",
+};
+
+export const SOURCES: readonly Source[] = [SKILLS_SOURCE, SCRIBE_SOURCE, GHA_SOURCE];
 
 /** Every surface that doesn't opt into a source reads the skills nightly. */
 export const DEFAULT_SOURCE = SKILLS_SOURCE;
