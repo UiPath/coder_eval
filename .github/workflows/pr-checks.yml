@@ -998,10 +998,37 @@ jobs:
         uses: ./
         with:
           version: local
-          tasks: tasks/hello_date.yaml
+          # Deliberately exercises the inputs that CANNOT be proven anywhere else.
+          # tests/test_action_inputs.py executes both step scripts and asserts the
+          # argv they build, but it cannot prove that `working-directory:` works on
+          # a composite step, or that a plugin installed via `--with` is actually
+          # discovered at runtime. Those two only hold on a real runner.
+          #
+          # `working-directory` with a RELATIVE run-dir: the run lands under
+          # tasks/runs/ci-action-dogfood, which is the contract docs/CI_GATE.md
+          # states and the next step asserts. `tasks` and `extra-packages` resolve
+          # from here too, hence the bare filename and the `../` path.
+          working-directory: tasks
+          tasks: hello_date.yaml
           model: claude-haiku-4-5-20251001
           run-dir: runs/ci-action-dogfood
           junit-path: runs/ci-action-dogfood/junit.xml
+          # The BYOA fixture, installed INTO the action's tool environment. An
+          # entry point is only discovered when the plugin shares a virtualenv with
+          # its host, and `uv tool install` builds an isolated one whose shims
+          # shadow every other coder-eval on PATH — so this input is the only way a
+          # plugin reaches the CLI the action invokes. "Verify the plugin was
+          # discovered" below fails if it did not.
+          extra-packages: ../tests/fixtures/byoa_demo_plugin
+          # A bracketed override, the case `args` exists for: `[...]` is a bash
+          # character class, so the same value through `extra-args` is intact only
+          # while no file in the working directory happens to match it. Adds Glob to
+          # the three tools hello_date.yaml already grants, so the resolved config
+          # differs from the task file and the assertion below can tell the
+          # difference between "arrived" and "was ignored".
+          args: |
+            -D
+            agent.allowed_tools=[Read,Write,Bash,Glob]
           # Credentials go through the generic env passthrough (the only channel);
           # ANTHROPIC_API_KEY reaching the run is proven by the API-backed task
           # succeeding. A floor of 0.0 passes for any produced score (exercises
@@ -1012,7 +1039,11 @@ jobs:
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             CE_DOGFOOD_MARKER=1
 
+      # Runs in `tasks/` because that is the assertion: the action reports its
+      # run-dir/junit-path outputs exactly as passed, so a relative one is relative
+      # to `working-directory`, NOT to the job's default cwd.
       - name: Verify outputs and JUnit file
+        working-directory: tasks
         env:
           JUNIT: ${{ steps.dogfood.outputs.junit-path }}
           RUNDIR: ${{ steps.dogfood.outputs.run-dir }}
@@ -1023,11 +1054,55 @@ jobs:
           # our writer emits no DTDs/entities) — stdlib ET is fine here.
           python3 -c "import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])" "$JUNIT"
           test -f "$RUNDIR/run.json" || { echo "run.json missing"; exit 1; }
+          # An absolute path here would mean working-directory was ignored and the
+          # run happened to land somewhere the test still found.
+          case "$RUNDIR" in /*) echo "run-dir output was rewritten to an absolute path: $RUNDIR"; exit 1 ;; esac
+
+      - name: Verify the plugin was discovered and the bracketed override arrived
+        working-directory: tasks
+        env:
+          RUNDIR: ${{ steps.dogfood.outputs.run-dir }}
+        run: |
+          set -euo pipefail
+
+          # `coder-eval` on PATH is the uv tool shim the action created, so this
+          # interrogates the action's own environment. A task naming the fixture's
+          # agent kind validates ONLY if the entry point was discovered there;
+          # otherwise plan exits 1 with "No agent registered for type 'byoa-demo'".
+          cat > byoa-probe.yaml <<'YAML'
+          task_id: "action_extra_packages_probe"
+          description: "Validates only when the byoa-demo plugin is discoverable."
+          initial_prompt: "not executed - plan validates without running an agent"
+          agent:
+            type: "byoa-demo"
+          success_criteria:
+            - type: "file_exists"
+              path: "app.py"
+              description: "not executed"
+          YAML
+          coder-eval plan byoa-probe.yaml
+          rm -f byoa-probe.yaml
+
+          # And the `args` value survived as a 4-element YAML list rather than
+          # arriving word-split or glob-rewritten.
+          RUN_JSON="$RUNDIR/run.json" python3 <<'PY'
+          import json, os, sys
+
+          data = json.load(open(os.environ["RUN_JSON"], encoding="utf-8"))
+          rows = data.get("task_results") or []
+          if not rows:
+              sys.exit("run.json has no task_results to check the -D override against")
+          tools = (rows[0].get("agent_config") or {}).get("allowed_tools")
+          expected = ["Read", "Write", "Bash", "Glob"]
+          if tools != expected:
+              sys.exit(f"-D override did not arrive intact: allowed_tools={tools!r}, expected {expected!r}")
+          print(f"bracketed -D override resolved to {tools!r}")
+          PY
 
       - name: Upload dogfood run on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: action-dogfood-runs
-          path: runs/ci-action-dogfood/
+          path: tasks/runs/ci-action-dogfood/
           retention-days: 7

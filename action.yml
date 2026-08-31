@@ -38,10 +38,63 @@ inputs:
     description: Extra arguments appended verbatim to `coder-eval run` (trusted caller input; covers --experiment, -D overrides, --tags exclusions, etc.)
     required: false
     default: ""
+  args:
+    description: >-
+      Extra arguments appended to `coder-eval run`, ONE ARGUMENT PER LINE, each
+      passed through verbatim — no word splitting and no pathname expansion.
+      Use this instead of `extra-args` for any value containing whitespace or
+      glob metacharacters (`[` `]` `*` `?`), e.g. a `-D` override whose value is
+      a bracketed list. A flag and its value are two separate lines (`-D`, then
+      `key=[a,b]`), or one line in `=` form (`--model=x`); a flag and value
+      sharing a line arrive as a single malformed token. Blank lines, `#`
+      comments and surrounding whitespace are ignored. Applied before
+      `extra-args`.
+    required: false
+    default: ""
   version:
     description: coder-eval version to install from PyPI, or "local" to install from the action checkout
     required: false
     default: "0.11.5"   # <-- kept in sync with releases by release.yml
+  extras:
+    description: >-
+      Comma-separated coder-eval extras to install, e.g. `codex` or
+      `antigravity,litellm`. Composed into the install requirement
+      (`coder-eval[codex]==<version>`) rather than installed afterwards: `uv
+      tool install` builds an isolated environment whose shims shadow anything
+      else named `coder-eval` on PATH, so an extra added on the side is
+      invisible to the CLI this action actually invokes. Each name must match
+      ^[A-Za-z0-9][A-Za-z0-9._-]*$.
+    required: false
+    default: ""
+  extra-packages:
+    description: >-
+      Additional requirements installed INTO coder-eval's tool environment (`uv
+      tool install --with`), one per line: a PEP 508 specifier or a local path.
+      This is how a coder-eval plugin distributed outside this repo becomes
+      discoverable — an entry point is only found when the plugin shares a
+      virtualenv with its host. Relative paths resolve against
+      `working-directory`. Blank lines, `#` comments and surrounding whitespace
+      are ignored.
+    required: false
+    default: ""
+  prerelease:
+    description: >-
+      Allow prerelease versions while resolving the install ("true"/"false").
+      Passes `--prerelease=allow` to `uv tool install`, for when `version` or an
+      `extra-packages` entry needs a prerelease to resolve.
+    required: false
+    default: "false"
+  working-directory:
+    description: >-
+      Directory every step of this action runs in. `tasks`, `run-dir`,
+      `junit-path` and relative `extra-packages` entries all resolve against it,
+      and the `run-dir` output is reported as given, so a relative one is
+      relative to this directory too. GitHub rejects `working-directory:` on a
+      `uses:` step and a job-level `defaults.run` does not reach inside a
+      composite action, so this input is the only way to run the gate from a
+      subdirectory.
+    required: false
+    default: "."
   run-dir:
     description: Run directory (--run-dir)
     required: false
@@ -91,24 +144,64 @@ runs:
       uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
     - name: Install coder-eval
       shell: bash
+      working-directory: ${{ inputs.working-directory }}
       env:
         CE_VERSION: ${{ inputs.version }}
+        CE_EXTRAS: ${{ inputs.extras }}
+        CE_EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+        CE_PRERELEASE: ${{ inputs.prerelease }}
         CE_ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
-        if [ "$CE_VERSION" = "local" ]; then
-          uv tool install "$CE_ACTION_PATH"
-        else
-          uv tool install "coder-eval==$CE_VERSION"
+
+        # Extras go into the requirement string, not a follow-up install: the
+        # tool environment's shims shadow any other coder-eval on PATH, so an
+        # extra installed beside it would never be imported by the CLI this
+        # action runs. Validated rather than interpolated blindly — the value
+        # lands inside a spec that reaches the resolver.
+        extras=""
+        if [ -n "$CE_EXTRAS" ]; then
+          if [[ ! "$CE_EXTRAS" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*$ ]]; then
+            echo "::error::extras must be a comma-separated list of extra names, got '$CE_EXTRAS'"; exit 1
+          fi
+          extras="[$CE_EXTRAS]"
         fi
+
+        install_args=(tool install)
+        case "$CE_PRERELEASE" in
+          true) install_args+=(--prerelease=allow) ;;
+          false|"") ;;
+          *) echo "::error::prerelease must be \"true\" or \"false\", got '$CE_PRERELEASE'"; exit 1 ;;
+        esac
+
+        # One requirement per line, each appended as a single argv entry: a local
+        # path can contain spaces and a specifier can contain `[`, `]` or `>`,
+        # none of which survive word splitting.
+        while IFS= read -r line; do
+          line="${line%$'\r'}"                       # tolerate CRLF inputs
+          line="${line#"${line%%[![:space:]]*}"}"    # left-trim
+          line="${line%"${line##*[![:space:]]}"}"    # right-trim
+          [ -z "$line" ] && continue
+          case "$line" in '#'*) continue ;; esac      # allow comment lines
+          install_args+=(--with "$line")
+        done <<< "$CE_EXTRA_PACKAGES"
+
+        if [ "$CE_VERSION" = "local" ]; then
+          install_args+=("${CE_ACTION_PATH}${extras}")
+        else
+          install_args+=("coder-eval${extras}==${CE_VERSION}")
+        fi
+        uv "${install_args[@]}"
     - name: Run coder-eval
       id: run
       shell: bash
+      working-directory: ${{ inputs.working-directory }}
       env:
         CE_TASKS: ${{ inputs.tasks }}
         CE_TAGS: ${{ inputs.tags }}
         CE_MODEL: ${{ inputs.model }}
         CE_EXTRA_ARGS: ${{ inputs.extra-args }}
+        CE_ARGS: ${{ inputs.args }}
         CE_RUN_DIR: ${{ inputs.run-dir }}
         CE_JUNIT: ${{ inputs.junit-path }}
         CE_SUMMARY: ${{ inputs.step-summary }}
@@ -145,6 +238,20 @@ runs:
         args=(run --run-dir "$CE_RUN_DIR" --junit-xml "$CE_JUNIT")
         [ -n "$CE_TAGS" ] && args+=(--tags "$CE_TAGS")
         [ -n "$CE_MODEL" ] && args+=(--model "$CE_MODEL")
+
+        # `args`: one argv entry per line, appended verbatim. Neither word split
+        # nor glob expanded, so a `-D` override whose value is a bracketed list
+        # (`key=[A,B]` — a bash character class) arrives at the CLI intact. That
+        # is the difference from CE_EXTRA_ARGS below, which is deliberately split.
+        while IFS= read -r line; do
+          line="${line%$'\r'}"                       # tolerate CRLF inputs
+          line="${line#"${line%%[![:space:]]*}"}"    # left-trim
+          line="${line%"${line##*[![:space:]]}"}"    # right-trim
+          [ -z "$line" ] && continue
+          case "$line" in '#'*) continue ;; esac      # allow comment lines
+          args+=("$line")
+        done <<< "$CE_ARGS"
+
         # extra-args is a trusted caller input, split on whitespace intentionally
         # shellcheck disable=SC2206
         [ -n "$CE_EXTRA_ARGS" ] && args+=($CE_EXTRA_ARGS)

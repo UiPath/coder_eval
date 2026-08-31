@@ -138,8 +138,13 @@ task/gate failure:
 | `tasks` | *(all `tasks/`)* | Task YAML path(s)/glob |
 | `tags` | — | `--tags` filter |
 | `model` | — | `--model` override |
-| `extra-args` | — | Verbatim extra args (`--experiment`, `-D …`, …) |
+| `extra-args` | — | Verbatim extra args (`--experiment`, `-D …`, …), whitespace-split |
+| `args` | — | Same, but one argument per line and never split or glob-expanded |
 | `version` | pinned release | PyPI version, or `local` to install from the checkout |
+| `extras` | — | coder-eval extras to install, comma-separated (`codex`, `antigravity,litellm`) |
+| `extra-packages` | — | Extra requirements installed into coder-eval's environment (`--with`), one per line |
+| `prerelease` | `false` | Allow prereleases while resolving the install |
+| `working-directory` | `.` | Directory every step of the action runs in |
 | `run-dir` | `runs/ci` | Run directory |
 | `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit report |
 | `step-summary` | `true` | Append `run.md` to the job summary |

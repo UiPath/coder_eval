@@ -49,8 +49,13 @@ those steps for your own agent's runtime as needed.
 | `tasks` | — | Task YAML path(s)/glob(s) passed to `coder-eval run`. Effectively required — see below. |
 | `tags` | — | Only run tasks matching these comma-separated tags (`--tags`). |
 | `model` | — | Override agent model for all tasks (`--model`). |
-| `extra-args` | — | Extra args appended verbatim to `coder-eval run` (`--experiment`, `-D …`, `--exclude-tags`, …). Trusted caller input. |
+| `extra-args` | — | Extra args appended verbatim to `coder-eval run` (`--experiment`, `-D …`, `--exclude-tags`, …), whitespace-split. Trusted caller input. |
+| `args` | — | The same, one argument per line, never split or glob-expanded — see below. |
 | `version` | pinned release | `coder-eval` version to install from PyPI, or `local` to install from the action checkout. |
+| `extras` | — | Comma-separated `coder-eval` extras to install (`codex`, `antigravity,litellm`). |
+| `extra-packages` | — | Extra requirements installed into `coder-eval`'s environment (`uv tool install --with`), one per line. |
+| `prerelease` | `false` | Allow prerelease versions while resolving the install. |
+| `working-directory` | `.` | Directory every step of the action runs in — see below. |
 | `run-dir` | `runs/ci` | Run directory (`--run-dir`). |
 | `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit XML report. |
 | `step-summary` | `true` | Append `run.md` to the GitHub job summary. |
@@ -79,6 +84,71 @@ Three sharp edges make that worth the words:
   `Error: Task file not found: tests/tasks/*/*/*.yaml`.
 
 An explicit file list is always safe, and is the better choice for a small suite.
+
+#### `args` vs `extra-args`
+
+Both append to `coder-eval run`; they differ in how the value is tokenized.
+`extra-args` is one string, split on whitespace and pathname-expanded — the same
+mechanism as `tasks`, and convenient for ordinary flags. `args` takes **one
+argument per line** and appends each verbatim, with no splitting and no globbing.
+
+Reach for `args` whenever a value contains whitespace or a glob metacharacter
+(`[`, `]`, `*`, `?`). The canonical case is a `-D` override whose value is a
+bracketed list, which bash reads as a character class:
+
+```yaml
+args: |
+  -D
+  sandbox.docker.env_passthrough_extra=[AUTH_TOKEN,BASE_URL]
+```
+
+Through `extra-args` that value is intact only as long as no file in the working
+directory happens to match the class — one named
+`sandbox.docker.env_passthrough_extra=A` rewrites it to a single-name list, and
+the run measures something other than what the workflow asked for, silently.
+
+A flag and its value are **two lines** (`-D`, then the assignment), or one line in
+`=` form (`--model=claude-sonnet-5`). A flag and value sharing a line arrive as a
+single malformed token, which the CLI rejects. Blank lines, `#` comments and
+surrounding whitespace are ignored.
+
+#### Running from a subdirectory (`working-directory`)
+
+A suite that lives under `tests/` needs the run to happen there, and GitHub
+rejects `working-directory:` on a `uses:` step — a job-level `defaults.run` does
+not reach inside a composite action either. The `working-directory` input is the
+way in. It applies to **every** step the action runs, so `tasks`, `run-dir`,
+`junit-path` and relative `extra-packages` entries all resolve against it, and the
+`run-dir` output is reported exactly as passed (a relative one is relative to that
+directory, which matters when a later step reads it from the job's default cwd).
+
+#### Extras and plugins (`extras`, `extra-packages`, `prerelease`)
+
+The action installs the CLI with `uv tool install`, which builds an isolated
+environment whose shims **shadow** anything else named `coder-eval` on `PATH`.
+Pre-installing your own copy beside it therefore does not work: the action's copy
+is the one that runs. Both inputs exist because of that.
+
+`extras` is composed into the requirement string, so agent extras land in the
+environment the action actually invokes:
+
+```yaml
+extras: codex          # -> coder-eval[codex]==<version>
+```
+
+`extra-packages` adds requirements *into* that same environment, one per line —
+a PEP 508 specifier or a local path. This is how a `coder-eval` plugin
+distributed outside this repo becomes discoverable, since an entry point is only
+found when the plugin shares a virtualenv with its host:
+
+```yaml
+extra-packages: |
+  ./vendor/my-coder-eval-plugin
+  some-published-plugin>=1.2
+```
+
+`prerelease: "true"` passes `--prerelease=allow` for when `version` or one of
+those requirements needs a prerelease to resolve.
 
 ### Outputs
 
