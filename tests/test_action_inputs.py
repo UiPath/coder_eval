@@ -24,8 +24,8 @@ file in the working directory happens to match. One file named
 
 from __future__ import annotations
 
-import json
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -79,21 +79,33 @@ def _step_script(step_name: str) -> str:
 def _stub(dir_: Path, name: str) -> Path:
     """A fake executable recording its argv and its inherited ``CE_PROBE``, exit 0.
 
+    Written in bash rather than Python on purpose. ``shell: bash`` on a Windows
+    runner is Git Bash, which rewrites arguments that look like absolute POSIX
+    paths on the way to a *native* Windows binary: a python-shebang stub gets
+    ``/action-checkout`` as ``C:/Program Files/Git/action-checkout``, and
+    switching that conversion off only moves the failure, because the shebang
+    launcher then cannot hand python its own script path either. A bash stub
+    never crosses that boundary, so argv arrives byte-for-byte everywhere.
+
+    argv is recorded NUL-delimited instead of as JSON so a value carrying a
+    quote, a backslash or a space needs no escaping on the way out of bash. Each
+    invocation truncates the file; no test invokes the stub twice.
+
     ``CE_PROBE`` is how the env-passthrough test observes what the child actually
     received: the passthrough exports into the step's own shell, so only a process
     the script itself launches can report it.
     """
-    record = dir_ / "argv.json"
+    record = dir_ / "argv.bin"
+    # Forward slashes, not the native separator: the consumer is MSYS bash, which
+    # reads `C:/...` but not every backslash form.
+    quoted_dir = shlex.quote(str(dir_).replace("\\", "/"))
     exe = dir_ / name
     exe.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, sys, pathlib\n"
-        f"d = pathlib.Path({str(dir_)!r})\n"
-        "p = d / 'argv.json'\n"
-        "lines = p.read_text().splitlines() if p.exists() else []\n"
-        "lines.append(json.dumps(sys.argv[1:]))\n"
-        "p.write_text('\\n'.join(lines) + '\\n')\n"
-        "(d / 'probe.txt').write_text(os.environ.get('CE_PROBE', '<unset>'))\n",
+        "#!/usr/bin/env bash\n"
+        f"d={quoted_dir}\n"
+        ': > "$d/argv.bin"\n'
+        'for a in "$@"; do printf "%s\\0" "$a" >> "$d/argv.bin"; done\n'
+        'printf "%s" "${CE_PROBE-<unset>}" > "$d/probe.txt"\n',
         encoding="utf-8",
     )
     exe.chmod(0o755)
@@ -111,14 +123,6 @@ def _run(script: str, env: dict[str, str], *, cwd: Path, stub: str) -> tuple[int
         "HOME": str(cwd),
         "GITHUB_OUTPUT": str(cwd / "gh_output"),
         "GITHUB_STEP_SUMMARY": str(cwd / "gh_summary"),
-        # Git Bash (the `shell: bash` of a Windows runner) rewrites arguments
-        # that look like absolute POSIX paths into Windows form on the way to a
-        # native binary, so `/action-checkout` reached the stub as
-        # `C:/Program Files/Git/action-checkout` and the composition assertions
-        # failed for a reason that has nothing to do with the action. These two
-        # switch that conversion off. Harmless on POSIX, where nothing reads them.
-        "MSYS2_ARG_CONV_EXCL": "*",
-        "MSYS_NO_PATHCONV": "1",
         **env,
     }
     (cwd / "gh_output").touch()
@@ -134,9 +138,8 @@ def _run(script: str, env: dict[str, str], *, cwd: Path, stub: str) -> tuple[int
     )
     argv: list[str] = []
     if record.exists():
-        for line in record.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                argv = json.loads(line)
+        # Trailing NUL terminates the last entry, so the split leaves an empty tail.
+        argv = [part.decode() for part in record.read_bytes().split(b"\0")[:-1]]
     return proc.returncode, argv, proc.stdout + proc.stderr
 
 
