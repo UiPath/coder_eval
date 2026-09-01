@@ -2,6 +2,90 @@
 
 <!-- version list -->
 
+## v0.11.6 (2026-09-01)
+
+### Bug Fixes
+
+- **action**: Drop the literal expression syntax from a run-step comment
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **action**: Stop the env passthrough mutating the action's own shell
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **docs**: Drop the last references to inputs that no longer exist
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **evalboard**: Even out the variant tiles and keep a task's arms adjacent
+  ([#145](https://github.com/UiPath/coder_eval/pull/145),
+  [`6780227`](https://github.com/UiPath/coder_eval/commit/6780227e5e431b4c1099f2f88839be37540dcd71))
+
+- **evalboard**: Resolve a variant-less task link to the task's first arm
+  ([#145](https://github.com/UiPath/coder_eval/pull/145),
+  [`6780227`](https://github.com/UiPath/coder_eval/commit/6780227e5e431b4c1099f2f88839be37540dcd71))
+
+### Documentation
+
+- **action**: Trim the comment bulk on the eight-input surface
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **evalboard**: Trim variant commentary and redundant tests
+  ([#145](https://github.com/UiPath/coder_eval/pull/145),
+  [`6780227`](https://github.com/UiPath/coder_eval/commit/6780227e5e431b4c1099f2f88839be37540dcd71))
+
+### Features
+
+- **action**: Add working-directory, extras, extra-packages, prerelease and args inputs
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **action**: Refactor github action input surface around args; harden env passthrough
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **evalboard**: Register an unlisted gha source for ad-hoc dispatch runs
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **evalboard**: Render multi-variant runs, one row per (task, arm)
+  ([#145](https://github.com/UiPath/coder_eval/pull/145),
+  [`6780227`](https://github.com/UiPath/coder_eval/commit/6780227e5e431b4c1099f2f88839be37540dcd71))
+
+### Refactoring
+
+- **action**: Drop every forwarding input; flags go through args
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **evalboard**: Drop the variant colour palette and the spread helper
+  ([#145](https://github.com/UiPath/coder_eval/pull/145),
+  [`6780227`](https://github.com/UiPath/coder_eval/commit/6780227e5e431b4c1099f2f88839be37540dcd71))
+
+- **evalboard**: Report pass rate per arm instead of alongside a blended one
+  ([#145](https://github.com/UiPath/coder_eval/pull/145),
+  [`6780227`](https://github.com/UiPath/coder_eval/commit/6780227e5e431b4c1099f2f88839be37540dcd71))
+
+### Testing
+
+- Drop the skip-guard unit test ([#146](https://github.com/UiPath/coder_eval/pull/146),
+  [`d679ff2`](https://github.com/UiPath/coder_eval/commit/d679ff2667f2c1e76a5d6384059107be4538c750))
+
+- Skip the enforcement live tests when the agent declines to try
+  ([#146](https://github.com/UiPath/coder_eval/pull/146),
+  [`d679ff2`](https://github.com/UiPath/coder_eval/commit/d679ff2667f2c1e76a5d6384059107be4538c750))
+
+- **action**: Record stub argv from bash so Windows argv is byte-exact
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+- **action**: Stop Git Bash rewriting the absolute path in the install-spec tests
+  ([#147](https://github.com/UiPath/coder_eval/pull/147),
+  [`7b81456`](https://github.com/UiPath/coder_eval/commit/7b81456e4f4ef8d26eaa9fdf8afe499376164d6b))
+
+
 ## v0.11.5 (2026-08-28)
 
 ### Bug Fixes
