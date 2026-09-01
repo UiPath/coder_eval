@@ -444,3 +444,34 @@ class TestEnvPassthrough:
         assert rc != 0
         assert "s3cr3t-token-value" not in out
         assert "entry #1" in out
+
+    # An `env` value carrying a newline splits into a second entry, because the
+    # loop is line-based. That used to be an argv-rewrite: the pairs were
+    # `export`ed into the step's own shell, which is where CE_ARGS and
+    # CE_RUN_DIR are read from AFTER the loop. They are collected and handed to
+    # `env` now, so the injected entry reaches the child as data and nothing
+    # else. Reachable without a hostile author: any interpolated value or a
+    # rotated multi-line secret.
+    @pytest.mark.parametrize("hijack", ["CE_ARGS", "CE_RUN_DIR", "GITHUB_OUTPUT"])
+    def test_a_newline_in_a_value_cannot_rewrite_the_step(self, run_script, tmp_path, hijack):
+        rc, argv, out = _coder_eval(
+            run_script,
+            tmp_path,
+            CE_ARGS="tasks/real.yaml\n",
+            CE_RUN_DIR="runs/ci",
+            CE_ENV=f"API_BASE=x\n{hijack}=/tmp/hijacked\n",
+        )
+        assert rc == 0, out
+        assert "tasks/real.yaml" in argv, "the caller's task path was dropped"
+        assert "/tmp/hijacked" not in argv
+        assert argv[:5] == ["run", "--run-dir", "runs/ci", "--junit-xml", "runs/ci/junit.xml"]
+
+    # PATH is the sharpest of these: it decides WHICH coder-eval runs, and the
+    # name filter admits it. $GITHUB_PATH is the scoped, log-visible alternative.
+    @pytest.mark.parametrize("name", ["PATH", "BASH_ENV", "LD_PRELOAD", "IFS"])
+    def test_reserved_names_are_rejected_before_running(self, run_script, tmp_path, name):
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ENV=f"{name}=/tmp/evil")
+        assert rc != 0
+        assert argv == [], "coder-eval ran despite a reserved env name"
+        assert "reserved name" in out
+        assert name in out

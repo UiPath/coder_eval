@@ -65,12 +65,14 @@ inputs:
     default: ""
   env:
     description: >-
-      Newline-separated NAME=VALUE pairs, exported for the coder-eval process only
-      — never written to $GITHUB_ENV, so a forwarded secret cannot bleed into
-      later job steps. The sole channel for credentials and backend config
+      Newline-separated NAME=VALUE pairs, handed to the coder-eval process only.
+      Never written to $GITHUB_ENV and never exported into the action's own
+      shell, so a forwarded secret cannot bleed into later job steps, nor rewrite
+      what this step runs. The sole channel for credentials and backend config
       (ANTHROPIC_API_KEY, API_BACKEND, model vars, plugin paths). Names must match
-      ^[A-Za-z_][A-Za-z0-9_]*$. Wire values from repository secrets; never inline
-      a literal.
+      ^[A-Za-z_][A-Za-z0-9_]*$; PATH and the loader/shell-startup names are
+      rejected outright (use $GITHUB_PATH for a tool directory). Wire values from
+      repository secrets; never inline a literal.
     required: false
     default: ""
   working-directory:
@@ -193,10 +195,20 @@ runs:
           done
         }
 
-        # Exported for this step's coder-eval child only, never to $GITHUB_ENV.
+        # COLLECTED, not exported. `export` mutates THIS shell, and the name
+        # filter below admits `CE_ARGS`, `CE_RUN_DIR` and `PATH`, all of which
+        # are read after this loop. The reachable case is not a hostile workflow author
+        # but a VALUE carrying a newline: the loop is line-based, so one
+        # forwarded secret or `${{ }}` interpolation whose value contains
+        # `\nCE_RUN_DIR=...` became a second honoured entry that could rewrite
+        # the argv, redirect where results land, or shadow which coder-eval ran.
+        # Handing the pairs to `env` instead makes the documented contract
+        # ("for the coder-eval process only") true rather than aspirational.
+        #
         # Only NAME is validated; VALUE is opaque data and is never eval'd. Not
         # clean_lines, because right-trimming would silently alter a credential
         # that legitimately ends in whitespace.
+        ce_env=()
         n=0
         while IFS= read -r line; do
           n=$((n + 1))
@@ -213,7 +225,15 @@ runs:
           if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             echo "::error::env entry #$n has an invalid name (must match ^[A-Za-z_][A-Za-z0-9_]*\$)"; exit 1
           fi
-          export "$name=${line#*=}"
+          # Rejected by name: these change how the child RESOLVES code, not how
+          # it behaves, and this channel exists for credentials and backend
+          # config. A tool directory belongs on $GITHUB_PATH in a step of your
+          # own, which is scoped and visible in the log.
+          case "$name" in
+            PATH|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH)
+              echo "::error::env entry #$n uses the reserved name '$name'. Put a tool directory on \$GITHUB_PATH in an earlier step instead."; exit 1 ;;
+          esac
+          ce_env+=("$name=${line#*=}")
         done <<< "$CE_ENV"
 
         # Reports live inside the run directory; `%/` keeps a trailing slash on the
@@ -228,7 +248,10 @@ runs:
         done < <(clean_lines <<< "$CE_ARGS")
 
         set +e
-        coder-eval "${args[@]}"
+        # `${a[@]+"${a[@]}"}` because bash 3.2 (macOS runners) treats an empty
+        # array as unset under `set -u`. `--` so a NAME=VALUE pair can never be
+        # read as an option to env itself.
+        env -- ${ce_env[@]+"${ce_env[@]}"} coder-eval "${args[@]}"
         CODE=$?
         set -e
 

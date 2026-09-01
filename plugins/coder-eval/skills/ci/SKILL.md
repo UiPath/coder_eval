@@ -1,5 +1,5 @@
 ---
-description: Generate a GitHub Actions workflow that runs a coder-eval suite as a CI gate or on a schedule, using the published composite action — with the agent runtime, credentials, JUnit output and a score floor wired correctly.
+description: Generate a GitHub Actions workflow that runs a coder-eval suite as a CI gate or on a schedule, using the published composite action — with the agent runtime, credentials, JUnit output and the run reports wired correctly.
 disable-model-invocation: true
 allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 ---

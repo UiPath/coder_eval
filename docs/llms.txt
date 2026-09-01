@@ -35,7 +35,7 @@ and A/B plumbing.
 - [Bring Your Own Dataset](https://coder-eval.com/docs/datasets): Fan a single task out over a dataset
 - [Dialog Mode](https://coder-eval.com/docs/dialog-mode): Evaluate agents in multi-turn conversation via a simulated user
 - [Docker Isolation](https://coder-eval.com/docs/docker-isolation): The container sandbox driver, with custom images
-- [CI Gate & GitHub Action](https://coder-eval.com/docs/ci-gate): Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor
+- [CI Gate & GitHub Action](https://coder-eval.com/docs/ci-gate): Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, run reports
 - [Claude Code Plugin](https://coder-eval.com/docs/plugin): Install the Claude Code plugin — author, run, and analyze suites from inside the agent
 - [Extending Coder Eval](https://coder-eval.com/docs/extending): Author a custom agent, criterion, or model pricing via the plugin SPI
 - [Report Schema](https://coder-eval.com/docs/report-schema): Field-level reference for run.json / variant.json / task.json
