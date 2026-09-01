@@ -1,8 +1,7 @@
 ---
 description: >-
   Run Coder Eval as a CI gate — the coder_eval GitHub Action from the Actions
-  Marketplace, JUnit XML output for test-report ingestion, and an optional
-  per-task score floor.
+  Marketplace, and JUnit XML output for test-report ingestion.
 ---
 
 # CI Gate: GitHub Action & JUnit reports
@@ -10,10 +9,9 @@ description: >-
 Coder Eval ships a **packaged CI gate**: a composite GitHub Action — on the
 Actions Marketplace as
 [**coder_eval**](https://github.com/marketplace/actions/coder_eval) — that
-installs the CLI, runs your tasks, emits a JUnit XML report, appends the run
-summary to the job summary, and fails the build on any task/gate failure. This
-page is the reference for the Action and the JUnit output. For a walkthrough
-(including a hand-rolled workflow), see
+installs the CLI, runs your tasks, emits a JUnit XML report, and fails the build
+on any task failure. This page is the reference for the Action and the JUnit
+output. For a walkthrough (including a hand-rolled workflow), see
 [Tutorial 02 — Running Coder Eval in CI](tutorials/02-ci-pipeline.md).
 
 ## The GitHub Action
@@ -46,13 +44,12 @@ those steps for your own agent's runtime as needed.
 
 ### Inputs
 
-Eight, and **none of them is a `coder-eval run` flag**. The CLI has 21 flags; an
-input that merely forwards one buys nothing and costs a lot, because GitHub
-silently *ignores* an input the referenced tag does not define. A forwarding input
-that is mistyped, or newer than the tag you pinned, produces a run that measured
-something else and still exits 0. A wrong CLI flag is a hard error instead. So
-every flag goes through `args`, and an input exists only where the action does
-something with the value besides pass it along.
+Eight, and **none of them is a `coder-eval run` flag**. GitHub silently *ignores*
+an input the referenced tag does not define, so a forwarding input that is
+mistyped or newer than your pin produces a run that measured something else and
+still exits 0, where a wrong CLI flag is a hard error. Every flag goes through
+`args`, and an input exists only where the action does something with the value
+besides pass it along.
 
 | Input | Default | Purpose |
 | --- | --- | --- |
@@ -83,12 +80,9 @@ args: |
 A flag and value sharing a line arrive as a single malformed token, which the CLI
 rejects. Blank lines, `#` comments and surrounding whitespace are ignored.
 
-Verbatim is the point. A `-D` override whose value is a bracketed list is a bash
-character class, so any input that split on whitespace would leave it intact only
-while no file in the working directory happened to match — one named
-`sandbox.docker.env_passthrough_extra=A` would rewrite it to a single-name list
-and the run would measure something other than what the workflow asked for,
-silently.
+Verbatim is the point: a bracketed `-D` value is a bash character class, so any
+input that split on whitespace would survive only until a file in the working
+directory happened to match and silently rewrote the list.
 
 Task globs are handed to the CLI **unexpanded**, and it expands them itself:
 
@@ -101,9 +95,9 @@ Task globs are handed to the CLI **unexpanded**, and it expands them itself:
 #### Extras and plugins (`extras`, `extra-packages`, `install-flags`)
 
 The action installs the CLI with `uv tool install`, which builds an isolated
-environment whose shims **shadow** anything else named `coder-eval` on `PATH`.
-Pre-installing your own copy beside it therefore does not work: the action's copy
-is the one that runs. These inputs exist because of that.
+environment whose shims **shadow** anything else named `coder-eval` on `PATH`, so
+pre-installing your own copy beside it does not work. These inputs exist for that
+reason.
 
 `extras` is composed into the requirement string, so agent extras land in the
 environment the action actually invokes:
@@ -135,39 +129,13 @@ install-flags: |
 
 #### Running from a subdirectory (`working-directory`)
 
-A suite that lives under `tests/` needs the run to happen there, and GitHub
-rejects `working-directory:` on a `uses:` step — a job-level `defaults.run` does
-not reach inside a composite action either. The `working-directory` input is the
-way in. It applies to **every** step the action runs, so `run-dir`, the task
-paths in `args` and relative `extra-packages` entries all resolve against it, and
-the `run-dir` output is reported exactly as passed (a relative one is relative to
-that directory, which matters when a later step reads it from the job's default
-cwd).
-
-#### Extras and plugins (`extras`, `extra-packages`, `prerelease`)
-
-The action installs the CLI with `uv tool install`, which builds an isolated
-environment whose shims **shadow** anything else named `coder-eval` on `PATH`.
-Pre-installing your own copy beside it therefore does not work: the action's copy
-is the one that runs. Both inputs exist because of that.
-
-`extras` is composed into the requirement string, so agent extras land in the
-environment the action actually invokes:
-
-```yaml
-extras: codex          # -> coder-eval[codex]==<version>
-```
-
-`extra-packages` adds requirements *into* that same environment, one per line —
-a PEP 508 specifier or a local path. This is how a `coder-eval` plugin
-distributed outside this repo becomes discoverable, since an entry point is only
-found when the plugin shares a virtualenv with its host:
-
-```yaml
-extra-packages: |
-  ./vendor/my-coder-eval-plugin
-  some-published-plugin>=1.2
-```
+A suite under `tests/` needs the run to happen there, and GitHub rejects
+`working-directory:` on a `uses:` step — a job-level `defaults.run` does not reach
+inside a composite either. This input is the way in. It applies to **every** step
+the action runs, so `run-dir`, the task paths in `args` and relative
+`extra-packages` entries all resolve against it. The `run-dir` output is reported
+exactly as passed, so a relative one is relative to that directory, not to the
+job's default cwd a later step reads it from.
 
 ### Outputs
 
@@ -178,11 +146,9 @@ extra-packages: |
 | `run-md-path` | The markdown run report, at `<run-dir>/run.md`. |
 
 There is no `junit-path` **input**: the report belongs with the run it describes,
-and every consumer that had the choice put it there anyway.
-
-The action does not append the report to `$GITHUB_STEP_SUMMARY`. A consumer that
-must redact the report first cannot undo a write that has already happened, so the
-write is yours to make:
+and every consumer that had the choice put it there anyway. Nor does the action
+append the report to `$GITHUB_STEP_SUMMARY` — a consumer that must redact it first
+cannot undo a write that already happened, so that write is yours to make:
 
 ```yaml
 - id: eval

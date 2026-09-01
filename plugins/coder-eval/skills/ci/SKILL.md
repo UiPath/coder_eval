@@ -90,9 +90,8 @@ Adjust the model and the cron to the repository. Pin the action at `@v0`, the mo
 tag. Then work through the four things the snippet cannot guess.
 
 Note the shape of `args:`: the action promotes **none** of `coder-eval run`'s flags to a
-named input, so task paths and flags all go there, one argument per line, and a flag and
-its value are two separate lines. There is no `tasks:`, `tags:` or `model:` input to
-reach for.
+named input, so task paths and flags all go there, one argument per line, with a flag and
+its value on separate lines. There is no `tasks:`, `tags:` or `model:` input.
 
 ### The task paths — from discovery
 
@@ -125,21 +124,21 @@ self-documenting.
 
 ### The experiment, if the suite runs through one
 
-If the repository's suite resolves through an experiment, the workflow must pass it via
-`extra-args` — again with the discovered path, not the illustrative one below:
+If the repository's suite resolves through an experiment, the workflow must pass it in
+`args` — two lines, and with the discovered path, not the illustrative one below:
 
 ```yaml
-extra-args: "-e tests/experiments/default.yaml"
+args: |
+  tests/tasks/**/*.yaml
+  -e
+  tests/experiments/default.yaml
 ```
 
-This is load-bearing rather than tidy: an experiment usually supplies `agent:` config, so
+This matters rather than being tidy: an experiment usually supplies `agent:` config, so
 omitting it silently changes what the run measures — the gate and the local run stop
 being the same test. If the repository has **several** experiments, ask which one the
 gate should use; a CI gate quietly running the wrong experiment is precisely the failure
 this exists to prevent.
-
-`extra-args` is a trusted input that is split on whitespace, so a path containing a space
-is unsafe there. Choose paths without spaces rather than discovering this in CI.
 
 ### Environment — including the skill source, if the suite is an activation suite
 
