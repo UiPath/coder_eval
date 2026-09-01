@@ -475,3 +475,25 @@ class TestEnvPassthrough:
         assert argv == [], "coder-eval ran despite a reserved env name"
         assert "reserved name" in out
         assert name in out
+
+
+class TestNoWorkflowExpressionsInScripts:
+    """A `run:` body must carry no `${{ ... }}`.
+
+    Two reasons, one of which has already bitten. GitHub parses every `${{ }}`
+    inside a block scalar before bash ever sees it, so a malformed one -- even
+    inside a shell COMMENT -- fails the whole action template to load with
+    `An expression was expected` and a line number pointing at `run: |`, which
+    says nothing about where the text actually is. And a well-formed one would
+    be textually substituted before bash parses the line, which is the injection
+    pattern GitHub's own hardening guidance rejects. Every value this action
+    needs already arrives through the step's `env:` block.
+    """
+
+    @pytest.mark.parametrize("step_name", ["Install coder-eval", "Run coder-eval"])
+    def test_no_expression_syntax_in_a_run_body(self, step_name):
+        script = _step_script(step_name)
+        assert "${{" not in script, (
+            f"the {step_name!r} script contains '${{{{' -- GitHub evaluates it before bash, "
+            "so even a comment breaks the template. Pass the value through the step's env: block."
+        )

@@ -199,7 +199,7 @@ runs:
         # filter below admits `CE_ARGS`, `CE_RUN_DIR` and `PATH`, all of which
         # are read after this loop. The reachable case is not a hostile workflow author
         # but a VALUE carrying a newline: the loop is line-based, so one
-        # forwarded secret or `${{ }}` interpolation whose value contains
+        # forwarded secret or interpolated workflow expression whose value holds
         # `\nCE_RUN_DIR=...` became a second honoured entry that could rewrite
         # the argv, redirect where results land, or shadow which coder-eval ran.
         # Handing the pairs to `env` instead makes the documented contract
