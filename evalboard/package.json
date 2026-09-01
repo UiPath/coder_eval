@@ -12,32 +12,32 @@
         "verify": "tsc --noEmit && vitest run && next build"
     },
     "dependencies": {
-        "next": "^15.5.20",
+        "next": "^16.2.12",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "react-markdown": "^10.1.0",
-        "recharts": "^2.15.0",
+        "recharts": "^3.10.1",
         "remark-gfm": "^4.0.1"
     },
     "optionalDependencies": {
         "@azure/identity": "^4.13.1",
-        "@azure/storage-blob": ">=12.31.0 <12.33.0"
+        "@azure/storage-blob": ">=12.31.0 <12.34.0"
     },
     "devDependencies": {
         "@tailwindcss/typography": "^0.5.19",
-        "@testing-library/jest-dom": "^6.0.0",
+        "@testing-library/jest-dom": "^7.0.0",
         "@testing-library/react": "^16.0.0",
-        "@types/node": "^22.10.0",
+        "@types/node": "^26.1.2",
         "@types/react": "^19.0.0",
         "@types/react-dom": "^19.0.0",
-        "@vitejs/plugin-react": "^4.7.0",
-        "@vitest/coverage-v8": "^3.2.6",
+        "@vitejs/plugin-react": "^6.0.5",
+        "@vitest/coverage-v8": "^4.1.10",
         "autoprefixer": "^10.4.20",
-        "jsdom": "^25.0.0",
+        "jsdom": "^30.0.1",
         "postcss": "^8.5.23",
-        "tailwindcss": "^3.4.17",
-        "typescript": "^5.6.3",
-        "vitest": "^3.2.6"
+        "tailwindcss": "^4.3.3",
+        "typescript": "^7.0.2",
+        "vitest": "^4.1.10"
     },
     "pnpm": {
         "overrides": {
