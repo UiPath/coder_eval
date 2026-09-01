@@ -76,21 +76,34 @@ def expand_task_files(task_files: list[Path]) -> list[Path]:
         List of resolved task file paths
 
     Raises:
-        typer.Exit: If no task files are found
+        typer.Exit: If any pattern matches no task file
     """
     all_task_files = []
+    # Per-pattern, not just on the union. Accumulating and checking only the
+    # total meant one stale entry among several (a renamed or moved suite)
+    # silently ran the surviving subset and exited 0, so a CI gate reported
+    # green over tasks it never measured. A pattern the caller wrote is a
+    # pattern the caller expects to match something.
+    unmatched = []
     for pattern in task_files:
         if pattern.is_file():
             all_task_files.append(pattern)
+            continue
+        # Try as glob pattern (supports ** for recursive matching)
+        if pattern.is_absolute():
+            matches = list(Path(pattern.anchor).glob(str(pattern.relative_to(pattern.anchor))))
         else:
-            # Try as glob pattern (supports ** for recursive matching)
-            if pattern.is_absolute():
-                all_task_files.extend(Path(pattern.anchor).glob(str(pattern.relative_to(pattern.anchor))))
-            else:
-                all_task_files.extend(Path().glob(str(pattern)))
+            matches = list(Path().glob(str(pattern)))
+        if not matches:
+            unmatched.append(pattern)
+        all_task_files.extend(matches)
 
-    if not all_task_files:
+    # The union check still stands on its own: an empty `task_files` reaches here
+    # with nothing unmatched, and returning [] would run a zero-task suite green.
+    if unmatched or not all_task_files:
         console.print("[red]No task files found![/red]")
+        for pattern in unmatched:
+            console.print(f"[red]  no match: {pattern}[/red]")
         raise typer.Exit(1)
 
     random.shuffle(all_task_files)

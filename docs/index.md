@@ -87,7 +87,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
 | [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
-| [CI Gate & GitHub Action](CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor |
+| [CI Gate & GitHub Action](CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, run reports |
 | [Claude Code Plugin](PLUGIN.md) | Install the Claude Code plugin — author, run, and analyze suites from inside the agent |
 | [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |

@@ -1753,45 +1753,16 @@ class TestPluginArtifacts:
         # drops the `agent:` config it supplies, so the gate measures something other than
         # what the suite measures locally; and a `version:` input that ignores the repo's
         # pin runs the gate on a different CLI than the repo is authored against.
-        text = " ".join((PLUGIN_ROOT / "skills" / "ci" / "SKILL.md").read_text(encoding="utf-8").split())
-        assert "extra-args" in text and "experiment" in text, (
+        raw = (PLUGIN_ROOT / "skills" / "ci" / "SKILL.md").read_text(encoding="utf-8")
+        text = " ".join(raw.split())
+        # A standalone `-e` token, not the substring inside "coder-eval": the experiment
+        # now rides in `args`, one argument per line, so the flag stands on its own.
+        assert "-e" in raw.split() and "experiment" in text, (
             "the ci skill does not say how to pass an experiment through to the run — a "
             "suite that resolves through one silently measures something else without it"
         )
         assert "pin" in text, (
             "the ci skill no longer conditions the `version:` input on whether the repository pins a coder-eval version"
-        )
-
-    def test_ci_skill_does_not_recommend_a_recursive_task_glob(self):
-        # `action.yml` expands the `tasks:` input unquoted (`args+=($CE_TASKS)`) with
-        # globstar OFF, so `a/**/*.yaml` degrades to `a/*/*.yaml` and silently drops every
-        # top-level task — a depth-dependent "measured the wrong set" bug. nullglob is off
-        # too, so an unmatched depth pattern reaches the CLI literally and exits 1. Both
-        # reproduced by hand. The snippet must therefore show neither `**` in its tasks
-        # value nor a fixed ladder of depths.
-        skill = PLUGIN_ROOT / "skills" / "ci" / "SKILL.md"
-        assert "globstar" in skill.read_text(encoding="utf-8"), (
-            "the ci skill emits explicit globs but no longer says WHY — without the reason, "
-            "the next reader simplifies them back to `**` and loses the top-level tasks"
-        )
-
-        # Scoped to every surface CE026 already scans, not just the skill: the `ci` skill was
-        # taught to avoid `**` while five snippets across README.md, docs/CI_GATE.md and the
-        # CI tutorial still showed `tasks: tests/tasks/**/*.yaml`, so the plugin contradicted
-        # the repo's own onboarding docs — and those are the ones integrators copy.
-        from tests.lint.action_docs import default_doc_paths
-
-        offenders = [
-            f"{path}:{n}: {line.strip()}"
-            for path in default_doc_paths(Path(__file__).parent.parent)
-            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-            if re.search(r"^\s*tasks:.*\*\*", line)
-        ]
-        assert not offenders, (
-            "recursive `**` glob in a documented `tasks:` input value — the action word-splits "
-            "and pathname-expands that value with globstar off, so it silently drops every task "
-            "above the deepest matching level. Emit explicit per-depth globs or a file "
-            "list:\n\n" + "\n".join(f"  {o}" for o in offenders)
         )
 
     def test_check_skill_detects_before_scaffolding(self):
@@ -2292,7 +2263,7 @@ class TestCE026ActionDocSurfaces:
         from tests.lint.action_docs import action_input_names
 
         names = action_input_names(self.ACTION_YML)
-        assert {"tasks", "junit-path", "env"} <= names, names
+        assert {"args", "run-dir", "env"} <= names, names
 
     def test_catches_an_unknown_action_input(self, tmp_path: Path):
         from tests.lint.action_docs import find_unknown_action_inputs

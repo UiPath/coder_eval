@@ -1,8 +1,7 @@
 ---
 description: >-
   Run Coder Eval as a CI gate — the coder_eval GitHub Action from the Actions
-  Marketplace, JUnit XML output for test-report ingestion, and an optional
-  per-task score floor.
+  Marketplace, and JUnit XML output for test-report ingestion.
 ---
 
 # CI Gate: GitHub Action & JUnit reports
@@ -10,10 +9,9 @@ description: >-
 Coder Eval ships a **packaged CI gate**: a composite GitHub Action — on the
 Actions Marketplace as
 [**coder_eval**](https://github.com/marketplace/actions/coder_eval) — that
-installs the CLI, runs your tasks, emits a JUnit XML report, appends the run
-summary to the job summary, and fails the build on any task/gate failure. This
-page is the reference for the Action and the JUnit output. For a walkthrough
-(including a hand-rolled workflow), see
+installs the CLI, runs your tasks, emits a JUnit XML report, and fails the build
+on any task failure. This page is the reference for the Action and the JUnit
+output. For a walkthrough (including a hand-rolled workflow), see
 [Tutorial 02 — Running Coder Eval in CI](tutorials/02-ci-pipeline.md).
 
 ## The GitHub Action
@@ -30,8 +28,10 @@ repo path — there is no Marketplace install step:
 
 - uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
-    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
-    model: claude-sonnet-5
+    args: |
+      tests/tasks/**/*.yaml
+      --model
+      claude-sonnet-5
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
@@ -44,48 +44,119 @@ those steps for your own agent's runtime as needed.
 
 ### Inputs
 
+Eight, and **none of them is a `coder-eval run` flag**. GitHub silently *ignores*
+an input the referenced tag does not define, so a forwarding input that is
+mistyped or newer than your pin produces a run that measured something else and
+still exits 0, where a wrong CLI flag is a hard error. Every flag goes through
+`args`, and an input exists only where the action does something with the value
+besides pass it along.
+
 | Input | Default | Purpose |
 | --- | --- | --- |
-| `tasks` | — | Task YAML path(s)/glob(s) passed to `coder-eval run`. Effectively required — see below. |
-| `tags` | — | Only run tasks matching these comma-separated tags (`--tags`). |
-| `model` | — | Override agent model for all tasks (`--model`). |
-| `extra-args` | — | Extra args appended verbatim to `coder-eval run` (`--experiment`, `-D …`, `--exclude-tags`, …). Trusted caller input. |
+| `args` | — | Everything for `coder-eval run` — task paths/globs and every flag — one argument per line, appended verbatim. See below. |
 | `version` | pinned release | `coder-eval` version to install from PyPI, or `local` to install from the action checkout. |
-| `run-dir` | `runs/ci` | Run directory (`--run-dir`). |
-| `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit XML report. |
-| `step-summary` | `true` | Append `run.md` to the GitHub job summary. |
+| `extras` | — | Comma-separated `coder-eval` extras, composed into the install requirement (`codex`, `antigravity,litellm`). |
+| `extra-packages` | — | Extra requirements installed into `coder-eval`'s environment (`uv tool install --with`), one per line. |
+| `install-flags` | — | Flags for `uv tool install`, one per line (`--prerelease=allow`, `--extra-index-url …`). |
 | `env` | — | Credential/backend passthrough (see below). |
-| `minimum-task-score` | *(off)* | Optional strict per-task score floor (see below). |
+| `working-directory` | `.` | Directory every step of the action runs in — see below. |
+| `run-dir` | `runs/ci` | Run directory (`--run-dir`). Also where the reports are written. |
 
-#### Writing the `tasks` glob
+#### Writing `args`
 
-Always pass `tasks` explicitly, and spell out each depth you actually have:
+**One argument per line, appended verbatim.** No word splitting, no pathname
+expansion. A flag and its value are **two lines**, or one line in `=` form:
 
 ```yaml
-tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
+args: |
+  tests/tasks/**/*.yaml
+  --tags
+  smoke
+  --model=claude-sonnet-5
+  -D
+  sandbox.docker.env_passthrough_extra=[AUTH_TOKEN,BASE_URL]
 ```
 
-Three sharp edges make that worth the words:
+A flag and value sharing a line arrive as a single malformed token, which the CLI
+rejects. Blank lines, `#` comments and surrounding whitespace are ignored.
 
-- **Omitting `tasks` does not run everything.** The value is shell-expanded into the
-  `coder-eval run` argument list, so an empty one invokes the CLI with no paths — and
-  zero-argument discovery resolves against the *installed package's* location, not your
-  checkout. It finds nothing and exits 1.
-- **Do not use `**`.** The expansion happens with `globstar` off, so
-  `tests/tasks/**/*.yaml` collapses to `tests/tasks/*/*.yaml` and **silently drops every
-  top-level task** — the gate goes green having never run them.
-- **Only list depths that match.** `nullglob` is off too, so a pattern matching nothing
-  reaches the CLI verbatim and fails the run with
-  `Error: Task file not found: tests/tasks/*/*/*.yaml`.
+Verbatim is the point: a bracketed `-D` value is a bash character class, so any
+input that split on whitespace would survive only until a file in the working
+directory happened to match and silently rewrote the list.
 
-An explicit file list is always safe, and is the better choice for a small suite.
+Task globs are handed to the CLI **unexpanded**, and it expands them itself:
+
+- **`**` works.** `tests/tasks/**/*.yaml` is recursive, no `globstar` needed.
+- **A glob matching nothing exits 1** with `No task files found!`, rather than
+  reaching the CLI as a literal path or vanishing.
+- **Omitting `args` entirely does not run your suite.** Zero-argument discovery
+  resolves against `tasks/` relative to the working directory. Pass your paths.
+
+#### Extras and plugins (`extras`, `extra-packages`, `install-flags`)
+
+The action installs the CLI with `uv tool install`, which builds an isolated
+environment whose shims **shadow** anything else named `coder-eval` on `PATH`, so
+pre-installing your own copy beside it does not work. These inputs exist for that
+reason.
+
+`extras` is composed into the requirement string, so agent extras land in the
+environment the action actually invokes:
+
+```yaml
+extras: codex          # -> coder-eval[codex]==<version>
+```
+
+`extra-packages` adds requirements *into* that same environment, one per line —
+a PEP 508 specifier or a local path. This is how a `coder-eval` plugin
+distributed outside this repo becomes discoverable, since an entry point is only
+found when the plugin shares a virtualenv with its host:
+
+```yaml
+extra-packages: |
+  ./vendor/my-coder-eval-plugin
+  some-published-plugin>=1.2
+```
+
+`install-flags` passes resolver flags through, one per line, for what the install
+needs and the action does not model:
+
+```yaml
+install-flags: |
+  --prerelease=allow
+  --extra-index-url
+  https://my-private-index.example/simple
+```
+
+#### Running from a subdirectory (`working-directory`)
+
+A suite under `tests/` needs the run to happen there, and GitHub rejects
+`working-directory:` on a `uses:` step — a job-level `defaults.run` does not reach
+inside a composite either. This input is the way in. It applies to **every** step
+the action runs, so `run-dir`, the task paths in `args` and relative
+`extra-packages` entries all resolve against it. The `run-dir` output is reported
+exactly as passed, so a relative one is relative to that directory, not to the
+job's default cwd a later step reads it from.
 
 ### Outputs
 
 | Output | Description |
 | --- | --- |
-| `run-dir` | The run directory containing `run.json` / `run.md`. |
-| `junit-path` | Path to the written JUnit XML report. |
+| `run-dir` | The run directory, as passed, containing `run.json` / `run.md`. |
+| `junit-path` | The JUnit XML report, at `<run-dir>/junit.xml`. |
+| `run-md-path` | The markdown run report, at `<run-dir>/run.md`. |
+
+There is no `junit-path` **input**: the report belongs with the run it describes,
+and every consumer that had the choice put it there anyway. Nor does the action
+append the report to `$GITHUB_STEP_SUMMARY` — a consumer that must redact it first
+cannot undo a write that already happened, so that write is yours to make:
+
+```yaml
+- id: eval
+  uses: UiPath/coder_eval@v0
+  with: { args: "tests/tasks/**/*.yaml" }
+- if: always()
+  run: cat "${{ steps.eval.outputs.run-md-path }}" >> "$GITHUB_STEP_SUMMARY"
+```
 
 ### Credentials via `env`
 
@@ -99,7 +170,7 @@ values from repository secrets — never inline a secret literal.
 ```yaml
 - uses: UiPath/coder_eval@v0
   with:
-    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
+    args: tests/tasks/**/*.yaml
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
       API_BACKEND=direct
@@ -110,16 +181,6 @@ vars, `GEMINI_API_KEY` for Antigravity, `EVALBOARD_*`, plugin paths, etc. See th
 [User Guide → Environment Variables](USER_GUIDE.md#environment-variables) and the
 per-agent guides ([Claude Code](agents/CLAUDE_CODE.md) · [Codex](agents/CODEX.md) ·
 [Antigravity](agents/ANTIGRAVITY.md)) for what each backend needs.
-
-### The score floor (`minimum-task-score`)
-
-An **additional** gate on top of `coder-eval`'s own exit code. Set a float in
-`[0.0, 1.0]` and the step fails if **any** scored task, in any variant, has a
-`weighted_score` below it — *or* if `coder-eval` itself exits non-zero (both
-verdicts surface). It reads the always-written `run.json` spine
-(`task_results[*].weighted_score`), so it works for plain and experiment runs
-alike. Errored tasks (null score) are left to `coder-eval`'s exit code; a
-malformed/`NaN` score fails closed. Empty (the default) disables the floor.
 
 ### Security
 
