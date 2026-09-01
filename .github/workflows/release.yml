@@ -95,7 +95,7 @@ jobs:
           permission-contents: write
 
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0  # semantic-release needs full history for tags + changelog
           # Persisted in .git config so semantic-release's push to main is
@@ -104,12 +104,12 @@ jobs:
           token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           enable-cache: true
 
@@ -266,7 +266,7 @@ jobs:
       # consume these files rather than rebuild them.
       - name: Upload dist for PyPI publish
         if: steps.ver.outputs.version != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: release-dist
           path: dist/
@@ -313,12 +313,12 @@ jobs:
       - name: Set up Docker Buildx
         continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
         if: steps.ver.outputs.version != ''
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
 
       - name: Log in to GHCR
         continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
         if: steps.ver.outputs.version != ''
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -327,7 +327,7 @@ jobs:
       - name: Build and push versioned agent image
         continue-on-error: true  # GHCR image is internal/best-effort; don't block PyPI
         if: steps.ver.outputs.version != ''
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6.19.2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
           context: .
           file: docker/Dockerfile
@@ -384,7 +384,7 @@ jobs:
           echo "publishing coder-eval==$VERSION"
 
       - name: Download built dist
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: release-dist
           path: dist/
@@ -595,7 +595,7 @@ jobs:
       # release job ran, and the CHANGELOG slice below must be the one that shipped
       # with this version.
       - name: Checkout released tag
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: refs/tags/v${{ needs.release.outputs.released_version }}
           fetch-depth: 0  # need tag objects to re-point the major tag
