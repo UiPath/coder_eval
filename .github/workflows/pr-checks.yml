@@ -1006,13 +1006,11 @@ jobs:
           #
           # `working-directory` with a RELATIVE run-dir: the run lands under
           # tasks/runs/ci-action-dogfood, which is the contract docs/CI_GATE.md
-          # states and the next step asserts. `tasks` and `extra-packages` resolve
-          # from here too, hence the bare filename and the `../` path.
+          # states and the next step asserts. The task path in `args` and the
+          # `extra-packages` entry resolve from here too, hence the bare filename
+          # and the `../` path.
           working-directory: tasks
-          tasks: hello_date.yaml
-          model: claude-haiku-4-5-20251001
           run-dir: runs/ci-action-dogfood
-          junit-path: runs/ci-action-dogfood/junit.xml
           # The BYOA fixture, installed INTO the action's tool environment. An
           # entry point is only discovered when the plugin shares a virtualenv with
           # its host, and `uv tool install` builds an isolated one whose shims
@@ -1020,28 +1018,29 @@ jobs:
           # plugin reaches the CLI the action invokes. "Verify the plugin was
           # discovered" below fails if it did not.
           extra-packages: ../tests/fixtures/byoa_demo_plugin
-          # A bracketed override, the case `args` exists for: `[...]` is a bash
-          # character class, so the same value through `extra-args` is intact only
-          # while no file in the working directory happens to match it. Adds Glob to
-          # the three tools hello_date.yaml already grants, so the resolved config
-          # differs from the task file and the assertion below can tell the
-          # difference between "arrived" and "was ignored".
+          # Everything the CLI takes goes here, one argv entry per line: there is
+          # no `tasks`, `tags` or `model` input. The bracketed `-D` override is the
+          # case this format exists for — `[...]` is a bash character class, so a
+          # whitespace-split input silently collapses the list whenever a file in
+          # the working directory matches. It adds Glob to the three tools
+          # hello_date.yaml already grants, so the resolved config differs from the
+          # task file and the assertion below can tell "arrived" from "ignored".
           args: |
+            hello_date.yaml
+            --model
+            claude-haiku-4-5-20251001
             -D
             agent.allowed_tools=[Read,Write,Bash,Glob]
           # Credentials go through the generic env passthrough (the only channel);
           # ANTHROPIC_API_KEY reaching the run is proven by the API-backed task
-          # succeeding. A floor of 0.0 passes for any produced score (exercises
-          # the gate path green in CI without flakiness); the second line
-          # exercises multi-line env parsing.
-          minimum-task-score: "0.0"
+          # succeeding. The second line exercises multi-line env parsing.
           env: |
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             CE_DOGFOOD_MARKER=1
 
-      # Runs in `tasks/` because that is the assertion: the action reports its
-      # run-dir/junit-path outputs exactly as passed, so a relative one is relative
-      # to `working-directory`, NOT to the job's default cwd.
+      # Runs in `tasks/` because that is the assertion: the action reports `run-dir`
+      # exactly as passed and derives `junit-path` from it, so a relative one is
+      # relative to `working-directory`, NOT to the job's default cwd.
       - name: Verify outputs and JUnit file
         working-directory: tasks
         env:
@@ -1057,6 +1056,19 @@ jobs:
           # An absolute path here would mean working-directory was ignored and the
           # run happened to land somewhere the test still found.
           case "$RUNDIR" in /*) echo "run-dir output was rewritten to an absolute path: $RUNDIR"; exit 1 ;; esac
+
+      # The action deliberately does not touch $GITHUB_STEP_SUMMARY, so this is
+      # both the assertion that `run-md-path` points somewhere real and the
+      # one-line recipe the docs tell consumers to use.
+      - name: Append the run report to the job summary
+        if: always()
+        working-directory: tasks
+        env:
+          RUN_MD: ${{ steps.dogfood.outputs.run-md-path }}
+        run: |
+          set -euo pipefail
+          test -f "$RUN_MD" || { echo "run-md-path output does not exist: $RUN_MD"; exit 1; }
+          cat "$RUN_MD" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the plugin was discovered and the bracketed override arrived
         working-directory: tasks

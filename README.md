@@ -117,8 +117,8 @@ That adds six slash commands: `/coder-eval:init`, `/coder-eval:check-skill`,
 A composite action — on the Marketplace as
 [**coder_eval**](https://github.com/marketplace/actions/coder_eval) — runs
 `coder-eval` as a CI gate. It installs the pinned CLI, runs your tasks, writes a
-JUnit XML report, appends `run.md` to the job summary, and fails the step on any
-task/gate failure:
+JUnit XML report, reports where its artifacts landed, and fails the step on any
+task failure:
 
 ```yaml
 - uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…
@@ -126,40 +126,45 @@ task/gate failure:
 - run: npm install -g @anthropic-ai/claude-code
 
 - uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
+  id: eval
   with:
-    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
-    model: claude-sonnet-5
+    args: |
+      tests/tasks/**/*.yaml
+      --model
+      claude-sonnet-5
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
+Eight inputs, and **none of them is a `coder-eval run` flag**. The CLI has 21;
+GitHub silently ignores an input the referenced tag does not define, so a
+forwarding input that is mistyped or newer than your pin yields a run that
+measured something else and still exits 0. A wrong CLI flag is a hard error. So
+flags and task globs all go through `args`, and an input exists only where the
+action does something with the value besides pass it along.
+
 | Input | Default | Purpose |
 | --- | --- | --- |
-| `tasks` | *(all `tasks/`)* | Task YAML path(s)/glob |
-| `tags` | — | `--tags` filter |
-| `model` | — | `--model` override |
-| `extra-args` | — | Verbatim extra args (`--experiment`, `-D …`, …), whitespace-split |
-| `args` | — | Same, but one argument per line and never split or glob-expanded |
+| `args` | — | Task paths/globs and every flag for `coder-eval run`, one argument per line, verbatim |
 | `version` | pinned release | PyPI version, or `local` to install from the checkout |
-| `extras` | — | coder-eval extras to install, comma-separated (`codex`, `antigravity,litellm`) |
+| `extras` | — | coder-eval extras, composed into the install requirement (`codex`, `antigravity,litellm`) |
 | `extra-packages` | — | Extra requirements installed into coder-eval's environment (`--with`), one per line |
-| `prerelease` | `false` | Allow prereleases while resolving the install |
-| `working-directory` | `.` | Directory every step of the action runs in |
-| `run-dir` | `runs/ci` | Run directory |
-| `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit report |
-| `step-summary` | `true` | Append `run.md` to the job summary |
+| `install-flags` | — | Flags for `uv tool install`, one per line (`--prerelease=allow`, `--extra-index-url …`) |
 | `env` | — | Credentials/backend passthrough: newline-separated `NAME=VALUE` pairs, exported for the run step only |
-| `minimum-task-score` | *(off)* | Strict floor (0.0–1.0): fail the step if any task's `weighted_score` is below it |
+| `working-directory` | `.` | Directory every step of the action runs in |
+| `run-dir` | `runs/ci` | Run directory; also where the reports are written |
 
-Outputs: `run-dir` and `junit-path`. Feed the JUnit file to your platform's
-test-report renderer — e.g. on GitHub Actions with
-[`mikepenz/action-junit-report`](https://github.com/mikepenz/action-junit-report):
+Outputs: `run-dir`, `junit-path` (`<run-dir>/junit.xml`) and `run-md-path`
+(`<run-dir>/run.md`). The action writes nothing to the job summary — a consumer
+that has to redact the report first cannot undo a write that already happened:
 
 ```yaml
+- if: always()
+  run: cat "${{ steps.eval.outputs.run-md-path }}" >> "$GITHUB_STEP_SUMMARY"
 - uses: mikepenz/action-junit-report@v5
   if: always()
   with:
-    report_paths: coder-eval-junit.xml
+    report_paths: ${{ steps.eval.outputs.junit-path }}
 ```
 
 **Credentials and backend config** are the sole responsibility of `env` — a
@@ -169,17 +174,13 @@ it can't leak into later steps). Set whatever the run needs, Anthropic or not:
 ```yaml
 - uses: UiPath/coder_eval@v0
   with:
-    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
-    minimum-task-score: "0.8"   # fail the build if any task scores below 0.8
+    args: tests/tasks/**/*.yaml
     env: |
       API_BACKEND=bedrock
       AWS_BEARER_TOKEN_BEDROCK=${{ secrets.BEDROCK_TOKEN }}
 ```
 
-`minimum-task-score` is a strict floor **on top of** coder-eval's own exit
-code: the step fails if *either* coder-eval exits non-zero *or* any task's
-`weighted_score` falls below the floor. Leave it unset to gate on the exit code
-alone.
+The step's exit code is coder-eval's own: non-zero on any failed task.
 
 > **Agent runtime is the caller's responsibility.** The action is agent-agnostic —
 > it installs `coder-eval` but no coding-agent runtime, which is why the example

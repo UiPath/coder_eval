@@ -1,11 +1,11 @@
 """Executable contract for the argv ``action.yml`` builds from its inputs.
 
 The composite action's two bash steps assemble two command lines — a ``uv tool
-install`` and a ``coder-eval run`` — out of ten string inputs. Everything that can
-go wrong there goes wrong *silently*: an extra dropped from the requirement string
-installs a working CLI that is missing an agent, and a value mangled by word
-splitting or pathname expansion reaches the CLI as a different value than the
-workflow wrote, so the run measures something else and still exits 0.
+install`` and a ``coder-eval run`` — out of eight string inputs. Everything that
+can go wrong there goes wrong *silently*: an extra dropped from the requirement
+string installs a working CLI that is missing an agent, and a value mangled by
+word splitting or pathname expansion reaches the CLI as a different value than
+the workflow wrote, so the run measures something else and still exits 0.
 
 These tests therefore execute the shipped script rather than reimplementing it.
 Each step's ``run:`` body is pulled straight out of ``action.yml`` and run under
@@ -14,17 +14,18 @@ assertions are about the real text that ships to consumers. A rewrite of the
 script that changes the resulting command line fails here even if it looks
 equivalent.
 
-The motivating bug is the ``args``/``extra-args`` split
-(``test_bracketed_override_*``): ``extra-args`` is deliberately word-split, which
-also means it is pathname-expanded, so a ``-D`` override whose value is a
-bracketed list (``key=[A,B,C]`` — a bash character class) is intact only while no
-file in the working directory happens to match. One file named
-``...=A`` silently rewrites a three-name list to one name.
+The design these tests pin: the action promotes NONE of ``coder-eval run``'s 21
+flags to a named input. Everything goes through ``args``, one argv entry per
+line, appended verbatim. That is what makes a ``-D`` override whose value is a
+bracketed list (``key=[A,B,C]`` — a bash character class) survive; the earlier
+whitespace-split input silently rewrote it to one name whenever a file in the
+working directory happened to match.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -42,23 +43,16 @@ BASH = shutil.which("bash")
 # The run step needs every CE_* name defined (`set -u`), so each case supplies only
 # what it varies.
 RUN_ENV_DEFAULTS = {
-    "CE_TASKS": "",
-    "CE_TAGS": "",
-    "CE_MODEL": "",
-    "CE_EXTRA_ARGS": "",
     "CE_ARGS": "",
     "CE_RUN_DIR": "runs/ci",
-    "CE_JUNIT": "junit.xml",
-    "CE_SUMMARY": "false",
     "CE_ENV": "",
-    "CE_MIN_SCORE": "",
 }
 
 INSTALL_ENV_DEFAULTS = {
     "CE_VERSION": "9.9.9",
     "CE_EXTRAS": "",
     "CE_EXTRA_PACKAGES": "",
-    "CE_PRERELEASE": "false",
+    "CE_INSTALL_FLAGS": "",
     "CE_ACTION_PATH": "/action-checkout",
 }
 
@@ -161,6 +155,24 @@ def _coder_eval(script: str, tmp_path: Path, **overrides: str) -> tuple[int, lis
     return _run(script, {**RUN_ENV_DEFAULTS, **overrides}, cwd=tmp_path, stub="coder-eval")
 
 
+def _outputs(tmp_path: Path) -> dict[str, str]:
+    """The step's `$GITHUB_OUTPUT` writes, parsed."""
+    text = (tmp_path / "gh_output").read_text(encoding="utf-8")
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+class TestSharedParser:
+    # `install-flags`, `extra-packages` and `args` are all "one entry per line,
+    # verbatim". One implementation, copied into both step scripts because they
+    # are separate bash processes. Copies drift; this is what stops them.
+    def test_clean_lines_is_byte_identical_in_both_steps(self, install_script, run_script):
+        pattern = re.compile(r"^clean_lines\(\) \{\n.*?^\}\n", re.S | re.M)
+        a = pattern.search(install_script)
+        b = pattern.search(run_script)
+        assert a and b, "clean_lines() is missing from one of the step scripts"
+        assert a.group(0) == b.group(0), "the two clean_lines() copies have drifted apart"
+
+
 class TestInstallSpec:
     def test_defaults_install_the_pinned_release(self, install_script, tmp_path):
         rc, argv, out = _install(install_script, tmp_path)
@@ -190,186 +202,245 @@ class TestInstallSpec:
         assert rc == 0, out
         assert argv == ["tool", "install", "coder-eval[antigravity,litellm]==9.9.9"]
 
-    # The value is interpolated into a spec that reaches a resolver, so it is
-    # validated rather than trusted. Rejecting is the point: a silently accepted
-    # `codex extra` would resolve to something other than what was asked for.
     @pytest.mark.parametrize(
         "bad",
-        ["codex;echo pwned", "codex extra", "-codex", "codex,", ",codex", "code x", "codex]"],
+        [
+            "codex;rm -rf /",  # shell metacharacters
+            "codex litellm",  # space instead of comma
+            "codex,",  # trailing comma
+            ",codex",  # leading comma
+            "-codex",  # must start alphanumeric
+            "$(id)",  # command substitution
+        ],
     )
-    def test_malformed_extras_fail_the_step(self, install_script, tmp_path, bad):
+    def test_malformed_extras_fail_before_installing(self, install_script, tmp_path, bad):
         rc, argv, out = _install(install_script, tmp_path, CE_EXTRAS=bad)
         assert rc != 0
-        assert "::error::extras must be" in out
-        assert argv == [], "install must not run with an unvalidated extras value"
+        assert argv == [], "install ran despite malformed extras"
+        assert "extras must be a comma-separated list" in out
 
     def test_extra_packages_become_one_with_flag_each(self, install_script, tmp_path):
-        rc, argv, out = _install(
-            install_script,
-            tmp_path,
-            CE_EXTRA_PACKAGES="./vendor/plugin\nsome-plugin>=1.2",
-        )
+        rc, argv, out = _install(install_script, tmp_path, CE_EXTRA_PACKAGES="./plugin-a\n../plugin-b\n")
         assert rc == 0, out
         assert argv == [
             "tool",
             "install",
             "--with",
-            "./vendor/plugin",
+            "./plugin-a",
             "--with",
-            "some-plugin>=1.2",
+            "../plugin-b",
             "coder-eval==9.9.9",
         ]
 
-    # A specifier contains `>` and `[`, and a local path can contain spaces; each
-    # line is therefore one argv entry rather than a word-split string.
+    # A specifier can contain `[`, `]`, `>` and `=`; a local path can contain a
+    # space. None of those survive an unquoted expansion.
     def test_extra_package_specifiers_survive_verbatim(self, install_script, tmp_path):
-        rc, argv, out = _install(
-            install_script,
-            tmp_path,
-            CE_EXTRA_PACKAGES="pkg[all]>=1.0,<2.0\n./a dir/plugin",
-        )
+        specs = ["coder-eval-uipath[dev]>=1.2,<2.0", "/opt/my plugin", "pkg!=0.2.144"]
+        rc, argv, out = _install(install_script, tmp_path, CE_EXTRA_PACKAGES="\n".join(specs))
         assert rc == 0, out
-        assert argv[2:] == [
-            "--with",
-            "pkg[all]>=1.0,<2.0",
-            "--with",
-            "./a dir/plugin",
-            "coder-eval==9.9.9",
-        ]
+        expected = ["tool", "install"]
+        for spec in specs:
+            expected += ["--with", spec]
+        assert argv == [*expected, "coder-eval==9.9.9"]
 
-    def test_blank_lines_comments_and_padding_are_ignored(self, install_script, tmp_path):
+    def test_install_flags_are_appended_one_per_line(self, install_script, tmp_path):
         rc, argv, out = _install(
             install_script,
             tmp_path,
-            CE_EXTRA_PACKAGES="  ./plugin  \n\n# a comment\n\t\n./other\r\n",
+            CE_INSTALL_FLAGS="--prerelease=allow\n--extra-index-url\nhttps://example.test/simple\n",
         )
         assert rc == 0, out
         assert argv == [
             "tool",
             "install",
+            "--prerelease=allow",
+            "--extra-index-url",
+            "https://example.test/simple",
+            "coder-eval==9.9.9",
+        ]
+
+    # Install flags precede --with and the requirement: uv accepts flags anywhere,
+    # but a stable order is what makes these assertions meaningful at all.
+    def test_install_flags_precede_extra_packages(self, install_script, tmp_path):
+        rc, argv, out = _install(
+            install_script,
+            tmp_path,
+            CE_INSTALL_FLAGS="--prerelease=allow",
+            CE_EXTRA_PACKAGES="./plugin",
+        )
+        assert rc == 0, out
+        assert argv == [
+            "tool",
+            "install",
+            "--prerelease=allow",
             "--with",
             "./plugin",
-            "--with",
-            "./other",
             "coder-eval==9.9.9",
         ]
 
-    def test_prerelease_true_allows_prereleases(self, install_script, tmp_path):
-        rc, argv, out = _install(install_script, tmp_path, CE_PRERELEASE="true")
+    @pytest.mark.parametrize("var", ["CE_EXTRA_PACKAGES", "CE_INSTALL_FLAGS"])
+    def test_blank_lines_comments_and_padding_are_ignored(self, install_script, tmp_path, var):
+        rc, argv, out = _install(install_script, tmp_path, **{var: "\n  ./plugin-a  \n\n# a comment\n\t./plugin-b\n\n"})
         assert rc == 0, out
-        assert argv == ["tool", "install", "--prerelease=allow", "coder-eval==9.9.9"]
-
-    @pytest.mark.parametrize("falsy", ["false", ""])
-    def test_prerelease_off_passes_no_flag(self, install_script, tmp_path, falsy):
-        rc, argv, out = _install(install_script, tmp_path, CE_PRERELEASE=falsy)
-        assert rc == 0, out
-        assert "--prerelease=allow" not in argv
-
-    # "yes"/"1"/"True" are the plausible typos, and a silently-ignored one would
-    # let a resolution failure look like a missing release.
-    @pytest.mark.parametrize("bad", ["yes", "1", "True", "allow"])
-    def test_non_boolean_prerelease_fails_the_step(self, install_script, tmp_path, bad):
-        rc, argv, out = _install(install_script, tmp_path, CE_PRERELEASE=bad)
-        assert rc != 0
-        assert "::error::prerelease must be" in out
-        assert argv == []
+        assert "./plugin-a" in argv and "./plugin-b" in argv
+        assert not any("comment" in a for a in argv)
+        assert not any(a.strip() != a for a in argv), f"an entry kept its padding: {argv}"
 
 
 class TestRunArgs:
     def test_baseline_argv(self, run_script, tmp_path):
         rc, argv, out = _coder_eval(run_script, tmp_path)
         assert rc == 0, out
-        assert argv == ["run", "--run-dir", "runs/ci", "--junit-xml", "junit.xml"]
+        assert argv == ["run", "--run-dir", "runs/ci", "--junit-xml", "runs/ci/junit.xml"]
+
+    # There is no `tasks` input: task paths and globs are `args` entries like any
+    # other. The CLI expands globs itself (`expand_task_files`), so passing them
+    # unexpanded is not a loss — and it exits 1 when nothing matches, where a
+    # shell would have silently passed the literal through.
+    def test_task_globs_are_ordinary_args(self, run_script, tmp_path):
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="skills/**/*.yaml\nrpa/*.yaml\n")
+        assert rc == 0, out
+        assert argv[-2:] == ["skills/**/*.yaml", "rpa/*.yaml"]
 
     def test_args_are_appended_one_entry_per_line(self, run_script, tmp_path):
-        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="-e\nexperiments/nightly.yaml\n-v")
-        assert rc == 0, out
-        assert argv[-3:] == ["-e", "experiments/nightly.yaml", "-v"]
-
-    def test_args_blank_lines_comments_and_padding_are_ignored(self, run_script, tmp_path):
-        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="  -v  \n\n# why not\n\t\n-q\r\n")
-        assert rc == 0, out
-        assert argv[-2:] == ["-v", "-q"]
-
-    # `args` runs before `extra-args`, which is the documented order; a reordering
-    # would change precedence for a repeated flag.
-    def test_args_precede_extra_args_and_tasks(self, run_script, tmp_path):
-        rc, argv, out = _coder_eval(
-            run_script,
-            tmp_path,
-            CE_ARGS="-e\nexperiments/nightly.yaml",
-            CE_EXTRA_ARGS="-j 4",
-            CE_TASKS="tasks/a.yaml tasks/b.yaml",
-        )
-        assert rc == 0, out
-        assert argv[-6:] == [
-            "-e",
-            "experiments/nightly.yaml",
-            "-j",
-            "4",
-            "tasks/a.yaml",
-            "tasks/b.yaml",
-        ]
-
-    # THE reason `args` exists. `[A,B,C]` is a bash character class, and a file in
-    # the working directory matching it rewrites the value. Both halves of the pair
-    # run with that file present, so the difference is the channel and nothing else.
-    def test_bracketed_override_survives_args(self, run_script, tmp_path):
-        override = "sandbox.docker.env_passthrough_extra=[AUTH_TOKEN,BASE_URL]"
-        (tmp_path / "sandbox.docker.env_passthrough_extra=A").touch()
-        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS=f"-D\n{override}")
-        assert rc == 0, out
-        assert argv[-2:] == ["-D", override]
-
-    def test_bracketed_override_is_mangled_by_extra_args(self, run_script, tmp_path):
-        override = "sandbox.docker.env_passthrough_extra=[AUTH_TOKEN,BASE_URL]"
-        (tmp_path / "sandbox.docker.env_passthrough_extra=A").touch()
-        rc, argv, out = _coder_eval(run_script, tmp_path, CE_EXTRA_ARGS=f"-D {override}")
-        assert rc == 0, out
-        # Documenting the hazard, not endorsing it: extra-args stays word-split for
-        # compatibility, so this is why a value like this must go through `args`.
-        assert argv[-2:] == ["-D", "sandbox.docker.env_passthrough_extra=A"]
-
-    def test_values_with_spaces_survive_args(self, run_script, tmp_path):
-        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="--title\ntwo words")
-        assert rc == 0, out
-        assert argv[-2:] == ["--title", "two words"]
-
-    # Every existing input keeps its shape — the `args` insertion sits between
-    # --model and extra-args and must not disturb either side.
-    def test_tags_and_model_still_pass_through(self, run_script, tmp_path):
-        rc, argv, out = _coder_eval(run_script, tmp_path, CE_TAGS="smoke,fast", CE_MODEL="claude-sonnet-5")
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="--tags\nsmoke\n--type\ncodex\n")
         assert rc == 0, out
         assert argv == [
             "run",
             "--run-dir",
             "runs/ci",
             "--junit-xml",
-            "junit.xml",
+            "runs/ci/junit.xml",
             "--tags",
-            "smoke,fast",
-            "--model",
-            "claude-sonnet-5",
+            "smoke",
+            "--type",
+            "codex",
         ]
 
-    def test_env_passthrough_still_reaches_the_child(self, run_script, tmp_path):
-        # Not a new input, but the `args` loop is a second `while read` in the same
-        # script, inserted downstream of this one. A heredoc wired to the wrong
-        # variable would leave the argv assertions above green while silently
-        # dropping every forwarded credential, so pin the passthrough here too.
-        rc, _, out = _coder_eval(run_script, tmp_path, CE_ENV="CE_PROBE=hello\n# note\n")
+    def test_args_blank_lines_comments_and_padding_are_ignored(self, run_script, tmp_path):
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="\n  -v  \n\n# note\n\t--stream\n\n")
+        assert rc == 0, out
+        assert argv[-2:] == ["-v", "--stream"]
+
+    # THE motivating case. `[...]` is a bash character class, so a whitespace-split
+    # input drops list members whenever a file in the working directory matches.
+    # A file is planted here so the test would fail under any implementation that
+    # word-splits or glob-expands.
+    def test_bracketed_override_survives_verbatim(self, run_script, tmp_path):
+        (tmp_path / "agent.allowed_tools=Read").touch()
+        override = "agent.allowed_tools=[Read,Write,Bash]"
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS=f"-D\n{override}\n")
+        assert rc == 0, out
+        assert argv[-2:] == ["-D", override]
+
+    def test_values_with_spaces_survive(self, run_script, tmp_path):
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="--model\nmodel with spaces\n")
+        assert rc == 0, out
+        assert argv[-2:] == ["--model", "model with spaces"]
+
+    def test_run_dir_reaches_the_cli(self, run_script, tmp_path):
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_RUN_DIR="/tmp/runs")
+        assert rc == 0, out
+        assert argv[:5] == ["run", "--run-dir", "/tmp/runs", "--junit-xml", "/tmp/runs/junit.xml"]
+
+
+class TestOutputs:
+    # There is no `junit-path` input. The report belongs with the run it
+    # describes, and both consumers that had the choice already put it there.
+    def test_report_paths_are_derived_from_run_dir(self, run_script, tmp_path):
+        rc, _, out = _coder_eval(run_script, tmp_path, CE_RUN_DIR="/tmp/runs")
+        assert rc == 0, out
+        assert _outputs(tmp_path) == {
+            "run-dir": "/tmp/runs",
+            "junit-path": "/tmp/runs/junit.xml",
+            "run-md-path": "/tmp/runs/run.md",
+        }
+
+    def test_a_trailing_slash_does_not_double_the_separator(self, run_script, tmp_path):
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_RUN_DIR="runs/ci/")
+        assert rc == 0, out
+        o = _outputs(tmp_path)
+        assert o["junit-path"] == "runs/ci/junit.xml"
+        assert o["run-md-path"] == "runs/ci/run.md"
+        # --run-dir is forwarded as given; only the derived paths are normalised.
+        assert argv[2] == "runs/ci/"
+
+    # run.json/run.md are written even on a red run, so a consumer uploading
+    # artifacts after a failure needs the paths.
+    def test_outputs_are_written_before_a_failing_exit(self, run_script, tmp_path):
+        bindir = tmp_path / "_stubbin"
+        bindir.mkdir()
+        _stub(bindir, "coder-eval")
+        (bindir / "coder-eval").write_text("#!/usr/bin/env bash\nexit 3\n", encoding="utf-8")
+        (bindir / "coder-eval").chmod(0o755)
+        (tmp_path / "gh_output").touch()
+        proc = subprocess.run(
+            [BASH, "-c", _step_script("Run coder-eval")],
+            cwd=tmp_path,
+            env={
+                "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                "HOME": str(tmp_path),
+                "GITHUB_OUTPUT": str(tmp_path / "gh_output"),
+                "GITHUB_STEP_SUMMARY": str(tmp_path / "gh_summary"),
+                **RUN_ENV_DEFAULTS,
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 3, "the step must exit with coder-eval's own code"
+        assert _outputs(tmp_path)["run-dir"] == "runs/ci"
+
+    # The action no longer appends run.md to the job summary: a consumer that has
+    # to redact the report first cannot undo a write that already happened.
+    def test_nothing_is_written_to_the_job_summary(self, run_script, tmp_path):
+        (tmp_path / "runs" / "ci").mkdir(parents=True)
+        (tmp_path / "runs" / "ci" / "run.md").write_text("# report\n", encoding="utf-8")
+        rc, _, out = _coder_eval(run_script, tmp_path)
+        assert rc == 0, out
+        assert (tmp_path / "gh_summary").read_text(encoding="utf-8") == ""
+
+
+class TestEnvPassthrough:
+    def test_env_reaches_the_child(self, run_script, tmp_path):
+        rc, _, out = _coder_eval(run_script, tmp_path, CE_ENV="CE_PROBE=hello\n")
         assert rc == 0, out
         assert (tmp_path / "_stubbin" / "probe.txt").read_text(encoding="utf-8") == "hello"
 
+    # The two multi-line inputs are parsed by different loops (env values are not
+    # right-trimmed, because a value is the caller's data). Neither may consume
+    # the other's content.
     def test_args_and_env_do_not_bleed_into_each_other(self, run_script, tmp_path):
-        # The concrete confusion the two loops invite: an `args` entry must never be
-        # exported, and an `env` entry must never become an argument.
-        rc, argv, out = _coder_eval(
-            run_script,
-            tmp_path,
-            CE_ENV="CE_PROBE=from-env",
-            CE_ARGS="--model=x",
-        )
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ARGS="--stream\n", CE_ENV="CE_PROBE=v\n")
         assert rc == 0, out
-        assert argv[-1] == "--model=x"
-        assert (tmp_path / "_stubbin" / "probe.txt").read_text(encoding="utf-8") == "from-env"
+        assert argv[-1] == "--stream"
+        assert "CE_PROBE=v" not in argv
+        assert (tmp_path / "_stubbin" / "probe.txt").read_text(encoding="utf-8") == "v"
+
+    def test_a_value_containing_equals_is_kept_whole(self, run_script, tmp_path):
+        rc, _, out = _coder_eval(run_script, tmp_path, CE_ENV="CE_PROBE=a=b=c\n")
+        assert rc == 0, out
+        assert (tmp_path / "_stubbin" / "probe.txt").read_text(encoding="utf-8") == "a=b=c"
+
+    @pytest.mark.parametrize(
+        ("bad", "message"),
+        [
+            ("NOEQUALS", "is not NAME=VALUE"),
+            ("2LEADING_DIGIT=x", "invalid name"),
+            ("has space=x", "invalid name"),
+            ("has-dash=x", "invalid name"),
+        ],
+    )
+    def test_malformed_env_fails_before_running(self, run_script, tmp_path, bad, message):
+        rc, argv, out = _coder_eval(run_script, tmp_path, CE_ENV=bad)
+        assert rc != 0
+        assert argv == [], "coder-eval ran despite a malformed env entry"
+        assert message in out
+
+    # A caller who omits `NAME=` would otherwise have the secret printed verbatim
+    # in the error, and GitHub only masks values it already knows are secrets.
+    def test_a_malformed_entry_is_reported_by_position_not_by_value(self, run_script, tmp_path):
+        rc, _, out = _coder_eval(run_script, tmp_path, CE_ENV="s3cr3t-token-value")
+        assert rc != 0
+        assert "s3cr3t-token-value" not in out
+        assert "entry #1" in out

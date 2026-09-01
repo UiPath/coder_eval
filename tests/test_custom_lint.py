@@ -2292,7 +2292,7 @@ class TestCE026ActionDocSurfaces:
         from tests.lint.action_docs import action_input_names
 
         names = action_input_names(self.ACTION_YML)
-        assert {"tasks", "junit-path", "env"} <= names, names
+        assert {"args", "run-dir", "env"} <= names, names
 
     def test_catches_an_unknown_action_input(self, tmp_path: Path):
         from tests.lint.action_docs import find_unknown_action_inputs

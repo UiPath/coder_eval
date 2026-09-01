@@ -30,8 +30,10 @@ repo path — there is no Marketplace install step:
 
 - uses: UiPath/coder_eval@v0       # …then run the gate (@v1 once 1.0.0 ships; @vX.Y.Z pins exactly)
   with:
-    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
-    model: claude-sonnet-5
+    args: |
+      tests/tasks/**/*.yaml
+      --model
+      claude-sonnet-5
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```
@@ -44,83 +46,103 @@ those steps for your own agent's runtime as needed.
 
 ### Inputs
 
+Eight, and **none of them is a `coder-eval run` flag**. The CLI has 21 flags; an
+input that merely forwards one buys nothing and costs a lot, because GitHub
+silently *ignores* an input the referenced tag does not define. A forwarding input
+that is mistyped, or newer than the tag you pinned, produces a run that measured
+something else and still exits 0. A wrong CLI flag is a hard error instead. So
+every flag goes through `args`, and an input exists only where the action does
+something with the value besides pass it along.
+
 | Input | Default | Purpose |
 | --- | --- | --- |
-| `tasks` | — | Task YAML path(s)/glob(s) passed to `coder-eval run`. Effectively required — see below. |
-| `tags` | — | Only run tasks matching these comma-separated tags (`--tags`). |
-| `model` | — | Override agent model for all tasks (`--model`). |
-| `extra-args` | — | Extra args appended verbatim to `coder-eval run` (`--experiment`, `-D …`, `--exclude-tags`, …), whitespace-split. Trusted caller input. |
-| `args` | — | The same, one argument per line, never split or glob-expanded — see below. |
+| `args` | — | Everything for `coder-eval run` — task paths/globs and every flag — one argument per line, appended verbatim. See below. |
 | `version` | pinned release | `coder-eval` version to install from PyPI, or `local` to install from the action checkout. |
-| `extras` | — | Comma-separated `coder-eval` extras to install (`codex`, `antigravity,litellm`). |
+| `extras` | — | Comma-separated `coder-eval` extras, composed into the install requirement (`codex`, `antigravity,litellm`). |
 | `extra-packages` | — | Extra requirements installed into `coder-eval`'s environment (`uv tool install --with`), one per line. |
-| `prerelease` | `false` | Allow prerelease versions while resolving the install. |
-| `working-directory` | `.` | Directory every step of the action runs in — see below. |
-| `run-dir` | `runs/ci` | Run directory (`--run-dir`). |
-| `junit-path` | `coder-eval-junit.xml` | Where to write the JUnit XML report. |
-| `step-summary` | `true` | Append `run.md` to the GitHub job summary. |
+| `install-flags` | — | Flags for `uv tool install`, one per line (`--prerelease=allow`, `--extra-index-url …`). |
 | `env` | — | Credential/backend passthrough (see below). |
-| `minimum-task-score` | *(off)* | Optional strict per-task score floor (see below). |
+| `working-directory` | `.` | Directory every step of the action runs in — see below. |
+| `run-dir` | `runs/ci` | Run directory (`--run-dir`). Also where the reports are written. |
 
-#### Writing the `tasks` glob
+#### Writing `args`
 
-Always pass `tasks` explicitly, and spell out each depth you actually have:
-
-```yaml
-tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
-```
-
-Three sharp edges make that worth the words:
-
-- **Omitting `tasks` does not run everything.** The value is shell-expanded into the
-  `coder-eval run` argument list, so an empty one invokes the CLI with no paths — and
-  zero-argument discovery resolves against the *installed package's* location, not your
-  checkout. It finds nothing and exits 1.
-- **Do not use `**`.** The expansion happens with `globstar` off, so
-  `tests/tasks/**/*.yaml` collapses to `tests/tasks/*/*.yaml` and **silently drops every
-  top-level task** — the gate goes green having never run them.
-- **Only list depths that match.** `nullglob` is off too, so a pattern matching nothing
-  reaches the CLI verbatim and fails the run with
-  `Error: Task file not found: tests/tasks/*/*/*.yaml`.
-
-An explicit file list is always safe, and is the better choice for a small suite.
-
-#### `args` vs `extra-args`
-
-Both append to `coder-eval run`; they differ in how the value is tokenized.
-`extra-args` is one string, split on whitespace and pathname-expanded — the same
-mechanism as `tasks`, and convenient for ordinary flags. `args` takes **one
-argument per line** and appends each verbatim, with no splitting and no globbing.
-
-Reach for `args` whenever a value contains whitespace or a glob metacharacter
-(`[`, `]`, `*`, `?`). The canonical case is a `-D` override whose value is a
-bracketed list, which bash reads as a character class:
+**One argument per line, appended verbatim.** No word splitting, no pathname
+expansion. A flag and its value are **two lines**, or one line in `=` form:
 
 ```yaml
 args: |
+  tests/tasks/**/*.yaml
+  --tags
+  smoke
+  --model=claude-sonnet-5
   -D
   sandbox.docker.env_passthrough_extra=[AUTH_TOKEN,BASE_URL]
 ```
 
-Through `extra-args` that value is intact only as long as no file in the working
-directory happens to match the class — one named
-`sandbox.docker.env_passthrough_extra=A` rewrites it to a single-name list, and
-the run measures something other than what the workflow asked for, silently.
+A flag and value sharing a line arrive as a single malformed token, which the CLI
+rejects. Blank lines, `#` comments and surrounding whitespace are ignored.
 
-A flag and its value are **two lines** (`-D`, then the assignment), or one line in
-`=` form (`--model=claude-sonnet-5`). A flag and value sharing a line arrive as a
-single malformed token, which the CLI rejects. Blank lines, `#` comments and
-surrounding whitespace are ignored.
+Verbatim is the point. A `-D` override whose value is a bracketed list is a bash
+character class, so any input that split on whitespace would leave it intact only
+while no file in the working directory happened to match — one named
+`sandbox.docker.env_passthrough_extra=A` would rewrite it to a single-name list
+and the run would measure something other than what the workflow asked for,
+silently.
+
+Task globs are handed to the CLI **unexpanded**, and it expands them itself:
+
+- **`**` works.** `tests/tasks/**/*.yaml` is recursive, no `globstar` needed.
+- **A glob matching nothing exits 1** with `No task files found!`, rather than
+  reaching the CLI as a literal path or vanishing.
+- **Omitting `args` entirely does not run your suite.** Zero-argument discovery
+  resolves against `tasks/` relative to the working directory. Pass your paths.
+
+#### Extras and plugins (`extras`, `extra-packages`, `install-flags`)
+
+The action installs the CLI with `uv tool install`, which builds an isolated
+environment whose shims **shadow** anything else named `coder-eval` on `PATH`.
+Pre-installing your own copy beside it therefore does not work: the action's copy
+is the one that runs. These inputs exist because of that.
+
+`extras` is composed into the requirement string, so agent extras land in the
+environment the action actually invokes:
+
+```yaml
+extras: codex          # -> coder-eval[codex]==<version>
+```
+
+`extra-packages` adds requirements *into* that same environment, one per line —
+a PEP 508 specifier or a local path. This is how a `coder-eval` plugin
+distributed outside this repo becomes discoverable, since an entry point is only
+found when the plugin shares a virtualenv with its host:
+
+```yaml
+extra-packages: |
+  ./vendor/my-coder-eval-plugin
+  some-published-plugin>=1.2
+```
+
+`install-flags` passes resolver flags through, one per line, for what the install
+needs and the action does not model:
+
+```yaml
+install-flags: |
+  --prerelease=allow
+  --extra-index-url
+  https://my-private-index.example/simple
+```
 
 #### Running from a subdirectory (`working-directory`)
 
 A suite that lives under `tests/` needs the run to happen there, and GitHub
 rejects `working-directory:` on a `uses:` step — a job-level `defaults.run` does
 not reach inside a composite action either. The `working-directory` input is the
-way in. It applies to **every** step the action runs, so `tasks`, `run-dir`,
-`junit-path` and relative `extra-packages` entries all resolve against it, and the
-`run-dir` output is reported exactly as passed (a relative one is relative to that
-directory, which matters when a later step reads it from the job's default cwd).
+way in. It applies to **every** step the action runs, so `run-dir`, the task
+paths in `args` and relative `extra-packages` entries all resolve against it, and
+the `run-dir` output is reported exactly as passed (a relative one is relative to
+that directory, which matters when a later step reads it from the job's default
+cwd).
 
 #### Extras and plugins (`extras`, `extra-packages`, `prerelease`)
 
@@ -147,15 +169,28 @@ extra-packages: |
   some-published-plugin>=1.2
 ```
 
-`prerelease: "true"` passes `--prerelease=allow` for when `version` or one of
-those requirements needs a prerelease to resolve.
-
 ### Outputs
 
 | Output | Description |
 | --- | --- |
-| `run-dir` | The run directory containing `run.json` / `run.md`. |
-| `junit-path` | Path to the written JUnit XML report. |
+| `run-dir` | The run directory, as passed, containing `run.json` / `run.md`. |
+| `junit-path` | The JUnit XML report, at `<run-dir>/junit.xml`. |
+| `run-md-path` | The markdown run report, at `<run-dir>/run.md`. |
+
+There is no `junit-path` **input**: the report belongs with the run it describes,
+and every consumer that had the choice put it there anyway.
+
+The action does not append the report to `$GITHUB_STEP_SUMMARY`. A consumer that
+must redact the report first cannot undo a write that has already happened, so the
+write is yours to make:
+
+```yaml
+- id: eval
+  uses: UiPath/coder_eval@v0
+  with: { args: "tests/tasks/**/*.yaml" }
+- if: always()
+  run: cat "${{ steps.eval.outputs.run-md-path }}" >> "$GITHUB_STEP_SUMMARY"
+```
 
 ### Credentials via `env`
 
@@ -169,7 +204,7 @@ values from repository secrets — never inline a secret literal.
 ```yaml
 - uses: UiPath/coder_eval@v0
   with:
-    tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
+    args: tests/tasks/**/*.yaml
     env: |
       ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
       API_BACKEND=direct
@@ -180,16 +215,6 @@ vars, `GEMINI_API_KEY` for Antigravity, `EVALBOARD_*`, plugin paths, etc. See th
 [User Guide → Environment Variables](USER_GUIDE.md#environment-variables) and the
 per-agent guides ([Claude Code](agents/CLAUDE_CODE.md) · [Codex](agents/CODEX.md) ·
 [Antigravity](agents/ANTIGRAVITY.md)) for what each backend needs.
-
-### The score floor (`minimum-task-score`)
-
-An **additional** gate on top of `coder-eval`'s own exit code. Set a float in
-`[0.0, 1.0]` and the step fails if **any** scored task, in any variant, has a
-`weighted_score` below it — *or* if `coder-eval` itself exits non-zero (both
-verdicts surface). It reads the always-written `run.json` spine
-(`task_results[*].weighted_score`), so it works for plain and experiment runs
-alike. Errored tasks (null score) are left to `coder-eval`'s exit code; a
-malformed/`NaN` score fails closed. Empty (the default) disables the floor.
 
 ### Security
 

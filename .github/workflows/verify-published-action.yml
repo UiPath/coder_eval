@@ -359,10 +359,9 @@ jobs:
           echo "--- task YAML:"; cat tasks/published_smoke.yaml
 
       # continue-on-error, because this step's exit code is NOT the gate. The action
-      # exits with coder-eval's own code (action.yml combines them), and coder-eval
-      # exits 1 on any failed task -- so a model flake failing `file_exists` would
-      # redden this workflow even with minimum-task-score at 0.0, which does not
-      # neutralize that path. This check must answer "does the published action still
+      # exits with coder-eval's own code, and coder-eval exits 1 on any failed task,
+      # so a model flake failing `file_exists` would redden this workflow.
+      # This check must answer "does the published action still
       # work", not "is the model still good": the verification step below gates on
       # ARTIFACTS instead. A genuine model/credential outage still surfaces there, via
       # the zero-token assertion.
@@ -373,11 +372,13 @@ jobs:
         with:
           # `version:` intentionally omitted -- the whole point is to exercise the
           # default pin baked into action.yml at the v0 tag.
-          tasks: tasks/published_smoke.yaml
-          model: claude-haiku-4-5-20251001
           run-dir: runs/verify-published
-          junit-path: runs/verify-published/junit.xml
-          minimum-task-score: "0.0"
+          # Task path and flags both go through `args`: the action promotes none of
+          # the CLI's flags to named inputs.
+          args: |
+            tasks/published_smoke.yaml
+            --model
+            claude-haiku-4-5-20251001
           env: |
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 
