@@ -44,27 +44,18 @@ export const SCRIBE_SOURCE: Source = {
 };
 
 // Ad-hoc runs uploaded by UiPath/skills' `run-coder-eval` workflow_dispatch, so a
-// debug run has a shareable dashboard link instead of only a downloadable artifact.
+// debug run has a shareable link instead of only a downloadable artifact.
 //
-// DELIBERATELY UNLISTED: registered here, but absent from `NAV` in app/layout.tsx,
-// which is a hardcoded array and does not iterate SOURCES. There is no tab, no
-// listing page and no aggregate view — a run is reachable only by its direct link
-// from the GitHub run that produced it. That is why the README's rule about a new
-// source needing its own `getAdhocRunListing` section does not apply: nothing here
-// enumerates, and app/runs/[id] reads by id on demand, so a fresh link resolves
-// without any listing existing.
+// DELIBERATELY UNLISTED: registered here but absent from `NAV` in app/layout.tsx,
+// so there is no tab and nothing enumerates it — a run is reachable only by the
+// direct link from the GitHub run that produced it, which is why the README's
+// `getAdhocRunListing` rule does not apply. Registration is still mandatory:
+// `sourceById` COERCES an unknown id to DEFAULT_SOURCE rather than throwing, so
+// without this entry `?src=gha` would read the nightly's container and 404.
 //
-// Registration is still MANDATORY: `sourceById` is the only path by which a
-// container becomes reachable, and it COERCES an unknown id to DEFAULT_SOURCE
-// rather than throwing, so without this entry `?src=gha` would silently read the
-// skills nightly's container and 404.
-//
-// Its own container, not `runs` with an `adhoc-` prefix: getAdhocRunListing loads
-// per-run metadata for every non-date-shaped id in a container BEFORE truncating
-// to the front page's limit, so a stream of dispatches would bury the intentional
-// ad-hoc runs and cost a per-run blob load each. A separate container also keeps
-// the 14-day expiry lifecycle rule (`expire-runs-gha-14d` on the storage account)
-// from ever reaching nightly history.
+// Its own container, not `runs` with a prefix: getAdhocRunListing loads per-run
+// metadata for every non-date-shaped id before truncating, and the 14-day expiry
+// rule (`expire-runs-gha-14d`) must never reach nightly history.
 export const GHA_SOURCE: Source = {
     id: "gha",
     label: "Ad-hoc (GH)",

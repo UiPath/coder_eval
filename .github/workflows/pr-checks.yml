@@ -997,50 +997,35 @@ jobs:
         id: dogfood
         uses: ./
         with:
+          # Exercises what tests/test_action_inputs.py cannot: it asserts the argv
+          # both step scripts build, but only a real runner proves that
+          # `working-directory:` works on a composite step and that a plugin
+          # installed via `--with` is discovered at runtime. Hence a relative
+          # run-dir (landing under tasks/), the bare task filename and the `../`
+          # plugin path, all resolved from `working-directory`.
           version: local
-          # Deliberately exercises the inputs that CANNOT be proven anywhere else.
-          # tests/test_action_inputs.py executes both step scripts and asserts the
-          # argv they build, but it cannot prove that `working-directory:` works on
-          # a composite step, or that a plugin installed via `--with` is actually
-          # discovered at runtime. Those two only hold on a real runner.
-          #
-          # `working-directory` with a RELATIVE run-dir: the run lands under
-          # tasks/runs/ci-action-dogfood, which is the contract docs/CI_GATE.md
-          # states and the next step asserts. The task path in `args` and the
-          # `extra-packages` entry resolve from here too, hence the bare filename
-          # and the `../` path.
           working-directory: tasks
           run-dir: runs/ci-action-dogfood
-          # The BYOA fixture, installed INTO the action's tool environment. An
-          # entry point is only discovered when the plugin shares a virtualenv with
-          # its host, and `uv tool install` builds an isolated one whose shims
-          # shadow every other coder-eval on PATH — so this input is the only way a
-          # plugin reaches the CLI the action invokes. "Verify the plugin was
-          # discovered" below fails if it did not.
           extra-packages: ../tests/fixtures/byoa_demo_plugin
-          # Everything the CLI takes goes here, one argv entry per line: there is
-          # no `tasks`, `tags` or `model` input. The bracketed `-D` override is the
-          # case this format exists for — `[...]` is a bash character class, so a
-          # whitespace-split input silently collapses the list whenever a file in
-          # the working directory matches. It adds Glob to the three tools
-          # hello_date.yaml already grants, so the resolved config differs from the
-          # task file and the assertion below can tell "arrived" from "ignored".
+          # The bracketed `-D` override is the case one-argv-entry-per-line exists
+          # for: `[...]` is a bash character class, so a whitespace-split input
+          # would collapse the list whenever a file in the cwd matched. It adds
+          # Glob to hello_date.yaml's three tools, so the assertions below can tell
+          # "arrived" from "ignored".
           args: |
             hello_date.yaml
             --model
             claude-haiku-4-5-20251001
             -D
             agent.allowed_tools=[Read,Write,Bash,Glob]
-          # Credentials go through the generic env passthrough (the only channel);
           # ANTHROPIC_API_KEY reaching the run is proven by the API-backed task
-          # succeeding. The second line exercises multi-line env parsing.
+          # succeeding; the second line exercises multi-line env parsing.
           env: |
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             CE_DOGFOOD_MARKER=1
 
-      # Runs in `tasks/` because that is the assertion: the action reports `run-dir`
-      # exactly as passed and derives `junit-path` from it, so a relative one is
-      # relative to `working-directory`, NOT to the job's default cwd.
+      # In `tasks/` because that is the assertion: `run-dir` is reported exactly as
+      # passed, so a relative one is relative to `working-directory`.
       - name: Verify outputs and JUnit file
         working-directory: tasks
         env:
@@ -1053,13 +1038,11 @@ jobs:
           # our writer emits no DTDs/entities) — stdlib ET is fine here.
           python3 -c "import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])" "$JUNIT"
           test -f "$RUNDIR/run.json" || { echo "run.json missing"; exit 1; }
-          # An absolute path here would mean working-directory was ignored and the
-          # run happened to land somewhere the test still found.
+          # An absolute path would mean working-directory was ignored.
           case "$RUNDIR" in /*) echo "run-dir output was rewritten to an absolute path: $RUNDIR"; exit 1 ;; esac
 
-      # The action deliberately does not touch $GITHUB_STEP_SUMMARY, so this is
-      # both the assertion that `run-md-path` points somewhere real and the
-      # one-line recipe the docs tell consumers to use.
+      # The action does not touch $GITHUB_STEP_SUMMARY: this is both the assertion
+      # that `run-md-path` is real and the recipe the docs hand consumers.
       - name: Append the run report to the job summary
         if: always()
         working-directory: tasks
@@ -1077,10 +1060,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # `coder-eval` on PATH is the uv tool shim the action created, so this
-          # interrogates the action's own environment. A task naming the fixture's
-          # agent kind validates ONLY if the entry point was discovered there;
-          # otherwise plan exits 1 with "No agent registered for type 'byoa-demo'".
+          # `coder-eval` on PATH is the action's uv tool shim, so this interrogates
+          # its environment: a task naming the fixture's agent kind validates only
+          # if the entry point was discovered there, else plan exits 1 with
+          # "No agent registered for type 'byoa-demo'".
           cat > byoa-probe.yaml <<'YAML'
           task_id: "action_extra_packages_probe"
           description: "Validates only when the byoa-demo plugin is discoverable."
@@ -1095,8 +1078,8 @@ jobs:
           coder-eval plan byoa-probe.yaml
           rm -f byoa-probe.yaml
 
-          # And the `args` value survived as a 4-element YAML list rather than
-          # arriving word-split or glob-rewritten.
+          # And the `-D` value survived as a 4-element list, not word-split or
+          # glob-rewritten.
           RUN_JSON="$RUNDIR/run.json" python3 <<'PY'
           import json, os, sys
 

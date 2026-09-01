@@ -123,16 +123,12 @@ run-scoped page and API route reads. An absent or unrecognised `src` resolves to
 the default source (`sourceById` coerces rather than throwing, so a stray param
 in a shared link degrades to the skills dashboard instead of an error page).
 
-**A source need not have a tab.** Registration in `SOURCES` and appearance in the
-header are independent: `NAV` in `app/layout.tsx` is a hardcoded array and does
-not iterate `SOURCES`. `gha` is registered and deliberately unlisted — ad-hoc runs
-uploaded by UiPath/skills' `run-coder-eval` dispatch, reachable only by the direct
-link printed in the GitHub run summary, and expiring after 14 days under the
-storage account's `expire-runs-gha-14d` lifecycle rule. Registration is still
-mandatory, because `sourceById` is the only path by which a container becomes
-reachable at all. That is also what exempts it from the enumeration invariant
-below: nothing enumerates it, and `app/runs/[id]` reads by id on demand, so a
-fresh link resolves with no listing in existence.
+**A source need not have a tab.** `NAV` in `app/layout.tsx` is a hardcoded array
+and does not iterate `SOURCES`, so `gha` is registered and deliberately unlisted:
+ad-hoc runs uploaded by UiPath/skills' `run-coder-eval` dispatch, reachable only
+by the direct link in the GitHub run summary, expiring after 14 days under the
+storage account's `expire-runs-gha-14d` rule. Registration is still mandatory —
+`sourceById` is the only path by which a container becomes reachable at all.
 
 Two invariants worth preserving if you add a source:
 
@@ -148,12 +144,11 @@ Two invariants worth preserving if you add a source:
   `listRunIdsInWindow` filter on `parseRunIdDate`, so such runs surface only in
   the ad-hoc section. A new source's page therefore needs its OWN
   `getAdhocRunListing` section, or ad-hoc uploads to that container land
-  nowhere reachable. (Unless the source is unlisted by design, like `gha` — no
-  page, no enumeration, nothing to be invisible to.) Note also that
+  nowhere reachable — unless it is unlisted by design, like `gha`, where nothing
+  enumerates and `app/runs/[id]` reads by id on demand. Note also that
   `getAdhocRunListing` loads per-run metadata for **every** non-date-shaped id in
-  the container before truncating to the display limit, which is why a source
-  expecting a steady stream of ad-hoc uploads needs its own container rather than
-  a prefix inside `runs`.
+  the container before truncating to the display limit, so a source expecting a
+  steady stream of ad-hoc uploads needs its own container, not a prefix in `runs`.
 - **Local mode is per-source too.** `listRunIds` resolves
   `runsDirFor(RUNS_DIR, source)` when `EVALBOARD_LOCAL_RUNS_DIR` is set, so
   `/scribe` reads `<local>-scribe`. Listing off the bare local dir instead —

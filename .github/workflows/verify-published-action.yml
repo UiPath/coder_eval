@@ -360,11 +360,10 @@ jobs:
 
       # continue-on-error, because this step's exit code is NOT the gate. The action
       # exits with coder-eval's own code, and coder-eval exits 1 on any failed task,
-      # so a model flake failing `file_exists` would redden this workflow.
-      # This check must answer "does the published action still
-      # work", not "is the model still good": the verification step below gates on
-      # ARTIFACTS instead. A genuine model/credential outage still surfaces there, via
-      # the zero-token assertion.
+      # so a model flake failing `file_exists` would redden this workflow. This check
+      # must answer "does the published action still work", not "is the model still
+      # good": the verification step below gates on ARTIFACTS instead. A genuine
+      # model/credential outage still surfaces there, via the zero-token assertion.
       - name: Run the published action
         id: run
         continue-on-error: true
@@ -373,8 +372,7 @@ jobs:
           # `version:` intentionally omitted -- the whole point is to exercise the
           # default pin baked into action.yml at the v0 tag.
           run-dir: runs/verify-published
-          # Task path and flags both go through `args`: the action promotes none of
-          # the CLI's flags to named inputs.
+          # Task path and flags both go through `args` — the action promotes no CLI flag.
           args: |
             tasks/published_smoke.yaml
             --model

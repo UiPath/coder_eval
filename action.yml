@@ -1,41 +1,26 @@
-# `name` is the GitHub Marketplace listing title and must be globally unique
-# across Marketplace actions, users, AND organizations. `coder-eval` is taken by
-# an unrelated squatted org (github.com/coder-eval), so the listing uses the
-# underscored repo name instead. This value is display-only: consumers reference
-# the action by repo path (`uses: UiPath/coder_eval@v0`), never by this name.
+# Marketplace listing titles are globally unique across actions, users AND orgs,
+# and `coder-eval` is taken by an unrelated org, hence the underscored repo name.
+# Display only: consumers reference the action by repo path.
 name: coder_eval
-# Matches the authorship the project already declares in pyproject.toml
-# (`authors = [{ name = "UiPath", ... }]`) and NOTICE (`© 2026 UiPath`).
 author: UiPath
 description: Install a pinned coder-eval and run evaluation tasks as a CI gate, with JUnit XML output.
 branding:
   icon: check-circle
   color: orange
 
-# This action installs and runs the `coder-eval` CLI. It is agent-agnostic: it
-# does NOT install any coding-agent runtime. Tasks that use the default
-# `claude-code` agent need the `claude` CLI on PATH (Node + the
-# `@anthropic-ai/claude-code` npm package) provided by the calling job before
-# this action runs. See the README "Use as a GitHub Action" section.
+# Agent-agnostic: this installs `coder-eval`, not any coding-agent runtime. Tasks
+# on the default `claude-code` agent need the `claude` CLI on PATH, supplied by
+# the calling job. See the README's "Use as a GitHub Action".
 #
 # SECURITY: evaluated tasks execute agent-generated code. Do NOT run this action
 # under `pull_request_target` with secrets exposed to untrusted fork PRs.
 #
-# ── INPUT DESIGN ───────────────────────────────────────────────────────────────
-# `coder-eval run` has 21 flags. This action promotes NONE of them to a named
-# input, and that is deliberate. An input that only forwards a flag buys nothing
-# and costs a lot: GitHub silently IGNORES an input the referenced tag does not
-# define, so a mistyped or newly-added forwarding input produces a run that
-# measured something else and still exits 0. A wrong CLI flag, by contrast, is a
-# hard error. So every flag goes through `args`, and an input exists here only
-# when the action does something with the value besides pass it along:
-#
-#   version / extras / extra-packages / install-flags -> compose the install spec
-#   working-directory                                 -> applied to these steps
-#   env                                               -> exported into this shell
-#   run-dir                                           -> read back for outputs
-#
-# Resist adding a named input for a flag. Add it to `args` at the call site.
+# No input forwards a `coder-eval run` flag, deliberately: GitHub silently
+# IGNORES an input the referenced tag does not define, so a forwarding input that
+# is mistyped or newer than the pinned tag yields a green run that measured
+# something else, where a wrong CLI flag is a hard error. Flags go through `args`.
+# An input lives here only when the action uses the value for more than passing
+# it on.
 inputs:
   version:
     description: coder-eval version to install from PyPI, or "local" to install from the action checkout
@@ -43,80 +28,65 @@ inputs:
     default: "0.11.5"   # <-- kept in sync with releases by release.yml
   extras:
     description: >-
-      Comma-separated coder-eval extras to install, e.g. `codex` or
-      `antigravity,litellm`. Composed into the install requirement
-      (`coder-eval[codex]==<version>`) rather than installed afterwards: `uv
-      tool install` builds an isolated environment whose shims shadow anything
-      else named `coder-eval` on PATH, so an extra added on the side is
-      invisible to the CLI this action actually invokes. Each name must match
+      Comma-separated coder-eval extras (`codex`, `antigravity,litellm`), composed
+      into the install requirement rather than installed afterwards: `uv tool
+      install` builds an isolated environment whose shims shadow anything else
+      named `coder-eval` on PATH. Each name must match
       ^[A-Za-z0-9][A-Za-z0-9._-]*$.
     required: false
     default: ""
   extra-packages:
     description: >-
-      Additional requirements installed INTO coder-eval's tool environment (`uv
-      tool install --with`), one per line: a PEP 508 specifier or a local path.
-      This is how a coder-eval plugin distributed outside this repo becomes
-      discoverable — an entry point is only found when the plugin shares a
-      virtualenv with its host. Relative paths resolve against
-      `working-directory`. Blank lines, `#` comments and surrounding whitespace
-      are ignored.
+      Extra requirements installed INTO coder-eval's tool environment (`uv tool
+      install --with`), one per line: a PEP 508 specifier, or a path relative to
+      `working-directory`. The only way an out-of-tree coder-eval plugin becomes
+      discoverable, since an entry point is found only when the plugin shares a
+      virtualenv with its host.
     required: false
     default: ""
   install-flags:
     description: >-
-      Flags passed to `uv tool install`, one per line, each appended verbatim.
-      For resolver control the install needs and this action does not model,
-      e.g. `--prerelease=allow` when `version` or an `extra-packages` entry
-      resolves to a prerelease, or `--extra-index-url <url>` for a private
-      index. Blank lines, `#` comments and surrounding whitespace are ignored.
+      Flags for `uv tool install`, one per line, appended verbatim — resolver
+      control this action does not model (`--prerelease=allow`,
+      `--extra-index-url <url>`).
     required: false
     default: ""
   args:
     description: >-
-      Arguments appended to `coder-eval run`, ONE ARGUMENT PER LINE, each passed
-      through verbatim — no word splitting and no pathname expansion. This is
-      the ONLY channel for the CLI's flags and for the task paths/globs
-      themselves; there is no separate `tasks`, `tags` or `model` input (see
-      INPUT DESIGN above). Task globs are passed to the CLI unexpanded, which
-      expands them itself (`**` included) and exits 1 if nothing matches, so a
-      typo fails loudly instead of running the wrong set. A flag and its value
-      are two separate lines (`-D`, then `key=[a,b]`), or one line in `=` form
-      (`--model=x`); a flag and value sharing a line arrive as a single
-      malformed token. Blank lines, `#` comments and surrounding whitespace are
-      ignored.
+      Arguments appended to `coder-eval run`, ONE PER LINE, each verbatim — no
+      word splitting, no pathname expansion. The only channel for the CLI's flags
+      and for the task paths themselves. A flag and its value are two lines (`-D`,
+      then `key=[a,b]`) or one line in `=` form (`--model=x`); sharing a line
+      makes one malformed token. Globs reach the CLI unexpanded and it expands
+      them itself (`**` included), exiting 1 if nothing matches. Blank lines, `#`
+      comments and surrounding whitespace are ignored here, in `install-flags` and
+      in `extra-packages`.
     required: false
     default: ""
   env:
     description: >-
-      Environment passthrough — newline-separated NAME=VALUE pairs exported for
-      the coder-eval process only (scoped to the run step; NOT written to
-      $GITHUB_ENV, so nothing leaks into later job steps). This is the sole
-      channel for credentials and backend config: set ANTHROPIC_API_KEY,
-      API_BACKEND, model vars, plugin paths, etc. Names must match
-      ^[A-Za-z_][A-Za-z0-9_]*$; blank lines and `#` comments are ignored. Wire
-      values from repository secrets (secrets.MY_KEY) — never inline a secret
-      literal.
+      Newline-separated NAME=VALUE pairs, exported for the coder-eval process only
+      — never written to $GITHUB_ENV, so a forwarded secret cannot bleed into
+      later job steps. The sole channel for credentials and backend config
+      (ANTHROPIC_API_KEY, API_BACKEND, model vars, plugin paths). Names must match
+      ^[A-Za-z_][A-Za-z0-9_]*$. Wire values from repository secrets; never inline
+      a literal.
     required: false
     default: ""
   working-directory:
     description: >-
-      Directory every step of this action runs in. `run-dir`, the task paths in
-      `args` and relative `extra-packages` entries all resolve against it, and
-      the `run-dir` output is reported as given, so a relative one is relative
-      to this directory too. GitHub rejects `working-directory:` on a `uses:`
-      step and a job-level `defaults.run` does not reach inside a composite
-      action, so this input is the only way to run the gate from a
-      subdirectory.
+      Directory every step of this action runs in, and what `run-dir`, the task
+      paths in `args` and relative `extra-packages` entries resolve against.
+      GitHub rejects `working-directory:` on a `uses:` step and a job-level
+      `defaults.run` does not reach inside a composite, so this input is the only
+      way to run the gate from a subdirectory.
     required: false
     default: "."
   run-dir:
     description: >-
-      Run directory (--run-dir). The JUnit report is written to
-      `<run-dir>/junit.xml` and the markdown report to `<run-dir>/run.md`; both
-      paths are reported as outputs. There is no separate `junit-path` input:
-      the report belongs with the run it describes, and every consumer that had
-      the choice put it there anyway.
+      Run directory (--run-dir), reported as given. The JUnit and markdown reports
+      are written inside it and reported as outputs, so there is no separate
+      `junit-path` input.
     required: false
     default: "runs/ci"
 
@@ -129,11 +99,10 @@ outputs:
     value: ${{ steps.run.outputs.junit-path }}
   run-md-path:
     description: >-
-      Path to the markdown run report (`<run-dir>/run.md`). This action does not
-      append it to $GITHUB_STEP_SUMMARY: a consumer that has to redact the report
-      first cannot undo a write that already happened, so the write is the
-      consumer's call. `cat "$RUN_MD" >> "$GITHUB_STEP_SUMMARY"` is the whole of
-      the default behaviour this replaces.
+      Path to the markdown run report (`<run-dir>/run.md`). The action does not
+      append it to $GITHUB_STEP_SUMMARY, because a consumer that has to redact the
+      report first cannot undo a write that already happened;
+      `cat "$RUN_MD" >> "$GITHUB_STEP_SUMMARY"` is the whole of what that replaces.
     value: ${{ steps.run.outputs.run-md-path }}
 
 runs:
@@ -153,13 +122,10 @@ runs:
       run: |
         set -euo pipefail
 
-        # The shared line-list parser. `install-flags`, `extra-packages` and
-        # `args` are all "one entry per line, verbatim", and this is the single
-        # implementation of that so they cannot drift apart. Emitting to stdout
-        # rather than appending to a nameref array keeps it working on bash 3.2
-        # (macOS runners), where `local -n` does not exist.
-        # tests/test_action_inputs.py asserts this function is byte-identical in
-        # both steps.
+        # The one line-list parser for `install-flags`, `extra-packages` and `args`.
+        # Emits to stdout instead of filling a nameref array, which bash 3.2 (macOS
+        # runners) lacks. tests/test_action_inputs.py asserts the two copies of this
+        # function are byte-identical.
         clean_lines() {
           local line
           while IFS= read -r line; do
@@ -172,11 +138,9 @@ runs:
           done
         }
 
-        # Extras go into the requirement string, not a follow-up install: the
-        # tool environment's shims shadow any other coder-eval on PATH, so an
-        # extra installed beside it would never be imported by the CLI this
-        # action runs. Validated rather than interpolated blindly — the value
-        # lands inside a spec that reaches the resolver.
+        # Into the requirement string rather than a follow-up install: the tool
+        # environment's shims shadow any other coder-eval on PATH, so an extra
+        # added beside it is never imported. Validated, since it reaches a resolver.
         extras=""
         if [ -n "$CE_EXTRAS" ]; then
           if [[ ! "$CE_EXTRAS" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*$ ]]; then
@@ -190,9 +154,8 @@ runs:
           install_args+=("$flag")
         done < <(clean_lines <<< "$CE_INSTALL_FLAGS")
 
-        # A local path can contain spaces and a specifier can contain `[`, `]`
-        # or `>`, none of which survive word splitting — hence one argv entry
-        # each rather than an unquoted expansion.
+        # One argv entry each: a path can contain spaces and a specifier `[`, `]`
+        # or `>`, none of which survive word splitting.
         while IFS= read -r req; do
           install_args+=(--with "$req")
         done < <(clean_lines <<< "$CE_EXTRA_PACKAGES")
@@ -214,13 +177,10 @@ runs:
       run: |
         set -uo pipefail
 
-        # The shared line-list parser. `install-flags`, `extra-packages` and
-        # `args` are all "one entry per line, verbatim", and this is the single
-        # implementation of that so they cannot drift apart. Emitting to stdout
-        # rather than appending to a nameref array keeps it working on bash 3.2
-        # (macOS runners), where `local -n` does not exist.
-        # tests/test_action_inputs.py asserts this function is byte-identical in
-        # both steps.
+        # The one line-list parser for `install-flags`, `extra-packages` and `args`.
+        # Emits to stdout instead of filling a nameref array, which bash 3.2 (macOS
+        # runners) lacks. tests/test_action_inputs.py asserts the two copies of this
+        # function are byte-identical.
         clean_lines() {
           local line
           while IFS= read -r line; do
@@ -233,14 +193,10 @@ runs:
           done
         }
 
-        # Generic env passthrough. Each NAME=VALUE line is exported for the
-        # coder-eval child of THIS step only — deliberately not written to
-        # $GITHUB_ENV, so a forwarded secret never bleeds into later job steps.
-        # Only NAME is validated; VALUE is treated as opaque data (never eval'd),
-        # so no crafted value can inject shell.
-        #
-        # Not clean_lines: a VALUE is the caller's data, and right-trimming it
-        # would silently alter a credential that legitimately ends in whitespace.
+        # Exported for this step's coder-eval child only, never to $GITHUB_ENV.
+        # Only NAME is validated; VALUE is opaque data and is never eval'd. Not
+        # clean_lines, because right-trimming would silently alter a credential
+        # that legitimately ends in whitespace.
         n=0
         while IFS= read -r line; do
           n=$((n + 1))
@@ -248,9 +204,8 @@ runs:
           line="${line#"${line%%[![:space:]]*}"}"    # left-trim
           [ -z "$line" ] && continue
           case "$line" in '#'*) continue ;; esac      # allow comment lines
-          # Never echo $line/$value on error — a caller who forgets the `NAME=`
-          # prefix would otherwise print a forwarded secret verbatim (GitHub
-          # only masks values it knows are secrets). Report by position instead.
+          # Report by position, never echoing the line: a caller who forgot the
+          # `NAME=` prefix would otherwise print a secret GitHub cannot mask.
           if [ "$line" = "${line#*=}" ]; then
             echo "::error::env entry #$n is not NAME=VALUE (no '=' found)"; exit 1
           fi
@@ -261,8 +216,8 @@ runs:
           export "$name=${line#*=}"
         done <<< "$CE_ENV"
 
-        # Reports live inside the run directory. `%/` so a trailing slash on the
-        # input does not produce a doubled separator in the reported paths.
+        # Reports live inside the run directory; `%/` keeps a trailing slash on the
+        # input from doubling the separator in the reported paths.
         run_dir="${CE_RUN_DIR%/}"
         junit="$run_dir/junit.xml"
         run_md="$run_dir/run.md"
@@ -278,10 +233,9 @@ runs:
         set -e
 
         # Written before the exit so a red run still reports where its artifacts
-        # are. Whether a composite action propagates outputs from a step that
-        # exited non-zero is not a documented guarantee, so a consumer that must
-        # find the artifacts of a failed run should key off the paths it passed
-        # in, not off these outputs.
+        # are. Output propagation from a failed composite step is not a documented
+        # guarantee, so a consumer chasing a failed run should key off the paths it
+        # passed in rather than these.
         {
           echo "run-dir=$CE_RUN_DIR"
           echo "junit-path=$junit"
