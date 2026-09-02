@@ -177,6 +177,29 @@ class TestCE047EmbeddedShimStdlibOnly:
         # invocation_log.py renders the shim; it is not itself copied into one.
         assert not self._run("from coder_eval.models import RecordedCli", embedded=False)
 
+    def test_flags_a_name_the_shim_binds_itself(self):
+        """The shim's own `def record` wins, and respond() swallows the TypeError,
+        so every invocation would silently get the fallback response."""
+        assert self._run("def record(argv):\n    return argv")
+        assert self._run("RULES = []")
+
+    def test_allows_a_colliding_name_that_is_not_module_level(self):
+        assert not self._run("def matcher():\n    record = 1\n    return record")
+
+    def test_the_rule_guards_a_file_that_actually_exists(self):
+        """A rule matching nothing passes vacuously while reading as a guarantee --
+        which is what a move of the embedded module would otherwise cause."""
+        from pathlib import Path
+
+        from coder_eval.invocation_log import EMBEDDED_MODULES
+        from tests.lint.rules.ce047_embedded_shim_stdlib_only import EmbeddedShimStdlibOnly
+
+        package = Path(__file__).resolve().parents[1] / "src" / "coder_eval"
+        for module in EMBEDDED_MODULES:
+            target = package / module
+            assert target.is_file(), f"EMBEDDED_MODULES names {module}, which does not exist"
+            assert EmbeddedShimStdlibOnly(str(target))._embedded, f"CE047 does not match {target}"
+
 
 @pytest.mark.lint
 class TestCE017ModelsLazyAgentImports:

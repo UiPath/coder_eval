@@ -14,8 +14,8 @@ The matching *semantics* cannot drift — both lower to one spec dict that
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.argv_match import argv_matches
-from coder_eval.models import CliCalledCriterion, CliMatch, CliResponse
+from coder_eval.argv_match import FlagPredicate, MatchSpec, argv_matches
+from coder_eval.models import CliCalledCriterion, CliMatch, CliResponse, FlagMatch
 from coder_eval.models.cli_match import MATCH_FACET_FIELDS
 
 
@@ -24,6 +24,11 @@ class TestFacetParity:
         for field in MATCH_FACET_FIELDS:
             assert field in CliMatch.model_fields, f"CliMatch is missing match facet {field!r}"
             assert field in CliCalledCriterion.model_fields, f"cli_called is missing match facet {field!r}"
+
+    def test_the_rule_surface_declares_no_facet_outside_the_shared_tuple(self):
+        """Closes the loop the other direction: without this, a facet added to
+        CliMatch alone passes, since the loop above only walks MATCH_FACET_FIELDS."""
+        assert set(CliMatch.model_fields) == set(MATCH_FACET_FIELDS)
 
     def test_criterion_adds_only_non_argv_fields(self):
         """A facet on the criterion that CliMatch lacks is a rule authors cannot write."""
@@ -100,3 +105,17 @@ class TestSharedValidation:
         """`-1` is a value to the splitter, not a flag, so the check must not forbid it."""
         assert CliMatch(verb=verb).verb_spellings == [verb.split()]
         assert CliCalledCriterion(description="d", verb=verb).verb_spellings == [verb.split()]
+
+
+class TestLoweredSpecKeys:
+    """The lowered spec is a TypedDict, so pyright catches a renamed key. These
+    pin what pyright cannot: that the models and the TypedDicts hold the same
+    field set, which is what makes `build_match_spec`'s cast honest."""
+
+    def test_flag_predicate_keys_are_exactly_the_model_fields(self):
+        assert set(FlagPredicate.__annotations__) == set(FlagMatch.model_fields)
+
+    def test_match_spec_keys_are_exactly_what_lowering_emits(self):
+        emitted = set(CliMatch(verb="ixp dummy1").match_spec)
+        assert emitted == set(MatchSpec.__annotations__)
+        assert emitted == set(CliCalledCriterion(description="d", verb="ixp dummy1").match_spec)

@@ -174,18 +174,16 @@ class TestFlagPredicates:
         assert checker.check(without_dotall).score == 0.0
         assert checker.check(with_dotall).score == 1.0
 
-    def test_invalid_regex_reports_the_offending_flag(self, sandbox_with_log):
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "--val", "x"])])
-        criterion = CliCalledCriterion(
-            description="bad pattern",
-            log=LOG,
-            verb="ixp projects get",
-            flags={"val": {"matches_regex": "([unclosed"}},
-        )
-        result = SuccessChecker(sandbox).check(criterion)
-        assert result.score == 0.0
-        assert "Invalid matches_regex for flag 'val'" in (result.error or "")
+    def test_invalid_regex_is_refused_at_load_naming_the_flag(self):
+        """Load-time, not check-time: the same FlagMatch feeds a record_cli response
+        rule, which evaluates the pattern inside the sandbox and cannot report."""
+        with pytest.raises(ValidationError, match="matches_regex is not a valid regex"):
+            CliCalledCriterion(
+                description="bad pattern",
+                log=LOG,
+                verb="ixp projects get",
+                flags={"val": {"matches_regex": "([unclosed"}},
+            )
 
     def test_absent_distinguishes_missing_from_different_value(self, sandbox_with_log):
         """`absent` is why flags is a predicate map, not dict[str, str]."""
@@ -634,19 +632,15 @@ class TestRegressionsFromReview:
         )
         assert SuccessChecker(sandbox).check(criterion).score == 0.0
 
-    def test_bad_regex_flags_value_names_the_flag(self, sandbox_with_log):
-        """re.error is not a ValueError, so the pre-flight guard missed this."""
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "--val", "x"])])
-        criterion = CliCalledCriterion(
-            description="bad flags int",
-            log=LOG,
-            verb="ixp projects get",
-            flags={"val": {"matches_regex": "a", "flags": 99999999}},
-        )
-        result = SuccessChecker(sandbox).check(criterion)
-        assert result.score == 0.0
-        assert "flag 'val'" in (result.error or "")
+    def test_bad_regex_flags_value_is_refused_at_load(self):
+        """re.error is not a ValueError, so the old pre-flight guard missed this."""
+        with pytest.raises(ValidationError, match="not a valid regex with flags=99999999"):
+            CliCalledCriterion(
+                description="bad flags int",
+                log=LOG,
+                verb="ixp projects get",
+                flags={"val": {"matches_regex": "a", "flags": 99999999}},
+            )
 
 
 class TestModelValidation:

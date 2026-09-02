@@ -15,11 +15,12 @@ dict that engine consumes.
 from __future__ import annotations
 
 import itertools
-from typing import Any
+import re
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from coder_eval.argv_match import is_number
+from coder_eval.argv_match import FlagPredicate, MatchSpec, is_number
 
 
 class FlagMatch(BaseModel):
@@ -83,20 +84,6 @@ class FlagMatch(BaseModel):
         ),
     )
 
-    @property
-    def needs_value(self) -> bool:
-        """Whether evaluating this predicate requires the flag's VALUE.
-
-        Presence predicates (``present`` / ``absent``) do not, so they must not
-        make a flag value-bearing. Otherwise asserting a boolean switch would
-        make it consume the following token: adding ``flags: {yes: {present:
-        true}}`` to a guard on ``delete --yes proj-1`` would bind
-        ``yes=proj-1``, drop ``proj-1`` from the positionals, and hand the guard
-        a false PASS -- reintroducing the very defect declared value-binding
-        exists to prevent.
-        """
-        return not (self.present or self.absent)
-
     @model_validator(mode="before")
     @classmethod
     def _coerce_scalar_shorthand(cls, value: Any) -> Any:
@@ -125,6 +112,19 @@ class FlagMatch(BaseModel):
         if self.flags and self.matches_regex is None:
             msg = f"FlagMatch.flags applies only to matches_regex, but the predicate is {set_predicates[0]!r}"
             raise ValueError(msg)
+        # Compile HERE, not in a checker: this model now feeds two consumers, and
+        # only one of them can report. A `record_cli` response rule evaluates the
+        # pattern inside the sandbox, where a PatternError is swallowed and the
+        # tool serves its fallback -- a log line indistinguishable from a
+        # legitimate no-match, so the task scores differently for identical agent
+        # behaviour with nothing on any report surface. At load, both surfaces
+        # refuse the pattern instead.
+        if self.matches_regex is not None:
+            try:
+                re.compile(self.matches_regex, self.flags)
+            except (re.error, ValueError) as exc:
+                msg = f"FlagMatch.matches_regex is not a valid regex with flags={self.flags}: {exc}"
+                raise ValueError(msg) from exc
         return self
 
 
@@ -248,17 +248,25 @@ def build_match_spec(
     flags: dict[str, FlagMatch] | None,
     value_flags: list[str],
     ignore_flags: list[str],
-) -> dict[str, Any]:
-    """Lower an authored match surface to the plain dict :mod:`coder_eval.argv_match` reads.
+) -> MatchSpec:
+    """Lower an authored match surface to what :mod:`coder_eval.argv_match` reads.
 
     JSON-serializable on purpose: the same dict is embedded verbatim into a
     generated shim, so a spec the criterion evaluates in-process and a spec the
     shim evaluates in the sandbox are the same bytes.
+
+    The cast is honest because ``FlagMatch``'s field set IS ``FlagPredicate``'s key
+    set -- asserted in tests/test_cli_match_parity.py, so adding a field to one and
+    not the other fails rather than silently dropping out of the lowered spec.
     """
     return {
         "verb_spellings": verb_spellings,
         "positional": positional,
-        "flags": {name: predicate.model_dump() for name, predicate in flags.items()} if flags else None,
+        "flags": (
+            {name: cast("FlagPredicate", predicate.model_dump()) for name, predicate in flags.items()}
+            if flags
+            else None
+        ),
         "value_flags": list(value_flags),
         "ignore_flags": list(ignore_flags),
     }
@@ -343,8 +351,8 @@ class CliMatch(BaseModel):
         return verb_spellings_of(self.verb, self.verb_any_of)
 
     @property
-    def match_spec(self) -> dict[str, Any]:
-        """This pattern as the plain dict :func:`coder_eval.argv_match.argv_matches` reads."""
+    def match_spec(self) -> MatchSpec:
+        """This pattern as what :func:`coder_eval.argv_match.argv_matches` reads."""
         return build_match_spec(
             verb_spellings=self.verb_spellings,
             positional=self.positional,

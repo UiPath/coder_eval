@@ -409,17 +409,63 @@ class RecordedCli(BaseModel):
             "would, so an agent reads a plausible error rather than silence"
         ),
     )
-    responses: list[CliResponse] = MergeField(
-        strategy="replace",
+    # Plain Field, not MergeField: `RecordedCli` is never a merge root. The
+    # enclosing `SandboxConfig.record_cli` is a `replace` list, so a later layer
+    # substitutes the whole list of entries and no per-entry strategy is ever
+    # consulted. A strategy annotation here would read as a knob and be inert.
+    responses: list[CliResponse] = Field(
         default_factory=list,
         description=(
             "Per-invocation responses, tried in order until one matches; the fields above are the "
             "fallback for an invocation none of them claim. Use it when the agent's next step "
             "depends on what the tool answered -- `ixp projects list` returning a project the agent "
-            "then acts on, say -- instead of one fixed reply to everything. Replaced (not merged) "
-            "across config layers, like the enclosing record_cli list"
+            "then acts on, say -- instead of one fixed reply to everything. A config layer that sets "
+            "record_cli replaces the whole list of entries, this one included"
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_responses_are_reachable(self) -> RecordedCli:
+        """Reject a rule an earlier rule already claims.
+
+        First-match-wins means a rule below a more general one can never answer.
+        Silence there would be out of step with the rest of this authoring
+        surface, which hard-errors on every declaration that cannot take effect:
+        a `verb_any_of` entry prefixed by another, a predicate on an ignored
+        flag, an empty `positional`, two entries writing the same shim filename.
+
+        Deliberately narrow, because "A matches everything B matches" is not
+        decidable in general. Two sound cases only: an exact duplicate, and a
+        verb-only A whose verb prefixes B's under the same flag parsing.
+        """
+        specs = [response.when.match_spec for response in self.responses]
+        for later, spec in enumerate(specs):
+            for earlier, prior in enumerate(specs[:later]):
+                if prior == spec:
+                    reason = "is an exact duplicate of"
+                elif (
+                    prior["positional"] is None
+                    and prior["flags"] is None
+                    # Same parsing, or the two disagree on which tokens are even
+                    # positional and neither claim covers the other.
+                    and prior["value_flags"] == spec["value_flags"]
+                    and prior["ignore_flags"] == spec["ignore_flags"]
+                    and spec["verb_spellings"]
+                    and all(
+                        any(tokens[: len(prefix)] == prefix for prefix in prior["verb_spellings"])
+                        for tokens in spec["verb_spellings"]
+                    )
+                ):
+                    reason = "is already claimed by the more general"
+                else:
+                    continue
+                msg = (
+                    f"record_cli tool {self.tool!r}: responses[{later}] {reason} responses[{earlier}], "
+                    "so it can never answer -- the first matching rule wins. Put the specific rule "
+                    "above the general one, or drop the duplicate."
+                )
+                raise ValueError(msg)
+        return self
 
     @field_validator("tool")
     @classmethod

@@ -587,7 +587,7 @@ sandbox:
         - when:                       # any cli_called facet, ANDed
             verb: "ixp projects get"
             positional: ["proj-1"]
-            flags: {output: json}
+            flags: {model: gemini_2_5_pro}
           stdout: '{"id": "proj-1", "name": "Invoices"}'
         - when: {verb: "ixp projects get missing"}
           exit_code: 4
@@ -597,7 +597,7 @@ sandbox:
 - **`when` takes the same facets as [`cli_called`](#cli_called)** — `verb`, `verb_any_of`, `positional`, `flags`, `value_flags`, `ignore_flags` — evaluated by the same matcher, so the pattern that *serves* a response is the pattern that *grades* it. Always a mapping: a bare `when: "ixp dummy1"` is rejected (with the `{verb: ...}` spelling in the message), since a pattern has six facets and a lone string leaves which one you meant to inference.
 - **First match wins**, in declaration order: put the specific rule above the general one. An invocation no rule claims gets the entry's own `exit_code` / `stdout` / `stderr`.
 - **`exit_code` defaults to 0 on a rule** — the opposite of the entry default of 1. A rule exists because you described that invocation, so the natural reading is "and this is what it answers"; an undescribed one should still look like a tool that failed.
-- **`ignore_flags` is empty on a rule**, unlike the criterion's `[output]`: grading must not depend on a flag that changes nothing about the outcome, but a rule may legitimately answer differently for `--output json`.
+- **`ignore_flags` is empty on a rule**, unlike the criterion's `[output]`: grading must not depend on a flag that changes nothing about the outcome, but a rule may legitimately answer differently for `--output json`. That is the one place a rule is *not* copy-pastable into a criterion — `flags: {output: ...}` is valid on a rule and rejected on the criterion, which ignores that flag by default.
 - **The log names the rule that answered** (`"rule": 1`), and omits the key when none did — the first thing you want to know when an expected canned response does not arrive.
 - **Still stateless.** A rule answers the same way however many times it matches; a counter would have to survive concurrent agent commands. For a tool whose reply must change over a run, hand-write a mock under `mock_path_dirs`.
 

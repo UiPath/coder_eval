@@ -1,9 +1,8 @@
 """CLI-called criterion checker — structured matching over an invocation log."""
 
 import logging
-import re
 import shlex
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from coder_eval.argv_match import argv_matches
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
@@ -18,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict[str, Any]) -> bool:
+def _record_matches(criterion: CliCalledCriterion, argv: list[str], record: dict[str, object]) -> bool:
     """Whether one log record satisfies every configured facet of the criterion.
 
     ``tool`` is checked here rather than in :func:`argv_matches` because it is a
@@ -54,21 +53,10 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             Result with binary score (1.0 when the match count is within
             [min_count, max_count], 0.0 otherwise)
         """
-        # Up front so a bad pattern names its flag, rather than surfacing as a
-        # generic caught exception when some record first reaches that predicate.
-        for name, predicate in (criterion.flags or {}).items():
-            if predicate.matches_regex is None:
-                continue
-            try:
-                re.compile(predicate.matches_regex, predicate.flags)
-            except (re.error, ValueError) as exc:
-                return CriterionResult(
-                    criterion_type=criterion.type,
-                    description=criterion.description,
-                    score=0.0,
-                    error=f"Invalid matches_regex for flag '{name}': {exc}",
-                )
-
+        # No pre-flight re.compile here: `FlagMatch` compiles the pattern at
+        # validation, so an uncompilable one never reaches a checker -- and it has
+        # to be caught there, because the response-rule surface that shares this
+        # model cannot report an error at all.
         if not sandbox.file_exists(criterion.log):
             # Harness fault, not agent behaviour. Failing stops a max_count: 0
             # guard passing vacuously against a log that never existed.
@@ -97,6 +85,22 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         content = sandbox.get_file_content(criterion.log)
 
         usable, unusable = parse_log(content)
+
+        # The shim books this when its own rule evaluation raised. Defense in
+        # depth (FlagMatch compiles at load), but if it ever fires, the responses
+        # the agent saw were not the ones the task described, so no verdict over
+        # this log means anything -- same treatment as the write-failure sentinel.
+        faults = [record for _, record in usable if record.get("rule_error") is not None]
+        if faults:
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                error=(
+                    f"Recorder could not evaluate its response rules on {len(faults)} invocation(s), so the "
+                    f"agent saw fallback output the task did not describe. First: {faults[0].get('rule_error')!r}"
+                ),
+            )
 
         if unusable:
             # A record we cannot read might BE the call a max_count: 0 guard

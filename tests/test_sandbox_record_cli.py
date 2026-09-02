@@ -47,6 +47,14 @@ def _run_shim(sandbox_dir, tool: str, args: list[str]) -> subprocess.CompletedPr
     )
 
 
+# The two rendered shim shapes. Only the second splices in argv_match.py, so an
+# invariant asserted on the first alone proves nothing about the interesting half.
+SHIM_SHAPES = (
+    RecordedCli(tool="uip"),
+    RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"}, stdout="ok")]),
+)
+
+
 def _records(text: str) -> list[dict]:
     """Just the records; parse_log also returns the unusable count."""
     usable, _ = parse_log(text)
@@ -474,15 +482,17 @@ class TestRenderedSource:
         assert namespace["EXIT_CODE"] == 3
         assert namespace["STDERR_TEXT"] == "boom\n"
 
-    def test_rendered_shim_does_not_execute_anything(self):
+    @pytest.mark.parametrize("spec", SHIM_SHAPES, ids=("no_rules", "with_rules"))
+    def test_rendered_shim_does_not_execute_anything(self, spec):
         """It stubs a tool rather than proxying one: no subprocess, no exec."""
-        source = render_recorder(RecordedCli(tool="uip"))
+        source = render_recorder(spec)
         for forbidden in ("subprocess", "execv", "execvp", "popen", "system("):
             assert forbidden not in source
 
-    def test_rendered_shim_imports_nothing_from_coder_eval(self):
+    @pytest.mark.parametrize("spec", SHIM_SHAPES, ids=("no_rules", "with_rules"))
+    def test_rendered_shim_imports_nothing_from_coder_eval(self, spec):
         """It runs inside the sandbox, where this package is not installed."""
-        source = render_recorder(RecordedCli(tool="uip"))
+        source = render_recorder(spec)
         imports = [
             line.strip()
             for line in source.splitlines()
@@ -490,9 +500,15 @@ class TestRenderedSource:
         ]
         assert imports == []
 
-    def test_rendered_shim_is_pure_ascii(self):
-        """Written into arbitrary sandboxes and read by whatever python3 is there."""
-        source = render_recorder(RecordedCli(tool="uip"))
+    @pytest.mark.parametrize("spec", SHIM_SHAPES, ids=("no_rules", "with_rules"))
+    def test_rendered_shim_is_pure_ascii(self, spec):
+        """Written into arbitrary sandboxes and read by whatever python3 is there.
+
+        Parametrized over both shapes because only the rules-bearing one splices in
+        another module's source -- the half that can actually break any of these
+        three invariants, and the half the unparametrized versions never rendered.
+        """
+        source = render_recorder(spec)
         source.encode("ascii")
 
     def test_parse_log_separates_usable_from_unusable(self):
@@ -639,6 +655,40 @@ class TestPerInvocationResponses:
         finally:
             sandbox.cleanup(preserve=False)
 
+    def test_a_rule_evaluation_fault_is_recorded_and_fails_the_grading(self):
+        """The shim swallows a matcher fault so the stub does not crash, but the
+        record must say so: without it, an eval-config fault is byte-identical to a
+        legitimate no-match and the task scores as if the agent never made the call.
+
+        FlagMatch compiles at load, so the only way to reach this is to corrupt a
+        rendered shim -- which is the point: the branch is defense in depth, and
+        nothing else exercises it.
+        """
+        sandbox = _sandbox("record_rule_fault", record_cli=[self._spec()])
+        try:
+            sandbox_dir = sandbox.setup()
+            shim = sandbox_dir / RECORD_CLI_DIR / "uip"
+            source = shim.read_text(encoding="utf-8")
+            # A spec no matcher can evaluate, standing in for any future shim fault.
+            broken = source.replace("'verb_spellings': [['ixp', 'dummy1']]", "'verb_spellings': 5", 1)
+            assert broken != source, "the rule literal moved; update this test"
+            shim.write_text(broken, encoding="utf-8")
+
+            proc = _run_shim(sandbox_dir, "uip", ["ixp", "dummy1"])
+            assert proc.returncode == 1, "the stub must still answer, not crash"
+            assert "response matching failed" in proc.stderr
+
+            record = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))[0]
+            assert "rule" not in record
+            assert "TypeError" in record["rule_error"]
+
+            criterion = CliCalledCriterion(description="called dummy1", verb="ixp dummy1")
+            result = SuccessChecker(sandbox).check(criterion)
+            assert result.score == 0.0
+            assert "could not evaluate its response rules" in (result.error or "")
+        finally:
+            sandbox.cleanup(preserve=False)
+
     def test_matcher_is_embedded_only_when_rules_exist(self):
         """A shim with no rules never consults the matcher, so it does not carry it."""
         plain = render_recorder(RecordedCli(tool="uip"))
@@ -662,6 +712,41 @@ class TestPerInvocationResponses:
         """A catch-all rule is the entry's own default; two ways to say it is one too many."""
         with pytest.raises(ValidationError, match="at least one of verb"):
             CliResponse(when={})
+
+    @pytest.mark.parametrize(
+        ("responses", "expected"),
+        [
+            ([{"when": {"verb": "ixp x"}, "stdout": "a"}, {"when": {"verb": "ixp x"}, "stdout": "b"}], "duplicate"),
+            ([{"when": {"verb": "ixp projects"}}, {"when": {"verb": "ixp projects get"}}], "already claimed"),
+            (
+                [{"when": {"verb": "ixp projects"}}, {"when": {"verb_any_of": ["ixp projects get", "ixp projects x"]}}],
+                "already claimed",
+            ),
+        ],
+        ids=("exact_duplicate", "general_above_specific", "every_alternative_covered"),
+    )
+    def test_a_rule_an_earlier_rule_already_claims_is_rejected(self, responses, expected):
+        """First-match-wins makes such a rule dead, and the rest of this surface
+        hard-errors on every declaration that cannot take effect."""
+        with pytest.raises(ValidationError, match=expected):
+            RecordedCli(tool="uip", responses=responses)
+
+    @pytest.mark.parametrize(
+        "responses",
+        [
+            [{"when": {"verb": "ixp projects get"}}, {"when": {"verb": "ixp projects"}}],
+            [{"when": {"verb": "ixp projects", "flags": {"o": "j"}}}, {"when": {"verb": "ixp projects get"}}],
+            [{"when": {"verb": "ixp projects", "positional": ["p1"]}}, {"when": {"verb": "ixp projects get"}}],
+            [{"when": {"verb": "ixp projects", "value_flags": []}}, {"when": {"verb": "ixp projects get"}}],
+            [{"when": {"verb": "ixp a"}}, {"when": {"verb": "ixp b"}}],
+        ],
+        ids=("specific_first", "general_has_flag", "general_has_positional", "parsing_differs", "unrelated"),
+    )
+    def test_a_reachable_rule_is_not_rejected(self, responses):
+        """The check must stay narrow: an earlier rule that constrains anything
+        beyond its verb does NOT claim everything a later rule would, and two
+        rules parsing argv differently cannot be compared by verb prefix at all."""
+        assert len(RecordedCli(tool="uip", responses=responses).responses) == 2
 
     def test_a_bare_string_when_is_rejected_with_the_fix(self):
         """One shape for a pattern. A lone string leaves which of six facets it sets

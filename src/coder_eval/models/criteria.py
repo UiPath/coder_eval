@@ -14,6 +14,7 @@ from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from coder_eval.argv_match import MatchSpec
 from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
 from coder_eval.models.cli_match import (
     FlagMatch,
@@ -568,8 +569,8 @@ class CliCalledCriterion(BaseSuccessCriterion):
         return verb_spellings_of(self.verb, self.verb_any_of)
 
     @property
-    def match_spec(self) -> dict[str, Any]:
-        """This criterion's argv facets as the dict :mod:`coder_eval.argv_match` reads.
+    def match_spec(self) -> MatchSpec:
+        """This criterion's argv facets as what :mod:`coder_eval.argv_match` reads.
 
         The same lowering a ``record_cli`` response rule uses, so a rule that
         serves a response and the criterion that grades it cannot read one argv
