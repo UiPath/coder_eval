@@ -117,6 +117,10 @@ antigravity = [
 openhands = [
     "openhands-sdk==1.40.0",
     "openhands-tools==1.40.0",
+    # LiteLLM's Bedrock path needs boto3 — required for OpenHands to drive Claude on
+    # Bedrock (a `bedrock/…` model id + AWS_BEARER_TOKEN_BEDROCK), the only Claude
+    # route in this environment (no direct Anthropic key).
+    "boto3",
 ]
 
 [project.scripts]

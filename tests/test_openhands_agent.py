@@ -11,8 +11,15 @@ runtime tests below the importorskip need the extra.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
+# OpenHandsAgent imports cleanly WITHOUT the [openhands] SDK (all SDK imports are
+# lazy inside its methods), so it — and the pure-path resolver tests below — run in
+# default CI, which does NOT install the openhands extra.
+from coder_eval.agents.openhands_agent import OpenHandsAgent
 from coder_eval.models import (
     AgentConfig,
     AgentKind,
@@ -231,6 +238,135 @@ class TestOpenHandsEffectiveModel:
         assert agent._effective_model() is None
 
 
+# --- SDK-FREE skill-resolution + activation-scoring tests ---------------------
+#
+# `_resolve_skill_files` is pure path logic (all OpenHands SDK imports are lazy
+# inside methods), and `skill_triggered` scoring needs no SDK. These live ABOVE the
+# module-level importorskip so they run on a base install / in CI (which does NOT
+# install the [openhands] extra) — mirroring test_antigravity_agent.py's placement
+# of its resolver tests. The SDK-touching construction + live tests are below.
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SKILL_SMOKE_TASK = _REPO_ROOT / "tests" / "_fixtures" / "tasks" / "openhands_skill_smoke.yaml"
+
+_SKILL_MD = """---
+name: {name}
+description: A tiny skill for resolver tests.
+---
+Body for {name}.
+"""
+
+
+def _write_skill(root: Path, name: str) -> None:
+    """Create ``<root>/<name>/SKILL.md`` with valid AgentSkills frontmatter."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(_SKILL_MD.format(name=name))
+
+
+def _openhands_agent(*, plugins=None, model="openrouter/z-ai/glm-5.2") -> OpenHandsAgent:
+    return OpenHandsAgent(parse_agent_config(type=AgentKind.OPENHANDS, model=model, plugins=plugins or []))
+
+
+class TestResolveSkillFiles:
+    """`_resolve_skill_files` mirrors AntigravityAgent._resolve_skills_paths, then
+    expands each root to its `<skill>/SKILL.md` files (SDK-free, runs in base CI)."""
+
+    def test_resolve_skill_files_from_plugins(self, tmp_path):
+        # Marketplace-root layout: plugin path is the bundle root ABOVE skills/.
+        skills_dir = tmp_path / "bundle" / "skills"
+        _write_skill(skills_dir, "foo")
+        _write_skill(skills_dir, "bar")
+        agent = _openhands_agent(plugins=[{"type": "local", "path": str(tmp_path / "bundle")}])
+        files = agent._resolve_skill_files(None)
+        names = sorted(p.parent.name for p in files)
+        assert names == ["bar", "foo"]
+        assert all(p.name == "SKILL.md" for p in files)
+
+    def test_resolve_skill_files_direct_skills_dir_layout(self, tmp_path):
+        # The plugin path DIRECTLY parents <skill>/SKILL.md (no nested skills/).
+        _write_skill(tmp_path / "direct", "baz")
+        agent = _openhands_agent(plugins=[{"type": "local", "path": str(tmp_path / "direct")}])
+        files = agent._resolve_skill_files(None)
+        assert [p.parent.name for p in files] == ["baz"]
+
+    def test_resolve_skill_files_empty_when_no_plugins(self, tmp_path):
+        agent = _openhands_agent(plugins=[])
+        assert agent._resolve_skill_files(None) == []
+
+    def test_resolve_skill_files_from_plugin_tools_dir(self, tmp_path):
+        # The runtime plugin_tools_dir is an additional source (orchestrator seam).
+        _write_skill(tmp_path / "rt" / "skills", "qux")
+        agent = _openhands_agent(plugins=[])
+        files = agent._resolve_skill_files(str(tmp_path / "rt"))
+        assert [p.parent.name for p in files] == ["qux"]
+
+    def test_resolve_skill_files_dedupes(self, tmp_path):
+        # Same root supplied via both plugins AND plugin_tools_dir → each SKILL.md once.
+        _write_skill(tmp_path / "b" / "skills", "dup")
+        agent = _openhands_agent(plugins=[{"type": "local", "path": str(tmp_path / "b")}])
+        files = agent._resolve_skill_files(str(tmp_path / "b"))
+        assert [p.parent.name for p in files] == ["dup"]
+
+    def test_resolve_skill_files_warns_on_unresolved_path(self, tmp_path, caplog):
+        import logging
+
+        agent = _openhands_agent(plugins=[{"type": "local", "path": "$UNSET_SKILLS_VAR/x"}])
+        with caplog.at_level(logging.WARNING):
+            files = agent._resolve_skill_files(None)
+        assert files == []
+        assert any("did not resolve" in r.message for r in caplog.records)
+
+    def test_resolve_skill_files_skips_plugin_without_path(self, tmp_path):
+        # A local plugin whose `path` is empty is skipped by the guard (no crash).
+        agent = _openhands_agent(plugins=[{"type": "local", "path": ""}])
+        assert agent._resolve_skill_files(None) == []
+
+
+class TestOpenHandsSkillActivationSynthetic:
+    """Deterministic (no model call, no SDK): a synthesized `invoke_skill` turn is
+    scored 1.0 by skill_triggered. This is the always-green CI guard for the
+    activation wiring; the live test (below the SDK gate) is the real proof."""
+
+    def test_openhands_skill_activation_scored_from_synthetic_turns(self):
+        from datetime import datetime
+
+        from coder_eval.criteria.skill_triggered import SkillTriggeredChecker
+        from coder_eval.models import ClassificationCriterionResult, SkillTriggeredCriterion
+        from coder_eval.models.results import TurnRecord
+        from coder_eval.models.telemetry import CommandTelemetry
+
+        invoke = CommandTelemetry(
+            tool_name="invoke_skill",
+            tool_id="i1",
+            timestamp=datetime.now(),
+            parameters={"name": "oh-smoke-skill"},
+            result_status="success",
+        )
+        turn = TurnRecord(iteration=1, user_input="reveal marker", agent_output="done", commands=[invoke])
+        criterion = SkillTriggeredCriterion(
+            description="oh-smoke-skill activation",
+            skill_name="oh-smoke-skill",
+            expected_skill="oh-smoke-skill",
+        )
+        result = SkillTriggeredChecker().check(criterion, sandbox=None, turn_records=[turn])  # type: ignore[arg-type]
+        assert isinstance(result, ClassificationCriterionResult)
+        assert result.score == 1.0 and result.observed_label == "yes"
+
+    def test_skill_smoke_fixture_task_is_well_formed(self):
+        """The fixture task loads, targets the openhands agent with a type: local
+        plugin at the bundle ROOT, gates on skill_triggered, and pins no Opus."""
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(_SKILL_SMOKE_TASK)
+        assert task.agent is not None and str(task.agent.type) == "openhands"
+        plugins = task.agent.plugins or []
+        assert plugins and plugins[0]["type"] == "local"
+        assert plugins[0]["path"].endswith("skills_bundle")  # root ABOVE skills/
+        assert any(c.type == "skill_triggered" for c in task.success_criteria)
+        assert "opus" not in (task.agent.model or "").lower()
+
+
 # --- SDK-dependent agent runtime tests (mocked SDK; require the extra) --------
 
 pytest.importorskip("openhands.sdk")
@@ -241,7 +377,6 @@ from types import SimpleNamespace  # noqa: E402
 
 from coder_eval.agent import AgentState  # noqa: E402
 from coder_eval.agents.openhands_agent import (  # noqa: E402
-    OpenHandsAgent,
     _OpenHandsTurnState,
     _openrouter_extra_body,
 )
@@ -549,8 +684,13 @@ def _install_fake_sdk(monkeypatch, conversation_factory, *, captured: dict | Non
             captured["conversation"] = kw
         return conversation_factory(**kw)
 
+    def _agent(**kw):
+        if captured is not None:
+            captured["agent"] = kw
+        return SimpleNamespace(**kw)
+
     monkeypatch.setattr(ohsdk, "LLM", _llm, raising=False)
-    monkeypatch.setattr(ohsdk, "Agent", lambda **kw: SimpleNamespace(**kw), raising=False)
+    monkeypatch.setattr(ohsdk, "Agent", _agent, raising=False)
     monkeypatch.setattr(ohsdk, "Tool", lambda **kw: SimpleNamespace(**kw), raising=False)
     monkeypatch.setattr(ohsdk, "Conversation", _conversation, raising=False)
 
@@ -757,7 +897,10 @@ class TestCommunicateTimeout:
         assert agent.pending_turn.token_usage is not None
         assert agent.pending_turn.token_usage.uncached_input_tokens == 100
 
-    async def test_plugins_configured_warns(self, monkeypatch, tmp_path, caplog):
+    async def test_start_no_longer_warns_on_plugins(self, monkeypatch, tmp_path, caplog):
+        """The old 'OpenHandsAgent ignores agent.plugins' warning is gone: plugins
+        are now honored (resolved per-turn in _run_conversation), so start() must not
+        emit it. plugin_tools_dir is recorded for the per-turn resolution."""
         import logging
 
         agent = OpenHandsAgent(
@@ -768,8 +911,9 @@ class TestCommunicateTimeout:
             )
         )
         with caplog.at_level(logging.WARNING):
-            await agent.start(str(tmp_path))
-        assert any("ignores agent.plugins" in r.message for r in caplog.records)
+            await agent.start(str(tmp_path), plugin_tools_dir="/runtime/tools")
+        assert not any("ignores agent.plugins" in r.message for r in caplog.records)
+        assert agent._plugin_tools_dir == "/runtime/tools"
 
 
 class TestCommunicateStoppedEarly:
@@ -860,3 +1004,140 @@ class TestOffThreadEmission:
         # Exactly one tool, resolved once (no dup/drop).
         assert len(record.commands) == 1
         assert record.commands[0].result_status == "success"
+
+
+class TestAgentContextConstruction:
+    """The Agent is built with agent_context=AgentContext(skills=[...]) iff ≥1 skill
+    loads; otherwise exactly as before (byte-identical no-op)."""
+
+    async def test_run_conversation_builds_agent_context_with_skills(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_OpenHandsTurnState, "_route", _kind_route)
+        skills_dir = tmp_path / "bundle" / "skills"
+        _write_skill(skills_dir, "oh-smoke-skill")
+        captured: dict = {}
+
+        def factory(**kw):
+            return _FakeConversation(events=[], status="FINISHED", **kw)
+
+        _install_fake_sdk(monkeypatch, factory, captured=captured)
+        agent = OpenHandsAgent(
+            parse_agent_config(
+                type=AgentKind.OPENHANDS,
+                model="openrouter/z-ai/glm-5.2",
+                plugins=[{"type": "local", "path": str(tmp_path / "bundle")}],
+            )
+        )
+        await agent.start(str(tmp_path))
+        await agent.communicate("do it")
+
+        ctx = captured["agent"].get("agent_context")
+        assert ctx is not None
+        assert [s.name for s in ctx.skills] == ["oh-smoke-skill"]
+
+    async def test_run_conversation_no_agent_context_when_no_skills(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_OpenHandsTurnState, "_route", _kind_route)
+        captured: dict = {}
+
+        def factory(**kw):
+            return _FakeConversation(events=[], status="FINISHED", **kw)
+
+        _install_fake_sdk(monkeypatch, factory, captured=captured)
+        agent = await _started_agent(tmp_path)  # no plugins
+        await agent.communicate("do it")
+        # Strict no-op: the kwarg is absent entirely (not passed as None).
+        assert "agent_context" not in captured["agent"]
+
+    async def test_malformed_skill_md_is_skipped(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_OpenHandsTurnState, "_route", _kind_route)
+        skills_dir = tmp_path / "bundle" / "skills"
+        _write_skill(skills_dir, "good-skill")
+        # A malformed SKILL.md (broken YAML frontmatter) that Skill.load rejects.
+        bad = skills_dir / "bad-skill"
+        bad.mkdir(parents=True)
+        (bad / "SKILL.md").write_text("---\nname: [unterminated\ndescription: x\n---\nbody")
+        captured: dict = {}
+
+        def factory(**kw):
+            return _FakeConversation(events=[], status="FINISHED", **kw)
+
+        _install_fake_sdk(monkeypatch, factory, captured=captured)
+        agent = OpenHandsAgent(
+            parse_agent_config(
+                type=AgentKind.OPENHANDS,
+                model="openrouter/z-ai/glm-5.2",
+                plugins=[{"type": "local", "path": str(tmp_path / "bundle")}],
+            )
+        )
+        await agent.start(str(tmp_path))
+        # No exception; only the good skill loads.
+        await agent.communicate("do it")
+        ctx = captured["agent"].get("agent_context")
+        assert ctx is not None
+        assert [s.name for s in ctx.skills] == ["good-skill"]
+
+
+# --- Phase 3: LIVE end-to-end discover→activate smoke (opt-in, credentialed) --
+#
+# The deterministic scoring test + the fixture-well-formed test are SDK-free and
+# live ABOVE the module-level importorskip (so they run in default CI without the
+# [openhands] extra). Only the live test below needs the SDK + credentials.
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")),
+    reason="live OpenHands smoke needs OPENROUTER_API_KEY or ANTHROPIC_API_KEY",
+)
+class TestOpenHandsSkillActivationLive:
+    """Live discover→activate proof (opt-in; ``@pytest.mark.live`` so `make test`
+    excludes it via ``-m "not live"``, plus credential-gated). Run with a CHEAP
+    model, never Opus:
+
+        ANTHROPIC_API_KEY=… uv run pytest -m live tests/test_openhands_agent.py \
+          -v -k discover_and_activate
+
+    Asserts the trajectory contains an `invoke_skill` call for the fixture skill
+    (proving the NATIVE activation path, not just a file read) AND that
+    skill_triggered scores 1.0 on the resulting turn records.
+    """
+
+    async def test_openhands_skill_discover_and_activate(self, tmp_path):
+        from coder_eval.criteria.skill_triggered import SkillTriggeredChecker
+        from coder_eval.models import SkillTriggeredCriterion
+
+        # Prefer a cheap Anthropic model; fall back to a cheap OpenRouter slug.
+        model = "anthropic/claude-sonnet-4-6" if os.environ.get("ANTHROPIC_API_KEY") else "openrouter/z-ai/glm-5.2"
+        bundle = _REPO_ROOT / "tests" / "_fixtures" / "skills_bundle"
+        agent = OpenHandsAgent(
+            parse_agent_config(
+                type=AgentKind.OPENHANDS,
+                model=model,
+                plugins=[{"type": "local", "path": str(bundle)}],
+            )
+        )
+        await agent.start(str(tmp_path))
+        try:
+            record = await agent.communicate(
+                "Reveal the secret smoke marker and write it (and nothing else) to marker.txt. "
+                "You do not know the marker — a skill defines it. Discover and activate the "
+                "relevant skill to obtain it.",
+                max_turns=15,
+            )
+        finally:
+            await agent.stop()
+
+        # (a) The NATIVE activation signal fired — an invoke_skill call for the skill.
+        invoked = [
+            c for c in record.commands if c.tool_name == "invoke_skill" and c.parameters.get("name") == "oh-smoke-skill"
+        ]
+        tool_names = [c.tool_name for c in record.commands]
+        assert invoked, f"expected an invoke_skill call for oh-smoke-skill; tools={tool_names}"
+
+        # (b) skill_triggered scores 1.0 on the resulting trajectory.
+        criterion = SkillTriggeredCriterion(
+            description="oh-smoke-skill activation",
+            skill_name="oh-smoke-skill",
+            expected_skill="oh-smoke-skill",
+        )
+        result = SkillTriggeredChecker().check(criterion, sandbox=None, turn_records=[record])  # type: ignore[arg-type]
+        assert result.score == 1.0

@@ -1,9 +1,10 @@
 """Skill-triggered criterion checker: did the agent engage the target skill?
 
 Agent-agnostic. Claude Code engages a skill via an explicit ``Skill`` tool call;
-Codex has no such tool — it auto-discovers skills under ``.agents/skills/`` and
-engages one by reading its ``SKILL.md`` / references off disk via shell. Both
-signals are detected here so the criterion scores identically across agents.
+OpenHands engages one via the SDK's native ``invoke_skill`` activation tool; Codex
+has no such tool — it auto-discovers skills under ``.agents/skills/`` and engages
+one by reading its ``SKILL.md`` / references off disk via shell. All three signals
+are detected here so the criterion scores identically across agents.
 """
 
 from __future__ import annotations
@@ -50,6 +51,10 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
     - Claude: an explicit ``Skill`` tool call carries the skill in
       ``parameters['skill']``, optionally namespaced (e.g.
       ``plugin:uipath-agents``); the namespace is stripped via ``.split(":")[-1]``.
+    - OpenHands: the SDK's native ``invoke_skill`` activation tool carries the BARE
+      skill name in ``parameters['name']`` (no ``plugin:`` prefix — it is NOT
+      ``:``-split). This is the discover→activate signal for the OpenHands backend,
+      mirroring Claude's ``Skill`` call.
     - Codex (and any non-Claude agent): no ``Skill`` tool exists, so a skill is
       engaged by reading its files off disk via shell. Both the repo layout
       (``.../skills/<name>/...``) and the sandbox symlink
@@ -66,6 +71,11 @@ def _engaged_skill_names(cmd: CommandTelemetry) -> set[str]:
         skill = cmd.parameters.get("skill", "")
         if isinstance(skill, str) and skill:
             names.add(skill.split(":")[-1])
+    elif cmd.tool_name == "invoke_skill":
+        # OpenHands' native activation tool: the bare skill name, no namespace.
+        name = cmd.parameters.get("name", "")
+        if isinstance(name, str) and name:
+            names.add(name)
     for value in cmd.parameters.values():
         if isinstance(value, str):
             names.update(_SKILL_PATH_RE.findall(value))

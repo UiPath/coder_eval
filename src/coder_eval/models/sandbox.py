@@ -274,6 +274,11 @@ class DockerDriverConfig(BaseModel):
             # openai/… → OPENAI_API_KEY (ANTHROPIC_API_KEY / AWS_* are already forwarded
             # above). OPENHANDS_MODEL selects the model when agent.model is unset.
             "OPENAI_API_KEY",
+            # OPENAI_API_BASE / OPENAI_BASE_URL let an openai/… model target a custom
+            # OpenAI-compatible endpoint (e.g. the codex/Azure-gateway gpt-5.6 deployment,
+            # mapped from CODEX_BASE_URL) so OpenHands can drive it via LiteLLM.
+            "OPENAI_API_BASE",
+            "OPENAI_BASE_URL",
             "OPENROUTER_API_KEY",
             "OPENHANDS_MODEL",
             # User HOME used to keep ~/.claude resolution symmetric with the host.

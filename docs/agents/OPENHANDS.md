@@ -151,13 +151,29 @@ every other agent.
   booked as the `EventCollector`'s single reconciliation entry — the transcript token
   buckets still sum exactly to the turn total.
 
+## Skills
+
+OpenHands honors `agent.plugins` via the SDK's **native AgentSkills** discover→activate
+loop, so it gets the same skill affordance as Claude/Codex. Each plugin's
+`SKILL.md` is loaded as an SDK `Skill` and handed to the agent through
+`AgentContext(skills=[...])`; the SDK then renders the `<available_skills>`
+progressive-disclosure catalog (names + descriptions only) and auto-attaches its
+built-in `invoke_skill(name=…)` activation tool, which returns the full `SKILL.md`
+body on demand. Skill roots are resolved from `agent.plugins[].path` (env-expanded,
+nested-`skills/` layout preferred) plus the orchestrator's runtime skills dir,
+exactly as for the other agents; under the Docker driver the sanitized bundle path
+is read straight from the rewritten `agent.plugins[].path` (no OpenHands-specific
+plumbing). With no plugins configured this is a strict no-op — the agent is built
+exactly as before.
+
+`skill_triggered` scores OpenHands correctly: its agent-agnostic detector recognizes
+the `invoke_skill` tool call (bare skill name in the `name` parameter) alongside
+Claude's `Skill` tool and Codex's file-read, so activation is credited identically
+across harnesses.
+
 ## Known limitations
 
-1. **`skill_triggered` is not implemented for OpenHands.** OpenHands has no
-   Claude-style Skill tool, so a task that gates on `skill_triggered` scores it as
-   not-triggered for this agent. Exclude / treat it as N/A for cross-harness scoring
-   (a filesystem-read detector is a follow-up).
-2. **Watchdog-only timeout.** There is no native turn timeout; the deadline is
+1. **Watchdog-only timeout.** There is no native turn timeout; the deadline is
    enforced by Coder Eval's `ThreadedWatchdog`, which calls `conversation.pause()`.
    A cooperative pause may not stop a non-yielding native call promptly;
    `kill_sync()` best-effort `close()` is the backstop.
@@ -178,11 +194,12 @@ every other agent.
 
 A harness leaderboard (`agent.type × agent.model`, expressible today as experiment
 variants — see `experiments/harness-comparison.yaml`) is only valid if criteria
-grade **outcomes**, not harness-internal signals. `skill_triggered` inspects
-Claude's Skill tool, so OpenHands scores 0 on it *by construction* — that measures
-"Claude-shapedness", not task quality. Auditing the UiPath criteria for
-harness-neutrality is a prerequisite for a fair cross-harness leaderboard and is a
-separate workstream.
+grade **outcomes**, not harness-internal signals. `skill_triggered` is now
+agent-agnostic — it recognizes each harness's activation signal (Claude's `Skill`
+tool, OpenHands' `invoke_skill`, Codex's file-read), so it measures whether the
+skill was engaged rather than "Claude-shapedness". Auditing the remaining UiPath
+criteria for harness-neutrality is still a prerequisite for a fair cross-harness
+leaderboard and is a separate workstream.
 
 ## Running in Docker
 

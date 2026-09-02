@@ -70,7 +70,7 @@ ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex
 # All extras (codex, antigravity, and the opt-in uipath) resolve from public
 # PyPI per uv.lock, so the build needs no private-index credentials.
 RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS}" && \
-    uv export --frozen --extra codex --extra antigravity ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
+    uv export --frozen --extra codex --extra antigravity --extra openhands ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
 
 # Sanity check: the in-container entrypoint subcommand must be wired up.
 RUN coder-eval _run-task-internal --help > /dev/null

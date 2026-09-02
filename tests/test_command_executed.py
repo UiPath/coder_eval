@@ -1104,3 +1104,183 @@ class TestShellQuotingNormalization:
         )
         result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
         assert result.score == 0.0
+
+
+class TestShellToolHarnessAgnostic:
+    """The `command_executed` criterion treats OpenHands `terminal` as a shell tool.
+
+    A task author writes `tool_name: Bash` once; it must match an OpenHands
+    `terminal` call the same way it matches a Claude/Codex `Bash` call. Non-shell
+    filters (e.g. `Read`) keep exact-match semantics. Claude/Codex `Bash`
+    behavior is byte-for-byte unchanged (covered here plus by `test_match_found`
+    / `test_no_match`, which stand as the Bash regression).
+    """
+
+    def test_terminal_matches_bash_filter(self):
+        """The headline fix: a `terminal` command satisfies a `tool_name: Bash` filter."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="terminal",
+                        parameters={"command": "curl https://wttr.in/London"},
+                        result_status="success",
+                    ),
+                ]
+            )
+        ]
+        criterion = CommandExecutedCriterion(
+            description="Agent used curl to fetch weather (via terminal)",
+            tool_name="Bash",
+            command_pattern=r"curl.*wttr\.in",
+            min_count=1,
+            require_success=True,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+        assert result.error is None
+        assert "1/1" in result.details
+
+    def test_bash_filter_still_matches_bash(self):
+        """Regression twin of `test_match_found`: Bash behavior is unchanged."""
+        sandbox = MockSandbox()
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="Bash",
+                        parameters={"command": "curl https://wttr.in/London"},
+                        result_status="success",
+                    ),
+                ]
+            )
+        ]
+        criterion = CommandExecutedCriterion(
+            description="Agent used curl to fetch weather",
+            tool_name="Bash",
+            command_pattern=r"curl.*wttr\.in",
+            min_count=1,
+            require_success=True,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+
+    def test_non_shell_tool_name_stays_exact(self):
+        """A non-shell `tool_name` filter (`Read`) keeps exact-match semantics.
+
+        A shell command (`Bash`) must NOT satisfy a `Read` filter, and a `Read`
+        command must satisfy it — proving exact-match is preserved and not
+        accidentally broadened by the shell-tool loosening. (Also note: the
+        symmetric case — a hypothetical `tool_name: terminal` filter matching a
+        `Bash` command — is covered implicitly by `_tool_name_matches` in
+        `test_unit_predicate`.)
+        """
+        sandbox = MockSandbox()
+
+        bash_cmd = _make_turn([_make_command(tool_name="Bash", parameters={"command": "grep foo bar.txt"})])
+        read_filter = CommandExecutedCriterion(
+            description="Agent used Read tool",
+            tool_name="Read",
+            min_count=1,
+        )
+        assert SuccessChecker(sandbox).check(read_filter, turn_records=[bash_cmd]).score == 0.0
+
+        read_cmd = _make_turn([_make_command(tool_name="Read", parameters={"file_path": "bar.txt"})])
+        assert SuccessChecker(sandbox).check(read_filter, turn_records=[read_cmd]).score == 1.0
+
+    def test_terminal_normalization_applies(self):
+        """`_normalize_shell` quote-normalization runs for `terminal` commands.
+
+        A `bash -lc "... 'single-quoted' ..."` wrapper form on a `terminal` call
+        matches only against the logical (normalized) command — mirroring the
+        `TestShellQuotingNormalization` wrapper shape but on `terminal` telemetry.
+        """
+        sandbox = MockSandbox()
+        raw = (
+            '/bin/bash -lc "uip is resources run list uipath-salesforce-slack '
+            "'curated_channels?types=public_channel,private_channel' --output json\""
+        )
+        # Pattern allows optional backslash + optional DOUBLE quote, but no single
+        # quote — only the normalized form (single quotes resolved) matches.
+        yaml_pattern = r'uip\s+is\s+resources\s+run\s+list\s+\\?"?uipath-salesforce-slack\\?"?\s+\\?"?curated_channels'
+        turn_records = [_make_turn([_make_command(tool_name="terminal", parameters={"command": raw})])]
+        criterion = CommandExecutedCriterion(
+            description="curated_channels list ran (via terminal)",
+            tool_name="Bash",
+            command_pattern=yaml_pattern,
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 1.0
+        assert "1/1" in result.details
+
+    def test_terminal_non_str_command_falls_back(self):
+        """A `terminal` call without a str `command` is treated as non-shell.
+
+        An `is_input`-only terminal action has no `command` string, so it must
+        serialize its params to a JSON blob (no shell normalization) and get the
+        `terminal(...)` JSON-form label — same guard the Bash path already uses.
+        """
+        sandbox = MockSandbox()
+        turn_records = [_make_turn([_make_command(tool_name="terminal", parameters={"is_input": True})])]
+        # A pattern that would only match a normalized shell form must NOT hit the
+        # JSON blob (which is `{"is_input": true}`).
+        criterion = CommandExecutedCriterion(
+            description="no shell command present",
+            tool_name="Bash",
+            command_pattern=r"^curl",
+            min_count=1,
+        )
+        result = SuccessChecker(sandbox).check(criterion, turn_records=turn_records)
+        assert result.score == 0.0
+
+        # With no pattern, the fallback command still matches the shell filter and
+        # its label is the `terminal(...)` JSON form (not a raw-command label).
+        label_criterion = CommandExecutedCriterion(
+            description="any shell tool call",
+            tool_name="Bash",
+            min_count=1,
+        )
+        label_result = SuccessChecker(sandbox).check(label_criterion, turn_records=turn_records)
+        assert label_result.score == 1.0
+        assert "terminal(" in label_result.details
+
+    def test_live_verdict_terminal_pass(self):
+        """`live_verdict` and `_check_impl` agree on a `terminal`-only trajectory."""
+        from coder_eval.criteria.command_executed import CommandExecutedChecker
+
+        turn_records = [
+            _make_turn(
+                [
+                    _make_command(
+                        tool_name="terminal",
+                        parameters={"command": "curl https://wttr.in/London"},
+                        result_status="success",
+                    ),
+                ]
+            )
+        ]
+        criterion = CommandExecutedCriterion(
+            description="curl via terminal (live)",
+            tool_name="Bash",
+            command_pattern=r"curl.*wttr\.in",
+            min_count=1,
+            max_count=None,
+        )
+        assert CommandExecutedChecker().live_verdict(criterion, turn_records) == "pass"
+
+    def test_unit_predicate(self):
+        """The shell-tool predicates classify tools correctly."""
+        from coder_eval.criteria.command_executed import _is_shell_tool, _tool_name_matches
+
+        assert _is_shell_tool("Bash")
+        assert _is_shell_tool("terminal")
+        assert not _is_shell_tool("Read")
+
+        # Shell tools interchangeable (symmetric); non-shell filter is exact.
+        assert _tool_name_matches("Bash", "terminal")
+        assert _tool_name_matches("terminal", "Bash")
+        assert _tool_name_matches("Bash", "Bash")
+        assert not _tool_name_matches("Read", "Bash")
+        assert _tool_name_matches("Read", "Read")

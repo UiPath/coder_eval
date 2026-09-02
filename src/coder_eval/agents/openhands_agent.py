@@ -82,6 +82,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
@@ -176,6 +177,10 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
         self.route = route or DirectRoute()
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
+        # Runtime skill-tools dir supplied by the orchestrator at start(); the SDK
+        # objects are built per-turn, so skills are resolved at build time in
+        # _run_conversation (a run-time docker-rewritten path is honored then).
+        self._plugin_tools_dir: str | None = None
         # Live handle to the in-flight Conversation, set at the top of communicate()
         # and cleared in its finally. The watchdog / kill paths pause + close it.
         self._active_conversation: Any = None
@@ -207,6 +212,81 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
                 + "'openrouter/z-ai/glm-5.2' or 'anthropic/claude-sonnet-4-6'."
             )
 
+    def _resolve_skill_files(self, plugin_tools_dir: str | None) -> list[Path]:
+        """Resolve each skill's ``SKILL.md`` from ``config.plugins`` + ``plugin_tools_dir``.
+
+        Mirrors ``AntigravityAgent._resolve_skills_paths`` to find the skill *roots*
+        (env-expand each ``type: local`` plugin path, prefer the nested ``skills/``
+        layout, keep the loud warning on an unresolved path), then expands each root
+        to the ``SKILL.md`` files it directly parents (``<root>/<skill>/SKILL.md``).
+        Dedupes by resolved path; returns ``[]`` when nothing resolves (the strict
+        no-op path). The plugin path may be a host path (tempdir driver) or a
+        docker-rewritten in-container path — both resolve by the same ``is_dir()``
+        logic, so this makes no host-only assumption.
+        """
+        sources: list[Path] = []
+        for plugin in self.config.plugins or []:
+            if not (isinstance(plugin, dict) and plugin.get("type") == "local"):
+                continue
+            raw = plugin.get("path")
+            if not raw:
+                continue
+            expanded = expand_env_vars(raw)
+            path = Path(expanded)
+            if path.is_dir():
+                sources.append(path)
+            else:
+                # Loud: an unresolved env var (e.g. unset $SKILLS_REPO_PATH) or a
+                # missing dir silently drops the skills, so the agent runs blind.
+                hint = "env var likely unset" if "$" in expanded else "path does not exist"
+                self._log.warning("Plugin skills path did not resolve: %r → %r (%s)", raw, expanded, hint)
+        if plugin_tools_dir and Path(plugin_tools_dir).is_dir():
+            sources.append(Path(plugin_tools_dir))
+
+        skill_files: list[Path] = []
+        seen: set[str] = set()
+        for source in sources:
+            # Prefer the nested ``skills/`` layout (repo root) over the source itself.
+            for candidate in (source / "skills", source):
+                if not candidate.is_dir():
+                    continue
+                skills = [
+                    child / "SKILL.md"
+                    for child in sorted(candidate.iterdir())
+                    if child.is_dir() and (child / "SKILL.md").exists()
+                ]
+                if skills:
+                    for skill_md in skills:
+                        resolved = str(skill_md.resolve())
+                        if resolved not in seen:
+                            seen.add(resolved)
+                            skill_files.append(skill_md)
+                    break  # first matching layout per source wins
+        if sources and not skill_files:
+            self._log.warning(
+                "0 skills discovered under %s; check the plugin path points at a skills repo root",
+                [str(s) for s in sources],
+            )
+        else:
+            self._log.debug("OpenHands skill files resolved: %s", [str(p) for p in skill_files])
+        return skill_files
+
+    def _load_skills(self, skill_cls: Any, skill_files: list[Path]) -> list[Any]:
+        """Load each resolved ``SKILL.md`` into an SDK ``Skill``, skipping bad ones.
+
+        ``strict=False`` keeps ``Skill.load`` lenient about plugin-derived skill
+        names (hyphenated UiPath names pass validation either way). Each load is
+        guarded so one malformed ``SKILL.md`` (bad frontmatter) is dropped with a
+        warning rather than aborting the whole turn; the remaining skills still load.
+        """
+        skills: list[Any] = []
+        for skill_md in skill_files:
+            try:
+                skills.append(skill_cls.load(skill_md, strict=False))
+            except Exception as e:
+                self._log.warning("Skipping unloadable skill %s: %s", skill_md, e)
+        return skills
+
     async def start(
         self,
         working_directory: str,
@@ -228,11 +308,15 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
                 coder_eval's on-disk success criteria look for them.
             env_path_prepend: Absolute dirs to prepend to PATH so sandbox mock CLIs
                 shadow the real ones for the terminal tool's shell.
-            plugin_tools_dir: Unused (OpenHands has no Claude-style skill discovery
-                surface in v1; ``skill_triggered`` is not implemented for it).
+            plugin_tools_dir: Runtime skills-tools dir (orchestrator seam, same as
+                Claude/Codex/Antigravity). Recorded here and combined with
+                ``config.plugins`` to resolve skill ``SKILL.md`` files at per-turn
+                build time in ``_run_conversation`` (so a docker-rewritten path
+                present only at run time is honored).
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
+        self._plugin_tools_dir = plugin_tools_dir
         # Keep the SDK's startup banner out of the task log.
         os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
         self._state = AgentState.WORKING
@@ -242,18 +326,6 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
             import openhands.tools  # noqa: F401
         except ImportError as e:
             raise RuntimeError("OpenHands SDK not installed. Install with: pip install 'coder-eval[openhands]'") from e
-
-        # OpenHands has no Claude-style skill surface in v1: skill plugins are not
-        # wired and `skill_triggered` is not implemented for it. Warn loudly rather
-        # than silently ignoring a configured `plugins:` block (a task that armed a
-        # skill_triggered criterion against this agent would otherwise score it a
-        # silent always-negative — see docs/agents/OPENHANDS.md "Known limitations").
-        if self.config.plugins:
-            self._log.warning(
-                "OpenHandsAgent ignores agent.plugins (%d configured): "
-                + "skill discovery / skill_triggered are not implemented for this agent.",
-                len(self.config.plugins),
-            )
 
         # Best-effort early feedback; communicate() re-checks authoritatively.
         if model := self._effective_model():
@@ -428,7 +500,8 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
         terminal ``ConversationExecutionStatus`` decides clean-vs-crash and the
         accumulated ``Metrics`` are mapped onto the turn total.
         """
-        from openhands.sdk import LLM, Agent, Conversation, Tool
+        from openhands.sdk import LLM, Agent, AgentContext, Conversation, Tool
+        from openhands.sdk.skills.skill import Skill
 
         # Direct openrouter/* calls carry usage.include (real-cost recovery) + provider
         # routing via the request body; empty for every other prefix — {} is the SDK
@@ -439,7 +512,17 @@ class OpenHandsAgent(Agent[OpenHandsAgentConfig]):
             litellm_extra_body=litellm_extra_body,
             usage_id=state.turn_id,
         )
-        sdk_agent = Agent(llm=llm, tools=[Tool(name=_TERMINAL_TOOL), Tool(name=_FILE_EDITOR_TOOL)])
+        # Native AgentSkills discover→activate: load each SKILL.md as an SDK Skill
+        # and hand them to the Agent via AgentContext. The SDK then renders the
+        # <available_skills> progressive-disclosure catalog and auto-attaches its
+        # built-in InvokeSkillTool (invoke_skill) — verified against v1.40.0 because
+        # include_default_tools is left at its default. Empty ⇒ Agent built exactly
+        # as before (no agent_context) — a strict no-op when no plugins are set.
+        skills = self._load_skills(Skill, self._resolve_skill_files(self._plugin_tools_dir))
+        agent_kwargs: dict[str, Any] = {"llm": llm, "tools": [Tool(name=_TERMINAL_TOOL), Tool(name=_FILE_EDITOR_TOOL)]}
+        if skills:
+            agent_kwargs["agent_context"] = AgentContext(skills=skills)
+        sdk_agent = Agent(**agent_kwargs)
         conversation = Conversation(
             agent=sdk_agent,
             workspace=str(self.working_directory),

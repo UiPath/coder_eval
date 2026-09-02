@@ -23,6 +23,34 @@ logger = logging.getLogger(__name__)
 # shlex never sees more than this many chars and needs no separate size guard.
 _MAX_PATTERN_SEARCH_LEN = 2000
 
+# Tool names that denote a raw shell command carrying its script in
+# parameters["command"] (a str). Claude/Codex use "Bash" (Codex relabels its
+# exec_command/shell/local_shell item types to "Bash" at the agent seam, see
+# codex_agent.py::_TOOL_ITEM_NAMES / _ROLLOUT_FN_NAMES); OpenHands uses
+# "terminal" (openhands_agent.py::_TERMINAL_TOOL). Enumerated (not a predicate)
+# because the set is small, closed, and known — a task author's `tool_name: Bash`
+# filter must match ANY of these so the criterion is harness-agnostic. Literals
+# duplicated intentionally: criteria must not import a specific agent module.
+_SHELL_TOOL_NAMES = frozenset({"Bash", "terminal"})
+
+
+def _is_shell_tool(tool_name: str) -> bool:
+    """True if ``tool_name`` denotes an agent's raw shell tool (Bash/terminal)."""
+    return tool_name in _SHELL_TOOL_NAMES
+
+
+def _tool_name_matches(want: str, got: str) -> bool:
+    """Whether a command's ``got`` tool name satisfies a ``want`` filter.
+
+    Shell tools are interchangeable (a ``tool_name: Bash`` filter matches an
+    OpenHands ``terminal`` call and vice-versa), so the criterion is
+    harness-agnostic. Non-shell filters keep exact-match semantics (a ``Read``
+    filter must not match a ``Bash`` call).
+    """
+    if _is_shell_tool(want):
+        return _is_shell_tool(got)
+    return got == want
+
 
 def _is_shell_program(arg0: str) -> bool:
     """True if argv[0]'s basename looks like a POSIX shell.
@@ -166,21 +194,22 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
         matching: list[str] = []
         for cmd in all_commands:
             # Filter by tool name
-            if criterion.tool_name is not None and cmd.tool_name != criterion.tool_name:
+            if criterion.tool_name is not None and not _tool_name_matches(criterion.tool_name, cmd.tool_name):
                 continue
 
             # Filter by success status
             if criterion.require_success and cmd.result_status != "success":
                 continue
 
-            # Extract text for pattern matching (Bash: command param; others: JSON-serialized params).
+            # Extract text for pattern matching (shell tool (Bash/terminal): command
+            # param; others: JSON-serialized params).
             # ``parameters`` is ``dict[str, Any]``, and a ``command`` value is not
             # guaranteed to be a ``str`` — Codex sub-agent rollout recovery can carry
             # it as an argv *list* (codex_agent.py). Narrow with ``isinstance`` so a
             # non-``str`` value never reaches ``shlex.split``/slicing (which would raise
             # ``AttributeError`` and zero the whole criterion); fall back to the JSON blob.
             raw_command = cmd.parameters.get("command")
-            if cmd.tool_name == "Bash" and isinstance(raw_command, str) and raw_command:
+            if _is_shell_tool(cmd.tool_name) and isinstance(raw_command, str) and raw_command:
                 cmd_text = raw_command
                 is_shell = True
             else:
@@ -204,7 +233,7 @@ class CommandExecutedChecker(BaseCriterion[CommandExecutedCriterion]):
                 continue
 
             # Build a display label for the matched command (same narrowing as above)
-            if cmd.tool_name == "Bash" and isinstance(raw_command, str) and raw_command:
+            if _is_shell_tool(cmd.tool_name) and isinstance(raw_command, str) and raw_command:
                 label = raw_command
             else:
                 label = f"{cmd.tool_name}({json.dumps(cmd.parameters)[:80]})"

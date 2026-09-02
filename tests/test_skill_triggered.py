@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from coder_eval.criteria.skill_triggered import SkillTriggeredChecker
+from coder_eval.criteria.skill_triggered import SkillTriggeredChecker, _engaged_skill_names
 from coder_eval.models import (
     ClassificationCriterionResult,
     CriterionResult,
@@ -393,6 +393,88 @@ class TestSkillTriggeredCodex:
             commands=[_cmd("Read", {"file_path": "/x/skills/uipath-agents/SKILL.md"})],
         )
         assert result.observed_label == "yes" and result.score == 1.0
+
+
+class TestSkillTriggeredOpenHands:
+    """OpenHands engages a skill via the SDK's native ``invoke_skill`` tool.
+
+    The activation surfaces as telemetry ``tool_name == "invoke_skill"`` with the
+    bare skill name in ``parameters["name"]`` (no ``plugin:`` prefix). This is the
+    third agent-agnostic engagement signal, detected in the single
+    ``_engaged_skill_names`` seam alongside Claude's ``Skill`` tool and Codex's
+    file-read.
+    """
+
+    def _invoke(self, name: Any, tool_id: str = "i1") -> CommandTelemetry:
+        return _cmd("invoke_skill", {"name": name}, tool_id=tool_id)
+
+    def test_engaged_skill_names_detects_invoke_skill(self) -> None:
+        names = _engaged_skill_names(self._invoke("uipath-maestro-flow"))
+        assert names == {"uipath-maestro-flow"}
+
+    def test_invoke_skill_missing_name_is_noop(self) -> None:
+        # Missing / empty / non-string name each contribute nothing (no crash).
+        assert _engaged_skill_names(_cmd("invoke_skill", {})) == set()
+        assert _engaged_skill_names(self._invoke("")) == set()
+        assert _engaged_skill_names(self._invoke(123)) == set()
+
+    def test_invoke_skill_name_not_treated_as_namespaced(self) -> None:
+        # Unlike Claude's Skill tool, invoke_skill carries the BARE name — a colon is
+        # not a namespace separator and must NOT be split on (guards against copying
+        # the Claude branch's ``.split(":")``).
+        assert _engaged_skill_names(self._invoke("a:b")) == {"a:b"}
+
+    def test_invoke_skill_positive_row_scores_pass(self) -> None:
+        result = _check(
+            expected_skill="uipath-maestro-flow",
+            skill_name="uipath-maestro-flow",
+            commands=[self._invoke("uipath-maestro-flow")],
+        )
+        assert result.observed_label == "yes" and result.expected_label == "yes" and result.score == 1.0
+
+    def test_invoke_skill_distractor_row_scores_correctly(self) -> None:
+        # An invoke_skill for X against a negative criterion (skill_name=X,
+        # expected_skill="") is a precision miss -> 0.0.
+        fp = _check(expected_skill="", skill_name="oh-x", commands=[self._invoke("oh-x")])
+        assert fp.observed_label == "yes" and fp.score == 0.0
+        # The same run scored for a DIFFERENT positive skill (Y never invoked) ->
+        # undetected -> observed="no", expected="yes" -> 0.0.
+        fn = _check(expected_skill="oh-y", skill_name="oh-y", commands=[self._invoke("oh-x")])
+        assert fn.observed_label == "no" and fn.expected_label == "yes" and fn.score == 0.0
+
+    def test_invoke_skill_live_verdict_latches_pass(self) -> None:
+        criterion = SkillTriggeredCriterion(
+            description="d", expected_skill="uipath-maestro-flow", skill_name="uipath-maestro-flow"
+        )
+        checker = SkillTriggeredChecker()
+        # Before the invoke_skill call appears -> undecided.
+        before = [_turn([_cmd("terminal", {"command": "ls"})])]
+        assert checker.live_verdict(criterion, before) == "undecided"
+        # After the invoke_skill call -> latches pass.
+        after = [_turn([_cmd("terminal", {"command": "ls"}), self._invoke("uipath-maestro-flow")])]
+        assert checker.live_verdict(criterion, after) == "pass"
+
+    def test_detector_matches_real_sdk_invoke_skill_shape(self) -> None:
+        """Guard the detector against a future OpenHands SDK rename (Review #17).
+
+        The detector keys on the literal ``tool_name == "invoke_skill"`` and a
+        top-level ``name`` key. The OpenHands adapter builds telemetry from the
+        SDK's real ``InvokeSkillTool.name`` and ``action.model_dump(mode="json")``,
+        so pin BOTH against the installed SDK: if the tool is renamed or its action
+        field changes, this fails loudly instead of every OpenHands row silently
+        scoring not-triggered (which would corrupt suite P/R/F1).
+        """
+        pytest.importorskip("openhands.sdk")
+        from openhands.sdk.tool.builtins import InvokeSkillTool
+        from openhands.sdk.tool.builtins.invoke_skill import InvokeSkillAction
+
+        assert InvokeSkillTool.name == "invoke_skill"
+        assert "name" in InvokeSkillAction.model_fields
+        params = InvokeSkillAction(name="oh-smoke-skill").model_dump(mode="json")
+        assert params.get("name") == "oh-smoke-skill"
+        # The detector reads exactly this (tool_name, parameters) pair the adapter emits.
+        cmd = _cmd(InvokeSkillTool.name, params)
+        assert _engaged_skill_names(cmd) == {"oh-smoke-skill"}
 
 
 class TestSkillTriggeredCriterionValidation:
