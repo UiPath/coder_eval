@@ -10,7 +10,7 @@ import {
 } from "@/lib/runs";
 import { readRunReviewIndex, indexByTask, tagCountsForRun } from "@/lib/reviews";
 import { sourceById } from "@/lib/sources";
-import { scalarParam, withSource } from "@/app/_lib/source-param";
+import { scalarParam } from "@/app/_lib/source-param";
 import { fmtRunTime } from "@/lib/format";
 import { AnalysisPanel } from "./analysis-panel";
 import { RefreshButton } from "./refresh-button";
@@ -87,22 +87,23 @@ export default async function RunPage({
                             Ad-hoc
                         </span>
                     )}
-                    {/* Refresh re-pulls the run from blob storage and Download
-                        zips it — both are internal-hosting surfaces (the public
-                        OSS edition has no blob backend). See lib/edition.ts. */}
+                    {/* Refresh re-pulls the run from blob storage — an
+                        internal-hosting surface (the public OSS edition has no
+                        blob backend). See lib/edition.ts.
+
+                        There is deliberately no whole-run download here. A
+                        nightly run is ~10k blobs / ~400 MB, and zipping it meant
+                        fetching every one of them with no concurrency cap,
+                        walking the tree with a stat per file over Azure Files,
+                        and buffering the entire archive in memory before the
+                        first byte reached the browser — minutes of apparent
+                        hang, against a process that already peaks at 2.7 GB RSS.
+                        Per-task download (on the task page) is the supported
+                        shape; it bundles a handful of files and returns in
+                        well under a second. */}
                     {isInternal && (
                         <div className="ml-auto flex items-center gap-2">
                             <RefreshButton runId={id} sourceId={source.id} />
-                            <a
-                                href={withSource(
-                                    `/api/download?run=${encodeURIComponent(id)}`,
-                                    source.id,
-                                )}
-                                className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
-                                download
-                            >
-                                ↓ Download run (.zip)
-                            </a>
                         </div>
                     )}
                 </div>

@@ -553,6 +553,46 @@ describe("findMatureSourceRuns", () => {
         expect(await findMatureSourceRuns(["a"], "nope", deps)).toEqual({});
     });
 
+    // The scan reads in concurrent batches but must still consume them in index
+    // order — otherwise "the most recent run that executed this task" becomes
+    // "whichever read resolved first", which is nondeterministic and wrong.
+    test("within one batch, the newer run still wins", async () => {
+        const readRun = vi.fn(async (id: string) => {
+            // Resolve out of index order, so a scan that trusted completion
+            // order instead of index order would answer r2.
+            if (id === "r2") return runs.r2;
+            await Promise.resolve();
+            return runs[id] ?? null;
+        });
+        const out = await findMatureSourceRuns(["a"], "r5", {
+            listIds: async () => ids,
+            readRun,
+        });
+        expect(out).toEqual({ a: "r3" });
+    });
+
+    test("resolves across a batch boundary", async () => {
+        // 7 runs, so the first batch of 5 cannot resolve the task and the walk
+        // has to continue into the second.
+        const longIds = ["s7", "s6", "s5", "s4", "s3", "s2", "s1"];
+        const skipped = { task_results: [{ task_id: "a", mature_skipped: true }] };
+        const longRuns: Record<string, unknown> = {
+            s7: skipped,
+            s6: skipped,
+            s5: skipped,
+            s4: skipped,
+            s3: skipped,
+            s2: skipped,
+            s1: { task_results: [{ task_id: "a" }] },
+        };
+        const out = await findMatureSourceRuns(["a"], "s7", {
+            listIds: async () => longIds,
+            readRun: async (id: string) =>
+                (longRuns[id] as (typeof runs)[string]) ?? null,
+        });
+        expect(out).toEqual({ a: "s1" });
+    });
+
     test("a task with no earlier execution is omitted (stays non-clickable)", async () => {
         const onlyB = {
             listIds: async () => ["r2", "r1"],

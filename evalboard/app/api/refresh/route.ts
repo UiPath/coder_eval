@@ -1,5 +1,7 @@
+import { revalidateTag } from "next/cache";
 import { NextResponse } from "next/server";
 import { LOCAL_RUNS_DIR } from "@/lib/blob";
+import { runCacheTag } from "@/lib/overview";
 import { RUNS_DIR, clearRunCacheDir } from "@/lib/runs";
 import { runsDirFor, sourceById } from "@/lib/sources";
 
@@ -37,8 +39,12 @@ export async function POST(req: Request) {
     if (!(await clearRunCacheDir(runsDirFor(RUNS_DIR, source), runId))) {
         return NextResponse.json({ error: "invalid run" }, { status: 400 });
     }
+    // Evicting the on-disk copy is only half the job: the front page reads a
+    // memoized PROJECTION of it (lib/overview.ts::cachedLoadPerRunFor), and a
+    // settled run's projection is held for a day. Drop that entry too, or the
+    // refresh silently does nothing for every run older than 24h.
+    revalidateTag(runCacheTag(source.id, runId));
     // Re-download is lazy on next render. The run page is force-dynamic and
-    // reads the sidecars straight from disk, so it is fresh immediately; the
-    // homepage's per-run title list self-heals within its 5-minute revalidate.
+    // reads the sidecars straight from disk, so it is fresh immediately.
     return new Response(null, { status: 204 });
 }

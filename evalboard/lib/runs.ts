@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { cache } from "react";
 import {
     LOCAL_RUNS_DIR,
     ensureActivationSummary,
     ensureRunAnalysis,
-    ensureRunDir,
     ensureRunMeta,
     ensureRunSummary,
     ensureTaskDir,
@@ -693,14 +693,28 @@ async function readJson<T>(p: string): Promise<T | null> {
     }
 }
 
-async function readRunJson(
-    id: string,
-    source: Source = DEFAULT_SOURCE,
-): Promise<RawRunJson | null> {
-    const dir = runsDirFor(RUNS_DIR, source);
-    await ensureRunSummary(source.container, id, dir);
-    return readJson<RawRunJson>(path.join(dir, id, "run.json"));
-}
+// Request-scoped memo. A run.json is 1.5–6.5 MB and several readers want the
+// same one in a single render: the run page alone calls readRunSummary AND
+// readRunTasks on the same id, and findMatureSourceRuns walks back through
+// earlier runs that the same page may also be listing. `dedupe` in blob.ts only
+// collapses the DOWNLOAD — without this each caller still paid its own read off
+// the Azure Files mount plus its own JSON.parse.
+//
+// react/cache is per-request, so this never serves one request's data to
+// another; cross-request caching stays with unstable_cache in lib/overview.ts.
+// Keyed on the argument tuple, hence `source` last with a default — callers
+// that omit it and callers that pass DEFAULT_SOURCE are different keys, which
+// costs an extra read at worst and can never return the wrong container.
+const readRunJson = cache(
+    async (
+        id: string,
+        source: Source = DEFAULT_SOURCE,
+    ): Promise<RawRunJson | null> => {
+        const dir = runsDirFor(RUNS_DIR, source);
+        await ensureRunSummary(source.container, id, dir);
+        return readJson<RawRunJson>(path.join(dir, id, "run.json"));
+    },
+);
 
 // The activation suite is a nested sub-run: its self-contained run.json (enriched
 // cases + the per-skill rollup) lives at <id>/activation/run.json, separate from
@@ -877,8 +891,8 @@ export async function readRunTasks(
 // slot (SLOT_COUNT = 5 in the runner's maturity.py), so its most recent real
 // execution is at most ~5 *canonical* runs back; the headroom absorbs ad-hoc /
 // smoke runs that listRunIds() interleaves but maturity replay ignores. The scan
-// short-circuits as soon as every task is resolved, so this is a safety cap, not
-// the typical read count.
+// short-circuits once every task is resolved (at batch granularity — see the
+// walk below), so this is a safety cap, not the typical read count.
 const MATURE_SOURCE_LOOKBACK = 20;
 
 // For each mature-skipped task in `fromRunId`, find the most recent *earlier* run
@@ -909,13 +923,25 @@ export async function findMatureSourceRuns(
 
     const unresolved = new Set(matureTaskIds);
     const limit = Math.min(ids.length, start + 1 + MATURE_SOURCE_LOOKBACK);
-    for (let i = start + 1; i < limit && unresolved.size > 0; i++) {
-        const data = await readRun(ids[i]);
-        for (const t of data?.task_results ?? []) {
-            const tid = t.task_id;
-            if (!tid || !unresolved.has(tid) || t.mature_skipped) continue;
-            out[tid] = ids[i];
-            unresolved.delete(tid);
+    // Read in small concurrent batches, then CONSUME each batch in index order
+    // so "the most recent run that executed this task" is unchanged — the walk
+    // is still newest-first, only the IO overlaps. Serially, a run page with
+    // mature rows paid 20 round-trips to Azure Files back-to-back before it
+    // could render, and the scan only short-circuits once every mature task
+    // resolves, which with ~50% of tasks carried forward usually never happens.
+    // The cost of overshooting is at most BATCH-1 extra reads, and those are
+    // request-memoized (see readRunJson) for anything else on the page.
+    const BATCH = 5;
+    for (let i = start + 1; i < limit && unresolved.size > 0; i += BATCH) {
+        const batch = ids.slice(i, Math.min(i + BATCH, limit));
+        const loaded = await Promise.all(batch.map((id) => readRun(id)));
+        for (let j = 0; j < batch.length && unresolved.size > 0; j++) {
+            for (const t of loaded[j]?.task_results ?? []) {
+                const tid = t.task_id;
+                if (!tid || !unresolved.has(tid) || t.mature_skipped) continue;
+                out[tid] = batch[j];
+                unresolved.delete(tid);
+            }
         }
     }
     return out;
@@ -2460,23 +2486,6 @@ export async function collectTaskFiles(
     const refs = await walkArtifacts(taskDir);
     if (refs.length === 0) return null;
     return refs.map((r) => ({ relPath: r.relPath, abs: path.join(taskDir, r.relPath) }));
-}
-
-// Collect every file under a whole run (`<runId>/`) for the download-as-zip
-// button on the run page. Same noise filter / symlink skip as collectTaskFiles,
-// applied across all task subdirs plus run-level files (run.json, analysis.md,
-// meta.json, …). Returns null for an invalid id or a missing/empty run dir.
-export async function collectRunFiles(
-    runId: string,
-    source: Source = DEFAULT_SOURCE,
-): Promise<{ relPath: string; abs: string }[] | null> {
-    if (!isValidId(runId)) return null;
-    const dir = runsDirFor(RUNS_DIR, source);
-    await ensureRunDir(source.container, runId, dir);
-    const runDir = path.join(dir, runId);
-    const refs = await walkArtifacts(runDir);
-    if (refs.length === 0) return null;
-    return refs.map((r) => ({ relPath: r.relPath, abs: path.join(runDir, r.relPath) }));
 }
 
 export async function resolveSafePath(
