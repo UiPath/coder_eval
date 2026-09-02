@@ -147,6 +147,38 @@ class TestCE046EnvInfoSpreadsSuper:
 
 
 @pytest.mark.lint
+class TestCE047EmbeddedShimStdlibOnly:
+    """CE047 flags a non-stdlib import in a module embedded into generated shims."""
+
+    @staticmethod
+    def _run(src: str, *, embedded: bool = True):
+        import ast
+
+        from tests.lint.rules.ce047_embedded_shim_stdlib_only import EmbeddedShimStdlibOnly
+
+        path = "src/coder_eval/argv_match.py" if embedded else "src/coder_eval/invocation_log.py"
+        return EmbeddedShimStdlibOnly(path).check(ast.parse(src))
+
+    def test_flags_package_import(self):
+        assert self._run("from coder_eval.models import FlagMatch")
+        assert self._run("import coder_eval.models")
+
+    def test_flags_third_party_import(self):
+        assert self._run("import pydantic")
+        assert self._run("from pydantic import BaseModel")
+
+    def test_flags_relative_import(self):
+        assert self._run("from .models import FlagMatch")
+
+    def test_allows_stdlib(self):
+        assert not self._run("import re\nimport json")
+
+    def test_ignores_files_that_are_not_embedded(self):
+        # invocation_log.py renders the shim; it is not itself copied into one.
+        assert not self._run("from coder_eval.models import RecordedCli", embedded=False)
+
+
+@pytest.mark.lint
 class TestCE017ModelsLazyAgentImports:
     """CE017 flags only module-level agents/plugins imports inside models/."""
 

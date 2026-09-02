@@ -645,10 +645,11 @@ class Sandbox:
                 newline="",
             )
 
-        logger.info(
-            f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/: "
-            + ", ".join(f"{s.tool}(exit {s.exit_code})" for s in self.config.record_cli)
+        summary = ", ".join(
+            f"{s.tool}(exit {s.exit_code}" + (f", {len(s.responses)} rule(s)" if s.responses else "") + ")"
+            for s in self.config.record_cli
         )
+        logger.info(f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/: {summary}")
 
     def _apply_starter_files_source(self, source: StarterFilesSource) -> None:
         """Create inline starter files in sandbox with overwrite tracking.

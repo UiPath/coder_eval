@@ -26,6 +26,7 @@ from tests.lint.rules.ce038_acquire_inside_try import AcquireInsideTry
 from tests.lint.rules.ce039_config_error_escalates import ConfigErrorEscalates
 from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
 from tests.lint.rules.ce046_env_info_spreads_super import EnvInfoSpreadsSuper
+from tests.lint.rules.ce047_embedded_shim_stdlib_only import EmbeddedShimStdlibOnly
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -75,6 +76,7 @@ ALL_RULES: list[RuleClass] = [
     ConfigErrorEscalates,
     NoCommandOutputTruncation,
     EnvInfoSpreadsSuper,
+    EmbeddedShimStdlibOnly,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from coder_eval.models import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
     CliCalledCriterion,
+    CliResponse,
     RecordedCli,
     SandboxConfig,
     StarterFile,
@@ -504,3 +506,165 @@ class TestRenderedSource:
         assert [argv for argv, _ in usable] == [["a"]]
         # An argv that is not list[str] is unusable, not a non-match.
         assert unusable == 2
+
+
+class TestPerInvocationResponses:
+    """`responses:` — one shadowed tool answering each subcommand differently.
+
+    The reason the shim is more than a recorder: an agent that reads
+    `ixp projects list` and acts on what came back cannot be evaluated by a stub
+    that returns the same line for everything it types.
+    """
+
+    @staticmethod
+    def _spec() -> RecordedCli:
+        return RecordedCli(
+            tool="uip",
+            exit_code=1,
+            stderr="uip: unknown command\n",
+            responses=[
+                CliResponse(when={"verb": "ixp dummy1"}, stdout="response1\n"),
+                CliResponse(when={"verb": "ixp dummy2"}, stdout="response2\n"),
+            ],
+        )
+
+    def test_each_verb_gets_its_own_response(self):
+        sandbox = _sandbox("record_responses", record_cli=[self._spec()])
+        try:
+            sandbox_dir = sandbox.setup()
+            first = _run_shim(sandbox_dir, "uip", ["ixp", "dummy1"])
+            second = _run_shim(sandbox_dir, "uip", ["ixp", "dummy2"])
+            assert (first.returncode, first.stdout) == (0, "response1\n")
+            assert (second.returncode, second.stdout) == (0, "response2\n")
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_unmatched_invocation_falls_back_to_the_entry_defaults(self):
+        sandbox = _sandbox("record_responses_fallback", record_cli=[self._spec()])
+        try:
+            sandbox_dir = sandbox.setup()
+            proc = _run_shim(sandbox_dir, "uip", ["ixp", "dummy3"])
+            assert proc.returncode == 1
+            assert proc.stdout == ""
+            assert "unknown command" in proc.stderr
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_log_names_the_rule_that_answered(self):
+        """ "Returned the default" and "rule 1 answered" are otherwise the same line."""
+        sandbox = _sandbox("record_responses_log", record_cli=[self._spec()])
+        try:
+            sandbox_dir = sandbox.setup()
+            _run_shim(sandbox_dir, "uip", ["ixp", "dummy2"])
+            _run_shim(sandbox_dir, "uip", ["ixp", "dummy3"])
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            assert records[0]["rule"] == 1
+            assert records[0]["exit"] == 0
+            assert "rule" not in records[1], "no rule matched, so none may be claimed"
+            assert records[1]["exit"] == 1
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_first_matching_rule_wins(self):
+        """Order is the author's disambiguation tool, so the general rule last."""
+        spec = RecordedCli(
+            tool="uip",
+            responses=[
+                CliResponse(when={"verb": "ixp projects get proj-1"}, stdout="specific\n"),
+                CliResponse(when={"verb": "ixp projects get"}, stdout="generic\n"),
+            ],
+        )
+        sandbox = _sandbox("record_responses_order", record_cli=[spec])
+        try:
+            sandbox_dir = sandbox.setup()
+            assert _run_shim(sandbox_dir, "uip", ["ixp", "projects", "get", "proj-1"]).stdout == "specific\n"
+            assert _run_shim(sandbox_dir, "uip", ["ixp", "projects", "get", "proj-9"]).stdout == "generic\n"
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_rule_can_match_on_flags_and_positional(self):
+        spec = RecordedCli(
+            tool="uip",
+            responses=[
+                CliResponse(
+                    when={"verb": "ixp projects get", "positional": ["proj-1"], "flags": {"output": "json"}},
+                    stdout='{"id": "proj-1"}',
+                ),
+                CliResponse(when={"verb": "ixp projects get"}, stdout="proj-1 (table)\n"),
+            ],
+        )
+        sandbox = _sandbox("record_responses_flags", record_cli=[spec])
+        try:
+            sandbox_dir = sandbox.setup()
+            asked_json = _run_shim(sandbox_dir, "uip", ["ixp", "projects", "get", "proj-1", "--output", "json"])
+            asked_table = _run_shim(sandbox_dir, "uip", ["ixp", "projects", "get", "proj-1"])
+            other_project = _run_shim(sandbox_dir, "uip", ["ixp", "projects", "get", "proj-2", "--output", "json"])
+            assert asked_json.stdout == '{"id": "proj-1"}'
+            assert asked_table.stdout == "proj-1 (table)\n"
+            assert other_project.stdout == "proj-1 (table)\n"
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_stderr_and_exit_code_are_per_rule(self):
+        spec = RecordedCli(
+            tool="uip",
+            exit_code=0,
+            responses=[CliResponse(when={"verb": "ixp projects get missing"}, exit_code=4, stderr="not found\n")],
+        )
+        sandbox = _sandbox("record_responses_failure", record_cli=[spec])
+        try:
+            sandbox_dir = sandbox.setup()
+            proc = _run_shim(sandbox_dir, "uip", ["ixp", "projects", "get", "missing"])
+            assert (proc.returncode, proc.stderr) == (4, "not found\n")
+            # The entry default still applies to everything else, including its 0.
+            assert _run_shim(sandbox_dir, "uip", ["ixp", "projects", "list"]).returncode == 0
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_the_pattern_that_served_the_response_also_grades_it(self):
+        """One semantic across both surfaces: same facets, same verdict.
+
+        A rule and a criterion written from the same pattern must agree, or a task
+        stubs one invocation and grades another.
+        """
+        pattern = {"verb": "ixp projects configure-model", "positional": ["proj-1"], "flags": {"model": "pro"}}
+        spec = RecordedCli(tool="uip", responses=[CliResponse(when=dict(pattern), stdout="ok\n")])
+        sandbox = _sandbox("record_responses_parity", record_cli=[spec])
+        try:
+            sandbox_dir = sandbox.setup()
+            served = _run_shim(sandbox_dir, "uip", ["ixp", "projects", "configure-model", "proj-1", "--model", "pro"])
+            assert served.stdout == "ok\n", "the rule did not match, so the grading half proves nothing"
+            criterion = CliCalledCriterion(description="configured the model", **pattern)
+            assert SuccessChecker(sandbox).check(criterion).score == 1.0
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_matcher_is_embedded_only_when_rules_exist(self):
+        """A shim with no rules never consults the matcher, so it does not carry it."""
+        plain = render_recorder(RecordedCli(tool="uip"))
+        with_rules = render_recorder(RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})]))
+        assert "argv_match.py" not in plain
+        assert "def argv_matches" not in plain
+        assert "def argv_matches" in with_rules
+        # Both must be valid Python: the embedded half lands mid-file.
+        compile(plain, "shim", "exec")
+        compile(with_rules, "shim", "exec")
+
+    def test_embedded_matcher_is_the_shipped_source_verbatim(self):
+        """Not a paraphrase: the shim's matcher IS coder_eval/argv_match.py."""
+        from coder_eval import argv_match
+
+        shipped = Path(argv_match.__file__).read_text(encoding="utf-8")
+        rendered = render_recorder(RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})]))
+        assert shipped.strip() in rendered
+
+    def test_response_rule_needs_a_facet(self):
+        """A catch-all rule is the entry's own default; two ways to say it is one too many."""
+        with pytest.raises(ValidationError, match="at least one of verb"):
+            CliResponse(when={})
+
+    def test_a_bare_string_when_is_rejected_with_the_fix(self):
+        """One shape for a pattern. A lone string leaves which of six facets it sets
+        to inference, and reads enough like a command line to invite flags."""
+        with pytest.raises(ValidationError, match=r'use \{verb: "ixp dummy1"\}'):
+            CliResponse(when="ixp dummy1")

@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from coder_eval.models.cli_match import CliMatch
 from coder_eval.models.container_paths import CONTAINER_WORK_DIR, RESERVED_CONTAINER_DIRS
 from coder_eval.models.merge_strategy import MergeField
 from coder_eval.models.templates import TemplateSource
@@ -325,6 +326,40 @@ RECORD_CLI_RESERVED_TOOLS = frozenset(
 )
 
 
+class CliResponse(BaseModel):
+    """One canned response, served when an invocation matches ``when``.
+
+    The reason a shadowed tool can answer `uip ixp dummy1` and `uip ixp dummy2`
+    differently instead of returning one fixed pair of streams for everything an
+    agent types. Rules are tried in declaration order and the FIRST match wins,
+    so the specific rule goes above the general one; an invocation matching no
+    rule falls back to the entry's own ``exit_code`` / ``stdout`` / ``stderr``.
+
+    ``exit_code`` defaults to 0 here, the opposite of :class:`RecordedCli`: a rule
+    exists because the author described this exact invocation, so the natural
+    reading is "and this is what it answers", whereas an undescribed one should
+    look like a tool that failed rather than a silent success.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    when: CliMatch = Field(
+        description=(
+            'Pattern the invocation must match, e.g. {verb: "ixp dummy1"}. Always a mapping -- same '
+            "facets and same matching semantics as the cli_called criterion, so the pattern that "
+            "serves a response is the pattern that grades it"
+        )
+    )
+    exit_code: int = Field(
+        default=0,
+        ge=0,
+        le=255,
+        description="Exit status the shim returns for a matching invocation. Defaults to 0 (success)",
+    )
+    stdout: str = Field(default="", description="Text the shim writes to stdout for a matching invocation")
+    stderr: str = Field(default="", description="Text the shim writes to stderr for a matching invocation")
+
+
 class RecordedCli(BaseModel):
     """One executable to shadow with a generated recording shim.
 
@@ -334,6 +369,11 @@ class RecordedCli(BaseModel):
     ``cli_called`` criterion reads by default, so a task asserts on what actually
     ran without hand-rolling a mock and without the record shape being a contract
     between two repositories.
+
+    The fields below are what every invocation gets; ``responses`` overrides them
+    per invocation, so one shadowed ``uip`` can answer ``ixp dummy1`` and
+    ``ixp dummy2`` differently — what an agent needs when its next step depends on
+    what the tool just told it.
 
     It stubs a tool; it does not proxy one. A test that needs a REAL executable's
     behavior recorded on the way through still supplies its own wrapper under
@@ -367,6 +407,17 @@ class RecordedCli(BaseModel):
         description=(
             "Text the shim writes to stderr. Use it to explain the failure the way the real tool "
             "would, so an agent reads a plausible error rather than silence"
+        ),
+    )
+    responses: list[CliResponse] = MergeField(
+        strategy="replace",
+        default_factory=list,
+        description=(
+            "Per-invocation responses, tried in order until one matches; the fields above are the "
+            "fallback for an invocation none of them claim. Use it when the agent's next step "
+            "depends on what the tool answered -- `ixp projects list` returning a project the agent "
+            "then acts on, say -- instead of one fixed reply to everything. Replaced (not merged) "
+            "across config layers, like the enclosing record_cli list"
         ),
     )
 
@@ -458,10 +509,11 @@ class SandboxConfig(BaseModel):
             "Executables to shadow with a generated recording shim. The sandbox writes each shim "
             f"into '{RECORD_CLI_DIR}/' and PATH-prepends that directory, so the agent's calls are "
             f"recorded as JSON Lines in '{RECORD_CLI_LOG}' — the log a 'cli_called' criterion reads "
-            "by default. Use instead of hand-writing a mock under mock_path_dirs when all the test "
-            "needs is a faithful record of what ran plus a canned exit status and message. It does "
-            "NOT serve per-invocation responses and does NOT proxy the real executable; supply your "
-            "own mock for either. Replaced (not merged) across config layers, like mock_path_dirs."
+            "by default. Use instead of hand-writing a mock under mock_path_dirs when the test needs "
+            "a faithful record of what ran plus canned output -- one reply per entry, or a different "
+            "one per invocation via that entry's 'responses'. It does NOT proxy the real executable "
+            "(nothing is run, so no network, auth, or side effect); supply your own mock for that. "
+            "Replaced (not merged) across config layers, like mock_path_dirs."
         ),
     )
 

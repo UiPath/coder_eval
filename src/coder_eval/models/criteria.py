@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import itertools
 from abc import ABC, abstractmethod
 from pathlib import PurePosixPath
 from typing import Annotated, Any, ClassVar, Literal, Self
@@ -16,6 +15,14 @@ from typing import Annotated, Any, ClassVar, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from coder_eval.models.agent_config import AgentConfig, ClaudeCodeAgentConfig, parse_agent_config
+from coder_eval.models.cli_match import (
+    FlagMatch,
+    build_match_spec,
+    validate_flag_ownership,
+    validate_positional,
+    validate_verbs,
+    verb_spellings_of,
+)
 from coder_eval.models.enums import AgentKind
 from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.sandbox import RECORD_CLI_LOG
@@ -420,112 +427,6 @@ class FileMatchesRegexCriterion(BaseSuccessCriterion):
     flags: int = Field(default=0, description="Regex flags (e.g., re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16)")
 
 
-class FlagMatch(BaseModel):
-    """Predicate for ONE flag value within :class:`CliCalledCriterion`.
-
-    Exactly one predicate field may be set. In YAML a bare scalar is accepted as
-    shorthand for ``equals`` (``model: gemini_2_5_pro`` == ``model: {equals:
-    gemini_2_5_pro}``), which keeps the common case unnested.
-
-    ``absent: true`` asserts the flag was NOT passed — distinct from "passed with
-    a different value", and the reason this is a predicate rather than a bare
-    ``dict[str, str]`` on the criterion.
-
-    The one-predicate rule means a conjunction on a single flag ("contains BOTH
-    A and B") is not expressible here. Either declare two ``cli_called`` criteria
-    over the same log, or use one ``matches_regex`` that spans both — the latter
-    is what a heredoc-built JSON payload usually wants, together with
-    ``flags: 16`` (``re.DOTALL``) so ``.`` crosses the payload's newlines.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    equals: str | None = Field(default=None, description="Flag value must equal this string exactly")
-    contains: str | None = Field(default=None, description="Flag value must contain this substring")
-    matches_regex: str | None = Field(
-        default=None,
-        description="Flag value must match this regex. Scoped to ONE value, unlike a whole-line pattern",
-    )
-    any_of: list[str] | None = Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Flag value must equal one of these strings. Non-empty: an empty list would match "
-            "nothing, so a max_count: 0 guard built on it would pass vacuously"
-        ),
-    )
-    absent: bool = Field(default=False, description="Flag must NOT be present in the invocation")
-    present: bool = Field(
-        default=False,
-        description=(
-            "Flag must be present, whatever its value -- the predicate for a boolean switch. Unlike "
-            '`equals: ""` it survives a CLI that spells the switch `--force true`, and it never makes '
-            "the flag value-bearing, so asserting a switch cannot swallow the next positional"
-        ),
-    )
-    aliases: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Other names for the SAME flag, e.g. aliases: [y] on a `yes` predicate so `-y` and "
-            "`--yes` are one flag. Values are gathered across every name: `present` holds if any "
-            "appeared, `absent` only if none did, a value predicate matches if any value under any "
-            "name satisfies it"
-        ),
-    )
-    flags: int = Field(
-        default=0,
-        description=(
-            "Regex flags for matches_regex (re.IGNORECASE=2, re.MULTILINE=8, re.DOTALL=16), "
-            "mirroring FileMatchesRegexCriterion.flags. DOTALL is the usual need, since a "
-            "heredoc-built flag value spans lines"
-        ),
-    )
-
-    @property
-    def needs_value(self) -> bool:
-        """Whether evaluating this predicate requires the flag's VALUE.
-
-        Presence predicates (``present`` / ``absent``) do not, so they must not
-        make a flag value-bearing. Otherwise asserting a boolean switch would
-        make it consume the following token: adding ``flags: {yes: {present:
-        true}}`` to a guard on ``delete --yes proj-1`` would bind
-        ``yes=proj-1``, drop ``proj-1`` from the positionals, and hand the guard
-        a false PASS -- reintroducing the very defect declared value-binding
-        exists to prevent.
-        """
-        return not (self.present or self.absent)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _coerce_scalar_shorthand(cls, value: Any) -> Any:
-        """Accept ``model: gemini_2_5_pro`` as ``model: {equals: ...}``."""
-        if isinstance(value, str):
-            return {"equals": value}
-        return value
-
-    @model_validator(mode="after")
-    def _exactly_one_predicate(self) -> FlagMatch:
-        set_predicates = [
-            name for name in ("equals", "contains", "matches_regex", "any_of") if getattr(self, name) is not None
-        ]
-        if self.absent:
-            set_predicates.append("absent")
-        if self.present:
-            set_predicates.append("present")
-        if len(set_predicates) != 1:
-            msg = (
-                "FlagMatch requires exactly one of equals / contains / matches_regex / any_of / absent / present, "
-                f"got {sorted(set_predicates) or 'none'}"
-            )
-            raise ValueError(msg)
-        # `flags` only reaches re.compile via matches_regex; setting it beside any
-        # other predicate is a silent no-op, so reject it rather than mislead.
-        if self.flags and self.matches_regex is None:
-            msg = f"FlagMatch.flags applies only to matches_regex, but the predicate is {set_predicates[0]!r}"
-            raise ValueError(msg)
-        return self
-
-
 class CliCalledCriterion(BaseSuccessCriterion):
     """Check whether a CLI invocation matching a structured pattern was recorded.
 
@@ -664,40 +565,28 @@ class CliCalledCriterion(BaseSuccessCriterion):
         The only place either verb field is split, so the validators, the matcher and
         the failure detail cannot disagree.
         """
-        if self.verb is not None:
-            return [self.verb.split()]
-        if self.verb_any_of is not None:
-            return [spelling.split() for spelling in self.verb_any_of]
-        return []
+        return verb_spellings_of(self.verb, self.verb_any_of)
+
+    @property
+    def match_spec(self) -> dict[str, Any]:
+        """This criterion's argv facets as the dict :mod:`coder_eval.argv_match` reads.
+
+        The same lowering a ``record_cli`` response rule uses, so a rule that
+        serves a response and the criterion that grades it cannot read one argv
+        two ways. ``tool`` stays out: it matches a log record's field, not argv.
+        """
+        return build_match_spec(
+            verb_spellings=self.verb_spellings,
+            positional=self.positional,
+            flags=self.flags,
+            value_flags=self.value_flags,
+            ignore_flags=self.ignore_flags,
+        )
 
     @model_validator(mode="after")
     def _validate_verb(self) -> CliCalledCriterion:
         """Verb rules, kept off _validate_bounds so neither grows unreadable."""
-        if self.verb is not None and self.verb_any_of is not None:
-            msg = "cli_called accepts verb or verb_any_of, not both"
-            raise ValueError(msg)
-        # Falsy, so the at-least-one-facet check below would read it as "no verb".
-        if self.verb_any_of is not None and not self.verb_any_of:
-            msg = "cli_called verb_any_of must not be empty: drop the field to match any verb"
-            raise ValueError(msg)
-        # A character count would pass "   ", whose split() is an empty prefix.
-        if any(not tokens for tokens in self.verb_spellings):
-            msg = "cli_called verb must not be blank: a blank verb is an empty prefix and matches every record"
-            raise ValueError(msg)
-        for first, second in itertools.combinations(self.verb_spellings, 2):
-            if first == second:
-                msg = f"cli_called verb_any_of lists {' '.join(first)!r} twice"
-                raise ValueError(msg)
-            # Sorting by length is total here: two DISTINCT entries of equal length
-            # cannot prefix each other, since an equal-length prefix is the same list.
-            shorter, longer = sorted((first, second), key=len)
-            if longer[: len(shorter)] == shorter:
-                msg = (
-                    f"cli_called verb_any_of entry {' '.join(shorter)!r} is a prefix of "
-                    f"{' '.join(longer)!r}; the shorter one already accepts every invocation the "
-                    "longer one does, so drop the longer entry or list only the verbs you mean."
-                )
-                raise ValueError(msg)
+        validate_verbs(self.verb, self.verb_any_of, self.verb_spellings, "cli_called")
         return self
 
     @model_validator(mode="after")
@@ -715,45 +604,15 @@ class CliCalledCriterion(BaseSuccessCriterion):
             raise ValueError(msg)
         # Matching slices an empty expectation and compares it to itself, so this reads
         # as "took no arguments" while asserting nothing.
-        if self.positional is not None and not self.positional:
-            msg = (
-                "cli_called positional must not be empty: an empty list asserts nothing. List the "
-                "arguments you expect, or drop the field."
-            )
-            raise ValueError(msg)
+        validate_positional(self.positional, "cli_called")
         # Falsiness, not `is None`: `verb: ""` slipped past an `is None` check here and
-        # then matched every record, scoring 1.0.
+        # then matched every record, scoring 1.0. `tool` counts as a facet here (but not
+        # for a response rule), since a criterion may legitimately count every
+        # invocation of one shadowed executable.
         if not self.verb and not self.verb_any_of and not self.positional and not self.flags and not self.tool:
             msg = "cli_called requires at least one of verb / verb_any_of / positional / flags / tool to match on"
             raise ValueError(msg)
-        # A predicate on an ignored flag can never be evaluated: ignore_flags drops
-        # the flag before any predicate runs, so `absent` would pass vacuously and
-        # `equals` could never match.
-        # An alias that is also a key, or shared between two predicates, would make
-        # which predicate owns a recorded flag depend on dict order.
-        seen: dict[str, str] = {}
-        for key, predicate in (self.flags or {}).items():
-            for name in (key, *predicate.aliases):
-                if name in seen and seen[name] != key:
-                    msg = (
-                        f"cli_called flag name {name!r} is claimed by both {seen[name]!r} and {key!r} "
-                        "(via aliases); a flag can belong to only one predicate"
-                    )
-                    raise ValueError(msg)
-                seen[name] = key
-            if key in predicate.aliases:
-                msg = f"cli_called flag {key!r} lists itself in aliases"
-                raise ValueError(msg)
-
-        shadowed = sorted(set(seen) & set(self.ignore_flags))
-        if shadowed:
-            names = ", ".join(repr(n) for n in shadowed)
-            msg = (
-                f"cli_called flag predicate(s) {names} are also listed in ignore_flags (directly or as "
-                "an alias), which drops them before matching. Remove them from ignore_flags, or drop "
-                "the predicate."
-            )
-            raise ValueError(msg)
+        validate_flag_ownership(self.flags, self.ignore_flags, "cli_called")
         return self
 
 

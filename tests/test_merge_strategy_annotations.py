@@ -16,6 +16,7 @@ from coder_eval.models import (
     DockerDriverConfig,
     NodeEnvConfig,
     PythonEnvConfig,
+    RecordedCli,
     SandboxConfig,
     merge_strategy_of,
     parse_agent_config,
@@ -33,6 +34,7 @@ class TestSandboxStrategies:
             (SandboxConfig, "template_sources", "append"),
             (SandboxConfig, "mock_path_dirs", "replace"),
             (SandboxConfig, "record_cli", "replace"),
+            (RecordedCli, "responses", "replace"),
             (SandboxConfig, "ignore_patterns", "replace"),
             (SandboxConfig, "driver", "replace"),
             # nested models / dicts take the type-aware deep default (no annotation):

@@ -6,7 +6,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.criteria.cli_called import _split_flags
+from coder_eval.argv_match import split_flags
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CliCalledCriterion, SandboxConfig
 from coder_eval.sandbox import Sandbox
@@ -324,8 +324,8 @@ class TestLogHandling:
 
 class TestArgvNormalization:
     def test_equals_form_and_space_form_are_equivalent(self):
-        space = _split_flags(["get", "--model", "pro"], frozenset(), frozenset({"model"}))
-        equals = _split_flags(["get", "--model=pro"], frozenset(), frozenset({"model"}))
+        space = split_flags(["get", "--model", "pro"], frozenset(), frozenset({"model"}))
+        equals = split_flags(["get", "--model=pro"], frozenset(), frozenset({"model"}))
         assert space == equals == (["get"], {"model": ["pro"]})
 
     def test_output_is_ignored_by_default(self, sandbox_with_log):
@@ -344,13 +344,13 @@ class TestArgvNormalization:
         assert SuccessChecker(sandbox).check(with_json).score == 1.0
 
     def test_boolean_switch_does_not_consume_the_next_flag(self):
-        positional, flags = _split_flags(["delete", "proj-1", "--yes", "--force"], frozenset(), frozenset())
+        positional, flags = split_flags(["delete", "proj-1", "--yes", "--force"], frozenset(), frozenset())
         assert positional == ["delete", "proj-1"]
         assert flags == {"yes": [""], "force": [""]}
 
     def test_flag_like_value_stays_a_value(self):
         """A value that merely looks like a flag is still a value when quoted as one."""
-        positional, flags = _split_flags(
+        positional, flags = split_flags(
             ["confirm", "--corrections", '[{"v":"--x"}]'], frozenset(), frozenset({"corrections"})
         )
         assert positional == ["confirm"]
@@ -358,13 +358,13 @@ class TestArgvNormalization:
 
     def test_double_dash_terminates_flag_parsing(self):
         """`--` is consumed as a separator; what follows is positional, not a flag."""
-        positional, flags = _split_flags(["run", "--", "--not-a-flag"], frozenset(), frozenset())
+        positional, flags = split_flags(["run", "--", "--not-a-flag"], frozenset(), frozenset())
         assert positional == ["run", "--not-a-flag"]
         assert flags == {}
 
     def test_lone_dash_is_positional(self):
         """A bare `-` is the stdin convention, not a flag."""
-        positional, flags = _split_flags(["import", "-"], frozenset(), frozenset())
+        positional, flags = split_flags(["import", "-"], frozenset(), frozenset())
         assert positional == ["import", "-"]
         assert flags == {}
 
@@ -461,13 +461,13 @@ class TestRegressionsFromReview:
 
     def test_declared_multi_char_short_flag_is_taken_whole(self):
         """Declaring the name wins over splitting, for CLIs with real -ab flags."""
-        assert _split_flags(["rm", "-rf", "p"], frozenset(), frozenset(), frozenset({"rf"})) == (
+        assert split_flags(["rm", "-rf", "p"], frozenset(), frozenset(), frozenset({"rf"})) == (
             ["rm", "p"],
             {"rf": [""]},
         )
 
     def test_attached_value_on_a_short_flag(self):
-        assert _split_flags(["g", "-ff-002"], frozenset(), frozenset({"f"}), frozenset({"f"})) == (
+        assert split_flags(["g", "-ff-002"], frozenset(), frozenset({"f"}), frozenset({"f"})) == (
             ["g"],
             {"f": ["f-002"]},
         )
@@ -475,35 +475,35 @@ class TestRegressionsFromReview:
     def test_bare_negative_number_stays_positional(self):
         """`-1` as a flag named `1` dropped it from the positionals -- the same
         silent disappearance as the --yes bug."""
-        assert _split_flags(["seek", "-1"], frozenset(), frozenset(), frozenset()) == (
+        assert split_flags(["seek", "-1"], frozenset(), frozenset(), frozenset()) == (
             ["seek", "-1"],
             {},
         )
-        assert _split_flags(["seek", "-1.5"], frozenset(), frozenset(), frozenset())[0] == ["seek", "-1.5"]
+        assert split_flags(["seek", "-1.5"], frozenset(), frozenset(), frozenset())[0] == ["seek", "-1.5"]
 
     def test_declared_numeric_flag_still_parses_as_a_flag(self):
         """`head -1 file` -- declaring it wins over the numeric rule."""
-        assert _split_flags(["head", "-1", "f.txt"], frozenset(), frozenset(), frozenset({"1"})) == (
+        assert split_flags(["head", "-1", "f.txt"], frozenset(), frozenset(), frozenset({"1"})) == (
             ["head", "f.txt"],
             {"1": [""]},
         )
 
     def test_declared_value_flag_consumes_a_dash_leading_value(self):
         """`--limit -1 proj-1`: declared value flags bind even a dash-leading value."""
-        positional, flags = _split_flags(
+        positional, flags = split_flags(
             ["ixp", "proj", "get", "--limit", "-1", "proj-1"], frozenset(), frozenset({"limit"})
         )
         assert positional == ["ixp", "proj", "get", "proj-1"]
         assert flags == {"limit": ["-1"]}
 
     def test_undeclared_flag_leaves_its_neighbour_positional(self):
-        positional, flags = _split_flags(["ixp", "fields", "delete", "--yes", "proj-1"], frozenset(), frozenset())
+        positional, flags = split_flags(["ixp", "fields", "delete", "--yes", "proj-1"], frozenset(), frozenset())
         assert positional == ["ixp", "fields", "delete", "proj-1"]
         assert flags == {"yes": [""]}
 
     def test_equals_form_keeps_a_dash_leading_value_and_invents_no_flag(self):
         """`--offset=-1` used to drop the value AND invent a flag named `1`."""
-        positional, flags = _split_flags(["get", "--offset=-1"], frozenset(), frozenset())
+        positional, flags = split_flags(["get", "--offset=-1"], frozenset(), frozenset())
         assert positional == ["get"]
         assert flags == {"offset": ["-1"]}
 
