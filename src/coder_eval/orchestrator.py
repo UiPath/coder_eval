@@ -364,6 +364,7 @@ class Orchestrator:
         replicate_index: int = 0,
         workspace_dir: Path | None = None,
         grade: bool = True,
+        prior_result: EvaluationResult | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -393,6 +394,11 @@ class Orchestrator:
                 deliberately NOT a task-config field — a task YAML must never be
                 able to declare itself ungraded — so it arrives only from
                 ``BatchRunConfig.grade``, never from the 5-layer merge or -D.
+            prior_result: A completed run's ``EvaluationResult`` to re-grade
+                (evaluate-only mode). Its trajectory and execution facts are
+                carried onto the fresh result so the grade describes the run that
+                actually happened instead of an empty one — see
+                ``_seed_from_prior_result`` for the field-by-field rationale.
         """
         self.task = task
         self.run_dir = run_dir
@@ -412,6 +418,7 @@ class Orchestrator:
         self.config_lineage = config_lineage or {}
         self.replicate_index = replicate_index
         self.grade = grade
+        self.prior_result = prior_result
 
         # Derived paths
         self.report_path = self.run_dir / "task.json"
@@ -539,6 +546,8 @@ class Orchestrator:
             iteration_count=0,
             environment_info=get_version_info(),
         )
+
+        self._seed_from_prior_result()
 
         # Calculate task log path
         task_log_file = task_log_path(self.run_dir)
@@ -716,6 +725,51 @@ class Orchestrator:
                     raise teardown_interrupt
 
         return self.result
+
+    def _seed_from_prior_result(self) -> None:
+        """Carry a completed run's execution facts onto this re-grade's result.
+
+        ``execute`` then ``evaluate`` must equal a single ``run``. Everything
+        below is a fact the AGENT phase established that the grading phase cannot
+        re-derive; leaving any of them at their defaults would publish a row that
+        silently disagrees with the run it grades.
+
+        Deliberately NOT carried: ``final_status``, ``weighted_score`` and
+        ``success_criteria_results`` — those are exactly what this pass recomputes
+        — and the timestamps/duration, which describe the grading pass.
+        """
+        prior = self.prior_result
+        if prior is None or self.result is None:
+            return
+
+        # The trajectory itself. Every derived figure in _finalize_result —
+        # token totals, cost, command_stats, model_used, assistant turns —
+        # recomputes from `iterations`, so seeding it reproduces them exactly.
+        self.result.iterations = list(prior.iterations)
+        # Evaluate-only hardcodes 1; a multi-turn run must not be reported as
+        # single-turn just because the re-grade ran once.
+        self.result.iteration_count = prior.iteration_count or len(prior.iterations)
+
+        # LOAD-BEARING for the verdict: gate selection is FIRED-ONLY. When
+        # early_stop is not None the checker gates on the weighted ARMED subset
+        # instead of strict-AND over every criterion. Dropping it would re-grade a
+        # truncated trajectory under the full-run gate and flip the verdict.
+        self.result.early_stop = prior.early_stop
+
+        # Execution facts that outlive the agent process.
+        self.result.max_turns_exhausted = prior.max_turns_exhausted
+        self.result.error_message = prior.error_message
+        self.result.error_details = prior.error_details
+        self.result.sdk_options = prior.sdk_options
+
+        # environment_info: the prior run's capture describes the machine that
+        # RAN the task (installed_tools, api route, coder_eval version). Ours
+        # describes the machine grading it. Prior wins on conflict, and ours is
+        # preserved wholesale under `graded_by` rather than being interleaved —
+        # a report that shows the grader's tool versions as the run's is worse
+        # than one that shows neither.
+        graded_by = dict(self.result.environment_info)
+        self.result.environment_info = {**graded_by, **prior.environment_info, "graded_by": graded_by}
 
     async def _run_evaluation_with_failure_evidence(
         self,
@@ -1166,6 +1220,14 @@ class Orchestrator:
         """
         if not (isinstance(self.route, LiteLLMRoute) and settings.litellm_cost_log and self.result is not None):
             return
+        if self.prior_result is not None:
+            # Re-grading someone else's trajectory. The join keys on THIS
+            # Orchestrator's per-attempt nonce, which the original turns were
+            # never tagged with, so it would match nothing and overwrite the
+            # already-corrected per-turn costs with a warning about a missing
+            # bill. The prior run's cost is the real one; leave it alone.
+            logger.debug("Re-grade of a prior trajectory: keeping its recorded cost, skipping the LiteLLM join.")
+            return
         try:
             applied = apply_actual_cost(
                 self.result,
@@ -1340,6 +1402,14 @@ class Orchestrator:
             self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
+            # PATH parity with the run being graded. _sync_sandbox_command_path_
+            # with_agent recorded the agent's effective PATH; no agent runs here,
+            # so restore it explicitly or `run_command` criteria resolve binaries
+            # against ambient PATH and can disagree with the original verdict.
+            restored_path = self.result.environment_info.get("command_base_path")
+            if isinstance(restored_path, str) and restored_path:
+                self.sandbox.set_command_base_path(restored_path)
+
             self._resolve_routes()
             self._record_route_environment_info()
             return
@@ -1511,6 +1581,13 @@ class Orchestrator:
         path = sdk_env.get("PATH")
         if isinstance(path, str) and path:
             self.sandbox.set_command_base_path(path)
+            # Persist it so a LATER detached grade (`coder-eval evaluate` over a
+            # finished run dir) can restore the same PATH. Without this the
+            # "evaluate-only mode" gap named above is permanent: the re-grade
+            # would resolve `run_command` criteria against ambient PATH and could
+            # reach a different verdict than the run it claims to be grading.
+            if self.result is not None:
+                self.result.environment_info["command_base_path"] = path
 
     def _eval_route_overrides(self) -> EvalRouteOverrides:
         """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
@@ -1952,7 +2029,12 @@ class Orchestrator:
                     "Criteria %s require agent execution; results may be incomplete with no agent",
                     unsupported,
                 )
-            self.result.iteration_count = 1
+            # A bare `evaluate <task> <dir>` has no trajectory, so one nominal
+            # iteration stands for the single grading pass. A re-grade seeded
+            # from a prior result already carries the real count (and the turns
+            # the trajectory-reading criteria need) — do not flatten it to 1.
+            if self.prior_result is None:
+                self.result.iteration_count = 1
             # Load reference in evaluate-only mode too: judge criteria with
             # include_reference=true expect this populated even when no agent
             # runs. The agent-driven branch below has the same call.

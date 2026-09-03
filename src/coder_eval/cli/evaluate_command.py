@@ -1,6 +1,10 @@
-"""Evaluate command - run criteria against a directory without an agent."""
+"""Evaluate command - run criteria against a directory or re-grade a finished run."""
+
+from __future__ import annotations
 
 import asyncio
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -11,6 +15,7 @@ from ..models import (
     EvaluationResult,
     FinalStatus,
     PreservationMode,
+    TaskDefinition,
     TemplateDirSource,
     parse_agent_config,
 )
@@ -18,21 +23,215 @@ from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
 from ..sandbox import Sandbox
 from .console import console
+from .evaluate_target import TASK_JSON, EvaluateMode, EvaluateTarget, EvaluateTargetError, resolve_evaluate_target
 from .run_helpers import prepare_run_directory
 
 
+logger = logging.getLogger(__name__)
+
+# Where a run directory keeps the workspace the agent worked in. The extra
+# segment is the task id: preservation writes `artifacts/<task_id>/...`.
+ARTIFACTS_DIRNAME = "artifacts"
+
+
+def _load_prior_result(run_dir: Path) -> EvaluationResult:
+    """Read a finished run's ``task.json``."""
+    raw = (run_dir / TASK_JSON).read_text(encoding="utf-8")
+    try:
+        return EvaluationResult.model_validate_json(raw)
+    except ValueError as e:
+        raise typer.BadParameter(f"{run_dir / TASK_JSON} is not a readable EvaluationResult: {e}") from e
+
+
+def _task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinition, str]:
+    """Rebuild the executed task from the run's own recorded config.
+
+    Rebuilding from ``task_config.resolved`` rather than re-reading the YAML is
+    what makes the grade describe the run that happened: ``resolved`` is the
+    post-merge definition, so variant overrides, ``-D`` flags and dataset row
+    expansion are all already baked in. Re-loading the source YAML would silently
+    grade a DIFFERENT task whenever any of those were used.
+
+    Falls back to the source YAML only when ``resolved`` will not validate (a
+    schema change since the run), and says so loudly — a quiet fallback would
+    reintroduce exactly the drift above.
+    """
+    record = prior.task_config
+    if record is None:
+        raise typer.BadParameter(
+            f"{run_dir / TASK_JSON} carries no task_config, so the executed task cannot be "
+            + "rebuilt. Pass the task file explicitly: coder-eval evaluate <task.yaml> <run_dir>"
+        )
+    try:
+        return TaskDefinition.model_validate(record.resolved), record.source_yaml
+    except ValueError as e:
+        if not record.source_file or not Path(record.source_file).is_file():
+            raise typer.BadParameter(
+                f"The resolved task config in {run_dir / TASK_JSON} no longer validates ({e}), and "
+                + "its source YAML is unavailable. Pass the task file explicitly."
+            ) from e
+        console.print(
+            f"[yellow]⚠[/] The recorded resolved config does not validate ({e}); falling back to "
+            + f"{record.source_file}. Variant overrides, -D flags and dataset expansion from the "
+            + "original run are NOT reapplied, so this grade may not match what ran."
+        )
+        return load_task(Path(record.source_file))
+
+
+def _default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
+    """Locate the workspace a finished run left behind.
+
+    ``sandbox_path`` is authoritative when it still exists — it is where the run
+    actually worked. Otherwise fall back to the preserved artifacts tree, whose
+    single child is named for the task.
+    """
+    if prior.sandbox_path:
+        recorded = Path(prior.sandbox_path)
+        if recorded.is_dir():
+            return recorded
+
+    artifacts = run_dir / ARTIFACTS_DIRNAME
+    if not artifacts.is_dir():
+        raise typer.BadParameter(
+            f"No workspace to grade: {artifacts} does not exist and the recorded sandbox_path "
+            + f"({prior.sandbox_path or 'unset'}) is gone. The run was probably made with "
+            + "--preservation-mode NONE. Point at one explicitly with --workspace."
+        )
+    children = [p for p in sorted(artifacts.iterdir()) if p.is_dir()]
+    # Preservation nests the workspace under the task id; a flat artifacts dir
+    # (no subdirectory) means the workspace IS artifacts/.
+    return children[0] if len(children) == 1 else artifacts
+
+
+def _verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition) -> None:
+    """Refuse to grade when the reference tree changed since the run.
+
+    ``reference_comparison`` and reference-carrying judges score against
+    ``task.reference.directory``. If it moved since the run, the re-grade would
+    silently measure the agent's old work against a new answer key.
+    """
+    recorded = prior.environment_info.get("reference_digest")
+    if not isinstance(recorded, str) or task.reference is None:
+        return
+    from ..orchestration.evaluation import resolve_reference_dir
+    from ..path_utils import digest_tree
+
+    resolved = resolve_reference_dir(task, None)
+    if resolved is None or not resolved.is_dir():
+        return
+    if digest_tree(resolved) != recorded:
+        raise typer.BadParameter(
+            f"The reference directory {resolved} changed since this run was executed "
+            + "(digest mismatch). Grading now would score the agent's work against a "
+            + "different answer key. Restore the reference, or re-run the task."
+        )
+
+
+@dataclass(frozen=True)
+class _ResolvedInputs:
+    """Everything the two positionals + ``--workspace`` decide, resolved once."""
+
+    target: EvaluateTarget
+    task: TaskDefinition
+    source_yaml: str
+    work_dir: Path
+    task_file: Path | None
+    prior: EvaluationResult | None
+
+
+def _resolve_inputs(task_or_run_dir: Path, work_dir: Path | None, workspace: Path | None) -> _ResolvedInputs:
+    """Turn the CLI positionals into a task, a workspace, and (maybe) a prior run.
+
+    Split out of the command because it is where both shapes converge: after this
+    the rest of ``evaluate`` is one code path regardless of which form was used.
+    """
+    try:
+        target = resolve_evaluate_target(task_or_run_dir, work_dir)
+    except EvaluateTargetError as e:
+        raise typer.BadParameter(str(e)) from e
+
+    if workspace is not None and target.mode is not EvaluateMode.RUN_DIR:
+        raise typer.BadParameter(
+            "--workspace applies to a run directory only; in the two-argument form the "
+            + "directory to grade is already the second argument."
+        )
+
+    prior: EvaluationResult | None = None
+    if target.mode is EvaluateMode.RUN_DIR:
+        prior = _load_prior_result(target.target)
+        if target.task_file is not None:
+            task, source_yaml = load_task(target.task_file)
+            console.print(f"[dim]Grading with {target.task_file} (overrides the run's recorded config).[/dim]")
+        else:
+            task, source_yaml = _task_from_prior(prior, target.target)
+        work_dir = workspace or _default_workspace(target.target, prior)
+        recorded_source = prior.task_config.source_file if prior.task_config else None
+        task_file = target.task_file or (Path(recorded_source) if recorded_source else None)
+    else:
+        assert target.task_file is not None  # guaranteed by resolve_evaluate_target
+        task_file = target.task_file
+        try:
+            task, source_yaml = load_task(task_file)
+        except Exception as e:
+            console.print(f"[red]✗ Failed to load task:[/red] {e}")
+            raise typer.Exit(1) from e
+        work_dir = target.target
+
+    if not work_dir.is_dir():
+        console.print(f"[red]✗ Work directory is not a directory:[/red] {work_dir}")
+        raise typer.Exit(1)
+
+    # Evaluate-only mode bypasses experiment resolution + CLI overrides, so
+    # `agent` may be None or `agent.type` may be unset for tasks that defer
+    # those to the experiment / CLI layers. The orchestrator only uses
+    # `agent.type` for result labeling here (no agent is created), so a
+    # default is safe.
+    if task.agent is None:
+        task.agent = parse_agent_config(type=AgentKind.CLAUDE_CODE)
+    elif task.agent.type is None:
+        task.agent = parse_agent_config(**{**task.agent.model_dump(exclude_unset=True), "type": AgentKind.CLAUDE_CODE})
+
+    if prior is not None:
+        _verify_reference_unchanged(prior, task)
+
+    return _ResolvedInputs(
+        target=target,
+        task=task,
+        source_yaml=source_yaml,
+        work_dir=work_dir,
+        task_file=task_file,
+        prior=prior,
+    )
+
+
 def evaluate_command(
-    task_file: Path = typer.Argument(  # noqa: B008
+    task_or_run_dir: Path = typer.Argument(  # noqa: B008
         ...,
-        help="Path to task YAML file",
+        metavar="[TASK_FILE] TARGET",
+        help="Task YAML file, or (when it is the only argument) a finished run directory.",
         exists=True,
     ),
-    work_dir: Path = typer.Argument(  # noqa: B008
-        ...,
-        help="Directory containing the code to evaluate",
-        exists=True,
-        file_okay=False,
-        dir_okay=True,
+    work_dir: Path | None = typer.Argument(  # noqa: B008
+        None,
+        metavar="",
+        help="Directory containing the code to evaluate. Omit when TASK_FILE is a run directory.",
+    ),
+    workspace: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--workspace",
+        help=(
+            "Grade this directory instead of the run's own artifacts. Run-directory mode only (e.g. a verifier's /app)."
+        ),
+    ),
+    in_place: bool | None = typer.Option(
+        None,
+        "--in-place/--copy",
+        help=(
+            "Grade the workspace where it is, or copy it into a fresh sandbox first. "
+            "Default: in-place for a run directory, copy for a plain work directory. "
+            "Copying filters build output (node_modules, dist, build, .venv), so a "
+            "criterion that reads those needs --in-place."
+        ),
     ),
     verbose: bool = typer.Option(
         False,
@@ -49,43 +248,75 @@ def evaluate_command(
     run_dir: Path | None = typer.Option(  # noqa: B008
         None,
         "--run-dir",
-        help="Custom run directory (default: auto-generated timestamped directory in runs/)",
+        help="Where the graded task.json lands (default: auto-generated timestamped directory in runs/)",
     ),
 ) -> None:
-    """Evaluate criteria against a directory without running an agent.
+    """Evaluate criteria against a directory, or re-grade a finished run.
 
-    Runs the success criteria defined in a task against a work directory.
-    Artifacts are saved to a run directory when --preserve is used.
+    Two shapes, told apart by whether the target holds a task.json:
 
-    Examples:
+    \b
+    Grade a directory against a task (no agent runs):
         coder-eval evaluate tasks/hello.yaml ./my_solution
-        coder-eval evaluate tasks/test.yaml /path/to/code --preserve
-        coder-eval evaluate tasks/test.yaml /path/to/code --run-dir ./my_eval_run
+
+    \b
+    Re-grade a finished run — including one produced by `coder-eval execute`,
+    which leaves every task NOT_GRADED. The run's own task.json supplies the
+    resolved config AND the trajectory, so criteria that read the agent's tool
+    calls score exactly as they would have during the run:
+        coder-eval execute tasks/hello.yaml --run-dir ./r
+        coder-eval evaluate ./r/default/hello/00
+
+    \b
+    Iterate on criteria against a run you already paid for, by passing a task
+    file over a run directory (its trajectory and workspace are still used):
+        coder-eval evaluate tasks/hello.edited.yaml ./r/default/hello/00
+    """
+    run_evaluation(
+        task_or_run_dir=task_or_run_dir,
+        work_dir=work_dir,
+        workspace=workspace,
+        in_place=in_place,
+        verbose=verbose,
+        preserve=preserve,
+        run_dir=run_dir,
+    )
+
+
+def run_evaluation(
+    *,
+    task_or_run_dir: Path,
+    work_dir: Path | None = None,
+    workspace: Path | None = None,
+    in_place: bool | None = None,
+    verbose: bool = False,
+    preserve: bool = True,
+    run_dir: Path | None = None,
+) -> None:
+    """The body of ``coder-eval evaluate``, with real Python defaults.
+
+    Split from the Typer signature so it is directly callable: invoking a Typer
+    command function in-process hands every unspecified option an ``OptionInfo``
+    sentinel rather than its default, which silently turns ``in_place=None`` into
+    a truthy object. Callers (tests, and any library use) call this instead.
     """
     setup_logging(verbose=verbose)
 
     console.print("\n[bold]Evaluating Criteria[/bold]\n")
 
-    try:
-        task, source_yaml = load_task(task_file)
-    except Exception as e:
-        console.print(f"[red]✗ Failed to load task:[/red] {e}")
-        raise typer.Exit(1) from e
+    inputs = _resolve_inputs(task_or_run_dir, work_dir, workspace)
+    task = inputs.task
+    source_yaml = inputs.source_yaml
+    graded_dir = inputs.work_dir
+    task_file = inputs.task_file
+    prior = inputs.prior
+    target = inputs.target
 
-    # Evaluate-only mode bypasses experiment resolution + CLI overrides, so
-    # `agent` may be None or `agent.type` may be unset for tasks that defer
-    # those to the experiment / CLI layers. The orchestrator only uses
-    # `agent.type` for result labeling here (no agent is created), so a
-    # default is safe.
-
-    if task.agent is None:
-        task.agent = parse_agent_config(type=AgentKind.CLAUDE_CODE)
-    elif task.agent.type is None:
-        task.agent = parse_agent_config(**{**task.agent.model_dump(exclude_unset=True), "type": AgentKind.CLAUDE_CODE})
-
-    if not work_dir.is_dir():
-        console.print(f"[red]✗ Work directory is not a directory:[/red] {work_dir}")
-        raise typer.Exit(1)
+    # In-place is the default for a run directory: that workspace is the run's
+    # own output and copying it would filter build artifacts out of the grade.
+    # A plain work directory defaults to copying, because criteria can mutate the
+    # target and it is the user's own tree.
+    grade_in_place = in_place if in_place is not None else (target.mode is EvaluateMode.RUN_DIR)
 
     try:
         prepared_run_dir = prepare_run_directory(run_dir)
@@ -93,27 +324,38 @@ def evaluate_command(
         console.print(f"[red]✗ Failed to prepare run directory:[/red] {e}")
         raise typer.Exit(1) from e
 
-    # Build a sandbox pre-loaded with the work_dir contents, then run evaluate-only
     sandbox_config = task.sandbox.model_copy(deep=True)
-    template_source = TemplateDirSource(path=str(work_dir.resolve()))
-    if sandbox_config.template_sources:
-        sandbox_config.template_sources = [template_source, *sandbox_config.template_sources]
-    else:
-        sandbox_config.template_sources = [template_source]
+    if not grade_in_place:
+        # Copy path: preload the sandbox with the work dir as a template source.
+        template_source = TemplateDirSource(path=str(graded_dir.resolve()))
+        sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
+    # Grading never runs a container: the docker driver dispatches through
+    # DockerRunner, which needs an agent. Force tempdir so a task whose YAML says
+    # `driver: docker` is still gradeable on the host.
+    sandbox_config = sandbox_config.model_copy(update={"driver": "tempdir"})
 
-    task_dir = task_file.parent.resolve()
+    task_dir = task_file.parent.resolve() if task_file is not None else None
     sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
 
     async def _setup_and_run() -> EvaluationResult:
-        await asyncio.to_thread(sandbox.setup)
+        if grade_in_place:
+            await asyncio.to_thread(sandbox.adopt, graded_dir)
+        else:
+            await asyncio.to_thread(sandbox.setup)
         orchestrator = Orchestrator(
             task=task,
             run_dir=prepared_run_dir,
-            preservation_mode=PreservationMode.MOVE_ON_WRITE if preserve else PreservationMode.NONE,
+            # An adopted directory is the caller's; never move or delete it.
+            preservation_mode=(
+                PreservationMode.NONE
+                if grade_in_place
+                else (PreservationMode.MOVE_ON_WRITE if preserve else PreservationMode.NONE)
+            ),
             task_file=task_file,
             sandbox=sandbox,
-            variant_id="evaluate",
+            variant_id=prior.variant_id if prior is not None else "evaluate",
             source_yaml=source_yaml,
+            prior_result=prior,
         )
         return await orchestrator.run()
 
@@ -162,6 +404,13 @@ def evaluate_command(
     if result.sandbox_path:
         console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")
 
+    if prior is not None:
+        console.print(
+            f"[dim]Re-graded {prior.final_status.value} → {result.final_status.value} "
+            + f"over {len(result.iterations)} recorded turn(s).[/dim]"
+        )
+        _write_back(target.target, result)
+
     if result.final_status == FinalStatus.ERROR:
         console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
         raise typer.Exit(1)
@@ -171,3 +420,31 @@ def evaluate_command(
     else:
         console.print(f"\n[red]{failed} criterion/criteria failed.[/red]")
         raise typer.Exit(1)
+
+
+def _write_back(run_dir: Path, result: EvaluationResult) -> None:
+    """Replace the graded run's ``task.json`` with the verdict, keeping a copy of the original.
+
+    Updating in place is what makes the rest of the toolchain free: plain
+    ``coder-eval aggregate <run>`` then rebuilds ``run.json`` from these rows
+    with no new code, and every report and evalboard view reads the graded row.
+
+    The pre-grade original is kept alongside as ``task.execute.json`` so the
+    ungraded record is auditable — the write is not a silent overwrite of the
+    only evidence that the run was executed separately.
+    """
+    target = run_dir / TASK_JSON
+    backup = run_dir / "task.execute.json"
+    try:
+        if not backup.exists():
+            backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    except OSError as e:
+        # Never fail the grade over the write-back: the verdict was computed and
+        # already printed, and the fresh run dir holds its own task.json.
+        console.print(f"[yellow]⚠[/] Could not update {target}: {e}")
+        return
+    console.print(
+        f"[dim]Updated {target} (original kept as {backup.name}); "
+        + "run `coder-eval aggregate` to refresh run.json.[/dim]"
+    )

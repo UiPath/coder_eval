@@ -74,7 +74,7 @@ share one implementation, so they cannot drift apart.
 Use it when something *else* owns the verdict — an external harness that builds its own
 container and runs its own tests — or to separate one expensive agent run from grading
 you want to iterate on afterwards. Grade the results later with
-[`coder-eval evaluate`](#coder-eval-evaluate--test-criteria-without-an-agent).
+[`coder-eval evaluate`](#coder-eval-evaluate--grade-without-running-an-agent).
 
 **Only the verdict is withheld, never the facts of the run.** A crash, timeout, or
 budget breach still reports `ERROR` / `TIMEOUT` / `TOKEN_BUDGET_EXCEEDED` and still
@@ -105,22 +105,57 @@ Checks task syntax, required CLI tools, API keys, and schema validity without ex
 | --- | --- |
 | `--experiment, -e` | Experiment definition YAML to resolve variants against (default: `experiments/default.yaml`). |
 
-### `coder-eval evaluate` — test criteria without an agent
+### `coder-eval evaluate` — grade without running an agent
+
+Two shapes, told apart by whether the target holds a `task.json`:
 
 ```bash
-coder-eval evaluate tasks/hello_date.yaml ./my_solution            # evaluate a directory
-coder-eval evaluate tasks/hello_date.yaml ./my_solution --preserve # keep the sandbox
+# 1. Grade a directory against a task
+coder-eval evaluate tasks/hello_date.yaml ./my_solution
+
+# 2. Re-grade a finished run — including one left NOT_GRADED by `execute`
+coder-eval execute  tasks/hello_date.yaml --run-dir ./r
+coder-eval evaluate ./r/default/hello_date/00
+coder-eval aggregate ./r                      # run.json now reports the verdict
 ```
 
-Runs a task's success criteria against a directory without an agent — useful for
-testing criterion definitions, validating task configs, or scoring code that was
-already written.
+**Run-directory mode** rebuilds the task from the run's own recorded
+`task_config.resolved`, not by re-reading the YAML. That is what makes the grade
+describe the run that happened: variant overrides, `-D` flags and dataset row
+expansion are already baked into `resolved`, so re-loading the source would
+silently grade a *different* task. The run's trajectory is restored too, so
+criteria that read the agent's tool calls (`command_executed`, `skill_triggered`,
+judges with trajectory) score exactly as they would have during the run.
+
+It writes the verdict back into the run's `task.json` and keeps the pre-grade
+record beside it as `task.execute.json`. Writing back in place is what makes
+`aggregate` free — no new flag, no second copy of the results.
+
+Passing a task file **over** a run directory re-grades it with different
+criteria, reusing the trajectory and workspace of a run you already paid for:
+
+```bash
+coder-eval evaluate tasks/hello_date.edited.yaml ./r/default/hello_date/00
+```
+
+**In-place vs. copy.** The two-argument form copies your directory into a fresh
+sandbox (criteria can mutate the target, and it is your own tree). Run-directory
+mode grades **in place**, because copying filters build output — `node_modules`,
+`dist`, `build`, `.venv`, `.git` are all on the default ignore list, so a
+criterion like `test -f dist/bundle.js` would fail as a *copying artifact*
+rather than as a verdict. Override either default with `--in-place` / `--copy`.
 
 | Flag | Description |
 | --- | --- |
-| `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve) |
-| `--run-dir` | Custom run directory (default: auto-generated timestamped dir in `runs/`). |
+| `--workspace` | Grade this directory instead of the run's own artifacts (run-directory mode only). |
+| `--in-place / --copy` | Grade where the files are, or copy first. Default: in-place for a run directory, copy for a plain work directory. |
+| `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve). Ignored when grading in place — an adopted directory is never moved or deleted. |
+| `--run-dir` | Where the graded `task.json` lands (default: auto-generated timestamped dir in `runs/`). |
 | `--verbose, -v` | DEBUG-level logging |
+
+A re-grade refuses to run if the task's `reference:` directory changed since the
+run (digest mismatch) — grading then would score the agent's old work against a
+new answer key.
 
 ### `coder-eval report` — view results
 

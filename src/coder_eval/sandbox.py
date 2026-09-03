@@ -266,6 +266,83 @@ class Sandbox:
             )
         raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
 
+    def adopt(self, workspace: Path) -> Path:
+        """Use ``workspace`` **as** the sandbox, materializing nothing into it.
+
+        The grade-in-place counterpart to :meth:`setup`. ``setup`` builds a
+        workspace: it copies template sources in, generates ``record_cli`` shims,
+        creates a venv, installs packages. ``adopt`` takes a workspace that
+        already exists — an ``execute`` run's artifacts, or a verifier's ``/app``
+        — and only derives the *environment* the criteria need to run against it
+        (mock-dir ``+x``, venv discovery, the plugin-tools pin).
+
+        Why not ``setup(target_dir=workspace)``: that already adopts a
+        caller-supplied directory and sets ``_cleanup_on_exit=False``, but it
+        then runs ``_setup_template()``, which would write over the very files
+        it was asked to grade.
+
+        In-place is more CORRECT here, not merely faster:
+
+        * ``_setup_template`` filters what it copies through
+          ``_should_ignore_template_file`` — ``node_modules``, ``dist``,
+          ``build``, ``venv``, ``.git`` and friends are dropped. A criterion like
+          ``test -f dist/bundle.js`` therefore fails as a *copying artifact*
+          rather than as a verdict on the agent's work.
+        * ``run_command`` criteria execute with ``cwd = sandbox_dir``, so on the
+          copy path they see the copy's paths, not the ones the agent worked at.
+        * Copying a real workspace costs minutes.
+
+        The caller keeps ownership: ``_cleanup_on_exit`` stays False, so
+        ``cleanup()`` never deletes an adopted directory. Criteria CAN still
+        mutate it (a ``run_command`` that writes), which is why the copy path
+        remains the default for a bare user-supplied work dir.
+
+        Args:
+            workspace: An existing directory to grade in place.
+
+        Returns:
+            Path to the sandbox directory (``workspace``).
+
+        Raises:
+            RuntimeError: If the driver is ``docker`` (a container workspace is
+                not reachable from the host), or ``workspace`` is not a directory.
+        """
+        if self.config.driver == "docker":
+            raise RuntimeError(
+                "Sandbox.adopt() is host-side only; a driver='docker' workspace lives inside "
+                + "the container. Grade it from within the container, or copy it out first."
+            )
+        if not workspace.is_dir():
+            raise RuntimeError(f"Cannot adopt {workspace}: not an existing directory")
+
+        self.sandbox_dir = workspace.resolve()
+        # Never flipped True: an adopted directory belongs to the caller.
+        self._cleanup_on_exit = False
+
+        # Only NON-materializing steps below. Deliberately skipped, and why:
+        #   _setup_template            would overwrite the workspace being graded
+        #   _generate_cli_recorders    writes shims into it
+        #   _setup_virtualenv /
+        #     _install_*_packages      the execute phase already provisioned these;
+        #                              re-running mutates the graded tree
+        #   _maybe_remediate_home_plugins_pollution
+        #                              destructive on $HOME, and it is remediation
+        #                              rather than derivation — the execute phase
+        #                              already ran it if it was enabled
+        self._prepare_mock_path_dirs()
+
+        # Discover an existing venv instead of creating one, so `run_command`
+        # criteria get the same VIRTUAL_ENV/PATH the agent had. Absent venv ->
+        # None, exactly as for a task with no python config.
+        candidate = self.sandbox_dir / ".venv"
+        if candidate.is_dir():
+            self.venv_dir = candidate
+
+        self._check_parent_node_modules_contamination()
+        self._refresh_plugin_tools_dir()
+
+        return self.sandbox_dir
+
     def _setup_tempdir(self, target_dir: Path | None = None) -> Path:
         """Set up a sandbox directory.
 

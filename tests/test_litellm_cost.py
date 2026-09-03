@@ -257,6 +257,8 @@ class TestOrchestratorJoinHook:
             _cost_correlation_run_id=run_id,
             _cost_attempt_nonce="att1",
             _log_task_id="calc",
+            # A live run, not a re-grade: the join applies (see _join_litellm_actual_cost).
+            prior_result=None,
         )
         orch_mod.Orchestrator._join_litellm_actual_cost(fake)
         assert fake.result.iterations[0].token_usage.total_cost_usd == 0.09  # static 0.5 overridden
@@ -270,6 +272,8 @@ class TestOrchestratorJoinHook:
             _cost_correlation_run_id="R",
             _cost_attempt_nonce="att1",
             _log_task_id="calc",
+            # A live run, not a re-grade: the join applies (see _join_litellm_actual_cost).
+            prior_result=None,
         )
         orch_mod.Orchestrator._join_litellm_actual_cost(fake)  # missing file → no-op, no raise
         assert fake.result.iterations[0].token_usage.total_cost_usd == 0.5
@@ -294,6 +298,8 @@ class TestOrchestratorJoinHook:
             _cost_correlation_run_id=run_id,
             _cost_attempt_nonce="att1",
             _log_task_id="calc",
+            # A live run, not a re-grade: the join applies (see _join_litellm_actual_cost).
+            prior_result=None,
         )
         orch_mod.Orchestrator._join_litellm_actual_cost(fake)
         orch_mod.Orchestrator._aggregate_token_usage(fake)
