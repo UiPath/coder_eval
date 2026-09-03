@@ -75,10 +75,12 @@ describe("TrendsView — status strip run-axis alignment", () => {
         const unknown = screen.getByTitle("r1 · unknown");
         // The absent-run slot is the hollow stub; present runs are full bars
         // (including a present-but-null status, which renders as "unknown").
+        // `spark-bar` is the full-height bar geometry (app/globals.css); the
+        // stub keeps its own short height, so the token is the discriminator.
         expect(gap.className).toContain("border-gray-300");
-        expect(gap.className).not.toContain("h-full");
-        expect(success.className).toContain("h-full");
-        expect(unknown.className).toContain("h-full");
+        expect(gap.className).not.toContain("spark-bar");
+        expect(success.className).toContain("spark-bar");
+        expect(unknown.className).toContain("spark-bar");
         // Strip renders oldest → newest, left to right.
         const titles = [...gap.parentElement!.children].map((c) =>
             c.getAttribute("title"),

@@ -195,7 +195,7 @@ function StatusBar({
                         <span
                             key={runId}
                             title={`${runId} · mature (skipped, carried forward)`}
-                            className="w-[6px] h-full rounded-sm bg-green-100 border border-green-400"
+                            className="spark-bar bg-green-100 border border-green-400"
                         />
                     );
                 }
@@ -203,7 +203,7 @@ function StatusBar({
                     <span
                         key={runId}
                         title={`${runId} · ${entry.status ?? "unknown"}`}
-                        className={`w-[6px] h-full rounded-sm ${statusFill(entry.status)}`}
+                        className={`spark-bar ${statusFill(entry.status)}`}
                     />
                 );
             })}
@@ -478,7 +478,7 @@ function TaskRow({
                         </div>
                     )}
                 </td>
-                <td className="py-2 px-3 tabular-nums text-right text-gray-700">
+                <td className="num-cell">
                     {t.totalRuns}
                 </td>
                 <td
@@ -489,13 +489,13 @@ function TaskRow({
                 <td className="py-2 px-3">
                     <StatusBar runIds={runIds} statuses={t.recentStatuses} />
                 </td>
-                <td className="py-2 px-3 tabular-nums text-right text-gray-700">
+                <td className="num-cell">
                     {fmtDuration(t.avgDurationSeconds)}
                 </td>
-                <td className="py-2 px-3 tabular-nums text-right text-gray-700">
+                <td className="num-cell">
                     {fmtUsd(t.avgCostUsd)}
                 </td>
-                <td className="py-2 px-3 tabular-nums text-right text-gray-700">
+                <td className="num-cell">
                     {fmtCount(t.avgTotalTurns ?? t.avgActualCommands)}
                 </td>
                 <td className="py-2 px-2 text-xs text-gray-400">

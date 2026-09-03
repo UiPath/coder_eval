@@ -1,18 +1,22 @@
 import { promises as fs } from "node:fs";
 import { NextResponse } from "next/server";
-import { collectRunFiles, collectTaskFiles } from "@/lib/runs";
+import { collectTaskFiles } from "@/lib/runs";
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "@/lib/variants";
 import { sourceById } from "@/lib/sources";
 import { createZip, type ZipEntry } from "@/lib/zip";
 
 export const dynamic = "force-dynamic";
 
-// Bundle a task folder, or a whole run, into a zip download.
+// Bundle ONE task folder into a zip download.
 //   ?run=<id>&task=<id>[&v=<variant>]  → that task's folder (<variant>/<taskId>/)
-//   ?run=<id>                          → the entire run folder (run.json + every task dir)
 // minus the usual scaffolding noise, from the container named by ?src (the
-// skills nightly when absent). In blob mode the collect* helpers fetch the
-// needed blobs first, so this mirrors what the page would load.
+// skills nightly when absent). In blob mode collectTaskFiles fetches the needed
+// blobs first, so this mirrors what the page would load.
+//
+// `task` is REQUIRED. Omitting it used to mean "zip the whole run", which for a
+// nightly meant ~10k blobs / ~400 MB fetched uncapped and buffered in memory
+// before any of it was sent. That path and its button are gone; to inspect a
+// whole run, use the blob container.
 export async function GET(req: Request) {
     const url = new URL(req.url);
     const runId = url.searchParams.get("run");
@@ -25,22 +29,19 @@ export async function GET(req: Request) {
     if (!runId) {
         return new NextResponse("missing run", { status: 400 });
     }
+    if (!taskId) {
+        return new NextResponse("missing task", { status: 400 });
+    }
 
-    const files = taskId
-        ? await collectTaskFiles(runId, taskId, source, variantId)
-        : await collectRunFiles(runId, source);
+    const files = await collectTaskFiles(runId, taskId, source, variantId);
     if (!files) {
         return new NextResponse("not found", { status: 404 });
     }
 
-    // Top-level folder inside the archive: the task id for a task download,
-    // the run id for a whole-run download. A non-default arm is named too, so
+    // Top-level folder inside the archive. A non-default arm is named too, so
     // two arms of the same task don't produce two identically-named zips.
-    const root = taskId
-        ? variantId === DEFAULT_VARIANT_ID
-            ? taskId
-            : `${taskId}__${variantId}`
-        : runId;
+    const root =
+        variantId === DEFAULT_VARIANT_ID ? taskId : `${taskId}__${variantId}`;
     const entries: ZipEntry[] = [];
     for (const f of files) {
         const data = await fs.readFile(f.abs).catch(() => null);

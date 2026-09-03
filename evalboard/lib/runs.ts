@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { cache } from "react";
 import {
     LOCAL_RUNS_DIR,
     ensureActivationSummary,
     ensureRunAnalysis,
-    ensureRunDir,
     ensureRunMeta,
     ensureRunSummary,
     ensureTaskDir,
@@ -16,7 +16,7 @@ import {
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
 import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
-import { messageCostUsd } from "./pricing";
+import { messageCostUsd, normalizeModel } from "./pricing";
 
 // Resolution order:
 //   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
@@ -693,14 +693,22 @@ async function readJson<T>(p: string): Promise<T | null> {
     }
 }
 
-async function readRunJson(
-    id: string,
-    source: Source = DEFAULT_SOURCE,
-): Promise<RawRunJson | null> {
-    const dir = runsDirFor(RUNS_DIR, source);
-    await ensureRunSummary(source.container, id, dir);
-    return readJson<RawRunJson>(path.join(dir, id, "run.json"));
-}
+// Request-scoped memo. A run.json is 1.5-6.5 MB and the run page reads the same
+// one twice (readRunSummary and readRunTasks); `dedupe` in blob.ts collapses only
+// the download, not the read and parse. react/cache is per-request, so this
+// never serves one request's data to another. The key is the argument tuple, so
+// an omitted `source` and an explicit DEFAULT_SOURCE are two keys: one extra
+// read at worst, never the wrong container.
+const readRunJson = cache(
+    async (
+        id: string,
+        source: Source = DEFAULT_SOURCE,
+    ): Promise<RawRunJson | null> => {
+        const dir = runsDirFor(RUNS_DIR, source);
+        await ensureRunSummary(source.container, id, dir);
+        return readJson<RawRunJson>(path.join(dir, id, "run.json"));
+    },
+);
 
 // The activation suite is a nested sub-run: its self-contained run.json (enriched
 // cases + the per-skill rollup) lives at <id>/activation/run.json, separate from
@@ -843,24 +851,50 @@ export async function readRunSummary(
 // appeared. Mirrors mostCommonAgentType's "the thing these tasks ran on" vote,
 // but also reports the spread so the run header can say when there was more than
 // one instead of silently picking a winner.
+//
+// The vote groups on the NORMALIZED id (same key pricing resolves on) because
+// the recorded string varies by code path: a row that errored before the model
+// resolved keeps the qualified id it was configured with
+// ("eu.anthropic.claude-sonnet-5") while completed rows record the bare one, so
+// counting raw strings let one errored row read as a second model.
+//
+// Display stays the most common RAW string inside the winning group, so the chip
+// shows what the run recorded rather than a derived value.
 export function tallyModels(rows: RawTaskResult[]): {
     dominant: string | null;
     distinct: number;
 } {
-    const counts = new Map<string, number>();
+    const groups = new Map<string, Map<string, number>>();
     for (const r of rows) {
         const m = r.model_used;
-        if (typeof m === "string" && m) counts.set(m, (counts.get(m) ?? 0) + 1);
+        if (typeof m !== "string" || !m) continue;
+        const key = normalizeModel(m);
+        let raw = groups.get(key);
+        if (!raw) {
+            raw = new Map<string, number>();
+            groups.set(key, raw);
+        }
+        raw.set(m, (raw.get(m) ?? 0) + 1);
     }
     let dominant: string | null = null;
     let bestN = 0;
-    for (const [model, n] of counts) {
-        if (n > bestN) {
-            dominant = model;
-            bestN = n;
+    for (const raws of groups.values()) {
+        let groupN = 0;
+        let groupTop: string | null = null;
+        let groupTopN = 0;
+        for (const [model, n] of raws) {
+            groupN += n;
+            if (n > groupTopN) {
+                groupTop = model;
+                groupTopN = n;
+            }
+        }
+        if (groupN > bestN) {
+            dominant = groupTop;
+            bestN = groupN;
         }
     }
-    return { dominant, distinct: counts.size };
+    return { dominant, distinct: groups.size };
 }
 
 export async function readRunTasks(
@@ -877,8 +911,8 @@ export async function readRunTasks(
 // slot (SLOT_COUNT = 5 in the runner's maturity.py), so its most recent real
 // execution is at most ~5 *canonical* runs back; the headroom absorbs ad-hoc /
 // smoke runs that listRunIds() interleaves but maturity replay ignores. The scan
-// short-circuits as soon as every task is resolved, so this is a safety cap, not
-// the typical read count.
+// short-circuits once every task is resolved (at batch granularity), so this is
+// a safety cap, not the typical read count.
 const MATURE_SOURCE_LOOKBACK = 20;
 
 // For each mature-skipped task in `fromRunId`, find the most recent *earlier* run
@@ -909,13 +943,22 @@ export async function findMatureSourceRuns(
 
     const unresolved = new Set(matureTaskIds);
     const limit = Math.min(ids.length, start + 1 + MATURE_SOURCE_LOOKBACK);
-    for (let i = start + 1; i < limit && unresolved.size > 0; i++) {
-        const data = await readRun(ids[i]);
-        for (const t of data?.task_results ?? []) {
-            const tid = t.task_id;
-            if (!tid || !unresolved.has(tid) || t.mature_skipped) continue;
-            out[tid] = ids[i];
-            unresolved.delete(tid);
+    // Read in concurrent batches, then CONSUME each batch in index order so "the
+    // most recent run that executed this task" is unchanged: the walk is still
+    // newest-first, only the IO overlaps. Serially this was up to 20 round-trips
+    // to Azure Files back-to-back before the page could render. Overshooting
+    // costs at most BATCH-1 extra reads, and those are request-memoized.
+    const BATCH = 5;
+    for (let i = start + 1; i < limit && unresolved.size > 0; i += BATCH) {
+        const batch = ids.slice(i, Math.min(i + BATCH, limit));
+        const loaded = await Promise.all(batch.map((id) => readRun(id)));
+        for (let j = 0; j < batch.length && unresolved.size > 0; j++) {
+            for (const t of loaded[j]?.task_results ?? []) {
+                const tid = t.task_id;
+                if (!tid || !unresolved.has(tid) || t.mature_skipped) continue;
+                out[tid] = batch[j];
+                unresolved.delete(tid);
+            }
         }
     }
     return out;
@@ -2460,23 +2503,6 @@ export async function collectTaskFiles(
     const refs = await walkArtifacts(taskDir);
     if (refs.length === 0) return null;
     return refs.map((r) => ({ relPath: r.relPath, abs: path.join(taskDir, r.relPath) }));
-}
-
-// Collect every file under a whole run (`<runId>/`) for the download-as-zip
-// button on the run page. Same noise filter / symlink skip as collectTaskFiles,
-// applied across all task subdirs plus run-level files (run.json, analysis.md,
-// meta.json, …). Returns null for an invalid id or a missing/empty run dir.
-export async function collectRunFiles(
-    runId: string,
-    source: Source = DEFAULT_SOURCE,
-): Promise<{ relPath: string; abs: string }[] | null> {
-    if (!isValidId(runId)) return null;
-    const dir = runsDirFor(RUNS_DIR, source);
-    await ensureRunDir(source.container, runId, dir);
-    const runDir = path.join(dir, runId);
-    const refs = await walkArtifacts(runDir);
-    if (refs.length === 0) return null;
-    return refs.map((r) => ({ relPath: r.relPath, abs: path.join(runDir, r.relPath) }));
 }
 
 export async function resolveSafePath(

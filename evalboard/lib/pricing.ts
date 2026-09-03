@@ -136,7 +136,9 @@ const _ROUTING_PREFIXES = [
     "openrouter/",
 ];
 const _REGION_PREFIXES = ["eu.", "us.", "apac.", "global."];
-function normalizeModel(model: string): string {
+// Exported so the run header's model tally groups on the same key pricing looks
+// up on (lib/runs.ts::tallyModels).
+export function normalizeModel(model: string): string {
     let m = model.trim();
     for (const pre of _ROUTING_PREFIXES) {
         if (m.startsWith(pre)) {
