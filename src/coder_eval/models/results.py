@@ -1050,6 +1050,17 @@ class RunSummary(BaseModel):
     tasks_succeeded: int = Field(description="Number of tasks that succeeded")
     tasks_failed: int = Field(description="Number of tasks that failed")
     tasks_error: int = Field(description="Number of tasks that encountered errors")
+    # Part of the task_count invariant (a fourth bucket, not a sub-counter), but
+    # defaulted so run.json written before `coder-eval execute` existed — where
+    # no task can be ungraded — still deserialises.
+    tasks_not_graded: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of tasks executed without grading (`coder-eval execute`). "
+            "Excluded from BOTH sides of pass_rate — an ungraded task was never measured."
+        ),
+    )
 
     # Informational sub-counters: subsets of tasks_failed (NOT part of the
     # task_count invariant). Default 0 so old serialized RunSummary JSON
@@ -1097,10 +1108,16 @@ class RunSummary(BaseModel):
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> RunSummary:
-        if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
-            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+        buckets = self.tasks_succeeded + self.tasks_failed + self.tasks_error + self.tasks_not_graded
+        if buckets != self.tasks_run:
+            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error} + {self.tasks_not_graded}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
+
+    @property
+    def tasks_graded(self) -> int:
+        """Tasks that were actually measured — the denominator for every rate below."""
+        return self.tasks_run - self.tasks_not_graded
 
     # Derived run metrics: computed_fields over the stored counts and
     # ``task_results``, so they serialize into run.json while staying impossible to
@@ -1110,18 +1127,24 @@ class RunSummary(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty run."""
-        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+        """``tasks_succeeded / tasks_graded`` as a 0-1 fraction. ``None`` on an empty run.
+
+        The denominator excludes ungraded tasks (``coder-eval execute``), which were
+        never measured — counting them as misses would report a clean execute run as
+        0% pass. Identical to ``tasks_run`` for every graded run.
+        """
+        return self.tasks_succeeded / self.tasks_graded if self.tasks_graded else None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def error_share(self) -> float | None:
-        """``tasks_error / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
+        """``tasks_error / tasks_graded`` as a 0-1 fraction. ``None`` on an empty run.
 
         Diagnostic only, never adjusts the rate: a drop at a high error share is an
-        infrastructure night, the same drop at a normal share is the model.
+        infrastructure night, the same drop at a normal share is the model. Shares
+        ``pass_rate``'s denominator so the two are directly comparable.
         """
-        return self.tasks_error / self.tasks_run if self.tasks_run else None
+        return self.tasks_error / self.tasks_graded if self.tasks_graded else None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

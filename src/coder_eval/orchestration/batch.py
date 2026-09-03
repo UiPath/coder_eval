@@ -164,6 +164,7 @@ async def run_batch(
                         preservation_mode=preservation_mode,
                         stream_callback=task_callback,
                         verbose=config.verbose,
+                        grade=config.grade,
                     ).run()
                     # The in-container _finalize_result can't emit task telemetry
                     # (connection-string env vars aren't forwarded into the
@@ -185,6 +186,7 @@ async def run_batch(
                         source_yaml=rt.source_yaml,
                         config_lineage=rt.config_lineage,
                         replicate_index=rt.replicate_index,
+                        grade=config.grade,
                     )
                     result = await orchestrator.run()
                 tr = TaskResult(
@@ -665,6 +667,7 @@ def build_run_summary(
         tasks_succeeded=sum(1 for s in statuses if s.category == "succeeded"),
         tasks_failed=sum(1 for s in statuses if s.category == "failed"),
         tasks_error=sum(1 for s in statuses if s.category == "error"),
+        tasks_not_graded=sum(1 for s in statuses if s.category == "ungraded"),
         tasks_token_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.TOKEN_BUDGET_EXCEEDED),
         tasks_cost_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.COST_BUDGET_EXCEEDED),
         skipped_tasks=skipped_tasks or [],

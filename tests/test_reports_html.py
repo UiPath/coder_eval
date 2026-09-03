@@ -37,16 +37,21 @@ from coder_eval.reports_html import (
 )
 
 
-_CATEGORY_TO_CLASS = {"succeeded": "success", "failed": "failure", "error": "error"}
+# "ungraded" is the one category whose badge is legitimately neutral: the row
+# carries no verdict, so it must render as neither green nor red. Listing it
+# explicitly (rather than dropping the negative assertion below) keeps the guard
+# that no OTHER member falls through to the neutral fallback.
+_CATEGORY_TO_CLASS = {"succeeded": "success", "failed": "failure", "error": "error", "ungraded": "neutral"}
 
 
 @pytest.mark.parametrize("status", list(FinalStatus))
 def test_status_badge_dispatches_on_category(status: FinalStatus):
-    """Every FinalStatus member renders a non-neutral, category-correct badge."""
+    """Every FinalStatus member renders a category-correct badge, neutral only when intended."""
     badge = _status_badge(status)
     expected_cls = _CATEGORY_TO_CLASS[status.category]
     assert f'class="badge {expected_cls}"' in badge
-    assert "neutral" not in badge
+    if expected_cls != "neutral":
+        assert "neutral" not in badge
     # The human-readable label is the status value.
     assert status.value in badge
 
@@ -1229,16 +1234,20 @@ _EXPECTED_BADGE_CLASS = {
     FinalStatus.MAX_TURNS_EXHAUSTED: "failure",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "failure",
     FinalStatus.COST_BUDGET_EXCEEDED: "failure",
+    # Neutral on purpose — an ungraded row has no verdict to colour. See
+    # _CATEGORY_TO_CLASS above.
+    FinalStatus.NOT_GRADED: "neutral",
 }
 
 
 @pytest.mark.parametrize("status", list(FinalStatus))
 def test_status_badge_maps_every_member_to_its_category(status: FinalStatus):
-    """Every FinalStatus member gets a non-neutral badge matching its category."""
+    """Every FinalStatus member gets a badge matching its category, neutral only when intended."""
     badge = _status_badge(status)
     expected_cls = _EXPECTED_BADGE_CLASS[status]
     assert f'class="badge {expected_cls}"' in badge
-    assert "neutral" not in badge
+    if expected_cls != "neutral":
+        assert "neutral" not in badge
     assert status.value in badge
 
 

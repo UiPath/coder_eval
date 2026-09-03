@@ -626,7 +626,10 @@ class ExperimentReportGenerator:
             f"- **Succeeded**: {agg.tasks_succeeded}",
             failed_line,
             f"- **Errors**: {agg.tasks_error}",
-            f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_run})",
+            *([f"- **Not Graded**: {agg.tasks_not_graded}"] if agg.tasks_not_graded else []),
+            # Denominator is the GRADED count, matching VariantAggregate.pass_rate —
+            # an ungraded task was never measured and belongs on neither side.
+            f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_graded})",
             f"- **Average Score**: {agg.average_score:.3f}",
             f"- **Average Duration**: {agg.average_duration:.1f}s",
             f"- **Total Tokens**: {tokens_str}",

@@ -237,8 +237,16 @@ def early_stop_gate_note(reason: str) -> str:
 
 
 def _pass_rate_lines(summary: RunSummary) -> list[str]:
-    """The pass rate over every dispatched task, plus the error share when non-zero."""
-    lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_run})"]
+    """The pass rate over every GRADED task, plus the error share when non-zero.
+
+    An ungraded run (``coder-eval execute``) has no pass rate at all, so it says
+    so rather than rendering ``0.0% (0/N)`` — which reads as a total failure.
+    """
+    # Only an ungraded run gets the explanatory line. An ordinary EMPTY run keeps
+    # its original "n/a (0/0)" rendering — the two are different facts.
+    if summary.tasks_not_graded and not summary.tasks_graded:
+        return [f"- **Pass Rate**: n/a — {summary.tasks_not_graded} task(s) executed without grading"]
+    lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_graded})"]
     if summary.tasks_error:
         lines.append(
             f"- **Error Share**: {_fmt_rate(summary.error_share)} of tasks never produced a "
@@ -389,6 +397,7 @@ class ReportGenerator:
             f"- **Succeeded**: {summary.tasks_succeeded}",
             failed_line,
             f"- **Errors**: {summary.tasks_error}",
+            *([f"- **Not Graded**: {summary.tasks_not_graded}"] if summary.tasks_not_graded else []),
             *_pass_rate_lines(summary),
         ]
 

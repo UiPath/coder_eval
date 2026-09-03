@@ -153,6 +153,10 @@ def run_task_internal_command(
     # a missing key falls back to the docker default (DIRECT_WRITE) — a deliberate
     # default, not version back-compat.
     preservation_mode = PreservationMode(context.get("preservation_mode", PreservationMode.DIRECT_WRITE.value))
+    # `coder-eval run` vs `coder-eval execute`, decided host-side. Defaults to
+    # True (grade) so a host that predates `execute` — which never writes the
+    # key — keeps its exact behavior.
+    grade: bool = context.get("grade", True)
     # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
     # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
     # Absent -> None -> standard run_dir/artifacts workspace.
@@ -197,6 +201,7 @@ def run_task_internal_command(
         config_lineage=config_lineage,
         replicate_index=replicate_index,
         workspace_dir=workspace_dir,
+        grade=grade,
     )
 
     # Install the stdout-NDJSON stream callback so per-tool-call events

@@ -58,6 +58,40 @@ flags of their own. They live under `run_limits:` in the task YAML, or on the co
 `-D run_limits.<field>=<value>` (e.g. `-D run_limits.max_usd=2.50`). The complete field reference is
 in the [Task Definition Guide](TASK_DEFINITION_GUIDE.md#run-limits).
 
+### `coder-eval execute` — run without grading
+
+```bash
+coder-eval execute tasks/hello_date.yaml                    # run, capture, score nothing
+coder-eval execute tasks/*.yaml --run-dir ./my-run -j 3     # every `run` flag but two
+```
+
+Identical to `coder-eval run` except that no success criterion is checked. Each task
+executes normally and its full trajectory lands in `task.json` as usual, but
+`weighted_score` stays `null` and the row finalizes as `NOT_GRADED` — a reporting
+category of its own, excluded from both sides of every pass rate. The two commands
+share one implementation, so they cannot drift apart.
+
+Use it when something *else* owns the verdict — an external harness that builds its own
+container and runs its own tests — or to separate one expensive agent run from grading
+you want to iterate on afterwards. Grade the results later with
+[`coder-eval evaluate`](#coder-eval-evaluate--test-criteria-without-an-agent).
+
+**Only the verdict is withheld, never the facts of the run.** A crash, timeout, or
+budget breach still reports `ERROR` / `TIMEOUT` / `TOKEN_BUDGET_EXCEEDED` and still
+exits non-zero, exactly as under `run`.
+
+Every `run` flag is available except three things, each refused rather than quietly
+degraded:
+
+| Not supported | Why |
+| --- | --- |
+| `--junit-xml` | A JUnit report reports verdicts, and there are none. |
+| `--resume` | Resume treats "has any final status" as finalized, so a `NOT_GRADED` row would be *skipped* by a later `run --resume` rather than graded. |
+| Simulation tasks | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. |
+
+`stop_early:` blocks are also inert here: early stop exists to cut a run once the
+criteria decide the outcome, and under `execute` the full trajectory is the deliverable.
+
 ### `coder-eval plan` — validate tasks
 
 ```bash

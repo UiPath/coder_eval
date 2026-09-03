@@ -540,11 +540,16 @@ class DockerRunner:
         preservation_mode: PreservationMode = PreservationMode.DIRECT_WRITE,
         stream_callback: StreamCallback | None = None,
         verbose: bool = False,
+        grade: bool = True,
     ) -> None:
         self.rt = rt
         self.preservation_mode = preservation_mode
         self.stream_callback = stream_callback
         self.verbose = verbose
+        # Forwarded to the in-container orchestrator via context.json. It is a
+        # run-level decision made by the CLI, so it cannot be recovered from the
+        # staged task.yaml on the other side.
+        self.grade = grade
         # Set by _prepare_host_mounts: the tmp lean copy of ~/.claude that
         # _build_argv mounts read-write. None when there is no ~/.claude to
         # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
@@ -721,6 +726,9 @@ class DockerRunner:
                 "replicate_index": self.rt.replicate_index,
                 "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
                 "preservation_mode": self.preservation_mode.value,
+                # `coder-eval run` vs `coder-eval execute`. Not derivable from
+                # task.yaml on the container side (deliberately not a task field).
+                "grade": self.grade,
                 "source_yaml": self.rt.source_yaml,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).

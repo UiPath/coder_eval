@@ -354,6 +354,65 @@ def run_command(
 
         coder-eval run tasks/*.yaml --tags golden,basic --exclude-tags example
     """
+    run_pipeline(
+        grade=True,
+        task_files=task_files,
+        preservation_mode=preservation_mode,
+        run_dir=run_dir,
+        resume=resume,
+        max_parallel=max_parallel,
+        verbose=verbose,
+        log_file=log_file,
+        junit_xml=junit_xml,
+        tags=tags,
+        exclude_tags=exclude_tags,
+        include_skipped=include_skipped,
+        agent_type=agent_type,
+        model=model,
+        stream=stream,
+        backend=backend,
+        experiment=experiment,
+        sample=sample,
+        sample_per_stratum=sample_per_stratum,
+        repeats=repeats,
+        driver=driver,
+        set_overrides=set_overrides,
+    )
+
+
+def run_pipeline(
+    *,
+    grade: bool,
+    task_files: list[Path] | None,
+    preservation_mode: PreservationMode | None,
+    run_dir: Path | None,
+    resume: bool,
+    max_parallel: int,
+    verbose: bool,
+    log_file: Path | None,
+    junit_xml: Path | None,
+    tags: str | None,
+    exclude_tags: str | None,
+    include_skipped: bool,
+    agent_type: str | None,
+    model: str | None,
+    stream: str | None,
+    backend: str | None,
+    experiment: Path | None,
+    sample: int | None,
+    sample_per_stratum: int | None,
+    repeats: int | None,
+    driver: str | None,
+    set_overrides: list[str],
+) -> None:
+    """The shared body of ``coder-eval run`` and ``coder-eval execute``.
+
+    Everything below the Typer signature is identical for both commands; the only
+    difference is ``grade``, which decides whether success criteria are checked
+    (``run``) or the trajectory is captured and left unscored (``execute``). Both
+    commands are pure flag-parsing wrappers over this function, so a behavior
+    change can never apply to one and miss the other.
+    """
     # --resume needs an explicit run dir to resume into (auto-generated dirs are always fresh).
     if resume and run_dir is None:
         raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
@@ -414,6 +473,7 @@ def run_command(
                 resume=resume,
                 include_skipped=include_skipped,
                 junit_xml=junit_xml,
+                grade=grade,
             )
         )
     except KeyboardInterrupt:
@@ -439,6 +499,7 @@ async def _run_all_tasks(
     resume: bool = False,
     include_skipped: bool = False,
     junit_xml: Path | None = None,
+    grade: bool = True,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -459,6 +520,7 @@ async def _run_all_tasks(
         experiment_path: Optional path to experiment YAML (default: experiments/default.yaml)
         junit_xml: Optional path to write a JUnit XML report to, after the run
             summary is persisted and before the failure exit-code gate.
+        grade: False for `coder-eval execute` — run and capture, score nothing.
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -484,6 +546,7 @@ async def _run_all_tasks(
         repeats=repeats,
         verbose=verbose,
         include_skipped=include_skipped,
+        grade=grade,
     )
 
     from ..telemetry import flush_telemetry, track_event
@@ -500,6 +563,7 @@ async def _run_all_tasks(
             "StreamMode": stream_mode or "none",
             "Resume": resume,
             "ExperimentProvided": experiment_path is not None,
+            "Grade": grade,
         },
     )
 
@@ -513,7 +577,7 @@ async def _run_all_tasks(
     try:
         # Always run through experiment layer (defaults to experiments/default.yaml)
         summary, failed_suite_gates = await _run_with_experiment(
-            all_task_files, config, experiment_path, stream_mode, max_parallel, resume=resume
+            all_task_files, config, experiment_path, stream_mode, max_parallel, resume=resume, grade=grade
         )
 
         # Aggregate task logs into run.log
@@ -600,6 +664,7 @@ async def _run_with_experiment(
     stream_mode: str | None,
     max_parallel: int,
     resume: bool = False,
+    grade: bool = True,
 ) -> tuple[RunSummary, int]:
     """Run tasks through the experiment resolution layer.
 
@@ -669,6 +734,23 @@ async def _run_with_experiment(
         )
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
+
+    # Simulation tasks are rejected under `execute`, not silently degraded. The
+    # dialog loop reads criteria results to decide whether to keep talking, so an
+    # ungraded dialog would quietly change its own stopping behavior and produce a
+    # trajectory that is not the one `run` would have produced. Rejecting is a
+    # config error (exit 2), and it names the offending tasks.
+    if not grade:
+        simulated = sorted(
+            rt.task.task_id for rt in resolved if rt.task.simulation is not None and rt.task.simulation.enabled
+        )
+        if simulated:
+            raise typer.BadParameter(
+                "`coder-eval execute` does not support simulation tasks (their turn-continuation "
+                + "logic depends on criteria results): "
+                + ", ".join(simulated)
+                + ". Use `coder-eval run` for these."
+            )
 
     if skipped:
         console.print(
@@ -745,6 +827,12 @@ async def _run_with_experiment(
 
     # Per-suite pass-rate rollups for dataset-backed tasks (no-op when none were used).
     # Pass `resolved` through so suite_thresholds on each criterion can be evaluated.
+    # Skipped entirely under `execute`: a rollup aggregates per-criterion results,
+    # and there are none — running it would gate a suite on an empty aggregate and
+    # report a threshold failure for a run that was never measured.
+    if not grade:
+        return summary, 0
+
     from ..reports import write_suite_rollups
 
     rollups = write_suite_rollups(config.run_dir, task_results, resolved_tasks=resolved)

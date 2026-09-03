@@ -2,7 +2,13 @@
 // Mirrors coder_eval `FinalStatus.category` (src/coder_eval/models/enums.py):
 //   SUCCESS              -> passed
 //   ERROR / BUILD_FAILED -> error  (BUILD_FAILED is an environment/setup failure)
+//   NOT_GRADED           -> unknown (`coder-eval execute`: ran, deliberately unscored)
 //   anything else (FAILURE, TIMEOUT, MAX_TURNS_EXHAUSTED, …) -> failed
+//
+// NOT_GRADED maps to "unknown" rather than gaining a category of its own: every
+// consumer already handles "unknown" (a null status) as "no verdict here", which
+// is exactly what an ungraded row is. It is therefore not a pass, not a failure,
+// and sorts in the middle — the same treatment a missing status gets.
 //
 // Note: this only categorizes coder_eval task statuses. UI status display
 // (e.g. StatusPill) also handles flow execution statuses like "Completed"
@@ -16,6 +22,7 @@ export function statusCategory(status: string | null): StatusCategory {
     if (!status) return "unknown";
     if (status === "SUCCESS") return "passed";
     if (status === "ERROR" || status === "BUILD_FAILED") return "error";
+    if (status === "NOT_GRADED") return "unknown";
     return "failed";
 }
 

@@ -94,6 +94,20 @@ class BatchRunConfig(BaseModel):
         description="CLI override for replicates per (task, variant). None = defer to experiment layers.",
     )
 
+    # Grading switch: `coder-eval run` (True) vs `coder-eval execute` (False).
+    # It lives HERE and nowhere else on purpose — it is deliberately NOT part of
+    # the 5-layer task merge, so there is no `-D grade=...` path and no
+    # MergeField (CE014 does not apply to a scalar bool outside the merged
+    # roots). A task YAML must never be able to declare itself ungraded; only
+    # the invoking command decides.
+    grade: bool = Field(
+        default=True,
+        description=(
+            "Evaluate success criteria after execution. False = `coder-eval execute`: "
+            "run and capture the trajectory, score nothing, finalize as NOT_GRADED."
+        ),
+    )
+
     # Logging
     verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")
 

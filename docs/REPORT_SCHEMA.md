@@ -44,7 +44,8 @@ run-level summary; full per-replicate detail lives in each `task.json`.
 | `start_time` / `end_time` | `datetime` | Run window. |
 | `total_duration_seconds` | `float` | Wall-clock. |
 | `tasks_run` | `int` | Total replicates executed. |
-| `tasks_succeeded` / `tasks_failed` / `tasks_error` | `int` | Category counts. **Invariant:** the three sum to `tasks_run`. |
+| `tasks_succeeded` / `tasks_failed` / `tasks_error` / `tasks_not_graded` | `int` | Category counts. **Invariant:** the four sum to `tasks_run`. |
+| `tasks_not_graded` | `int` | Tasks run by `coder-eval execute` — executed, deliberately unscored. Excluded from **both** sides of `pass_rate`. Defaults to `0`, so pre-`execute` `run.json` still parses. |
 | `tasks_token_budget_exceeded` / `tasks_cost_budget_exceeded` | `int` | Sub-counters of `tasks_failed` (not part of the invariant). |
 | `skipped_tasks` | `list[{path, reason}]` | Load failures / `skip: true` opt-outs. |
 | `max_parallel` | `int` | Concurrency used. |
@@ -59,8 +60,9 @@ publishing different numbers for the same run.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `pass_rate` | `float \| None` | `tasks_succeeded / tasks_run` — errors are in the denominator, counted as misses. `None` on an empty run (0/0 is unknown, not 0%). |
-| `error_share` | `float \| None` | `tasks_error / tasks_run`. Diagnostic only; never adjusts the rate. |
+| `pass_rate` | `float \| None` | `tasks_succeeded / tasks_graded` — errors are in the denominator, counted as misses; ungraded tasks are in neither. `None` on an empty or fully ungraded run (0/0 is unknown, not 0%). |
+| `error_share` | `float \| None` | `tasks_error / tasks_graded`. Diagnostic only; never adjusts the rate. |
+| `tasks_graded` | `int` | `tasks_run - tasks_not_graded`. The denominator of both rates above. |
 | `total_cost_usd` | `float \| None` | **The bill**: agent + judge + simulator, summed over the rows. `None` when nothing could be priced. |
 | `agent_cost_usd` | `float \| None` | Subject-agent spend alone. The harness-vs-harness comparison figure — judge spend is a property of the suite's criteria and identical across harnesses, so leaving it in would make two harnesses look closer than they are. |
 | `eval_overhead_cost_usd` | `float \| None` | Judge + simulator spend. The other half of `total_cost_usd`. |
@@ -232,7 +234,8 @@ the same weighted armed gate as a native fail),
 ## `variant.json` — `VariantAggregate`
 
 A single aggregate (not wrapped): `variant_id`, `tasks_run`, `tasks_succeeded`,
-`tasks_failed`, `tasks_error` (same sum-to-`tasks_run` invariant), `average_score`,
+`tasks_failed`, `tasks_error`, `tasks_not_graded` (same sum-to-`tasks_run` invariant), `average_score`
+(the mean over **graded** rows only),
 `average_duration`, `total_tokens`, `replicate_count`, `tasks_token_budget_exceeded`,
 `tasks_cost_budget_exceeded`.
 
@@ -308,9 +311,19 @@ String enum values and their reporting category:
 | `COST_BUDGET_EXCEEDED` | failed | `$` |
 | `ERROR` | error | `!` |
 | `BUILD_FAILED` | error | `B` |
+| `NOT_GRADED` | ungraded | `?` |
 
 > **Gotcha:** `BUILD_FAILED` (a failed Docker image build) categorizes as **error**,
 > not failed — easy to miscount downstream.
+
+`NOT_GRADED` is produced only by [`coder-eval execute`](USER_GUIDE.md#coder-eval-execute--run-without-grading):
+the task ran and its full trajectory was captured, but no criterion was checked, so
+`weighted_score` is `None` (**not** `0.0` — that would be indistinguishable from a task
+that was graded and scored zero). `ungraded` is a fourth reporting category, not a fold
+into one of the other three: counting it as failed would depress every pass rate, and
+counting it as succeeded would invent a verdict. Execution facts still win over it — a
+crash, timeout, or budget breach under `execute` reports `ERROR` / `TIMEOUT` /
+`TOKEN_BUDGET_EXCEEDED` as usual.
 
 `TOKEN_BUDGET_EXCEEDED` and `COST_BUDGET_EXCEEDED` are produced by the cumulative budget caps under
 `run_limits:` (`max_input_tokens` / `max_output_tokens` / `max_total_tokens`, and `max_usd`

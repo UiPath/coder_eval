@@ -15,9 +15,16 @@ class FinalStatus(StrEnum):
     MAX_TURNS_EXHAUSTED = "MAX_TURNS_EXHAUSTED"
     TOKEN_BUDGET_EXCEEDED = "TOKEN_BUDGET_EXCEEDED"
     COST_BUDGET_EXCEEDED = "COST_BUDGET_EXCEEDED"
+    # `coder-eval execute` ran the agent but deliberately skipped grading, so
+    # there is no verdict to report. Distinct from FAILURE (which asserts the
+    # criteria were checked and did not pass) and from ERROR (which asserts
+    # something went wrong). Only SUCCESS/FAILURE collapse into it — every
+    # other member records an *execution* fact that still applies when the
+    # run is ungraded.
+    NOT_GRADED = "NOT_GRADED"
 
     @property
-    def category(self) -> Literal["succeeded", "failed", "error"]:
+    def category(self) -> Literal["succeeded", "failed", "error", "ungraded"]:
         """Classify this status into a reporting category (the SSOT for failed/succeeded/error)."""
         return _STATUS_CATEGORIES[self]
 
@@ -31,7 +38,7 @@ class FinalStatus(StrEnum):
 # catch-all default) so a newly-added status fails the assert below until it is
 # classified — rather than silently collapsing into "failed" (which would skew
 # reports AND the telemetry Category dimension). Mirrors the _STATUS_ICONS guard.
-_STATUS_CATEGORIES: dict[FinalStatus, Literal["succeeded", "failed", "error"]] = {
+_STATUS_CATEGORIES: dict[FinalStatus, Literal["succeeded", "failed", "error", "ungraded"]] = {
     FinalStatus.SUCCESS: "succeeded",
     FinalStatus.FAILURE: "failed",
     FinalStatus.ERROR: "error",
@@ -43,6 +50,12 @@ _STATUS_CATEGORIES: dict[FinalStatus, Literal["succeeded", "failed", "error"]] =
     FinalStatus.MAX_TURNS_EXHAUSTED: "failed",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "failed",
     FinalStatus.COST_BUDGET_EXCEEDED: "failed",
+    # A fourth category, not a fold into one of the three. Folding into
+    # "failed" would depress every pass rate; folding into "succeeded" would
+    # invent verdicts; folding into "error" would report a healthy run as
+    # broken. Reporting surfaces exclude it from BOTH the numerator and the
+    # denominator of a pass rate — an ungraded task was never measured.
+    FinalStatus.NOT_GRADED: "ungraded",
 }
 
 assert set(_STATUS_CATEGORIES) == set(FinalStatus), "Missing category for FinalStatus member"
@@ -57,6 +70,7 @@ _STATUS_ICONS: dict[FinalStatus, str] = {
     FinalStatus.MAX_TURNS_EXHAUSTED: "M",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "#",
     FinalStatus.COST_BUDGET_EXCEEDED: "$",
+    FinalStatus.NOT_GRADED: "?",
 }
 
 assert set(_STATUS_ICONS) == set(FinalStatus), "Missing icon for FinalStatus member"

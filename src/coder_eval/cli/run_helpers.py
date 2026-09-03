@@ -132,7 +132,14 @@ def print_execution_summary(run_dir: Path, summary: RunSummary) -> None:
         summary: Run execution summary
     """
     console.print(f"\n[bold green]Run complete:[/bold green] {run_dir}")
-    console.print(f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_run} succeeded")
+    # An ungraded run has no pass rate to report — printing "0/N succeeded" for a
+    # clean `coder-eval execute` reads as a total failure. Report what actually
+    # happened instead, and keep the graded line for whatever WAS graded.
+    if summary.tasks_not_graded:
+        console.print(f"[bold]Results:[/bold] {summary.tasks_not_graded}/{summary.tasks_run} executed, not graded")
+        console.print("[dim]Grade later: uv run coder-eval evaluate <task.yaml> <workspace>[/dim]")
+    if summary.tasks_graded:
+        console.print(f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_graded} succeeded")
     console.print(f"[dim]View report: open {run_dir / 'experiment.md'}[/dim]")
     console.print(f"[dim]View report: uv run coder-eval report {run_dir}[/dim]")
 

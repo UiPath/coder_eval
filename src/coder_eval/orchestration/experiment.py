@@ -819,9 +819,20 @@ def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
 
     Unknown categories fall back to priority -1 so they sort as worst-of-all
     (fail-closed: a new unrecognised status becomes the most urgent).
+
+    "ungraded" sorts LEAST urgent (above "succeeded") — it carries no verdict, so
+    any replicate that does have one must win. It therefore survives only when
+    every replicate is ungraded, which is the only case reachable today anyway
+    (``grade`` is run-level, so replicates never mix).
     """
-    priority = {"error": 0, "failed": 1, "succeeded": 2}
+    priority = {"error": 0, "failed": 1, "succeeded": 2, "ungraded": 3}
     return min(statuses, key=lambda s: priority.get(s.category, -1))
+
+
+def _mean_graded_score(vr_list: list[VariantResult]) -> float:
+    """Mean ``weighted_score`` over the graded rows; ``0.0`` when none were graded."""
+    graded = [v.weighted_score for v in vr_list if v.final_status.category != "ungraded"]
+    return sum(graded) / len(graded) if graded else 0.0
 
 
 def _mean_reference_similarity(reps: list[TaskResult]) -> float | None:
@@ -938,9 +949,14 @@ def aggregate_results(
             tasks_succeeded=sum(1 for v in vr_list if v.final_status.category == "succeeded"),
             tasks_failed=sum(1 for v in vr_list if v.final_status.category == "failed"),
             tasks_error=sum(1 for v in vr_list if v.final_status.category == "error"),
+            tasks_not_graded=sum(1 for v in vr_list if v.final_status.category == "ungraded"),
             tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
             tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
-            average_score=sum(v.weighted_score for v in vr_list) / len(vr_list),
+            # Mean over GRADED rows only. An ungraded row has no score (it
+            # arrives here as 0.0 because VariantResult.weighted_score is a
+            # plain float), so including it would report a clean execute run as
+            # average_score 0.0 — a number indistinguishable from "scored zero".
+            average_score=_mean_graded_score(vr_list),
             average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,
             replicate_count=vr_list[0].replicate_count if vr_list else 1,

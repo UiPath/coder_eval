@@ -222,6 +222,13 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     tasks_succeeded: int
     tasks_failed: int
     tasks_error: int
+    # Fourth bucket of the task_count invariant (see RunSummary.tasks_not_graded).
+    # Defaulted so experiment.json written before `coder-eval execute` still loads.
+    tasks_not_graded: int = Field(
+        default=0,
+        ge=0,
+        description="Tasks executed without grading (`coder-eval execute`). Excluded from pass_rate entirely.",
+    )
     average_score: float
     average_duration: float
     total_tokens: int | None = None
@@ -244,16 +251,25 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> VariantAggregate:
-        if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
-            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+        buckets = self.tasks_succeeded + self.tasks_failed + self.tasks_error + self.tasks_not_graded
+        if buckets != self.tasks_run:
+            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error} + {self.tasks_not_graded}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
+
+    @property
+    def tasks_graded(self) -> int:
+        """Tasks actually measured — ``pass_rate``'s denominator."""
+        return self.tasks_run - self.tasks_not_graded
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant."""
-        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+        """``tasks_succeeded / tasks_graded`` as a 0-1 fraction. ``None`` when nothing was graded.
+
+        Mirrors ``RunSummary.pass_rate``: ungraded tasks leave both sides.
+        """
+        return self.tasks_succeeded / self.tasks_graded if self.tasks_graded else None
 
 
 class TaskExperimentSummary(BaseModel):  # noqa: CE009 -- persisted result model; round-trip leniency like models/results.py

@@ -7,6 +7,7 @@ from coder_eval.telemetry import track_command
 from .aggregate_command import aggregate_command
 from .console import console
 from .evaluate_command import evaluate_command
+from .execute_command import execute_command
 from .plan_command import plan_command
 from .report_command import report_command
 from .run_command import run_command
@@ -46,7 +47,8 @@ def main(
     Run 'coder-eval COMMAND --help' for help on a specific command.
 
     Available commands:
-    - run: Execute evaluation tasks
+    - run: Execute evaluation tasks and grade them
+    - execute: Execute evaluation tasks WITHOUT grading them
     - plan: Validate task files (dry-run)
     - evaluate: Run criteria against a directory without an agent
     - report: Display or export evaluation reports
@@ -75,6 +77,7 @@ def main(
 # emits a CoderEval.Cli.<name> event (Status/DurationMs/ErrorType) on completion;
 # functools.wraps preserves the signature so Typer still parses each command's flags.
 app.command(name="run")(track_command("run")(run_command))
+app.command(name="execute")(track_command("execute")(execute_command))
 app.command(name="plan")(track_command("plan")(plan_command))
 app.command(name="evaluate")(track_command("evaluate")(evaluate_command))
 app.command(name="report")(track_command("report")(report_command))

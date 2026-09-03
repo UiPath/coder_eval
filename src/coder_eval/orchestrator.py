@@ -363,6 +363,7 @@ class Orchestrator:
         config_lineage: dict[str, ConfigLineageEntry] | None = None,
         replicate_index: int = 0,
         workspace_dir: Path | None = None,
+        grade: bool = True,
     ):
         """Initialize the orchestrator.
 
@@ -385,6 +386,13 @@ class Orchestrator:
                 run_dir/artifacts/<task>, and the workspace is copied out to run_dir/artifacts/<task>
                 at cleanup. Resolved host-side by DockerRunner; None keeps standard behavior.
                 Takes precedence over preservation_mode when set.
+            grade: Whether to evaluate success criteria after execution. False is
+                `coder-eval execute`: the agent runs and the full trajectory is
+                captured, but no criterion is checked, ``weighted_score`` stays
+                None, and the row finalizes as ``FinalStatus.NOT_GRADED``. It is
+                deliberately NOT a task-config field — a task YAML must never be
+                able to declare itself ungraded — so it arrives only from
+                ``BatchRunConfig.grade``, never from the 5-layer merge or -D.
         """
         self.task = task
         self.run_dir = run_dir
@@ -403,6 +411,7 @@ class Orchestrator:
         self.source_yaml = source_yaml
         self.config_lineage = config_lineage or {}
         self.replicate_index = replicate_index
+        self.grade = grade
 
         # Derived paths
         self.report_path = self.run_dir / "task.json"
@@ -583,11 +592,19 @@ class Orchestrator:
                         elapsed_seconds=time.time() - start_time,
                     )
 
-                # Update final status
+                # Update final status. The NOT_GRADED arm sits between the
+                # execution facts and FAILURE deliberately: under grade=False no
+                # criterion ran, so `success` is always False and FAILURE would be
+                # a verdict we never actually reached — but MAX_TURNS_EXHAUSTED
+                # (like TIMEOUT / BUILD_FAILED / the budget stops on the except
+                # branches below) is a fact about the RUN, not about grading, and
+                # still applies. With grade=True the chain is unchanged.
                 if success:
                     self.result.final_status = FinalStatus.SUCCESS
                 elif self.result.max_turns_exhausted:
                     self.result.final_status = FinalStatus.MAX_TURNS_EXHAUSTED
+                elif not self.grade:
+                    self.result.final_status = FinalStatus.NOT_GRADED
                 else:
                     self.result.final_status = FinalStatus.FAILURE
 
@@ -683,6 +700,9 @@ class Orchestrator:
                 # but BEFORE _finalize_result so task.json includes the field.
                 # Allowlist non-success terminal statuses; SUCCESS and
                 # MAX_TURNS_EXHAUSTED skip the tail to keep task.json compact.
+                # NOT_GRADED is deliberately absent: like SUCCESS and
+                # MAX_TURNS_EXHAUSTED it is not a diagnosis of something going
+                # wrong, so it keeps task.json compact.
                 if self.result.final_status in {
                     FinalStatus.ERROR,
                     FinalStatus.TIMEOUT,
@@ -785,6 +805,11 @@ class Orchestrator:
         """
         if self.result is None:
             return
+        if not self.grade:
+            # Grading site 4 of 4. Under `execute` no criterion is checked on any
+            # path, diagnostics included — recording a not_evaluated vector here
+            # would imply criteria we were supposed to run and couldn't.
+            return
         if self.success_checker is None or self.sandbox is None:
             self._record_post_failure_not_evaluated("the sandbox or success checker was unavailable")
             return
@@ -879,7 +904,14 @@ class Orchestrator:
         # path) run inside run()'s try, whose broad `except Exception` already converts
         # a raise into a populated ERROR result, so they intentionally stay unwrapped.
         try:
-            self.result.calculate_weighted_score(self.task.success_criteria)
+            if self.grade:
+                self.result.calculate_weighted_score(self.task.success_criteria)
+            else:
+                # Explicit None, NOT the 0.0 calculate_weighted_score writes for an
+                # empty results list — that value is indistinguishable from a task
+                # that was graded and scored zero, and every downstream `score or
+                # 0.0` would launder it into a real-looking failure.
+                self.result.weighted_score = None
         except ValueError as e:
             logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
             self.result.weighted_score = None
@@ -1284,7 +1316,18 @@ class Orchestrator:
         # armed evaluate-only re-grade builds an inert (never-fed) watcher —
         # harmless, and keeps a single creation point.
         if early_stop_active(self.task):
-            self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
+            if self.grade:
+                self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
+            else:
+                # Early stop cuts the run once coder-eval's own criteria decide the
+                # outcome. Under `execute` there is no outcome to decide and the
+                # trajectory is the deliverable (an external harness grades it), so
+                # an armed criterion must not truncate it. Same effect as the
+                # run_limits.stop_early kill switch, decided one layer up.
+                logger.info(
+                    "Grading disabled (execute mode): early-stop is armed but stays disabled; "
+                    + "the full trajectory is the deliverable."
+                )
 
         # Stage the reference BEFORE either branch returns: judge criteria with
         # include_reference=true (and any $REFERENCE_DIR/... file entry) expect it
@@ -1888,6 +1931,14 @@ class Orchestrator:
         assert self.task.agent is not None
 
         if self.agent is None:
+            # Grading site 1 of 4. Evaluate-only with grading off would neither
+            # run an agent nor check anything — a no-op that still writes a
+            # task.json. Refuse instead of producing an empty row.
+            if not self.grade:
+                raise ValueError(
+                    "grade=False is meaningless on the evaluate-only path (no agent attached): "
+                    + "the run would neither execute nor grade."
+                )
             # No agent attached: evaluate-only re-grade of a completed sandbox.
             # (No-op tasks have a NoOpAgent here, so they take the normal path
             # below.) Check the criteria directly against the sandbox.
@@ -1954,6 +2005,15 @@ class Orchestrator:
         self.result.early_stop = self._early_stop_watcher.info if self._early_stop_watcher is not None else None
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
+
+        # Grading site 2 of 4. `execute` stops here: the trajectory is captured
+        # and persisted exactly as on a graded run, but nothing is scored.
+        # Returning False keeps FinalStatus off SUCCESS; run()'s status chain
+        # turns it into NOT_GRADED. The reference-integrity check is skipped too
+        # — it exists to protect a grade that is not happening.
+        if not self.grade:
+            logger.info("Grading disabled (execute mode): skipping success criteria.")
+            return False
 
         # Check success criteria (reference_dir feeds reference_comparison + judges)
         logger.debug("Checking success criteria")
@@ -2073,6 +2133,15 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
+        # Grading site 3 of 4. Unreachable today — `execute` rejects simulation
+        # tasks at the CLI, because the dialog's turn-continuation logic reads
+        # criteria results to decide whether to keep talking, so an ungraded
+        # dialog would silently change its own stopping behavior. Kept as a
+        # correct, defensive no-op so the gate holds if that restriction lifts.
+        if not self.grade:
+            self.result.success_criteria_results = []
+            self.result.weighted_score = None
+            return []
         await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,

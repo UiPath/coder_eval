@@ -283,7 +283,10 @@ def _status_badge(status: Any) -> str:
     status_str = getattr(status, "value", None) or str(status)
     try:
         fs = status if isinstance(status, FinalStatus) else FinalStatus(str(status))
-        cls = {"succeeded": "success", "failed": "failure", "error": "error"}[fs.category]
+        # "ungraded" -> neutral: the row carries no verdict, so it must render as
+        # neither green nor red. Same class an unrecognised status falls back to,
+        # reached deliberately here rather than by accident.
+        cls = {"succeeded": "success", "failed": "failure", "error": "error", "ungraded": "neutral"}[fs.category]
     except (ValueError, KeyError):
         cls = "neutral"  # unknown / non-FinalStatus input
     return f'<span class="badge {_esc(cls)}">{_esc(status_str)}</span>'

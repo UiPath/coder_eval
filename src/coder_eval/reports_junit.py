@@ -54,7 +54,7 @@ def _xml_safe(text: str) -> str:
     return _ILLEGAL_XML.sub("", text)
 
 
-def _category_of(status: str) -> Literal["succeeded", "failed", "error"]:
+def _category_of(status: str) -> Literal["succeeded", "failed", "error", "ungraded"]:
     """Map a serialized status string to a reporting category via the SSOT.
 
     Goes through ``FinalStatus(value).category`` (an explicit allowlist, CE018);
@@ -301,6 +301,14 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
     status = _status_of(row)
     category = _category_of(status)
     if category == "succeeded":
+        return case
+
+    if category == "ungraded":
+        # `coder-eval execute`: the task ran but was deliberately not scored.
+        # <skipped> is JUnit's only "no verdict" element — reporting it as a
+        # <failure> would turn a healthy ungraded run red in CI, and reporting
+        # it as a pass would invent a verdict. _set_counts already counts these.
+        ET.SubElement(case, "skipped", {"message": "not graded (coder-eval execute)"})
         return case
 
     message = status if status in _KNOWN_STATUSES else f"unknown status: {status}"
