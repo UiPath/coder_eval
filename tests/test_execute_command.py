@@ -209,7 +209,6 @@ def _option_names(command: str) -> set[str]:
 # risk this test exists to close: a flag added to `run` must be added here too,
 # or consciously listed below as a deliberate omission.
 _DELIBERATELY_ABSENT_FROM_EXECUTE = {
-    "--resume",  # partition_for_resume would treat a NOT_GRADED row as finalized
     "--junit-xml",  # a report of verdicts, and there are none
 }
 

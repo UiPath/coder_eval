@@ -657,6 +657,70 @@ async def _run_with_callbacks(
     return result
 
 
+async def _grade_resumed_tasks(to_grade: list[ResolvedTask]) -> list[tuple[ResolvedTask, TaskResult]]:
+    """Grade the rows ``coder-eval execute`` left NOT_GRADED, in place.
+
+    Each task's trajectory and workspace are already on disk, so this runs the
+    criteria against them instead of re-running the agent — that reuse is the
+    whole reason to split ``execute`` from ``run``.
+
+    The task config comes from ``rt.task`` (this run's own 5-layer resolution),
+    not from the recorded one: ``--resume`` re-resolves the same task files, and
+    a config that drifted since the execute is already surfaced by the run
+    fingerprint warning above.
+
+    A task that cannot be graded is reported and folded back in with its ORIGINAL
+    ungraded result, so one bad row neither aborts the resume nor silently
+    vanishes from run.json — it stays visible as ``tasks_not_graded``.
+    """
+    from ..orchestration.regrade import (
+        RegradeError,
+        back_up_pre_grade_record,
+        default_workspace,
+        load_prior_result,
+        regrade_in_place,
+        verify_reference_unchanged,
+    )
+
+    graded: list[tuple[ResolvedTask, TaskResult]] = []
+    for rt in to_grade:
+        prior = load_prior_result(rt.run_dir)
+        try:
+            verify_reference_unchanged(prior, rt.task)
+            workspace = default_workspace(rt.run_dir, prior)
+            # Preserve the ungraded record BEFORE the orchestrator overwrites
+            # task.json in this same directory.
+            back_up_pre_grade_record(rt.run_dir)
+            result = await regrade_in_place(
+                task=rt.task,
+                prior=prior,
+                workspace=workspace,
+                run_dir=rt.run_dir,
+                task_file=rt.task_file,
+                source_yaml=rt.source_yaml,
+                variant_id=rt.variant_id,
+                replicate_index=rt.replicate_index,
+            )
+        except (RegradeError, OSError, RuntimeError, ValueError) as e:
+            console.print(f"[yellow]⚠[/] Could not grade {rt.task.task_id}: {e}")
+            result = prior
+        graded.append(
+            (
+                rt,
+                TaskResult(
+                    task_id=rt.task.task_id,
+                    variant_id=rt.variant_id,
+                    result=result,
+                    duration=result.duration_seconds or 0.0,
+                    suite_id=rt.task.suite_id,
+                    row_id=rt.task.row_id,
+                    replicate_index=rt.replicate_index,
+                ),
+            )
+        )
+    return graded
+
+
 async def _run_with_experiment(
     all_task_files: list[Path],
     config: BatchRunConfig,
@@ -787,16 +851,26 @@ async def _run_with_experiment(
     prior_results: list[TaskResult] = []
     prior_resolved: list[ResolvedTask] = []
     if resume:
-        to_run, prior_results, prior_resolved = partition_for_resume(resolved)
+        part = partition_for_resume(resolved, grade=grade)
+        to_run, prior_results, prior_resolved = part.to_run, part.prior_results, part.prior_resolved
         # A re-run task re-executes from scratch, so any leftover artifacts (only
         # DIRECT_WRITE writes them live; a container killed mid-run leaves partials)
         # are stale and could let a file-based criterion pass on the old output.
+        # to_grade is deliberately NOT cleared: its artifacts are the run's output
+        # and the very thing being graded.
         cleared = clear_rerun_artifacts(to_run)
         console.print(
             f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, "
             + f"running {len(to_run)} remaining"
+            + (f", grading {len(part.to_grade)} executed-but-ungraded" if part.to_grade else "")
             + (f" (cleared {cleared} stale artifact dir(s))" if cleared else "")
         )
+        # Grade the rows `execute` left behind, reusing the trajectory and
+        # workspace already on disk rather than paying for the agent twice.
+        # Folded in as prior_results so the summary covers them like any other.
+        for rt, tr in await _grade_resumed_tasks(part.to_grade):
+            prior_results.append(tr)
+            prior_resolved.append(rt)
 
     # Print execution mode
     print_execution_mode(len(to_run), max_parallel)

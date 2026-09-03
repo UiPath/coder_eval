@@ -12,14 +12,13 @@ the agent, and grades with its own ``tests/test.sh``. Grading twice there would
 be worse than not grading at all: coder-eval's verdict would be reported
 alongside Harbor's without being the one that counts.
 
-Every flag on ``run`` is available here except two, and both omissions are
-deliberate:
+Every flag on ``run`` is available here except ``--junit-xml``, which is a report
+of verdicts and there are none.
 
-* ``--junit-xml`` — a JUnit report is a report of verdicts, and there are none.
-* ``--resume`` — ``partition_for_resume`` treats "has any final status" as
-  finalized, so a ``NOT_GRADED`` row would be skipped by a later ``run --resume``
-  rather than graded. Supporting it needs resume to distinguish "done" from
-  "executed but unscored"; until then, refusing is the honest option.
+``--resume`` IS supported, because ``partition_for_resume`` now takes the
+resuming command into account: a ``NOT_GRADED`` row owes ``execute`` nothing (it
+finished executing) but owes ``run`` a grade, so ``run --resume`` grades those
+rows in place rather than skipping them as "already complete".
 
 The command shares ``run``'s entire body (``run_command.run_pipeline``); only the
 Typer signature is restated, because Typer builds its parser from the signature.
@@ -54,6 +53,16 @@ def execute_command(
         None,
         "--run-dir",
         help="Custom run directory (default: auto-generated timestamped directory in runs/)",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help=(
+            "Resume an interrupted execute: skip tasks already executed in --run-dir "
+            "and run only the rest. Requires --run-dir. A NOT_GRADED row counts as "
+            "done here (it finished executing); a later `coder-eval run --resume` on "
+            "the same directory grades those rows instead of skipping them."
+        ),
     ),
     max_parallel: int = typer.Option(
         1,
@@ -187,8 +196,7 @@ def execute_command(
     ERROR / TIMEOUT / TOKEN_BUDGET_EXCEEDED and exits non-zero exactly as under
     `run`. Only the verdict is withheld, never the facts of the run.
 
-    Not supported here: --junit-xml (no verdicts to report), --resume (a
-    NOT_GRADED row would be mistaken for a finalized one), and simulation tasks
+    Not supported here: --junit-xml (no verdicts to report) and simulation tasks
     (their turn-continuation logic reads criteria results).
 
     Examples:
@@ -202,8 +210,8 @@ def execute_command(
         task_files=task_files,
         preservation_mode=preservation_mode,
         run_dir=run_dir,
-        # Not exposed as flags — see the module docstring for why each is refused.
-        resume=False,
+        resume=resume,
+        # Not exposed as a flag — a JUnit report reports verdicts, and there are none.
         junit_xml=None,
         max_parallel=max_parallel,
         verbose=verbose,

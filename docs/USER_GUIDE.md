@@ -41,7 +41,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
 | `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
-| `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. A task with *any* final status (incl. FAILED/ERROR) counts as finalized, so resume does **not** retry failures — delete a task's `task.json` to force a re-run. A config mismatch is warned, not refused. |
+| `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. See [Resuming a run](#resuming-a-run). |
 | `--sample N` | For dataset-backed tasks, run a fixed-seed random N-row sample (reproducible; cheap smoke test). See [Bring Your Own Dataset](DATASETS.md). |
 | `--sample-per-stratum N` | For dataset-backed tasks, keep up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — see [Bring Your Own Dataset](DATASETS.md). |
 | `--include-skipped` | Also run tasks marked `skip: true` in their YAML (off by default so CI keeps excluding them). |
@@ -86,11 +86,46 @@ degraded:
 | Not supported | Why |
 | --- | --- |
 | `--junit-xml` | A JUnit report reports verdicts, and there are none. |
-| `--resume` | Resume treats "has any final status" as finalized, so a `NOT_GRADED` row would be *skipped* by a later `run --resume` rather than graded. |
 | Simulation tasks | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. |
 
 `stop_early:` blocks are also inert here: early stop exists to cut a run once the
 criteria decide the outcome, and under `execute` the full trajectory is the deliverable.
+
+`--resume` **is** supported, and `run --resume` pairs with it (see below).
+
+### Resuming a run
+
+`--resume` continues an interrupted run without re-paying for finished work. It
+requires `--run-dir` (an auto-generated directory is always fresh).
+
+What it owes each task depends on what it finds in that task's `task.json`:
+
+| On disk | `run --resume` | `execute --resume` |
+| --- | --- | --- |
+| No `task.json`, unreadable, or no `final_status` | re-run | re-run |
+| `NOT_GRADED` | **grade in place** | already complete |
+| Any other status, **including `FAILURE` / `ERROR`** | already complete | already complete |
+
+**"Finished" is relative to the resuming command.** A `NOT_GRADED` row owes
+`execute` nothing — it finished executing — but owes `run` a grade. So
+`run --resume` runs the criteria against the trajectory and workspace already on
+disk instead of re-running the agent, which is the whole reason to split the two
+commands:
+
+```bash
+coder-eval execute tasks/*.yaml --run-dir ./r    # expensive half
+coder-eval run     tasks/*.yaml --run-dir ./r --resume   # grades what execute left
+```
+
+**Resume never retries failures.** `FAILURE` and `ERROR` count as complete under
+both commands — delete a task's `task.json` to force a re-run. A task about to
+re-run has its stale `artifacts/<task_id>` cleared first, so leftover files from
+a killed container cannot satisfy a file-based criterion.
+
+A run-config mismatch is **warned, not refused**: resumed tasks keep their
+original-config results, so the run genuinely mixes configs. The `grade` flag is
+exempt from that warning, because `execute` → `run --resume` is a supported flow
+rather than a config mistake.
 
 ### `coder-eval plan` — validate tasks
 

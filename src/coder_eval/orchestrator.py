@@ -735,12 +735,19 @@ class Orchestrator:
         silently disagrees with the run it grades.
 
         Deliberately NOT carried: ``final_status``, ``weighted_score`` and
-        ``success_criteria_results`` — those are exactly what this pass recomputes
-        — and the timestamps/duration, which describe the grading pass.
+        ``success_criteria_results`` — those are exactly what this pass recomputes.
         """
         prior = self.prior_result
         if prior is None or self.result is None:
             return
+
+        # A task row describes the TASK, so its clock is the agent run's, not the
+        # grading pass's. Left alone, a 10-minute run re-graded in 2 seconds would
+        # report 2 seconds — and that figure feeds average_duration, the report
+        # tables and the evalboard, so harness-vs-harness comparisons would be
+        # quietly wrong. _finalize_result restores the duration after its own
+        # timing write; the grading pass's cost is recorded separately there.
+        self.result.started_at = prior.started_at
 
         # The trajectory itself. Every derived figure in _finalize_result —
         # token totals, cost, command_stats, model_used, assistant turns —
@@ -951,6 +958,13 @@ class Orchestrator:
 
         self.result.completed_at = datetime.now()
         self.result.duration_seconds = time.time() - start_time
+
+        # Re-grade: the row keeps the agent run's duration (see
+        # _seed_from_prior_result). The grading pass's own cost is preserved
+        # alongside rather than discarded, so a slow judge is still visible.
+        if self.prior_result is not None:
+            self.result.environment_info["grading_duration_seconds"] = round(self.result.duration_seconds, 3)
+            self.result.duration_seconds = self.prior_result.duration_seconds
 
         # Weighted score. This call site is wrapped because _finalize_result runs
         # inside run()'s finally — an unguarded raise here would skip persistence and

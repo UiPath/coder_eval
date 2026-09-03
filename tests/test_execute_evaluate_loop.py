@@ -145,3 +145,71 @@ def test_evaluate_rejects_workspace_flag_outside_run_dir_mode(tmp_path: Path) ->
     result = runner.invoke(app, ["evaluate", str(AGENTLESS_TASK), str(work), "--workspace", str(work)])
     assert result.exit_code != 0
     assert "run directory only" in result.output
+
+
+# --------------------------------------------------------------------------
+# `run --resume` over an executed run dir
+# --------------------------------------------------------------------------
+
+
+def test_run_resume_grades_the_ungraded_rows_it_finds(tmp_path: Path) -> None:
+    """The whole point of the resume fix: `run --resume` over an executed run
+    must GRADE those rows, not report "already complete" and exit 0."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.NOT_GRADED.value
+
+    result = _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert "grading 1" in result.output
+    assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.SUCCESS.value
+    summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert summary["tasks_not_graded"] == 0
+    assert summary["tasks_succeeded"] == 1
+    assert summary["pass_rate"] == 1.0
+
+
+def test_run_resume_does_not_re_execute_the_agent(tmp_path: Path) -> None:
+    """Grading must reuse the trajectory on disk. Re-executing would discard the
+    expensive half — the reason `execute` and `run` were split at all."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    executed = _row(_task_dir(run_dir))
+
+    result = _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert "running 0 remaining" in result.output, "the task was re-executed instead of graded"
+    graded = _row(_task_dir(run_dir))
+    assert len(graded["iterations"]) == len(executed["iterations"])
+    # The row still describes the TASK, not the grading pass: a re-execution
+    # would restamp these, and reporting the grading pass's 2s as the task's
+    # duration would corrupt average_duration and every harness comparison.
+    assert graded["started_at"] == executed["started_at"]
+    assert graded["duration_seconds"] == executed["duration_seconds"]
+    # The grading pass's own cost is kept alongside, not discarded.
+    assert "grading_duration_seconds" in graded["environment_info"]
+    # The pre-grade record is preserved by this path too, not just by `evaluate`.
+    assert _row(_task_dir(run_dir), "task.execute.json")["final_status"] == FinalStatus.NOT_GRADED.value
+
+
+def test_execute_resume_treats_an_executed_row_as_done(tmp_path: Path) -> None:
+    """`execute --resume` owes a NOT_GRADED row nothing — it finished executing."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+
+    result = _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert "1 task(s) already complete" in result.output
+    assert "grading" not in result.output
+    assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.NOT_GRADED.value
+
+
+def test_execute_to_run_resume_emits_no_config_drift_warning(tmp_path: Path) -> None:
+    """`grade` is exempt from the fingerprint diff: this flow is supported, and
+    the warning's "keeps their original-config results" text is wrong for it."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+
+    result = _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert "run config changed" not in result.output

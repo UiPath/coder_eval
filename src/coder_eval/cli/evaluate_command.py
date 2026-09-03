@@ -19,112 +19,25 @@ from ..models import (
     TemplateDirSource,
     parse_agent_config,
 )
+from ..orchestration.regrade import (
+    PRE_GRADE_JSON,
+    TASK_JSON,
+    RegradeError,
+    back_up_pre_grade_record,
+    default_workspace,
+    load_prior_result,
+    task_from_prior,
+    verify_reference_unchanged,
+)
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
 from ..sandbox import Sandbox
 from .console import console
-from .evaluate_target import TASK_JSON, EvaluateMode, EvaluateTarget, EvaluateTargetError, resolve_evaluate_target
+from .evaluate_target import EvaluateMode, EvaluateTarget, EvaluateTargetError, resolve_evaluate_target
 from .run_helpers import prepare_run_directory
 
 
 logger = logging.getLogger(__name__)
-
-# Where a run directory keeps the workspace the agent worked in. The extra
-# segment is the task id: preservation writes `artifacts/<task_id>/...`.
-ARTIFACTS_DIRNAME = "artifacts"
-
-
-def _load_prior_result(run_dir: Path) -> EvaluationResult:
-    """Read a finished run's ``task.json``."""
-    raw = (run_dir / TASK_JSON).read_text(encoding="utf-8")
-    try:
-        return EvaluationResult.model_validate_json(raw)
-    except ValueError as e:
-        raise typer.BadParameter(f"{run_dir / TASK_JSON} is not a readable EvaluationResult: {e}") from e
-
-
-def _task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinition, str]:
-    """Rebuild the executed task from the run's own recorded config.
-
-    Rebuilding from ``task_config.resolved`` rather than re-reading the YAML is
-    what makes the grade describe the run that happened: ``resolved`` is the
-    post-merge definition, so variant overrides, ``-D`` flags and dataset row
-    expansion are all already baked in. Re-loading the source YAML would silently
-    grade a DIFFERENT task whenever any of those were used.
-
-    Falls back to the source YAML only when ``resolved`` will not validate (a
-    schema change since the run), and says so loudly — a quiet fallback would
-    reintroduce exactly the drift above.
-    """
-    record = prior.task_config
-    if record is None:
-        raise typer.BadParameter(
-            f"{run_dir / TASK_JSON} carries no task_config, so the executed task cannot be "
-            + "rebuilt. Pass the task file explicitly: coder-eval evaluate <task.yaml> <run_dir>"
-        )
-    try:
-        return TaskDefinition.model_validate(record.resolved), record.source_yaml
-    except ValueError as e:
-        if not record.source_file or not Path(record.source_file).is_file():
-            raise typer.BadParameter(
-                f"The resolved task config in {run_dir / TASK_JSON} no longer validates ({e}), and "
-                + "its source YAML is unavailable. Pass the task file explicitly."
-            ) from e
-        console.print(
-            f"[yellow]⚠[/] The recorded resolved config does not validate ({e}); falling back to "
-            + f"{record.source_file}. Variant overrides, -D flags and dataset expansion from the "
-            + "original run are NOT reapplied, so this grade may not match what ran."
-        )
-        return load_task(Path(record.source_file))
-
-
-def _default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
-    """Locate the workspace a finished run left behind.
-
-    ``sandbox_path`` is authoritative when it still exists — it is where the run
-    actually worked. Otherwise fall back to the preserved artifacts tree, whose
-    single child is named for the task.
-    """
-    if prior.sandbox_path:
-        recorded = Path(prior.sandbox_path)
-        if recorded.is_dir():
-            return recorded
-
-    artifacts = run_dir / ARTIFACTS_DIRNAME
-    if not artifacts.is_dir():
-        raise typer.BadParameter(
-            f"No workspace to grade: {artifacts} does not exist and the recorded sandbox_path "
-            + f"({prior.sandbox_path or 'unset'}) is gone. The run was probably made with "
-            + "--preservation-mode NONE. Point at one explicitly with --workspace."
-        )
-    children = [p for p in sorted(artifacts.iterdir()) if p.is_dir()]
-    # Preservation nests the workspace under the task id; a flat artifacts dir
-    # (no subdirectory) means the workspace IS artifacts/.
-    return children[0] if len(children) == 1 else artifacts
-
-
-def _verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition) -> None:
-    """Refuse to grade when the reference tree changed since the run.
-
-    ``reference_comparison`` and reference-carrying judges score against
-    ``task.reference.directory``. If it moved since the run, the re-grade would
-    silently measure the agent's old work against a new answer key.
-    """
-    recorded = prior.environment_info.get("reference_digest")
-    if not isinstance(recorded, str) or task.reference is None:
-        return
-    from ..orchestration.evaluation import resolve_reference_dir
-    from ..path_utils import digest_tree
-
-    resolved = resolve_reference_dir(task, None)
-    if resolved is None or not resolved.is_dir():
-        return
-    if digest_tree(resolved) != recorded:
-        raise typer.BadParameter(
-            f"The reference directory {resolved} changed since this run was executed "
-            + "(digest mismatch). Grading now would score the agent's work against a "
-            + "different answer key. Restore the reference, or re-run the task."
-        )
 
 
 @dataclass(frozen=True)
@@ -156,15 +69,25 @@ def _resolve_inputs(task_or_run_dir: Path, work_dir: Path | None, workspace: Pat
             + "directory to grade is already the second argument."
         )
 
+    try:
+        return _resolve_run_dir_or_work_dir(target, workspace)
+    except RegradeError as e:
+        # The shared core raises a plain exception (orchestration/ must not
+        # depend on the CLI layer, CE004); surface it as a CLI error here.
+        raise typer.BadParameter(str(e)) from e
+
+
+def _resolve_run_dir_or_work_dir(target: EvaluateTarget, workspace: Path | None) -> _ResolvedInputs:
+    """The mode-specific half of :func:`_resolve_inputs`."""
     prior: EvaluationResult | None = None
     if target.mode is EvaluateMode.RUN_DIR:
-        prior = _load_prior_result(target.target)
+        prior = load_prior_result(target.target)
         if target.task_file is not None:
             task, source_yaml = load_task(target.task_file)
             console.print(f"[dim]Grading with {target.task_file} (overrides the run's recorded config).[/dim]")
         else:
-            task, source_yaml = _task_from_prior(prior, target.target)
-        work_dir = workspace or _default_workspace(target.target, prior)
+            task, source_yaml = task_from_prior(prior, target.target)
+        work_dir = workspace or default_workspace(target.target, prior)
         recorded_source = prior.task_config.source_file if prior.task_config else None
         task_file = target.task_file or (Path(recorded_source) if recorded_source else None)
     else:
@@ -192,7 +115,7 @@ def _resolve_inputs(task_or_run_dir: Path, work_dir: Path | None, workspace: Pat
         task.agent = parse_agent_config(**{**task.agent.model_dump(exclude_unset=True), "type": AgentKind.CLAUDE_CODE})
 
     if prior is not None:
-        _verify_reference_unchanged(prior, task)
+        verify_reference_unchanged(prior, task)
 
     return _ResolvedInputs(
         target=target,
@@ -434,10 +357,9 @@ def _write_back(run_dir: Path, result: EvaluationResult) -> None:
     only evidence that the run was executed separately.
     """
     target = run_dir / TASK_JSON
-    backup = run_dir / "task.execute.json"
+    backup = run_dir / PRE_GRADE_JSON
+    back_up_pre_grade_record(run_dir)
     try:
-        if not backup.exists():
-            backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
         target.write_text(result.model_dump_json(indent=2), encoding="utf-8")
     except OSError as e:
         # Never fail the grade over the write-back: the verdict was computed and

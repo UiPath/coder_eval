@@ -15,7 +15,7 @@ import shutil
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..models import (
     AgentKind,
@@ -324,10 +324,24 @@ def _create_error_task_result(
     )
 
 
-def partition_for_resume(
-    resolved_tasks: list[ResolvedTask],
-) -> tuple[list[ResolvedTask], list[TaskResult], list[ResolvedTask]]:
-    """Split resolved tasks into (to_run, prior_results, prior_resolved) for --resume.
+class ResumePartition(NamedTuple):
+    """How ``--resume`` splits a run's tasks over what each one still needs."""
+
+    to_run: list[ResolvedTask]
+    """Never finished executing — re-run from scratch."""
+
+    to_grade: list[ResolvedTask]
+    """Executed but ungraded (NOT_GRADED). Needs criteria, NOT another agent run."""
+
+    prior_results: list[TaskResult]
+    """Genuinely finished — reloaded so run.json covers the whole suite."""
+
+    prior_resolved: list[ResolvedTask]
+    """The ResolvedTask for each entry of prior_results, same order."""
+
+
+def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = True) -> ResumePartition:
+    """Split resolved tasks over what ``--resume`` still owes each one.
 
     A task is already-complete when its task.json exists, parses, and carries a
     final_status. task.json is written atomically at end-of-run, so any parseable
@@ -335,26 +349,40 @@ def partition_for_resume(
     tasks are reloaded into TaskResults (to fold into run.json) and excluded from
     to_run; everything else — including failed-to-parse — re-runs.
 
+    **"Finished" is relative to the resuming command, not absolute.** A
+    ``NOT_GRADED`` row (written by ``coder-eval execute``) has a final status, so
+    the naive test calls it complete. That is right for ``execute --resume``,
+    which owes it nothing — and wrong for ``run --resume``, which was asked to
+    grade: skipping it would report "already complete", grade nothing, and exit
+    0. So under ``grade=True`` those rows go to ``to_grade`` instead, where the
+    caller runs the criteria against the trajectory and workspace already on
+    disk rather than paying for the agent a second time.
+
+    Note the asymmetry is only for NOT_GRADED. FAILURE and ERROR stay complete
+    under both commands — resume has never retried failures (delete a task's
+    task.json to force that), and this does not change it.
+
     Args:
         resolved_tasks: Fully-resolved tasks for the whole run.
+        grade: Whether the resuming command grades (``run``) or not (``execute``).
 
     Returns:
-        (to_run, prior_results, prior_resolved):
-          - to_run: tasks still needing execution
-          - prior_results: reloaded results for already-complete tasks
-          - prior_resolved: the ResolvedTask for each prior_result (same order)
+        The four-way :class:`ResumePartition`.
     """
     to_run: list[ResolvedTask] = []
+    to_grade: list[ResolvedTask] = []
     prior_results: list[TaskResult] = []
     prior_resolved: list[ResolvedTask] = []
     for rt in resolved_tasks:
         tr = _load_completed_result(rt)
         if tr is None:
             to_run.append(rt)
+        elif grade and tr.result.final_status.category == "ungraded":
+            to_grade.append(rt)
         else:
             prior_results.append(tr)
             prior_resolved.append(rt)
-    return to_run, prior_results, prior_resolved
+    return ResumePartition(to_run, to_grade, prior_results, prior_resolved)
 
 
 def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
@@ -511,13 +539,24 @@ def read_run_fingerprint(run_dir: Path) -> dict[str, object] | None:
     return data if isinstance(data, dict) else None
 
 
+# `grade` is excluded from the drift warning: `execute` then `run --resume` is a
+# SUPPORTED flow, not a config mistake, and the warning's text ("already-finalized
+# tasks keep their original-config results") is actively wrong for it — those rows
+# are re-graded with the current config, which is the entire point.
+_FINGERPRINT_DIFF_EXEMPT = frozenset({"grade"})
+
+
 def fingerprint_diff(prior: dict[str, object], current: dict[str, object]) -> dict[str, tuple[object, object]]:
     """Keys present in BOTH stamps that disagree, as ``{key: (prior, current)}``.
 
     Only keys present in ``prior`` are compared, so adding fingerprint fields in a
     later version never false-flags a resume of an older run.
     """
-    return {k: (prior[k], current[k]) for k in current if k in prior and prior[k] != current[k]}
+    return {
+        k: (prior[k], current[k])
+        for k in current
+        if k in prior and prior[k] != current[k] and k not in _FINGERPRINT_DIFF_EXEMPT
+    }
 
 
 def _override_uip_versions_from_tasks(version_info: dict[str, Any], task_results: list[TaskResult]) -> None:
