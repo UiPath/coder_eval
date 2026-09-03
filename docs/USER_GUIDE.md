@@ -39,7 +39,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `-D path=value` / `--set` | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, token/USD budget caps, tools, plugins, and SDK options. |
 | `--model, -m` | Shorthand alias for `-D agent.model=…` (e.g., `claude-sonnet-5`) |
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
-| `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, or a plugin kind). |
+| `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, `delegate-sdk`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
 | `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. A task with *any* final status (incl. FAILED/ERROR) counts as finalized, so resume does **not** retry failures — delete a task's `task.json` to force a re-run. A config mismatch is warned, not refused. |
 | `--sample N` | For dataset-backed tasks, run a fixed-seed random N-row sample (reproducible; cheap smoke test). See [Bring Your Own Dataset](DATASETS.md). |

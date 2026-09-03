@@ -96,6 +96,25 @@ export const PRICING: Record<string, Pricing> = {
     "deepseek.v3.2": p(0.74, 2.22, 0.74, 0),
     "zai.glm-5": p(1.2, 3.84, 1.2, 0),
     "moonshotai.kimi-k2.5": p(0.72, 3.6, 0.72, 0),
+    // UiPath Delegate SDK route (DelegateSdkAgent). The Delegate backend echoes
+    // UNDERSCORED ids (gpt_5_6_terra) which the agent normalizes to HYPHENATED
+    // keys (gpt-5-6-terra) — a different key space from the dotted OpenAI/Gemini
+    // rows above, so delegate runs need these rows or render "—" for cost.
+    // Mirror of pricing.py; the rates were carried over verbatim from the
+    // coder_eval_uipath plugin that used to register them, and several differ
+    // from the dotted rows for the same physical model (cache-write treatment) —
+    // see the pricing.py comment before "reconciling" either side.
+    "virtuoso-1-5": p(0.95, 4, 0, 0.16),
+    "virtuoso-2-0": p(0.95, 4, 0, 0.19),
+    "gemini-3-5-flash": p(1.5, 9, 0, 0.15),
+    "gemini-3-6-flash": p(1.5, 7.5, 0, 0.15),
+    "gemini-3-1-pro-preview": p(2, 12, 0, 0.2),
+    "gpt-5-4": p(2.5, 15, 15, 0.25),
+    "gpt-5-5": p(5, 30, 30, 0.5),
+    "gpt-5-6-sol": p(5, 30, 6.25, 0.5),
+    "gpt-5-6-terra": p(2, 12, 2.5, 0.2),
+    "gpt-5-6-luna": p(0.2, 1.2, 0.25, 0.02),
+    "kimi-k2-7-code": p(0.95, 4, 0, 0.19),
 };
 
 function p(

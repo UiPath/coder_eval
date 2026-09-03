@@ -1,7 +1,7 @@
 [project]
 name = "coder-eval"
 version = "0.11.6"
-description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
+description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode, UiPath Delegate) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
@@ -9,7 +9,8 @@ authors = [{ name = "UiPath", email = "coder-eval@uipath.com" }]
 keywords = [
     "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
     "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
-    "gemini", "antigravity", "sandbox", "code-generation", "agent-evaluation",
+    "gemini", "antigravity", "opencode", "uipath", "delegate",
+    "sandbox", "code-generation", "agent-evaluation",
     "llm-evaluation", "llm-eval", "ai-evaluation", "skills-evaluation",
     "claude-skills", "claude-code-skills", "agent-skills", "skillsbench",
     "agent-testing", "llmops",
@@ -145,6 +146,21 @@ antigravity = [
 # fail at start() with a clear hint pointing back here.
 # See docs/agents/OPENCODE.md.
 opencode = []
+# Optional extra that enables UiPath Delegate SDK agent support.
+#
+# Deliberately EMPTY, for the same reason as `opencode` above. The Delegate
+# agent is driven through the `@uipath/delegate-stdio` Node host
+# (`npm install @uipath/delegate-stdio`, public npm registry), which
+# DelegateSdkAgent spawns as a subprocess speaking JSON-Lines over stdio — it
+# imports no third-party Python package. The extra keeps the opt-in surface
+# uniform across harnesses and gives the prerequisite a single home in the
+# packaging metadata.
+#
+# Without the host bundle on disk the framework still installs and runs;
+# delegate-sdk tasks fail at start() with an AgentConfigError naming the
+# install command and the DELEGATE_STDIO_PATH / DELEGATE_STDIO_NODE_MODULES seams.
+# See docs/agents/DELEGATE_SDK.md.
+delegate-sdk = []
 
 [project.scripts]
 coder-eval = "coder_eval.cli:app"
