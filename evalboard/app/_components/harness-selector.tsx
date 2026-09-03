@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { KNOWN_HARNESSES, orderHarnesses } from "@/lib/harness";
 import { HarnessBadge, harnessShortLabel } from "./harness-badge";
 
 // Segmented control for a page's harness scope. Sets `?h=<harness>` while
@@ -41,12 +42,19 @@ export function HarnessSelector({
         const qs = p.toString();
         router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     };
-    // Always show the active harness, even if it has aged out of the recent
-    // window (so a deep-linked `?h=` still reads as selected rather than absent).
-    const opts =
-        current == null || harnesses.includes(current)
-            ? harnesses
-            : [current, ...harnesses];
+    // Every known harness always gets a segment, whether or not it turned up in
+    // the discovery window. A weekly harness (delegate) drops out of that window
+    // between firings, and a control that quietly loses an option reads as "this
+    // harness was removed" rather than "it hasn't run lately". Scoping to one
+    // with no runs in the window shows an empty result, which is honest and one
+    // click from recoverable; a missing segment is neither. `current` is unioned
+    // in too, so a deep-linked `?h=` outside the known set still reads as
+    // selected. orderHarnesses fixes the order, so segments never reshuffle.
+    const opts = orderHarnesses([
+        ...KNOWN_HARNESSES,
+        ...harnesses,
+        ...(current == null ? [] : [current]),
+    ]);
     // shrink-0 + whitespace-nowrap: a segment must keep its label on one line
     // and never compress, so on a narrow screen the control scrolls (see the
     // wrapper) instead of wrapping "Claude Code" onto two lines and stretching
