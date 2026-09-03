@@ -24,6 +24,9 @@ export const PRICING: Record<string, Pricing> = {
     // alias must never inherit the older tier. Undated aliases each need their
     // own key: resolvePricing's fallback only strips a trailing date (dated →
     // undated), it cannot invent one.
+    // Fable 5.1 prices cache HITS at 0.025x input ($0.25), not the 0.1x every
+    // other Claude model uses — Fable 5 pays $1 on the identical $10 base.
+    "claude-fable-5-1": p(10, 50, 12.5, 0.25),
     "claude-fable-5": p(10, 50, 12.5, 1),
     "claude-opus-5": p(5, 25, 6.25, 0.5),
     "claude-opus-4-8": p(5, 25, 6.25, 0.5),
@@ -34,7 +37,10 @@ export const PRICING: Record<string, Pricing> = {
     "claude-opus-4-1": p(15, 75, 18.75, 1.5),
     "claude-opus-4": p(15, 75, 18.75, 1.5),
     "claude-opus-4-20250514": p(15, 75, 18.75, 1.5),
-    "claude-sonnet-5": p(3, 15, 3.75, 0.3),
+    // $2/$10 is Sonnet 5's STANDARD price (the introductory rate was made
+    // permanent and the 2026-09-01 increase cancelled) — 4.6 and earlier stay
+    // at $3/$15.
+    "claude-sonnet-5": p(2, 10, 2.5, 0.2),
     "claude-sonnet-4-6": p(3, 15, 3.75, 0.3),
     "claude-sonnet-4-5": p(3, 15, 3.75, 0.3),
     "claude-sonnet-4-5-20250929": p(3, 15, 3.75, 0.3),
@@ -64,8 +70,9 @@ export const PRICING: Record<string, Pricing> = {
     "gpt-5.2-codex": p(1.75, 14, 1.75, 0.175),
     "gpt-5.4": p(2.5, 15, 2.5, 0.25),
     "gpt-5.5": p(5, 30, 5, 0.5),
-    // Terra and Luna repriced 2026-07-30 (-20% / -80%); post-cut rates.
-    "gpt-5.6-sol": p(5, 30, 5, 0.5),
+    // Terra and Luna repriced 2026-07-30 (-20% / -80%); Sol cut since then from
+    // $5/$30 (-20% input / -33% output). Post-cut rates.
+    "gpt-5.6-sol": p(4, 20, 4, 0.4),
     "gpt-5.6-terra": p(2, 12, 2, 0.2),
     "gpt-5.6-luna": p(0.2, 1.2, 0.2, 0.02),
     // Google Gemini (AntigravityAgent). Gemini bills no separate cache-write
@@ -75,6 +82,10 @@ export const PRICING: Record<string, Pricing> = {
     "gemini-3-pro-preview": p(2, 12, 2, 0.2),
     "gemini-3.1-pro-preview": p(2, 12, 2, 0.2),
     "gemini-3.1-pro-preview-customtools": p(2, 12, 2, 0.2),
+    // 3.6 / 3.7 / 3.8 Flash share one rate card (list rate; Google's
+    // introductory half-price window on all three runs through 2026-12-31).
+    "gemini-3.8-flash": p(1.5, 7.5, 1.5, 0.15),
+    "gemini-3.7-flash": p(1.5, 7.5, 1.5, 0.15),
     "gemini-3.6-flash": p(1.5, 7.5, 1.5, 0.15),
     "gemini-3.5-flash": p(1.5, 9, 1.5, 0.15),
     "gemini-3.5-flash-lite": p(0.3, 2.5, 0.3, 0.03),
