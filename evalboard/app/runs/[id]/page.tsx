@@ -1,6 +1,10 @@
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import {
+    RunBodySkeleton,
+    SkeletonPage,
+} from "@/app/_components/skeleton";
+import {
     findMatureSourceRuns,
     readActivationScore,
     readRunAnalysis,
@@ -132,7 +136,20 @@ export default async function RunPage({
 
             {analysis && <AnalysisPanel markdown={analysis} />}
 
-            <Suspense fallback={null}>
+            {/* The header above streams as soon as run.json is parsed, but the
+                grid waits on the review index and the mature-source scan. With
+                `fallback={null}` that left a blank hole below a rendered header
+                for the rest of the wait, which reads as a broken page rather
+                than a loading one. The body skeleton is the same one
+                loading.tsx draws, so a navigation into the run shows one
+                continuous shape instead of two. */}
+            <Suspense
+                fallback={
+                    <SkeletonPage label="Loading tasks">
+                        <RunBodySkeleton />
+                    </SkeletonPage>
+                }
+            >
                 <RunView
                     runId={id}
                     tasks={tasks}
