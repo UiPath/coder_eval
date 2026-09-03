@@ -47,6 +47,19 @@ def plan_command(
         coder-eval plan tasks/*.yaml
         coder-eval plan tasks/*.yaml -e experiments/model-comparison.yaml
     """
+    run_plan(task_files=task_files, experiment=experiment)
+
+
+def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = None) -> None:
+    """The body of ``coder-eval plan``, with real Python defaults.
+
+    Split from the Typer signature for the same reason as ``run_pipeline`` /
+    ``run_evaluation``: calling a Typer command function in process hands every
+    unspecified option an ``OptionInfo`` sentinel rather than its default, and
+    the sentinel is truthy. The `isinstance(experiment, Path)` guard this
+    function used to need was that bug being papered over rather than fixed.
+    Callers (tests, library use) call this. Enforced by lint rule CE048.
+    """
     # Default to discovering all tasks under tasks/ when none provided
     resolved_task_files = task_files if task_files else discover_default_tasks()
 
@@ -64,7 +77,7 @@ def plan_command(
     from ..orchestration.run_limits import validate_run_limits
 
     # Always load experiment (defaults to experiments/default.yaml)
-    exp_path = experiment if isinstance(experiment, Path) else DEFAULT_EXPERIMENT_PATH
+    exp_path = experiment or DEFAULT_EXPERIMENT_PATH
     try:
         exp_def = load_experiment(exp_path)
         if exp_path == DEFAULT_EXPERIMENT_PATH:

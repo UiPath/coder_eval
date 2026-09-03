@@ -20,14 +20,19 @@ import asyncio
 import logging
 from pathlib import Path
 
-from coder_eval.models import EvaluationResult, PreservationMode, TaskConfigRecord, TaskDefinition
+from coder_eval.models import (
+    EvaluationResult,
+    PreservationMode,
+    SandboxConfig,
+    TaskConfigRecord,
+    TaskDefinition,
+)
+from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME
 from coder_eval.sandbox import Sandbox
 
 
 logger = logging.getLogger(__name__)
 
-TASK_JSON = "task.json"
-PRE_GRADE_JSON = "task.execute.json"
 ARTIFACTS_DIRNAME = "artifacts"
 
 
@@ -37,7 +42,7 @@ class RegradeError(Exception):
 
 def load_prior_result(run_dir: Path) -> EvaluationResult:
     """Read a finished run's ``task.json``."""
-    path = run_dir / TASK_JSON
+    path = run_dir / TASK_JSON_FILENAME
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as e:
@@ -64,7 +69,7 @@ def task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinit
     record = prior.task_config
     if record is None:
         raise RegradeError(
-            f"{run_dir / TASK_JSON} carries no task_config, so the executed task cannot be "
+            f"{run_dir / TASK_JSON_FILENAME} carries no task_config, so the executed task cannot be "
             + "rebuilt. Pass the task file explicitly: coder-eval evaluate <task.yaml> <run_dir>"
         )
     try:
@@ -104,7 +109,7 @@ def _fall_back_to_source(record: TaskConfigRecord, run_dir: Path, e: ValueError)
 
     if not record.source_file or not Path(record.source_file).is_file():
         raise RegradeError(
-            f"The resolved task config in {run_dir / TASK_JSON} no longer validates ({e}), and "
+            f"The resolved task config in {run_dir / TASK_JSON_FILENAME} no longer validates ({e}), and "
             + "its source YAML is unavailable. Pass the task file explicitly."
         ) from e
     logger.warning(
@@ -123,12 +128,26 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
     """Locate the workspace a finished run left behind.
 
     ``sandbox_path`` is authoritative when it still exists — it is where the run
-    actually worked. Otherwise fall back to the preserved artifacts tree, whose
-    single child is named for the task.
+    actually worked. Otherwise fall back to the preserved artifacts tree, where
+    preservation nests the workspace under the task id.
+
+    Raises rather than guessing when neither is conclusive. Guessing is worse
+    than failing here: grading the WRONG directory makes every path-relative
+    criterion fail as a locating artifact rather than as a verdict, and it
+    reports that as an ordinary score.
     """
     if prior.sandbox_path:
         recorded = Path(prior.sandbox_path)
         if recorded.is_dir():
+            if not _is_within(recorded, run_dir):
+                # An absolute path out of the run's own task.json, which is
+                # untrusted input for a shared run dir. Criteria execute with
+                # cwd there and may mutate it, so an out-of-tree location has to
+                # be the operator's explicit choice.
+                raise RegradeError(
+                    f"The recorded sandbox_path ({recorded}) is outside the run directory "
+                    + f"({run_dir}). Pass --workspace explicitly to grade it."
+                )
             return recorded
 
     artifacts = run_dir / ARTIFACTS_DIRNAME
@@ -138,10 +157,33 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
             + f"({prior.sandbox_path or 'unset'}) is gone. The run was probably made with "
             + "--preservation-mode NONE."
         )
+    # The exact path, not a heuristic. `task_id` may contain "/" (dataset rows
+    # are "<suite>/<row>"), so "the single child of artifacts/" resolves one
+    # level too high for every row task.
+    by_task_id = artifacts / prior.task_id
+    if by_task_id.is_dir():
+        return by_task_id
+
     children = [p for p in sorted(artifacts.iterdir()) if p.is_dir()]
-    # Preservation nests the workspace under the task id; a flat artifacts dir
-    # (no subdirectory) means the workspace IS artifacts/.
-    return children[0] if len(children) == 1 else artifacts
+    if not children:
+        # A flat artifacts dir (no subdirectory) means the workspace IS artifacts/.
+        return artifacts
+    if len(children) == 1:
+        return children[0]
+    raise RegradeError(
+        f"Cannot tell which directory under {artifacts} is the workspace: no {prior.task_id!r} "
+        + f"child, and {len(children)} candidates ({', '.join(p.name for p in children)}). "
+        + "Pass --workspace explicitly."
+    )
+
+
+def _is_within(candidate: Path, root: Path) -> bool:
+    """True when ``candidate`` resolves inside ``root``."""
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition, task_file: Path | None) -> None:
@@ -198,14 +240,34 @@ def back_up_pre_grade_record(run_dir: Path) -> None:
     a second grade must not overwrite the ORIGINAL execute record with an
     already-graded one.
     """
-    source, backup = run_dir / TASK_JSON, run_dir / PRE_GRADE_JSON
+    source, backup = run_dir / TASK_JSON_FILENAME, run_dir / PRE_GRADE_JSON_FILENAME
     if backup.exists() or not source.is_file():
+        return
+    if source.is_symlink() or backup.is_symlink():
+        # Untrusted run dir: writing through a symlink would let a shared
+        # artifact clobber an arbitrary file the grading user can write.
+        logger.warning("Not preserving the pre-grade record: %s or %s is a symlink.", source, backup)
         return
     try:
         backup.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
     except OSError as e:
         # Never fail a grade over the audit copy.
         logger.warning("Could not preserve the pre-grade record at %s: %s", backup, e)
+
+
+def grading_sandbox_config(task: TaskDefinition) -> SandboxConfig:
+    """The sandbox config a grading pass runs under.
+
+    Grading never runs a container: the docker driver dispatches through
+    DockerRunner, which needs an agent. Forcing ``tempdir`` keeps a task whose
+    YAML says ``driver: docker`` gradeable on the host.
+
+    Re-validated rather than ``model_copy(update=...)``: ``update`` skips both
+    pydantic validation and pyright, so a typo would produce a SandboxConfig
+    violating its own ``Literal`` and surface much later at an unrelated
+    ``if driver == "docker"`` branch.
+    """
+    return SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})
 
 
 async def regrade_in_place(
@@ -232,12 +294,13 @@ async def regrade_in_place(
     """
     from coder_eval.orchestrator import Orchestrator
 
-    # Grading never runs a container: the docker driver dispatches through
-    # DockerRunner, which needs an agent. Force tempdir so a task whose YAML says
-    # `driver: docker` is still gradeable on the host.
-    sandbox_config = task.sandbox.model_copy(deep=True).model_copy(update={"driver": "tempdir"})
+    # Inside the shared entry point, not at each caller: a guard a caller has to
+    # remember is one a third caller will forget, and this one is the difference
+    # between a verdict and a verdict against the wrong answer key.
+    verify_reference_unchanged(prior, task, task_file)
+
     sandbox = Sandbox(
-        sandbox_config,
+        grading_sandbox_config(task),
         task_id=task.task_id,
         task_dir=task_file.parent.resolve() if task_file is not None else None,
     )

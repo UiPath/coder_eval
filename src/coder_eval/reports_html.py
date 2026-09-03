@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
 from .reports import early_stop_gate_note
-from .reports_stats import format_score
+from .reports_stats import format_score, is_env_table_key
 
 
 if TYPE_CHECKING:
@@ -1074,8 +1074,8 @@ def _render_simulation(result: EvaluationResult) -> str:
 
 
 def _render_environment(result: EvaluationResult) -> str:
-    """Render Environment section (excluding installed_tools, which has its own)."""
-    env = {k: v for k, v in (result.environment_info or {}).items() if k != "installed_tools"}
+    """Render Environment section (excluding the keys with their own treatment)."""
+    env = {k: v for k, v in (result.environment_info or {}).items() if is_env_table_key(k)}
     if not env:
         return ""
     rows = "".join(f"<tr><td class='mono dim'>{_esc(k)}</td><td>{_esc(v)}</td></tr>" for k, v in env.items())

@@ -829,10 +829,10 @@ def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
     return min(statuses, key=lambda s: priority.get(s.category, -1))
 
 
-def _mean_graded_score(vr_list: list[VariantResult]) -> float:
-    """Mean ``weighted_score`` over the graded rows; ``0.0`` when none were graded."""
+def _mean_graded_score(vr_list: list[VariantResult]) -> float | None:
+    """Mean ``weighted_score`` over the graded rows; ``None`` when none were graded."""
     graded = [v.weighted_score for v in vr_list if v.weighted_score is not None]
-    return sum(graded) / len(graded) if graded else 0.0
+    return sum(graded) / len(graded) if graded else None
 
 
 def _mean_reference_similarity(reps: list[TaskResult]) -> float | None:
@@ -943,7 +943,7 @@ def aggregate_results(
                 tasks_succeeded=0,
                 tasks_failed=0,
                 tasks_error=0,
-                average_score=0.0,
+                average_score=None,
                 average_duration=0.0,
             )
             continue
@@ -959,10 +959,9 @@ def aggregate_results(
             tasks_not_graded=sum(1 for v in vr_list if v.final_status.category == "ungraded"),
             tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
             tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
-            # Mean over GRADED rows only. An ungraded row has no score (it
-            # arrives here as 0.0 because VariantResult.weighted_score is a
-            # plain float), so including it would report a clean execute run as
-            # average_score 0.0 — a number indistinguishable from "scored zero".
+            # Mean over GRADED rows only, and None when there are none: a clean
+            # execute run has no average score, and reporting 0.000 next to
+            # "Pass Rate: n/a" is a number indistinguishable from "scored zero".
             average_score=_mean_graded_score(vr_list),
             average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,

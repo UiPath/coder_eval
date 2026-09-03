@@ -67,7 +67,13 @@ from .models import (
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
 from .orchestration.run_limits import validate_run_limits
-from .path_utils import digest_tree, format_task_log_id, rmtree_restrictive, task_log_path
+from .path_utils import (
+    digest_tree,
+    format_task_log_id,
+    rmtree_restrictive,
+    task_log_path,
+    write_text_atomic,
+)
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -763,6 +769,11 @@ class Orchestrator:
         # quietly wrong. _finalize_result restores the duration after its own
         # timing write; the grading pass's cost is recorded separately there.
         self.result.started_at = prior.started_at
+        # completed_at too, so the row's three time fields stay consistent with
+        # each other: leaving it at grading wall-clock produces a triple where
+        # completed_at - started_at != duration_seconds, which misleads anyone
+        # deriving a duration from the timestamps.
+        self.result.completed_at = prior.completed_at
 
         # The trajectory itself. Every derived figure in _finalize_result —
         # token totals, cost, command_stats, model_used, assistant turns —
@@ -802,11 +813,25 @@ class Orchestrator:
         # environment_info: the prior run's capture describes the machine that
         # RAN the task (installed_tools, api route, coder_eval version). Ours
         # describes the machine grading it. Prior wins on conflict, and ours is
-        # preserved wholesale under `graded_by` rather than being interleaved —
+        # preserved as flat `graded_by_*` scalars rather than being interleaved —
         # a report that shows the grader's tool versions as the run's is worse
         # than one that shows neither.
-        graded_by = dict(self.result.environment_info)
-        self.result.environment_info = {**graded_by, **prior.environment_info, "graded_by": graded_by}
+        # Flattened to scalars rather than nested wholesale: environment_info is
+        # a flat map everywhere it is consumed (the HTML report `_esc`apes each
+        # value into a table cell; the evalboard types it as
+        # Record<string, string | number | null | Record<string, string>>), so a
+        # whole nested env capture renders as a Python dict repr. Only the three
+        # facts that identify the grading HOST are kept, and only when they
+        # differ from the run's.
+        grader = self.result.environment_info
+        provenance = {
+            f"graded_by_{key}": grader[key]
+            for key in ("coder_eval", "git_commit", "cli_version")
+            if key in grader and grader.get(key) != prior.environment_info.get(key)
+        }
+        # A second grade must not lose the first grader's stamp — merging prior
+        # over ours would otherwise clobber it and collapse the chain silently.
+        self.result.environment_info = {**grader, **prior.environment_info, **provenance}
 
     async def _run_evaluation_with_failure_evidence(
         self,
@@ -1111,10 +1136,8 @@ class Orchestrator:
         # docker-driver host-heartbeat watchdog firing) would otherwise leave
         # a truncated task.json that the host parses as malformed-JSON rather
         # than as "no result", conflating two distinct failure modes.
-        import os as _os
-
-        report_tmp = self.report_path.with_suffix(self.report_path.suffix + ".tmp")
-        report_tmp.write_text(  # noqa: CE002 — small JSON write at end of run
+        write_text_atomic(  # noqa: CE002 — small JSON write at end of run
+            self.report_path,
             self.result.model_dump_json(
                 indent=2,
                 # Strip inline transcripts: they live in sibling YAML files
@@ -1123,9 +1146,7 @@ class Orchestrator:
                 # in the row record without losing any data.
                 exclude=TASK_JSON_TRANSCRIPT_EXCLUDE,
             ),
-            encoding="utf-8",
         )
-        _os.replace(report_tmp, self.report_path)
 
         # Also emit an HTML trace/report alongside task.json. HTML failure must
         # never mask the underlying run outcome — write_task_html logs and

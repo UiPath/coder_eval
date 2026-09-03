@@ -80,7 +80,7 @@ you want to iterate on afterwards. Grade the results later with
 budget breach still reports `ERROR` / `TIMEOUT` / `TOKEN_BUDGET_EXCEEDED` and still
 exits non-zero, exactly as under `run`.
 
-Every `run` flag is available except three things, each refused rather than quietly
+Every `run` flag is available except two things, each refused rather than quietly
 degraded:
 
 | Not supported | Why |
@@ -126,6 +126,14 @@ A run-config mismatch is **warned, not refused**: resumed tasks keep their
 original-config results, so the run genuinely mixes configs. The `grade` flag is
 exempt from that warning, because `execute` → `run --resume` is a supported flow
 rather than a config mistake.
+
+**A dataset task must pin its sample to be resumable.** Stratified sampling
+(`--sample-per-stratum` / `dataset.sample_per_stratum`) re-draws on every
+invocation, and each row is its own task (`<task_id>/<row_id>`) with its own run
+directory. A resume therefore draws a *different* row set, finds no `task.json`
+for it, and pays for the agent a second time while the executed rows sit
+orphaned in the run dir. Set `dataset.sample_seed`, or use `--sample N` (which is
+seeded), before splitting a dataset run across `execute` and `run --resume`.
 
 ### `coder-eval plan` — validate tasks
 

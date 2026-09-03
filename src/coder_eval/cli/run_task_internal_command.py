@@ -156,7 +156,15 @@ def run_task_internal_command(
     # `coder-eval run` vs `coder-eval execute`, decided host-side. Defaults to
     # True (grade) so a host that predates `execute` — which never writes the
     # key — keeps its exact behavior.
-    grade: bool = context.get("grade", True)
+    # Coerced, not annotated: every other value crossing this boundary goes
+    # through a validating constructor, but `grade` was taken raw — so a
+    # hand-edited or older-format `"grade": "false"` arrives as a truthy str
+    # typed as bool and silently grades a run that asked not to be graded.
+    grade_raw = context.get("grade", True)
+    if not isinstance(grade_raw, bool):
+        typer.echo(f"FATAL: context.json 'grade' must be a boolean, got {grade_raw!r}", err=True)
+        raise typer.Exit(2)
+    grade: bool = grade_raw
     # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
     # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
     # Absent -> None -> standard run_dir/artifacts workspace.

@@ -21,8 +21,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-
-TASK_JSON = "task.json"
+from ..path_utils import TASK_JSON_FILENAME
 
 
 class EvaluateMode(StrEnum):
@@ -53,7 +52,7 @@ class EvaluateTargetError(ValueError):
 
 def is_run_dir(path: Path) -> bool:
     """Whether ``path`` is a finished task run directory (it holds ``task.json``)."""
-    return (path / TASK_JSON).is_file()
+    return (path / TASK_JSON_FILENAME).is_file()
 
 
 def resolve_evaluate_target(first: Path, second: Path | None) -> EvaluateTarget:
@@ -79,12 +78,12 @@ def resolve_evaluate_target(first: Path, second: Path | None) -> EvaluateTarget:
         if not first.is_dir():
             raise EvaluateTargetError(
                 f"{first} is not a directory. With a single argument, pass a finished run "
-                + f"directory (one containing {TASK_JSON}). To grade a directory against a "
+                + f"directory (one containing {TASK_JSON_FILENAME}). To grade a directory against a "
                 + "task, pass both: coder-eval evaluate <task.yaml> <directory>"
             )
         if not is_run_dir(first):
             raise EvaluateTargetError(
-                f"{first} holds no {TASK_JSON}, so it is not a run directory. Pass the task "
+                f"{first} holds no {TASK_JSON_FILENAME}, so it is not a run directory. Pass the task "
                 + f"file too: coder-eval evaluate <task.yaml> {first}"
             )
         return EvaluateTarget(mode=EvaluateMode.RUN_DIR, target=first, task_file=None)

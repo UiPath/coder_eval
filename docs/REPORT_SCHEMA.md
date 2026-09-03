@@ -23,6 +23,7 @@ read). Times are ISO-8601.
 | --- | --- | --- |
 | `run.json` / `run.md` | `RunSummary` | Every run (and rebuildable via `coder-eval aggregate`) |
 | `<variant>/<task_id>/<NN>/task.json` | `EvaluationResult` | One per replicate |
+| `<variant>/<task_id>/<NN>/task.execute.json` | `EvaluationResult` | Pre-grade snapshot, written once by a detached grade (`evaluate <run_dir>` / `run --resume`). Deliberately **not** matched by `rglob("task.json")`, so it never enters an aggregation. |
 | `<variant>/<suite_id>/suite.json` / `.md` | `SuiteRollup` | Dataset-backed suites only |
 | `experiment.json` / `.md` | `ExperimentResult` | Every run (experiment layer) |
 | `<variant>/variant.json` / `.md` | `VariantAggregate` | Per variant |
@@ -44,7 +45,7 @@ run-level summary; full per-replicate detail lives in each `task.json`.
 | `start_time` / `end_time` | `datetime` | Run window. |
 | `total_duration_seconds` | `float` | Wall-clock. |
 | `tasks_run` | `int` | Total replicates executed. |
-| `tasks_succeeded` / `tasks_failed` / `tasks_error` / `tasks_not_graded` | `int` | Category counts. **Invariant:** the four sum to `tasks_run`. |
+| `tasks_succeeded` / `tasks_failed` / `tasks_error` | `int` | Category counts. **Invariant:** these three plus `tasks_not_graded` sum to `tasks_run`. |
 | `tasks_not_graded` | `int` | Tasks run by `coder-eval execute` — executed, deliberately unscored. Excluded from **both** sides of `pass_rate`. Defaults to `0`, so pre-`execute` `run.json` still parses. |
 | `tasks_token_budget_exceeded` / `tasks_cost_budget_exceeded` | `int` | Sub-counters of `tasks_failed` (not part of the invariant). |
 | `skipped_tasks` | `list[{path, reason}]` | Load failures / `skip: true` opt-outs. |
@@ -265,8 +266,8 @@ Written for dataset-backed suites; its `passed` flag drives the CI exit code.
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `suite_id` / `variant_id` | `str` | Identity. |
-| `rows_total` / `rows_passed` / `rows_failed` / `rows_error` | `int` | Row counts. |
-| `pass_rate` | `float` | `rows_passed / rows_total`. |
+| `rows_total` / `rows_passed` / `rows_failed` / `rows_error` / `rows_not_graded` | `int` | Row counts. **Invariant:** the four category counts sum to `rows_total`. `rows_not_graded` defaults to `0`. |
+| `pass_rate` | `float` | `rows_passed / (rows_total - rows_not_graded)` — ungraded rows leave both sides, matching `RunSummary.pass_rate`. |
 | `average_weighted_score` | `float \| null` | Mean row score. |
 | `criterion_stats` | `list[{criterion_type, rows_evaluated, average_score, error_count}]` | Per-criterion summary. |
 | `failed_samples` | `list[FailedRowSummary]` | Capped at 20 (`{row_id, task_id, final_status, weighted_score, failure_reasons, error_message, task_json_relpath, replicate_index}`). |

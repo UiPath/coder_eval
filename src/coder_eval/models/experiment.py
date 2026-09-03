@@ -233,7 +233,10 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
         ge=0,
         description="Tasks executed without grading (`coder-eval execute`). Excluded from pass_rate entirely.",
     )
-    average_score: float
+    # None when nothing in this variant was graded (`coder-eval execute`).
+    # A 0.0 here is indistinguishable from "measured and scored zero" — the same
+    # reason EvaluationResult.weighted_score is Optional.
+    average_score: float | None
     average_duration: float
     total_tokens: int | None = None
     replicate_count: int = Field(

@@ -106,7 +106,7 @@ def _prior() -> EvaluationResult:
         pre_run_results=[PostRunResult(command="prior-pre", exit_code=0)],
         post_run_results=[PostRunResult(command="prior-post", exit_code=0)],
         sandbox_path="/prior/workspace",
-        environment_info={"installed_tools": "prior"},
+        environment_info={"installed_tools": "prior", "coder_eval": "1.0.0-run"},
         early_stop=EarlyStopInfo(
             reason=EarlyStopReason.CRITERION_FAILED,
             deciding_criterion_type="skill_triggered",
@@ -137,7 +137,7 @@ def _seeded(tmp_path: Path) -> tuple[Orchestrator, EvaluationResult]:
         started_at=datetime(2030, 1, 1, 0, 0, 0),
         final_status=FinalStatus.FAILURE,
         iteration_count=0,
-        environment_info={"installed_tools": "grader"},
+        environment_info={"installed_tools": "grader", "coder_eval": "9.9.9-grader"},
     )
     orch._seed_from_prior_result()
     assert orch.result is not None
@@ -182,7 +182,13 @@ def test_grader_environment_is_kept_beside_the_run_s_not_over_it(tmp_path: Path)
     # The run's own capture wins: a report showing the grader's tool versions as
     # the run's is worse than one showing neither.
     assert orch.result.environment_info["installed_tools"] == "prior"
-    assert orch.result.environment_info["graded_by"] == {"installed_tools": "grader"}
+    # The grader is recorded as FLAT scalars, and only where it differs. Nesting
+    # a whole env capture here renders as a Python dict repr in the HTML report
+    # and violates the evalboard's declared value type.
+    assert orch.result.environment_info["graded_by_coder_eval"] == "9.9.9-grader"
+    assert all(not isinstance(v, dict) or k == "installed_tools" for k, v in orch.result.environment_info.items()), (
+        "environment_info is consumed as a flat map"
+    )
 
 
 def test_the_evaluate_only_path_selects_the_same_gate_as_the_agent_path(tmp_path: Path) -> None:

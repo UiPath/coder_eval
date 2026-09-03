@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 
 TASK_LOG_FILENAME = "task.log"
 
+# The per-task result record, and the pre-grade snapshot a detached grade keeps
+# beside it. Module-level because ~12 sites name them — including three that
+# `rglob` for the first — and two half-copies of the same string in different
+# packages is how a rename becomes a silent no-op on the sites it missed.
+TASK_JSON_FILENAME = "task.json"
+PRE_GRADE_JSON_FILENAME = "task.execute.json"
+
+# The virtualenv directory `setup` creates and `adopt` discovers. Named because
+# whether it is on PATH decides which binaries a criterion resolves.
+VENV_DIRNAME = ".venv"
+
 # Ignore list for every copy of a reference solution tree. A module-level
 # constant, not an inline literal at each call site: the host-side docker mount
 # (`DockerRunner._prepare_reference_mount`) and the per-run staged copy
@@ -23,6 +34,22 @@ TASK_LOG_FILENAME = "task.log"
 # ``$REFERENCE_DIR`` contents driver-dependent the moment one of them grew an
 # entry.
 REFERENCE_COPY_IGNORE = [".git"]
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a temp file + ``os.replace``.
+
+    A plain ``write_text`` truncates first, so a SIGKILL or a full disk mid-write
+    leaves a half-file. For ``task.json`` that is worse than no file: a truncated
+    record parses as *malformed*, which the recovery paths treat as "not
+    complete" — so a later ``--resume`` re-executes the task and pays for the
+    agent again, and the row vanishes from ``run.json``. One writer, so the
+    orchestrator and the detached grade's write-back cannot have different crash
+    semantics for the same file.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def digest_tree(root: Path) -> str:

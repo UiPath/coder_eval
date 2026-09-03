@@ -20,11 +20,10 @@ from ..models import (
     parse_agent_config,
 )
 from ..orchestration.regrade import (
-    PRE_GRADE_JSON,
-    TASK_JSON,
     RegradeError,
     back_up_pre_grade_record,
     default_workspace,
+    grading_sandbox_config,
     load_prior_result,
     regrade_in_place,
     task_from_prior,
@@ -32,6 +31,7 @@ from ..orchestration.regrade import (
 )
 from ..orchestration.task_loader import load_task
 from ..orchestrator import Orchestrator
+from ..path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME, write_text_atomic
 from ..sandbox import Sandbox
 from .console import console
 from .evaluate_target import EvaluateMode, EvaluateTarget, EvaluateTargetError, resolve_evaluate_target
@@ -117,6 +117,11 @@ def _resolve_run_dir_or_work_dir(target: EvaluateTarget, workspace: Path | None)
 
     if prior is not None:
         verify_reference_unchanged(prior, task, task_file)
+        # Snapshot the ungraded record BEFORE anything grades. Taking it inside
+        # _write_back instead would capture an ALREADY-GRADED record whenever
+        # --run-dir points at the target run dir (the orchestrator writes there
+        # first), destroying the very evidence the copy exists to preserve.
+        back_up_pre_grade_record(target.target)
 
     return _ResolvedInputs(
         target=target,
@@ -143,13 +148,18 @@ def _replicate_index_of(run_dir: Path) -> int:
 def evaluate_command(
     task_or_run_dir: Path = typer.Argument(  # noqa: B008
         ...,
-        metavar="[TASK_FILE] TARGET",
+        # One metavar per positional, so the usage line reads as Click renders
+        # it. A composite metavar on the first ("[TASK_FILE] TARGET") plus an
+        # empty one on the second produced `[TASK_FILE] TARGET []`.
+        metavar="TASK_FILE_OR_RUN_DIR",
         help="Task YAML file, or (when it is the only argument) a finished run directory.",
         exists=True,
     ),
     work_dir: Path | None = typer.Argument(  # noqa: B008
         None,
-        metavar="",
+        # No metavar="" here: an empty one leaks a bare `[]` into both the usage
+        # line and the arguments table. The first positional's metavar already
+        # spells out the two shapes.
         help="Directory containing the code to evaluate. Omit when TASK_FILE is a run directory.",
     ),
     workspace: Path | None = typer.Option(  # noqa: B008
@@ -179,7 +189,11 @@ def evaluate_command(
         True,
         "--preserve/--no-preserve",
         "-p/-P",
-        help="Move sandbox artifacts to run directory (default: preserve). The temp sandbox is always removed.",
+        help=(
+            "Move sandbox artifacts to run directory (default: preserve). The temp sandbox is "
+            "always removed. Ignored when grading in place (the default for a run directory) — "
+            "an adopted directory is never moved or deleted."
+        ),
     ),
     run_dir: Path | None = typer.Option(  # noqa: B008
         None,
@@ -260,15 +274,11 @@ def run_evaluation(
         console.print(f"[red]✗ Failed to prepare run directory:[/red] {e}")
         raise typer.Exit(1) from e
 
-    sandbox_config = task.sandbox.model_copy(deep=True)
+    sandbox_config = grading_sandbox_config(task)
     if not grade_in_place:
         # Copy path: preload the sandbox with the work dir as a template source.
         template_source = TemplateDirSource(path=str(graded_dir.resolve()))
         sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
-    # Grading never runs a container: the docker driver dispatches through
-    # DockerRunner, which needs an agent. Force tempdir so a task whose YAML says
-    # `driver: docker` is still gradeable on the host.
-    sandbox_config = sandbox_config.model_copy(update={"driver": "tempdir"})
 
     task_dir = task_file.parent.resolve() if task_file is not None else None
     sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
@@ -361,7 +371,19 @@ def run_evaluation(
             f"[dim]Re-graded {prior.final_status.value} → {result.final_status.value} "
             + f"over {len(result.iterations)} recorded turn(s).[/dim]"
         )
-        _write_back(target.target, result)
+        if result.final_status is FinalStatus.ERROR:
+            # A grading-time crash (a failing checker, an unreachable judge) is
+            # not a verdict about the run. Writing it back would replace a
+            # perfectly re-gradeable NOT_GRADED row with ERROR — which BOTH
+            # commands treat as permanently complete, so the run could never be
+            # graded again without hand-restoring task.execute.json. The
+            # diagnostic row is still in this grade's own run dir.
+            console.print(
+                f"[yellow]⚠[/] Grading errored; leaving {target.target / TASK_JSON_FILENAME} "
+                + "as it was so the run stays re-gradeable."
+            )
+        else:
+            _write_back(target.target, result)
 
     if result.final_status == FinalStatus.ERROR:
         console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
@@ -385,11 +407,19 @@ def _write_back(run_dir: Path, result: EvaluationResult) -> None:
     ungraded record is auditable — the write is not a silent overwrite of the
     only evidence that the run was executed separately.
     """
-    target = run_dir / TASK_JSON
-    backup = run_dir / PRE_GRADE_JSON
-    back_up_pre_grade_record(run_dir)
+    target = run_dir / TASK_JSON_FILENAME
+    backup = run_dir / PRE_GRADE_JSON_FILENAME
+    if target.is_symlink():
+        # A run directory is a shareable artifact, so its task.json is untrusted
+        # input. Following a symlink here turns `evaluate <run_dir>` into an
+        # arbitrary-file-overwrite primitive on the grader's host.
+        console.print(f"[yellow]⚠[/] {target} is a symlink; refusing to write through it.")
+        return
     try:
-        target.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        # Atomic, matching the orchestrator's own task.json writer: a torn write
+        # here makes the row parse as malformed, which a later --resume reads as
+        # "not complete" and re-pays for the agent.
+        write_text_atomic(target, result.model_dump_json(indent=2))
     except OSError as e:
         # Never fail the grade over the write-back: the verdict was computed and
         # already printed, and the fresh run dir holds its own task.json.

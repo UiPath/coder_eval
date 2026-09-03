@@ -27,8 +27,6 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.orchestration.regrade import (
-    PRE_GRADE_JSON,
-    TASK_JSON,
     RegradeError,
     back_up_pre_grade_record,
     default_workspace,
@@ -36,7 +34,7 @@ from coder_eval.orchestration.regrade import (
     task_from_prior,
     verify_reference_unchanged,
 )
-from coder_eval.path_utils import digest_tree
+from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME, digest_tree
 
 
 def _task(*, reference: dict[str, str] | None = None, command: str | None = None) -> TaskDefinition:
@@ -80,7 +78,7 @@ def test_missing_task_json_is_a_regrade_error(tmp_path: Path) -> None:
 
 
 def test_unparseable_task_json_is_a_regrade_error(tmp_path: Path) -> None:
-    (tmp_path / TASK_JSON).write_text("{not json", encoding="utf-8")
+    (tmp_path / TASK_JSON_FILENAME).write_text("{not json", encoding="utf-8")
     with pytest.raises(RegradeError, match="not a readable EvaluationResult"):
         load_prior_result(tmp_path)
 
@@ -235,25 +233,64 @@ def test_a_task_with_no_reference_is_not_checked(tmp_path: Path) -> None:
 def test_the_pre_grade_record_is_written_once(tmp_path: Path) -> None:
     """A second grade must not overwrite the ORIGINAL execute record with an
     already-graded one — that is the only evidence the run was ungraded."""
-    (tmp_path / TASK_JSON).write_text('{"round": 1}', encoding="utf-8")
+    (tmp_path / TASK_JSON_FILENAME).write_text('{"round": 1}', encoding="utf-8")
     back_up_pre_grade_record(tmp_path)
-    (tmp_path / TASK_JSON).write_text('{"round": 2}', encoding="utf-8")
+    (tmp_path / TASK_JSON_FILENAME).write_text('{"round": 2}', encoding="utf-8")
     back_up_pre_grade_record(tmp_path)
 
-    assert json.loads((tmp_path / PRE_GRADE_JSON).read_text(encoding="utf-8")) == {"round": 1}
+    assert json.loads((tmp_path / PRE_GRADE_JSON_FILENAME).read_text(encoding="utf-8")) == {"round": 1}
 
 
 def test_backup_is_a_no_op_with_nothing_to_back_up(tmp_path: Path) -> None:
     back_up_pre_grade_record(tmp_path)
-    assert not (tmp_path / PRE_GRADE_JSON).exists()
+    assert not (tmp_path / PRE_GRADE_JSON_FILENAME).exists()
 
 
 def test_a_failed_backup_never_fails_the_grade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The audit copy is a convenience; the verdict is the deliverable."""
-    (tmp_path / TASK_JSON).write_text("{}", encoding="utf-8")
+    (tmp_path / TASK_JSON_FILENAME).write_text("{}", encoding="utf-8")
 
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise OSError("read-only file system")
 
     monkeypatch.setattr(Path, "write_text", _boom)
     back_up_pre_grade_record(tmp_path)  # must not raise
+
+
+# --------------------------------------------------------------------------
+# Dataset-row ids contain "/"
+# --------------------------------------------------------------------------
+
+
+def test_a_dataset_row_workspace_resolves_by_task_id_not_by_child_count(tmp_path: Path) -> None:
+    """Preservation writes artifacts/<task_id>, and a dataset row's task_id is
+    "<suite>/<row>". "The single child of artifacts/" therefore resolves to
+    artifacts/<suite> — one level too high — and every path-relative criterion
+    then fails as a locating artifact rather than as a verdict."""
+    workspace = tmp_path / "artifacts" / "suite" / "row-1"
+    workspace.mkdir(parents=True)
+
+    resolved = default_workspace(tmp_path, _result(task_id="suite/row-1"))
+
+    assert resolved == workspace
+
+
+def test_an_ambiguous_artifacts_dir_refuses_rather_than_guessing(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "a").mkdir(parents=True)
+    (artifacts / "b").mkdir()
+
+    with pytest.raises(RegradeError, match="Pass --workspace"):
+        default_workspace(tmp_path, _result(task_id="neither"))
+
+
+def test_a_sandbox_path_outside_the_run_dir_is_refused(tmp_path: Path) -> None:
+    """`sandbox_path` is an unvalidated absolute path out of the run's own
+    task.json, and criteria execute with cwd there and may mutate it."""
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(RegradeError, match="outside the run directory"):
+        default_workspace(run_dir, _result(sandbox_path=str(outside)))

@@ -27,6 +27,7 @@ from coder_eval.reports_stats import (
     fmt_mean_sd,
     fmt_p,
     format_score,
+    is_env_table_key,
     load_variant_eval_results,
     paired_comparison,
     stddev,
@@ -632,7 +633,7 @@ class ExperimentReportGenerator:
             # Denominator is the GRADED count, matching VariantAggregate.pass_rate —
             # an ungraded task was never measured and belongs on neither side.
             f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_graded})",
-            f"- **Average Score**: {agg.average_score:.3f}",
+            f"- **Average Score**: {format_score(agg.average_score)}",
             f"- **Average Duration**: {agg.average_duration:.1f}s",
             f"- **Total Tokens**: {tokens_str}",
         ]
@@ -723,7 +724,7 @@ class ExperimentReportGenerator:
                 # Environment (from first result with data)
                 for er in eval_results:
                     if er.environment_info:
-                        env = {k: v for k, v in er.environment_info.items() if k != "installed_tools"}
+                        env = {k: v for k, v in er.environment_info.items() if is_env_table_key(k)}
                         if env:
                             lines.extend(["", "## Environment", ""])
                             for key, value in env.items():

@@ -213,7 +213,7 @@ _DELIBERATELY_ABSENT_FROM_EXECUTE = {
 }
 
 
-def test_execute_exposes_run_flags_minus_the_two_refused_ones() -> None:
+def test_execute_exposes_run_flags_minus_the_refused_one() -> None:
     run_opts = _option_names("run")
     execute_opts = _option_names("execute")
 
@@ -282,10 +282,10 @@ def test_container_defaults_to_grading_when_the_host_sends_no_key() -> None:
 
 
 def test_execute_help_explains_the_refused_flags() -> None:
-    """The two omissions are documented in the help, not silently absent — a user
-    who reaches for `--resume` needs to learn why it is refused, not just that it
+    """The omission is documented in the help, not silently absent — a user who
+    reaches for `--junit-xml` needs to learn why it is refused, not just that it
     is unrecognised. (Presence as a real *flag* is covered by the option-set test
-    above; here we only require the help text to mention them.)"""
+    above; here we only require the help text to mention it.)"""
     result = runner.invoke(app, ["execute", "--help"])
     assert result.exit_code == 0
     for flag in _DELIBERATELY_ABSENT_FROM_EXECUTE:

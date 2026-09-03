@@ -23,13 +23,21 @@ from tests.lint.runner import ALL_RULES, check_paths
 SRC = Path(__file__).parent.parent / "src"
 
 
+# Rules whose defect class lives in the TEST tree, not in src/. CE048's whole
+# subject is an in-process call to a Typer command, and the only place that
+# happens is a test — scanning src/ alone would leave the rule permanently green
+# while the bug it exists for sat five lines away.
+_ALSO_SCAN_TESTS = {"CE048"}
+
+
 @pytest.mark.lint
 @pytest.mark.parametrize("rule_class", ALL_RULES, ids=[r.id for r in ALL_RULES])
 def test_no_violations(rule_class: type) -> None:
     import sys
 
     mod_doc = (getattr(sys.modules.get(rule_class.__module__), "__doc__", "") or "").splitlines()[0].strip()
-    violations = check_paths([SRC], rules=[rule_class])
+    paths = [SRC, Path(__file__).parent] if rule_class.id in _ALSO_SCAN_TESTS else [SRC]
+    violations = check_paths(paths, rules=[rule_class])
     assert not violations, (
         f"\n{len(violations)} violation(s) for {rule_class.id} ({mod_doc}):\n\n"
         + "\n".join(f"  {v}" for v in violations)

@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from ..config import Settings, settings
 from ..logging_config import setup_logging
-from ..models import PreservationMode, ResolvedTask, RunSummary, TaskResult
+from ..models import EvaluationResult, FinalStatus, PreservationMode, ResolvedTask, RunSummary, TaskResult
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
@@ -192,10 +192,16 @@ def run_command(
             "Resume an interrupted run: skip tasks already finalized in --run-dir and "
             "run only the rest, folding prior results into run.json. A task counts as "
             "finalized once it has ANY final status — including FAILED/ERROR — so resume "
-            "does NOT retry failures (delete a task's task.json to force a re-run). "
+            "does NOT retry failures (delete a task's task.json to force a re-run). The "
+            "one exception is a NOT_GRADED row left by `coder-eval execute`: `run` was "
+            "asked for a verdict, so those rows are GRADED in place against the "
+            "trajectory and workspace already on disk, without re-running the agent. "
             "Requires --run-dir. A config mismatch (model/backend/flags) is warned, not "
             "refused — the resumed tasks keep their original-config results, so the run "
-            "mixes configs; use a fresh --run-dir to keep configs separate."
+            "mixes configs; use a fresh --run-dir to keep configs separate. A dataset "
+            "task using nondeterministic stratified sampling needs dataset.sample_seed "
+            "(or --sample) to be resumable — otherwise the resume draws a different row "
+            "set and pays for the agent twice."
         ),
     ),
     max_parallel: int = typer.Option(
@@ -678,7 +684,15 @@ async def _grade_resumed_tasks(to_grade: list[ResolvedTask]) -> list[tuple[Resol
 
     A task that cannot be graded is reported and folded back in with its ORIGINAL
     ungraded result, so one bad row neither aborts the resume nor silently
-    vanishes from run.json — it stays visible as ``tasks_not_graded``.
+    vanishes from run.json — it stays visible as ``tasks_not_graded``, with the
+    reason on its ``error_message``. That covers three shapes: a helper raising,
+    a row too broken to read at all (skipped entirely — there is nothing to fold
+    back), and a re-grade that returns ``FinalStatus.ERROR``, which
+    ``Orchestrator.run()`` produces INSTEAD of raising and which would otherwise
+    make the row permanently un-regradeable.
+
+    Returns the graded rows; the caller's exit gate fails the command whenever
+    any row is still ungraded, so a resume that graded nothing never exits 0.
     """
     from ..orchestration.regrade import (
         RegradeError,
@@ -686,14 +700,20 @@ async def _grade_resumed_tasks(to_grade: list[ResolvedTask]) -> list[tuple[Resol
         default_workspace,
         load_prior_result,
         regrade_in_place,
-        verify_reference_unchanged,
     )
 
     graded: list[tuple[ResolvedTask, TaskResult]] = []
+    failed_to_load: list[str] = []
     for rt in to_grade:
-        prior = load_prior_result(rt.run_dir)
+        # Inside the try: an unreadable row must skip like any other grading
+        # failure. Outside it, one bad task.json propagates out of the loop and
+        # aborts the whole resume BEFORE run_batch, so none of the `to_run`
+        # tasks execute either — the opposite of "one bad row never aborts".
+        prior: EvaluationResult | None = None
         try:
-            verify_reference_unchanged(prior, rt.task, rt.task_file)
+            prior = load_prior_result(rt.run_dir)
+            # The reference check lives inside regrade_in_place, so a caller
+            # cannot forget it.
             workspace = default_workspace(rt.run_dir, prior)
             # Preserve the ungraded record BEFORE the orchestrator overwrites
             # task.json in this same directory.
@@ -710,12 +730,33 @@ async def _grade_resumed_tasks(to_grade: list[ResolvedTask]) -> list[tuple[Resol
             )
         except (RegradeError, OSError, RuntimeError, ValueError) as e:
             console.print(f"[yellow]⚠[/] Could not grade {rt.task.task_id}: {e}")
+            if prior is None:
+                # The row could not even be read, so there is nothing to fold
+                # back. Skipping keeps it out of run.json exactly as it already
+                # is on disk, and the exit gate still fails the command because
+                # a task the resume owed a grade produced none.
+                failed_to_load.append(rt.task.task_id)
+                continue
             # Stamp the reason onto the row. Without it the failure survives only
             # in this console line: the folded-back result keeps the execute
             # phase's empty error_message, so run.json, the reports and CI show
             # an ungraded row with no explanation of why grading never happened.
             result = prior
             result.error_message = f"Grading failed during --resume: {e}"
+        else:
+            if result.final_status is FinalStatus.ERROR:
+                # An orchestrator-level grading crash is not a verdict about the
+                # run. Orchestrator.run() converts internal failures into a
+                # populated ERROR result rather than raising, so without this the
+                # `except` above never sees them and the ERROR row replaces a
+                # perfectly re-gradeable NOT_GRADED one — and ERROR is "complete"
+                # for both commands, so the row could never be graded again.
+                console.print(
+                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({result.error_message}); "
+                    + "keeping the ungraded row so it stays re-gradeable."
+                )
+                prior.error_message = f"Grading errored during --resume: {result.error_message}"
+                result = prior
         graded.append(
             (
                 rt,

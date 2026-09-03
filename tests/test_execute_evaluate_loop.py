@@ -14,6 +14,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -262,3 +263,98 @@ def test_execute_to_run_resume_emits_no_config_drift_warning(tmp_path: Path) -> 
     result = _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
 
     assert "run config changed" not in result.output
+
+
+def test_run_resume_keeps_the_row_regradeable_when_grading_crashes(tmp_path: Path) -> None:
+    """A grading crash is not a verdict about the run. Folding the ORIGINAL
+    ungraded row back keeps the task re-gradeable — writing ERROR over it would
+    not, since ERROR is "complete" for both commands."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+
+    with patch(
+        "coder_eval.orchestration.regrade.regrade_in_place",
+        new=AsyncMock(side_effect=RuntimeError("checker exploded")),
+    ):
+        result = runner.invoke(app, ["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert result.exit_code != 0, "a resume that graded nothing must not report success"
+    assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.NOT_GRADED.value
+    # The reason is durable, not console-only. It lands in run.json rather than
+    # task.json: task.json stays the pristine execute record, which is what keeps
+    # the row re-gradeable below.
+    summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert "checker exploded" in str(summary["task_results"])
+
+    # And the row really is still re-gradeable.
+    _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+    assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.SUCCESS.value
+
+
+def test_run_resume_reports_a_failing_verdict_and_exits_non_zero(tmp_path: Path) -> None:
+    """The other resume gate: grading that SUCCEEDS but fails the criteria."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    # Remove the file the criteria read, so the grade legitimately fails.
+    for proof in run_dir.glob("**/artifacts/**/proof.txt"):
+        proof.unlink()
+
+    result = runner.invoke(app, ["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert result.exit_code != 0
+    assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.FAILURE.value
+    summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert summary["tasks_failed"] == 1
+    assert summary["tasks_not_graded"] == 0
+
+
+def test_evaluate_grades_the_directory_named_by_workspace(tmp_path: Path) -> None:
+    """--workspace exists for a verifier that built its own /app; nothing else
+    asserted it actually grades that directory rather than the run's artifacts."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "proof.txt").write_text("coder-eval-ran-without-a-coder", encoding="utf-8")
+    # Make the run's own artifacts FAIL, so a pass can only come from --workspace.
+    for proof in run_dir.glob("**/artifacts/**/proof.txt"):
+        proof.unlink()
+
+    _invoke(["evaluate", str(_task_dir(run_dir)), "--workspace", str(elsewhere)])
+
+    assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.SUCCESS.value
+
+
+def test_evaluate_refuses_to_re_grade_a_run_that_errored(tmp_path: Path) -> None:
+    """Grading may only move NOT_GRADED to a verdict. An ERROR / TIMEOUT run is
+    an execution fact this pass neither repeated nor observed — laundering it
+    into SUCCESS would report a crashed run as a pass."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    row = _row(task_dir)
+    row["final_status"] = FinalStatus.TIMEOUT.value
+    (task_dir / "task.json").write_text(json.dumps(row), encoding="utf-8")
+
+    _invoke(["evaluate", str(task_dir)])
+
+    assert _row(task_dir)["final_status"] == FinalStatus.TIMEOUT.value
+
+
+def test_grading_the_same_run_twice_reaches_the_same_verdict(tmp_path: Path) -> None:
+    """Idempotence. A second grade must see the same workspace the first did —
+    it catches both a pre_run that mutated the tree and a lost sandbox_path."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+
+    _invoke(["evaluate", str(task_dir)])
+    first = _row(task_dir)
+    _invoke(["evaluate", str(task_dir)])
+    second = _row(task_dir)
+
+    assert second["final_status"] == first["final_status"]
+    assert second["weighted_score"] == first["weighted_score"]
+    assert second["sandbox_path"] == first["sandbox_path"], "the artifacts pointer must survive a re-grade"
+    # The pre-grade record is still the ORIGINAL ungraded one, not the first grade's.
+    assert _row(task_dir, "task.execute.json")["final_status"] == FinalStatus.NOT_GRADED.value

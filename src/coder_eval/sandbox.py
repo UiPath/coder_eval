@@ -23,6 +23,7 @@ from .models import (
     StarterFilesSource,
     TemplateDirSource,
 )
+from .path_utils import VENV_DIRNAME
 from .resources import get_ignore_patterns, should_ignore_path
 
 
@@ -298,6 +299,11 @@ class Sandbox:
           copy path they see the copy's paths, not the ones the agent worked at.
         * Copying a real workspace costs minutes.
 
+        "Materializing nothing" means it writes no FILES. It does still chmod
+        ``+x`` over the task's declared mock-PATH directories inside the tree —
+        a mode change the criteria need in order to resolve the same shimmed
+        binaries the agent did.
+
         The caller keeps ownership: ``_cleanup_on_exit`` stays False, so
         ``cleanup()`` never deletes an adopted directory. Criteria CAN still
         mutate it (a ``run_command`` that writes), which is why the copy path
@@ -341,9 +347,17 @@ class Sandbox:
         # Discover an existing venv instead of creating one, so `run_command`
         # criteria get the same VIRTUAL_ENV/PATH the agent had. Absent venv ->
         # None, exactly as for a task with no python config.
-        candidate = self.sandbox_dir / ".venv"
-        if candidate.is_dir():
-            self.venv_dir = candidate
+        #
+        # Gated on `config.python` for the same reason `setup` is: venv_dir
+        # prepends the venv's bin/ to PATH and exports VIRTUAL_ENV for every
+        # criterion subprocess, so discovering one a task never asked for grades
+        # it under a PATH it never ran under — the exact divergence the
+        # command_base_path round trip exists to close. It would also let an
+        # agent shadow binaries by writing `.venv/bin/` into its own workspace.
+        if self.config.python:
+            candidate = self.sandbox_dir / VENV_DIRNAME
+            if candidate.is_dir():
+                self.venv_dir = candidate
 
         self._check_parent_node_modules_contamination()
         self._refresh_plugin_tools_dir()
@@ -800,7 +814,7 @@ class Sandbox:
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox directory not initialized")
 
-        self.venv_dir = self.sandbox_dir / ".venv"
+        self.venv_dir = self.sandbox_dir / VENV_DIRNAME
 
         # Use uv to create virtual environment (faster than venv)
         try:

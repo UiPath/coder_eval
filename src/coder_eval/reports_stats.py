@@ -310,6 +310,19 @@ class VariantSeries(NamedTuple):
     asst_turns: list[float]
 
 
+# environment_info keys the Environment table must NOT render as ordinary rows.
+# `installed_tools` has its own dedicated section; the rest are harness
+# bookkeeping the reader did not ask for — `command_base_path` is a full PATH
+# string on every row, and the graded_by_* provenance keys only appear on a
+# re-graded row where they would read as facts about the run itself.
+ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest"})
+
+
+def is_env_table_key(key: str) -> bool:
+    """Whether ``key`` belongs in a rendered Environment table."""
+    return key not in ENV_TABLE_EXCLUDE and not key.startswith("graded_by_")
+
+
 # What an ungraded row shows where a score would go. Deliberately not "0.000":
 # an ungraded task was never measured, and a zero is indistinguishable from a
 # task that was measured and scored nothing.
