@@ -475,6 +475,45 @@ describe("tallyModels", () => {
             distinct: 0,
         });
     });
+
+    // A row that errors before the model resolves keeps the qualified id it was
+    // configured with, while completed rows record the bare one. Counting raw
+    // strings made that single row read as a second model, so the header showed
+    // "+1 more" on a run that used one model from end to end.
+    test("a qualified id is the same model as its bare form", () => {
+        const out = tallyModels([
+            row("claude-sonnet-5"),
+            row("claude-sonnet-5"),
+            row("eu.anthropic.claude-sonnet-5"),
+        ]);
+        expect(out).toEqual({ dominant: "claude-sonnet-5", distinct: 1 });
+    });
+
+    test("display keeps the raw string the run recorded, not a derived one", () => {
+        // Every row is qualified, so there is no bare variant to prefer; the
+        // chip must not invent one.
+        const out = tallyModels([
+            row("eu.anthropic.claude-sonnet-5"),
+            row("eu.anthropic.claude-sonnet-5"),
+        ]);
+        expect(out).toEqual({
+            dominant: "eu.anthropic.claude-sonnet-5",
+            distinct: 1,
+        });
+    });
+
+    test("genuinely different models still count separately", () => {
+        // The normalization must not collapse an A/B run's real spread.
+        const out = tallyModels([
+            row("eu.anthropic.claude-sonnet-5"),
+            row("us.anthropic.claude-opus-5"),
+            row("us.anthropic.claude-opus-5"),
+        ]);
+        expect(out).toEqual({
+            dominant: "us.anthropic.claude-opus-5",
+            distinct: 2,
+        });
+    });
 });
 
 describe("extractRunConfig", () => {

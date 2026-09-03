@@ -16,7 +16,7 @@ import {
 import { DEFAULT_VARIANT_ID, isValidVariantId } from "./variants";
 import { DEFAULT_SOURCE, runsDirFor, type Source } from "./sources";
 import { DELIVERABLE_KINDS, DELIVERABLE_NAMES } from "./artifact-kinds";
-import { messageCostUsd } from "./pricing";
+import { messageCostUsd, normalizeModel } from "./pricing";
 
 // Resolution order:
 //   1. EVALBOARD_LOCAL_RUNS_DIR — local mode, points at a coder_eval runs dir
@@ -857,24 +857,53 @@ export async function readRunSummary(
 // appeared. Mirrors mostCommonAgentType's "the thing these tasks ran on" vote,
 // but also reports the spread so the run header can say when there was more than
 // one instead of silently picking a winner.
+//
+// The vote groups on the NORMALIZED id (same key pricing resolves on), because
+// the recorded string varies by code path for one and the same model: a row that
+// errored before the model resolved keeps the qualified id it was configured
+// with ("eu.anthropic.claude-sonnet-5") while every completed row records the
+// bare one ("claude-sonnet-5"). Counting raw strings made a single errored row
+// read as a second model, and the header then claimed a mixed-model run over
+// what was actually one model throughout.
+//
+// Display stays the most common RAW string inside the winning group, so the
+// chip still shows exactly what the run recorded rather than a value the header
+// derived. Only the "how many models" question is answered on normalized keys.
 export function tallyModels(rows: RawTaskResult[]): {
     dominant: string | null;
     distinct: number;
 } {
-    const counts = new Map<string, number>();
+    const groups = new Map<string, Map<string, number>>();
     for (const r of rows) {
         const m = r.model_used;
-        if (typeof m === "string" && m) counts.set(m, (counts.get(m) ?? 0) + 1);
+        if (typeof m !== "string" || !m) continue;
+        const key = normalizeModel(m);
+        let raw = groups.get(key);
+        if (!raw) {
+            raw = new Map<string, number>();
+            groups.set(key, raw);
+        }
+        raw.set(m, (raw.get(m) ?? 0) + 1);
     }
     let dominant: string | null = null;
     let bestN = 0;
-    for (const [model, n] of counts) {
-        if (n > bestN) {
-            dominant = model;
-            bestN = n;
+    for (const raws of groups.values()) {
+        let groupN = 0;
+        let groupTop: string | null = null;
+        let groupTopN = 0;
+        for (const [model, n] of raws) {
+            groupN += n;
+            if (n > groupTopN) {
+                groupTop = model;
+                groupTopN = n;
+            }
+        }
+        if (groupN > bestN) {
+            dominant = groupTop;
+            bestN = groupN;
         }
     }
-    return { dominant, distinct: counts.size };
+    return { dominant, distinct: groups.size };
 }
 
 export async function readRunTasks(

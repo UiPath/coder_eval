@@ -128,7 +128,10 @@ const _ROUTING_PREFIXES = [
     "openrouter/",
 ];
 const _REGION_PREFIXES = ["eu.", "us.", "apac.", "global."];
-function normalizeModel(model: string): string {
+// Exported so the run header's model tally can group on the same key pricing
+// looks up on. Without it a single row that recorded the qualified id counts
+// as a second model and the header claims a mixed-model run.
+export function normalizeModel(model: string): string {
     let m = model.trim();
     for (const pre of _ROUTING_PREFIXES) {
         if (m.startsWith(pre)) {
