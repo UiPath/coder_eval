@@ -128,10 +128,8 @@ describe("POST /api/refresh", () => {
             await expect(fs.access(runDir)).rejects.toThrow();
         });
 
-        // Evicting only the on-disk copy is not enough: the front page reads a
-        // memoized projection of run.json that a settled run holds for a day
-        // (lib/overview.ts::perRunRevalidate), so without this the refresh
-        // button is a no-op for anything older than 24h.
+        // Without this the button is a no-op for a settled run, whose
+        // projection is held for a day (lib/overview.ts::perRunRevalidate).
         test("valid run -> the memoized projection is invalidated too", async () => {
             const POST = await loadPost();
             await POST(post("2026-06-01_04-04-22"));

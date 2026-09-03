@@ -40,9 +40,8 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "invalid run" }, { status: 400 });
     }
     // Evicting the on-disk copy is only half the job: the front page reads a
-    // memoized PROJECTION of it (lib/overview.ts::cachedLoadPerRunFor), and a
-    // settled run's projection is held for a day. Drop that entry too, or the
-    // refresh silently does nothing for every run older than 24h.
+    // memoized projection of it (lib/overview.ts::cachedLoadPerRunFor), held for
+    // a day on a settled run. Without this the refresh would no-op for those.
     revalidateTag(runCacheTag(source.id, runId));
     // Re-download is lazy on next render. The run page is force-dynamic and
     // reads the sidecars straight from disk, so it is fresh immediately.

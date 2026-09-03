@@ -14,11 +14,9 @@ export const dynamic = "force-dynamic";
 // blobs first, so this mirrors what the page would load.
 //
 // `task` is REQUIRED. Omitting it used to mean "zip the whole run", which for a
-// nightly meant ~10k blobs / ~400 MB: an uncapped fan-out of blob downloads, a
-// stat-per-file walk over Azure Files, and the entire archive buffered in
-// memory before any of it was sent. That path is gone, along with the run
-// page's button for it — a task folder is a handful of files and returns in
-// well under a second. To inspect a whole run, use the blob container directly.
+// nightly meant ~10k blobs / ~400 MB fetched uncapped and buffered in memory
+// before any of it was sent. That path and its button are gone; to inspect a
+// whole run, use the blob container.
 export async function GET(req: Request) {
     const url = new URL(req.url);
     const runId = url.searchParams.get("run");

@@ -296,14 +296,10 @@ export function RunView({
 
     // Commit a filter change to the URL WITHOUT a server round-trip.
     //
-    // Every reader of `tags` / `rtags` / `q` on this page is client-side — the
-    // grid is filtered by `filtered` below, out of rows the server already
-    // sent. The page's server component reads only `src`. So `router.replace`
-    // bought nothing and cost a full re-render of a force-dynamic route: two
-    // separate parses of the same multi-MB run.json (readRunSummary and
-    // readRunTasks each read it), the activation sub-run, the review index, and
-    // the mature-source scan's serial walk back through earlier runs — all to
-    // return markup this component recomputes locally anyway.
+    // Every reader of `tags` / `rtags` / `q` on this page is client-side (see
+    // `filtered` below); the server component reads only `src`. So
+    // `router.replace` bought nothing and cost a full re-render of a
+    // force-dynamic route to return markup this component recomputes anyway.
     //
     // The native History API keeps the URL shareable and the back button
     // working; Next syncs `useSearchParams` off pushState/replaceState, so this

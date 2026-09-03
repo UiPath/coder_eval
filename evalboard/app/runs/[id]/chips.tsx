@@ -9,11 +9,9 @@ export type ChipVariant = "skill" | "review" | "tag";
 export type ChipSize = "sm" | "md";
 
 // The colour/size utilities behind these tokens live in app/globals.css under
-// `@layer components`. A chip renders ~11k times on a nightly run page, so the
-// composed utility string (~130 chars each) was the single largest contributor
-// to that page's HTML — 1.4 MB of identical class text. Emitting short tokens
-// instead moves that text into the stylesheet, where the browser parses it once
-// and caches it across navigations.
+// `@layer components`. A chip renders ~11k times on a nightly run page, and the
+// composed utility string (~130 chars each) was 1.4 MB of identical class text
+// in one response; short tokens move it into the cached stylesheet.
 const STYLES: Record<
     ChipVariant,
     {
@@ -76,9 +74,8 @@ export function ChipButton({
     const s = STYLES[variant];
     const activeCls =
         variant === "tag" && size === "md" ? TAG_MD_ACTIVE : s.active;
-    // `chip-act` arms the hover rules, and only the interactive branch gets it —
-    // otherwise the non-interactive <span> shows a hover affordance it can't
-    // honor. (This replaces stripping `hover:` utilities out of the string.)
+    // `chip-act` arms the hover rules, and only the interactive branch gets it:
+    // a non-clickable <span> must not show an affordance it can't honor.
     const idleCls = onClick ? `${s.idle} chip-act` : s.idle;
     const stateCls = active ? activeCls : idleCls;
     const baseCls = `chip ${SIZE_CLS[size]} ${stateCls}`;

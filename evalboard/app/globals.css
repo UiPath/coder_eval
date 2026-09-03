@@ -42,11 +42,9 @@ details[open] > summary .group-chevron {
 }
 
 /* Filter/tag chips (app/runs/[id]/chips.tsx). The composed utility string was
-   ~130 chars and rendered ~11k times on a nightly run page (and ~6k on
-   /trends): 1.4 MB of identical class text in one response, from 120 distinct
-   values across 56k attributes. The utilities live here now so the emitted
-   attribute is four short tokens. The component still decides WHICH tokens to
-   emit; the variant/state matrix is carried by compound selectors below. */
+   ~130 chars and rendered ~11k times on a nightly run page: 1.4 MB of identical
+   class text in one response. Emitting four short tokens instead moves it here,
+   where the browser parses it once and caches it across navigations. */
 @layer components {
     .chip {
         @apply rounded border transition-colors;
@@ -57,8 +55,8 @@ details[open] > summary .group-chevron {
     .chip-md {
         @apply text-xs px-2 py-0.5;
     }
-    /* Idle. Exactly one of idle/selected is ever emitted, so these never
-       collide and neither needs to out-specify the other. */
+    /* Idle. Exactly one of idle/selected is ever emitted, so neither needs to
+       out-specify the other. */
     .chip-skill {
         @apply bg-indigo-50 text-indigo-700 border-indigo-200 font-medium;
     }
@@ -69,8 +67,7 @@ details[open] > summary .group-chevron {
         @apply bg-gray-50 text-gray-500 border-gray-200;
     }
     /* Hover rides on .chip-act, which only the interactive (button) branch
-       emits — a non-clickable span must not show an affordance it can't
-       honor. Replaces the old runtime hover-utility strip. */
+       emits, so a non-clickable span shows no affordance it can't honor. */
     .chip-act.chip-skill:hover {
         @apply bg-indigo-100;
     }
@@ -96,17 +93,16 @@ details[open] > summary .group-chevron {
         @apply bg-studio-blue text-white border-studio-blue;
     }
 
-    /* Per-row stat key in the grid's stacked card layout — 5.2k renders on a
-       nightly run page at 49 chars each. */
+    /* Per-row stat key in the grid's stacked card layout; 5.2k renders. */
     .stat-k {
         @apply text-[10px] uppercase tracking-wide text-gray-400;
     }
-    /* Numeric table cell on /trends — 5.4k renders at 47 chars each. */
+    /* Numeric table cell on /trends; 5.4k renders. */
     .num-cell {
         @apply py-2 px-3 tabular-nums text-right text-gray-700;
     }
-    /* One bar of a /trends sparkline — 9.9k renders. The status color stays a
-       utility on the element; only the geometry is shared. */
+    /* One bar of a /trends sparkline; 9.9k renders. The status color stays a
+       utility on the element, so only the geometry is shared. */
     .spark-bar {
         @apply w-[6px] h-full rounded-sm;
     }

@@ -42,14 +42,13 @@ export function HarnessSelector({
         const qs = p.toString();
         router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     };
-    // Every known harness always gets a segment, whether or not it turned up in
-    // the discovery window. A weekly harness (delegate) drops out of that window
-    // between firings, and a control that quietly loses an option reads as "this
-    // harness was removed" rather than "it hasn't run lately". Scoping to one
-    // with no runs in the window shows an empty result, which is honest and one
-    // click from recoverable; a missing segment is neither. `current` is unioned
-    // in too, so a deep-linked `?h=` outside the known set still reads as
-    // selected. orderHarnesses fixes the order, so segments never reshuffle.
+    // Every known harness gets a segment whether or not it turned up in the
+    // discovery window. A weekly harness (delegate) drops out of that window
+    // between firings, and a control that quietly loses an option reads as
+    // "removed" rather than "hasn't run lately"; an empty result is honest and
+    // one click from recoverable. `current` is unioned in so a deep-linked `?h=`
+    // outside the known set still reads as selected, and orderHarnesses fixes
+    // the order so segments never reshuffle.
     const opts = orderHarnesses([
         ...KNOWN_HARNESSES,
         ...harnesses,

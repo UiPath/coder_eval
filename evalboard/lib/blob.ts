@@ -297,11 +297,9 @@ export async function ensureRunReviewIndex(
     });
 }
 
-// NOTE: there is deliberately no whole-run fetch. `ensureRunDir` used to exist
-// for the run page's download-as-zip button and pulled EVERY blob under the run
-// prefix with no concurrency cap — ~10k blobs / ~400 MB for a nightly, issued as
-// one unbounded Promise.all. Both it and the button are gone; per-task download
-// (below) is the supported shape.
+// There is deliberately no whole-run fetch. `ensureRunDir` used to pull EVERY
+// blob under the run prefix with no concurrency cap (~10k blobs / ~400 MB for a
+// nightly). Per-task download, below, is the supported shape.
 
 // Narrow fetch: run.json + just one task subdir. Used by the per-task
 // detail page so opening a deep link to a 50-task run doesn't pull every

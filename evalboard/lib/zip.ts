@@ -20,12 +20,10 @@ export interface ZipEntry {
     data: Buffer;
 }
 
-// Standard CRC-32 (IEEE 802.3 polynomial 0xEDB88320). ZIP stores one per entry
-// for integrity. `zlib.crc32` is the same checksum computed natively; the
-// hand-rolled table-driven loop this replaces walked the UNCOMPRESSED bytes one
-// at a time on the event loop, ~47x slower measured (94 ms vs 2 ms per 50 MB),
-// blocking every other request the server was serving for the duration.
-// `>>> 0` keeps it unsigned, matching what the old loop returned.
+// Standard CRC-32 (IEEE 802.3 polynomial 0xEDB88320), one per ZIP entry.
+// `zlib.crc32` computes it natively; the hand-rolled loop it replaces walked the
+// uncompressed bytes one at a time on the event loop, ~47x slower measured.
+// `>>> 0` keeps it unsigned, matching what that loop returned.
 function entryCrc(buf: Buffer): number {
     return crc32(buf) >>> 0;
 }

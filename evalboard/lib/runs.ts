@@ -693,18 +693,12 @@ async function readJson<T>(p: string): Promise<T | null> {
     }
 }
 
-// Request-scoped memo. A run.json is 1.5–6.5 MB and several readers want the
-// same one in a single render: the run page alone calls readRunSummary AND
-// readRunTasks on the same id, and findMatureSourceRuns walks back through
-// earlier runs that the same page may also be listing. `dedupe` in blob.ts only
-// collapses the DOWNLOAD — without this each caller still paid its own read off
-// the Azure Files mount plus its own JSON.parse.
-//
-// react/cache is per-request, so this never serves one request's data to
-// another; cross-request caching stays with unstable_cache in lib/overview.ts.
-// Keyed on the argument tuple, hence `source` last with a default — callers
-// that omit it and callers that pass DEFAULT_SOURCE are different keys, which
-// costs an extra read at worst and can never return the wrong container.
+// Request-scoped memo. A run.json is 1.5-6.5 MB and the run page reads the same
+// one twice (readRunSummary and readRunTasks); `dedupe` in blob.ts collapses only
+// the download, not the read and parse. react/cache is per-request, so this
+// never serves one request's data to another. The key is the argument tuple, so
+// an omitted `source` and an explicit DEFAULT_SOURCE are two keys: one extra
+// read at worst, never the wrong container.
 const readRunJson = cache(
     async (
         id: string,
@@ -858,17 +852,14 @@ export async function readRunSummary(
 // but also reports the spread so the run header can say when there was more than
 // one instead of silently picking a winner.
 //
-// The vote groups on the NORMALIZED id (same key pricing resolves on), because
-// the recorded string varies by code path for one and the same model: a row that
-// errored before the model resolved keeps the qualified id it was configured
-// with ("eu.anthropic.claude-sonnet-5") while every completed row records the
-// bare one ("claude-sonnet-5"). Counting raw strings made a single errored row
-// read as a second model, and the header then claimed a mixed-model run over
-// what was actually one model throughout.
+// The vote groups on the NORMALIZED id (same key pricing resolves on) because
+// the recorded string varies by code path: a row that errored before the model
+// resolved keeps the qualified id it was configured with
+// ("eu.anthropic.claude-sonnet-5") while completed rows record the bare one, so
+// counting raw strings let one errored row read as a second model.
 //
-// Display stays the most common RAW string inside the winning group, so the
-// chip still shows exactly what the run recorded rather than a value the header
-// derived. Only the "how many models" question is answered on normalized keys.
+// Display stays the most common RAW string inside the winning group, so the chip
+// shows what the run recorded rather than a derived value.
 export function tallyModels(rows: RawTaskResult[]): {
     dominant: string | null;
     distinct: number;
@@ -920,8 +911,8 @@ export async function readRunTasks(
 // slot (SLOT_COUNT = 5 in the runner's maturity.py), so its most recent real
 // execution is at most ~5 *canonical* runs back; the headroom absorbs ad-hoc /
 // smoke runs that listRunIds() interleaves but maturity replay ignores. The scan
-// short-circuits once every task is resolved (at batch granularity — see the
-// walk below), so this is a safety cap, not the typical read count.
+// short-circuits once every task is resolved (at batch granularity), so this is
+// a safety cap, not the typical read count.
 const MATURE_SOURCE_LOOKBACK = 20;
 
 // For each mature-skipped task in `fromRunId`, find the most recent *earlier* run
@@ -952,14 +943,11 @@ export async function findMatureSourceRuns(
 
     const unresolved = new Set(matureTaskIds);
     const limit = Math.min(ids.length, start + 1 + MATURE_SOURCE_LOOKBACK);
-    // Read in small concurrent batches, then CONSUME each batch in index order
-    // so "the most recent run that executed this task" is unchanged — the walk
-    // is still newest-first, only the IO overlaps. Serially, a run page with
-    // mature rows paid 20 round-trips to Azure Files back-to-back before it
-    // could render, and the scan only short-circuits once every mature task
-    // resolves, which with ~50% of tasks carried forward usually never happens.
-    // The cost of overshooting is at most BATCH-1 extra reads, and those are
-    // request-memoized (see readRunJson) for anything else on the page.
+    // Read in concurrent batches, then CONSUME each batch in index order so "the
+    // most recent run that executed this task" is unchanged: the walk is still
+    // newest-first, only the IO overlaps. Serially this was up to 20 round-trips
+    // to Azure Files back-to-back before the page could render. Overshooting
+    // costs at most BATCH-1 extra reads, and those are request-memoized.
     const BATCH = 5;
     for (let i = start + 1; i < limit && unresolved.size > 0; i += BATCH) {
         const batch = ids.slice(i, Math.min(i + BATCH, limit));
