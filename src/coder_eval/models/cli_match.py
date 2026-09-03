@@ -263,9 +263,7 @@ def build_match_spec(
         "verb_spellings": verb_spellings,
         "positional": positional,
         "flags": (
-            {name: cast("FlagPredicate", predicate.model_dump()) for name, predicate in flags.items()}
-            if flags
-            else None
+            {name: cast(FlagPredicate, predicate.model_dump()) for name, predicate in flags.items()} if flags else None
         ),
         "value_flags": list(value_flags),
         "ignore_flags": list(ignore_flags),
