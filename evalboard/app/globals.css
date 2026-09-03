@@ -40,3 +40,74 @@ details[open] > summary > .msg-chevron {
 details[open] > summary .group-chevron {
     transform: rotate(90deg);
 }
+
+/* Filter/tag chips (app/runs/[id]/chips.tsx). The composed utility string was
+   ~130 chars and rendered ~11k times on a nightly run page (and ~6k on
+   /trends): 1.4 MB of identical class text in one response, from 120 distinct
+   values across 56k attributes. The utilities live here now so the emitted
+   attribute is four short tokens. The component still decides WHICH tokens to
+   emit; the variant/state matrix is carried by compound selectors below. */
+@layer components {
+    .chip {
+        @apply rounded border transition-colors;
+    }
+    .chip-sm {
+        @apply text-[10px] leading-none px-1.5 py-0.5;
+    }
+    .chip-md {
+        @apply text-xs px-2 py-0.5;
+    }
+    /* Idle. Exactly one of idle/selected is ever emitted, so these never
+       collide and neither needs to out-specify the other. */
+    .chip-skill {
+        @apply bg-indigo-50 text-indigo-700 border-indigo-200 font-medium;
+    }
+    .chip-review {
+        @apply bg-rose-50 text-rose-700 border-rose-200;
+    }
+    .chip-tag {
+        @apply bg-gray-50 text-gray-500 border-gray-200;
+    }
+    /* Hover rides on .chip-act, which only the interactive (button) branch
+       emits — a non-clickable span must not show an affordance it can't
+       honor. Replaces the old runtime hover-utility strip. */
+    .chip-act.chip-skill:hover {
+        @apply bg-indigo-100;
+    }
+    .chip-act.chip-review:hover {
+        @apply bg-rose-100;
+    }
+    .chip-act.chip-tag:hover {
+        @apply bg-gray-100;
+    }
+    /* Selected. */
+    .chip-skill-on {
+        @apply bg-indigo-600 text-white border-indigo-600 font-medium;
+    }
+    .chip-review-on {
+        @apply bg-rose-600 text-white border-rose-600;
+    }
+    .chip-tag-on {
+        @apply bg-studio-blue/10 text-studio-blue border-studio-blue/30;
+    }
+    /* The md gray-tag (filter-rail) selected state is solid studio-blue, not
+       the softer 10% tint the sm grid chips use. */
+    .chip-tag-on-md {
+        @apply bg-studio-blue text-white border-studio-blue;
+    }
+
+    /* Per-row stat key in the grid's stacked card layout — 5.2k renders on a
+       nightly run page at 49 chars each. */
+    .stat-k {
+        @apply text-[10px] uppercase tracking-wide text-gray-400;
+    }
+    /* Numeric table cell on /trends — 5.4k renders at 47 chars each. */
+    .num-cell {
+        @apply py-2 px-3 tabular-nums text-right text-gray-700;
+    }
+    /* One bar of a /trends sparkline — 9.9k renders. The status color stays a
+       utility on the element; only the geometry is shared. */
+    .spark-bar {
+        @apply w-[6px] h-full rounded-sm;
+    }
+}
