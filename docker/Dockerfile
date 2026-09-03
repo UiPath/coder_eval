@@ -64,6 +64,10 @@ COPY experiments/default.yaml ./experiments/default.yaml
 # `--driver docker` does not support it. Adding it means a pinned version that
 # travels with the release tag (as CLAUDE_CODE_VERSION does) plus an
 # env_passthrough block; see docs/agents/OPENCODE.md "Running in Docker".
+# The same holds for `delegate-sdk`: its `@uipath/delegate-stdio` Node host is
+# not baked in, and its UiPath auth env is not in the default allowlist -- a
+# docker run needs an overlay image + `-D sandbox.docker.env_passthrough_extra`;
+# see docs/agents/DELEGATE_SDK.md "Running in Docker".
 #
 # CODER_EVAL_UV_EXTRAS carries ADDITIONAL opt-in extras on top of those; it
 # defaults to none. `make docker-image-full` passes `--extra uipath`, which

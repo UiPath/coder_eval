@@ -84,6 +84,7 @@ extra:
     agents/CODEX.md: "Running the OpenAI Codex agent"
     agents/ANTIGRAVITY.md: "Running the Google Antigravity / Gemini agent"
     agents/OPENCODE.md: "Running the OpenCode agent on open-weight models"
+    agents/DELEGATE_SDK.md: "Running UiPath Autopilot's Delegate agent via the @uipath/delegate-stdio host"
     agents/HARNESS_PARITY.md: "What each run_limits field means on every harness"
     AB_EXPERIMENTS.md: "Compare models / tools / prompts across the same tasks"
     DATASETS.md: "Fan a single task out over a dataset"
@@ -114,6 +115,7 @@ nav:
       - Codex: agents/CODEX.md
       - Antigravity (Gemini): agents/ANTIGRAVITY.md
       - OpenCode: agents/OPENCODE.md
+      - UiPath Delegate SDK: agents/DELEGATE_SDK.md
       - Run-Limit Parity: agents/HARNESS_PARITY.md
   - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md

@@ -4,7 +4,7 @@ description: >-
   Coder Eval is an open-source framework to evaluate, benchmark, and A/B-test AI
   coding agents and Claude Code skills in a sandbox — declarative YAML tasks,
   weighted scoring, cost/token telemetry, and CI gates for Claude Code, Codex,
-  Gemini, and OpenCode.
+  Gemini, OpenCode, and UiPath Delegate.
 ---
 
 # Evaluate AI coding agents & Claude Code skills — Coder Eval
@@ -14,7 +14,7 @@ description: >-
 builders — with sandboxing, reproducibility, and data-driven analysis. It is not
 an "agentic coding" benchmark: it measures how effective *your* CLI and skills
 are when used by coding agents such as **Claude Code**, **Codex**, **Google
-Antigravity (Gemini)**, and **OpenCode**.
+Antigravity (Gemini)**, **OpenCode**, and **UiPath Delegate**.
 
 If you have ever asked *"how do I test whether my Claude Code skill actually
 triggers?"*, *"how do I benchmark Claude Code vs. Codex on my own tasks?"*, or
@@ -30,7 +30,7 @@ triggers?"*, *"how do I benchmark Claude Code vs. Codex on my own tasks?"*, or
 - **Sandboxed execution** in isolated environments with resource limits
 - **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
 - **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), and OpenCode today, extensible via a plugin SPI
+- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), OpenCode, and UiPath Delegate today, extensible via a plugin SPI
 - **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
 
@@ -82,6 +82,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Codex](agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
+| [UiPath Delegate SDK](agents/DELEGATE_SDK.md) | Running UiPath Autopilot's Delegate agent via the @uipath/delegate-stdio host |
 | [Run-Limit Parity](agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |

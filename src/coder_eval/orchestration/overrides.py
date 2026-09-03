@@ -72,6 +72,29 @@ def parse_override(raw: str) -> tuple[str, Any]:
     return path, parse_scalar(value)
 
 
+def _kind_declares_sdk_options(kind: str | None) -> bool:
+    """True when ``kind`` is registered with a config class that has an ``sdk_options`` field.
+
+    Looked up on the live registry (plugins included) rather than hardcoded, so
+    the layer-5 guard stays in step with whatever config classes actually
+    exist. An unregistered or missing kind is False — the resolver's own error
+    then reports it.
+    """
+    from ..agents.registry import AgentRegistry
+
+    if kind is None:
+        return False
+    registration = AgentRegistry.get(kind)
+    return registration is not None and "sdk_options" in registration.config_class.model_fields
+
+
+def _kinds_declaring_sdk_options() -> list[str]:
+    """Sorted registered kinds whose config declares ``sdk_options`` (for the error hint)."""
+    from ..agents.registry import AgentRegistry
+
+    return [kind for kind in AgentRegistry.list_kinds() if _kind_declares_sdk_options(kind)]
+
+
 def _assign_nested(patch: dict[str, Any], segments: list[str], value: Any) -> None:
     """Set ``patch[seg0][seg1]... = value``, creating intermediate dicts.
 
@@ -132,15 +155,22 @@ def apply_overrides(
 
     if agent_patch:
         assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
-        # Preserve the friendly "sdk_options only for claude-code" message before
-        # reconstruction, keyed on the type the agent is *becoming*.
+        # Preserve the friendly "sdk_options is not a field of this agent" message
+        # before reconstruction, keyed on the type the agent is *becoming*. The
+        # gate is REGISTRY-DRIVEN: a kind qualifies iff the config class it is
+        # registered with declares an ``sdk_options`` field (claude-code and
+        # delegate-sdk today, plus any plugin that models the same knob) — so a
+        # new harness never has to be hand-listed here, and a kind without the
+        # field still gets this hint instead of the resolver's generic typo error.
         if "sdk_options" in agent_patch:
             becoming = agent_patch.get("type", task.agent.type)
             type_value = becoming.value if isinstance(becoming, AgentKind) else becoming
-            if type_value != AgentKind.CLAUDE_CODE.value:
+            if not _kind_declares_sdk_options(type_value):
                 where = "no agent type is set" if type_value is None else f"agent type {type_value}"
                 raise OverrideError(
-                    f"sdk_options cannot be used with {where}. This option is only supported for claude-code agents."
+                    f"sdk_options cannot be used with {where}. This option is only supported for claude-code "
+                    + "and other agents whose config declares an sdk_options field "
+                    + f"(registered: {', '.join(_kinds_declaring_sdk_options())})."
                 )
         # Seed with only the explicitly-set fields (exclude_unset) so switching the
         # agent subclass via --type doesn't drag subclass-only defaults into a model

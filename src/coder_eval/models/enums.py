@@ -109,6 +109,7 @@ class AgentKind(StrEnum):
     CODEX = "codex"
     ANTIGRAVITY = "antigravity"
     OPENCODE = "opencode"
+    DELEGATE_SDK = "delegate-sdk"  # UiPath Autopilot's Delegate agent, driven via the @uipath/delegate-stdio host.
     NONE = "none"  # Agentless / system task — no coding agent runs; success criteria do all the work.
     UNKNOWN = "unknown"  # Used when agent type cannot be determined (e.g., task loading failure)
 

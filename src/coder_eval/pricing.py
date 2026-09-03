@@ -117,10 +117,41 @@ _PRICING: dict[str, ModelPricing] = {
     "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
     "z-ai/glm-5.2": ModelPricing(0.7168, 2.2528, 0.7168, 0.13312),
     "deepseek/deepseek-v4-pro": ModelPricing(0.435, 0.87, 0.435, 0.003625),
+    # UiPath Delegate SDK route (DelegateSdkAgent). The Delegate backend echoes
+    # UNDERSCORED model ids (``gpt_5_6_terra``) and the agent normalizes them to
+    # HYPHENATED keys (``gpt-5-6-terra``) before pricing — nothing maps them onto
+    # the dotted ids above (``gpt-5.6-terra``), so every delegate-routed model
+    # needs its own hyphenated row here or it silently reports total_cost_usd=None.
+    # Only UiPath-reachable routes (Delegate SDK / Fireworks / Vertex / Gateway)
+    # belong in this block. Rates were carried over VERBATIM from the
+    # coder_eval_uipath plugin that used to register them (behavior-preserving
+    # migration): note that several differ from the dotted rows for the same
+    # physical model — the plugin priced GPT-5.4/5.5 cache WRITES at the output
+    # rate where the rows above use the input rate, and prices no cache writes
+    # for Gemini — so a cross-harness cost comparison mixes rate tables until the
+    # two blocks are reconciled.
+    # Virtuoso 1.5 / 2.0 (Fireworks): implicit caching — no cache writes.
+    "virtuoso-1-5": ModelPricing(0.95, 4.0, 0.0, 0.16),
+    "virtuoso-2-0": ModelPricing(0.95, 4.0, 0.0, 0.19),
+    # Gemini 3.5 / 3.6 Flash + 3.1 Pro Preview (Vertex via Delegate): no cache writes.
+    "gemini-3-5-flash": ModelPricing(1.50, 9.0, 0.0, 0.15),
+    "gemini-3-6-flash": ModelPricing(1.50, 7.50, 0.0, 0.15),
+    "gemini-3-1-pro-preview": ModelPricing(2.0, 12.0, 0.0, 0.20),
+    # GPT-5.4 / 5.5 (OpenAI via the LLM Gateway): cache writes billed at the output rate.
+    "gpt-5-4": ModelPricing(2.50, 15.0, 15.0, 0.25),
+    "gpt-5-5": ModelPricing(5.0, 30.0, 30.0, 0.50),
+    # GPT-5.6 (Azure OpenAI via the LLM Gateway): sol flagship / terra balanced /
+    # luna economy. From 5.6 on, cache writes bill at 1.25x input and cached reads
+    # at 10% of input; post-2026-07-30 terra/luna cut, like the dotted rows.
+    "gpt-5-6-sol": ModelPricing(5.0, 30.0, 6.25, 0.50),
+    "gpt-5-6-terra": ModelPricing(2.0, 12.0, 2.50, 0.20),
+    "gpt-5-6-luna": ModelPricing(0.20, 1.20, 0.25, 0.02),
+    # Kimi K2.7 Code (Fireworks, gateway-routed only): implicit caching — no cache writes.
+    "kimi-k2-7-code": ModelPricing(0.95, 4.0, 0.0, 0.19),
 }
 
 
-# Plugin-contributed rates (e.g. coder_eval_uipath registers UiPath models).
+# Plugin-contributed rates (a third-party plugin registering its own models).
 # Merged over the built-in table at lookup time.
 _REGISTERED_PRICING: dict[str, ModelPricing] = {}
 

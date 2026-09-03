@@ -2087,7 +2087,9 @@ class TestCE033PluginReferenceParity:
 
         write(tmp_path)
         target = tmp_path / "plugins/coder-eval/reference/criteria.md"
-        target.write_text(target.read_text(encoding="utf-8").replace("### `file_exists`", "### `tampered`"))
+        target.write_text(
+            target.read_text(encoding="utf-8").replace("### `file_exists`", "### `tampered`"), encoding="utf-8"
+        )
         assert str(target) in check(tmp_path)
 
 

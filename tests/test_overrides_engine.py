@@ -15,6 +15,7 @@ from coder_eval.models import (
     ClaudeCodeAgentConfig,
     CodexAgentConfig,
     ConfigLineageEntry,
+    DelegateSdkAgentConfig,
     DockerDriverConfig,
     FileExistsCriterion,
     RunLimits,
@@ -151,6 +152,47 @@ class TestApplyOverrides:
         task = _make_task(agent=parse_agent_config(type="claude-code"))
         with pytest.raises(OverrideError, match="only supported for claude-code"):
             apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="codex")
+
+    def test_sdk_options_error_names_the_kinds_that_declare_the_field(self):
+        """The hint is registry-driven: it lists every kind whose config has sdk_options."""
+        task = _make_task(agent=parse_agent_config(type="codex"))
+        with pytest.raises(OverrideError, match=r"registered: claude-code, delegate-sdk"):
+            apply_overrides(task, {"agent.sdk_options.effort": "high"})
+
+    @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
+    def test_sdk_options_effort_on_delegate_sdk_is_accepted(self, effort: str):
+        """delegate-sdk declares its own sdk_options (the host reads ``effort``), so the
+        layer-5 guard must let ``-D agent.sdk_options.effort`` through — this is how
+        the RPA eval pipeline forwards reasoning effort to the Delegate host."""
+        task = _make_task(agent=parse_agent_config(type=AgentKind.DELEGATE_SDK))
+        apply_overrides(task, {"agent.sdk_options.effort": effort}, agent_type="delegate-sdk")
+        assert isinstance(task.agent, DelegateSdkAgentConfig)
+        assert task.agent.sdk_options == {"effort": effort}
+
+    def test_sdk_options_on_delegate_sdk_via_type_switch(self):
+        """``--type delegate-sdk`` on a claude-code task qualifies the BECOMING kind."""
+        task = _make_task(agent=parse_agent_config(type="claude-code"))
+        apply_overrides(task, {"agent.sdk_options.effort": "low"}, agent_type="delegate-sdk")
+        assert isinstance(task.agent, DelegateSdkAgentConfig)
+        assert task.agent.sdk_options == {"effort": "low"}
+
+    def test_sdk_options_on_delegate_sdk_deep_merges_with_config_layer(self):
+        """A ``-D`` key merges onto (and overrides) sdk_options set at the config layer."""
+        task = _make_task(agent=parse_agent_config(type="delegate-sdk", sdk_options={"effort": "low", "other": "keep"}))
+        apply_overrides(task, {"agent.sdk_options.effort": "high"})
+        assert task.agent.sdk_options == {"effort": "high", "other": "keep"}
+
+    def test_sdk_options_on_delegate_sdk_alongside_other_override(self):
+        task = _make_task(agent=parse_agent_config(type="delegate-sdk"))
+        apply_overrides(task, {"agent.sdk_options.effort": "low", "agent.model": "kimi-k2-7-code"})
+        assert task.agent.sdk_options == {"effort": "low"}
+        assert task.agent.model == "kimi-k2-7-code"
+
+    def test_sdk_options_on_antigravity_still_blocked(self):
+        """A kind whose config has no sdk_options field is not relaxed by the registry gate."""
+        task = _make_task(agent=parse_agent_config(type="antigravity"))
+        with pytest.raises(OverrideError, match="only supported for claude-code"):
+            apply_overrides(task, {"agent.sdk_options.effort": "high"})
 
     def test_unknown_root_raises(self):
         task = _make_task()

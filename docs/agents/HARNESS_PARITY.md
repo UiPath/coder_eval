@@ -10,12 +10,12 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 ## The table
 
-| Limit | claude-code | codex | antigravity | opencode |
-|---|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
-| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) |
+| Limit | claude-code | codex | antigravity | opencode | delegate-sdk |
+|---|---|---|---|---|---|
+| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native step cap (forwarded to the host as `maxSteps`; see below) |
+| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced on every host read; SIGKILL on the Node host, partial turn preserved |
+| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
+| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | **not supported** — the host runs its own inner loop with no between-message poll point (`supports_cooperative_stop` is False, so arming it is rejected at resolution) |
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 
@@ -49,6 +49,17 @@ exists and is honored: `max_turns: N` allows N complete steps and cuts the run
 when step N+1 begins, with the completed steps' tokens intact. A step is one
 assistant generation and may carry several tool calls — so, as with claude-code,
 the same number is a looser tool-call budget than on the visible-turn backends.
+
+**delegate-sdk also keeps a native unit — the Delegate SDK's own steps.** The cap
+is forwarded to the `@uipath/delegate-stdio` host as `maxSteps`, and the host
+reports back `maxStepsReached` on the terminal `result` message, which becomes
+`max_turns_exhausted`. A step is one backend round-trip (one LLM generation), so,
+as with claude-code and OpenCode, `max_turns: N` is a looser tool-call budget than on
+the visible-turn backends. One consequence worth knowing before writing an
+activation suite: the SDK stops a limit-hit tool call **before** it emits the
+`tool_call` event, so under `max_turns: 1` a first-response skill engagement never
+reaches `TurnRecord.commands` and `skill_triggered` reads false even when the
+model did the right thing — do not run `max_turns: 1` routing rows on this harness.
 
 **So holding `max_turns` constant across harnesses does not hold the budget
 constant.** If you are A/B-ing across backends and the cap is close to binding, that
@@ -116,10 +127,10 @@ whose cap fires should not look like a task whose harness hung.
 Not a run limit, but the same promise: one task file, three harnesses, same meaning.
 This field breaks it silently.
 
-| | claude-code | codex | antigravity |
-|---|---|---|---|
-| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted |
-| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted |
+| | claude-code | codex | antigravity | delegate-sdk |
+|---|---|---|---|---|
+| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted | **required** |
+| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted | **loads nothing** |
 
 claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
 live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
@@ -127,7 +138,12 @@ parents the skill directories and no skill loads. Codex
 (`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
 both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
 
-So `.claude/skills` works on two backends out of three and fails on the third — and
+delegate-sdk behaves like claude-code here: it forwards `<path>/skills` to the
+`@uipath/delegate-stdio` host as `bundledSkillsPath` (only the first `plugins:` entry;
+a second one is warned about and ignored), so the same bare skills directory loads
+nothing there too.
+
+So `.claude/skills` works on two backends out of four and fails on the other two — and
 fails without an error. The agent simply is not offered the skill, every positive row
 of an activation suite scores 0, and the suite reports recall 0.0. That is
 indistinguishable from a skill that never triggers, which is the finding such a suite
@@ -147,7 +163,7 @@ claude --plugin-dir /path/to/root/skills # lists nothing         <- loaded nothi
 
 A bare `<skill>` with no prefix is project discovery, not your plugin.
 
-**Write the plugin root.** It is correct on all three, so there is never a reason to
+**Write the plugin root.** It is correct on every harness, so there is never a reason to
 write the deeper form. For `.claude/skills/my-skill/SKILL.md` that is `.claude`.
 
 Note what else that pulls in: a plugin root loads the **whole** plugin, so an
@@ -170,10 +186,10 @@ so the same requirement applies there and is unlinted.
 `tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more
 sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
 outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
-`--type antigravity` / `--type opencode` to check a backend against the contract
-above.
+`--type antigravity` / `--type opencode` / `--type delegate-sdk` to check a backend
+against the contract above.
 
 ## Related
 
-- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md)
+- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md) · [UiPath Delegate SDK](DELEGATE_SDK.md)
 - [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) — the full `run_limits` schema

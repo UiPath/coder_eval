@@ -22,10 +22,10 @@ const HARNESS_LOGO: Record<string, { src: string; label: string; short: string }
         label: "Antigravity · Google Gemini",
         short: "Antigravity",
     },
-    // The Delegate harness is UiPath's own (the coder_eval_uipath plugin), so
+    // The Delegate harness is UiPath's own (the built-in DelegateSdkAgent), so
     // its vendor mark is the UiPath logo already served for the site header
     // rather than a per-harness file under /harness. The key stays `delegate-sdk`
-    // because that is the `agent.type` the plugin registers and therefore what
+    // because that is the `agent.type` the agent registers and therefore what
     // run.json carries; only the label people read is shortened.
     "delegate-sdk": {
         src: "/uipath.png",

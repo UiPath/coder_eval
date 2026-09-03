@@ -12,7 +12,7 @@
 **evaluating and benchmarking AI coding agents and their skills** — built for CLI
 and skill builders — with sandboxing, reproducibility, and data-driven analysis.
 It runs a real agent (**Claude Code**, **Codex**, **Google Antigravity /
-Gemini**, or **OpenCode**) in a sandbox against declarative YAML tasks, then scores the files and
+Gemini**, **OpenCode**, or **UiPath Delegate**) in a sandbox against declarative YAML tasks, then scores the files and
 commands it actually produced. Not an "agentic coding" benchmark: it measures how
 effective your CLI and skills are when used by coding agents.
 
@@ -33,7 +33,7 @@ telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
 - **Sandboxed execution** in isolated environments with resource limits
 - **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
 - **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), and OpenCode today, extensible via a plugin SPI
+- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), OpenCode, and UiPath Delegate today, extensible via a plugin SPI
 - **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
 
@@ -216,6 +216,7 @@ The step's exit code is coder-eval's own: non-zero on any failed task.
 | [Codex](docs/agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](docs/agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
+| [UiPath Delegate SDK](docs/agents/DELEGATE_SDK.md) | Running UiPath Autopilot's Delegate agent via the @uipath/delegate-stdio host |
 | [Run-Limit Parity](docs/agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |

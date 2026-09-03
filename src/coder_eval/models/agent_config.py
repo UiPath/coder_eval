@@ -381,6 +381,52 @@ class OpenCodeAgentConfig(BaseAgentConfig):
     )
 
 
+class DelegateSdkAgentConfig(BaseAgentConfig):
+    """Delegate SDK agent configuration (UiPath Autopilot's Delegate agent).
+
+    Drives the Delegate agent through the published ``@uipath/delegate-stdio``
+    Node host, a subprocess speaking JSON-Lines over stdio. The host package is
+    self-contained: it pulls ``@uipath/delegate-sdk`` in as its npm dependency.
+    Runtime prerequisites (host install + ``DELEGATE_STDIO_PATH`` /
+    ``DELEGATE_STDIO_NODE_MODULES``, auth) are documented in
+    ``coder_eval.agents.delegate_sdk_agent`` and ``docs/agents/DELEGATE_SDK.md``.
+    """
+
+    type: Literal[AgentKind.DELEGATE_SDK]  # type: ignore[assignment]
+
+    sdk_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Pass-through options for the delegate-stdio host. The host currently "
+            "consumes ``effort`` (low/medium/high/xhigh) and forwards it as "
+            "user_config.effort on every chat request. Other keys are accepted and "
+            "silently ignored so a shared experiment YAML can carry Claude-only "
+            "sdk_options keys (e.g. ``max_thinking_tokens``) without breaking the "
+            "delegate-sdk variant."
+        ),
+    )
+
+    project_id: str = Field(
+        default="",
+        description=(
+            "Bind SDK-created sessions to this project id for local wiki routing "
+            "(forwarded as the SDK ``projectId`` option). When set, the wiki lands at "
+            "``<workingDirectory>/projects/<project_id>/wiki`` instead of the per-session "
+            "``<workingDirectory>/sessions/<sessionId>/wiki``. Client-side routing key "
+            "only; empty keeps the session-scoped default."
+        ),
+    )
+    session_id: str = Field(
+        default="",
+        description=(
+            "Pin the SDK session id (forwarded as the SDK ``sessionId`` option) so the "
+            "session-scoped wiki dir is deterministic. Empty lets the SDK generate a "
+            "fresh session per run. A pinned id skips ``createSession``, so it must be "
+            "one the backend accepts."
+        ),
+    )
+
+
 class NoneAgentConfig(BaseAgentConfig):
     """No-op ("agentless") agent configuration.
 
@@ -405,7 +451,12 @@ class NoneAgentConfig(BaseAgentConfig):
 # Only includes the concrete subclasses (not BaseAgentConfig) since the discriminator
 # must be a Literal type. BaseAgentConfig is returned by parse_agent_config when type=None.
 type AgentConfig = Annotated[
-    ClaudeCodeAgentConfig | CodexAgentConfig | AntigravityAgentConfig | OpenCodeAgentConfig | NoneAgentConfig,
+    ClaudeCodeAgentConfig
+    | CodexAgentConfig
+    | AntigravityAgentConfig
+    | OpenCodeAgentConfig
+    | DelegateSdkAgentConfig
+    | NoneAgentConfig,
     Field(discriminator="type"),
 ]
 
