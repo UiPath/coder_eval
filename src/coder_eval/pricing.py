@@ -5,12 +5,8 @@ Anthropic/OpenAI/Google built-in rates; plugins contribute additional rates via
 Sources: https://platform.claude.com/docs/en/about-claude/pricing,
 https://developers.openai.com/api/docs/pricing,
 https://ai.google.dev/gemini-api/docs/pricing, and OpenRouter's live
-``/api/v1/models`` (every row re-verified 2026-09-03).
-
-The Bedrock open-weight block is the ONE exception: its eu-north-1 rates could
-not be re-verified (the AWS pricing page does not publish Stockholm figures for
-those three models), so they are carried forward unchanged rather than
-"corrected" against the US column they explicitly do not use.
+``/api/v1/models`` (every row re-verified 2026-09-03, except the Bedrock
+open-weight block: AWS publishes no eu-north-1 figures for those three).
 """
 
 from collections.abc import Iterable
@@ -30,9 +26,8 @@ class ModelPricing:
 # Official vendor rate cards, verified 2026-09-03.
 # Key: CLI model name (before gateway mapping)
 _PRICING: dict[str, ModelPricing] = {
-    # Fable 5.1 (and Mythos 5.1) price cache HITS at 0.025x input, not the 0.1x
-    # every other Claude model uses — $0.25, not the $1 that Fable 5 pays on the
-    # identical $10 base. Do NOT "fix" 5.1's cache read to match 5's.
+    # Fable 5.1 (and Mythos 5.1) price cache hits at 0.025x input, not the 0.1x
+    # every other Claude model uses. Fable 5 pays $1 on the identical $10 base.
     "claude-fable-5-1": ModelPricing(10.0, 50.0, 12.50, 0.25),
     "claude-fable-5": ModelPricing(10.0, 50.0, 12.50, 1.0),
     # Opus 4.5 and later dropped to $5/$25; 4.1 and 4 keep the old $15/$75. The
@@ -46,12 +41,8 @@ _PRICING: dict[str, ModelPricing] = {
     "claude-opus-4-1": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    # $2/$10, NOT the $3/$15 that Sonnet 4.6 and earlier pay. The $2/$10 shipped
-    # as introductory pricing through 2026-08-31 and this table deliberately held
-    # the higher rate against it lapsing — but Anthropic has since made $2/$10 the
-    # standard price and cancelled the 2026-09-01 increase, so the hedge was
-    # simply overstating every Sonnet 5 run by 50%. Sonnet 5 is the nightly's
-    # model; do not copy the 4.x row onto it.
+    # $2/$10, NOT the $3/$15 that Sonnet 4.6 and earlier pay. Do not copy the
+    # 4.x row onto it.
     "claude-sonnet-5": ModelPricing(2.0, 10.0, 2.50, 0.20),
     "claude-sonnet-4-6": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-5": ModelPricing(3.0, 15.0, 3.75, 0.30),
@@ -93,15 +84,9 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5.4-mini": ModelPricing(0.75, 4.5, 0.75, 0.075),
     "gpt-5.4-nano": ModelPricing(0.20, 1.25, 0.20, 0.02),
     # GPT-5.6: sol flagship / terra balanced (Codex default) / luna economy.
-    # Terra and Luna were REPRICED on 2026-07-30 (-20% and -80%), and Sol has
-    # since been cut too (-20% input / -33% output, from $5/$30); these are the
-    # post-cut rates. The pre-cut figures are what a historical run was actually
-    # billed, but this table is a single current-rate card with no notion of an
-    # effective date, so old runs re-price low.
-    # Sol's cut is published as promotional "at least through 2026-11-21" — it is
-    # taken at face value here because the one prior promo this table hedged
-    # against (Sonnet 5's $2/$10) became permanent, so pricing the CURRENT rate
-    # has the better track record. Re-check after that date.
+    # This table is a single current-rate card with no notion of an effective
+    # date, so a repriced model makes historical runs re-price at today's rate.
+    # Sol's rate is promotional through at least 2026-11-21; re-check then.
     "gpt-5.6-sol": ModelPricing(4.0, 20.0, 4.0, 0.40),
     "gpt-5.6-terra": ModelPricing(2.0, 12.0, 2.0, 0.20),
     "gpt-5.6-luna": ModelPricing(0.20, 1.20, 0.20, 0.02),
@@ -110,10 +95,8 @@ _PRICING: dict[str, ModelPricing] = {
     # cache_write == input (unused: the agent maps cache_creation_tokens to 0).
     # CAVEAT: Pro's >200K-token tier costs more ($4/$18, $0.40 cached), so a
     # very-large-context run reads low.
-    # 3.6 / 3.7 / 3.8 Flash share one rate card. Google is running an introductory
-    # half-price window on all three through 2026-12-31 ($0.75/$3.75/$0.075); the
-    # list rate below is what they revert to, and matches what 3.6 has always been
-    # carried at here.
+    # 3.6 / 3.7 / 3.8 Flash share one rate card. These are list rates; Google is
+    # discounting all three by half through 2026-12-31.
     "gemini-3.8-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
     "gemini-3.7-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
     "gemini-3.6-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
@@ -136,14 +119,11 @@ _PRICING: dict[str, ModelPricing] = {
     "moonshotai.kimi-k2.5": ModelPricing(0.72, 3.6, 0.72, 0.0),
     # OpenRouter models. These providers cache prefixes implicitly (no
     # cache_control, no write fee), so cache-creation is priced at input (unused)
-    # and cache-read at OpenRouter's published input_cache_read rate. Rates read
-    # from the live /api/v1/models catalogue, which is the same feed the site
-    # renders — glm-5.2 and deepseek-v4-pro had both drifted well above the
-    # figures previously carried here (deepseek's cache read by ~24x).
-    # These are headline rates: OpenRouter routes per request, so the real bill
-    # depends on the provider a call lands on. That is why the litellm path
-    # captures ACTUAL per-call cost proxy-side and overrides these (see
-    # litellm_cost.apply_actual_cost) — the rows below are the static fallback.
+    # and cache-read at OpenRouter's published input_cache_read rate, read from
+    # the live /api/v1/models catalogue. Headline rates only: OpenRouter routes
+    # per request, so the real bill depends on the provider a call lands on —
+    # which is why the litellm path captures actual per-call cost proxy-side and
+    # overrides these (litellm_cost.apply_actual_cost). Static fallback.
     "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
     "z-ai/glm-5.2": ModelPricing(0.966, 3.036, 0.966, 0.1932),
     "deepseek/deepseek-v4-pro": ModelPricing(1.030776, 2.061552, 1.030776, 0.085898),
