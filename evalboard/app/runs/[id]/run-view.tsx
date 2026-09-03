@@ -1,6 +1,6 @@
 "use client";
 
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 import type { ActivationScore, TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
@@ -284,7 +284,6 @@ export function RunView({
     // the one call site instead.
     sourceId: string;
 }) {
-    const router = useRouter();
     const pathname = usePathname();
     const searchParams = useSearchParams();
 
@@ -306,6 +305,29 @@ export function RunView({
     const q = searchParams.get("q") ?? "";
     const [showAllTags, setShowAllTags] = useState(false);
 
+    // Commit a filter change to the URL WITHOUT a server round-trip.
+    //
+    // Every reader of `tags` / `rtags` / `q` on this page is client-side (see
+    // `filtered` below); the server component reads only `src`. So
+    // `router.replace` bought nothing and cost a full re-render of a
+    // force-dynamic route to return markup this component recomputes anyway.
+    //
+    // The native History API keeps the URL shareable and the back button
+    // working; Next syncs `useSearchParams` off pushState/replaceState, so this
+    // component still re-renders. `replaceState` (not `push`) preserves the old
+    // behavior of not stacking a history entry per chip click.
+    const setSearchParams = useCallback(
+        (params: URLSearchParams) => {
+            const qs = params.toString();
+            window.history.replaceState(
+                null,
+                "",
+                qs ? `${pathname}?${qs}` : pathname,
+            );
+        },
+        [pathname],
+    );
+
     const updateParam = useCallback(
         (key: string, next: string[]) => {
             // Read the live URL on commit so a concurrent debounced write
@@ -313,12 +335,9 @@ export function RunView({
             const params = new URLSearchParams(window.location.search);
             if (next.length === 0) params.delete(key);
             else params.set(key, next.join(","));
-            const qs = params.toString();
-            router.replace(qs ? `${pathname}?${qs}` : pathname, {
-                scroll: false,
-            });
+            setSearchParams(params);
         },
-        [pathname, router],
+        [setSearchParams],
     );
 
     const toggleTag = useCallback(
@@ -350,9 +369,8 @@ export function RunView({
         params.delete("q");
         params.delete("tags");
         params.delete("rtags");
-        const qs = params.toString();
-        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-    }, [pathname, router]);
+        setSearchParams(params);
+    }, [setSearchParams]);
 
     // Skill is the primary group; everything else is a secondary tag. The
     // secondary "Tags" rail excludes the per-task skill so it doesn't echo

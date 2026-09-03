@@ -9,13 +9,24 @@ import {
     test,
     vi,
 } from "vitest";
+import { runCacheTag } from "@/lib/overview";
 import { SCRIBE_SOURCE, runsDirFor } from "@/lib/sources";
+
+// The route calls revalidateTag to evict the run's memoized front-page
+// projection alongside its on-disk copy. The real implementation asserts it is
+// inside a Next request/render store, which a direct POST() call is not, so it
+// is stubbed here and asserted on instead.
+const revalidateTag = vi.fn();
+vi.mock("next/cache", () => ({
+    revalidateTag: (tag: string) => revalidateTag(tag),
+}));
 
 // RUNS_DIR and LOCAL_RUNS_DIR are module-level consts read from env at import
 // time, so each scenario sets env, resets the module registry, then imports a
 // fresh copy of the route.
 async function loadPost() {
     vi.resetModules();
+    revalidateTag.mockClear();
     return (await import("../route")).POST;
 }
 
@@ -115,6 +126,24 @@ describe("POST /api/refresh", () => {
 
             expect(res.status).toBe(204);
             await expect(fs.access(runDir)).rejects.toThrow();
+        });
+
+        // Without this the button is a no-op for a settled run, whose
+        // projection is held for a day (lib/overview.ts::perRunRevalidate).
+        test("valid run -> the memoized projection is invalidated too", async () => {
+            const POST = await loadPost();
+            await POST(post("2026-06-01_04-04-22"));
+
+            expect(revalidateTag).toHaveBeenCalledWith(
+                runCacheTag("skills", "2026-06-01_04-04-22"),
+            );
+        });
+
+        test("a rejected id revalidates nothing", async () => {
+            const POST = await loadPost();
+            await POST(post(".."));
+
+            expect(revalidateTag).not.toHaveBeenCalled();
         });
 
         // Run ids collide across sources (both suites name runs
