@@ -32,12 +32,20 @@ LOG_FILENAME = "calls.jsonl"
 # the day the module moves, and would pass vacuously rather than fail.
 EMBEDDED_MODULES = ("argv_match.py",)
 
-# Top-level names the generated shim binds itself. An embedded module that binds
-# any of them is rebound by the shim's own definition further down the file --
-# and the resulting TypeError is swallowed by respond(), so EVERY invocation
-# would quietly fall back to the entry defaults.
+# Top-level names the generated shim binds itself, IMPORTS INCLUDED -- the
+# template imports before the splice and calls after it, so a collision breaks
+# the shim whichever side binds first: an embedded `sys = None` kills the
+# template's own `sys.stdout.write`, and an embedded `record` is rebound by the
+# template's definition further down. Either way respond() swallows the
+# resulting TypeError and EVERY invocation quietly falls back to the entry
+# defaults. Kept honest by a test that parses a rendered shim and asserts this
+# set is exactly what it binds, so the list cannot drift from the template.
 SHIM_GLOBALS = frozenset(
     {
+        "json",
+        "os",
+        "sys",
+        "time",
         "TOOL",
         "EXIT_CODE",
         "STDOUT_TEXT",

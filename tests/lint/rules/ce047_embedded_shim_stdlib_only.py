@@ -76,11 +76,19 @@ class EmbeddedShimStdlibOnly(BaseRule):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         # A relative import (level > 0) is a package import by definition.
         self._check_import(node, node.module if node.level == 0 else f".{node.module or ''}")
+        for alias in node.names:
+            # `from typing import TypedDict as RULES` binds RULES, so an import
+            # is a collision route as much as a def is.
+            self._check_name(node, alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             self._check_import(node, alias.name)
+            # A plain `import sys` binds the very module the shim imports anyway,
+            # so only a renaming import can put something else under the name.
+            if alias.asname is not None:
+                self._check_name(node, alias.asname)
         self.generic_visit(node)
 
     def visit_Module(self, node: ast.Module) -> None:

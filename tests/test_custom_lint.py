@@ -183,6 +183,16 @@ class TestCE047EmbeddedShimStdlibOnly:
         assert self._run("def record(argv):\n    return argv")
         assert self._run("RULES = []")
 
+    def test_flags_a_renaming_import_onto_a_shim_global(self):
+        """An import binds a name too, so it is a collision route as much as a def."""
+        assert self._run("from typing import TypedDict as RULES")
+        assert self._run("import json as respond")
+
+    def test_allows_a_plain_stdlib_import_of_a_shim_global(self):
+        """`import sys` binds the very module the shim imports anyway."""
+        assert not self._run("import sys")
+        assert not self._run("import json")
+
     def test_allows_a_colliding_name_that_is_not_module_level(self):
         assert not self._run("def matcher():\n    record = 1\n    return record")
 

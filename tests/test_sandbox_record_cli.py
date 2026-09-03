@@ -739,14 +739,48 @@ class TestPerInvocationResponses:
             [{"when": {"verb": "ixp projects", "positional": ["p1"]}}, {"when": {"verb": "ixp projects get"}}],
             [{"when": {"verb": "ixp projects", "value_flags": []}}, {"when": {"verb": "ixp projects get"}}],
             [{"when": {"verb": "ixp a"}}, {"when": {"verb": "ixp b"}}],
+            # A predicate makes its flag known and value-bearing in the LATER
+            # rule's parse only: `--profile prod ixp projects get` leaves `prod`
+            # positional for the verb-only rule, which therefore does not match.
+            [{"when": {"verb": "ixp projects"}}, {"when": {"verb": "ixp projects get", "flags": {"profile": "p"}}}],
         ],
-        ids=("specific_first", "general_has_flag", "general_has_positional", "parsing_differs", "unrelated"),
+        ids=(
+            "specific_first",
+            "general_has_flag",
+            "general_has_positional",
+            "parsing_differs",
+            "unrelated",
+            "later_flag_predicate_changes_parsing",
+        ),
     )
     def test_a_reachable_rule_is_not_rejected(self, responses):
         """The check must stay narrow: an earlier rule that constrains anything
         beyond its verb does NOT claim everything a later rule would, and two
         rules parsing argv differently cannot be compared by verb prefix at all."""
         assert len(RecordedCli(tool="uip", responses=responses).responses) == 2
+
+    def test_shim_globals_lists_exactly_what_the_template_binds(self):
+        """CE047 rejects an embedded module that binds one of these names, so a
+        name the template binds but this set omits is an unguarded collision --
+        which is how `sys`, `json`, `os` and `time` were missed the first time."""
+        import ast
+
+        from coder_eval.invocation_log import SHIM_GLOBALS
+
+        # The rules-less shape: it binds only the template's own names, whereas
+        # the spliced one also carries the embedded module's.
+        tree = ast.parse(render_recorder(RecordedCli(tool="uip")))
+        bound: set[str] = set()
+        for statement in tree.body:
+            if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                bound.add(statement.name)
+            elif isinstance(statement, ast.Assign):
+                bound.update(t.id for t in statement.targets if isinstance(t, ast.Name))
+            elif isinstance(statement, ast.Import):
+                bound.update(a.asname or a.name.split(".")[0] for a in statement.names)
+            elif isinstance(statement, ast.ImportFrom):
+                bound.update(a.asname or a.name for a in statement.names)
+        assert bound == set(SHIM_GLOBALS)
 
     def test_a_bare_string_when_is_rejected_with_the_fix(self):
         """One shape for a pattern. A lone string leaves which of six facets it sets

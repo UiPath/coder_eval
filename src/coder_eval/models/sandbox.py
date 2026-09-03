@@ -446,8 +446,14 @@ class RecordedCli(BaseModel):
                 elif (
                     prior["positional"] is None
                     and prior["flags"] is None
-                    # Same parsing, or the two disagree on which tokens are even
-                    # positional and neither claim covers the other.
+                    # BOTH sides free of flag predicates, not just the earlier
+                    # one: a predicate makes its flag known and value-bearing in
+                    # that rule's parse only. `--profile prod ixp projects get`
+                    # leaves `prod` positional for a verb-only `ixp projects`,
+                    # which therefore does NOT match, while a later
+                    # `ixp projects get` + `flags: {profile: prod}` does -- so the
+                    # later rule is reachable and rejecting it was wrong.
+                    and spec["flags"] is None
                     and prior["value_flags"] == spec["value_flags"]
                     and prior["ignore_flags"] == spec["ignore_flags"]
                     and spec["verb_spellings"]
