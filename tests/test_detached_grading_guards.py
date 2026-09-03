@@ -7,6 +7,7 @@ that is wrong. They were all shipped with coverage on the happy path only.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -221,7 +222,11 @@ def test_a_restored_path_drops_entries_inside_the_graded_workspace(tmp_path: Pat
     orch.sandbox = MagicMock()
     orch.sandbox.sandbox_dir = workspace
 
-    kept = orch._sanitize_restored_path(f"{workspace / 'bin'}:{outside}:{tmp_path / 'gone'}")
+    # os.pathsep, not a hardcoded ":" — the separator is ";" on Windows, where a
+    # colon-joined value parses as one (non-existent) entry and every assertion
+    # below passes vacuously against an empty result.
+    recorded = os.pathsep.join([str(workspace / "bin"), str(outside), str(tmp_path / "gone")])
+    kept = orch._sanitize_restored_path(recorded)
 
     assert str(outside.resolve()) in kept
     assert str(workspace) not in kept, "an entry inside the graded tree must be dropped"

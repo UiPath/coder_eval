@@ -16,6 +16,7 @@ Three layers, deliberately:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -28,6 +29,19 @@ from coder_eval.models import FinalStatus, RunSummary
 
 
 runner = CliRunner()
+
+# Rich styles each `--option` token in help text, and it splits the token across
+# several style spans (`--junit-xml` renders as `-` + `-junit` + `-xml`, each with
+# its own escape sequence). Styling is ON whenever rich thinks it is writing to a
+# terminal — which includes GitHub Actions, so a bare substring check over
+# `result.output` passes locally and fails only in CI. Same helper, same reason,
+# as tests/test_cli_type_flag.py.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
 
 # The agentless smoke task: no agent, no model call, and a pre_run that writes a
 # file its criteria read back. Executing it must still write that file (proving
@@ -288,5 +302,6 @@ def test_execute_help_explains_the_refused_flags() -> None:
     above; here we only require the help text to mention it.)"""
     result = runner.invoke(app, ["execute", "--help"])
     assert result.exit_code == 0
+    output = _strip_ansi(result.output)
     for flag in _DELIBERATELY_ABSENT_FROM_EXECUTE:
-        assert flag in result.output, f"execute's help should explain why {flag} is unavailable"
+        assert flag in output, f"execute's help should explain why {flag} is unavailable"
