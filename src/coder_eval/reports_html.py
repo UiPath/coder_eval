@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
 from .reports import early_stop_gate_note
+from .reports_stats import format_score
 
 
 if TYPE_CHECKING:
@@ -1124,7 +1125,7 @@ def _variant_stddev_lines(variant_id: str, result: ExperimentResult | None) -> s
     from .reports_stats import stddev
 
     vrs = [vr for ts in result.task_summaries for vr in ts.variant_results if vr.variant_id == variant_id]
-    scores = [vr.weighted_score for vr in vrs]
+    scores = [vr.weighted_score for vr in vrs if vr.weighted_score is not None]
     durations = [vr.duration_seconds for vr in vrs]
     extras: list[str] = []
     if len(scores) >= 2:
@@ -1451,7 +1452,7 @@ def _experiment_per_task_comparison(result: ExperimentResult) -> str:
             if vr is None:
                 cells.append("<td>N/A</td>")
             else:
-                cells.append(f"<td>{vr.weighted_score:.3f} ({_esc(vr.final_status.icon)})</td>")
+                cells.append(f"<td>{format_score(vr.weighted_score)} ({_esc(vr.final_status.icon)})</td>")
         best = "TIE" if ts.is_tie else ts.best_variant
         cells.append(f"<td>{_esc(best)}</td>")
         cells.append(f"<td>{ts.score_spread:.3f}</td>")
@@ -1581,6 +1582,15 @@ class HTMLReportGenerator:
         )
         stddev_lines = _variant_stddev_lines(variant_id, result)
         rich_sections = _variant_rich_sections(variant_id, result, run_dir)
+        # Only rendered when non-zero, so an ordinary graded run's tile is
+        # unchanged — but a `coder-eval execute` run says where its tasks went
+        # instead of showing Succeeded/Failed/Errors all at zero.
+        ungraded_stat = (
+            '<div class="stat"><div class="label">Not Graded</div>'
+            + f'<div class="value">{agg.tasks_not_graded}</div></div>'
+            if agg.tasks_not_graded > 0
+            else ""
+        )
         budget_stats = ""
         if agg.tasks_token_budget_exceeded > 0:
             budget_stats += (
@@ -1609,6 +1619,7 @@ class HTMLReportGenerator:
     <div class="stat"><div class="label">Succeeded</div><div class="value">{agg.tasks_succeeded}</div></div>
     <div class="stat"><div class="label">Failed</div><div class="value">{agg.tasks_failed}</div></div>
     <div class="stat"><div class="label">Errors</div><div class="value">{agg.tasks_error}</div></div>
+    {ungraded_stat}
     {budget_stats}
   </div>
   {stddev_lines}
@@ -1650,7 +1661,7 @@ class HTMLReportGenerator:
 <tr>
   <td><a href="{_esc(link)}">{_esc(vid)}</a></td>
   <td style="text-align:center">{_score_pill(agg.average_score)}</td>
-  <td>{agg.tasks_succeeded}/{agg.tasks_run}</td>
+  <td>{agg.tasks_succeeded}/{agg.tasks_graded}</td>
 </tr>
 """
             )

@@ -20,7 +20,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from coder_eval.models import EvaluationResult, PreservationMode, TaskDefinition
+from coder_eval.models import EvaluationResult, PreservationMode, TaskConfigRecord, TaskDefinition
 from coder_eval.sandbox import Sandbox
 
 
@@ -61,8 +61,6 @@ def task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinit
     schema change since the run), and says so loudly — a quiet fallback would
     reintroduce exactly the drift above.
     """
-    from .task_loader import load_task
-
     record = prior.task_config
     if record is None:
         raise RegradeError(
@@ -70,21 +68,55 @@ def task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinit
             + "rebuilt. Pass the task file explicitly: coder-eval evaluate <task.yaml> <run_dir>"
         )
     try:
-        return TaskDefinition.model_validate(record.resolved), record.source_yaml
+        task = TaskDefinition.model_validate(record.resolved)
     except ValueError as e:
-        if not record.source_file or not Path(record.source_file).is_file():
-            raise RegradeError(
-                f"The resolved task config in {run_dir / TASK_JSON} no longer validates ({e}), and "
-                + "its source YAML is unavailable. Pass the task file explicitly."
-            ) from e
-        logger.warning(
-            "The recorded resolved config does not validate (%s); falling back to %s. Variant "
-            + "overrides, -D flags and dataset expansion from the original run are NOT reapplied, "
-            + "so this grade may not match what ran.",
-            e,
-            record.source_file,
-        )
-        return load_task(Path(record.source_file))
+        return _fall_back_to_source(record, run_dir, e)
+    warn_on_embedded_commands(task, run_dir)
+    return task, record.source_yaml
+
+
+def warn_on_embedded_commands(task: TaskDefinition, run_dir: Path) -> None:
+    """Name the shell commands a rebuilt config will execute on this host.
+
+    ``task_config.resolved`` is data that travels inside a run directory, and a
+    run directory is a shareable artifact — the detached-grading flow exists so
+    one machine can execute and another can grade. Rebuilding the task from it
+    means the *run dir* decides what ``run_command`` criteria the grader runs,
+    with the grader's environment. That is the intended behavior (it is how the
+    grade reproduces the executed config), but it must not be invisible: print
+    what will run so an unexpected command is noticed before it executes.
+    """
+    commands = [cmd for c in task.success_criteria if isinstance(cmd := getattr(c, "command", None), str)]
+    commands += [c.command for c in task.pre_run] + [c.command for c in task.post_run]
+    if not commands:
+        return
+    logger.warning(
+        "Grading %s runs %d shell command(s) taken from that run's own recorded config: %s",
+        run_dir,
+        len(commands),
+        "; ".join(commands),
+    )
+
+
+def _fall_back_to_source(record: TaskConfigRecord, run_dir: Path, e: ValueError) -> tuple[TaskDefinition, str]:
+    """The loud source-YAML fallback for a resolved config that no longer validates."""
+    from .task_loader import load_task
+
+    if not record.source_file or not Path(record.source_file).is_file():
+        raise RegradeError(
+            f"The resolved task config in {run_dir / TASK_JSON} no longer validates ({e}), and "
+            + "its source YAML is unavailable. Pass the task file explicitly."
+        ) from e
+    logger.warning(
+        "The recorded resolved config does not validate (%s); falling back to %s. Variant "
+        + "overrides, -D flags and dataset expansion from the original run are NOT reapplied, "
+        + "so this grade may not match what ran.",
+        e,
+        record.source_file,
+    )
+    task, source_yaml = load_task(Path(record.source_file))
+    warn_on_embedded_commands(task, run_dir)
+    return task, source_yaml
 
 
 def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
@@ -112,23 +144,44 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
     return children[0] if len(children) == 1 else artifacts
 
 
-def verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition) -> None:
+def verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition, task_file: Path | None) -> None:
     """Refuse to grade when the reference tree changed since the run.
 
     ``reference_comparison`` and reference-carrying judges score against
     ``task.reference.directory``. If it moved since the run, the re-grade would
     silently measure the agent's old work against a new answer key.
+
+    ``task_file`` is what ``reference.directory`` resolves against, so it is
+    required for any task that declares one — resolving without it raises, which
+    is why it is threaded through rather than passed as ``None``.
     """
+    if task.reference is None:
+        return
     recorded = prior.environment_info.get("reference_digest")
-    if not isinstance(recorded, str) or task.reference is None:
+    if not isinstance(recorded, str):
+        # A run that predates the digest being persisted. Say so: silence here is
+        # what made this whole guard dead code for its first release.
+        logger.warning(
+            "This run recorded no reference_digest, so the answer key cannot be verified. "
+            + "Grading proceeds; a reference edited since the run would go undetected."
+        )
         return
     from coder_eval.path_utils import digest_tree
 
     from .evaluation import resolve_reference_dir
 
-    resolved = resolve_reference_dir(task, None)
+    try:
+        resolved = resolve_reference_dir(task, task_file)
+    except (FileNotFoundError, ValueError) as e:
+        raise RegradeError(
+            f"This run's task declares a reference directory that cannot be resolved now ({e}), "
+            + "so its contents cannot be verified against the executed run."
+        ) from e
     if resolved is None or not resolved.is_dir():
-        return
+        raise RegradeError(
+            f"The reference directory recorded for this run is gone ({resolved}). Grading now "
+            + "would score against a missing answer key. Restore it, or re-run the task."
+        )
     if digest_tree(resolved) != recorded:
         raise RegradeError(
             f"The reference directory {resolved} changed since this run was executed "

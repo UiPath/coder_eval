@@ -201,6 +201,10 @@ async def test_none_without_workspace_dir_discards_path(tmp_path) -> None:
     orchestrator.workspace_dir = None
     orchestrator.result.sandbox_path = "/stale/path"  # must be cleared
     mock_sandbox = MagicMock()
+    # A real Sandbox that was not adopted. Explicit because a bare MagicMock
+    # attribute is truthy, which would take the adopted arm (that one KEEPS the
+    # path, since an adopted directory survives cleanup) and hide the discard.
+    mock_sandbox.was_adopted = False
     orchestrator.sandbox = mock_sandbox
 
     await orchestrator._cleanup()

@@ -26,6 +26,7 @@ from ..orchestration.regrade import (
     back_up_pre_grade_record,
     default_workspace,
     load_prior_result,
+    regrade_in_place,
     task_from_prior,
     verify_reference_unchanged,
 )
@@ -115,7 +116,7 @@ def _resolve_run_dir_or_work_dir(target: EvaluateTarget, workspace: Path | None)
         task.agent = parse_agent_config(**{**task.agent.model_dump(exclude_unset=True), "type": AgentKind.CLAUDE_CODE})
 
     if prior is not None:
-        verify_reference_unchanged(prior, task)
+        verify_reference_unchanged(prior, task, task_file)
 
     return _ResolvedInputs(
         target=target,
@@ -125,6 +126,18 @@ def _resolve_run_dir_or_work_dir(target: EvaluateTarget, workspace: Path | None)
         task_file=task_file,
         prior=prior,
     )
+
+
+def _replicate_index_of(run_dir: Path) -> int:
+    """Recover the replicate index a run directory encodes in its leaf name.
+
+    Preservation lays runs out as ``<run>/<variant>/<task>/<NN>``. Hardcoding 0
+    would relabel every replicate but the first as replicate 0.
+    """
+    try:
+        return int(run_dir.name)
+    except ValueError:
+        return 0
 
 
 def evaluate_command(
@@ -261,6 +274,22 @@ def run_evaluation(
     sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
 
     async def _setup_and_run() -> EvaluationResult:
+        if grade_in_place and prior is not None:
+            # Delegate to the shared re-grade core. Restating its body here is
+            # how this path and `run --resume` came to differ (replicate_index,
+            # error semantics) while CLAUDE.md called regrade.py the single
+            # implementation — two copies of "how to re-grade" drift into two
+            # verdicts for the same run.
+            return await regrade_in_place(
+                task=task,
+                prior=prior,
+                workspace=graded_dir,
+                run_dir=prepared_run_dir,
+                task_file=task_file,
+                source_yaml=source_yaml,
+                variant_id=prior.variant_id,
+                replicate_index=_replicate_index_of(target.target),
+            )
         if grade_in_place:
             await asyncio.to_thread(sandbox.adopt, graded_dir)
         else:

@@ -79,7 +79,7 @@ def test_help_never_crashes_when_telemetry_enabled_and_config_unwritable(tmp_pat
 
 
 async def test_run_emits_run_start_and_flushes(tmp_path):
-    summary = Mock(tasks_failed=0, tasks_error=0)
+    summary = Mock(tasks_failed=0, tasks_error=0, tasks_not_graded=0)
 
     with (
         patch("coder_eval.cli.run_command.prepare_run_directory", return_value=tmp_path),
@@ -115,7 +115,7 @@ async def test_run_emits_run_start_and_flushes(tmp_path):
 async def test_run_start_uses_default_fallbacks_for_none_inputs(tmp_path):
     # agent_type=None / stream_mode=None must surface as the "default"/"none"
     # fallback property values, not as null.
-    summary = Mock(tasks_failed=0, tasks_error=0)
+    summary = Mock(tasks_failed=0, tasks_error=0, tasks_not_graded=0)
 
     with (
         patch("coder_eval.cli.run_command.prepare_run_directory", return_value=tmp_path),

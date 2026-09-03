@@ -33,6 +33,19 @@ class FinalStatus(StrEnum):
         """Single-character icon for reports and CLI output."""
         return _STATUS_ICONS[self]
 
+    @property
+    def is_execution_fact(self) -> bool:
+        """True when this status records HOW THE RUN ENDED, not what grading decided.
+
+        A detached grade (``evaluate <run_dir>`` / ``run --resume``) re-runs the
+        criteria over a trajectory it did not produce, so it may only move a row
+        between the three GRADING outcomes — ``NOT_GRADED`` -> ``SUCCESS`` /
+        ``FAILURE``. It must never launder a run that timed out, crashed, or blew
+        a budget into a pass: those statuses describe the agent phase, which the
+        grading pass neither repeated nor observed.
+        """
+        return _EXECUTION_FACT_STATUSES[self]
+
 
 # Every FinalStatus maps to exactly one reporting category, listed EXPLICITLY (no
 # catch-all default) so a newly-added status fails the assert below until it is
@@ -74,6 +87,25 @@ _STATUS_ICONS: dict[FinalStatus, str] = {
 }
 
 assert set(_STATUS_ICONS) == set(FinalStatus), "Missing icon for FinalStatus member"
+
+
+# Explicit, no catch-all, for the same reason as the two maps above: a new status
+# must be classified as "the agent phase ended this way" (True — a detached grade
+# preserves it) or "grading decided this" (False — a detached grade replaces it).
+# Defaulting either way silently is how an ERROR row becomes a SUCCESS.
+_EXECUTION_FACT_STATUSES: dict[FinalStatus, bool] = {
+    FinalStatus.SUCCESS: False,
+    FinalStatus.FAILURE: False,
+    FinalStatus.NOT_GRADED: False,
+    FinalStatus.ERROR: True,
+    FinalStatus.BUILD_FAILED: True,
+    FinalStatus.TIMEOUT: True,
+    FinalStatus.MAX_TURNS_EXHAUSTED: True,
+    FinalStatus.TOKEN_BUDGET_EXCEEDED: True,
+    FinalStatus.COST_BUDGET_EXCEEDED: True,
+}
+
+assert set(_EXECUTION_FACT_STATUSES) == set(FinalStatus), "Unclassified FinalStatus member"
 
 
 class ApiBackend(StrEnum):

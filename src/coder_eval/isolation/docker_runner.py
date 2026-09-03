@@ -871,7 +871,28 @@ class DockerRunner:
             # rather than crashing with an uncaught ValidationError/JSONDecodeError.
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
         self._warn_on_version_mismatch(result)
+        self._assert_grade_honored(result)
         return result
+
+    def _assert_grade_honored(self, result: EvaluationResult) -> None:
+        """Fail loudly when `execute` came back with a graded verdict.
+
+        ``grade`` crosses the boundary only through ``context.json``. An image
+        that predates ``execute`` ignores the unknown key and grades anyway, and
+        the image-version preflight only warns — so ``execute --driver docker``
+        against a stale image would silently produce SUCCESS/FAILURE rows that
+        look like a normal graded run. Version skew must not change what a
+        command MEANS, so refuse the row rather than publish it.
+        """
+        if self.grade or result.final_status.is_execution_fact:
+            return
+        if result.final_status is not FinalStatus.NOT_GRADED:
+            raise DockerRunError(
+                "`coder-eval execute` asked the container not to grade, but it returned "
+                + f"{result.final_status.value} with {len(result.success_criteria_results)} criterion "
+                + "result(s). The runtime image predates `execute` and ignored the request; "
+                + "rebuild or pull a matching agent image."
+            )
 
     async def _handle_malformed_task_json(self, task_json: Path, log_path: Path, exc: ValueError) -> DockerRunError:
         """Degrade a present-but-malformed task.json; return the DockerRunError to raise.

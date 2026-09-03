@@ -11,6 +11,7 @@ Everything here runs against the agentless task — deterministic, no API key.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +203,54 @@ def test_execute_resume_treats_an_executed_row_as_done(tmp_path: Path) -> None:
     assert "1 task(s) already complete" in result.output
     assert "grading" not in result.output
     assert _row(_task_dir(run_dir))["final_status"] == FinalStatus.NOT_GRADED.value
+
+
+def test_a_detached_grade_does_not_re_run_pre_run_against_the_workspace(tmp_path: Path) -> None:
+    """`run()` calls the pre/post-run hooks unconditionally, with cwd = the
+    sandbox. On an ADOPTED sandbox that sandbox is the agent's own output, and
+    several in-tree tasks stage fixtures there (`cp -a /app/[!.]* "$PWD/"`), so
+    re-running them would overwrite the deliverables before the criteria read
+    them — changing the verdict and destroying preserved artifacts."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    proof = sorted(run_dir.glob("**/artifacts/**/proof.txt"))[0]
+    # Mark the agent's file. The fixture's pre_run rewrites proof.txt from
+    # scratch, so a re-run would wipe this marker.
+    proof.write_text("coder-eval-ran-without-a-coder AND-THE-AGENT-EDITED-THIS", encoding="utf-8")
+
+    _invoke(["evaluate", str(task_dir)])
+
+    assert "AND-THE-AGENT-EDITED-THIS" in proof.read_text(encoding="utf-8"), (
+        "pre_run re-ran against the adopted workspace and overwrote the agent's work"
+    )
+    # The hooks' recorded outcomes are carried over rather than lost.
+    assert _row(task_dir)["pre_run_results"], "the execute phase's pre_run results were dropped"
+
+
+def test_run_resume_exits_non_zero_when_it_cannot_grade(tmp_path: Path) -> None:
+    """`run` was asked for a verdict. If grading fails, reporting exit 0 tells CI
+    the suite is fine when nothing was actually scored."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    # Remove the workspace so the re-grade has nothing to grade against.
+    shutil.rmtree(run_dir / "default" / "agentless_smoke_test" / "00" / "artifacts", ignore_errors=True)
+    row = _task_dir(run_dir) / "task.json"
+    record = json.loads(row.read_text(encoding="utf-8"))
+    record["sandbox_path"] = str(tmp_path / "gone")
+    row.write_text(json.dumps(record), encoding="utf-8")
+
+    result = runner.invoke(app, ["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert result.exit_code != 0, "a run that graded nothing must not report success"
+
+
+def test_execute_still_exits_zero_with_every_row_ungraded(tmp_path: Path) -> None:
+    """The other side of the rule above: under `execute` an ungraded row is the
+    expected outcome, not a failure of the command."""
+    run_dir = tmp_path / "r"
+    result = runner.invoke(app, ["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    assert result.exit_code == 0, result.output
 
 
 def test_execute_to_run_resume_emits_no_config_drift_warning(tmp_path: Path) -> None:

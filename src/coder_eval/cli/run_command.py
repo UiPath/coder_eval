@@ -604,7 +604,14 @@ async def _run_all_tasks(
         flush_telemetry()
 
     # Exit with non-zero code if any tasks failed, errored, or any suite failed its thresholds.
-    if summary.tasks_failed > 0 or summary.tasks_error > 0 or failed_suite_gates > 0:
+    #
+    # An ungraded row counts too, but only under `run`: `run` was asked for a
+    # verdict and did not produce one (the grade crashed, or --resume could not
+    # grade the row), which is a failure of the command even though the row is
+    # neither `failed` nor `error`. Under `execute` an ungraded row is the
+    # expected outcome for every task, so it must not fail the command.
+    ungraded_but_asked_to_grade = grade and summary.tasks_not_graded > 0
+    if summary.tasks_failed > 0 or summary.tasks_error > 0 or failed_suite_gates > 0 or ungraded_but_asked_to_grade:
         raise typer.Exit(1)
 
 
@@ -686,7 +693,7 @@ async def _grade_resumed_tasks(to_grade: list[ResolvedTask]) -> list[tuple[Resol
     for rt in to_grade:
         prior = load_prior_result(rt.run_dir)
         try:
-            verify_reference_unchanged(prior, rt.task)
+            verify_reference_unchanged(prior, rt.task, rt.task_file)
             workspace = default_workspace(rt.run_dir, prior)
             # Preserve the ungraded record BEFORE the orchestrator overwrites
             # task.json in this same directory.
@@ -703,7 +710,12 @@ async def _grade_resumed_tasks(to_grade: list[ResolvedTask]) -> list[tuple[Resol
             )
         except (RegradeError, OSError, RuntimeError, ValueError) as e:
             console.print(f"[yellow]⚠[/] Could not grade {rt.task.task_id}: {e}")
+            # Stamp the reason onto the row. Without it the failure survives only
+            # in this console line: the folded-back result keeps the execute
+            # phase's empty error_message, so run.json, the reports and CI show
+            # an ungraded row with no explanation of why grading never happened.
             result = prior
+            result.error_message = f"Grading failed during --resume: {e}"
         graded.append(
             (
                 rt,

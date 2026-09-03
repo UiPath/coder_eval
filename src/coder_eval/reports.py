@@ -868,6 +868,10 @@ def _compute_suite_rollup(
     rows_passed = sum(1 for r in rows if r.result.final_status.category == "succeeded")
     rows_failed = sum(1 for r in rows if r.result.final_status.category == "failed")
     rows_error = sum(1 for r in rows if r.result.final_status.category == "error")
+    # An ungraded row was never measured, so it leaves BOTH sides of the rate —
+    # the same rule RunSummary.pass_rate and VariantAggregate.pass_rate follow.
+    rows_not_graded = sum(1 for r in rows if r.result.final_status.category == "ungraded")
+    rows_graded = rows_total - rows_not_graded
 
     scored = [r.result.weighted_score for r in rows if r.result.weighted_score is not None]
     average_weighted_score = sum(scored) / len(scored) if scored else None
@@ -982,7 +986,8 @@ def _compute_suite_rollup(
         rows_passed=rows_passed,
         rows_failed=rows_failed,
         rows_error=rows_error,
-        pass_rate=rows_passed / rows_total if rows_total else 0.0,
+        rows_not_graded=rows_not_graded,
+        pass_rate=rows_passed / rows_graded if rows_graded else 0.0,
         average_weighted_score=average_weighted_score,
         criterion_stats=criterion_stats,
         failed_samples=failed_samples,
@@ -998,8 +1003,9 @@ def _render_suite_markdown(rollup: SuiteRollup) -> str:
         "",
         f"**Variant**: `{rollup.variant_id}`",
         (
-            f"**Rows**: {rollup.rows_total} total — "
-            f"{rollup.rows_passed} passed, {rollup.rows_failed} failed, {rollup.rows_error} errored"
+            f"**Rows**: {rollup.rows_total} total — {rollup.rows_passed} passed, "
+            + f"{rollup.rows_failed} failed, {rollup.rows_error} errored"
+            + (f", {rollup.rows_not_graded} not graded" if rollup.rows_not_graded else "")
         ),
         f"**Pass rate**: {rollup.pass_rate * 100:.1f}%",
     ]

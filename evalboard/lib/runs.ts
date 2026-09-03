@@ -60,6 +60,7 @@ export interface RunSummary {
     tasksSucceeded: number;
     tasksFailed: number;
     tasksError: number;
+    tasksNotGraded: number;
     totalCostUsd: number | null;
     componentShas: ComponentSha[];
     // What actually produced this run, for the run header. `harness` is the
@@ -463,6 +464,9 @@ interface RawRunJson {
     tasks_succeeded?: number;
     tasks_failed?: number;
     tasks_error?: number;
+    // Rows that ran but were never scored (`coder-eval execute`). Optional: a
+    // run.json written before the field existed simply has none.
+    tasks_not_graded?: number;
     task_results?: RawTaskResult[];
     // Values are scalars except `tool_plugins`, a {plugin: version} map of
     // the installed @uipath/*-tool packages (recorded since coder_eval #366).
@@ -831,6 +835,7 @@ export async function readRunSummary(
         tasksSucceeded: data.tasks_succeeded ?? 0,
         tasksFailed: data.tasks_failed ?? 0,
         tasksError: data.tasks_error ?? 0,
+        tasksNotGraded: data.tasks_not_graded ?? 0,
         totalCostUsd: taskResults.length ? totalCost : null,
         componentShas: extractComponentShas(data.environment_info),
         harness: extractRunConfig(data).harness,

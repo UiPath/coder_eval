@@ -831,7 +831,7 @@ def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
 
 def _mean_graded_score(vr_list: list[VariantResult]) -> float:
     """Mean ``weighted_score`` over the graded rows; ``0.0`` when none were graded."""
-    graded = [v.weighted_score for v in vr_list if v.final_status.category != "ungraded"]
+    graded = [v.weighted_score for v in vr_list if v.weighted_score is not None]
     return sum(graded) / len(graded) if graded else 0.0
 
 
@@ -878,11 +878,15 @@ def aggregate_results(
     # Collect per-replicate scores keyed variant_id → task_id → [scores] for stats rendering.
     per_replicate_scores: dict[str, dict[str, list[float]]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
-        per_replicate_scores.setdefault(variant_id, {})[task_id] = [r.result.weighted_score or 0.0 for r in reps]
+        per_replicate_scores.setdefault(variant_id, {})[task_id] = [
+            r.result.weighted_score for r in reps if r.result.weighted_score is not None
+        ]
 
     task_variants: dict[str, list[VariantResult]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
-        scores = [r.result.weighted_score or 0.0 for r in reps]
+        # Ungraded replicates drop out entirely rather than contributing 0.0 —
+        # `or 0.0` would average a clean `execute` run down to a real-looking zero.
+        scores = [r.result.weighted_score for r in reps if r.result.weighted_score is not None]
         non_errored = [r for r in reps if r.result.final_status.category != "error"]
         durations = [r.result.duration_seconds for r in non_errored]
         statuses = [r.result.final_status for r in reps]
@@ -895,7 +899,7 @@ def aggregate_results(
         variant_result = VariantResult(
             variant_id=variant_id,
             task_id=task_id,
-            weighted_score=sum(scores) / len(scores),
+            weighted_score=sum(scores) / len(scores) if scores else None,
             final_status=final_status,
             duration_seconds=sum(durations),
             total_tokens=sum(token_vals) if token_vals else None,
@@ -910,9 +914,12 @@ def aggregate_results(
     # Build task summaries
     task_summaries: list[TaskExperimentSummary] = []
     for task_id, variants in task_variants.items():
-        best = max(variants, key=lambda v: (v.weighted_score, v.variant_id))
-        scores = [v.weighted_score for v in variants]
-        top_count = sum(1 for v in variants if v.weighted_score == best.weighted_score)
+        # Only graded variants can win or set a spread. Including ungraded ones
+        # at 0.0 would name an arbitrary "best" among scores that do not exist.
+        scored = [(v, v.weighted_score) for v in variants if v.weighted_score is not None]
+        best = max(scored, key=lambda pair: (pair[1], pair[0].variant_id))[0] if scored else variants[0]
+        scores = [s for _, s in scored]
+        top_count = sum(1 for _, s in scored if s == best.weighted_score)
         rep_counts = {v.replicate_count for v in variants}
         task_summaries.append(
             TaskExperimentSummary(
@@ -920,7 +927,7 @@ def aggregate_results(
                 variant_results=variants,
                 best_variant=best.variant_id,
                 is_tie=top_count > 1,
-                score_spread=max(scores) - min(scores),
+                score_spread=(max(scores) - min(scores)) if scores else 0.0,
                 replicate_count=min(rep_counts) if rep_counts else 1,
             )
         )

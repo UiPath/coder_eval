@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import re
 import tempfile
 import time
@@ -608,7 +609,21 @@ class Orchestrator:
                 # (like TIMEOUT / BUILD_FAILED / the budget stops on the except
                 # branches below) is a fact about the RUN, not about grading, and
                 # still applies. With grade=True the chain is unchanged.
-                if success:
+                #
+                # A detached grade goes further: the prior run's terminal status
+                # may itself be an execution fact (TIMEOUT, ERROR, a budget stop)
+                # that this pass neither repeated nor observed, so grading must
+                # not overwrite it. Without this, a crashed run re-graded against
+                # its half-finished workspace reports SUCCESS — with the original
+                # error_message still attached.
+                inherited = self.prior_result.final_status if self.prior_result is not None else None
+                if inherited is not None and inherited.is_execution_fact:
+                    logger.info(
+                        "Preserving the run's terminal status %s: grading cannot overturn an execution fact.",
+                        inherited.value,
+                    )
+                    self.result.final_status = inherited
+                elif success:
                     self.result.final_status = FinalStatus.SUCCESS
                 elif self.result.max_turns_exhausted:
                     self.result.final_status = FinalStatus.MAX_TURNS_EXHAUSTED
@@ -767,7 +782,22 @@ class Orchestrator:
         self.result.max_turns_exhausted = prior.max_turns_exhausted
         self.result.error_message = prior.error_message
         self.result.error_details = prior.error_details
+        self.result.error_log_tail = prior.error_log_tail
         self.result.sdk_options = prior.sdk_options
+        self.result.agent_config = prior.agent_config
+        self.result.expected_commands = prior.expected_commands
+        self.result.simulation = prior.simulation
+
+        # The hooks belong to the execute phase and are NOT re-run against an
+        # adopted workspace (see _skip_hooks_for_adopted), so their recorded
+        # outcomes would otherwise vanish from the graded row.
+        self.result.pre_run_results = list(prior.pre_run_results)
+        self.result.post_run_results = list(prior.post_run_results)
+
+        # The artifacts pointer. An adopted sandbox is not deleted by cleanup(),
+        # so the path stays valid — and a SECOND grade needs it, since without it
+        # the caller falls back to guessing the workspace.
+        self.result.sandbox_path = prior.sandbox_path
 
         # environment_info: the prior run's capture describes the machine that
         # RAN the task (installed_tools, api route, coder_eval version). Ours
@@ -1325,6 +1355,12 @@ class Orchestrator:
             destination = staging / "reference"
             self._reference_dir = await asyncio.to_thread(stage_reference_dir, source, destination)
         self._reference_digest = await asyncio.to_thread(digest_tree, self._reference_dir)
+        # Persist it: a DETACHED grade happens in a different process with no
+        # access to this instance, and refuses to score old work against a new
+        # answer key by comparing the tree it stages against this recorded hash
+        # (orchestration/regrade.py::verify_reference_unchanged).
+        if self.result is not None:
+            self.result.environment_info["reference_digest"] = self._reference_digest
         self._validate_reference_consumers()
 
     def _validate_reference_consumers(self) -> None:
@@ -1422,7 +1458,7 @@ class Orchestrator:
             # against ambient PATH and can disagree with the original verdict.
             restored_path = self.result.environment_info.get("command_base_path")
             if isinstance(restored_path, str) and restored_path:
-                self.sandbox.set_command_base_path(restored_path)
+                self.sandbox.set_command_base_path(self._sanitize_restored_path(restored_path))
 
             self._resolve_routes()
             self._record_route_environment_info()
@@ -2009,6 +2045,94 @@ class Orchestrator:
                 # forward so it isn't dropped from the latest results list.
                 r.token_usage = prior
 
+    def _sanitize_restored_path(self, recorded: str) -> str:
+        """Filter a PATH restored from a run's own ``task.json`` before prepending it.
+
+        The restored value is PREPENDED ahead of the host PATH, and it arrives
+        from a file inside the directory being graded — a run dir is a shareable
+        artifact (that is the whole point of the detached-grading flow), and under
+        ``driver: docker`` it is bind-mounted writable into the container the agent
+        runs in. Prepending it verbatim lets a run dir decide which binary
+        ``pytest`` resolves to on the grader's host.
+
+        Two filters, both cheap and both about what PATH parity actually needs:
+        drop anything that is not an existing directory (a dead entry buys no
+        parity), and drop any entry inside the workspace being graded (that tree is
+        agent-writable, so a shim dropped there would shadow a real tool). What
+        remains is the run's genuine toolchain locations.
+        """
+        workspace = self.sandbox.sandbox_dir.resolve() if self.sandbox and self.sandbox.sandbox_dir else None
+        kept: list[str] = []
+        for entry in recorded.split(os.pathsep):
+            if not entry:
+                continue
+            candidate = Path(entry)
+            if not candidate.is_dir():
+                logger.debug("Dropping recorded PATH entry %s: not a directory here.", entry)
+                continue
+            resolved = candidate.resolve()
+            if workspace is not None and (resolved == workspace or workspace in resolved.parents):
+                logger.warning(
+                    "Dropping recorded PATH entry %s: it lies inside the workspace being graded, "
+                    + "so a binary there could shadow a real tool on the grader's host.",
+                    entry,
+                )
+                continue
+            kept.append(str(resolved))
+        return os.pathsep.join(kept)
+
+    def _select_gate(self) -> bool:
+        """Apply the verdict gate to the criteria results already on ``self.result``.
+
+        Gate selection is FIRED-ONLY: the weighted armed gate applies iff the
+        watcher actually cut the run (``early_stop is not None``) — on a truncated
+        trajectory the unarmed criteria never had the chance to be satisfied, so
+        they stay advisory. A run that completed naturally (armed or not, watcher
+        never fired or disarmed fail-open) has a full trajectory and gates
+        strict-AND over every gating criterion, exactly like an unarmed run —
+        arming a criterion (e.g. adding a ``decide_within`` fail-fast timeout)
+        must never change the verdict of a run it didn't cut.
+
+        BOTH grading paths must call this. A detached grade (``evaluate
+        <run_dir>`` / ``run --resume``) reaches the verdict through the
+        evaluate-only branch, where ``early_stop`` arrives via
+        ``_seed_from_prior_result`` rather than from a live watcher; selecting
+        the gate there in a second, hand-written place is exactly how the
+        seeded field came to be carried but never read — re-grading an
+        early-stopped run under the full-run strict-AND gate flips its verdict.
+        """
+        assert self.result is not None
+        if self.result.early_stop is not None:
+            # One gate for every early-stopped run, no per-reason branches: a
+            # decision-budget stop is just a fail-stop whose deciding criterion
+            # timed out (the watcher only fires once the weighted ceiling
+            # proves the armed gate cannot pass). The ceiling is an upper bound
+            # on the authoritative armed score only because the watcher reduces
+            # the SAME trajectory the checker scores — it records UNRESOLVED
+            # tool ends exactly like the agent's EventCollector does (see
+            # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
+            # correct whether the watcher fired on a pass, a fail, or a timeout.
+            gate_threshold = (
+                self.task.run_limits.stop_early_gate_threshold
+                if self.task.run_limits is not None
+                else DEFAULT_STOP_EARLY_GATE_THRESHOLD
+            )
+            armed_count = sum(1 for c in self.task.success_criteria if c.is_stop_armed)
+            logger.info(
+                "Early-stopped run (%s): gating on %d armed criteria (%d advisory, not gated).",
+                self.result.early_stop.reason.value,
+                armed_count,
+                len(self.task.success_criteria) - armed_count,
+            )
+            return self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
+
+        if self._early_stop_watcher is not None:
+            if self._early_stop_watcher.disarmed:
+                logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
+            else:
+                logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
+        return self.result.all_criteria_passed(self.task.success_criteria)
+
     async def _evaluation_loop(self) -> bool:
         """Run the main evaluation loop.
 
@@ -2058,7 +2182,7 @@ class Orchestrator:
                 turn_records=self.result.iterations,
             )
             self.result.success_criteria_results = criteria_results
-            return self.result.all_criteria_passed(self.task.success_criteria)
+            return self._select_gate()
 
         # Working directory context prepended to every prompt (including feedback).
         # The agent resumes its session between iterations via session_id.
@@ -2127,44 +2251,7 @@ class Orchestrator:
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
-        # Gate selection is FIRED-ONLY: the weighted armed gate applies iff the
-        # watcher actually cut the run (early_stop is not None) — on a truncated
-        # trajectory the unarmed criteria never had the chance to be satisfied,
-        # so they stay advisory. A run that completed naturally (armed or not,
-        # watcher never fired or disarmed fail-open) has a full trajectory and
-        # gates strict-AND over every gating criterion, exactly like an unarmed
-        # run — arming a criterion (e.g. adding a decide_within fail-fast
-        # timeout) must never change the verdict of a run it didn't cut.
-        if self.result.early_stop is not None:
-            # One gate for every early-stopped run, no per-reason branches: a
-            # decision-budget stop is just a fail-stop whose deciding criterion
-            # timed out (the watcher only fires once the weighted ceiling
-            # proves the armed gate cannot pass). The ceiling is an upper bound
-            # on the authoritative armed score only because the watcher reduces
-            # the SAME trajectory the checker scores — it records UNRESOLVED
-            # tool ends exactly like the agent's EventCollector does (see
-            # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
-            # correct whether the watcher fired on a pass, a fail, or a timeout.
-            gate_threshold = (
-                self.task.run_limits.stop_early_gate_threshold
-                if self.task.run_limits is not None
-                else DEFAULT_STOP_EARLY_GATE_THRESHOLD
-            )
-            all_passed = self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
-            armed_count = sum(1 for c in self.task.success_criteria if c.is_stop_armed)
-            logger.info(
-                "Early-stopped run (%s): gating on %d armed criteria (%d advisory, not gated).",
-                self.result.early_stop.reason.value,
-                armed_count,
-                total_count - armed_count,
-            )
-        else:
-            if self._early_stop_watcher is not None:
-                if self._early_stop_watcher.disarmed:
-                    logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
-                else:
-                    logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
-            all_passed = self.result.all_criteria_passed(self.task.success_criteria)
+        all_passed = self._select_gate()
 
         # Reuse the model method for weighted score (single source of truth)
         self.result.calculate_weighted_score(self.task.success_criteria)
@@ -2835,8 +2922,10 @@ class Orchestrator:
         outer ``except Exception`` handler and lands the run as
         ``FinalStatus.ERROR``. Post-run commands and cleanup still execute via
         the ``finally`` block.
+
+        Skipped entirely on an adopted sandbox — see ``_skip_hooks_for_adopted``.
         """
-        if self.result is None:
+        if self.result is None or self._skip_hooks_for_adopted("pre_run"):
             return
         await self._run_command_list(self.task.pre_run, self.result.pre_run_results, "pre_run")
 
@@ -2846,10 +2935,38 @@ class Orchestrator:
         See ``_run_command_list``. Post-run commands are informational only —
         ``fail_on_error`` is not part of ``PostRunCommand``, so failures are
         warning-logged and never affect the evaluation verdict.
+
+        Skipped entirely on an adopted sandbox — see ``_skip_hooks_for_adopted``.
         """
-        if self.result is None:
+        if self.result is None or self._skip_hooks_for_adopted("post_run"):
             return
         await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
+
+    def _skip_hooks_for_adopted(self, phase: str) -> bool:
+        """True when ``phase``'s commands must not run against an adopted sandbox.
+
+        ``adopt()`` guarantees it materializes nothing into the workspace, but
+        that guarantee is only as strong as its weakest caller: ``run()`` invokes
+        the pre/post-run hooks unconditionally, and those commands run with
+        ``cwd = sandbox_dir``. Several in-tree tasks stage fixtures there
+        (``cp -a /app/[!.]* "$PWD/"``), so re-running them during a detached
+        grade would overwrite the agent's deliverables *before* the criteria read
+        them — silently changing the verdict and destroying preserved artifacts.
+
+        The hooks belong to the EXECUTE phase; the prior run already ran them,
+        and their recorded results are carried over by ``_seed_from_prior_result``.
+        """
+        if self.sandbox is None or not self.sandbox.was_adopted:
+            return False
+        commands = self.task.pre_run if phase == "pre_run" else self.task.post_run
+        if commands:
+            logger.info(
+                "Skipping %d %s command(s): the sandbox was adopted for grading, and re-running them "
+                + "would mutate the workspace under evaluation.",
+                len(commands),
+                phase,
+            )
+        return True
 
     async def _cleanup(self) -> None:
         """Clean up all resources."""
@@ -2914,8 +3031,15 @@ class Orchestrator:
                     await asyncio.to_thread(self.sandbox.grant_read_access)
                     logger.info(f"Sandbox preserved (in-place): {self.sandbox.sandbox_dir}")
                 elif self.preservation_mode == PreservationMode.NONE and self.result:
-                    # Sandbox will be deleted by cleanup() below; clear stale path.
-                    self.result.sandbox_path = None
+                    if self.sandbox.was_adopted:
+                        # An adopted sandbox belongs to the caller and survives
+                        # cleanup(), so the path is not stale — and clearing it
+                        # would strip the graded row of its artifacts pointer
+                        # (which a second grade needs to find the workspace).
+                        self.result.sandbox_path = str(self.sandbox.sandbox_dir)
+                    else:
+                        # Sandbox will be deleted by cleanup() below; clear stale path.
+                        self.result.sandbox_path = None
                 elif self.result:
                     # Defensive: a future PreservationMode member with no arm here
                     # would otherwise silently fall through. Treat as no-preserve.

@@ -11,6 +11,7 @@
 
 import type { PerRun } from "./overview";
 import type { RunOverviewTask } from "./runs";
+import { isGraded } from "./status";
 import { timeRatio } from "./timing";
 import { turnRatio } from "./turns";
 
@@ -116,7 +117,9 @@ function stdev(xs: number[]): number {
 function skillPassSeq(runs: LoadedRun[], skill: string): number[] {
     const seq: number[] = [];
     for (const run of runs) {
-        const ts = run.tasks.filter((t) => t.skill === skill);
+        const ts = run.tasks.filter(
+            (t) => t.skill === skill && isGraded(t.status),
+        );
         if (ts.length === 0) continue;
         seq.push(ts.filter((t) => isPass(t.status)).length / ts.length);
     }
@@ -137,6 +140,8 @@ export function leaderboard(runs: LoadedRun[]): LeaderboardRow[] {
     for (const run of runs) {
         for (const t of run.tasks) {
             if (!t.skill) continue;
+            // Ungraded rows leave both sides of the rate — see isGraded.
+            if (!isGraded(t.status)) continue;
             total.set(t.skill, (total.get(t.skill) ?? 0) + 1);
             if (isPass(t.status))
                 passed.set(t.skill, (passed.get(t.skill) ?? 0) + 1);
@@ -202,6 +207,8 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
             const ts = run.tasks.filter((t) => t.skill === skill);
             if (ts.length > 0) appeared++;
             for (const t of ts) {
+                // Ungraded rows leave both sides of the rate — see isGraded.
+                if (!isGraded(t.status)) continue;
                 outcomes++;
                 taskIds.add(t.taskId);
                 if (isPass(t.status)) passes++;

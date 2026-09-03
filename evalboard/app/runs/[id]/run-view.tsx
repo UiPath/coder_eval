@@ -38,6 +38,9 @@ export interface RunMetrics {
     passed: number;
     failed: number;
     errored: number;
+    // Rows that ran but were never scored (`coder-eval execute`). Excluded from
+    // both sides of `pct`, so a fully ungraded run reports 0 of 0, not 0%.
+    ungraded: number;
     failedTotal: number;
     pct: number;
     // Per-task view of pass rate for repeated runs: distinct task_ids, and how
@@ -72,6 +75,7 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
     let passed = 0;
     let failed = 0;
     let errored = 0;
+    let ungraded = 0;
     let cost = 0;
     let durationSum = 0;
     const costSamples: number[] = [];
@@ -80,6 +84,11 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
         const cat = statusCategory(t.status);
         if (cat === "passed") passed++;
         else if (cat === "error") errored++;
+        // An ungraded row (`coder-eval execute`) was never scored. It leaves
+        // BOTH sides of the rate — the `else failed++` below would otherwise
+        // count it as a failure AND keep it in the denominator, rendering a
+        // clean execute run as 0% pass, N failed.
+        else if (cat === "ungraded") ungraded++;
         else failed++;
         if (t.matureSkipped) continue;
         if (t.totalCostUsd != null) {
@@ -91,13 +100,15 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
             durSamples.push(t.durationSeconds);
         }
     }
+    const graded = total - ungraded;
     return {
         total,
         passed,
         failed,
         errored,
+        ungraded,
         failedTotal: failed + errored,
-        pct: total ? (passed / total) * 100 : 0,
+        pct: graded ? (passed / graded) * 100 : 0,
         ...(() => {
             // Per-task rollup (any replicate passed → task passed) via the shared
             // helper, so the run tile and the grid badge apply the same rule.

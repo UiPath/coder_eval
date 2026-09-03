@@ -163,6 +163,12 @@ class Sandbox:
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
+        # True once adopt() takes over an existing workspace. Read by the
+        # Orchestrator to suppress every step that would MUTATE the tree it was
+        # asked to grade (pre_run/post_run above all — several in-tree tasks
+        # copy fixtures over the workspace there) and to keep sandbox_path in
+        # the result, since an adopted directory outlives cleanup().
+        self.was_adopted = False
         self.installed_tool_versions: dict[str, str] = {}
         self._command_base_path: str | None = None
         # Cached canonical `node_modules/@uipath`; pins UiPath CLI plugin discovery
@@ -318,6 +324,7 @@ class Sandbox:
         self.sandbox_dir = workspace.resolve()
         # Never flipped True: an adopted directory belongs to the caller.
         self._cleanup_on_exit = False
+        self.was_adopted = True
 
         # Only NON-materializing steps below. Deliberately skipped, and why:
         #   _setup_template            would overwrite the workspace being graded

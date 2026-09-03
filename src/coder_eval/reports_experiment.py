@@ -26,6 +26,7 @@ from coder_eval.reports_stats import (
     describe_prompt_config,
     fmt_mean_sd,
     fmt_p,
+    format_score,
     load_variant_eval_results,
     paired_comparison,
     stddev,
@@ -248,7 +249,8 @@ class ExperimentReportGenerator:
             tokens_str = f"{v.total_tokens:,}" if v.total_tokens is not None else "N/A"
             avg_dur = v.duration_seconds / v.replicate_count
             lines.append(
-                f"| {v.variant_id} | {v.weighted_score:.3f} | {v.final_status}" + f" | {avg_dur:.1f}s | {tokens_str} |"
+                f"| {v.variant_id} | {format_score(v.weighted_score)} | {v.final_status}"
+                + f" | {avg_dur:.1f}s | {tokens_str} |"
             )
 
         return "\n".join(lines)
@@ -483,7 +485,7 @@ class ExperimentReportGenerator:
                 vr = scores_by_variant.get(vid)
                 if vr:
                     status_icon = vr.final_status.icon
-                    cells.append(f"{vr.weighted_score:.3f} ({status_icon})")
+                    cells.append(f"{format_score(vr.weighted_score)} ({status_icon})")
                 else:
                     cells.append("N/A")
             best_str = f"{'TIE' if ts.is_tie else ts.best_variant}"
@@ -639,7 +641,7 @@ class ExperimentReportGenerator:
         variant_results = [
             vr for ts in result.task_summaries for vr in ts.variant_results if vr.variant_id == variant_id
         ]
-        scores = [vr.weighted_score for vr in variant_results]
+        scores = [vr.weighted_score for vr in variant_results if vr.weighted_score is not None]
         durations = [vr.duration_seconds / vr.replicate_count for vr in variant_results]
 
         if scores and len(scores) >= 2:
@@ -673,7 +675,8 @@ class ExperimentReportGenerator:
             for vr in ts.variant_results:
                 if vr.variant_id == variant_id:
                     avg_duration = vr.duration_seconds / vr.replicate_count
-                    row = f"| {ts.task_id} | {vr.weighted_score:.3f} | {vr.final_status} | {avg_duration:.1f}s |"
+                    score_text = format_score(vr.weighted_score)
+                    row = f"| {ts.task_id} | {score_text} | {vr.final_status} | {avg_duration:.1f}s |"
                     if has_reps:
                         row += f" {vr.replicate_count} |"
                     if has_similarity:

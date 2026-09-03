@@ -887,7 +887,11 @@ class SuiteRollup(BaseModel):
     rows_passed: int
     rows_failed: int
     rows_error: int
-    pass_rate: float = Field(ge=0.0, le=1.0, description="rows_passed / rows_total")
+    # The fourth bucket, matching RunSummary.tasks_not_graded and
+    # VariantAggregate.tasks_not_graded. Defaulted so a suite.json written before
+    # `execute` existed still parses.
+    rows_not_graded: int = 0
+    pass_rate: float = Field(ge=0.0, le=1.0, description="rows_passed / rows_graded (ungraded rows excluded)")
     average_weighted_score: float | None = Field(
         default=None, description="Mean weighted_score across rows that produced one."
     )
@@ -910,6 +914,20 @@ class SuiteRollup(BaseModel):
             "Drives CLI exit code for dataset-backed tasks."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_row_count_invariant(self) -> SuiteRollup:
+        """The same guard RunSummary carries, which this model was missing.
+
+        Without it a row that lands outside all four buckets — the shape a new
+        FinalStatus category takes before every counter is updated — silently
+        drops out of the rollup instead of failing.
+        """
+        buckets = self.rows_passed + self.rows_failed + self.rows_error + self.rows_not_graded
+        if buckets != self.rows_total:
+            total = f"{self.rows_passed} + {self.rows_failed} + {self.rows_error} + {self.rows_not_graded}"
+            raise ValueError(f"Suite row count invariant violated: {total} != {self.rows_total}")
+        return self
 
 
 class SkippedTask(BaseModel):
@@ -1030,10 +1048,13 @@ def eval_result_total_cost(result: EvaluationResult) -> float | None:
 class RunSummary(BaseModel):
     """Summary of an entire evaluation run across multiple tasks.
 
-    ``pass_rate`` is ``tasks_succeeded / tasks_run``: every dispatched task is in the
-    denominator, errors included as misses. The previous formula excluded errors,
-    which paid a bonus for erroring. ``error_share`` reports how much of the rate is
-    errors, so a bad infrastructure night shows instead of being absorbed.
+    ``pass_rate`` is ``tasks_succeeded / tasks_graded``: every task that was
+    MEASURED is in the denominator, errors included as misses. An earlier formula
+    excluded errors, which paid a bonus for erroring. ``error_share`` reports how
+    much of the rate is errors, so a bad infrastructure night shows instead of
+    being absorbed. Only ungraded tasks (``coder-eval execute``) leave the
+    denominator — they were never measured, so a 0/0 run has no rate at all
+    rather than a 0% one.
 
     This is the framework's single denominator: every reporting surface reads
     ``pass_rate`` rather than re-deriving one. Derived metrics here are computed,
@@ -1114,9 +1135,17 @@ class RunSummary(BaseModel):
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
 
+    @computed_field
     @property
     def tasks_graded(self) -> int:
-        """Tasks that were actually measured — the denominator for every rate below."""
+        """Tasks that were actually measured — the denominator for every rate below.
+
+        A ``computed_field`` rather than a plain property so it reaches run.json:
+        it is the denominator of `pass_rate` and `error_share`, and a consumer
+        that cannot read it has to re-derive the rate from the raw counts — which
+        is precisely how a consumer ends up publishing a different number for the
+        same run. REPORT_SCHEMA.md documents it as serialized.
+        """
         return self.tasks_run - self.tasks_not_graded
 
     # Derived run metrics: computed_fields over the stored counts and

@@ -190,7 +190,11 @@ class VariantResult(BaseModel):  # noqa: CE009 -- persisted result model; round-
 
     variant_id: str
     task_id: str
-    weighted_score: float
+    # None when nothing was graded (`coder-eval execute`), mirroring
+    # EvaluationResult.weighted_score. A plain float here would launder the
+    # ungraded None into 0.000, which renders as — and is picked as a best
+    # variant against — a real score of zero.
+    weighted_score: float | None = None
     final_status: FinalStatus
     duration_seconds: float
     total_tokens: int | None = None
@@ -257,9 +261,14 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def tasks_graded(self) -> int:
-        """Tasks actually measured — ``pass_rate``'s denominator."""
+        """Tasks actually measured — ``pass_rate``'s denominator.
+
+        Serialized for the same reason as its RunSummary twin: a consumer that
+        cannot read the denominator re-derives the rate and drifts.
+        """
         return self.tasks_run - self.tasks_not_graded
 
     @computed_field  # type: ignore[prop-decorator]
