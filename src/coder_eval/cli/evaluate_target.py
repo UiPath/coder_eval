@@ -94,5 +94,27 @@ def resolve_evaluate_target(first: Path, second: Path | None) -> EvaluateTarget:
     # criteria against an expensive run I already paid for" case, which is the
     # main reason to keep `execute` and `evaluate` separate at all. Allow it, and
     # let the caller be told which config won.
+    #
+    # This probe is a filename test, so a plain work directory that merely
+    # happens to contain a file called `task.json` is read as a run directory —
+    # and the pre-existing two-argument form would abort on a pydantic wall with
+    # no way to override it. It is not repaired here (this function is pure and
+    # cannot tell a real record from a namesake); the caller re-reads the record
+    # and falls back to WORK_DIR when it does not parse. See
+    # ``evaluate_command._resolve_run_dir_or_work_dir``.
     mode = EvaluateMode.RUN_DIR if second.is_dir() and is_run_dir(second) else EvaluateMode.WORK_DIR
     return EvaluateTarget(mode=mode, target=second, task_file=first)
+
+
+def as_work_dir(target: EvaluateTarget) -> EvaluateTarget:
+    """Re-read a two-argument target as the plain work-directory shape.
+
+    The escape hatch for the namesake ``task.json`` above. Only valid when a task
+    file was supplied, which is exactly the two-argument form.
+    """
+    if target.task_file is None:
+        raise EvaluateTargetError(
+            f"{target.target} holds a {TASK_JSON_FILENAME} that is not a readable run record, and no "
+            + f"task file was given. Pass one: coder-eval evaluate <task.yaml> {target.target}"
+        )
+    return EvaluateTarget(mode=EvaluateMode.WORK_DIR, target=target.target, task_file=target.task_file)

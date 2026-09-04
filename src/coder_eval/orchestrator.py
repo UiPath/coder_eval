@@ -303,7 +303,6 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "Status": result.final_status.value,
         "Category": result.final_status.category,
         "DurationMs": int((result.duration_seconds or 0.0) * 1000),
-        "Score": float(result.weighted_score or 0.0),
         "Iterations": result.iteration_count,
         "AgentType": result.agent_type or "",
         "Model": result.model_used or "",
@@ -311,6 +310,13 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "EarlyStopped": result.early_stop is not None,
         "EarlyStopReason": (result.early_stop.reason.value if result.early_stop is not None else ""),
     }
+    # `Score` is OMITTED, never coalesced to 0.0, when the row was not graded.
+    # Dashboards compute `avg(todouble(customDimensions.Score))` with no status
+    # filter, so a laundered zero for a `coder-eval execute` night drags every
+    # score tile toward zero and is indistinguishable from a genuinely bad night.
+    # An absent dimension drops out of the average instead.
+    if result.weighted_score is not None:
+        props["Score"] = float(result.weighted_score)
     return "CoderEval.Task.End", props
 
 
@@ -516,6 +522,44 @@ class Orchestrator:
             return str(self.task.agent.type)
         return AgentKind.NONE.value
 
+    def _terminal_status(self, success: bool) -> FinalStatus:
+        """The status a normally-completed evaluation loop lands on.
+
+        Extracted from ``run()`` because the chain answers one question and
+        ``run()`` answers several; inlining it grew ``run()`` past the
+        complexity bound the moment the grading switch was threaded in.
+
+        Order matters at every step:
+
+        * A detached grade may NOT overturn an execution fact. The prior run's
+          terminal status (TIMEOUT, ERROR, a budget stop) describes an agent
+          phase this pass neither repeated nor observed. Without the first arm a
+          crashed run re-graded against its half-finished workspace reports
+          SUCCESS — with the original ``error_message`` still attached.
+        * The NOT_GRADED arm sits between the execution facts and FAILURE: under
+          ``grade=False`` no criterion ran, so ``success`` is always False and
+          FAILURE would be a verdict never actually reached — but
+          MAX_TURNS_EXHAUSTED is a fact about the RUN, like the statuses the
+          ``except`` branches assign, and still applies.
+
+        With ``grade=True`` and no prior result the chain is the original one.
+        """
+        assert self.result is not None, "Result not initialized"
+        inherited = self.prior_result.final_status if self.prior_result is not None else None
+        if inherited is not None and inherited.is_execution_fact:
+            logger.info(
+                "Preserving the run's terminal status %s: grading cannot overturn an execution fact.",
+                inherited.value,
+            )
+            return inherited
+        if success:
+            return FinalStatus.SUCCESS
+        if self.result.max_turns_exhausted:
+            return FinalStatus.MAX_TURNS_EXHAUSTED
+        if not self.grade:
+            return FinalStatus.NOT_GRADED
+        return FinalStatus.FAILURE
+
     async def run(self) -> EvaluationResult:
         """Run the complete evaluation.
 
@@ -608,35 +652,7 @@ class Orchestrator:
                         elapsed_seconds=time.time() - start_time,
                     )
 
-                # Update final status. The NOT_GRADED arm sits between the
-                # execution facts and FAILURE deliberately: under grade=False no
-                # criterion ran, so `success` is always False and FAILURE would be
-                # a verdict we never actually reached — but MAX_TURNS_EXHAUSTED
-                # (like TIMEOUT / BUILD_FAILED / the budget stops on the except
-                # branches below) is a fact about the RUN, not about grading, and
-                # still applies. With grade=True the chain is unchanged.
-                #
-                # A detached grade goes further: the prior run's terminal status
-                # may itself be an execution fact (TIMEOUT, ERROR, a budget stop)
-                # that this pass neither repeated nor observed, so grading must
-                # not overwrite it. Without this, a crashed run re-graded against
-                # its half-finished workspace reports SUCCESS — with the original
-                # error_message still attached.
-                inherited = self.prior_result.final_status if self.prior_result is not None else None
-                if inherited is not None and inherited.is_execution_fact:
-                    logger.info(
-                        "Preserving the run's terminal status %s: grading cannot overturn an execution fact.",
-                        inherited.value,
-                    )
-                    self.result.final_status = inherited
-                elif success:
-                    self.result.final_status = FinalStatus.SUCCESS
-                elif self.result.max_turns_exhausted:
-                    self.result.final_status = FinalStatus.MAX_TURNS_EXHAUSTED
-                elif not self.grade:
-                    self.result.final_status = FinalStatus.NOT_GRADED
-                else:
-                    self.result.final_status = FinalStatus.FAILURE
+                self.result.final_status = self._terminal_status(success)
 
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
@@ -1103,10 +1119,13 @@ class Orchestrator:
         # Terminal per-task summary line. Emitted before report writes so a
         # write failure cannot swallow the one-line outcome.
         logger.info(
-            "Task finished: status=%s duration=%.1fs score=%.3f iterations=%d",
+            "Task finished: status=%s duration=%.1fs score=%s iterations=%d",
             self.result.final_status.value,
             self.result.duration_seconds or 0.0,
-            self.result.weighted_score or 0.0,
+            # "n/a", not 0.000: this line is read when diagnosing a run, and a
+            # zero here would say the criteria scored nothing rather than that
+            # nothing was scored.
+            "n/a" if self.result.weighted_score is None else f"{self.result.weighted_score:.3f}",
             self.result.iteration_count,
         )
 
@@ -1741,6 +1760,25 @@ class Orchestrator:
             )
             raise ValueError(msg)
 
+    def _record_grader_route_provenance(self) -> None:
+        """Record the GRADING host's route without touching the run's.
+
+        Two keys only — the agent route and the judge route — because those are
+        the two that decide what a re-grade's LLM criteria actually talked to.
+        Omitted entirely when they match the run, so an ordinary same-machine
+        re-grade adds nothing to the record.
+        """
+        assert self.result is not None
+        assert self.route is not None
+        env = self.result.environment_info
+        grader_routes = {"graded_by_api_routing": ROUTE_NAMES[type(self.route)]}
+        if self.eval_route is not None:
+            grader_routes["graded_by_eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
+        for key, value in grader_routes.items():
+            run_key = key.removeprefix("graded_by_")
+            if env.get(run_key) != value:
+                env[key] = value
+
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.
 
@@ -1750,6 +1788,17 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.route is not None
+        if self.prior_result is not None:
+            # A detached grade resolves routes for ITS OWN host, which may be a
+            # different backend from the one that ran the task. Writing them into
+            # the run's keys contradicts the "prior wins" contract in
+            # _seed_from_prior_result and leaves a self-contradictory record —
+            # `api_routing: anthropic_direct` beside the run's stale `aws_region`
+            # and `bedrock_model`. Keep the run's routing; record the grader's
+            # alongside it, under the same `graded_by_` provenance prefix the
+            # seeding uses, and only when it actually differs.
+            self._record_grader_route_provenance()
+            return
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
         # The judge side (llm_judge / agent_judge) may run on a different,
         # constant backend — pinned to Claude when the agent is on LiteLLM — so
@@ -2076,25 +2125,46 @@ class Orchestrator:
         runs in. Prepending it verbatim lets a run dir decide which binary
         ``pytest`` resolves to on the grader's host.
 
-        Two filters, both cheap and both about what PATH parity actually needs:
-        drop anything that is not an existing directory (a dead entry buys no
-        parity), and drop any entry inside the workspace being graded (that tree is
-        agent-writable, so a shim dropped there would shadow a real tool). What
-        remains is the run's genuine toolchain locations.
+        Four filters, all cheap and all about what PATH parity actually needs:
+
+        * **Absolute only.** A relative entry resolves against the grader's
+          *current working directory*, which has nothing to do with the run — so
+          ``evilbin`` in a recorded PATH becomes ``$PWD/evilbin`` at the front of
+          every criterion subprocess's PATH. It also cannot be the toolchain
+          location it claims to be, since the run resolved it somewhere else.
+        * Drop anything that is not an existing directory (a dead entry buys no
+          parity).
+        * Drop any entry inside the **workspace** being graded — that tree is
+          agent-writable, so a shim dropped there would shadow a real tool.
+        * Drop any entry inside the **run directory** as a whole. The workspace
+          is only part of it; ``artifacts/``, a sibling replicate's tree and the
+          run root itself all travel in the same shared artifact and are all
+          equally attacker-chosen.
+
+        What remains is the run's genuine toolchain locations.
         """
         workspace = self.sandbox.sandbox_dir.resolve() if self.sandbox and self.sandbox.sandbox_dir else None
+        run_root = self.run_dir.resolve()
+        blocked = [p for p in (workspace, run_root) if p is not None]
         kept: list[str] = []
         for entry in recorded.split(os.pathsep):
             if not entry:
                 continue
             candidate = Path(entry)
+            if not candidate.is_absolute():
+                logger.warning(
+                    "Dropping recorded PATH entry %r: it is relative, so it would resolve against "
+                    + "the grader's working directory rather than the run's toolchain.",
+                    entry,
+                )
+                continue
             if not candidate.is_dir():
                 logger.debug("Dropping recorded PATH entry %s: not a directory here.", entry)
                 continue
             resolved = candidate.resolve()
-            if workspace is not None and (resolved == workspace or workspace in resolved.parents):
+            if any(resolved == root or root in resolved.parents for root in blocked):
                 logger.warning(
-                    "Dropping recorded PATH entry %s: it lies inside the workspace being graded, "
+                    "Dropping recorded PATH entry %s: it lies inside the run being graded, "
                     + "so a binary there could shadow a real tool on the grader's host.",
                     entry,
                 )
@@ -2247,6 +2317,21 @@ class Orchestrator:
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
+        # Facts about the RUN, recorded before the grading switch. `execute`
+        # withholds the verdict, never the facts: a max-turns or over-budget run
+        # must finalize the same way under `execute` as under `run`, or
+        # `execute` exits 0 where `run` exits 1 for identical agent output — and
+        # `_seed_from_prior_result` cannot restore a fact the execute phase never
+        # captured, so a later `evaluate` inherits the wrong terminal status too.
+        if turn_record.max_turns_exhausted:
+            self.result.max_turns_exhausted = True
+            logger.warning(
+                "Agent exhausted max_turns (%s).",
+                self.task.run_limits.max_turns if self.task.run_limits else None,
+            )
+        # Soft cumulative-turn check (logs once; never aborts).
+        self._check_expected_turns(iteration=iteration)
+
         # Grading site 2 of 4. `execute` stops here: the trajectory is captured
         # and persisted exactly as on a graded run, but nothing is scored.
         # Returning False keeps FinalStatus off SUCCESS; run()'s status chain
@@ -2254,6 +2339,10 @@ class Orchestrator:
         # — it exists to protect a grade that is not happening.
         if not self.grade:
             logger.info("Grading disabled (execute mode): skipping success criteria.")
+            # The budget gate is a run limit, not a verdict. Its only reason to
+            # sit after the criteria on the graded path is partial-credit
+            # visibility, and there is no partial credit here.
+            self._check_run_limits(iteration=iteration)
             return False
 
         # Check success criteria (reference_dir feeds reference_comparison + judges)
@@ -2276,23 +2365,18 @@ class Orchestrator:
 
         # Reuse the model method for weighted score (single source of truth)
         self.result.calculate_weighted_score(self.task.success_criteria)
-        current_score = self.result.weighted_score or 0.0
+        # calculate_weighted_score just ran, so a score exists; the fallback is
+        # for the type, not for an unmeasured row (this branch only runs when
+        # grading did).
+        current_score = self.result.weighted_score or 0.0  # noqa: CE049 — graded here by construction
 
         logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
 
         self._emit_criteria_event(criteria_results)
 
-        if turn_record.max_turns_exhausted:
-            self.result.max_turns_exhausted = True
-            logger.warning(
-                "Agent exhausted max_turns (%s) without passing criteria.",
-                self.task.run_limits.max_turns if self.task.run_limits else None,
-            )
-
-        # Soft cumulative-turn check (logs once; never aborts).
-        self._check_expected_turns(iteration=iteration)
-
         # Budget gate runs AFTER criteria so partial-credit visibility is preserved.
+        # (max_turns capture and the soft turn check are recorded above, before
+        # the grading switch — they are facts about the run, not verdicts.)
         self._check_run_limits(iteration=iteration)
 
         return all_passed
@@ -2780,7 +2864,8 @@ class Orchestrator:
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
-        current_score = self.result.weighted_score or 0.0
+        # Reached only from the grading path, where a score has been computed.
+        current_score = self.result.weighted_score or 0.0  # noqa: CE049 — graded here by construction
         criteria_details = [
             f"{criterion.type}: {'PASS' if result.score >= criterion.pass_threshold else 'FAIL'}"
             + f" ({result.score:.2f})"

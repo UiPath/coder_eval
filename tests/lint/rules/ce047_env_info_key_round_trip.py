@@ -59,7 +59,11 @@ def _written_keys() -> set[str]:
 class EnvInfoKeyRoundTrip(BaseRule):
     id = "CE047"
 
-    _SRC_PATH = re.compile(r"[/\\]src[/\\]coder_eval[/\\]")
+    # `(^|sep)`, not a bare leading separator: a repo-relative path
+    # ("src/coder_eval/x.py") is how every caller in tests/ addresses a file,
+    # and requiring the separator silently put those out of scope — which
+    # would make a rule-behaviour test pass while proving nothing.
+    _SRC_PATH = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")
     _written: set[str] | None = None
 
     def __init__(self, filepath: str) -> None:

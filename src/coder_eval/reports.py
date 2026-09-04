@@ -913,8 +913,10 @@ def _compute_suite_rollup(
             per_rows = [
                 row.result.success_criteria_results[i] for row in rows if i < len(row.result.success_criteria_results)
             ]
-            suite_thresholds = getattr(criterion, "suite_thresholds", None)
-            description = getattr(criterion, "description", None)
+            # Both are declared on BaseSuccessCriterion, so they are typed
+            # attributes on every union member — no string probe needed.
+            suite_thresholds = criterion.suite_thresholds
+            description = criterion.description
             try:
                 checker_cls = CriterionRegistry.get_checker(ctype)
             except KeyError:
@@ -942,7 +944,12 @@ def _compute_suite_rollup(
     # Sample up to K failed/errored rows for error analysis
     failed_samples: list[FailedRowSummary] = []
     for row in rows:
-        if row.result.final_status.category == "succeeded":
+        # "succeeded" is not the only non-failure. An UNGRADED row was never
+        # measured, so it has no failure reasons to report and listing it here
+        # (in a field documented as failed/errored rows) contradicts the same
+        # function's own rule two blocks up, where it leaves both sides of the
+        # pass rate.
+        if row.result.final_status.category in ("succeeded", "ungraded"):
             continue
         if len(failed_samples) >= _FAILED_SAMPLE_LIMIT:
             break
@@ -987,7 +994,9 @@ def _compute_suite_rollup(
         rows_failed=rows_failed,
         rows_error=rows_error,
         rows_not_graded=rows_not_graded,
-        pass_rate=rows_passed / rows_graded if rows_graded else 0.0,
+        # None, never 0.0: a suite where nothing was graded has no pass rate,
+        # and 0.0 renders as "0.0%" beside a full set of rows.
+        pass_rate=rows_passed / rows_graded if rows_graded else None,
         average_weighted_score=average_weighted_score,
         criterion_stats=criterion_stats,
         failed_samples=failed_samples,
@@ -1007,7 +1016,11 @@ def _render_suite_markdown(rollup: SuiteRollup) -> str:
             + f"{rollup.rows_failed} failed, {rollup.rows_error} errored"
             + (f", {rollup.rows_not_graded} not graded" if rollup.rows_not_graded else "")
         ),
-        f"**Pass rate**: {rollup.pass_rate * 100:.1f}%",
+        (
+            f"**Pass rate**: {rollup.pass_rate * 100:.1f}% ({rollup.rows_passed}/{rollup.rows_graded})"
+            if rollup.pass_rate is not None
+            else "**Pass rate**: n/a (no rows were graded)"
+        ),
     ]
     if rollup.average_weighted_score is not None:
         lines.append(f"**Average weighted score**: {rollup.average_weighted_score:.3f}")
@@ -1202,12 +1215,12 @@ def write_suite_rollups(
         (suite_dir / "suite.md").write_text(_render_suite_markdown(rollup), encoding="utf-8")
         rollups.append(rollup)
         logger.info(
-            "Wrote suite rollup: variant=%s suite=%s pass_rate=%.1f%% (%d/%d) gate=%s",
+            "Wrote suite rollup: variant=%s suite=%s pass_rate=%s (%d/%d) gate=%s",
             variant_id,
             suite_id,
-            rollup.pass_rate * 100,
+            f"{rollup.pass_rate * 100:.1f}%" if rollup.pass_rate is not None else "n/a",
             rollup.rows_passed,
-            rollup.rows_total,
+            rollup.rows_graded,
             "PASS" if rollup.passed else "FAIL",
         )
     return rollups

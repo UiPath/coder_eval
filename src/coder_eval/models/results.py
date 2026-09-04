@@ -890,8 +890,17 @@ class SuiteRollup(BaseModel):
     # The fourth bucket, matching RunSummary.tasks_not_graded and
     # VariantAggregate.tasks_not_graded. Defaulted so a suite.json written before
     # `execute` existed still parses.
-    rows_not_graded: int = 0
-    pass_rate: float = Field(ge=0.0, le=1.0, description="rows_passed / rows_graded (ungraded rows excluded)")
+    rows_not_graded: int = Field(default=0, ge=0)
+    pass_rate: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "rows_passed / rows_graded (ungraded rows excluded). None — never 0.0 — when nothing "
+            "was graded: a suite that was never measured has no pass rate, and 0.0 would publish "
+            "'0.0%' for it, indistinguishable from a suite where every row failed."
+        ),
+    )
     average_weighted_score: float | None = Field(
         default=None, description="Mean weighted_score across rows that produced one."
     )
@@ -914,6 +923,18 @@ class SuiteRollup(BaseModel):
             "Drives CLI exit code for dataset-backed tasks."
         ),
     )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def rows_graded(self) -> int:
+        """The denominator behind ``pass_rate``, serialized like its two twins.
+
+        ``RunSummary.tasks_graded`` exists for the same reason and states it: a
+        consumer that cannot read the denominator has to re-derive it, which is
+        precisely how two surfaces end up publishing different numbers for the
+        same suite.
+        """
+        return self.rows_total - self.rows_not_graded
 
     @model_validator(mode="after")
     def _check_row_count_invariant(self) -> SuiteRollup:

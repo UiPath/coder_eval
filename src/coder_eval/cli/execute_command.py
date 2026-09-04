@@ -196,8 +196,10 @@ def execute_command(
     ERROR / TIMEOUT / TOKEN_BUDGET_EXCEEDED and exits non-zero exactly as under
     `run`. Only the verdict is withheld, never the facts of the run.
 
-    Not supported here: --junit-xml (no verdicts to report) and simulation tasks
-    (their turn-continuation logic reads criteria results).
+    Not supported here: --junit-xml (no verdicts to report), --allow-host-grading
+    (nothing is graded, so there is no host-grading decision to make — pass it to
+    `coder-eval run --resume` or `coder-eval evaluate` instead), and simulation
+    tasks (their turn-continuation logic reads criteria results).
 
     Examples:
 
@@ -213,6 +215,8 @@ def execute_command(
         resume=resume,
         # Not exposed as a flag — a JUnit report reports verdicts, and there are none.
         junit_xml=None,
+        # Same reason: nothing is graded here, so there is no host-grading choice.
+        allow_host_grading=False,
         max_parallel=max_parallel,
         verbose=verbose,
         log_file=log_file,

@@ -1359,6 +1359,17 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     )
     rows.append(_row("Failed", [str(result.variant_aggregates[vid].tasks_failed) for vid in result.variant_ids], None))
     rows.append(_row("Errors", [str(result.variant_aggregates[vid].tasks_error) for vid in result.variant_ids], None))
+    # The fourth bucket, conditionally like its siblings elsewhere. Without it
+    # Tasks Run / Succeeded / Failed / Errors no longer sum to tasks_run on an
+    # ungraded run, with nothing on the page to say where the rest went.
+    if any(result.variant_aggregates[vid].tasks_not_graded > 0 for vid in result.variant_ids):
+        rows.append(
+            _row(
+                "Not Graded",
+                [str(result.variant_aggregates[vid].tasks_not_graded) for vid in result.variant_ids],
+                None,
+            )
+        )
 
     def _pass_rate(vid: str) -> str:
         rate = result.variant_aggregates[vid].pass_rate

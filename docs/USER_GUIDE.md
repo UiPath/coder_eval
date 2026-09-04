@@ -172,7 +172,24 @@ judges with trajectory) score exactly as they would have during the run.
 
 It writes the verdict back into the run's `task.json` and keeps the pre-grade
 record beside it as `task.execute.json`. Writing back in place is what makes
-`aggregate` free — no new flag, no second copy of the results.
+`aggregate` free — no new flag, no second copy of the results. If grading itself
+crashes, the ungraded record is put back: `ERROR` counts as complete for both
+commands, so an errored row could never be graded again.
+
+**A run directory is untrusted input.** It is a shareable artifact — the whole
+point of the detached flow is that one machine executes and another grades — and
+rebuilding the task from it means the run dir decides what runs on your host,
+with your environment. So two things are refused rather than assumed:
+
+- A recorded config that carries shell (`run_command` criteria, `agent_judge`,
+  `uipath_eval`, and on the `--copy` path `pre_run`/`post_run`) needs
+  `--allow-recorded-commands`. The message names every command first. Passing the
+  task file explicitly bypasses this — that config came from you.
+- A run made with `driver: docker` needs `--allow-host-grading`. Grading cannot
+  start a container, and such a task's criteria address container paths and
+  toolchains; on your host they score `0.0` for a run that passed. An opted-in
+  row is stamped `graded_on_host` in `environment_info` so it is never silently
+  compared with a container-graded one.
 
 Passing a task file **over** a run directory re-grades it with different
 criteria, reusing the trajectory and workspace of a run you already paid for:

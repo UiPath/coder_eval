@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.resources
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -822,17 +823,46 @@ def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
 
     "ungraded" sorts LEAST urgent (above "succeeded") — it carries no verdict, so
     any replicate that does have one must win. It therefore survives only when
-    every replicate is ungraded, which is the only case reachable today anyway
-    (``grade`` is run-level, so replicates never mix).
+    every replicate is ungraded.
+
+    Mixed sets ARE reachable, contrary to an earlier note here: ``grade`` is
+    run-level, but ``run --resume`` grades each executed-but-ungraded row
+    independently and folds a row whose grade failed back in still ungraded
+    (``cli/run_command._grade_resumed_tasks``). So one replicate can be graded
+    while its sibling is not, and the ordering above is what keeps that from
+    absorbing an unmeasured replicate into a pass.
     """
     priority = {"error": 0, "failed": 1, "succeeded": 2, "ungraded": 3}
     return min(statuses, key=lambda s: priority.get(s.category, -1))
 
 
+def _measured_scores(rows: Sequence[VariantResult] | Sequence[TaskResult]) -> list[float]:
+    """The scores of every row that was actually GRADED, errors included as 0.0.
+
+    The filter is on ``final_status.category``, deliberately not on
+    ``weighted_score is not None``. Those look equivalent and are not: an
+    ERROR / BUILD_FAILED row also has no score, and dropping it removes it from
+    BOTH sides of the mean. A nightly where one image build failed would then
+    report a HIGHER headline score than a clean one, and A/B comparisons would
+    be biased toward whichever variant errored more — the exact "bonus for
+    erroring" the run-level rates are written to avoid.
+
+    Only ``ungraded`` rows leave both sides: nothing measured them, so they are
+    not a miss. Everything else that ran and produced no score IS a miss.
+    """
+    scores: list[float] = []
+    for row in rows:
+        result = row if isinstance(row, VariantResult) else row.result
+        if result.final_status.category == "ungraded":
+            continue
+        scores.append(result.weighted_score if result.weighted_score is not None else 0.0)
+    return scores
+
+
 def _mean_graded_score(vr_list: list[VariantResult]) -> float | None:
-    """Mean ``weighted_score`` over the graded rows; ``None`` when none were graded."""
-    graded = [v.weighted_score for v in vr_list if v.weighted_score is not None]
-    return sum(graded) / len(graded) if graded else None
+    """Mean score over the measured rows; ``None`` when none were measured."""
+    scores = _measured_scores(vr_list)
+    return sum(scores) / len(scores) if scores else None
 
 
 def _mean_reference_similarity(reps: list[TaskResult]) -> float | None:
@@ -844,6 +874,37 @@ def _mean_reference_similarity(reps: list[TaskResult]) -> float | None:
         if cr.criterion_type == "reference_comparison"
     ]
     return sum(scores) / len(scores) if scores else None
+
+
+def _fold_replicates(task_id: str, variant_id: str, reps: list[TaskResult]) -> VariantResult:
+    """Fold every replicate of one (task, variant) into a single VariantResult.
+
+    Extracted from ``aggregate_results``, which was already the largest function
+    in the module before the ungraded bucket added another filter to it.
+    """
+    # Ungraded replicates — and ONLY those — drop out entirely rather than
+    # contributing 0.0: `or 0.0` would average a clean `execute` run down to a
+    # real-looking zero, while dropping an errored one would pay it a bonus.
+    scores = _measured_scores(reps)
+    non_errored = [r for r in reps if r.result.final_status.category != "error"]
+    durations = [r.result.duration_seconds for r in non_errored]
+    iter_counts = [r.result.iteration_count for r in reps if r.result.iteration_count is not None]
+    asst_turns = [r.result.total_assistant_turns for r in reps if r.result.total_assistant_turns is not None]
+    token_vals = [r.result.total_token_usage.total_tokens for r in reps if r.result.total_token_usage is not None]
+
+    return VariantResult(
+        variant_id=variant_id,
+        task_id=task_id,
+        weighted_score=sum(scores) / len(scores) if scores else None,
+        final_status=_pick_worst_status([r.result.final_status for r in reps]),
+        duration_seconds=sum(durations),
+        total_tokens=sum(token_vals) if token_vals else None,
+        iteration_count=round(sum(iter_counts) / len(iter_counts)) if iter_counts else None,
+        total_assistant_turns=round(sum(asst_turns) / len(asst_turns)) if asst_turns else None,
+        reference_similarity=_mean_reference_similarity(reps),
+        replicate_index=0,  # aggregate — points at first replicate for link rendering
+        replicate_count=len(reps),
+    )
 
 
 def aggregate_results(
@@ -878,48 +939,32 @@ def aggregate_results(
     # Collect per-replicate scores keyed variant_id → task_id → [scores] for stats rendering.
     per_replicate_scores: dict[str, dict[str, list[float]]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
-        per_replicate_scores.setdefault(variant_id, {})[task_id] = [
-            r.result.weighted_score for r in reps if r.result.weighted_score is not None
-        ]
+        per_replicate_scores.setdefault(variant_id, {})[task_id] = _measured_scores(reps)
 
     task_variants: dict[str, list[VariantResult]] = {}
     for (task_id, variant_id), reps in task_variant_reps.items():
-        # Ungraded replicates drop out entirely rather than contributing 0.0 —
-        # `or 0.0` would average a clean `execute` run down to a real-looking zero.
-        scores = [r.result.weighted_score for r in reps if r.result.weighted_score is not None]
-        non_errored = [r for r in reps if r.result.final_status.category != "error"]
-        durations = [r.result.duration_seconds for r in non_errored]
-        statuses = [r.result.final_status for r in reps]
-        iter_counts = [r.result.iteration_count for r in reps if r.result.iteration_count is not None]
-        asst_turns = [r.result.total_assistant_turns for r in reps if r.result.total_assistant_turns is not None]
-        token_vals = [r.result.total_token_usage.total_tokens for r in reps if r.result.total_token_usage is not None]
-        ref_similarity = _mean_reference_similarity(reps)
-        final_status = _pick_worst_status(statuses)
-
-        variant_result = VariantResult(
-            variant_id=variant_id,
-            task_id=task_id,
-            weighted_score=sum(scores) / len(scores) if scores else None,
-            final_status=final_status,
-            duration_seconds=sum(durations),
-            total_tokens=sum(token_vals) if token_vals else None,
-            iteration_count=round(sum(iter_counts) / len(iter_counts)) if iter_counts else None,
-            total_assistant_turns=round(sum(asst_turns) / len(asst_turns)) if asst_turns else None,
-            reference_similarity=ref_similarity,
-            replicate_index=0,  # aggregate — points at first replicate for link rendering
-            replicate_count=len(reps),
-        )
-        task_variants.setdefault(task_id, []).append(variant_result)
+        task_variants.setdefault(task_id, []).append(_fold_replicates(task_id, variant_id, reps))
 
     # Build task summaries
     task_summaries: list[TaskExperimentSummary] = []
     for task_id, variants in task_variants.items():
         # Only graded variants can win or set a spread. Including ungraded ones
         # at 0.0 would name an arbitrary "best" among scores that do not exist.
+        #
+        # When NOTHING was scored there is no winner, and the fallback must not
+        # invent one: `variants[0]` is whichever arm the input happened to list
+        # first, so swapping the two inputs flipped the reported winner — with
+        # `is_tie=False` asserting it was a real result. Sort by variant_id (so
+        # the field is at least deterministic) and mark it a tie among all arms,
+        # which is what "no arm outscored another" actually means.
         scored = [(v, v.weighted_score) for v in variants if v.weighted_score is not None]
-        best = max(scored, key=lambda pair: (pair[1], pair[0].variant_id))[0] if scored else variants[0]
+        if scored:
+            best = max(scored, key=lambda pair: (pair[1], pair[0].variant_id))[0]
+            top_count = sum(1 for _, s in scored if s == best.weighted_score)
+        else:
+            best = min(variants, key=lambda v: v.variant_id)
+            top_count = len(variants)
         scores = [s for _, s in scored]
-        top_count = sum(1 for _, s in scored if s == best.weighted_score)
         rep_counts = {v.replicate_count for v in variants}
         task_summaries.append(
             TaskExperimentSummary(

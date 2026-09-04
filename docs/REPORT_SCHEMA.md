@@ -235,8 +235,9 @@ the same weighted armed gate as a native fail),
 ## `variant.json` — `VariantAggregate`
 
 A single aggregate (not wrapped): `variant_id`, `tasks_run`, `tasks_succeeded`,
-`tasks_failed`, `tasks_error`, `tasks_not_graded` (same sum-to-`tasks_run` invariant), `average_score`
-(the mean over **graded** rows only),
+`tasks_failed`, `tasks_error`, `tasks_not_graded` (same sum-to-`tasks_run` invariant),
+`average_score` (`float | None` — the mean over **measured** rows: an errored row counts
+as `0.0`, an ungraded one leaves both sides; `null` when nothing was measured),
 `average_duration`, `total_tokens`, `replicate_count`, `tasks_token_budget_exceeded`,
 `tasks_cost_budget_exceeded`.
 
@@ -247,7 +248,8 @@ The cross-variant summary:
 - `experiment_id`, `description`, `variant_ids`.
 - `task_summaries: list[TaskExperimentSummary]` — each
   `{task_id, variant_results, best_variant, is_tie, score_spread, replicate_count}`,
-  where each `VariantResult` carries `{variant_id, task_id, weighted_score,
+  where each `VariantResult` carries `{variant_id, task_id, weighted_score` (`float |
+  None` — `null` on an ungraded or errored row)`,
   final_status, duration_seconds, total_tokens, iteration_count,
   total_assistant_turns, reference_similarity, replicate_index, replicate_count}`.
 - `variant_aggregates: dict[str, VariantAggregate]` — keyed by variant id.
@@ -267,7 +269,8 @@ Written for dataset-backed suites; its `passed` flag drives the CI exit code.
 | --- | --- | --- |
 | `suite_id` / `variant_id` | `str` | Identity. |
 | `rows_total` / `rows_passed` / `rows_failed` / `rows_error` / `rows_not_graded` | `int` | Row counts. **Invariant:** the four category counts sum to `rows_total`. `rows_not_graded` defaults to `0`. |
-| `pass_rate` | `float` | `rows_passed / (rows_total - rows_not_graded)` — ungraded rows leave both sides, matching `RunSummary.pass_rate`. |
+| `pass_rate` | `float \| null` | `rows_passed / rows_graded` — ungraded rows leave both sides, matching `RunSummary.pass_rate`. `null` when nothing was graded (0/0 is unknown, not 0%). |
+| `rows_graded` | `int` | `rows_total - rows_not_graded`. The denominator above, serialized so a consumer never has to re-derive it. |
 | `average_weighted_score` | `float \| null` | Mean row score. |
 | `criterion_stats` | `list[{criterion_type, rows_evaluated, average_score, error_count}]` | Per-criterion summary. |
 | `failed_samples` | `list[FailedRowSummary]` | Capped at 20 (`{row_id, task_id, final_status, weighted_score, failure_reasons, error_message, task_json_relpath, replicate_index}`). |

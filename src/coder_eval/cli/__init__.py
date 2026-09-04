@@ -50,7 +50,7 @@ def main(
     - run: Execute evaluation tasks and grade them
     - execute: Execute evaluation tasks WITHOUT grading them
     - plan: Validate task files (dry-run)
-    - evaluate: Run criteria against a directory without an agent
+    - evaluate: Grade a directory against a task, or re-grade a finished run
     - report: Display or export evaluation reports
     - aggregate: Rebuild run.json/run.md from finalized task.json files
     """

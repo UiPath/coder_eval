@@ -132,16 +132,43 @@ def test_source_fallback_is_loud(tmp_path: Path, caplog: pytest.LogCaptureFixtur
     assert "NOT reapplied" in caplog.text
 
 
-def test_shell_commands_from_a_run_dir_config_are_announced(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_shell_commands_from_a_run_dir_config_are_refused_by_default(tmp_path: Path) -> None:
     """A run dir is a shareable artifact, and rebuilding from it decides what the
-    grader executes. Intended, but never silent."""
+    grader executes with the grader's credentials.
+
+    A warning is not a control — it is printed as the command is already being
+    prepared. So the default is REFUSAL, and the message names both the commands
+    and the way to accept them."""
+    resolved = _task(command="echo surprising").model_dump(mode="json")
+    prior = _result(task_config=TaskConfigRecord(resolved=resolved, source_yaml="raw", source_file=None))
+
+    with pytest.raises(RegradeError) as exc:
+        task_from_prior(prior, tmp_path)
+
+    assert "echo surprising" in str(exc.value)
+    assert "--allow-recorded-commands" in str(exc.value)
+
+
+def test_the_opt_in_accepts_them_and_still_names_them(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Accepted is not the same as invisible: the opt-in still logs what will run."""
     resolved = _task(command="echo surprising").model_dump(mode="json")
     prior = _result(task_config=TaskConfigRecord(resolved=resolved, source_yaml="raw", source_file=None))
 
     with caplog.at_level(logging.WARNING):
-        task_from_prior(prior, tmp_path)
+        task, _ = task_from_prior(prior, tmp_path, allow_recorded_commands=True)
 
+    assert task.task_id
     assert "echo surprising" in caplog.text
+
+
+def test_a_config_with_no_shell_needs_no_opt_in(tmp_path: Path) -> None:
+    """The common case — execute then evaluate your own file/JSON criteria — is
+    unaffected, or the gate would just be turned off."""
+    resolved = _task().model_dump(mode="json")
+    prior = _result(task_config=TaskConfigRecord(resolved=resolved, source_yaml="raw", source_file=None))
+
+    task, _ = task_from_prior(prior, tmp_path)
+    assert task.task_id
 
 
 # --------------------------------------------------------------------------

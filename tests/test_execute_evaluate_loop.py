@@ -358,3 +358,71 @@ def test_grading_the_same_run_twice_reaches_the_same_verdict(tmp_path: Path) -> 
     assert second["sandbox_path"] == first["sandbox_path"], "the artifacts pointer must survive a re-grade"
     # The pre-grade record is still the ORIGINAL ungraded one, not the first grade's.
     assert _row(task_dir, "task.execute.json")["final_status"] == FinalStatus.NOT_GRADED.value
+
+
+# --------------------------------------------------------------------------
+# `execute` withholds the verdict, never the facts of the run
+# --------------------------------------------------------------------------
+
+
+def test_execute_records_max_turns_exhausted_exactly_as_run_does(tmp_path: Path) -> None:
+    """`max_turns_exhausted` is a fact about the RUN, not a verdict.
+
+    It used to be captured AFTER the grading switch's early return, so under
+    `execute` it was never recorded at all: the row finalized NOT_GRADED and the
+    command exited 0 where `run` reported MAX_TURNS_EXHAUSTED and exited 1 — for
+    identical agent output. `_seed_from_prior_result` cannot restore a fact the
+    execute phase never captured, so a later `evaluate` inherited the wrong
+    terminal status too.
+    """
+    from coder_eval.streaming.collector import EventCollector
+
+    # One turn that reports the cap was hit, on both paths.
+    original = EventCollector.build_turn_record
+
+    def _exhausted(self, *args: Any, **kwargs: Any):
+        record = original(self, *args, **kwargs)
+        record.max_turns_exhausted = True
+        return record
+
+    def _run(command: str, run_dir: Path) -> Any:
+        with patch.object(EventCollector, "build_turn_record", _exhausted):
+            return runner.invoke(app, [command, str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+
+    graded_dir = tmp_path / "graded"
+    _run("run", graded_dir)
+    graded = _row(_task_dir(graded_dir))
+
+    executed_dir = tmp_path / "executed"
+    _run("execute", executed_dir)
+    executed = _row(_task_dir(executed_dir))
+
+    assert graded["max_turns_exhausted"] is True, "the fixture must actually exhaust turns under `run`"
+    assert executed["max_turns_exhausted"] is True, (
+        "`execute` dropped a fact about the run. Only the verdict is withheld."
+    )
+    assert executed["final_status"] == FinalStatus.MAX_TURNS_EXHAUSTED.value
+
+
+def test_a_detached_grade_keeps_the_runs_api_routing_not_the_graders(tmp_path: Path) -> None:
+    """`_seed_from_prior_result`'s contract is that the PRIOR run wins on
+    environment_info. The route recorder ran after the seeding and overwrote
+    `api_routing` with the grading host's, leaving a self-contradictory record —
+    a direct route named beside the run's stale bedrock fields."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+
+    before = _row(task_dir)["environment_info"]
+    before["api_routing"] = "a_backend_this_host_does_not_use"
+    row = _row(task_dir)
+    row["environment_info"] = before
+    (task_dir / "task.json").write_text(json.dumps(row), encoding="utf-8")
+
+    _invoke(["evaluate", str(task_dir)])
+    after = _row(task_dir)["environment_info"]
+
+    assert after["api_routing"] == "a_backend_this_host_does_not_use", (
+        "the grade overwrote the RUN's recorded routing with the grading host's"
+    )
+    assert after.get("graded_by_api_routing"), "the grader's own route must still be recorded, just not in place"

@@ -346,7 +346,19 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
-        # Every task the variant ran is in the denominator, errors included.
+        # Row: Not Graded — conditional, like the budget sub-rows above. Without
+        # it Tasks Run / Succeeded / Failed / Errors stop summing to tasks_run on
+        # an ungraded run, with nothing in the table to say where the rest went.
+        if any(result.variant_aggregates[vid].tasks_not_graded > 0 for vid in result.variant_ids):
+            row = "| Not Graded"
+            for vid in result.variant_ids:
+                row += f" | {result.variant_aggregates[vid].tasks_not_graded}"
+            if show_p_values:
+                row += " | —"
+            lines.append(row + " |")
+
+        # Every task the variant GRADED is in the denominator, errors included;
+        # ungraded rows leave both sides.
         row = "| Pass Rate"
         for vid in result.variant_ids:
             rate = result.variant_aggregates[vid].pass_rate

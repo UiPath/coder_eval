@@ -3608,3 +3608,159 @@ class TestCE045PluginPathIsAPluginRoot:
             encoding="utf-8",
         )
         assert not self._offending_paths_in(task)
+
+
+class TestCE047EnvInfoKeyRoundTrip:
+    """CE047 fires when an environment_info key is read with no writer anywhere.
+
+    The rule shipped with only the whole-tree "finds nothing" scan, which cannot
+    tell a rule that is CORRECT from one that can never fire — the exact failure
+    its own docstring is about. The path form matters too: the rule scopes itself
+    with a leading-separator regex, so a repo-relative path must still be in
+    scope or a house-style test would pass vacuously.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestrator.py"):
+        import ast
+
+        from tests.lint.rules.ce047_env_info_key_round_trip import EnvInfoKeyRoundTrip
+
+        return EnvInfoKeyRoundTrip(filepath).check(ast.parse(src))
+
+    def test_flags_a_get_with_no_writer(self):
+        assert self._run('x = self.result.environment_info.get("no_such_key_anywhere")')
+
+    def test_flags_a_subscript_read_with_no_writer(self):
+        assert self._run('x = self.result.environment_info["no_such_key_anywhere"]')
+
+    def test_allows_a_key_that_is_written_in_src(self):
+        # reference_digest gained a writer; that is the whole point of the rule.
+        assert not self._run('x = self.result.environment_info.get("reference_digest")')
+
+    def test_allows_the_graded_by_prefix(self):
+        assert not self._run('x = self.result.environment_info.get("graded_by_git_commit")')
+
+    def test_ignores_a_computed_key(self):
+        assert not self._run("x = self.result.environment_info.get(key)")
+
+    def test_is_out_of_scope_outside_src(self):
+        assert not self._run('x = r.environment_info.get("no_such_key_anywhere")', filepath="tests/test_thing.py")
+
+    def test_scope_is_the_same_for_relative_and_absolute_paths(self):
+        """A repo-relative path must be in scope, or every house-style test lies."""
+        src = 'x = self.result.environment_info.get("no_such_key_anywhere")'
+        relative = self._run(src, filepath="src/coder_eval/orchestrator.py")
+        absolute = self._run(src, filepath="/home/u/repo/src/coder_eval/orchestrator.py")
+        assert bool(relative) == bool(absolute) is True
+
+
+class TestCE048NoInProcessTyperCommandCall:
+    """CE048 fires on an in-process call to a Typer command function."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "tests/test_thing.py"):
+        import ast
+
+        from tests.lint.rules.ce048_no_in_process_typer_command_call import NoInProcessTyperCommandCall
+
+        return NoInProcessTyperCommandCall(filepath).check(ast.parse(src))
+
+    def test_flags_calling_a_command_function_directly(self):
+        assert self._run("from coder_eval.cli.evaluate_command import evaluate_command\nevaluate_command(x)")
+
+    def test_allows_the_plain_python_entry_point(self):
+        assert not self._run("from coder_eval.cli.evaluate_command import run_evaluation\nrun_evaluation(x=1)")
+
+
+class TestCE049NoScoreOrZero:
+    """CE049 flags coalescing an unmeasured score into a real-looking number."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce049_no_score_or_zero import NoScoreOrZero
+
+        return NoScoreOrZero("src/coder_eval/orchestrator.py").check(ast.parse(src))
+
+    def test_flags_weighted_score_or_zero(self):
+        assert self._run("x = float(result.weighted_score or 0.0)")
+
+    def test_flags_a_bare_score_name_and_an_int_literal(self):
+        assert self._run("x = score or 0")
+
+    def test_flags_a_rate(self):
+        assert self._run("x = summary.pass_rate or 0.0")
+
+    def test_allows_an_explicit_none_branch(self):
+        assert not self._run("x = 0.0 if result.weighted_score is None else result.weighted_score")
+
+    def test_allows_a_non_numeric_fallback(self):
+        assert not self._run('x = result.weighted_score or "n/a"')
+
+    def test_ignores_an_unrelated_name(self):
+        assert not self._run("x = retry_count or 0")
+
+
+class TestCE050NoUnionGetattrProbe:
+    """CE050 flags an untyped getattr probe for a discriminated-union field."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestration/regrade.py"):
+        import ast
+
+        from tests.lint.rules.ce050_no_union_getattr_probe import NoUnionGetattrProbe
+
+        return NoUnionGetattrProbe(filepath).check(ast.parse(src))
+
+    def test_flags_the_command_probe(self):
+        assert self._run('cmd = getattr(c, "command", None)')
+
+    def test_allows_isinstance_narrowing(self):
+        assert not self._run("cmd = c.command if isinstance(c, RunCommandCriterion) else None")
+
+    def test_ignores_a_name_no_union_member_declares(self):
+        assert not self._run('x = getattr(obj, "definitely_not_a_criterion_field", None)')
+
+    def test_ignores_a_computed_key(self):
+        assert not self._run("x = getattr(obj, name, None)")
+
+    def test_is_out_of_scope_outside_src(self):
+        assert not self._run('cmd = getattr(c, "command", None)', filepath="tests/test_thing.py")
+
+
+class TestCE051NoDriverOverride:
+    """CE051 flags a silent sandbox-driver rewrite."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestration/regrade.py"):
+        import ast
+
+        from tests.lint.rules.ce051_no_driver_override import NoDriverOverride
+
+        return NoDriverOverride(filepath).check(ast.parse(src))
+
+    def test_flags_a_spread_model_validate(self):
+        assert self._run('SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})')
+
+    def test_flags_model_copy_update(self):
+        assert self._run('cfg.model_copy(update={"driver": "tempdir"})')
+
+    def test_flags_setattr(self):
+        assert self._run('setattr(cfg, "driver", "tempdir")')
+
+    def test_flags_attribute_assignment(self):
+        assert self._run('cfg.driver = "tempdir"')
+
+    def test_allows_a_config_built_from_scratch(self):
+        assert not self._run('SandboxConfig.model_validate({"driver": "tempdir"})')
+
+    def test_allows_carrying_a_config_forward_unchanged(self):
+        assert not self._run("task.sandbox.model_copy(deep=True)")
+
+    def test_is_out_of_scope_in_the_model_module(self):
+        assert not self._run(
+            'cfg.model_copy(update={"driver": "tempdir"})',
+            filepath="src/coder_eval/models/sandbox.py",
+        )

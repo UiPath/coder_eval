@@ -224,6 +224,7 @@ def _option_names(command: str) -> set[str]:
 # or consciously listed below as a deliberate omission.
 _DELIBERATELY_ABSENT_FROM_EXECUTE = {
     "--junit-xml",  # a report of verdicts, and there are none
+    "--allow-host-grading",  # decides how a GRADE runs; execute never grades
 }
 
 

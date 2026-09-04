@@ -28,6 +28,9 @@ from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputT
 from tests.lint.rules.ce046_env_info_spreads_super import EnvInfoSpreadsSuper
 from tests.lint.rules.ce047_env_info_key_round_trip import EnvInfoKeyRoundTrip
 from tests.lint.rules.ce048_no_in_process_typer_command_call import NoInProcessTyperCommandCall
+from tests.lint.rules.ce049_no_score_or_zero import NoScoreOrZero
+from tests.lint.rules.ce050_no_union_getattr_probe import NoUnionGetattrProbe
+from tests.lint.rules.ce051_no_driver_override import NoDriverOverride
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -79,6 +82,9 @@ ALL_RULES: list[RuleClass] = [
     EnvInfoSpreadsSuper,
     EnvInfoKeyRoundTrip,
     NoInProcessTyperCommandCall,
+    NoScoreOrZero,
+    NoUnionGetattrProbe,
+    NoDriverOverride,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

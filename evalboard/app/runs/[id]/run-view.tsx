@@ -6,7 +6,7 @@ import type { ActivationScore, TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
 import { passBarClass, passClass } from "@/lib/pass-rate";
-import { perTaskPassCounts, statusCategory } from "@/lib/status";
+import { assertNever, perTaskPassCounts, statusCategory } from "@/lib/status";
 import {
     DEFAULT_VARIANT_ID,
     taskVariantKey,
@@ -41,6 +41,11 @@ export interface RunMetrics {
     // Rows that ran but were never scored (`coder-eval execute`). Excluded from
     // both sides of `pct`, so a fully ungraded run reports 0 of 0, not 0%.
     ungraded: number;
+    // `total - ungraded`: the pass-rate denominator. Carried on the metrics
+    // rather than re-derived at each tile — the tile used to divide by `graded`
+    // while LABELLING the result `passed / total`, so 8 of 10 graded beside 2
+    // ungraded rendered "80%  8 / 12".
+    graded: number;
     failedTotal: number;
     pct: number;
     // Per-task view of pass rate for repeated runs: distinct task_ids, and how
@@ -81,15 +86,30 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
     const costSamples: number[] = [];
     const durSamples: number[] = [];
     for (const t of tasks) {
+        // A `switch` with an assertNever default, not an if/else chain with a
+        // catch-all `else failed++`. That chain is what made adding "ungraded"
+        // a SILENT change: anything not a pass or an error was counted as a
+        // failure and kept in the denominator, and no compiler saw it. With
+        // this shape a fifth StatusCategory fails `tsc --noEmit` right here.
         const cat = statusCategory(t.status);
-        if (cat === "passed") passed++;
-        else if (cat === "error") errored++;
-        // An ungraded row (`coder-eval execute`) was never scored. It leaves
-        // BOTH sides of the rate — the `else failed++` below would otherwise
-        // count it as a failure AND keep it in the denominator, rendering a
-        // clean execute run as 0% pass, N failed.
-        else if (cat === "ungraded") ungraded++;
-        else failed++;
+        switch (cat) {
+            case "passed":
+                passed++;
+                break;
+            case "error":
+                errored++;
+                break;
+            case "ungraded":
+                // Never scored, so it leaves BOTH sides of the rate.
+                ungraded++;
+                break;
+            case "failed":
+            case "unknown":
+                failed++;
+                break;
+            default:
+                assertNever(cat);
+        }
         if (t.matureSkipped) continue;
         if (t.totalCostUsd != null) {
             cost += t.totalCostUsd;
@@ -107,11 +127,15 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
         failed,
         errored,
         ungraded,
+        graded,
         failedTotal: failed + errored,
         pct: graded ? (passed / graded) * 100 : 0,
         ...(() => {
             // Per-task rollup (any replicate passed → task passed) via the shared
             // helper, so the run tile and the grid badge apply the same rule.
+            // perTaskPassCounts already drops ungraded replicates, so a task
+            // whose replicates were all ungraded is absent from the map — which
+            // is what keeps it out of BOTH taskTotal and taskPassed.
             const perTask = perTaskPassCounts(tasks);
             const taskPassed = [...perTask.values()].filter((n) => n > 0).length;
             return {
@@ -555,11 +579,15 @@ export function RunView({
                         const passed = hasRepeats
                             ? metrics.taskPassed
                             : metrics.passed;
+                        // metrics.graded, NOT metrics.total: `pct` divides by
+                        // the graded count, so labelling it with every row that
+                        // ran renders a mismatched pair (and a red 0% next to
+                        // "0 / 12" for a clean `coder-eval execute` run).
                         const totalN = hasRepeats
                             ? metrics.taskTotal
-                            : metrics.total;
-                        // null when nothing ran, so an empty run reads neutral
-                        // rather than as a measured 0%.
+                            : metrics.graded;
+                        // null when nothing was MEASURED, so an empty or fully
+                        // ungraded run reads neutral rather than as a 0%.
                         const tone = totalN > 0 ? pct : null;
                         return (
                             <>

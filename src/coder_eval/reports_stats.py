@@ -348,15 +348,22 @@ def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]
             s = series.get(vr.variant_id)
             if s is None:  # a task result for a variant not in variant_ids
                 continue
-            if vr.weighted_score is None:
-                # Ungraded row: no score exists, and appending 0.0 would enter a
-                # fabricated data point into every statistic below. Skip the row
-                # WHOLE rather than just its score — paired_comparison pairs the
-                # series across variants by index, so dropping one field would
-                # misalign them. `grade` is run-level, so an experiment is either
-                # entirely graded or entirely ungraded; this never splits a pair.
-                continue
-            s.scores.append(vr.weighted_score)
+            # Only the SCORE is dropped when there is none — never the row.
+            # Duration, tokens and assistant turns are facts about the run that
+            # grading has nothing to do with, and `execute`'s stated contract is
+            # that only the verdict is withheld. Skipping the row whole made an
+            # all-ungraded experiment render `Avg Duration | N/A | N/A` with the
+            # Tokens and Assistant Turns rows absent entirely.
+            #
+            # The series are consumed independently (each statistic reads one
+            # list), so they need not be index-aligned with each other;
+            # `paired_comparison` pairs across VARIANTS by task id, not by index
+            # into these lists. An earlier note here claimed an experiment is
+            # either entirely graded or entirely ungraded because `grade` is
+            # run-level — `run --resume` grades rows independently and folds a
+            # failed one back ungraded, so mixed experiments are real.
+            if vr.weighted_score is not None:
+                s.scores.append(vr.weighted_score)
             s.durations.append(vr.duration_seconds / vr.replicate_count)
             if vr.total_tokens is not None:
                 s.tokens.append(float(vr.total_tokens))

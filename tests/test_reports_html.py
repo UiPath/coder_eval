@@ -1261,3 +1261,79 @@ def test_status_badge_unknown_string_is_neutral():
     badge = _status_badge("LEGACY_UNKNOWN")
     assert 'class="badge neutral"' in badge
     assert "LEGACY_UNKNOWN" in badge
+
+
+class TestUngradedRenderingInHtml:
+    """The four ungraded changes to reports_html, only one of which had a test.
+
+    An all-ungraded ExperimentResult exercises the variant tile, the variant
+    table's denominator, `_variant_stddev_lines`' None filter and the per-task
+    comparison's switch to `format_score` in one pass.
+    """
+
+    @staticmethod
+    def _all_ungraded(variant_ids: list[str]) -> ExperimentResult:
+        summaries = [
+            TaskExperimentSummary(
+                task_id="t0",
+                variant_results=[
+                    VariantResult(
+                        variant_id=vid,
+                        task_id="t0",
+                        weighted_score=None,
+                        final_status=FinalStatus.NOT_GRADED,
+                        duration_seconds=1.0,
+                        total_tokens=100,
+                        iteration_count=1,
+                        total_assistant_turns=1,
+                    )
+                    for vid in variant_ids
+                ],
+                best_variant=variant_ids[0],
+                is_tie=True,
+                score_spread=0.0,
+            )
+        ]
+        aggregates = {
+            vid: VariantAggregate(
+                variant_id=vid,
+                tasks_run=3,
+                tasks_succeeded=0,
+                tasks_failed=0,
+                tasks_error=0,
+                tasks_not_graded=3,
+                average_score=None,
+                average_duration=12.0,
+            )
+            for vid in variant_ids
+        }
+        return ExperimentResult(
+            experiment_id="exp-ungraded",
+            description="d",
+            variant_ids=variant_ids,
+            task_summaries=summaries,
+            variant_aggregates=aggregates,
+            total_duration_seconds=30.0,
+        )
+
+    def test_the_variant_tile_names_the_fourth_bucket(self):
+        """Rendered only when non-zero, so an off-by-one on `> 0` is invisible on
+        a graded run — this is the only place it shows."""
+        html = HTMLReportGenerator.generate_experiment_html(self._all_ungraded(["v1"]), None)
+        assert "Not Graded" in html
+
+    def test_a_graded_run_does_not_grow_the_tile(self):
+        html = HTMLReportGenerator.generate_experiment_html(_experiment_result(["v1"]), None)
+        assert "Not Graded" not in html
+
+    def test_the_aggregate_table_accounts_for_every_task(self):
+        """Tasks Run / Succeeded / Failed / Errors stopped summing to tasks_run
+        on an ungraded run, with nothing on the page to say where the rest went."""
+        html = HTMLReportGenerator.generate_experiment_html(self._all_ungraded(["v1", "v2"]), None)
+        assert "<td>Not Graded</td>" in html
+
+    def test_no_surface_publishes_a_fabricated_zero(self):
+        """A run nothing measured must read `n/a`, never `0.0` or `0.0%`."""
+        html = HTMLReportGenerator.generate_experiment_html(self._all_ungraded(["v1"]), None)
+        assert "n/a" in html
+        assert "0.0%" not in html

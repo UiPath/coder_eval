@@ -27,7 +27,7 @@ from coder_eval.models import (
     TaskConfigRecord,
     TaskDefinition,
 )
-from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME
+from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME, write_text_atomic
 from coder_eval.sandbox import Sandbox
 
 
@@ -53,7 +53,13 @@ def load_prior_result(run_dir: Path) -> EvaluationResult:
         raise RegradeError(f"{path} is not a readable EvaluationResult: {e}") from e
 
 
-def task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinition, str]:
+def task_from_prior(
+    prior: EvaluationResult,
+    run_dir: Path,
+    *,
+    allow_recorded_commands: bool = False,
+    include_hooks: bool = True,
+) -> tuple[TaskDefinition, str]:
     """Rebuild the executed task from the run's own recorded config.
 
     Rebuilding from ``task_config.resolved`` rather than re-reading the YAML is
@@ -65,6 +71,9 @@ def task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinit
     Falls back to the source YAML only when ``resolved`` will not validate (a
     schema change since the run), and says so loudly — a quiet fallback would
     reintroduce exactly the drift above.
+
+    ``allow_recorded_commands`` gates the shell half. See
+    :func:`check_embedded_commands`.
     """
     record = prior.task_config
     if record is None:
@@ -75,35 +84,98 @@ def task_from_prior(prior: EvaluationResult, run_dir: Path) -> tuple[TaskDefinit
     try:
         task = TaskDefinition.model_validate(record.resolved)
     except ValueError as e:
-        return _fall_back_to_source(record, run_dir, e)
-    warn_on_embedded_commands(task, run_dir)
+        return _fall_back_to_source(
+            record, run_dir, e, allow_recorded_commands=allow_recorded_commands, include_hooks=include_hooks
+        )
+    check_embedded_commands(task, run_dir, allow_recorded_commands=allow_recorded_commands, include_hooks=include_hooks)
     return task, record.source_yaml
 
 
-def warn_on_embedded_commands(task: TaskDefinition, run_dir: Path) -> None:
-    """Name the shell commands a rebuilt config will execute on this host.
+def embedded_commands(task: TaskDefinition, *, include_hooks: bool = True) -> list[str]:
+    """Every shell command a rebuilt task definition would run on this host.
+
+    ``include_hooks`` covers ``pre_run`` / ``post_run``. They are SKIPPED on the
+    in-place grading path (``Sandbox.was_adopted`` — re-running them would
+    overwrite the agent's deliverables before the criteria read them), so on that
+    path they are not a capability the run dir has; on the ``--copy`` path they
+    are.
+
+    ``isinstance`` narrowing, never ``getattr(c, "command", None)``: an untyped
+    string probe over a discriminated union is invisible to pyright, so renaming
+    a field silently degrades the only guard on this path to a permanent no-op —
+    the exact hazard ``models/tasks.py`` already documents in prose. It also
+    cannot reach ``agent_judge``, whose ``bash`` tooling is the widest blast
+    radius of the three.
+    """
+    from coder_eval.models import AgentJudgeCriterion, RunCommandCriterion, UiPathEvalCriterion
+
+    commands: list[str] = []
+    for c in task.success_criteria:
+        if isinstance(c, RunCommandCriterion):
+            commands.append(c.command)
+        elif isinstance(c, AgentJudgeCriterion):
+            # No command string of its own: it spawns a Claude Code SDK agent
+            # with tool access (Bash included) under the grader's credentials,
+            # which is a strictly wider capability than one shell line.
+            commands.append(f"<agent_judge: spawns a tool-using agent — {c.description}>")
+        elif isinstance(c, UiPathEvalCriterion):
+            # Builds and shells `uv run uipath eval …`. Every argument is
+            # shlex-quoted, so this is disclosure rather than injection — but it
+            # is still a subprocess the recorded config chose to start.
+            commands.append(f"uv run uipath eval {c.agent_name} {c.eval_set}")
+    if include_hooks:
+        commands += [c.command for c in task.pre_run] + [c.command for c in task.post_run]
+    return commands
+
+
+def check_embedded_commands(
+    task: TaskDefinition, run_dir: Path, *, allow_recorded_commands: bool, include_hooks: bool = True
+) -> None:
+    """Refuse — or at minimum name — the shell a rebuilt config will run here.
 
     ``task_config.resolved`` is data that travels inside a run directory, and a
     run directory is a shareable artifact — the detached-grading flow exists so
     one machine can execute and another can grade. Rebuilding the task from it
     means the *run dir* decides what ``run_command`` criteria the grader runs,
-    with the grader's environment. That is the intended behavior (it is how the
-    grade reproduces the executed config), but it must not be invisible: print
-    what will run so an unexpected command is noticed before it executes.
+    with the grader's environment (API keys, cloud credentials, SSH agent).
+
+    A warning is not a control: it is printed as the command is already being
+    prepared, and nobody reads a log line fast enough to stop it. So a recorded
+    config that carries shell is REFUSED unless the operator opted in. The common
+    case — ``execute`` then ``evaluate`` on your own machine — is unaffected
+    whenever the criteria are file/JSON checks, and the opt-in is one flag.
+
+    Passing the task file explicitly (``evaluate <task.yaml> <run_dir>``) also
+    bypasses this: that config came from the operator, not from the artifact.
     """
-    commands = [cmd for c in task.success_criteria if isinstance(cmd := getattr(c, "command", None), str)]
-    commands += [c.command for c in task.pre_run] + [c.command for c in task.post_run]
+    commands = embedded_commands(task, include_hooks=include_hooks)
     if not commands:
         return
+    rendered = "; ".join(commands)
+    if not allow_recorded_commands:
+        raise RegradeError(
+            f"The config recorded in {run_dir / TASK_JSON_FILENAME} would run {len(commands)} shell "
+            + f"command(s) on this host with your environment: {rendered}\n"
+            + "A run directory is a shareable artifact, so its recorded config is untrusted input. "
+            + "Re-run with --allow-recorded-commands to accept them, or pass the task file "
+            + "explicitly: coder-eval evaluate <task.yaml> <run_dir>"
+        )
     logger.warning(
         "Grading %s runs %d shell command(s) taken from that run's own recorded config: %s",
         run_dir,
         len(commands),
-        "; ".join(commands),
+        rendered,
     )
 
 
-def _fall_back_to_source(record: TaskConfigRecord, run_dir: Path, e: ValueError) -> tuple[TaskDefinition, str]:
+def _fall_back_to_source(
+    record: TaskConfigRecord,
+    run_dir: Path,
+    e: ValueError,
+    *,
+    allow_recorded_commands: bool,
+    include_hooks: bool = True,
+) -> tuple[TaskDefinition, str]:
     """The loud source-YAML fallback for a resolved config that no longer validates."""
     from .task_loader import load_task
 
@@ -120,7 +192,7 @@ def _fall_back_to_source(record: TaskConfigRecord, run_dir: Path, e: ValueError)
         record.source_file,
     )
     task, source_yaml = load_task(Path(record.source_file))
-    warn_on_embedded_commands(task, run_dir)
+    check_embedded_commands(task, run_dir, allow_recorded_commands=allow_recorded_commands, include_hooks=include_hooks)
     return task, source_yaml
 
 
@@ -160,8 +232,20 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
     # The exact path, not a heuristic. `task_id` may contain "/" (dataset rows
     # are "<suite>/<row>"), so "the single child of artifacts/" resolves one
     # level too high for every row task.
+    #
+    # Containment-checked like the sandbox_path branch above, and for the same
+    # reason: `task_id` is an unvalidated string out of the run's own task.json,
+    # so `"../../../../home/victim"` joins to a real directory that `is_dir()`
+    # happily confirms. Every run_command criterion then executes with that as
+    # its cwd. The two branches read the same untrusted record; only one of them
+    # used to check.
     by_task_id = artifacts / prior.task_id
     if by_task_id.is_dir():
+        if not _is_within(by_task_id, artifacts):
+            raise RegradeError(
+                f"The recorded task_id ({prior.task_id!r}) resolves outside {artifacts}. "
+                + "Pass --workspace explicitly to grade a directory outside the run."
+            )
         return by_task_id
 
     children = [p for p in sorted(artifacts.iterdir()) if p.is_dir()]
@@ -208,8 +292,6 @@ def verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition, ta
             + "Grading proceeds; a reference edited since the run would go undetected."
         )
         return
-    from coder_eval.path_utils import digest_tree
-
     from .evaluation import resolve_reference_dir
 
     try:
@@ -224,12 +306,36 @@ def verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition, ta
             f"The reference directory recorded for this run is gone ({resolved}). Grading now "
             + "would score against a missing answer key. Restore it, or re-run the task."
         )
-    if digest_tree(resolved) != recorded:
+    if _staged_digest(resolved) != recorded:
         raise RegradeError(
             f"The reference directory {resolved} changed since this run was executed "
             + "(digest mismatch). Grading now would score the agent's work against a "
             + "different answer key. Restore the reference, or re-run the task."
         )
+
+
+def _staged_digest(source: Path) -> str:
+    """Digest ``source`` the way the run recorded it — through a staged copy.
+
+    The recorded ``reference_digest`` is taken over the per-run STAGED copy
+    (``Orchestrator._stage_reference``), which ``stage_reference_dir`` filters
+    through ``REFERENCE_COPY_IGNORE`` (``.git``) and strips of symlinks.
+    Digesting the raw source instead compares two differently-filtered trees, so
+    any reference that is a git checkout — the case the ignore list exists for —
+    reports a permanent false mismatch and un-grades the row for good.
+
+    Re-staging rather than re-implementing the filter keeps the two in step: a
+    future entry in the ignore list applies here without a second edit.
+    """
+    import tempfile
+
+    from coder_eval.path_utils import digest_tree
+
+    from .evaluation import stage_reference_dir
+
+    with tempfile.TemporaryDirectory(prefix="coder-eval-refdigest-") as tmp:
+        staged = stage_reference_dir(source, Path(tmp) / "reference")
+        return digest_tree(staged)
 
 
 def back_up_pre_grade_record(run_dir: Path) -> None:
@@ -255,19 +361,90 @@ def back_up_pre_grade_record(run_dir: Path) -> None:
         logger.warning("Could not preserve the pre-grade record at %s: %s", backup, e)
 
 
-def grading_sandbox_config(task: TaskDefinition) -> SandboxConfig:
+def restore_pre_grade_record(run_dir: Path) -> bool:
+    """Put the ungraded ``task.json`` back after a grading crash.
+
+    ``Orchestrator._finalize_result`` writes ``task.json`` into its run dir
+    *before* returning, so by the time a caller sees ``FinalStatus.ERROR`` the
+    ERROR row is already on disk whenever the grade wrote into the run being
+    graded (always, on ``run --resume``). Both commands treat ERROR as complete,
+    so the row would be permanently un-regradeable — and a caller that only fixes
+    its in-memory result leaves ``run.json`` disagreeing with ``task.json``.
+
+    Returns whether the restore happened; there is nothing to restore when the
+    grade wrote elsewhere and the original was never replaced.
+    """
+    source, backup = run_dir / TASK_JSON_FILENAME, run_dir / PRE_GRADE_JSON_FILENAME
+    if not backup.is_file() or backup.is_symlink() or source.is_symlink():
+        return False
+    try:
+        text = backup.read_text(encoding="utf-8")
+        if source.is_file() and source.read_text(encoding="utf-8") == text:
+            return False  # never overwritten; nothing to undo
+        write_text_atomic(source, text)
+    except OSError as e:
+        logger.warning("Could not restore the ungraded record at %s: %s", source, e)
+        return False
+    logger.info("Restored the ungraded record at %s after a grading failure.", source)
+    return True
+
+
+def grading_sandbox_config(task: TaskDefinition, *, allow_host_grading: bool = False) -> SandboxConfig:
     """The sandbox config a grading pass runs under.
 
     Grading never runs a container: the docker driver dispatches through
-    DockerRunner, which needs an agent. Forcing ``tempdir`` keeps a task whose
-    YAML says ``driver: docker`` gradeable on the host.
+    DockerRunner, which needs an agent. So a ``driver: docker`` task can only be
+    graded on the host — and that is a DIFFERENT machine from the one its
+    criteria were written against.
+
+    It is therefore refused rather than downgraded. A container task's criteria
+    address container paths (``/verifier``, ``/logs/verifier``) and container
+    toolchains; run on the host they score 0.0 for a trajectory ``run`` scored
+    1.0, and the row is written back FAILURE. The same commands (``rm -rf
+    /verifier``, ``mkdir -p /logs/verifier``) also execute unsandboxed on the
+    grading machine. A silent rewrite additionally neutralized the ``docker``
+    refusal in ``Sandbox.adopt``, which exists to catch exactly this.
+
+    ``allow_host_grading`` is the operator's explicit acceptance of both. Rows
+    graded that way are stamped ``graded_on_host`` in ``environment_info``
+    (:func:`stamp_host_grading`) so they are never silently comparable with rows
+    a container graded.
 
     Re-validated rather than ``model_copy(update=...)``: ``update`` skips both
     pydantic validation and pyright, so a typo would produce a SandboxConfig
     violating its own ``Literal`` and surface much later at an unrelated
     ``if driver == "docker"`` branch.
     """
-    return SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})
+    if task.sandbox.driver != "docker":
+        return task.sandbox.model_copy(deep=True)
+    if not allow_host_grading:
+        raise RegradeError(
+            f"Task {task.task_id!r} ran under `driver: docker`, and grading cannot start a container "
+            + "(there is no agent to run in it). Grading on the host would execute this task's "
+            + "criteria against a filesystem that lacks the container's paths and toolchain, "
+            + "scoring a FAILURE for a run that passed — and would run its shell commands "
+            + "unsandboxed here. Re-run with --allow-host-grading to accept that, or grade on a "
+            + "machine that reproduces the container."
+        )
+    logger.warning(
+        "Grading %r on the host: its `driver: docker` sandbox cannot be reproduced here, so "
+        + "path- and toolchain-dependent criteria may score differently than they did in the run. "
+        + "The row is stamped graded_on_host.",
+        task.task_id,
+    )
+    return SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})  # noqa: CE051
+
+
+def stamp_host_grading(result: EvaluationResult, task: TaskDefinition) -> None:
+    """Record that a docker task's verdict was produced on the host.
+
+    Written onto the result, not just logged: a console warning does not travel
+    with ``task.json`` into ``run.json``, the reports or the evalboard, and this
+    row must never be compared with a container-graded one without that caveat
+    attached.
+    """
+    if task.sandbox.driver == "docker":
+        result.environment_info["graded_on_host"] = True
 
 
 async def regrade_in_place(
@@ -280,6 +457,7 @@ async def regrade_in_place(
     source_yaml: str,
     variant_id: str,
     replicate_index: int = 0,
+    allow_host_grading: bool = False,
 ) -> EvaluationResult:
     """Run ``task``'s criteria against an already-executed ``workspace``.
 
@@ -300,7 +478,7 @@ async def regrade_in_place(
     verify_reference_unchanged(prior, task, task_file)
 
     sandbox = Sandbox(
-        grading_sandbox_config(task),
+        grading_sandbox_config(task, allow_host_grading=allow_host_grading),
         task_id=task.task_id,
         task_dir=task_file.parent.resolve() if task_file is not None else None,
     )
@@ -318,4 +496,6 @@ async def regrade_in_place(
         replicate_index=replicate_index,
         prior_result=prior,
     )
-    return await orchestrator.run()
+    result = await orchestrator.run()
+    stamp_host_grading(result, task)
+    return result

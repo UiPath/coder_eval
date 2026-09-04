@@ -202,14 +202,23 @@ def test_the_agents_path_is_persisted_so_a_later_grade_can_restore_it(tmp_path: 
     assert "command_base_path" in orch.result.environment_info
 
 
-def test_a_restored_path_drops_entries_inside_the_graded_workspace(tmp_path: Path) -> None:
+def test_a_restored_path_drops_entries_inside_the_graded_run(tmp_path: Path) -> None:
     """The restored value is PREPENDED ahead of the host PATH and comes out of the
-    run's own task.json. An entry inside the agent-writable workspace could
-    shadow a real tool on the grader's host."""
-    workspace = tmp_path / "ws"
+    run's own task.json — a shareable artifact. Every entry an attacker could
+    have placed there must be dropped; only the run's real toolchain survives.
+
+    The run-directory SIBLING case is the one this test used to pin the wrong way
+    round: it asserted such an entry was kept. The workspace is only part of the
+    run dir, and ``artifacts/`` and the run root travel in the same archive.
+    """
+    run_dir = tmp_path / "run"
+    workspace = run_dir / "ws"
     (workspace / "bin").mkdir(parents=True)
-    outside = tmp_path / "toolchain"
-    outside.mkdir()
+    sibling = run_dir / "artifacts-shim"  # inside the run dir, outside the workspace
+    sibling.mkdir()
+    toolchain = tmp_path / "toolchain"  # a genuine location outside the run entirely
+    toolchain.mkdir()
+    relative = Path("evilbin")
 
     task = TaskDefinition(
         task_id="t",
@@ -218,18 +227,28 @@ def test_a_restored_path_drops_entries_inside_the_graded_workspace(tmp_path: Pat
         agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
         success_criteria=[FileExistsCriterion(path="x.txt", description="x")],
     )
-    orch = Orchestrator(task=task, run_dir=tmp_path, variant_id="v")
+    orch = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
     orch.sandbox = MagicMock()
     orch.sandbox.sandbox_dir = workspace
 
     # os.pathsep, not a hardcoded ":" — the separator is ";" on Windows, where a
     # colon-joined value parses as one (non-existent) entry and every assertion
     # below passes vacuously against an empty result.
-    recorded = os.pathsep.join([str(workspace / "bin"), str(outside), str(tmp_path / "gone")])
+    recorded = os.pathsep.join(
+        [
+            str(workspace / "bin"),
+            str(sibling),
+            str(relative),
+            str(toolchain),
+            str(tmp_path / "gone"),
+        ]
+    )
     kept = orch._sanitize_restored_path(recorded)
 
-    assert str(outside.resolve()) in kept
-    assert str(workspace) not in kept, "an entry inside the graded tree must be dropped"
+    assert str(toolchain.resolve()) in kept, "a real out-of-run toolchain entry is the point of the restore"
+    assert str(workspace) not in kept, "an entry inside the graded workspace must be dropped"
+    assert str(sibling) not in kept, "an entry elsewhere in the run directory must be dropped too"
+    assert "evilbin" not in kept, "a relative entry would resolve against the grader's cwd"
     assert "gone" not in kept, "a non-existent entry buys no parity"
 
 

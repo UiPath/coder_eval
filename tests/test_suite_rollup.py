@@ -6,6 +6,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from coder_eval.models import (
     AgentKind,
     ClassificationCriterionResult,
@@ -210,7 +212,11 @@ class TestComputeSuiteRollup:
     def test_empty_suite(self, tmp_path: Path) -> None:
         rollup = _compute_suite_rollup("s", "v1", [], tmp_path)
         assert rollup.rows_total == 0
-        assert rollup.pass_rate == 0.0
+        # None, not 0.0. A suite that measured nothing has no pass rate, and
+        # 0.0 publishes "0.0%" — indistinguishable from a suite where every row
+        # failed. Same rule as RunSummary.pass_rate and VariantAggregate.
+        assert rollup.pass_rate is None
+        assert rollup.rows_graded == 0
         assert rollup.average_weighted_score is None
 
 
@@ -746,3 +752,74 @@ class TestErrorRowDenominator:
         assert cr_check.actual_value == agg.metrics["completion_rate"]
         assert cr_check.passed is False
         assert rollup.passed is False
+
+
+def _row(row_id: str, final_status: FinalStatus, weighted_score: float | None) -> TaskResult:
+    """A one-criterion suite row. An ungraded row carries NO criteria results —
+    that is what `execute` leaves behind, and grading them is the whole point."""
+    criteria = [] if weighted_score is None else [("file_exists", weighted_score, None)]
+    return _make_row(
+        suite_id="s",
+        row_id=row_id,
+        final_status=final_status,
+        weighted_score=weighted_score,
+        criteria=criteria,
+    )
+
+
+class TestSuiteRollupUngradedBucket:
+    """The fourth bucket on the suite surface, which shipped with no coverage.
+
+    An ungraded row (`coder-eval execute`) leaves BOTH sides of the suite pass
+    rate — it is not a pass and not a failure — and it carries no failure reason,
+    so it must not appear in `failed_samples` either. The row-count invariant
+    counts it, so a row landing outside all four buckets fails loudly instead of
+    silently vanishing from the rollup.
+    """
+
+    def test_ungraded_rows_leave_both_sides_of_the_pass_rate(self, tmp_path: Path) -> None:
+        rows = [
+            _row("r1", FinalStatus.SUCCESS, 1.0),
+            _row("r2", FinalStatus.NOT_GRADED, None),
+            _row("r3", FinalStatus.NOT_GRADED, None),
+        ]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+
+        assert rollup.rows_total == 3
+        assert rollup.rows_not_graded == 2
+        assert rollup.rows_graded == 1
+        # 1 of 1 graded, not 1 of 3.
+        assert rollup.pass_rate == 1.0
+
+    def test_a_fully_ungraded_suite_has_no_pass_rate(self, tmp_path: Path) -> None:
+        rows = [_row(f"r{i}", FinalStatus.NOT_GRADED, None) for i in range(3)]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+
+        assert rollup.rows_graded == 0
+        assert rollup.pass_rate is None
+        assert "n/a" in _render_suite_markdown(rollup)
+
+    def test_ungraded_rows_are_not_collected_as_failed_samples(self, tmp_path: Path) -> None:
+        """`failed_samples` is documented as failed/errored rows. An ungraded row
+        has no failure reasons to show, so listing it contradicts the same
+        function's pass-rate rule two blocks up."""
+        rows = [
+            _row("r1", FinalStatus.FAILURE, 0.0),
+            _row("r2", FinalStatus.NOT_GRADED, None),
+        ]
+        rollup = _compute_suite_rollup("s", "v1", rows, tmp_path)
+
+        assert [s.row_id for s in rollup.failed_samples] == ["r1"]
+
+    def test_a_row_outside_every_bucket_fails_the_invariant(self) -> None:
+        with pytest.raises(ValueError, match="Suite row count invariant violated"):
+            SuiteRollup(
+                suite_id="s",
+                variant_id="v",
+                rows_total=3,
+                rows_passed=1,
+                rows_failed=0,
+                rows_error=0,
+                rows_not_graded=1,  # 1+0+0+1 != 3
+                pass_rate=1.0,
+            )

@@ -191,7 +191,11 @@ def run_task_internal_command(
     # We're already inside the container; another nested docker would be
     # both wrong and impossible (no docker CLI in image).
     if task.sandbox.driver == "docker":
-        task = task.model_copy(update={"sandbox": task.sandbox.model_copy(update={"driver": "tempdir"})})
+        # noqa: CE051 — the ONE legitimate rewrite. We are already inside the
+        # container the docker driver asked for, so the isolation the driver
+        # names is present, not bypassed; a nested docker would be both wrong
+        # and impossible (no docker CLI in the image).
+        task = task.model_copy(update={"sandbox": task.sandbox.model_copy(update={"driver": "tempdir"})})  # noqa: CE051
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

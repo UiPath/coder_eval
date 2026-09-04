@@ -44,6 +44,7 @@ describe("summarizeListing", () => {
             id: "r",
             tasksSucceeded: 0,
             tasksRun: 0,
+            tasksGraded: 0,
             totalCostUsd: null,
             taskDurationSeconds: null,
             ...overrides,
@@ -57,6 +58,7 @@ describe("summarizeListing", () => {
             costPartial: false,
             tasksSucceeded: 0,
             tasksRun: 0,
+            tasksGraded: 0,
             durationSeconds: null,
             durationPartial: false,
         });

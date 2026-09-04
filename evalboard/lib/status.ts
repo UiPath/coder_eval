@@ -10,8 +10,15 @@
 // rate helper in this app is written as `if passed … else if error … else
 // failed++`, so anything that is not a pass or an error is counted as a failure
 // AND kept in the denominator. A clean `execute` run then renders as 0% pass, N
-// failed. A distinct member makes that a type error at each site instead, so a
-// consumer has to decide what to do with it.
+// failed.
+//
+// Widening this union does NOT by itself produce a type error at the consumers:
+// most of them go through `isPassStatus` / `isGraded` rather than switching on
+// StatusCategory, and the two that do switch used if/else chains with a final
+// `else`. That is exactly why the first ungraded sweep missed lib/overview.ts
+// entirely. `assertNever` below is the fix: a consumer that must handle every
+// category exhaustively uses a `switch` with `default: return assertNever(c)`,
+// and adding a member then fails `tsc --noEmit` at that site.
 //
 // Note: this only categorizes coder_eval task statuses. UI status display
 // (e.g. StatusPill) also handles flow execution statuses like "Completed"
@@ -52,10 +59,39 @@ export function perTaskPassCounts<
 >(rows: readonly T[]): Map<string, number> {
     const m = new Map<string, number>();
     for (const r of rows) {
+        // Ungraded replicates leave BOTH sides, exactly as they do in every
+        // per-row rate: they are excluded from the count AND from the map, so a
+        // task whose replicates were all ungraded does not appear at all rather
+        // than appearing as "0 of N passed". Without this an
+        // `execute --repeats 2` run renders a red "0/2 ✓".
+        if (!isGraded(r.status)) continue;
         const k = taskVariantKey(r);
         m.set(k, (m.get(k) ?? 0) + (isPassStatus(r.status) ? 1 : 0));
     }
     return m;
+}
+
+// Per (variant, task): how many replicates were GRADED. The denominator paired
+// with perTaskPassCounts, so a badge reading "k/N ✓" never divides a graded
+// numerator by an all-rows N.
+export function perTaskGradedCounts<
+    T extends { taskId: string; variantId?: string | null; status: string | null },
+>(rows: readonly T[]): Map<string, number> {
+    const m = new Map<string, number>();
+    for (const r of rows) {
+        if (!isGraded(r.status)) continue;
+        const k = taskVariantKey(r);
+        m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+}
+
+// Compile-time exhaustiveness guard. Call it from a `switch`'s `default` arm
+// over a StatusCategory: a new member then makes the argument non-`never` and
+// `tsc --noEmit` fails at that site, which is what forces every consumer to be
+// revisited instead of silently falling through an `else`.
+export function assertNever(x: never): never {
+    throw new Error(`Unhandled status category: ${String(x)}`);
 }
 
 // Default table sort: failures and errors first, unknowns next, passes last.

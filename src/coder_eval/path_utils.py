@@ -46,10 +46,32 @@ def write_text_atomic(path: Path, text: str) -> None:
     agent again, and the row vanishes from ``run.json``. One writer, so the
     orchestrator and the detached grade's write-back cannot have different crash
     semantics for the same file.
+
+    The temp file is opened ``O_CREAT | O_EXCL | O_NOFOLLOW``. Without it a
+    pre-planted ``task.json.tmp`` *symlink* in a shared run directory makes this
+    an arbitrary-file-overwrite primitive — and one that bypasses the destination
+    symlink refusal in ``evaluate``'s write-back, since the guard checks the
+    destination while the truncation happens through the temp name. A partial
+    temp file is unlinked before the error propagates, so a failed write never
+    leaves ``.tmp`` litter beside the record.
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(tmp, flags, 0o600)
+    except FileExistsError as e:
+        raise OSError(
+            f"Refusing to write {path}: {tmp} already exists. Remove it if it is stale — a "
+            + "pre-planted temp file (especially a symlink) would redirect this write."
+        ) from e
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def digest_tree(root: Path) -> str:

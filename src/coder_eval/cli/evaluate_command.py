@@ -9,6 +9,7 @@ from pathlib import Path
 
 import typer
 
+from ..evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
 from ..logging_config import setup_logging
 from ..models import (
     AgentKind,
@@ -26,6 +27,7 @@ from ..orchestration.regrade import (
     grading_sandbox_config,
     load_prior_result,
     regrade_in_place,
+    restore_pre_grade_record,
     task_from_prior,
     verify_reference_unchanged,
 )
@@ -34,7 +36,13 @@ from ..orchestrator import Orchestrator
 from ..path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME, write_text_atomic
 from ..sandbox import Sandbox
 from .console import console
-from .evaluate_target import EvaluateMode, EvaluateTarget, EvaluateTargetError, resolve_evaluate_target
+from .evaluate_target import (
+    EvaluateMode,
+    EvaluateTarget,
+    EvaluateTargetError,
+    as_work_dir,
+    resolve_evaluate_target,
+)
 from .run_helpers import prepare_run_directory
 
 
@@ -53,7 +61,14 @@ class _ResolvedInputs:
     prior: EvaluationResult | None
 
 
-def _resolve_inputs(task_or_run_dir: Path, work_dir: Path | None, workspace: Path | None) -> _ResolvedInputs:
+def _resolve_inputs(
+    task_or_run_dir: Path,
+    work_dir: Path | None,
+    workspace: Path | None,
+    *,
+    allow_recorded_commands: bool,
+    in_place: bool | None,
+) -> _ResolvedInputs:
     """Turn the CLI positionals into a task, a workspace, and (maybe) a prior run.
 
     Split out of the command because it is where both shapes converge: after this
@@ -71,23 +86,59 @@ def _resolve_inputs(task_or_run_dir: Path, work_dir: Path | None, workspace: Pat
         )
 
     try:
-        return _resolve_run_dir_or_work_dir(target, workspace)
+        return _resolve_run_dir_or_work_dir(
+            target, workspace, allow_recorded_commands=allow_recorded_commands, in_place=in_place
+        )
     except RegradeError as e:
         # The shared core raises a plain exception (orchestration/ must not
         # depend on the CLI layer, CE004); surface it as a CLI error here.
         raise typer.BadParameter(str(e)) from e
 
 
-def _resolve_run_dir_or_work_dir(target: EvaluateTarget, workspace: Path | None) -> _ResolvedInputs:
+def _resolve_run_dir_or_work_dir(
+    target: EvaluateTarget,
+    workspace: Path | None,
+    *,
+    allow_recorded_commands: bool,
+    in_place: bool | None,
+) -> _ResolvedInputs:
     """The mode-specific half of :func:`_resolve_inputs`."""
     prior: EvaluationResult | None = None
+    if target.mode is EvaluateMode.RUN_DIR and target.task_file is not None:
+        # `is_run_dir` is a filename probe, so a plain work directory holding an
+        # unrelated file called task.json lands here. That would abort the
+        # pre-existing `evaluate <task.yaml> <dir>` form on a pydantic wall the
+        # user can only escape by renaming their own file. The task file is
+        # already in hand, so fall back to the shape they asked for.
+        try:
+            load_prior_result(target.target)
+        except RegradeError as e:
+            logger.warning(
+                "%s holds a %s that is not a readable run record (%s); grading it as a plain " + "work directory.",
+                target.target,
+                TASK_JSON_FILENAME,
+                e,
+            )
+            target = as_work_dir(target)
+
     if target.mode is EvaluateMode.RUN_DIR:
         prior = load_prior_result(target.target)
         if target.task_file is not None:
             task, source_yaml = load_task(target.task_file)
             console.print(f"[dim]Grading with {target.task_file} (overrides the run's recorded config).[/dim]")
         else:
-            task, source_yaml = task_from_prior(prior, target.target)
+            # pre_run/post_run are skipped on the in-place path (an adopted
+            # workspace must not have its hooks re-run over the agent's
+            # deliverables), so there they are not shell the run dir can make
+            # this host execute — only --copy re-runs them. Mirrors the
+            # grade_in_place default computed in run_evaluation.
+            hooks_will_run = not (in_place if in_place is not None else True)
+            task, source_yaml = task_from_prior(
+                prior,
+                target.target,
+                allow_recorded_commands=allow_recorded_commands,
+                include_hooks=hooks_will_run,
+            )
         work_dir = workspace or default_workspace(target.target, prior)
         recorded_source = prior.task_config.source_file if prior.task_config else None
         task_file = target.task_file or (Path(recorded_source) if recorded_source else None)
@@ -195,6 +246,24 @@ def evaluate_command(
             "an adopted directory is never moved or deleted."
         ),
     ),
+    allow_recorded_commands: bool = typer.Option(
+        False,
+        "--allow-recorded-commands",
+        help=(
+            "Accept shell commands (run_command criteria, pre_run/post_run) rebuilt from the run "
+            "directory's own task.json. A run directory is a shareable artifact, so its recorded "
+            "config is untrusted input; without this, grading refuses rather than running it here."
+        ),
+    ),
+    allow_host_grading: bool = typer.Option(
+        False,
+        "--allow-host-grading",
+        help=(
+            "Grade a `driver: docker` run on this host. Grading cannot start a container, so the "
+            "criteria run against a filesystem that lacks the container's paths and toolchain — "
+            "scores may differ from the run. Such rows are stamped graded_on_host."
+        ),
+    ),
     run_dir: Path | None = typer.Option(  # noqa: B008
         None,
         "--run-dir",
@@ -229,6 +298,8 @@ def evaluate_command(
         in_place=in_place,
         verbose=verbose,
         preserve=preserve,
+        allow_recorded_commands=allow_recorded_commands,
+        allow_host_grading=allow_host_grading,
         run_dir=run_dir,
     )
 
@@ -241,6 +312,8 @@ def run_evaluation(
     in_place: bool | None = None,
     verbose: bool = False,
     preserve: bool = True,
+    allow_recorded_commands: bool = False,
+    allow_host_grading: bool = False,
     run_dir: Path | None = None,
 ) -> None:
     """The body of ``coder-eval evaluate``, with real Python defaults.
@@ -254,7 +327,13 @@ def run_evaluation(
 
     console.print("\n[bold]Evaluating Criteria[/bold]\n")
 
-    inputs = _resolve_inputs(task_or_run_dir, work_dir, workspace)
+    inputs = _resolve_inputs(
+        task_or_run_dir,
+        work_dir,
+        workspace,
+        allow_recorded_commands=allow_recorded_commands,
+        in_place=in_place,
+    )
     task = inputs.task
     source_yaml = inputs.source_yaml
     graded_dir = inputs.work_dir
@@ -274,7 +353,11 @@ def run_evaluation(
         console.print(f"[red]✗ Failed to prepare run directory:[/red] {e}")
         raise typer.Exit(1) from e
 
-    sandbox_config = grading_sandbox_config(task)
+    try:
+        sandbox_config = grading_sandbox_config(task, allow_host_grading=allow_host_grading)
+    except RegradeError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(1) from e
     if not grade_in_place:
         # Copy path: preload the sandbox with the work dir as a template source.
         template_source = TemplateDirSource(path=str(graded_dir.resolve()))
@@ -299,6 +382,7 @@ def run_evaluation(
                 source_yaml=source_yaml,
                 variant_id=prior.variant_id,
                 replicate_index=_replicate_index_of(target.target),
+                allow_host_grading=allow_host_grading,
             )
         if grade_in_place:
             await asyncio.to_thread(sandbox.adopt, graded_dir)
@@ -322,6 +406,27 @@ def run_evaluation(
         return await orchestrator.run()
 
     result = asyncio.run(_setup_and_run())
+
+    # BEFORE the count guard below. A grading crash returns a populated ERROR
+    # result with an EMPTY criteria list (Orchestrator.run() converts internal
+    # failures into a result rather than raising), so the count check fires
+    # first and the user is told only "Result count mismatch: got 0, expected 2"
+    # — the real error is never printed, and the "still re-gradeable" notice is
+    # unreachable on exactly the path it was written for.
+    if result.final_status is FinalStatus.ERROR:
+        console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
+        if prior is not None:
+            # A grading-time crash (a failing checker, an unreachable judge) is
+            # not a verdict about the run. Leaving ERROR on disk would replace a
+            # perfectly re-gradeable NOT_GRADED row with one BOTH commands treat
+            # as permanently complete, so the run could never be graded again
+            # without hand-restoring task.execute.json.
+            restore_pre_grade_record(target.target)
+            console.print(
+                f"[yellow]⚠[/] Grading errored; {target.target / TASK_JSON_FILENAME} is left "
+                + "ungraded so the run stays re-gradeable."
+            )
+        raise typer.Exit(1)
 
     # Display results
     console.print("[bold]Criteria Results:[/bold]\n")
@@ -371,24 +476,9 @@ def run_evaluation(
             f"[dim]Re-graded {prior.final_status.value} → {result.final_status.value} "
             + f"over {len(result.iterations)} recorded turn(s).[/dim]"
         )
-        if result.final_status is FinalStatus.ERROR:
-            # A grading-time crash (a failing checker, an unreachable judge) is
-            # not a verdict about the run. Writing it back would replace a
-            # perfectly re-gradeable NOT_GRADED row with ERROR — which BOTH
-            # commands treat as permanently complete, so the run could never be
-            # graded again without hand-restoring task.execute.json. The
-            # diagnostic row is still in this grade's own run dir.
-            console.print(
-                f"[yellow]⚠[/] Grading errored; leaving {target.target / TASK_JSON_FILENAME} "
-                + "as it was so the run stays re-gradeable."
-            )
-        else:
-            _write_back(target.target, result)
+        _write_back(target.target, result)
 
-    if result.final_status == FinalStatus.ERROR:
-        console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
-        raise typer.Exit(1)
-    elif failed == 0:
+    if failed == 0:
         console.print("\n[green]All criteria passed! ✓[/green]")
         raise typer.Exit(0)
     else:
@@ -419,7 +509,7 @@ def _write_back(run_dir: Path, result: EvaluationResult) -> None:
         # Atomic, matching the orchestrator's own task.json writer: a torn write
         # here makes the row parse as malformed, which a later --resume reads as
         # "not complete" and re-pays for the agent.
-        write_text_atomic(target, result.model_dump_json(indent=2))
+        write_text_atomic(target, result.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE))
     except OSError as e:
         # Never fail the grade over the write-back: the verdict was computed and
         # already printed, and the fresh run dir holds its own task.json.
