@@ -119,9 +119,14 @@ jobs:
                   for p in sorted(pathlib.Path(sys.argv[1]).rglob("task.json"))]
           for r in rows:
               print(f"- {r.get('task_id','?')}: {r.get('final_status','?')}")
-          ok = sum(1 for r in rows if r.get("final_status") == "SUCCESS")
-          print(f"\n**{ok}/{len(rows)} PASS**")
-          sys.exit(0 if rows and ok == len(rows) else 1)
+          # NOT_GRADED is a fourth category, not a failure: `coder-eval execute`
+          # runs the agent and deliberately scores nothing. Counting such a row
+          # as a miss fails a pipeline that has not measured anything yet.
+          graded = [r for r in rows if r.get("final_status") != "NOT_GRADED"]
+          ok = sum(1 for r in graded if r.get("final_status") == "SUCCESS")
+          print(f"\n**{ok}/{len(graded)} PASS**"
+                + (f" ({len(rows) - len(graded)} not graded)" if len(graded) != len(rows) else ""))
+          sys.exit(0 if graded and ok == len(graded) else 1)
           PY
 
       - name: Upload run reports

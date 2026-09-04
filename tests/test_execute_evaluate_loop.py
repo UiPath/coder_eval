@@ -42,9 +42,18 @@ def _row(task_dir: Path, name: str = "task.json") -> dict[str, Any]:
     return json.loads((task_dir / name).read_text(encoding="utf-8"))
 
 
-def _invoke(args: list[str]) -> Any:
+def _invoke(args: list[str], *, expect_exit: int = 0) -> Any:
+    """Run a CLI command and pin its exit code.
+
+    ``expect_exit`` is explicit rather than "0 unless it raised" because the exit
+    code IS the contract for a CI wrapper: a helper that always demanded 0 once
+    pinned a preserved-TIMEOUT row exiting 0 under "All criteria passed" as the
+    expected behaviour.
+    """
     result = runner.invoke(app, args)
-    assert result.exit_code == 0, f"{args} failed:\n{result.output}"
+    assert result.exit_code == expect_exit, (
+        f"{args} exited {result.exit_code}, expected {expect_exit}:\n{result.output}"
+    )
     return result
 
 
@@ -328,7 +337,12 @@ def test_evaluate_grades_the_directory_named_by_workspace(tmp_path: Path) -> Non
 def test_evaluate_refuses_to_re_grade_a_run_that_errored(tmp_path: Path) -> None:
     """Grading may only move NOT_GRADED to a verdict. An ERROR / TIMEOUT run is
     an execution fact this pass neither repeated nor observed — laundering it
-    into SUCCESS would report a crashed run as a pass."""
+    into SUCCESS would report a crashed run as a pass.
+
+    The exit code has to agree. It exited 0 under "All criteria passed! ✓" for a
+    row `run.json` counts as failed, because the gate read the criteria tally
+    rather than the outcome — so a CI wrapper shelling `coder-eval evaluate`
+    went green on a timed-out run."""
     run_dir = tmp_path / "r"
     _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
     task_dir = _task_dir(run_dir)
@@ -336,9 +350,32 @@ def test_evaluate_refuses_to_re_grade_a_run_that_errored(tmp_path: Path) -> None
     row["final_status"] = FinalStatus.TIMEOUT.value
     (task_dir / "task.json").write_text(json.dumps(row), encoding="utf-8")
 
-    _invoke(["evaluate", str(task_dir)])
+    result = _invoke(["evaluate", str(task_dir)], expect_exit=1)
 
     assert _row(task_dir)["final_status"] == FinalStatus.TIMEOUT.value
+    assert "All criteria passed" not in result.output
+    assert FinalStatus.TIMEOUT.value in result.output
+
+
+def test_an_inherited_error_still_renders_its_criteria_and_keeps_the_status(tmp_path: Path) -> None:
+    """The other arm of the same confusion. A PRESERVED ERROR is not a grading
+    crash: the ERROR branch fired anyway, printed the ORIGINAL run's crash
+    message as though grading had failed, claimed the row was "left ungraded"
+    (it was not — the restored record still reads ERROR), and discarded a verdict
+    it had just computed."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    row = _row(task_dir)
+    row["final_status"] = FinalStatus.ERROR.value
+    row["error_message"] = "agent crashed during the original run"
+    (task_dir / "task.json").write_text(json.dumps(row), encoding="utf-8")
+
+    result = _invoke(["evaluate", str(task_dir)], expect_exit=1)
+
+    assert "Criteria Results" in result.output, "the computed verdict was thrown away"
+    assert "left ungraded" not in result.output, "grading did not crash; saying so is false"
+    assert _row(task_dir)["final_status"] == FinalStatus.ERROR.value
 
 
 def test_grading_the_same_run_twice_reaches_the_same_verdict(tmp_path: Path) -> None:
@@ -401,7 +438,22 @@ def test_execute_records_max_turns_exhausted_exactly_as_run_does(tmp_path: Path)
     assert executed["max_turns_exhausted"] is True, (
         "`execute` dropped a fact about the run. Only the verdict is withheld."
     )
-    assert executed["final_status"] == FinalStatus.MAX_TURNS_EXHAUSTED.value
+    # The FACT is recorded; the STATUS is not decided. `run` returns SUCCESS for
+    # a max-turns trajectory whose criteria pass and only falls through to
+    # MAX_TURNS_EXHAUSTED when they fail — so the status is not knowable without
+    # grading, and claiming it here made it both terminal and permanent
+    # (MAX_TURNS_EXHAUSTED is an execution fact, which the detached grade may
+    # never overturn).
+    assert executed["final_status"] == FinalStatus.NOT_GRADED.value
+
+    # The parity that matters: grading the executed run must land exactly where
+    # `run` did. Asserting only the executed half is what let the divergence ship.
+    _invoke(["evaluate", str(_task_dir(executed_dir))])
+    regraded = _row(_task_dir(executed_dir))
+
+    assert regraded["final_status"] == graded["final_status"]
+    assert regraded["weighted_score"] == graded["weighted_score"]
+    assert regraded["max_turns_exhausted"] is True, "the fact must survive the grade too"
 
 
 def test_a_detached_grade_keeps_the_runs_api_routing_not_the_graders(tmp_path: Path) -> None:

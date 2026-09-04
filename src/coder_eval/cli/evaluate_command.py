@@ -28,6 +28,7 @@ from ..orchestration.regrade import (
     load_prior_result,
     regrade_in_place,
     restore_pre_grade_record,
+    stamp_host_grading,
     task_from_prior,
     verify_reference_unchanged,
 )
@@ -47,6 +48,24 @@ from .run_helpers import prepare_run_directory
 
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_grade_in_place(target: EvaluateTarget, in_place: bool | None) -> bool:
+    """Whether this grade runs in the target directory or in a copy of it.
+
+    In-place is the default for a run directory: that workspace is the run's own
+    output, and copying it filters build artifacts (``node_modules``, ``dist``,
+    ``.venv``) out of the grade, so a criterion reading them fails as a copying
+    artifact rather than as a verdict. A plain work directory defaults to
+    copying, because criteria can mutate the target and it is the user's own
+    tree.
+
+    A function rather than an expression because two places need the answer and
+    one of them — the recorded-shell refusal — changes what the command is
+    willing to execute. A restated copy of the rule silently stops matching the
+    moment the default moves.
+    """
+    return in_place if in_place is not None else (target.mode is EvaluateMode.RUN_DIR)
 
 
 @dataclass(frozen=True)
@@ -127,17 +146,22 @@ def _resolve_run_dir_or_work_dir(
             task, source_yaml = load_task(target.task_file)
             console.print(f"[dim]Grading with {target.task_file} (overrides the run's recorded config).[/dim]")
         else:
-            # pre_run/post_run are skipped on the in-place path (an adopted
-            # workspace must not have its hooks re-run over the agent's
-            # deliverables), so there they are not shell the run dir can make
-            # this host execute — only --copy re-runs them. Mirrors the
-            # grade_in_place default computed in run_evaluation.
-            hooks_will_run = not (in_place if in_place is not None else True)
+            # pre_run/post_run and the sandbox's installers both run only on the
+            # --copy path (an adopted workspace must not have its hooks re-run
+            # over the agent's deliverables, and `adopt` installs nothing), so
+            # in place they are not capabilities the run dir can reach.
+            #
+            # Derived through the SAME function `run_evaluation` uses, not
+            # restated. This value decides whether recorded shell is refused, so
+            # a second copy of the rule would keep answering the old question if
+            # the default ever moved — and silently stop covering commands that
+            # then do run.
+            setup_will_run = not resolve_grade_in_place(target, in_place)
             task, source_yaml = task_from_prior(
                 prior,
                 target.target,
                 allow_recorded_commands=allow_recorded_commands,
-                include_hooks=hooks_will_run,
+                include_setup_phase=setup_will_run,
             )
         work_dir = workspace or default_workspace(target.target, prior)
         recorded_source = prior.task_config.source_file if prior.task_config else None
@@ -341,11 +365,7 @@ def run_evaluation(
     prior = inputs.prior
     target = inputs.target
 
-    # In-place is the default for a run directory: that workspace is the run's
-    # own output and copying it would filter build artifacts out of the grade.
-    # A plain work directory defaults to copying, because criteria can mutate the
-    # target and it is the user's own tree.
-    grade_in_place = in_place if in_place is not None else (target.mode is EvaluateMode.RUN_DIR)
+    grade_in_place = resolve_grade_in_place(target, in_place)
 
     try:
         prepared_run_dir = prepare_run_directory(run_dir)
@@ -400,12 +420,39 @@ def run_evaluation(
             task_file=task_file,
             sandbox=sandbox,
             variant_id=prior.variant_id if prior is not None else "evaluate",
+            replicate_index=_replicate_index_of(target.target),
             source_yaml=source_yaml,
             prior_result=prior,
         )
-        return await orchestrator.run()
+        graded = await orchestrator.run()
+        # Same stamp the delegating branch gets from `regrade_in_place`. Line 357
+        # above accepted the docker→host downgrade for THIS branch too, and
+        # CLAUDE.md, the user guide and CE051's own noqa all state the stamp as
+        # unconditional — so `evaluate <run_dir> --copy --allow-host-grading`
+        # was writing an unstamped host verdict that nothing downstream could
+        # tell apart from a container-graded one.
+        stamp_host_grading(graded, task)
+        return graded
 
     result = asyncio.run(_setup_and_run())
+    _report_and_exit(result, task=task, prior=prior, target=target, prepared_run_dir=prepared_run_dir)
+
+
+def _report_and_exit(
+    result: EvaluationResult,
+    *,
+    task: TaskDefinition,
+    prior: EvaluationResult | None,
+    target: EvaluateTarget,
+    prepared_run_dir: Path,
+) -> None:
+    """Render the graded row, write it back, and choose the exit code.
+
+    Split out of ``run_evaluation`` because it answers a different question —
+    what to TELL the operator about a result that already exists — and because
+    the two together grew past the function-size bound the moment the inherited
+    status handling landed. Always raises ``typer.Exit``.
+    """
 
     # BEFORE the count guard below. A grading crash returns a populated ERROR
     # result with an EMPTY criteria list (Orchestrator.run() converts internal
@@ -413,7 +460,20 @@ def run_evaluation(
     # first and the user is told only "Result count mismatch: got 0, expected 2"
     # — the real error is never printed, and the "still re-gradeable" notice is
     # unreachable on exactly the path it was written for.
-    if result.final_status is FinalStatus.ERROR:
+    # Whether the terminal status describes THIS pass or was carried over from
+    # the run being graded. `Orchestrator._terminal_status` preserves a prior
+    # execution fact (TIMEOUT / ERROR / BUILD_FAILED / a budget stop) because
+    # grading may not overturn it — so reading `result.final_status` as this
+    # pass's own outcome misreports both arms below. It made a preserved ERROR
+    # print the ORIGINAL run's crash message as though grading had crashed,
+    # claim the row was "left ungraded" (it was not — the restored record still
+    # reads ERROR), and throw away a verdict that had just been computed at
+    # 1.000; and it made a preserved TIMEOUT exit 0 under "All criteria passed",
+    # so a CI wrapper reading the exit code goes green on a row run.json counts
+    # as failed.
+    inherited = prior is not None and prior.final_status.is_execution_fact
+
+    if result.final_status is FinalStatus.ERROR and not inherited:
         console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
         if prior is not None:
             # A grading-time crash (a failing checker, an unreachable judge) is
@@ -478,6 +538,16 @@ def run_evaluation(
         )
         _write_back(target.target, result)
 
+    if result.final_status.is_execution_fact:
+        # The criteria tally is real and worth printing — it is why the table
+        # above still renders — but it is not the row's outcome. run.json will
+        # count this row under its preserved status, and the exit code must
+        # agree with run.json rather than with the tally.
+        console.print(
+            f"\n[red]Criteria: {passed}/{total} passed, but the run itself ended as "
+            + f"{result.final_status.value} — grading cannot overturn that.[/red]"
+        )
+        raise typer.Exit(1)
     if failed == 0:
         console.print("\n[green]All criteria passed! ✓[/green]")
         raise typer.Exit(0)

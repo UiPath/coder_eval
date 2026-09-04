@@ -32,6 +32,7 @@ import { VersionChip } from "@/app/_components/version-list";
 import { HarnessSelector } from "@/app/_components/harness-selector";
 import { harnessShortLabel } from "@/app/_components/harness-badge";
 import { fetchTaskHistoryAction } from "./actions";
+import { isGraded, isPassStatus } from "@/lib/status";
 
 function fmtUsd(c: number | null): string {
     if (c == null) return "—";
@@ -146,9 +147,13 @@ function sortTasks(
 
 function statusFill(status: string | null): string {
     if (status == null) return "bg-gray-300";
-    if (status === "SUCCESS") return "bg-green-500";
-    // All non-success outcomes share one red — the trends view treats every
-    // failure mode as equally bad rather than ranking FAILED vs ERROR.
+    if (isPassStatus(status)) return "bg-green-500";
+    // An ungraded row was never measured, so it is not a failure. Painting it
+    // red contradicted lib/trends.ts, which had just excluded those very rows
+    // from the pass rate feeding this same timeline.
+    if (!isGraded(status)) return "bg-gray-300";
+    // All non-success graded outcomes share one red — the trends view treats
+    // every failure mode as equally bad rather than ranking FAILED vs ERROR.
     return "bg-red-500";
 }
 

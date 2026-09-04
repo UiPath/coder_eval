@@ -28,7 +28,7 @@ from ..models import (
     TaskDefinition,
     TaskResult,
 )
-from ..path_utils import format_task_log_id
+from ..path_utils import TASK_JSON_FILENAME, format_task_log_id
 from ..pricing import unpriced_models
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
@@ -331,13 +331,27 @@ class ResumePartition(NamedTuple):
     """Never finished executing — re-run from scratch."""
 
     to_grade: list[ResolvedTask]
-    """Executed but ungraded (NOT_GRADED). Needs criteria, NOT another agent run."""
+    """Executed but never scored. Needs criteria, NOT another agent run."""
 
     prior_results: list[TaskResult]
     """Genuinely finished — reloaded so run.json covers the whole suite."""
 
     prior_resolved: list[ResolvedTask]
     """The ResolvedTask for each entry of prior_results, same order."""
+
+
+def _owes_a_grade(result: EvaluationResult) -> bool:
+    """Whether a finalized row was executed but never scored.
+
+    Evidence, not label. ``NOT_GRADED`` is the ordinary shape, but an ``execute``
+    row that also tripped a run limit (TIMEOUT, a budget stop) carries an
+    execution-fact status whose category is ``error``/``failed`` — and no verdict
+    at all. Both are equally owed a grade; only the first announces it.
+
+    A row that carries a criteria vector or a score has been graded, whatever its
+    status, so a genuine FAILURE/ERROR from ``run`` is untouched.
+    """
+    return result.weighted_score is None and not result.success_criteria_results
 
 
 def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = True) -> ResumePartition:
@@ -358,9 +372,20 @@ def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = Tr
     caller runs the criteria against the trajectory and workspace already on
     disk rather than paying for the agent a second time.
 
-    Note the asymmetry is only for NOT_GRADED. FAILURE and ERROR stay complete
-    under both commands — resume has never retried failures (delete a task's
-    task.json to force that), and this does not change it.
+    The test is the row's **evidence**, not its status: a row is owed a grade
+    when it was executed but never scored. Keying on ``category == "ungraded"``
+    alone missed every ``execute`` row that also carries an execution fact — a
+    TIMEOUT or budget stop aborts the run before grading, so under ``execute`` it
+    lands with ``weighted_score is None`` and an empty criteria vector, yet its
+    category is ``error``/``failed`` and resume filed it as complete. It then
+    stayed permanently unscored in run.json, the rollup and the evalboard, while
+    ``evaluate <run_dir>`` graded the identical bytes happily — two entry points
+    into one feature disagreeing about the same record.
+
+    Note the asymmetry is only for a row that was never scored. FAILURE and ERROR
+    rows that DO carry a verdict stay complete under both commands — resume has
+    never retried failures (delete a task's task.json to force that), and this
+    does not change it.
 
     Args:
         resolved_tasks: Fully-resolved tasks for the whole run.
@@ -377,7 +402,7 @@ def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = Tr
         tr = _load_completed_result(rt)
         if tr is None:
             to_run.append(rt)
-        elif grade and tr.result.final_status.category == "ungraded":
+        elif grade and _owes_a_grade(tr.result):
             to_grade.append(rt)
         else:
             prior_results.append(tr)
@@ -408,7 +433,7 @@ def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
 
 def _load_completed_result(rt: ResolvedTask) -> TaskResult | None:
     """Reconstruct a TaskResult from a finalized task.json, or None if absent/incomplete."""
-    report_path = rt.run_dir / "task.json"
+    report_path = rt.run_dir / TASK_JSON_FILENAME
     try:
         text = report_path.read_text(encoding="utf-8")
     except OSError:
@@ -455,7 +480,7 @@ def recover_task_results(run_dir: Path) -> list[TaskResult]:
     """
     nested_roots = [p.parent for p in run_dir.rglob("run.json") if p.parent != run_dir]
     recovered: list[TaskResult] = []
-    for task_json in run_dir.rglob("task.json"):
+    for task_json in run_dir.rglob(TASK_JSON_FILENAME):
         if any(root in task_json.parents for root in nested_roots):
             continue  # belongs to a nested sub-run (its own run.json), not this one
         try:

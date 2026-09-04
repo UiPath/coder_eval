@@ -20,7 +20,7 @@ from .models import (
     row_cost_incomplete,
     sum_costs,
 )
-from .path_utils import build_task_run_dir
+from .path_utils import TASK_JSON_FILENAME, build_task_run_dir
 
 
 if TYPE_CHECKING:
@@ -244,7 +244,15 @@ def _pass_rate_lines(summary: RunSummary) -> list[str]:
     """
     # Only an ungraded run gets the explanatory line. An ordinary EMPTY run keeps
     # its original "n/a (0/0)" rendering — the two are different facts.
-    if summary.tasks_not_graded and not summary.tasks_graded:
+    #
+    # `pass_rate is None` rather than `not tasks_graded`: an execute night with a
+    # crashed row has tasks_graded > 0 (an ERROR row is category `error`, not
+    # `ungraded`, so it stays in the denominator) while still having measured
+    # nothing — and this line then rendered `0.0% (0/5)` plus `Error Share:
+    # 100.0%`, exactly the total-failure reading the guard exists to prevent.
+    # Deferring to the model keeps one rule for run.md, run.json and the
+    # evalboard instead of three.
+    if summary.tasks_not_graded and summary.pass_rate is None:
         return [f"- **Pass Rate**: n/a — {summary.tasks_not_graded} task(s) executed without grading"]
     lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_graded})"]
     if summary.tasks_error:
@@ -734,7 +742,7 @@ class ReportGenerator:
         all_turns: list[TurnRecord] = []
 
         # Find all task.json files recursively to handle both flat and nested (experiment) layouts
-        for report_path in run_dir.rglob("task.json"):
+        for report_path in run_dir.rglob(TASK_JSON_FILENAME):
             if "artifacts" in report_path.parts or ".git" in report_path.parts:
                 continue
             try:
@@ -965,7 +973,8 @@ def _compute_suite_rollup(
             if len(reasons) >= _FAILURE_REASONS_PER_ROW:
                 break
         task_json_path = (
-            build_task_run_dir(run_dir, variant_id, row.task_id, replicate_index=row.replicate_index) / "task.json"
+            build_task_run_dir(run_dir, variant_id, row.task_id, replicate_index=row.replicate_index)
+            / TASK_JSON_FILENAME
         )
         try:
             # Persist as POSIX — this value lands in suite.json and in

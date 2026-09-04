@@ -61,7 +61,7 @@ publishing different numbers for the same run.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `pass_rate` | `float \| None` | `tasks_succeeded / tasks_graded` — errors are in the denominator, counted as misses; ungraded tasks are in neither. `None` on an empty or fully ungraded run (0/0 is unknown, not 0%). |
+| `pass_rate` | `float \| None` | `tasks_succeeded / tasks_graded` — errors are in the denominator, counted as misses; ungraded tasks are in neither. `None` when the run is empty, **or when no row produced a verdict at all** — an `execute` night whose only non-ungraded rows are crashes was never measured, and reporting `0.0%` there reads as a total failure. |
 | `error_share` | `float \| None` | `tasks_error / tasks_graded`. Diagnostic only; never adjusts the rate. |
 | `tasks_graded` | `int` | `tasks_run - tasks_not_graded`. The denominator of both rates above. |
 | `total_cost_usd` | `float \| None` | **The bill**: agent + judge + simulator, summed over the rows. `None` when nothing could be priced. |
@@ -248,10 +248,14 @@ The cross-variant summary:
 - `experiment_id`, `description`, `variant_ids`.
 - `task_summaries: list[TaskExperimentSummary]` — each
   `{task_id, variant_results, best_variant, is_tie, score_spread, replicate_count}`,
-  where each `VariantResult` carries `{variant_id, task_id, weighted_score` (`float |
-  None` — `null` on an ungraded or errored row)`,
+  where each `VariantResult` carries `{variant_id, task_id, weighted_score,
   final_status, duration_seconds, total_tokens, iteration_count,
   total_assistant_turns, reference_similarity, replicate_index, replicate_count}`.
+  `weighted_score` is `float | None`: `null` only when every replicate was
+  **ungraded**. An **errored** replicate counts as `0.0` — same rule as
+  `VariantAggregate.average_score` above. That is deliberate: dropping errored
+  rows would let a nightly where one image build failed report a *higher*
+  headline score than a clean one.
 - `variant_aggregates: dict[str, VariantAggregate]` — keyed by variant id.
 - `total_duration_seconds`.
 - `per_replicate_scores: dict[variant_id -> dict[task_id -> list[float]]]`.

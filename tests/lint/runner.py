@@ -32,6 +32,7 @@ from tests.lint.rules.ce049_no_score_or_zero import NoScoreOrZero
 from tests.lint.rules.ce050_no_union_getattr_probe import NoUnionGetattrProbe
 from tests.lint.rules.ce051_no_driver_override import NoDriverOverride
 from tests.lint.rules.ce052_process_lethal_must_be_container_gated import ProcessLethalMustBeContainerGated
+from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -87,6 +88,7 @@ ALL_RULES: list[RuleClass] = [
     NoUnionGetattrProbe,
     NoDriverOverride,
     ProcessLethalMustBeContainerGated,
+    NoRunRecordFilenameLiteral,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

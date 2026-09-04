@@ -282,18 +282,12 @@ async def test_docker_forwards_grade_to_the_container(tmp_path: Path, grade: boo
     assert (await _staged_context(tmp_path, grade=grade))["grade"] is grade
 
 
-def test_container_defaults_to_grading_when_the_host_sends_no_key() -> None:
-    """A host predating `execute` writes no `grade` key; the container must keep
-    its original (grading) behavior rather than silently withholding verdicts."""
-    # The parse is inline in a Typer command that cannot run outside a container,
-    # so this reads its source. Resolved off the function object because
-    # `coder_eval.cli` rebinds the submodule's name to the function it exports.
-    import inspect
-
-    from coder_eval.cli.run_task_internal_command import run_task_internal_command
-
-    source = inspect.getsource(inspect.getmodule(run_task_internal_command))  # type: ignore[arg-type]
-    assert 'context.get("grade", True)' in source, "the in-container default must be True (grade)"
+# The in-container grading default is asserted behaviourally in
+# tests/test_detached_grading_boundaries.py
+# (`TestGradePlumbedIntoTheContainerOrchestrator`), which drives the real command
+# with `Orchestrator` patched and reads the captured `grade` kwarg. The source-text
+# grep that used to live here was duplicated verbatim in that file and proved
+# nothing: deleting `grade=grade` at the call site left both greps green.
 
 
 def test_execute_help_explains_the_refused_flags() -> None:

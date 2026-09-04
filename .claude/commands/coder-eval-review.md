@@ -24,7 +24,8 @@ The run layout (`runs/<run_id>/<variant_id>/<task_id>/<NN>/…`, `<NN>` a zero-p
 1. Read `<run_path>/run.json` if present (for context — `run_id`, `start_time`).
 2. Glob `<run_path>/*/*/*/task.json` and read each one.
 3. Read `<run_path>/analysis.md` if present — it already diagnoses many failures; lean on its findings rather than re-deriving them.
-4. A task counts as **failed** if `final_status != "SUCCESS"` **or** `weighted_score < 0.9`. Skip passing tasks for now (we may extend to passing tasks later — the schema supports it).
+4. Skip any task whose `final_status` is `"NOT_GRADED"` — `coder-eval execute` produced it, no criterion ran, and `weighted_score` is `null`. It is neither a pass nor a failure, and comparing `null < 0.9` would book every ungraded row as a failure to review.
+5. Of the rest, a task counts as **failed** if `final_status != "SUCCESS"` **or** `weighted_score < 0.9`. Skip passing tasks for now (we may extend to passing tasks later — the schema supports it).
 
 If no `task.json` files exist, write an empty `review_index.json` (`{"reviews": []}`) and exit.
 

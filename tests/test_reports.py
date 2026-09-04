@@ -1307,3 +1307,60 @@ def test_generate_markdown_renders_both_markers_when_both_fire():
     assert "max_turns exhausted" in report_md
     assert "expected_turns exceeded" in report_md
     assert "7/5" in report_md
+
+
+class TestAnUnmeasuredRunPublishesNoRate:
+    """`tasks_graded` is the complement of the ungraded bucket, so it keeps ERROR
+    rows — right under `run`, where an errored row was attempted and genuinely
+    missed. Under `coder-eval execute` no criterion runs on ANY row, yet a
+    crashed one lands in the `error` bucket, so it stayed in the denominator on
+    its own: a 100-task execute night with 5 crashes published `pass_rate 0.0`
+    and `error_share 1.0`, a measured-looking total failure for a run that was
+    never measured at all.
+    """
+
+    @staticmethod
+    def _summary(*, succeeded: int, failed: int, error: int, not_graded: int) -> RunSummary:
+        return RunSummary(
+            run_id="2026-01-01_00-00-00",
+            start_time=datetime(2026, 1, 1),
+            end_time=datetime(2026, 1, 1),
+            total_duration_seconds=0.0,
+            tasks_run=succeeded + failed + error + not_graded,
+            tasks_succeeded=succeeded,
+            tasks_failed=failed,
+            tasks_error=error,
+            tasks_not_graded=not_graded,
+            task_results=[],
+            framework_version="0.1.0",
+            environment_info={},
+        )
+
+    def test_an_execute_night_with_a_crash_reports_no_rate(self):
+        summary = self._summary(succeeded=0, failed=0, error=5, not_graded=95)
+
+        assert summary.pass_rate is None
+        assert summary.error_share is None
+
+    def test_the_markdown_says_so_rather_than_rendering_zero_percent(self):
+        summary = self._summary(succeeded=0, failed=0, error=5, not_graded=95)
+
+        md = ReportGenerator.generate_markdown(summary)
+
+        assert "n/a" in md
+        assert "0.0%" not in md, "a never-measured run rendered a measured-looking 0.0% pass rate"
+
+    def test_a_partly_graded_run_still_reports_a_rate(self):
+        """The carve-out is only for "nothing was measured". Once ANY row reached
+        a verdict, an errored row is a genuine miss and belongs in the
+        denominator — the erroring-bonus this rule exists to prevent."""
+        summary = self._summary(succeeded=3, failed=1, error=1, not_graded=5)
+
+        assert summary.pass_rate == 3 / 5
+        assert summary.error_share == 1 / 5
+
+    def test_an_ordinary_graded_run_is_untouched(self):
+        summary = self._summary(succeeded=2, failed=1, error=1, not_graded=0)
+
+        assert summary.pass_rate == 0.5
+        assert summary.error_share == 0.25

@@ -29,7 +29,9 @@ from coder_eval.models import (
     FileExistsCriterion,
     FinalStatus,
     PostRunResult,
+    SimulationTelemetry,
     TaskDefinition,
+    TurnRecord,
     parse_agent_config,
 )
 from coder_eval.orchestrator import Orchestrator
@@ -96,6 +98,14 @@ def _prior() -> EvaluationResult:
         started_at=datetime(2020, 1, 1, 0, 0, 0),
         final_status=FinalStatus.NOT_GRADED,
         iteration_count=7,
+        # Distinctive, NOT the model default. `iterations` and `simulation` were
+        # left at `[]` / `None`, so their parametrized sensors asserted `[] == []`
+        # and `None == None` — verified by deleting the `simulation` carry line in
+        # orchestrator.py and getting a byte-identical green suite, i.e. nothing
+        # anywhere guarded it and a re-graded simulation run would silently lose
+        # its dialog record.
+        iterations=[TurnRecord(iteration=1, user_input="prior prompt", agent_output="prior reply")],
+        simulation=SimulationTelemetry(n_trials=3, replicate_index=2, stop_reason="stop_token", total_turns=4),
         max_turns_exhausted=True,
         error_message="prior message",
         error_details={"where": "prior"},
@@ -161,6 +171,18 @@ def test_field_partition_covers_every_evaluation_result_field() -> None:
 def test_every_carried_field_reaches_the_regrade(field: str, tmp_path: Path) -> None:
     orch, prior = _seeded(tmp_path)
     assert orch.result is not None
+    # Anti-vacuity FIRST. This module's docstring claims every carried field is
+    # set to a distinctive value, and for two of sixteen it was not — so the
+    # assertion below compared a default against itself and would have passed
+    # with the production carry line deleted. Checking the fixture differs from
+    # the model default makes that failure mode impossible to reintroduce
+    # silently: a new CARRIED entry left at its default fails HERE, naming the
+    # fixture, rather than passing and pinning nothing.
+    default = EvaluationResult.model_fields[field].get_default(call_default_factory=True)
+    assert getattr(prior, field) != default, (
+        f"_prior() leaves `{field}` at its model default, so the comparison below is vacuous — "
+        "it would pass with the carry line deleted. Give the fixture a distinctive value."
+    )
     assert getattr(orch.result, field) == getattr(prior, field), (
         f"_seed_from_prior_result dropped `{field}`; the graded row would report its default "
         "instead of what the run actually did."

@@ -444,6 +444,16 @@ def run_pipeline(
     # --resume needs an explicit run dir to resume into (auto-generated dirs are always fresh).
     if resume and run_dir is None:
         raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
+    # --allow-host-grading only reaches anything from inside the `if resume:`
+    # branch below, so without --resume it parsed, was accepted, and did nothing
+    # at all — no warning, no error. The sibling mode-scoped flag on the same
+    # feature (`evaluate --workspace`) hard-errors on exactly this misuse; two
+    # new flags behaving differently for one user mistake is the inconsistency.
+    if allow_host_grading and not resume:
+        raise typer.BadParameter(
+            "--allow-host-grading applies to --resume only (it decides how an executed-but-ungraded "
+            + "row is graded). A fresh `run` grades inside the driver the task asks for."
+        )
 
     # Parse tag filters
     include_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None

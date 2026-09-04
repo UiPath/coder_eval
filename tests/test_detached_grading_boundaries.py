@@ -14,6 +14,7 @@ Three boundaries, each shipped without a behavioural test:
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -196,15 +197,11 @@ class TestInContainerGradeCoercion:
         assert result.exit_code == 2
         assert "must be a boolean" in result.output
 
-    def test_the_default_is_to_grade(self) -> None:
-        """A host predating `execute` writes no key; the container must keep its
-        original behaviour rather than silently withholding verdicts."""
-        import inspect
-
-        from coder_eval.cli.run_task_internal_command import run_task_internal_command
-
-        source = inspect.getsource(inspect.getmodule(run_task_internal_command))  # type: ignore[arg-type]
-        assert 'context.get("grade", True)' in source
+    # The in-container default is asserted BEHAVIOURALLY by
+    # `TestGradePlumbedIntoTheContainerOrchestrator::test_an_absent_key_still_grades`.
+    # It used to be a `assert 'context.get("grade", True)' in source` grep, which
+    # is the same static check that already failed here once: it passes happily
+    # while the line it describes is never executed.
 
 
 # --------------------------------------------------------------------------
@@ -331,20 +328,56 @@ class TestGradingCrashLeavesTheRowRegradeable:
 
 class TestAtomicWriteIsNotAnOverwritePrimitive:
     """``evaluate``'s write-back guards its DESTINATION against a symlink, but the
-    truncation happens through the temp name — so a pre-planted
-    ``task.json.tmp`` symlink bypassed the guard entirely."""
+    truncation happens through the temp name — so a pre-planted temp symlink
+    bypassed the guard entirely. The name is now unpredictable AND ``O_NOFOLLOW``,
+    so both halves are closed."""
 
-    def test_a_pre_planted_temp_symlink_is_refused(self, tmp_path: Path) -> None:
-        from coder_eval.path_utils import write_text_atomic
+    def test_a_symlink_at_the_temp_name_is_never_followed(self, tmp_path: Path) -> None:
+        """Pinned by pinning the random half, since a real attacker cannot guess
+        it — the point is that O_NOFOLLOW still refuses even if they could."""
+        from coder_eval import path_utils
 
         victim = tmp_path / "victim"
         victim.write_text("keep me", encoding="utf-8")
         target = tmp_path / "task.json"
-        (tmp_path / "task.json.tmp").symlink_to(victim)
+        planted = tmp_path / f"task.json.{os.getpid()}.deadbeef.tmp"
+        planted.symlink_to(victim)
 
-        with pytest.raises(OSError, match="already exists"):
-            write_text_atomic(target, "attacker content")
+        with (
+            patch.object(path_utils.secrets, "token_hex", return_value="deadbeef"),
+            pytest.raises(OSError),
+        ):
+            path_utils.write_text_atomic(target, "attacker content")
         assert victim.read_text(encoding="utf-8") == "keep me"
+
+    def test_a_stale_temp_file_does_not_wedge_the_write(self, tmp_path: Path) -> None:
+        """The regression that mattered most. Under a FIXED temp name, `O_EXCL`
+        turned a leftover from a SIGKILL into a permanent refusal to persist the
+        record — so the row reported ERROR, `--resume` saw no task.json, re-ran
+        the task into the same run dir, and hit the same file again, re-paying
+        for the agent on every pass."""
+        from coder_eval.path_utils import write_text_atomic
+
+        target = tmp_path / "task.json"
+        (tmp_path / "task.json.tmp").write_text("leftover from a hard kill", encoding="utf-8")
+
+        write_text_atomic(target, "hello")
+
+        assert target.read_text(encoding="utf-8") == "hello"
+
+    def test_the_record_is_readable_by_other_uids(self, tmp_path: Path) -> None:
+        """Under `driver: docker` the in-container orchestrator writes this file
+        as root straight into the bind-mounted host run dir, and the host reads it
+        back as the invoking uid through an UNGUARDED `read_text`. Creating it
+        0600 made that raise PermissionError for every docker-driver task on
+        Linux — invisible on macOS, where Docker Desktop remaps ownership."""
+        from coder_eval.path_utils import write_text_atomic
+
+        target = tmp_path / "task.json"
+        write_text_atomic(target, "hello")
+
+        mode = target.stat().st_mode & 0o777
+        assert mode & 0o044, f"task.json is not group/other-readable: {mode:#o}"
 
     def test_an_ordinary_write_still_works(self, tmp_path: Path) -> None:
         from coder_eval.path_utils import write_text_atomic
@@ -352,7 +385,7 @@ class TestAtomicWriteIsNotAnOverwritePrimitive:
         target = tmp_path / "task.json"
         write_text_atomic(target, "hello")
         assert target.read_text(encoding="utf-8") == "hello"
-        assert not (tmp_path / "task.json.tmp").exists()
+        assert not list(tmp_path.glob("*.tmp"))
 
     def test_a_failed_write_leaves_no_temp_file(self, tmp_path: Path) -> None:
         from coder_eval.path_utils import write_text_atomic
@@ -360,7 +393,7 @@ class TestAtomicWriteIsNotAnOverwritePrimitive:
         target = tmp_path / "task.json"
         with patch("os.replace", side_effect=OSError("boom")), pytest.raises(OSError):
             write_text_atomic(target, "hello")
-        assert not (tmp_path / "task.json.tmp").exists()
+        assert not list(tmp_path.glob("*.tmp"))
 
 
 # --------------------------------------------------------------------------
@@ -442,3 +475,200 @@ def test_a_reference_that_vanished_is_refused_not_skipped(tmp_path: Path) -> Non
         pytest.raises(RegradeError, match="is gone"),
     ):
         verify_reference_unchanged(prior, task, tmp_path / "t.yaml")
+
+
+# --------------------------------------------------------------------------
+# The recorded-config gate must cover PROVISIONING, not just criteria
+# --------------------------------------------------------------------------
+
+
+class TestRecordedProvisioningIsGatedToo:
+    """`grading_sandbox_config` carries the recorded `sandbox` block through
+    untouched, and the `--copy` branch then calls `Sandbox.setup` — which reaches
+    `uv pip install <recorded packages>`, `npm install <recorded packages>` and
+    `git clone <recorded url>`. A package name is arbitrary code at install time.
+
+    The gate walked only `success_criteria` + hooks, so a shared run directory
+    whose criteria were all `file_exists` passed it and still ran installers.
+    """
+
+    @staticmethod
+    def _task_with(**sandbox_kwargs) -> TaskDefinition:
+        return TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
+            sandbox=SandboxConfig(**sandbox_kwargs),
+            success_criteria=[FileExistsCriterion(path="x.txt", description="x")],
+        )
+
+    def test_python_packages_are_named(self) -> None:
+        from coder_eval.models import PythonEnvConfig
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        task = self._task_with(python=PythonEnvConfig(env_packages=["attacker-pkg"]))
+        assert any("attacker-pkg" in c for c in embedded_commands(task))
+
+    def test_node_packages_are_named(self) -> None:
+        from coder_eval.models import NodeEnvConfig
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        task = self._task_with(node=NodeEnvConfig(env_packages=["evil-npm"]))
+        assert any("evil-npm" in c for c in embedded_commands(task))
+
+    def test_a_repo_source_url_is_named(self) -> None:
+        from coder_eval.models import RepoSource
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        task = self._task_with(template_sources=[RepoSource(url="https://evil.example/repo.git")])
+        assert any("evil.example" in c for c in embedded_commands(task))
+
+    def test_provisioning_alone_triggers_the_refusal(self, tmp_path: Path) -> None:
+        """The exact repro: every criterion is a file_exists, so the old scan
+        found nothing and the installers ran with no opt-in."""
+        from coder_eval.models import PythonEnvConfig
+        from coder_eval.orchestration.regrade import check_embedded_commands
+
+        task = self._task_with(python=PythonEnvConfig(env_packages=["attacker-pkg"]))
+        with pytest.raises(RegradeError, match="--allow-recorded-commands"):
+            check_embedded_commands(task, tmp_path, allow_recorded_commands=False)
+
+    def test_the_in_place_path_is_exempt(self, tmp_path: Path) -> None:
+        """`adopt()` installs nothing, so in place these are not capabilities the
+        run dir has — and refusing there would break the headline flow."""
+        from coder_eval.models import PythonEnvConfig
+        from coder_eval.orchestration.regrade import check_embedded_commands
+
+        task = self._task_with(python=PythonEnvConfig(env_packages=["attacker-pkg"]))
+        check_embedded_commands(task, tmp_path, allow_recorded_commands=False, include_setup_phase=False)
+
+    def test_an_llm_judge_is_named(self) -> None:
+        """No shell, but it spends the grader's model budget and ships the graded
+        artifacts to a provider the recorded config chose."""
+        from coder_eval.models import LLMJudgeCriterion
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
+            success_criteria=[LLMJudgeCriterion(description="x", prompt="grade it")],
+        )
+        assert any("llm_judge" in c for c in embedded_commands(task))
+
+
+class TestGradePlumbedIntoTheContainerOrchestrator:
+    """The `grade` value reaching the in-container Orchestrator was asserted only
+    by grepping the module's own source text, which passes while the line it
+    describes is never executed — deleting `grade=grade` left every test green."""
+
+    @staticmethod
+    def _invoke(tmp_path: Path, context: dict) -> object:
+        captured: dict[str, object] = {}
+
+        class _FakeOrchestrator:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def run(self):
+                return _result()
+
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        task_yaml = (
+            "task_id: t\ndescription: d\nagent:\n  type: none\n"
+            "success_criteria:\n  - type: file_exists\n    path: p.txt\n    description: x\n"
+        )
+        (input_dir / "task.yaml").write_text(task_yaml, encoding="utf-8")
+        (input_dir / "context.json").write_text(
+            json.dumps({"variant_id": "default", "source_yaml": task_yaml, **context}), encoding="utf-8"
+        )
+        with patch("coder_eval.orchestrator.Orchestrator", _FakeOrchestrator):
+            runner.invoke(
+                app,
+                ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")],
+            )
+        return captured.get("grade")
+
+    def test_execute_forwards_grade_false(self, tmp_path: Path) -> None:
+        assert self._invoke(tmp_path, {"grade": False}) is False
+
+    def test_an_absent_key_still_grades(self, tmp_path: Path) -> None:
+        """A host predating `execute` writes no key; the container must keep its
+        original behaviour rather than silently withholding verdicts."""
+        assert self._invoke(tmp_path, {}) is True
+
+
+class TestContainerContextIsValidated:
+    """`json.loads` returns Any, so an annotation at this boundary reads like a
+    guarantee and enforces nothing."""
+
+    @staticmethod
+    def _run(tmp_path: Path, context: dict):
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "task.yaml").write_text("task_id: t\n", encoding="utf-8")
+        (input_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+        return runner.invoke(app, ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")])
+
+    def test_a_non_string_variant_id_is_refused(self, tmp_path: Path) -> None:
+        result = self._run(tmp_path, {"variant_id": 7, "source_yaml": "task_id: t\n"})
+        assert result.exit_code == 2
+        assert "variant_id" in result.output
+
+    def test_a_string_replicate_index_is_refused(self, tmp_path: Path) -> None:
+        """`"00"` would reach build_task_run_dir typed as int."""
+        result = self._run(tmp_path, {"variant_id": "default", "replicate_index": "00", "source_yaml": "task_id: t\n"})
+        assert result.exit_code == 2
+        assert "replicate_index" in result.output
+
+
+class TestCriterionPathsCannotEscapeTheSandbox:
+    """`Path('/tmp/sandbox') / '/etc/passwd'` is `/etc/passwd` — pathlib discards
+    the prefix on an absolute right operand — and criterion paths were the one
+    task-authored path in sandbox.py that skipped `_resolve_within_sandbox`.
+
+    Defensible while a task YAML was operator-supplied; not once
+    `evaluate <run_dir>` began rebuilding the criteria list from a shareable run
+    directory, which turns `file_contains` / `file_check` / `file_matches_regex`
+    into a pass-fail oracle over any file the grading user can read.
+    """
+
+    @staticmethod
+    def _sandbox(tmp_path: Path):
+        from coder_eval.sandbox import Sandbox
+
+        sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id="t")
+        work = tmp_path / "work"
+        work.mkdir()
+        sandbox.sandbox_dir = work
+        return sandbox, work
+
+    def test_an_absolute_path_resolves_to_nothing(self, tmp_path: Path) -> None:
+        sandbox, _ = self._sandbox(tmp_path)
+        secret = tmp_path / "secret.txt"
+        secret.write_text("token", encoding="utf-8")
+
+        assert sandbox.resolve_files(str(secret)) == []
+
+    def test_a_dotdot_traversal_resolves_to_nothing(self, tmp_path: Path) -> None:
+        sandbox, _ = self._sandbox(tmp_path)
+        (tmp_path / "secret.txt").write_text("token", encoding="utf-8")
+
+        assert sandbox.resolve_files("../secret.txt") == []
+
+    def test_a_glob_cannot_escape_either(self, tmp_path: Path) -> None:
+        sandbox, _ = self._sandbox(tmp_path)
+        (tmp_path / "secret.txt").write_text("token", encoding="utf-8")
+
+        assert sandbox.resolve_files("../*.txt") == []
+
+    def test_an_ordinary_in_sandbox_path_still_resolves(self, tmp_path: Path) -> None:
+        """The control — the guard must not break normal grading."""
+        sandbox, work = self._sandbox(tmp_path)
+        (work / "proof.txt").write_text("ok", encoding="utf-8")
+
+        assert sandbox.resolve_files("proof.txt") == [work / "proof.txt"]
+        assert sandbox.resolve_files("*.txt") == [work / "proof.txt"]

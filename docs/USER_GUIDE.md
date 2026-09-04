@@ -42,6 +42,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
 | `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. See [Resuming a run](#resuming-a-run). |
+| `--allow-host-grading` | `--resume` only. Grade an executed-but-ungraded `driver: docker` row on this host instead of refusing; the row is stamped `graded_on_host`. Rejected without `--resume`, since a fresh `run` grades inside the driver the task asks for. |
 | `--sample N` | For dataset-backed tasks, run a fixed-seed random N-row sample (reproducible; cheap smoke test). See [Bring Your Own Dataset](DATASETS.md). |
 | `--sample-per-stratum N` | For dataset-backed tasks, keep up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — see [Bring Your Own Dataset](DATASETS.md). |
 | `--include-skipped` | Also run tasks marked `skip: true` in their YAML (off by default so CI keeps excluding them). |
@@ -80,12 +81,21 @@ you want to iterate on afterwards. Grade the results later with
 budget breach still reports `ERROR` / `TIMEOUT` / `TOKEN_BUDGET_EXCEEDED` and still
 exits non-zero, exactly as under `run`.
 
-Every `run` flag is available except two things, each refused rather than quietly
+Exhausting `max_turns` is the one fact that does *not* become a status here. Under
+`run` it decides the outcome only when the criteria fail — a max-turns trajectory
+whose criteria pass is `SUCCESS` — so it is not knowable without grading. `execute`
+records `max_turns_exhausted: true` on the row and finalizes `NOT_GRADED`; the later
+grade reads the flag and reaches exactly the status `run` would have. Rows like this
+are picked up by `run --resume`, which owes a grade to anything executed but never
+scored — including a row that also timed out or tripped a budget.
+
+Every `run` flag is available except three things, each refused rather than quietly
 degraded:
 
 | Not supported | Why |
 | --- | --- |
 | `--junit-xml` | A JUnit report reports verdicts, and there are none. |
+| `--allow-host-grading` | It decides how an executed-but-ungraded row is *graded*, and `execute` grades nothing. |
 | Simulation tasks | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. |
 
 `stop_early:` blocks are also inert here: early stop exists to cut a run once the
@@ -211,6 +221,8 @@ rather than as a verdict. Override either default with `--in-place` / `--copy`.
 | `--in-place / --copy` | Grade where the files are, or copy first. Default: in-place for a run directory, copy for a plain work directory. |
 | `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve). Ignored when grading in place — an adopted directory is never moved or deleted. |
 | `--run-dir` | Where the graded `task.json` lands (default: auto-generated timestamped dir in `runs/`). |
+| `--allow-recorded-commands` | Accept a rebuilt config that would run shell (`run_command` criteria, judges, `pre_run`/`post_run`) or install packages on this host. Refused by default — a run directory is a shareable artifact, so its recorded config is untrusted input. |
+| `--allow-host-grading` | Grade a `driver: docker` task on this host instead of refusing. The row is stamped `graded_on_host` so it is never silently compared with a container-graded one. |
 | `--verbose, -v` | DEBUG-level logging |
 
 A re-grade refuses to run if the task's `reference:` directory changed since the

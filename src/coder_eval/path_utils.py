@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import platform
+import secrets
 import shutil
 from collections.abc import Callable
 from datetime import datetime
@@ -47,23 +48,40 @@ def write_text_atomic(path: Path, text: str) -> None:
     orchestrator and the detached grade's write-back cannot have different crash
     semantics for the same file.
 
-    The temp file is opened ``O_CREAT | O_EXCL | O_NOFOLLOW``. Without it a
-    pre-planted ``task.json.tmp`` *symlink* in a shared run directory makes this
-    an arbitrary-file-overwrite primitive — and one that bypasses the destination
-    symlink refusal in ``evaluate``'s write-back, since the guard checks the
-    destination while the truncation happens through the temp name. A partial
-    temp file is unlinked before the error propagates, so a failed write never
-    leaves ``.tmp`` litter beside the record.
+    The temp file is opened ``O_CREAT | O_EXCL | O_NOFOLLOW`` under a name that
+    is UNIQUE per call. Without ``O_NOFOLLOW`` a pre-planted ``task.json.tmp``
+    *symlink* in a shared run directory makes this an arbitrary-file-overwrite
+    primitive — and one that bypasses the destination symlink refusal in
+    ``evaluate``'s write-back, since the guard checks the destination while the
+    truncation happens through the temp name.
+
+    The name must be unique, not fixed, and that is a correctness requirement
+    rather than tidiness. ``os.replace`` is the only step that can be interrupted
+    without trace, and this function exists precisely because the process may be
+    SIGKILLed (the docker host-heartbeat watchdog does exactly that) — so a
+    crash between ``open`` and ``replace`` WILL sometimes leave the temp file
+    behind. Under a fixed name, ``O_EXCL`` then turned that leftover into a
+    permanent refusal to write the record at all: the row reported ERROR, and
+    ``--resume`` saw no ``task.json``, re-ran the task into the same run dir, and
+    hit the same stale file — an unbounded loop that re-pays for the agent every
+    time. A unique name keeps ``O_EXCL``'s guarantee while making a leftover
+    inert. It can litter a dead ``.tmp`` beside the record after a hard kill;
+    that is strictly better than wedging finalization, and the litter is
+    recognisable by its embedded pid.
+
+    Mode is ``0o666`` so the umask applies, giving the same 0644 a plain
+    ``write_text`` produced. Creating it 0600 broke the docker driver on Linux:
+    the in-container orchestrator writes ``task.json`` as root straight into the
+    bind-mounted host run dir, and the host then reads it back as the invoking
+    uid — an unguarded read that raises ``PermissionError`` for every task. A
+    result record is not a secret, and the symlink hazard is closed by
+    ``O_NOFOLLOW`` and the unpredictable name rather than by the mode.
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # pid + random: unique across concurrent writers AND across a crashed
+    # predecessor, so O_EXCL can never collide with our own leftovers.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(tmp, flags, 0o600)
-    except FileExistsError as e:
-        raise OSError(
-            f"Refusing to write {path}: {tmp} already exists. Remove it if it is stale — a "
-            + "pre-planted temp file (especially a symlink) would redirect this write."
-        ) from e
+    fd = os.open(tmp, flags, 0o666)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)

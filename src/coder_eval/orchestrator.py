@@ -7,7 +7,7 @@ import re
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -68,6 +68,7 @@ from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, valid
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
 from .orchestration.run_limits import validate_run_limits
 from .path_utils import (
+    TASK_JSON_FILENAME,
     digest_tree,
     format_task_log_id,
     rmtree_restrictive,
@@ -434,7 +435,7 @@ class Orchestrator:
         self.prior_result = prior_result
 
         # Derived paths
-        self.report_path = self.run_dir / "task.json"
+        self.report_path = self.run_dir / TASK_JSON_FILENAME
         self.html_report_path = self.run_dir / "task.html"
         # Clean user<->agent transcript for simulation runs. Written alongside
         # task.log so a human can follow the conversation without the
@@ -536,11 +537,25 @@ class Orchestrator:
           phase this pass neither repeated nor observed. Without the first arm a
           crashed run re-graded against its half-finished workspace reports
           SUCCESS — with the original ``error_message`` still attached.
-        * The NOT_GRADED arm sits between the execution facts and FAILURE: under
-          ``grade=False`` no criterion ran, so ``success`` is always False and
-          FAILURE would be a verdict never actually reached — but
-          MAX_TURNS_EXHAUSTED is a fact about the RUN, like the statuses the
-          ``except`` branches assign, and still applies.
+        * The NOT_GRADED arm sits ABOVE ``max_turns_exhausted``, and that order
+          is what makes ``execute`` + ``evaluate`` equal a single ``run``.
+          MAX_TURNS_EXHAUSTED reads like an execution fact but is not one: on the
+          graded path it is subordinate to the verdict — ``run`` returns SUCCESS
+          for a max-turns trajectory whose criteria pass, and only falls through
+          to MAX_TURNS_EXHAUSTED when they do not. So it is not knowable under
+          ``grade=False``. Consuming it here first made it terminal *and*
+          permanent (``is_execution_fact`` pins it in the first arm), so the same
+          agent output scored SUCCESS/1.0 under ``run`` and MAX_TURNS_EXHAUSTED
+          under ``execute`` → ``evaluate`` — and, being category ``failed``,
+          `run --resume` called the row complete and left it forever unscored.
+          Nothing is lost by deferring: the fact lives on
+          ``result.max_turns_exhausted``, which ``_seed_from_prior_result``
+          carries, so the detached grade walks this identical chain and reaches
+          the arm below.
+
+          The statuses that ARE execution facts (TIMEOUT, ERROR, the budget
+          stops) differ in kind: they abort the run before a verdict is
+          reachable, so preserving them overturns nothing.
 
         With ``grade=True`` and no prior result the chain is the original one.
         """
@@ -554,10 +569,10 @@ class Orchestrator:
             return inherited
         if success:
             return FinalStatus.SUCCESS
-        if self.result.max_turns_exhausted:
-            return FinalStatus.MAX_TURNS_EXHAUSTED
         if not self.grade:
             return FinalStatus.NOT_GRADED
+        if self.result.max_turns_exhausted:
+            return FinalStatus.MAX_TURNS_EXHAUSTED
         return FinalStatus.FAILURE
 
     async def run(self) -> EvaluationResult:
@@ -2184,13 +2199,22 @@ class Orchestrator:
         arming a criterion (e.g. adding a ``decide_within`` fail-fast timeout)
         must never change the verdict of a run it didn't cut.
 
-        BOTH grading paths must call this. A detached grade (``evaluate
-        <run_dir>`` / ``run --resume``) reaches the verdict through the
-        evaluate-only branch, where ``early_stop`` arrives via
+        BOTH SINGLE-SHOT grading paths must call this — the live one and the
+        evaluate-only one, which are its two call sites. A detached grade
+        (``evaluate <run_dir>`` / ``run --resume``) reaches the verdict through
+        the evaluate-only branch, where ``early_stop`` arrives via
         ``_seed_from_prior_result`` rather than from a live watcher; selecting
         the gate there in a second, hand-written place is exactly how the
         seeded field came to be carried but never read — re-grading an
         early-stopped run under the full-run strict-AND gate flips its verdict.
+
+        The simulation dialog path does NOT route through here, and saying "both
+        grading paths" without that qualifier read as though it did. It is
+        benign only because ``result.early_stop`` is never assigned on the
+        dialog path, so an armed simulation task silently gates strict-AND on a
+        possibly-truncated trajectory. Wiring the dialog path through this seam
+        means also setting ``early_stop`` there; until then the limit is stated
+        rather than implied.
         """
         assert self.result is not None
         if self.result.early_stop is not None:
@@ -2318,11 +2342,15 @@ class Orchestrator:
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
         # Facts about the RUN, recorded before the grading switch. `execute`
-        # withholds the verdict, never the facts: a max-turns or over-budget run
-        # must finalize the same way under `execute` as under `run`, or
-        # `execute` exits 0 where `run` exits 1 for identical agent output — and
-        # `_seed_from_prior_result` cannot restore a fact the execute phase never
-        # captured, so a later `evaluate` inherits the wrong terminal status too.
+        # withholds the verdict, never the facts: `_seed_from_prior_result`
+        # cannot restore a fact the execute phase never captured, so a later
+        # `evaluate` would inherit the wrong terminal status.
+        #
+        # Recording the fact is NOT the same as finalizing on it. `max_turns`
+        # exhaustion decides the status only when the criteria fail (see
+        # `_terminal_status`), so under `grade=False` this flag is carried into
+        # task.json and consumed by the detached grade, not turned into a
+        # terminal status here.
         if turn_record.max_turns_exhausted:
             self.result.max_turns_exhausted = True
             logger.warning(
@@ -2424,12 +2452,24 @@ class Orchestrator:
         # Grading site 3 of 4. Unreachable today — `execute` rejects simulation
         # tasks at the CLI, because the dialog's turn-continuation logic reads
         # criteria results to decide whether to keep talking, so an ungraded
-        # dialog would silently change its own stopping behavior. Kept as a
-        # correct, defensive no-op so the gate holds if that restriction lifts.
+        # dialog would silently change its own stopping behavior.
+        #
+        # RAISES rather than returning an empty list, matching the evaluate-only
+        # path's refusal. The empty-list version described itself as a
+        # "defensive no-op so the gate holds", and it was neither: both callers
+        # go straight on to `all_criteria_passed`, whose first act is a
+        # length pre-check that raises on a mismatch — and an empty criteria
+        # list is forbidden by `TaskDefinition.validate_success_criteria`, so
+        # the mismatch was guaranteed. If the simulation restriction ever lifts,
+        # that "no-op" turns every ungraded dialog into FinalStatus.ERROR. A
+        # loud refusal here is honest about the fact that this path has no
+        # ungraded semantics yet.
         if not self.grade:
-            self.result.success_criteria_results = []
-            self.result.weighted_score = None
-            return []
+            raise ValueError(
+                "Grading is disabled but the simulation dialog path requires criteria results to "
+                + "decide turn continuation. `execute` refuses simulation tasks at the CLI; reaching "
+                + "here means that refusal was bypassed."
+            )
         await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
@@ -3031,7 +3071,7 @@ class Orchestrator:
 
         Skipped entirely on an adopted sandbox — see ``_skip_hooks_for_adopted``.
         """
-        if self.result is None or self._skip_hooks_for_adopted("pre_run"):
+        if self.result is None or self._skip_hooks_for_adopted(self.task.pre_run, "pre_run"):
             return
         await self._run_command_list(self.task.pre_run, self.result.pre_run_results, "pre_run")
 
@@ -3044,11 +3084,11 @@ class Orchestrator:
 
         Skipped entirely on an adopted sandbox — see ``_skip_hooks_for_adopted``.
         """
-        if self.result is None or self._skip_hooks_for_adopted("post_run"):
+        if self.result is None or self._skip_hooks_for_adopted(self.task.post_run, "post_run"):
             return
         await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
 
-    def _skip_hooks_for_adopted(self, phase: str) -> bool:
+    def _skip_hooks_for_adopted(self, commands: Sequence[PreRunCommand | PostRunCommand], phase: str) -> bool:
         """True when ``phase``'s commands must not run against an adopted sandbox.
 
         ``adopt()`` guarantees it materializes nothing into the workspace, but
@@ -3061,10 +3101,15 @@ class Orchestrator:
 
         The hooks belong to the EXECUTE phase; the prior run already ran them,
         and their recorded results are carried over by ``_seed_from_prior_result``.
+
+        ``commands`` is passed in rather than looked up from ``phase``. The
+        lookup was a stringly-typed branch whose only consumer was a log line, so
+        a typo (``"prerun"``) would silently report the post_run count with
+        nothing — not pyright, not ruff — able to see it, in the same module
+        CE050 was written to protect from exactly that.
         """
         if self.sandbox is None or not self.sandbox.was_adopted:
             return False
-        commands = self.task.pre_run if phase == "pre_run" else self.task.post_run
         if commands:
             logger.info(
                 "Skipping %d %s command(s): the sandbox was adopted for grading, and re-running them "

@@ -12,7 +12,7 @@ import {
 } from "./overview";
 import { DEFAULT_HARNESS } from "./harness";
 import { DEFAULT_SOURCE, type Source } from "./sources";
-import { isGraded } from "./status";
+import { isGraded, isPassStatus } from "./status";
 import { taskCarriesRepoTag } from "./tags";
 import type { ComponentSha } from "./runs";
 
@@ -162,7 +162,7 @@ export function aggregate(perRun: PerRun[]): TrendsData {
                 status: t.status,
                 matureSkipped: t.matureSkipped ?? false,
             });
-            if (t.status === "SUCCESS") {
+            if (isPassStatus(t.status)) {
                 b.successCount += 1;
                 // A mature task the nightly skipped still counts as a pass, but
                 // it wasn't executed — its row carries 0 cost / 0 duration and

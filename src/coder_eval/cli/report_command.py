@@ -6,6 +6,7 @@ import typer
 from rich.markdown import Markdown
 
 from ..models import EvaluationResult
+from ..path_utils import TASK_JSON_FILENAME
 from ..reports import ReportGenerator
 from ..reports_html import write_task_html
 from .console import console
@@ -96,7 +97,7 @@ def _regenerate_html_reports(run_dir: Path, output_file: Path | None) -> None:
     report is written to that file. Otherwise each task.html is written
     next to its task.json.
     """
-    task_json_paths = sorted(run_dir.rglob("task.json"))
+    task_json_paths = sorted(run_dir.rglob(TASK_JSON_FILENAME))
     if not task_json_paths:
         console.print(f"[red]Error: no task.json files found under {run_dir}[/red]")
         raise typer.Exit(1)

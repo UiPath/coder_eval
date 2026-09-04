@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from .evaluation.judge_context import truncate
 from .models import FinalStatus, RunSummary, SuiteRollup
+from .path_utils import TASK_JSON_FILENAME
 
 
 logger = logging.getLogger(__name__)
@@ -169,14 +170,14 @@ def _load_task_json(run_dir: Path, row: dict[str, Any], variant: str) -> dict[st
     replicate_index = row.get("replicate_index")
     task_dir = run_dir / variant / task_id
     if isinstance(replicate_index, int) and not isinstance(replicate_index, bool):
-        candidate = task_dir / f"{replicate_index:02d}" / "task.json"
+        candidate = task_dir / f"{replicate_index:02d}" / TASK_JSON_FILENAME
     else:
-        matches = sorted(task_dir.glob("*/task.json"))
+        matches = sorted(task_dir.glob(f"*/{TASK_JSON_FILENAME}"))
         # With no replicate index, picking one of several would misattribute
         # another replicate's failure detail to this row — degrade instead.
         if len(matches) > 1:
             return None
-        candidate = matches[0] if matches else task_dir / "task.json"
+        candidate = matches[0] if matches else task_dir / TASK_JSON_FILENAME
 
     try:
         # Belt-and-braces containment check (catches symlink escapes too).

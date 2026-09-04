@@ -94,10 +94,25 @@ export function assertNever(x: never): never {
     throw new Error(`Unhandled status category: ${String(x)}`);
 }
 
-// Default table sort: failures and errors first, unknowns next, passes last.
+// Default table sort: failures and errors first, ungraded/unknown next, passes
+// last. A `switch` with `assertNever`, not the if/else-with-catch-all this
+// file's own header calls out: the catch-all sorted the new "ungraded" bucket
+// into the "unknown" rank by fall-through rather than by decision, and a sixth
+// category would land there just as silently.
 export function statusSortRank(status: string | null): number {
     const c = statusCategory(status);
-    if (c === "failed" || c === "error") return 0;
-    if (c === "passed") return 2;
-    return 1;
+    switch (c) {
+        case "failed":
+        case "error":
+            return 0;
+        case "passed":
+            return 2;
+        case "ungraded":
+        case "unknown":
+            // Between the two: an ungraded row is not a failure to rank first,
+            // and not a pass to bury last.
+            return 1;
+        default:
+            return assertNever(c);
+    }
 }

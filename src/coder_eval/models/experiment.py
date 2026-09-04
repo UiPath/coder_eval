@@ -217,8 +217,9 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     """Aggregated statistics for a single variant across all tasks.
 
     ``pass_rate`` uses the same denominator as ``RunSummary.pass_rate``: every task
-    the variant ran, errors included as misses. Otherwise an A/B whose variants
-    error at different rates compares two different denominators.
+    the variant GRADED, errors included as misses, ungraded tasks leaving BOTH
+    sides. Otherwise an A/B whose variants error at different rates compares two
+    different denominators.
     """
 
     variant_id: str

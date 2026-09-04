@@ -451,7 +451,13 @@ class Sandbox:
         assert self.sandbox_dir is not None, "Sandbox directory not initialized"
 
         repo_dir = self.sandbox_dir / "repo"
-        cmd = ["git", "clone", source.url, str(repo_dir)]
+        # `--` before the URL: it is argv position 2, so without the separator a
+        # value beginning with `-` is parsed by git as an OPTION rather than a
+        # repository (`--upload-pack=…` runs a command of the caller's choosing).
+        # That URL is task-authored, and since `evaluate <run_dir>` rebuilds the
+        # task from a shareable run directory it is no longer necessarily the
+        # operator's own string.
+        cmd = ["git", "clone", "--", source.url, str(repo_dir)]
 
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=60)
@@ -1290,6 +1296,39 @@ class Sandbox:
     # needs filesystem access beyond the sandbox root (e.g., reading installed packages,
     # system headers). Path traversal protection is handled at the agent permission level.
 
+    def _within_sandbox(self, candidate: Path) -> bool:
+        """Whether a resolved criterion path stays inside the sandbox.
+
+        The read-side twin of :meth:`_resolve_within_sandbox`, which every OTHER
+        task-authored path already goes through. Criterion paths were the one
+        consumer that skipped it, and ``Path('/tmp/sandbox') / '/etc/passwd'`` is
+        ``/etc/passwd`` — pathlib discards the prefix on an absolute right
+        operand — so ``file_contains`` / ``file_check`` / ``file_matches_regex``
+        were a pass-fail oracle over any file the grading user could read, and
+        ``json_check`` could surface parsed values in ``details``.
+
+        That was defensible while a task YAML was operator-supplied. It stopped
+        being so when ``evaluate <run_dir>`` began rebuilding the criteria list
+        from a shareable run directory.
+
+        Returns False rather than raising: an out-of-sandbox path is
+        indistinguishable to the criterion from a file that is not there, which
+        is the same answer the template and mock-dir paths give, and raising
+        here would book a config error as an agent crash (CE039).
+        """
+        assert self.sandbox_dir is not None
+        root = self.sandbox_dir.resolve()
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return False
+        if resolved == root or root in resolved.parents:
+            return True
+        logger.warning(
+            "Criterion path %r resolves outside the sandbox (%s); treating it as no match.", str(candidate), root
+        )
+        return False
+
     def resolve_files(self, path: str) -> list[Path]:
         """Resolve a criterion ``path`` to the sandbox files it addresses.
 
@@ -1324,7 +1363,7 @@ class Sandbox:
         # Literal first: an existing path is never reinterpreted as a pattern.
         candidate = self.sandbox_dir / path
         if candidate.exists():
-            return [candidate]
+            return [candidate] if self._within_sandbox(candidate) else []
 
         if not _is_glob(path):
             return []
@@ -1334,7 +1373,7 @@ class Sandbox:
 
         matches: list[Path] = []
         for match in self.sandbox_dir.glob(path):
-            if not match.is_file():
+            if not match.is_file() or not self._within_sandbox(match):
                 continue
             discovered = [part for part in match.relative_to(self.sandbox_dir).parts if part not in pinned]
             if discovered and should_ignore_path(Path(*discovered), patterns):

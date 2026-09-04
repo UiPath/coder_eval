@@ -13,7 +13,7 @@ import logging
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -818,8 +818,8 @@ def resolve_all_tasks(
 def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
     """Pick the worst final_status across replicates (error > failed > succeeded).
 
-    Unknown categories fall back to priority -1 so they sort as worst-of-all
-    (fail-closed: a new unrecognised status becomes the most urgent).
+    Every category is enumerated below and indexed directly, so a new one is a
+    type error here rather than a silent placement.
 
     "ungraded" sorts LEAST urgent (above "succeeded") — it carries no verdict, so
     any replicate that does have one must win. It therefore survives only when
@@ -832,8 +832,22 @@ def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
     while its sibling is not, and the ordering above is what keeps that from
     absorbing an unmeasured replicate into a pass.
     """
-    priority = {"error": 0, "failed": 1, "succeeded": 2, "ungraded": 3}
-    return min(statuses, key=lambda s: priority.get(s.category, -1))
+    # Annotated with the SAME Literal `FinalStatus.category` returns, and indexed
+    # directly rather than via `.get(..., -1)`. Adding the fourth `ungraded`
+    # bucket here was a manual step no checker could verify — an untyped
+    # `dict[str, int]` proves neither that every category is present nor that no
+    # stray key is — while the `-1` default it leaned on was already unreachable
+    # (the `assert set(_STATUS_CATEGORIES) == set(FinalStatus)` in models/enums.py
+    # makes `category` total). Worse, that default was documented as
+    # "fail-closed", but -1 sorts BELOW error, so a fifth category would have
+    # silently outranked ERROR as the worst status.
+    priority: dict[Literal["succeeded", "failed", "error", "ungraded"], int] = {
+        "error": 0,
+        "failed": 1,
+        "succeeded": 2,
+        "ungraded": 3,
+    }
+    return min(statuses, key=lambda s: priority[s.category])
 
 
 def _measured_scores(rows: Sequence[VariantResult] | Sequence[TaskResult]) -> list[float]:

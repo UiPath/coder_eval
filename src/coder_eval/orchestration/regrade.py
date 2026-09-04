@@ -58,7 +58,7 @@ def task_from_prior(
     run_dir: Path,
     *,
     allow_recorded_commands: bool = False,
-    include_hooks: bool = True,
+    include_setup_phase: bool = True,
 ) -> tuple[TaskDefinition, str]:
     """Rebuild the executed task from the run's own recorded config.
 
@@ -85,20 +85,32 @@ def task_from_prior(
         task = TaskDefinition.model_validate(record.resolved)
     except ValueError as e:
         return _fall_back_to_source(
-            record, run_dir, e, allow_recorded_commands=allow_recorded_commands, include_hooks=include_hooks
+            record, run_dir, e, allow_recorded_commands=allow_recorded_commands, include_setup_phase=include_setup_phase
         )
-    check_embedded_commands(task, run_dir, allow_recorded_commands=allow_recorded_commands, include_hooks=include_hooks)
+    check_embedded_commands(
+        task, run_dir, allow_recorded_commands=allow_recorded_commands, include_setup_phase=include_setup_phase
+    )
     return task, record.source_yaml
 
 
-def embedded_commands(task: TaskDefinition, *, include_hooks: bool = True) -> list[str]:
+def embedded_commands(task: TaskDefinition, *, include_setup_phase: bool = True) -> list[str]:
     """Every shell command a rebuilt task definition would run on this host.
 
-    ``include_hooks`` covers ``pre_run`` / ``post_run``. They are SKIPPED on the
-    in-place grading path (``Sandbox.was_adopted`` — re-running them would
-    overwrite the agent's deliverables before the criteria read them), so on that
-    path they are not a capability the run dir has; on the ``--copy`` path they
-    are.
+    ``include_setup_phase`` covers the two capability families that exist only on
+    the ``--copy`` path: ``pre_run`` / ``post_run``, and the sandbox's own
+    provisioning. Both are SKIPPED when grading in place (``Sandbox.adopt`` runs
+    no installer, and re-running the hooks would overwrite the agent's
+    deliverables before the criteria read them), so on that path they are not a
+    capability the run dir has.
+
+    Sandbox provisioning is the half this gate originally missed, and it was the
+    worst one. ``grading_sandbox_config`` carries the recorded ``sandbox`` block
+    through untouched, and the ``--copy`` branch then calls ``Sandbox.setup``,
+    which reaches ``uv pip install <recorded packages>``, ``npm install <recorded
+    packages>`` and ``git clone <recorded url>``. A package name is arbitrary
+    code at install time. Because the scan walked only ``success_criteria``, a
+    shared run directory whose criteria were all ``file_exists`` sailed through
+    the gate and still ran installers of the attacker's choosing.
 
     ``isinstance`` narrowing, never ``getattr(c, "command", None)``: an untyped
     string probe over a discriminated union is invisible to pyright, so renaming
@@ -107,7 +119,13 @@ def embedded_commands(task: TaskDefinition, *, include_hooks: bool = True) -> li
     cannot reach ``agent_judge``, whose ``bash`` tooling is the widest blast
     radius of the three.
     """
-    from coder_eval.models import AgentJudgeCriterion, RunCommandCriterion, UiPathEvalCriterion
+    from coder_eval.models import (
+        AgentJudgeCriterion,
+        LLMJudgeCriterion,
+        RepoSource,
+        RunCommandCriterion,
+        UiPathEvalCriterion,
+    )
 
     commands: list[str] = []
     for c in task.success_criteria:
@@ -118,18 +136,32 @@ def embedded_commands(task: TaskDefinition, *, include_hooks: bool = True) -> li
             # with tool access (Bash included) under the grader's credentials,
             # which is a strictly wider capability than one shell line.
             commands.append(f"<agent_judge: spawns a tool-using agent — {c.description}>")
+        elif isinstance(c, LLMJudgeCriterion):
+            # No shell, but it spends the grader's model budget and ships the
+            # graded artifacts (and optionally the trajectory) to a provider of
+            # the recorded config's choosing. That is a capability the operator
+            # should approve, even though nothing executes locally.
+            commands.append(f"<llm_judge: sends artifacts to {c.model} on your credentials>")
         elif isinstance(c, UiPathEvalCriterion):
             # Builds and shells `uv run uipath eval …`. Every argument is
             # shlex-quoted, so this is disclosure rather than injection — but it
             # is still a subprocess the recorded config chose to start.
             commands.append(f"uv run uipath eval {c.agent_name} {c.eval_set}")
-    if include_hooks:
+    if include_setup_phase:
         commands += [c.command for c in task.pre_run] + [c.command for c in task.post_run]
+        sandbox = task.sandbox
+        if sandbox.python is not None and sandbox.python.env_packages:
+            commands.append(f"uv pip install {' '.join(sandbox.python.env_packages)}")
+        if sandbox.node is not None and sandbox.node.env_packages:
+            commands.append(f"npm install {' '.join(sandbox.node.env_packages)}")
+        for source in sandbox.template_sources or []:
+            if isinstance(source, RepoSource):
+                commands.append(f"git clone -- {source.url}")
     return commands
 
 
 def check_embedded_commands(
-    task: TaskDefinition, run_dir: Path, *, allow_recorded_commands: bool, include_hooks: bool = True
+    task: TaskDefinition, run_dir: Path, *, allow_recorded_commands: bool, include_setup_phase: bool = True
 ) -> None:
     """Refuse — or at minimum name — the shell a rebuilt config will run here.
 
@@ -148,7 +180,7 @@ def check_embedded_commands(
     Passing the task file explicitly (``evaluate <task.yaml> <run_dir>``) also
     bypasses this: that config came from the operator, not from the artifact.
     """
-    commands = embedded_commands(task, include_hooks=include_hooks)
+    commands = embedded_commands(task, include_setup_phase=include_setup_phase)
     if not commands:
         return
     rendered = "; ".join(commands)
@@ -174,7 +206,7 @@ def _fall_back_to_source(
     e: ValueError,
     *,
     allow_recorded_commands: bool,
-    include_hooks: bool = True,
+    include_setup_phase: bool = True,
 ) -> tuple[TaskDefinition, str]:
     """The loud source-YAML fallback for a resolved config that no longer validates."""
     from .task_loader import load_task
@@ -192,7 +224,9 @@ def _fall_back_to_source(
         record.source_file,
     )
     task, source_yaml = load_task(Path(record.source_file))
-    check_embedded_commands(task, run_dir, allow_recorded_commands=allow_recorded_commands, include_hooks=include_hooks)
+    check_embedded_commands(
+        task, run_dir, allow_recorded_commands=allow_recorded_commands, include_setup_phase=include_setup_phase
+    )
     return task, source_yaml
 
 

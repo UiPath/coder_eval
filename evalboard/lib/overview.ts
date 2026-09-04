@@ -81,7 +81,14 @@ export function turnBudgetRateForTasks(tasks: RunOverviewTask[]): number | null 
     for (const t of tasks) {
         const hasBudget = t.expectedTurns != null && t.expectedTurns >= 1;
         if (!hasBudget) continue; // unbudgeted tasks never count, success or fail
-        if (t.status !== "SUCCESS") {
+        // An ungraded row leaves BOTH sides, like every other rate in this app.
+        // A raw `!== "SUCCESS"` here put it in `eligible` and never in
+        // `withinBudget`, i.e. booked it as a budget MISS — so one
+        // `coder-eval execute` run published a measured-looking Turn Budget of
+        // 0%. `status` is a free string, so neither tsc nor assertNever could
+        // see it; the typed helper is the only thing that can.
+        if (!isGraded(t.status)) continue;
+        if (!isPassStatus(t.status)) {
             // A budgeted task that didn't succeed never stayed within budget.
             eligible += 1;
             continue;
@@ -111,7 +118,10 @@ export function withinExpectedTimeRateForTasks(
     let eligible = 0;
     let within = 0;
     for (const t of tasks) {
-        if (t.status !== "SUCCESS" || t.matureSkipped) continue;
+        // Behaviourally identical to the old raw literal (a non-pass already
+        // left both sides here), converted so this file has ONE rule for what
+        // "passed" means rather than two spellings of it.
+        if (!isPassStatus(t.status) || t.matureSkipped) continue;
         const verdict = withinExpectedTime(t.durationSeconds, t.expectedSeconds);
         if (verdict === null) continue; // unscored, or no duration → can't judge
         eligible += 1;

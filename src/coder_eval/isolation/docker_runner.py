@@ -40,7 +40,13 @@ from coder_eval.models import (
     ResourceLimits,
 )
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
-from coder_eval.path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks, rmtree_restrictive
+from coder_eval.path_utils import (
+    REFERENCE_COPY_IGNORE,
+    TASK_JSON_FILENAME,
+    ignore_patterns_and_symlinks,
+    rmtree_restrictive,
+    write_text_atomic,
+)
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -845,7 +851,7 @@ class DockerRunner:
         task.json and raise ``DockerRunError`` so the batch dispatcher records the
         failure as an ERROR-status result.
         """
-        task_json = output_dir / "task.json"
+        task_json = output_dir / TASK_JSON_FILENAME
         if not await asyncio.to_thread(task_json.exists):
             # The container died before its orchestrator's `finally` could
             # write task.json (e.g. it was torn down by the cleanup above
@@ -871,10 +877,10 @@ class DockerRunner:
             # rather than crashing with an uncaught ValidationError/JSONDecodeError.
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
         self._warn_on_version_mismatch(result)
-        self._assert_grade_honored(result)
+        self._assert_grade_honored(result, task_json)
         return result
 
-    def _assert_grade_honored(self, result: EvaluationResult) -> None:
+    def _assert_grade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
         """Fail loudly when `execute` came back with a graded verdict.
 
         ``grade`` crosses the boundary only through ``context.json``. An image
@@ -883,16 +889,44 @@ class DockerRunner:
         against a stale image would silently produce SUCCESS/FAILURE rows that
         look like a normal graded run. Version skew must not change what a
         command MEANS, so refuse the row rather than publish it.
+
+        ``task_json`` is the on-disk record, quarantined before the raise. The
+        refusal used to be in-memory only, which left the graded ``task.json``
+        sitting in the bind-mounted host run dir: a later
+        ``execute --resume`` read it back as a completed row (its category is
+        ``succeeded``, so the resume partition files it under prior results) and
+        plain ``aggregate`` folded it straight into ``run.json`` — publishing
+        exactly the row this guard declined to publish. Refusing in memory while
+        leaving contradictory bytes on disk is not a refusal.
         """
-        if self.grade or result.final_status.is_execution_fact:
+        if self.grade:
             return
-        if result.final_status is not FinalStatus.NOT_GRADED:
-            raise DockerRunError(
-                "`coder-eval execute` asked the container not to grade, but it returned "
-                + f"{result.final_status.value} with {len(result.success_criteria_results)} criterion "
-                + "result(s). The runtime image predates `execute` and ignored the request; "
-                + "rebuild or pull a matching agent image."
-            )
+        # Keyed on EVIDENCE, not on the label. Exempting every execution-fact
+        # status let a stale image return a fully graded MAX_TURNS_EXHAUSTED row
+        # — criteria vector, weighted score and all — unchallenged, because the
+        # exemption exists for statuses a *fresh* image also produces, and a
+        # fresh one produces them with neither. The question is not "what status
+        # is this" but "did it grade".
+        graded_anyway = bool(result.success_criteria_results) or result.weighted_score is not None
+        if not graded_anyway and (
+            result.final_status.is_execution_fact or result.final_status is FinalStatus.NOT_GRADED
+        ):
+            return
+        if task_json is not None:
+            # Same sidecar pattern as `_handle_malformed_task_json`. Best-effort:
+            # a failed move is logged, never masking the raise below.
+            sidecar = task_json.with_suffix(task_json.suffix + ".graded")
+            try:
+                os.replace(task_json, sidecar)
+                logger.warning("Quarantined the refused graded record to %s", sidecar)
+            except OSError as exc:
+                logger.warning("Could not quarantine %s: %s", task_json, exc)
+        raise DockerRunError(
+            "`coder-eval execute` asked the container not to grade, but it returned "
+            + f"{result.final_status.value} with {len(result.success_criteria_results)} criterion "
+            + "result(s). The runtime image predates `execute` and ignored the request; "
+            + "rebuild or pull a matching agent image."
+        )
 
     async def _handle_malformed_task_json(self, task_json: Path, log_path: Path, exc: ValueError) -> DockerRunError:
         """Degrade a present-but-malformed task.json; return the DockerRunError to raise.
@@ -939,7 +973,9 @@ class DockerRunner:
             await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
             log_path = self.rt.run_dir / "docker.log"
             await asyncio.to_thread(log_path.write_text, exc.build_log or str(exc), encoding="utf-8")
-            await self._write_synthetic_task_json(self.rt.run_dir / "task.json", exc, status=FinalStatus.BUILD_FAILED)
+            await self._write_synthetic_task_json(
+                self.rt.run_dir / TASK_JSON_FILENAME, exc, status=FinalStatus.BUILD_FAILED
+            )
         except OSError as io_exc:  # pragma: no cover - defensive
             logger.warning("Failed to record build failure for %s: %s", self.rt.task.task_id, io_exc)
 
@@ -968,9 +1004,15 @@ class DockerRunner:
         def _write() -> None:
             if target.exists():
                 return
-            tmp = target.with_suffix(target.suffix + ".synthetic.tmp")
-            tmp.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-            os.replace(tmp, target)
+            # Through `write_text_atomic` like every other writer of this file.
+            # The hand-rolled tmp+replace here used `Path.write_text`, which
+            # FOLLOWS symlinks — so a pre-planted `task.json.synthetic.tmp` in a
+            # run directory (a shareable artifact, bind-mounted writable into the
+            # agent's own container) redirected this harness-privileged write to
+            # any path the grading user could reach. It also falsified the
+            # helper's "one writer, so the crash semantics cannot differ" claim,
+            # which is the property future readers rely on.
+            write_text_atomic(target, result.model_dump_json(indent=2))
 
         try:
             await asyncio.to_thread(_write)

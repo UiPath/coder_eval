@@ -11,7 +11,7 @@
 
 import type { PerRun } from "./overview";
 import type { RunOverviewTask } from "./runs";
-import { isGraded } from "./status";
+import { isGraded, isPassStatus } from "./status";
 import { timeRatio } from "./timing";
 import { turnRatio } from "./turns";
 
@@ -99,7 +99,10 @@ function runsNewestFirst(perRun: PerRun[]): LoadedRun[] {
         .map((r) => ({ id: r.id, tasks: r.overview!.tasks }));
 }
 
-const isPass = (status: string | null) => status === "SUCCESS";
+// Delegates rather than restating `=== "SUCCESS"`: this file already had to
+// learn about the ungraded bucket, and a second private spelling of "passed"
+// is how one surface ends up disagreeing with the rest.
+const isPass = (status: string | null) => isPassStatus(status);
 
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
 const mean = (xs: number[]) =>
@@ -217,6 +220,14 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
             }
         }
         if (appeared < floor) continue;
+        // Nothing measured ⇒ nothing to say. Without this, a skill whose rows
+        // were all ungraded fell into `outcomes ? … : 0` below and scored
+        // passRate 0 / failRate 1 — the maximum FAIL_WEIGHT — so a
+        // `coder-eval execute` night would put its most-run skill at the TOP of
+        // an exec-triage hero, described as chronically failing. The same
+        // "never measured" vs "measured and scored zero" confusion CE049 exists
+        // to prevent on the Python side.
+        if (outcomes === 0) continue;
 
         const passRate = outcomes ? passes / outcomes : 0;
         const failRate = 1 - passRate;

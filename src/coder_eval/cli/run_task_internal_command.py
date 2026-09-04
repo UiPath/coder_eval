@@ -34,6 +34,7 @@ from coder_eval.models import (
     CONTAINER_TASK_DIR,
     ConfigLineageEntry,
     PreservationMode,
+    SandboxConfig,
 )
 from coder_eval.orchestration.task_loader import load_task
 
@@ -51,37 +52,13 @@ def heartbeat_is_alive(current: str, last_counter: str, current_mtime: float, la
     return bool(current and current != last_counter) or current_mtime > last_mtime
 
 
-def run_task_internal_command(
-    input_dir: Path = typer.Option(  # noqa: B008
-        Path(CONTAINER_INPUT_DIR),
-        "--input",
-        help="Directory containing task.yaml and context.json (bind-mounted by host).",
-    ),
-    output_dir: Path = typer.Option(  # noqa: B008
-        Path(CONTAINER_OUTPUT_DIR),
-        "--output",
-        help="Directory to write task.json/task.html into (bind-mounted by host).",
-    ),
-    task_dir: Path = typer.Option(  # noqa: B008
-        Path(CONTAINER_TASK_DIR),
-        "--task-dir",
-        help="Original task directory mount (used to resolve relative template paths).",
-    ),
-    verbose: bool = typer.Option(
-        False,
-        "--verbose",
-        "-v",
-        help="Enable verbose (DEBUG level) logging",
-    ),
-) -> None:
-    """Run a single staged task inside the container."""
-    # Use the same logging path as the host CLI so LOG_LEVEL from the
-    # forwarded env is honoured. Without this, root stays at INFO and the
-    # DEBUG-level task_log_handler attached by Orchestrator never sees the
-    # agent's per-tool-call DEBUG records.
-    log_level = "DEBUG" if verbose else settings.log_level
-    setup_logging(level=log_level)
+def _arm_host_heartbeat_watchdog(output_dir: Path) -> None:
+    """Start the orphan-container reaper, but only inside the container.
 
+    A module-level function rather than an inline block so the only
+    process-lethal code in this command sits behind one named, testable seam
+    instead of being a side effect of the command body.
+    """
     # Start the host-heartbeat watchdog: if the host process dies
     # ungracefully (SIGKILL, Claude-Code Escape, crash) before it can
     # `docker kill` us, the heartbeat file in output_dir goes stale and
@@ -159,6 +136,40 @@ def run_task_internal_command(
     else:
         logger.debug("Not in a container; host-heartbeat watchdog not armed.")
 
+
+def run_task_internal_command(
+    input_dir: Path = typer.Option(  # noqa: B008
+        Path(CONTAINER_INPUT_DIR),
+        "--input",
+        help="Directory containing task.yaml and context.json (bind-mounted by host).",
+    ),
+    output_dir: Path = typer.Option(  # noqa: B008
+        Path(CONTAINER_OUTPUT_DIR),
+        "--output",
+        help="Directory to write task.json/task.html into (bind-mounted by host).",
+    ),
+    task_dir: Path = typer.Option(  # noqa: B008
+        Path(CONTAINER_TASK_DIR),
+        "--task-dir",
+        help="Original task directory mount (used to resolve relative template paths).",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose (DEBUG level) logging",
+    ),
+) -> None:
+    """Run a single staged task inside the container."""
+    # Use the same logging path as the host CLI so LOG_LEVEL from the
+    # forwarded env is honoured. Without this, root stays at INFO and the
+    # DEBUG-level task_log_handler attached by Orchestrator never sees the
+    # agent's per-tool-call DEBUG records.
+    log_level = "DEBUG" if verbose else settings.log_level
+    setup_logging(level=log_level)
+
+    _arm_host_heartbeat_watchdog(output_dir)
+
     task_yaml = input_dir / "task.yaml"
     context_json = input_dir / "context.json"
     if not task_yaml.exists():
@@ -169,8 +180,20 @@ def run_task_internal_command(
         raise typer.Exit(2)
 
     context = json.loads(context_json.read_text(encoding="utf-8"))
-    variant_id: str = context["variant_id"]
-    replicate_index: int = context.get("replicate_index", 0)
+    # Checked, not just annotated. `json.loads` returns `Any`, so pyright accepts
+    # `variant_id: str = context["variant_id"]` for a value that may be anything
+    # at all — the annotation reads like a guarantee and enforces nothing. A
+    # `"replicate_index": "00"` then reached `build_task_run_dir` typed as `int`.
+    # This is the host→container boundary; the comment below (about `grade`
+    # being the one raw value) was only true because these two looked checked.
+    variant_id = context["variant_id"]
+    if not isinstance(variant_id, str):
+        typer.echo(f"FATAL: context.json 'variant_id' must be a string, got {variant_id!r}", err=True)
+        raise typer.Exit(2)
+    replicate_index = context.get("replicate_index", 0)
+    if not isinstance(replicate_index, int) or isinstance(replicate_index, bool):
+        typer.echo(f"FATAL: context.json 'replicate_index' must be an integer, got {replicate_index!r}", err=True)
+        raise typer.Exit(2)
     # The host resolves the driver-derived default before dispatch; the container
     # obeys it verbatim. This command only ever runs inside the docker driver, so
     # a missing key falls back to the docker default (DIRECT_WRITE) — a deliberate
@@ -179,10 +202,10 @@ def run_task_internal_command(
     # `coder-eval run` vs `coder-eval execute`, decided host-side. Defaults to
     # True (grade) so a host that predates `execute` — which never writes the
     # key — keeps its exact behavior.
-    # Coerced, not annotated: every other value crossing this boundary goes
-    # through a validating constructor, but `grade` was taken raw — so a
-    # hand-edited or older-format `"grade": "false"` arrives as a truthy str
-    # typed as bool and silently grades a run that asked not to be graded.
+    # Coerced, not annotated, like every other value crossing this boundary —
+    # `grade` was once the only raw one, so a hand-edited or older-format
+    # `"grade": "false"` arrived as a truthy str typed as bool and silently
+    # graded a run that asked not to be graded.
     grade_raw = context.get("grade", True)
     if not isinstance(grade_raw, bool):
         typer.echo(f"FATAL: context.json 'grade' must be a boolean, got {grade_raw!r}", err=True)
@@ -218,7 +241,14 @@ def run_task_internal_command(
         # container the docker driver asked for, so the isolation the driver
         # names is present, not bypassed; a nested docker would be both wrong
         # and impossible (no docker CLI in the image).
-        task = task.model_copy(update={"sandbox": task.sandbox.model_copy(update={"driver": "tempdir"})})  # noqa: CE051
+        # Re-validated rather than `model_copy(update=...)`, matching its sibling
+        # `regrade.grading_sandbox_config`: `update` skips BOTH pydantic and
+        # pyright, so a typo would produce a SandboxConfig violating its own
+        # `Literal` and only surface far downstream. Two driver-rewrite sites
+        # landing in one change with two different levels of type safety is how
+        # the weaker one becomes the pattern people copy.
+        rewritten = SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})  # noqa: CE051
+        task = task.model_copy(update={"sandbox": rewritten})
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

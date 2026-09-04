@@ -1156,7 +1156,7 @@ class RunSummary(BaseModel):
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def tasks_graded(self) -> int:
         """Tasks that were actually measured — the denominator for every rate below.
@@ -1168,6 +1168,24 @@ class RunSummary(BaseModel):
         same run. REPORT_SCHEMA.md documents it as serialized.
         """
         return self.tasks_run - self.tasks_not_graded
+
+    @property
+    def _nothing_was_measured(self) -> bool:
+        """True when no row in this run produced a criteria verdict.
+
+        ``tasks_graded`` is the complement of the ungraded bucket, so it still
+        counts ERROR rows — correct under ``run``, where an errored row was
+        attempted and genuinely missed. Under ``coder-eval execute`` no criterion
+        runs on ANY row, yet a crashed one lands in the ``error`` bucket rather
+        than the ``ungraded`` one, so it stayed in the denominator on its own: a
+        100-task execute night with 5 crashes published ``pass_rate 0.0`` and
+        ``error_share 1.0`` — a measured-looking total failure for a run that was
+        never measured at all, and a real 0% point on the evalboard trend.
+
+        The test is evidence again: if not one row reached a pass or a fail, the
+        rate has no numerator to be a fraction of.
+        """
+        return self.tasks_not_graded > 0 and (self.tasks_succeeded + self.tasks_failed) == 0
 
     # Derived run metrics: computed_fields over the stored counts and
     # ``task_results``, so they serialize into run.json while staying impossible to
@@ -1182,7 +1200,12 @@ class RunSummary(BaseModel):
         The denominator excludes ungraded tasks (``coder-eval execute``), which were
         never measured — counting them as misses would report a clean execute run as
         0% pass. Identical to ``tasks_run`` for every graded run.
+
+        ``None`` also when no row produced a verdict at all, not just when the run
+        is empty — see ``_nothing_was_measured``.
         """
+        if self._nothing_was_measured:
+            return None
         return self.tasks_succeeded / self.tasks_graded if self.tasks_graded else None
 
     @computed_field  # type: ignore[prop-decorator]
@@ -1192,8 +1215,12 @@ class RunSummary(BaseModel):
 
         Diagnostic only, never adjusts the rate: a drop at a high error share is an
         infrastructure night, the same drop at a normal share is the model. Shares
-        ``pass_rate``'s denominator so the two are directly comparable.
+        ``pass_rate``'s denominator so the two are directly comparable — including
+        being ``None`` on a run where nothing was measured, or an execute night
+        with one crashed row reports 100% error.
         """
+        if self._nothing_was_measured:
+            return None
         return self.tasks_error / self.tasks_graded if self.tasks_graded else None
 
     @computed_field  # type: ignore[prop-decorator]

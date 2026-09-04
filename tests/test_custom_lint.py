@@ -3818,3 +3818,86 @@ class TestCE052ProcessLethalMustBeContainerGated:
         source = path.read_text(encoding="utf-8")
         assert not self._run(source, filepath=str(path))
         assert "_os._exit(137)" in source, "the guarded call must still exist"
+
+
+class TestRuffExternalCoversEveryRule:
+    """Every CE rule's documented `# noqa` must be accepted by ruff.
+
+    `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid
+    rule code" for a suppression it does not own. It was hand-maintained and had
+    fallen ~14 ids behind — including CE047 and CE048, whose own docstrings
+    advertise `# noqa: CE047` / `# noqa: CE048` as the supported escape hatch. So
+    the first person to use the documented exemption got a red `make check`
+    instead, for doing exactly what the rule told them to.
+    """
+
+    @staticmethod
+    def _external() -> set[str]:
+        import tomllib
+        from pathlib import Path
+
+        data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        return set(data["tool"]["ruff"]["lint"]["external"])
+
+    def test_every_registered_rule_is_listed(self):
+        from tests.lint.runner import ALL_RULES
+
+        missing = sorted({r.id for r in ALL_RULES} - self._external())
+        assert not missing, f"add to [tool.ruff.lint] external in pyproject.toml: {missing}"
+
+    def test_every_listed_id_is_well_formed(self):
+        """Cheap guard against a typo silently widening the allowlist."""
+        import re
+
+        bad = sorted(i for i in self._external() if not re.fullmatch(r"CE\d{3}", i))
+        assert not bad, f"not a CE rule id: {bad}"
+
+
+class TestCE053NoRunRecordFilenameLiteral:
+    """CE053 flags a `task.json` literal outside path_utils."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/reports.py"):
+        import ast
+
+        from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
+
+        return NoRunRecordFilenameLiteral(filepath).check(ast.parse(src))
+
+    def test_flags_a_bare_literal(self):
+        assert self._run('path = run_dir / "task.json"')
+
+    def test_flags_an_rglob(self):
+        """The three rglob sites are the ones the constant's own comment cites."""
+        assert self._run('for p in run_dir.rglob("task.json"): pass')
+
+    def test_flags_a_trailing_path_segment(self):
+        assert self._run('matches = sorted(d.glob("*/task.json"))')
+
+    def test_flags_the_pre_grade_record_too(self):
+        assert self._run('backup = run_dir / "task.execute.json"')
+
+    def test_allows_the_constant(self):
+        assert not self._run("path = run_dir / TASK_JSON_FILENAME")
+
+    def test_allows_prose_that_merely_mentions_the_file(self):
+        """Naming the file in an error message is the point of the message."""
+        assert not self._run('raise ValueError("no task.json in that directory")')
+
+    def test_is_out_of_scope_in_path_utils(self):
+        assert not self._run('TASK_JSON_FILENAME = "task.json"', filepath="src/coder_eval/path_utils.py")
+
+    def test_the_tree_is_clean(self):
+        """The migration must actually have happened — a rule whose only
+        evidence is synthetic proves nothing about the repo."""
+        import ast
+        from pathlib import Path
+
+        from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
+
+        offenders = []
+        for path in Path("src/coder_eval").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            if NoRunRecordFilenameLiteral(str(path)).check(tree):
+                offenders.append(str(path))
+        assert not offenders, offenders

@@ -16,6 +16,8 @@ from typing import NamedTuple
 
 from coder_eval.models import EvaluationResult, ExperimentResult, ExperimentVariant, TaskExperimentSummary
 
+from .path_utils import TASK_JSON_FILENAME
+
 
 logger = logging.getLogger(__name__)
 
@@ -527,7 +529,7 @@ def load_variant_eval_results(
         if not task_dir.is_dir():
             continue
         for rep_subdir in sorted(task_dir.glob("[0-9][0-9]")):
-            task_json = rep_subdir / "task.json"
+            task_json = rep_subdir / TASK_JSON_FILENAME
             if task_json.exists():
                 try:
                     results.append(EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")))
