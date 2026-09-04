@@ -54,8 +54,8 @@ export function WindowSummary({
     isFiltered: boolean;
 }) {
     const pct =
-        totals.tasksRun > 0
-            ? (totals.tasksSucceeded / totals.tasksRun) * 100
+        totals.tasksGraded > 0
+            ? (totals.tasksSucceeded / totals.tasksGraded) * 100
             : null;
     const scope = isFiltered
         ? `matching · last ${window}`

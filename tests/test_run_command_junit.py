@@ -26,7 +26,7 @@ async def _invoke(
     status: str,
     failed: bool,
 ) -> None:
-    summary = Mock(tasks_failed=1 if failed else 0, tasks_error=0)
+    summary = Mock(tasks_failed=1 if failed else 0, tasks_error=0, tasks_not_graded=0)
 
     async def _fake(*_args, **_kwargs):
         # Mirror production: run.json is persisted inside _run_with_experiment.

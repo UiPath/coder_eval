@@ -23,6 +23,7 @@ from .models import (
     StarterFilesSource,
     TemplateDirSource,
 )
+from .path_utils import VENV_DIRNAME
 from .resources import get_ignore_patterns, should_ignore_path
 
 
@@ -163,6 +164,12 @@ class Sandbox:
         self.sandbox_dir: Path | None = None
         self.venv_dir: Path | None = None
         self._cleanup_on_exit = True
+        # True once adopt() takes over an existing workspace. Read by the
+        # Orchestrator to suppress every step that would MUTATE the tree it was
+        # asked to grade (pre_run/post_run above all — several in-tree tasks
+        # copy fixtures over the workspace there) and to keep sandbox_path in
+        # the result, since an adopted directory outlives cleanup().
+        self.was_adopted = False
         self.installed_tool_versions: dict[str, str] = {}
         self._command_base_path: str | None = None
         # Cached canonical `node_modules/@uipath`; pins UiPath CLI plugin discovery
@@ -266,6 +273,97 @@ class Sandbox:
             )
         raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
 
+    def adopt(self, workspace: Path) -> Path:
+        """Use ``workspace`` **as** the sandbox, materializing nothing into it.
+
+        The grade-in-place counterpart to :meth:`setup`. ``setup`` builds a
+        workspace: it copies template sources in, generates ``record_cli`` shims,
+        creates a venv, installs packages. ``adopt`` takes a workspace that
+        already exists — an ``execute`` run's artifacts, or a verifier's ``/app``
+        — and only derives the *environment* the criteria need to run against it
+        (mock-dir ``+x``, venv discovery, the plugin-tools pin).
+
+        Why not ``setup(target_dir=workspace)``: that already adopts a
+        caller-supplied directory and sets ``_cleanup_on_exit=False``, but it
+        then runs ``_setup_template()``, which would write over the very files
+        it was asked to grade.
+
+        In-place is more CORRECT here, not merely faster:
+
+        * ``_setup_template`` filters what it copies through
+          ``_should_ignore_template_file`` — ``node_modules``, ``dist``,
+          ``build``, ``venv``, ``.git`` and friends are dropped. A criterion like
+          ``test -f dist/bundle.js`` therefore fails as a *copying artifact*
+          rather than as a verdict on the agent's work.
+        * ``run_command`` criteria execute with ``cwd = sandbox_dir``, so on the
+          copy path they see the copy's paths, not the ones the agent worked at.
+        * Copying a real workspace costs minutes.
+
+        "Materializing nothing" means it writes no FILES. It does still chmod
+        ``+x`` over the task's declared mock-PATH directories inside the tree —
+        a mode change the criteria need in order to resolve the same shimmed
+        binaries the agent did.
+
+        The caller keeps ownership: ``_cleanup_on_exit`` stays False, so
+        ``cleanup()`` never deletes an adopted directory. Criteria CAN still
+        mutate it (a ``run_command`` that writes), which is why the copy path
+        remains the default for a bare user-supplied work dir.
+
+        Args:
+            workspace: An existing directory to grade in place.
+
+        Returns:
+            Path to the sandbox directory (``workspace``).
+
+        Raises:
+            RuntimeError: If the driver is ``docker`` (a container workspace is
+                not reachable from the host), or ``workspace`` is not a directory.
+        """
+        if self.config.driver == "docker":
+            raise RuntimeError(
+                "Sandbox.adopt() is host-side only; a driver='docker' workspace lives inside "
+                + "the container. Grade it from within the container, or copy it out first."
+            )
+        if not workspace.is_dir():
+            raise RuntimeError(f"Cannot adopt {workspace}: not an existing directory")
+
+        self.sandbox_dir = workspace.resolve()
+        # Never flipped True: an adopted directory belongs to the caller.
+        self._cleanup_on_exit = False
+        self.was_adopted = True
+
+        # Only NON-materializing steps below. Deliberately skipped, and why:
+        #   _setup_template            would overwrite the workspace being graded
+        #   _generate_cli_recorders    writes shims into it
+        #   _setup_virtualenv /
+        #     _install_*_packages      the execute phase already provisioned these;
+        #                              re-running mutates the graded tree
+        #   _maybe_remediate_home_plugins_pollution
+        #                              destructive on $HOME, and it is remediation
+        #                              rather than derivation — the execute phase
+        #                              already ran it if it was enabled
+        self._prepare_mock_path_dirs()
+
+        # Discover an existing venv instead of creating one, so `run_command`
+        # criteria get the same VIRTUAL_ENV/PATH the agent had. Absent venv ->
+        # None, exactly as for a task with no python config.
+        #
+        # Gated on `config.python` for the same reason `setup` is: venv_dir
+        # prepends the venv's bin/ to PATH and exports VIRTUAL_ENV for every
+        # criterion subprocess, so discovering one a task never asked for grades
+        # it under a PATH it never ran under — the exact divergence the
+        # command_base_path round trip exists to close. It would also let an
+        # agent shadow binaries by writing `.venv/bin/` into its own workspace.
+        if self.config.python:
+            candidate = self.sandbox_dir / VENV_DIRNAME
+            if candidate.is_dir():
+                self.venv_dir = candidate
+
+        self._check_parent_node_modules_contamination()
+        self._refresh_plugin_tools_dir()
+
+        return self.sandbox_dir
+
     def _setup_tempdir(self, target_dir: Path | None = None) -> Path:
         """Set up a sandbox directory.
 
@@ -353,7 +451,13 @@ class Sandbox:
         assert self.sandbox_dir is not None, "Sandbox directory not initialized"
 
         repo_dir = self.sandbox_dir / "repo"
-        cmd = ["git", "clone", source.url, str(repo_dir)]
+        # `--` before the URL: it is argv position 2, so without the separator a
+        # value beginning with `-` is parsed by git as an OPTION rather than a
+        # repository (`--upload-pack=…` runs a command of the caller's choosing).
+        # That URL is task-authored, and since `evaluate <run_dir>` rebuilds the
+        # task from a shareable run directory it is no longer necessarily the
+        # operator's own string.
+        cmd = ["git", "clone", "--", source.url, str(repo_dir)]
 
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=60)
@@ -716,7 +820,7 @@ class Sandbox:
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox directory not initialized")
 
-        self.venv_dir = self.sandbox_dir / ".venv"
+        self.venv_dir = self.sandbox_dir / VENV_DIRNAME
 
         # Use uv to create virtual environment (faster than venv)
         try:
@@ -1192,6 +1296,46 @@ class Sandbox:
     # needs filesystem access beyond the sandbox root (e.g., reading installed packages,
     # system headers). Path traversal protection is handled at the agent permission level.
 
+    def _within_sandbox(self, candidate: Path) -> bool:
+        """Whether a resolved criterion path stays inside the sandbox.
+
+        The read-side twin of :meth:`_resolve_within_sandbox`, which every OTHER
+        task-authored path already goes through. Criterion paths were the one
+        consumer that skipped it, and ``Path('/tmp/sandbox') / '/etc/passwd'`` is
+        ``/etc/passwd`` — pathlib discards the prefix on an absolute right
+        operand — so ``file_contains`` / ``file_check`` / ``file_matches_regex``
+        were a pass-fail oracle over any file the grading user could read, and
+        ``json_check`` could surface parsed values in ``details``.
+
+        That was defensible while a task YAML was operator-supplied. It stopped
+        being so when ``evaluate <run_dir>`` began rebuilding the criteria list
+        from a shareable run directory.
+
+        Returns False rather than raising: an out-of-sandbox path is
+        indistinguishable to the criterion from a file that is not there, which
+        is the same answer the template and mock-dir paths give, and raising
+        here would book a config error as an agent crash (CE039).
+
+        Silent by design — :meth:`resolve_files` reports the escape ONCE per
+        criterion, naming the pattern the task author actually wrote. Logging
+        here instead named a resolved absolute path (uninformative: it is the
+        author's own string joined onto a tempdir) once per rejected glob
+        match, so a wide pattern produced a burst of near-identical warnings.
+        """
+        assert self.sandbox_dir is not None
+        root = self.sandbox_dir.resolve()
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return False
+        return resolved == root or root in resolved.parents
+
+    def _warn_escaped(self, path: str) -> None:
+        """Report that a criterion's declared path left the sandbox."""
+        logger.warning(
+            "Criterion path %r resolves outside the sandbox (%s); treating it as no match.", path, self.sandbox_dir
+        )
+
     def resolve_files(self, path: str) -> list[Path]:
         """Resolve a criterion ``path`` to the sandbox files it addresses.
 
@@ -1226,7 +1370,10 @@ class Sandbox:
         # Literal first: an existing path is never reinterpreted as a pattern.
         candidate = self.sandbox_dir / path
         if candidate.exists():
-            return [candidate]
+            if self._within_sandbox(candidate):
+                return [candidate]
+            self._warn_escaped(path)
+            return []
 
         if not _is_glob(path):
             return []
@@ -1235,14 +1382,20 @@ class Sandbox:
         pinned = {segment for segment in path.split("/") if segment and not _is_glob(segment)}
 
         matches: list[Path] = []
+        escaped = False
         for match in self.sandbox_dir.glob(path):
             if not match.is_file():
+                continue
+            if not self._within_sandbox(match):
+                escaped = True
                 continue
             discovered = [part for part in match.relative_to(self.sandbox_dir).parts if part not in pinned]
             if discovered and should_ignore_path(Path(*discovered), patterns):
                 continue
             matches.append(match)
 
+        if escaped:
+            self._warn_escaped(path)
         return sorted(matches)
 
     def resolved_path_label(self, path: str) -> str | None:

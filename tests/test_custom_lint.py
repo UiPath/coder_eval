@@ -23,13 +23,21 @@ from tests.lint.runner import ALL_RULES, check_paths
 SRC = Path(__file__).parent.parent / "src"
 
 
+# Rules whose defect class lives in the TEST tree, not in src/. CE048's whole
+# subject is an in-process call to a Typer command, and the only place that
+# happens is a test — scanning src/ alone would leave the rule permanently green
+# while the bug it exists for sat five lines away.
+_ALSO_SCAN_TESTS = {"CE048"}
+
+
 @pytest.mark.lint
 @pytest.mark.parametrize("rule_class", ALL_RULES, ids=[r.id for r in ALL_RULES])
 def test_no_violations(rule_class: type) -> None:
     import sys
 
     mod_doc = (getattr(sys.modules.get(rule_class.__module__), "__doc__", "") or "").splitlines()[0].strip()
-    violations = check_paths([SRC], rules=[rule_class])
+    paths = [SRC, Path(__file__).parent] if rule_class.id in _ALSO_SCAN_TESTS else [SRC]
+    violations = check_paths(paths, rules=[rule_class])
     assert not violations, (
         f"\n{len(violations)} violation(s) for {rule_class.id} ({mod_doc}):\n\n"
         + "\n".join(f"  {v}" for v in violations)
@@ -3600,3 +3608,294 @@ class TestCE045PluginPathIsAPluginRoot:
             encoding="utf-8",
         )
         assert not self._offending_paths_in(task)
+
+
+class TestCE047EnvInfoKeyRoundTrip:
+    """CE047 fires when an environment_info key is read with no writer anywhere.
+
+    The rule shipped with only the whole-tree "finds nothing" scan, which cannot
+    tell a rule that is CORRECT from one that can never fire — the exact failure
+    its own docstring is about. The path form matters too: the rule scopes itself
+    with a leading-separator regex, so a repo-relative path must still be in
+    scope or a house-style test would pass vacuously.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestrator.py"):
+        import ast
+
+        from tests.lint.rules.ce047_env_info_key_round_trip import EnvInfoKeyRoundTrip
+
+        return EnvInfoKeyRoundTrip(filepath).check(ast.parse(src))
+
+    def test_flags_a_get_with_no_writer(self):
+        assert self._run('x = self.result.environment_info.get("no_such_key_anywhere")')
+
+    def test_flags_a_subscript_read_with_no_writer(self):
+        assert self._run('x = self.result.environment_info["no_such_key_anywhere"]')
+
+    def test_allows_a_key_that_is_written_in_src(self):
+        # reference_digest gained a writer; that is the whole point of the rule.
+        assert not self._run('x = self.result.environment_info.get("reference_digest")')
+
+    def test_allows_the_graded_by_prefix(self):
+        assert not self._run('x = self.result.environment_info.get("graded_by_git_commit")')
+
+    def test_ignores_a_computed_key(self):
+        assert not self._run("x = self.result.environment_info.get(key)")
+
+    def test_is_out_of_scope_outside_src(self):
+        assert not self._run('x = r.environment_info.get("no_such_key_anywhere")', filepath="tests/test_thing.py")
+
+    def test_scope_is_the_same_for_relative_and_absolute_paths(self):
+        """A repo-relative path must be in scope, or every house-style test lies."""
+        src = 'x = self.result.environment_info.get("no_such_key_anywhere")'
+        relative = self._run(src, filepath="src/coder_eval/orchestrator.py")
+        absolute = self._run(src, filepath="/home/u/repo/src/coder_eval/orchestrator.py")
+        assert bool(relative) == bool(absolute) is True
+
+
+class TestCE048NoInProcessTyperCommandCall:
+    """CE048 fires on an in-process call to a Typer command function."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "tests/test_thing.py"):
+        import ast
+
+        from tests.lint.rules.ce048_no_in_process_typer_command_call import NoInProcessTyperCommandCall
+
+        return NoInProcessTyperCommandCall(filepath).check(ast.parse(src))
+
+    def test_flags_calling_a_command_function_directly(self):
+        assert self._run("from coder_eval.cli.evaluate_command import evaluate_command\nevaluate_command(x)")
+
+    def test_allows_the_plain_python_entry_point(self):
+        assert not self._run("from coder_eval.cli.evaluate_command import run_evaluation\nrun_evaluation(x=1)")
+
+
+class TestCE049NoScoreOrZero:
+    """CE049 flags coalescing an unmeasured score into a real-looking number."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce049_no_score_or_zero import NoScoreOrZero
+
+        return NoScoreOrZero("src/coder_eval/orchestrator.py").check(ast.parse(src))
+
+    def test_flags_weighted_score_or_zero(self):
+        assert self._run("x = float(result.weighted_score or 0.0)")
+
+    def test_flags_a_bare_score_name_and_an_int_literal(self):
+        assert self._run("x = score or 0")
+
+    def test_flags_a_rate(self):
+        assert self._run("x = summary.pass_rate or 0.0")
+
+    def test_allows_an_explicit_none_branch(self):
+        assert not self._run("x = 0.0 if result.weighted_score is None else result.weighted_score")
+
+    def test_allows_a_non_numeric_fallback(self):
+        assert not self._run('x = result.weighted_score or "n/a"')
+
+    def test_ignores_an_unrelated_name(self):
+        assert not self._run("x = retry_count or 0")
+
+
+class TestCE050NoUnionGetattrProbe:
+    """CE050 flags an untyped getattr probe for a discriminated-union field."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestration/regrade.py"):
+        import ast
+
+        from tests.lint.rules.ce050_no_union_getattr_probe import NoUnionGetattrProbe
+
+        return NoUnionGetattrProbe(filepath).check(ast.parse(src))
+
+    def test_flags_the_command_probe(self):
+        assert self._run('cmd = getattr(c, "command", None)')
+
+    def test_allows_isinstance_narrowing(self):
+        assert not self._run("cmd = c.command if isinstance(c, RunCommandCriterion) else None")
+
+    def test_ignores_a_name_no_union_member_declares(self):
+        assert not self._run('x = getattr(obj, "definitely_not_a_criterion_field", None)')
+
+    def test_ignores_a_computed_key(self):
+        assert not self._run("x = getattr(obj, name, None)")
+
+    def test_is_out_of_scope_outside_src(self):
+        assert not self._run('cmd = getattr(c, "command", None)', filepath="tests/test_thing.py")
+
+
+class TestCE051NoDriverOverride:
+    """CE051 flags a silent sandbox-driver rewrite."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestration/regrade.py"):
+        import ast
+
+        from tests.lint.rules.ce051_no_driver_override import NoDriverOverride
+
+        return NoDriverOverride(filepath).check(ast.parse(src))
+
+    def test_flags_a_spread_model_validate(self):
+        assert self._run('SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})')
+
+    def test_flags_model_copy_update(self):
+        assert self._run('cfg.model_copy(update={"driver": "tempdir"})')
+
+    def test_flags_setattr(self):
+        assert self._run('setattr(cfg, "driver", "tempdir")')
+
+    def test_flags_attribute_assignment(self):
+        assert self._run('cfg.driver = "tempdir"')
+
+    def test_allows_a_config_built_from_scratch(self):
+        assert not self._run('SandboxConfig.model_validate({"driver": "tempdir"})')
+
+    def test_allows_carrying_a_config_forward_unchanged(self):
+        assert not self._run("task.sandbox.model_copy(deep=True)")
+
+    def test_is_out_of_scope_in_the_model_module(self):
+        assert not self._run(
+            'cfg.model_copy(update={"driver": "tempdir"})',
+            filepath="src/coder_eval/models/sandbox.py",
+        )
+
+
+class TestCE052ProcessLethalMustBeContainerGated:
+    """CE052 flags an `os._exit` that is not gated on being in the container."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/cli/run_task_internal_command.py"):
+        import ast
+
+        from tests.lint.rules.ce052_process_lethal_must_be_container_gated import (
+            ProcessLethalMustBeContainerGated,
+        )
+
+        return ProcessLethalMustBeContainerGated(filepath).check(ast.parse(src))
+
+    def test_flags_an_ungated_exit(self):
+        assert self._run("os._exit(137)")
+
+    def test_flags_it_under_an_unrelated_guard(self):
+        assert self._run("if stale:\n    os._exit(137)")
+
+    def test_flags_it_in_the_else_arm_of_the_container_guard(self):
+        """An inverted guard is the shape a well-meaning refactor produces."""
+        src = 'if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n    pass\nelse:\n    os._exit(137)'
+        assert self._run(src)
+
+    def test_allows_a_gated_exit(self):
+        src = 'if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n    os._exit(137)'
+        assert not self._run(src)
+
+    def test_allows_it_nested_deeper_inside_the_gate(self):
+        """The real site defines a function and a loop inside the guard."""
+        src = (
+            'if _os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n'
+            "\n"
+            "    def _watch() -> None:\n"
+            "        while True:\n"
+            "            if stale:\n"
+            "                _os._exit(137)\n"
+        )
+        assert not self._run(src)
+
+    def test_is_out_of_scope_outside_the_package(self):
+        assert not self._run("os._exit(137)", filepath="scripts/reap.py")
+
+    def test_the_real_module_is_clean(self):
+        """The rule must actually pass on the site it was written for — a rule
+        that only ever fires on synthetic input proves nothing about the tree."""
+        from pathlib import Path
+
+        path = Path("src/coder_eval/cli/run_task_internal_command.py")
+        source = path.read_text(encoding="utf-8")
+        assert not self._run(source, filepath=str(path))
+        assert "_os._exit(137)" in source, "the guarded call must still exist"
+
+
+class TestRuffExternalCoversEveryRule:
+    """Every CE rule's documented `# noqa` must be accepted by ruff.
+
+    `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid
+    rule code" for a suppression it does not own. It was hand-maintained and had
+    fallen ~14 ids behind — including CE047 and CE048, whose own docstrings
+    advertise `# noqa: CE047` / `# noqa: CE048` as the supported escape hatch. So
+    the first person to use the documented exemption got a red `make check`
+    instead, for doing exactly what the rule told them to.
+    """
+
+    @staticmethod
+    def _external() -> set[str]:
+        import tomllib
+        from pathlib import Path
+
+        data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        return set(data["tool"]["ruff"]["lint"]["external"])
+
+    def test_every_registered_rule_is_listed(self):
+        from tests.lint.runner import ALL_RULES
+
+        missing = sorted({r.id for r in ALL_RULES} - self._external())
+        assert not missing, f"add to [tool.ruff.lint] external in pyproject.toml: {missing}"
+
+    def test_every_listed_id_is_well_formed(self):
+        """Cheap guard against a typo silently widening the allowlist."""
+        bad = sorted(i for i in self._external() if not re.fullmatch(r"CE\d{3}", i))
+        assert not bad, f"not a CE rule id: {bad}"
+
+
+class TestCE053NoRunRecordFilenameLiteral:
+    """CE053 flags a `task.json` literal outside path_utils."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/reports.py"):
+        import ast
+
+        from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
+
+        return NoRunRecordFilenameLiteral(filepath).check(ast.parse(src))
+
+    def test_flags_a_bare_literal(self):
+        assert self._run('path = run_dir / "task.json"')
+
+    def test_flags_an_rglob(self):
+        """The three rglob sites are the ones the constant's own comment cites."""
+        assert self._run('for p in run_dir.rglob("task.json"): pass')
+
+    def test_flags_a_trailing_path_segment(self):
+        assert self._run('matches = sorted(d.glob("*/task.json"))')
+
+    def test_flags_the_pre_grade_record_too(self):
+        assert self._run('backup = run_dir / "task.execute.json"')
+
+    def test_allows_the_constant(self):
+        assert not self._run("path = run_dir / TASK_JSON_FILENAME")
+
+    def test_allows_prose_that_merely_mentions_the_file(self):
+        """Naming the file in an error message is the point of the message."""
+        assert not self._run('raise ValueError("no task.json in that directory")')
+
+    def test_is_out_of_scope_in_path_utils(self):
+        assert not self._run('TASK_JSON_FILENAME = "task.json"', filepath="src/coder_eval/path_utils.py")
+
+    def test_the_tree_is_clean(self):
+        """The migration must actually have happened — a rule whose only
+        evidence is synthetic proves nothing about the repo."""
+        import ast
+        from pathlib import Path
+
+        from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
+
+        offenders = []
+        for path in Path("src/coder_eval").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            if NoRunRecordFilenameLiteral(str(path)).check(tree):
+                offenders.append(str(path))
+        assert not offenders, offenders

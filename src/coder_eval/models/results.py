@@ -887,7 +887,20 @@ class SuiteRollup(BaseModel):
     rows_passed: int
     rows_failed: int
     rows_error: int
-    pass_rate: float = Field(ge=0.0, le=1.0, description="rows_passed / rows_total")
+    # The fourth bucket, matching RunSummary.tasks_not_graded and
+    # VariantAggregate.tasks_not_graded. Defaulted so a suite.json written before
+    # `execute` existed still parses.
+    rows_not_graded: int = Field(default=0, ge=0)
+    pass_rate: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "rows_passed / rows_graded (ungraded rows excluded). None — never 0.0 — when nothing "
+            "was graded: a suite that was never measured has no pass rate, and 0.0 would publish "
+            "'0.0%' for it, indistinguishable from a suite where every row failed."
+        ),
+    )
     average_weighted_score: float | None = Field(
         default=None, description="Mean weighted_score across rows that produced one."
     )
@@ -910,6 +923,32 @@ class SuiteRollup(BaseModel):
             "Drives CLI exit code for dataset-backed tasks."
         ),
     )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def rows_graded(self) -> int:
+        """The denominator behind ``pass_rate``, serialized like its two twins.
+
+        ``RunSummary.tasks_graded`` exists for the same reason and states it: a
+        consumer that cannot read the denominator has to re-derive it, which is
+        precisely how two surfaces end up publishing different numbers for the
+        same suite.
+        """
+        return self.rows_total - self.rows_not_graded
+
+    @model_validator(mode="after")
+    def _check_row_count_invariant(self) -> SuiteRollup:
+        """The same guard RunSummary carries, which this model was missing.
+
+        Without it a row that lands outside all four buckets — the shape a new
+        FinalStatus category takes before every counter is updated — silently
+        drops out of the rollup instead of failing.
+        """
+        buckets = self.rows_passed + self.rows_failed + self.rows_error + self.rows_not_graded
+        if buckets != self.rows_total:
+            total = f"{self.rows_passed} + {self.rows_failed} + {self.rows_error} + {self.rows_not_graded}"
+            raise ValueError(f"Suite row count invariant violated: {total} != {self.rows_total}")
+        return self
 
 
 class SkippedTask(BaseModel):
@@ -1030,10 +1069,13 @@ def eval_result_total_cost(result: EvaluationResult) -> float | None:
 class RunSummary(BaseModel):
     """Summary of an entire evaluation run across multiple tasks.
 
-    ``pass_rate`` is ``tasks_succeeded / tasks_run``: every dispatched task is in the
-    denominator, errors included as misses. The previous formula excluded errors,
-    which paid a bonus for erroring. ``error_share`` reports how much of the rate is
-    errors, so a bad infrastructure night shows instead of being absorbed.
+    ``pass_rate`` is ``tasks_succeeded / tasks_graded``: every task that was
+    MEASURED is in the denominator, errors included as misses. An earlier formula
+    excluded errors, which paid a bonus for erroring. ``error_share`` reports how
+    much of the rate is errors, so a bad infrastructure night shows instead of
+    being absorbed. Only ungraded tasks (``coder-eval execute``) leave the
+    denominator — they were never measured, so a 0/0 run has no rate at all
+    rather than a 0% one.
 
     This is the framework's single denominator: every reporting surface reads
     ``pass_rate`` rather than re-deriving one. Derived metrics here are computed,
@@ -1050,6 +1092,17 @@ class RunSummary(BaseModel):
     tasks_succeeded: int = Field(description="Number of tasks that succeeded")
     tasks_failed: int = Field(description="Number of tasks that failed")
     tasks_error: int = Field(description="Number of tasks that encountered errors")
+    # Part of the task_count invariant (a fourth bucket, not a sub-counter), but
+    # defaulted so run.json written before `coder-eval execute` existed — where
+    # no task can be ungraded — still deserialises.
+    tasks_not_graded: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of tasks executed without grading (`coder-eval execute`). "
+            "Excluded from BOTH sides of pass_rate — an ungraded task was never measured."
+        ),
+    )
 
     # Informational sub-counters: subsets of tasks_failed (NOT part of the
     # task_count invariant). Default 0 so old serialized RunSummary JSON
@@ -1097,10 +1150,42 @@ class RunSummary(BaseModel):
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> RunSummary:
-        if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
-            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+        buckets = self.tasks_succeeded + self.tasks_failed + self.tasks_error + self.tasks_not_graded
+        if buckets != self.tasks_run:
+            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error} + {self.tasks_not_graded}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def tasks_graded(self) -> int:
+        """Tasks that were actually measured — the denominator for every rate below.
+
+        A ``computed_field`` rather than a plain property so it reaches run.json:
+        it is the denominator of `pass_rate` and `error_share`, and a consumer
+        that cannot read it has to re-derive the rate from the raw counts — which
+        is precisely how a consumer ends up publishing a different number for the
+        same run. REPORT_SCHEMA.md documents it as serialized.
+        """
+        return self.tasks_run - self.tasks_not_graded
+
+    @property
+    def _nothing_was_measured(self) -> bool:
+        """True when no row in this run produced a criteria verdict.
+
+        ``tasks_graded`` is the complement of the ungraded bucket, so it still
+        counts ERROR rows — correct under ``run``, where an errored row was
+        attempted and genuinely missed. Under ``coder-eval execute`` no criterion
+        runs on ANY row, yet a crashed one lands in the ``error`` bucket rather
+        than the ``ungraded`` one, so it stayed in the denominator on its own: a
+        100-task execute night with 5 crashes published ``pass_rate 0.0`` and
+        ``error_share 1.0`` — a measured-looking total failure for a run that was
+        never measured at all, and a real 0% point on the evalboard trend.
+
+        The test is evidence again: if not one row reached a pass or a fail, the
+        rate has no numerator to be a fraction of.
+        """
+        return self.tasks_not_graded > 0 and (self.tasks_succeeded + self.tasks_failed) == 0
 
     # Derived run metrics: computed_fields over the stored counts and
     # ``task_results``, so they serialize into run.json while staying impossible to
@@ -1110,18 +1195,33 @@ class RunSummary(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty run."""
-        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+        """``tasks_succeeded / tasks_graded`` as a 0-1 fraction. ``None`` on an empty run.
+
+        The denominator excludes ungraded tasks (``coder-eval execute``), which were
+        never measured — counting them as misses would report a clean execute run as
+        0% pass. Identical to ``tasks_run`` for every graded run.
+
+        ``None`` also when no row produced a verdict at all, not just when the run
+        is empty — see ``_nothing_was_measured``.
+        """
+        if self._nothing_was_measured:
+            return None
+        return self.tasks_succeeded / self.tasks_graded if self.tasks_graded else None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def error_share(self) -> float | None:
-        """``tasks_error / tasks_run`` as a 0-1 fraction. ``None`` on an empty run.
+        """``tasks_error / tasks_graded`` as a 0-1 fraction. ``None`` on an empty run.
 
         Diagnostic only, never adjusts the rate: a drop at a high error share is an
-        infrastructure night, the same drop at a normal share is the model.
+        infrastructure night, the same drop at a normal share is the model. Shares
+        ``pass_rate``'s denominator so the two are directly comparable — including
+        being ``None`` on a run where nothing was measured, or an execute night
+        with one crashed row reports 100% error.
         """
-        return self.tasks_error / self.tasks_run if self.tasks_run else None
+        if self._nothing_was_measured:
+            return None
+        return self.tasks_error / self.tasks_graded if self.tasks_graded else None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

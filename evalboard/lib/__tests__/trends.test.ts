@@ -225,3 +225,30 @@ describe("historyForTaskInner", () => {
         expect(byRun.r2).toBe(false);
     });
 });
+
+describe("aggregate — ungraded rows", () => {
+    // The parallel of the "mature skip" block above, for the fourth status
+    // category. The denominator changed here with nothing asserting it: an
+    // ungraded row must leave BOTH sides, or a `coder-eval execute` run drags
+    // every task's trend down as though it had failed.
+    test("leave both sides of the pass rate", () => {
+        const { trends } = aggregate([
+            perRun("r1", [task({ status: "SUCCESS" })]),
+            perRun("r2", [task({ status: "NOT_GRADED" })]),
+        ]);
+
+        expect(trends[0].totalRuns).toBe(1);
+        expect(trends[0].successRuns).toBe(1);
+        expect(trends[0].passRate).toBe(1);
+    });
+
+    test("a fully ungraded task reports no runs rather than a 0% pass rate", () => {
+        const { trends } = aggregate([
+            perRun("r1", [task({ status: "NOT_GRADED" })]),
+            perRun("r2", [task({ status: "NOT_GRADED" })]),
+        ]);
+
+        expect(trends[0].totalRuns).toBe(0);
+        expect(trends[0].successRuns).toBe(0);
+    });
+});

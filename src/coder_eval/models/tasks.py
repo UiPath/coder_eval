@@ -733,7 +733,10 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         """
         if self.dataset is None and self.suite_id is None:
             for c in self.success_criteria:
-                if getattr(c, "suite_thresholds", None):
+                # Direct attribute access, not getattr: suite_thresholds is
+                # declared on BaseSuccessCriterion, so every union member has it
+                # and pyright can see a rename.
+                if c.suite_thresholds:
                     raise ValueError(
                         f"success_criteria[{c.type!r}].suite_thresholds requires a dataset: block "
                         + "(thresholds are evaluated on aggregated across-row metrics)"

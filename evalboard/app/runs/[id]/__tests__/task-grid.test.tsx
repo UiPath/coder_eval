@@ -408,7 +408,7 @@ describe("TaskGrid — replicates", () => {
         expect(reptaskLinks[0]).toHaveAttribute("href", "/runs/r1/reptask?r=0");
         // k/N ✓ badge: all 3 replicates passed → "3 of 3", GREEN. solo (single
         // run) shows no badge.
-        const badge = within(table).getByTitle(/3 of 3 replicates passed/i);
+        const badge = within(table).getByTitle(/3 of 3 graded replicates passed/i);
         expect(badge.textContent?.replace(/\s/g, "")).toBe("3/3✓");
         expect(badge.className).toContain("text-green-700");
     });
@@ -426,7 +426,7 @@ describe("TaskGrid — replicates", () => {
         );
         const table = screen.getByRole("table");
         // 1 of 3 replicates passed → shows the pass count, AMBER (partial).
-        const badge = within(table).getByTitle(/1 of 3 replicates passed/i);
+        const badge = within(table).getByTitle(/1 of 3 graded replicates passed/i);
         expect(badge.textContent?.replace(/\s/g, "")).toBe("1/3✓");
         expect(badge.className).toContain("text-amber-700");
     });
@@ -442,7 +442,7 @@ describe("TaskGrid — replicates", () => {
             />,
         );
         const table = screen.getByRole("table");
-        const badge = within(table).getByTitle(/0 of 2 replicates passed/i);
+        const badge = within(table).getByTitle(/0 of 2 graded replicates passed/i);
         expect(badge.textContent?.replace(/\s/g, "")).toBe("0/2✓");
         expect(badge.className).toContain("text-red-700");
     });
@@ -469,7 +469,7 @@ describe("TaskGrid — replicates", () => {
         expect(link).toHaveAttribute("href", "/runs/r1/t?r=1");
         // Badge still shows the true ratio.
         expect(
-            within(tr).getByTitle(/1 of 2 replicates passed/i).textContent?.replace(/\s/g, ""),
+            within(tr).getByTitle(/1 of 2 graded replicates passed/i).textContent?.replace(/\s/g, ""),
         ).toBe("1/2✓");
     });
 });

@@ -15,7 +15,7 @@ import shutil
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..models import (
     AgentKind,
@@ -28,7 +28,7 @@ from ..models import (
     TaskDefinition,
     TaskResult,
 )
-from ..path_utils import format_task_log_id
+from ..path_utils import TASK_JSON_FILENAME, format_task_log_id
 from ..pricing import unpriced_models
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
@@ -164,6 +164,7 @@ async def run_batch(
                         preservation_mode=preservation_mode,
                         stream_callback=task_callback,
                         verbose=config.verbose,
+                        grade=config.grade,
                     ).run()
                     # The in-container _finalize_result can't emit task telemetry
                     # (connection-string env vars aren't forwarded into the
@@ -185,6 +186,7 @@ async def run_batch(
                         source_yaml=rt.source_yaml,
                         config_lineage=rt.config_lineage,
                         replicate_index=rt.replicate_index,
+                        grade=config.grade,
                     )
                     result = await orchestrator.run()
                 tr = TaskResult(
@@ -322,10 +324,38 @@ def _create_error_task_result(
     )
 
 
-def partition_for_resume(
-    resolved_tasks: list[ResolvedTask],
-) -> tuple[list[ResolvedTask], list[TaskResult], list[ResolvedTask]]:
-    """Split resolved tasks into (to_run, prior_results, prior_resolved) for --resume.
+class ResumePartition(NamedTuple):
+    """How ``--resume`` splits a run's tasks over what each one still needs."""
+
+    to_run: list[ResolvedTask]
+    """Never finished executing — re-run from scratch."""
+
+    to_grade: list[ResolvedTask]
+    """Executed but never scored. Needs criteria, NOT another agent run."""
+
+    prior_results: list[TaskResult]
+    """Genuinely finished — reloaded so run.json covers the whole suite."""
+
+    prior_resolved: list[ResolvedTask]
+    """The ResolvedTask for each entry of prior_results, same order."""
+
+
+def _owes_a_grade(result: EvaluationResult) -> bool:
+    """Whether a finalized row was executed but never scored.
+
+    Evidence, not label. ``NOT_GRADED`` is the ordinary shape, but an ``execute``
+    row that also tripped a run limit (TIMEOUT, a budget stop) carries an
+    execution-fact status whose category is ``error``/``failed`` — and no verdict
+    at all. Both are equally owed a grade; only the first announces it.
+
+    A row that carries a criteria vector or a score has been graded, whatever its
+    status, so a genuine FAILURE/ERROR from ``run`` is untouched.
+    """
+    return result.weighted_score is None and not result.success_criteria_results
+
+
+def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = True) -> ResumePartition:
+    """Split resolved tasks over what ``--resume`` still owes each one.
 
     A task is already-complete when its task.json exists, parses, and carries a
     final_status. task.json is written atomically at end-of-run, so any parseable
@@ -333,26 +363,51 @@ def partition_for_resume(
     tasks are reloaded into TaskResults (to fold into run.json) and excluded from
     to_run; everything else — including failed-to-parse — re-runs.
 
+    **"Finished" is relative to the resuming command, not absolute.** A
+    ``NOT_GRADED`` row (written by ``coder-eval execute``) has a final status, so
+    the naive test calls it complete. That is right for ``execute --resume``,
+    which owes it nothing — and wrong for ``run --resume``, which was asked to
+    grade: skipping it would report "already complete", grade nothing, and exit
+    0. So under ``grade=True`` those rows go to ``to_grade`` instead, where the
+    caller runs the criteria against the trajectory and workspace already on
+    disk rather than paying for the agent a second time.
+
+    The test is the row's **evidence**, not its status: a row is owed a grade
+    when it was executed but never scored. Keying on ``category == "ungraded"``
+    alone missed every ``execute`` row that also carries an execution fact — a
+    TIMEOUT or budget stop aborts the run before grading, so under ``execute`` it
+    lands with ``weighted_score is None`` and an empty criteria vector, yet its
+    category is ``error``/``failed`` and resume filed it as complete. It then
+    stayed permanently unscored in run.json, the rollup and the evalboard, while
+    ``evaluate <run_dir>`` graded the identical bytes happily — two entry points
+    into one feature disagreeing about the same record.
+
+    Note the asymmetry is only for a row that was never scored. FAILURE and ERROR
+    rows that DO carry a verdict stay complete under both commands — resume has
+    never retried failures (delete a task's task.json to force that), and this
+    does not change it.
+
     Args:
         resolved_tasks: Fully-resolved tasks for the whole run.
+        grade: Whether the resuming command grades (``run``) or not (``execute``).
 
     Returns:
-        (to_run, prior_results, prior_resolved):
-          - to_run: tasks still needing execution
-          - prior_results: reloaded results for already-complete tasks
-          - prior_resolved: the ResolvedTask for each prior_result (same order)
+        The four-way :class:`ResumePartition`.
     """
     to_run: list[ResolvedTask] = []
+    to_grade: list[ResolvedTask] = []
     prior_results: list[TaskResult] = []
     prior_resolved: list[ResolvedTask] = []
     for rt in resolved_tasks:
         tr = _load_completed_result(rt)
         if tr is None:
             to_run.append(rt)
+        elif grade and _owes_a_grade(tr.result):
+            to_grade.append(rt)
         else:
             prior_results.append(tr)
             prior_resolved.append(rt)
-    return to_run, prior_results, prior_resolved
+    return ResumePartition(to_run, to_grade, prior_results, prior_resolved)
 
 
 def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
@@ -378,7 +433,7 @@ def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
 
 def _load_completed_result(rt: ResolvedTask) -> TaskResult | None:
     """Reconstruct a TaskResult from a finalized task.json, or None if absent/incomplete."""
-    report_path = rt.run_dir / "task.json"
+    report_path = rt.run_dir / TASK_JSON_FILENAME
     try:
         text = report_path.read_text(encoding="utf-8")
     except OSError:
@@ -425,7 +480,7 @@ def recover_task_results(run_dir: Path) -> list[TaskResult]:
     """
     nested_roots = [p.parent for p in run_dir.rglob("run.json") if p.parent != run_dir]
     recovered: list[TaskResult] = []
-    for task_json in run_dir.rglob("task.json"):
+    for task_json in run_dir.rglob(TASK_JSON_FILENAME):
         if any(root in task_json.parents for root in nested_roots):
             continue  # belongs to a nested sub-run (its own run.json), not this one
         try:
@@ -509,13 +564,24 @@ def read_run_fingerprint(run_dir: Path) -> dict[str, object] | None:
     return data if isinstance(data, dict) else None
 
 
+# `grade` is excluded from the drift warning: `execute` then `run --resume` is a
+# SUPPORTED flow, not a config mistake, and the warning's text ("already-finalized
+# tasks keep their original-config results") is actively wrong for it — those rows
+# are re-graded with the current config, which is the entire point.
+_FINGERPRINT_DIFF_EXEMPT = frozenset({"grade"})
+
+
 def fingerprint_diff(prior: dict[str, object], current: dict[str, object]) -> dict[str, tuple[object, object]]:
     """Keys present in BOTH stamps that disagree, as ``{key: (prior, current)}``.
 
     Only keys present in ``prior`` are compared, so adding fingerprint fields in a
     later version never false-flags a resume of an older run.
     """
-    return {k: (prior[k], current[k]) for k in current if k in prior and prior[k] != current[k]}
+    return {
+        k: (prior[k], current[k])
+        for k in current
+        if k in prior and prior[k] != current[k] and k not in _FINGERPRINT_DIFF_EXEMPT
+    }
 
 
 def _override_uip_versions_from_tasks(version_info: dict[str, Any], task_results: list[TaskResult]) -> None:
@@ -665,6 +731,7 @@ def build_run_summary(
         tasks_succeeded=sum(1 for s in statuses if s.category == "succeeded"),
         tasks_failed=sum(1 for s in statuses if s.category == "failed"),
         tasks_error=sum(1 for s in statuses if s.category == "error"),
+        tasks_not_graded=sum(1 for s in statuses if s.category == "ungraded"),
         tasks_token_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.TOKEN_BUDGET_EXCEEDED),
         tasks_cost_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.COST_BUDGET_EXCEEDED),
         skipped_tasks=skipped_tasks or [],

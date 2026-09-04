@@ -132,7 +132,23 @@ def print_execution_summary(run_dir: Path, summary: RunSummary) -> None:
         summary: Run execution summary
     """
     console.print(f"\n[bold green]Run complete:[/bold green] {run_dir}")
-    console.print(f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_run} succeeded")
+    # An ungraded run has no pass rate to report — printing "0/N succeeded" for a
+    # clean `coder-eval execute` reads as a total failure. Report what actually
+    # happened instead, and keep the graded line for whatever WAS graded.
+    if summary.tasks_not_graded:
+        console.print(f"[bold]Results:[/bold] {summary.tasks_not_graded}/{summary.tasks_run} executed, not graded")
+        # Point at the run-dir form, not `evaluate <task.yaml> <workspace>`: the
+        # two-argument shape grades a bare directory with NO trajectory, so
+        # command_executed / skill_triggered / trajectory-reading judges score
+        # differently from what `run` would have produced. The run-dir form
+        # restores the trajectory AND the resolved config.
+        console.print(f"[dim]Grade later: uv run coder-eval run <tasks> --run-dir {run_dir} --resume[/dim]")
+        console.print("[dim]           or: uv run coder-eval evaluate <run_dir>/<variant>/<task_id>/00[/dim]")
+    if summary.tasks_graded or not summary.tasks_not_graded:
+        # The `or not ...` keeps the pre-existing "0/0 succeeded" line for an
+        # empty run: without it a run with no tasks at all prints no Results
+        # line whatsoever, since both counters are falsy.
+        console.print(f"[bold]Results:[/bold] {summary.tasks_succeeded}/{summary.tasks_graded} succeeded")
     console.print(f"[dim]View report: open {run_dir / 'experiment.md'}[/dim]")
     console.print(f"[dim]View report: uv run coder-eval report {run_dir}[/dim]")
 

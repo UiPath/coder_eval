@@ -41,7 +41,8 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
 | `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
-| `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. A task with *any* final status (incl. FAILED/ERROR) counts as finalized, so resume does **not** retry failures — delete a task's `task.json` to force a re-run. A config mismatch is warned, not refused. |
+| `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. See [Resuming a run](#resuming-a-run). |
+| `--allow-host-grading` | `--resume` only. Grade an executed-but-ungraded `driver: docker` row on this host instead of refusing; the row is stamped `graded_on_host`. Rejected without `--resume`, since a fresh `run` grades inside the driver the task asks for. |
 | `--sample N` | For dataset-backed tasks, run a fixed-seed random N-row sample (reproducible; cheap smoke test). See [Bring Your Own Dataset](DATASETS.md). |
 | `--sample-per-stratum N` | For dataset-backed tasks, keep up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — see [Bring Your Own Dataset](DATASETS.md). |
 | `--include-skipped` | Also run tasks marked `skip: true` in their YAML (off by default so CI keeps excluding them). |
@@ -58,6 +59,92 @@ flags of their own. They live under `run_limits:` in the task YAML, or on the co
 `-D run_limits.<field>=<value>` (e.g. `-D run_limits.max_usd=2.50`). The complete field reference is
 in the [Task Definition Guide](TASK_DEFINITION_GUIDE.md#run-limits).
 
+### `coder-eval execute` — run without grading
+
+```bash
+coder-eval execute tasks/hello_date.yaml                    # run, capture, score nothing
+coder-eval execute tasks/*.yaml --run-dir ./my-run -j 3     # every `run` flag but two
+```
+
+Identical to `coder-eval run` except that no success criterion is checked. Each task
+executes normally and its full trajectory lands in `task.json` as usual, but
+`weighted_score` stays `null` and the row finalizes as `NOT_GRADED` — a reporting
+category of its own, excluded from both sides of every pass rate. The two commands
+share one implementation, so they cannot drift apart.
+
+Use it when something *else* owns the verdict — an external harness that builds its own
+container and runs its own tests — or to separate one expensive agent run from grading
+you want to iterate on afterwards. Grade the results later with
+[`coder-eval evaluate`](#coder-eval-evaluate--grade-without-running-an-agent).
+
+**Only the verdict is withheld, never the facts of the run.** A crash, timeout, or
+budget breach still reports `ERROR` / `TIMEOUT` / `TOKEN_BUDGET_EXCEEDED` and still
+exits non-zero, exactly as under `run`.
+
+Exhausting `max_turns` is the one fact that does *not* become a status here. Under
+`run` it decides the outcome only when the criteria fail — a max-turns trajectory
+whose criteria pass is `SUCCESS` — so it is not knowable without grading. `execute`
+records `max_turns_exhausted: true` on the row and finalizes `NOT_GRADED`; the later
+grade reads the flag and reaches exactly the status `run` would have. Rows like this
+are picked up by `run --resume`, which owes a grade to anything executed but never
+scored — including a row that also timed out or tripped a budget.
+
+Every `run` flag is available except three things, each refused rather than quietly
+degraded:
+
+| Not supported | Why |
+| --- | --- |
+| `--junit-xml` | A JUnit report reports verdicts, and there are none. |
+| `--allow-host-grading` | It decides how an executed-but-ungraded row is *graded*, and `execute` grades nothing. |
+| Simulation tasks | The dialog loop reads criteria results to decide whether to keep talking, so an ungraded dialog would silently change its own stopping behavior. Rejected by name at startup. |
+
+`stop_early:` blocks are also inert here: early stop exists to cut a run once the
+criteria decide the outcome, and under `execute` the full trajectory is the deliverable.
+
+`--resume` **is** supported, and `run --resume` pairs with it (see below).
+
+### Resuming a run
+
+`--resume` continues an interrupted run without re-paying for finished work. It
+requires `--run-dir` (an auto-generated directory is always fresh).
+
+What it owes each task depends on what it finds in that task's `task.json`:
+
+| On disk | `run --resume` | `execute --resume` |
+| --- | --- | --- |
+| No `task.json`, unreadable, or no `final_status` | re-run | re-run |
+| `NOT_GRADED` | **grade in place** | already complete |
+| Any other status, **including `FAILURE` / `ERROR`** | already complete | already complete |
+
+**"Finished" is relative to the resuming command.** A `NOT_GRADED` row owes
+`execute` nothing — it finished executing — but owes `run` a grade. So
+`run --resume` runs the criteria against the trajectory and workspace already on
+disk instead of re-running the agent, which is the whole reason to split the two
+commands:
+
+```bash
+coder-eval execute tasks/*.yaml --run-dir ./r    # expensive half
+coder-eval run     tasks/*.yaml --run-dir ./r --resume   # grades what execute left
+```
+
+**Resume never retries failures.** `FAILURE` and `ERROR` count as complete under
+both commands — delete a task's `task.json` to force a re-run. A task about to
+re-run has its stale `artifacts/<task_id>` cleared first, so leftover files from
+a killed container cannot satisfy a file-based criterion.
+
+A run-config mismatch is **warned, not refused**: resumed tasks keep their
+original-config results, so the run genuinely mixes configs. The `grade` flag is
+exempt from that warning, because `execute` → `run --resume` is a supported flow
+rather than a config mistake.
+
+**A dataset task must pin its sample to be resumable.** Stratified sampling
+(`--sample-per-stratum` / `dataset.sample_per_stratum`) re-draws on every
+invocation, and each row is its own task (`<task_id>/<row_id>`) with its own run
+directory. A resume therefore draws a *different* row set, finds no `task.json`
+for it, and pays for the agent a second time while the executed rows sit
+orphaned in the run dir. Set `dataset.sample_seed`, or use `--sample N` (which is
+seeded), before splitting a dataset run across `execute` and `run --resume`.
+
 ### `coder-eval plan` — validate tasks
 
 ```bash
@@ -71,22 +158,76 @@ Checks task syntax, required CLI tools, API keys, and schema validity without ex
 | --- | --- |
 | `--experiment, -e` | Experiment definition YAML to resolve variants against (default: `experiments/default.yaml`). |
 
-### `coder-eval evaluate` — test criteria without an agent
+### `coder-eval evaluate` — grade without running an agent
+
+Two shapes, told apart by whether the target holds a `task.json`:
 
 ```bash
-coder-eval evaluate tasks/hello_date.yaml ./my_solution            # evaluate a directory
-coder-eval evaluate tasks/hello_date.yaml ./my_solution --preserve # keep the sandbox
+# 1. Grade a directory against a task
+coder-eval evaluate tasks/hello_date.yaml ./my_solution
+
+# 2. Re-grade a finished run — including one left NOT_GRADED by `execute`
+coder-eval execute  tasks/hello_date.yaml --run-dir ./r
+coder-eval evaluate ./r/default/hello_date/00
+coder-eval aggregate ./r                      # run.json now reports the verdict
 ```
 
-Runs a task's success criteria against a directory without an agent — useful for
-testing criterion definitions, validating task configs, or scoring code that was
-already written.
+**Run-directory mode** rebuilds the task from the run's own recorded
+`task_config.resolved`, not by re-reading the YAML. That is what makes the grade
+describe the run that happened: variant overrides, `-D` flags and dataset row
+expansion are already baked into `resolved`, so re-loading the source would
+silently grade a *different* task. The run's trajectory is restored too, so
+criteria that read the agent's tool calls (`command_executed`, `skill_triggered`,
+judges with trajectory) score exactly as they would have during the run.
+
+It writes the verdict back into the run's `task.json` and keeps the pre-grade
+record beside it as `task.execute.json`. Writing back in place is what makes
+`aggregate` free — no new flag, no second copy of the results. If grading itself
+crashes, the ungraded record is put back: `ERROR` counts as complete for both
+commands, so an errored row could never be graded again.
+
+**A run directory is untrusted input.** It is a shareable artifact — the whole
+point of the detached flow is that one machine executes and another grades — and
+rebuilding the task from it means the run dir decides what runs on your host,
+with your environment. So two things are refused rather than assumed:
+
+- A recorded config that carries shell (`run_command` criteria, `agent_judge`,
+  `uipath_eval`, and on the `--copy` path `pre_run`/`post_run`) needs
+  `--allow-recorded-commands`. The message names every command first. Passing the
+  task file explicitly bypasses this — that config came from you.
+- A run made with `driver: docker` needs `--allow-host-grading`. Grading cannot
+  start a container, and such a task's criteria address container paths and
+  toolchains; on your host they score `0.0` for a run that passed. An opted-in
+  row is stamped `graded_on_host` in `environment_info` so it is never silently
+  compared with a container-graded one.
+
+Passing a task file **over** a run directory re-grades it with different
+criteria, reusing the trajectory and workspace of a run you already paid for:
+
+```bash
+coder-eval evaluate tasks/hello_date.edited.yaml ./r/default/hello_date/00
+```
+
+**In-place vs. copy.** The two-argument form copies your directory into a fresh
+sandbox (criteria can mutate the target, and it is your own tree). Run-directory
+mode grades **in place**, because copying filters build output — `node_modules`,
+`dist`, `build`, `.venv`, `.git` are all on the default ignore list, so a
+criterion like `test -f dist/bundle.js` would fail as a *copying artifact*
+rather than as a verdict. Override either default with `--in-place` / `--copy`.
 
 | Flag | Description |
 | --- | --- |
-| `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve) |
-| `--run-dir` | Custom run directory (default: auto-generated timestamped dir in `runs/`). |
+| `--workspace` | Grade this directory instead of the run's own artifacts (run-directory mode only). |
+| `--in-place / --copy` | Grade where the files are, or copy first. Default: in-place for a run directory, copy for a plain work directory. |
+| `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve). Ignored when grading in place — an adopted directory is never moved or deleted. |
+| `--run-dir` | Where the graded `task.json` lands (default: auto-generated timestamped dir in `runs/`). |
+| `--allow-recorded-commands` | Accept a rebuilt config that would run shell (`run_command` criteria, judges, `pre_run`/`post_run`) or install packages on this host. Refused by default — a run directory is a shareable artifact, so its recorded config is untrusted input. |
+| `--allow-host-grading` | Grade a `driver: docker` task on this host instead of refusing. The row is stamped `graded_on_host` so it is never silently compared with a container-graded one. |
 | `--verbose, -v` | DEBUG-level logging |
+
+A re-grade refuses to run if the task's `reference:` directory changed since the
+run (digest mismatch) — grading then would score the agent's old work against a
+new answer key.
 
 ### `coder-eval report` — view results
 

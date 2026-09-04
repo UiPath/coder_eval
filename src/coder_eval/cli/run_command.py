@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,15 @@ from tqdm import tqdm
 
 from ..config import Settings, settings
 from ..logging_config import setup_logging
-from ..models import PreservationMode, ResolvedTask, RunSummary, TaskResult
+from ..models import (
+    AgentKind,
+    EvaluationResult,
+    FinalStatus,
+    PreservationMode,
+    ResolvedTask,
+    RunSummary,
+    TaskResult,
+)
 from ..orchestration.config import BatchRunConfig
 from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
@@ -192,10 +201,27 @@ def run_command(
             "Resume an interrupted run: skip tasks already finalized in --run-dir and "
             "run only the rest, folding prior results into run.json. A task counts as "
             "finalized once it has ANY final status — including FAILED/ERROR — so resume "
-            "does NOT retry failures (delete a task's task.json to force a re-run). "
+            "does NOT retry failures (delete a task's task.json to force a re-run). The "
+            "one exception is a NOT_GRADED row left by `coder-eval execute`: `run` was "
+            "asked for a verdict, so those rows are GRADED in place against the "
+            "trajectory and workspace already on disk, without re-running the agent. "
             "Requires --run-dir. A config mismatch (model/backend/flags) is warned, not "
             "refused — the resumed tasks keep their original-config results, so the run "
-            "mixes configs; use a fresh --run-dir to keep configs separate."
+            "mixes configs; use a fresh --run-dir to keep configs separate. A dataset "
+            "task using nondeterministic stratified sampling needs dataset.sample_seed "
+            "(or --sample) to be resumable — otherwise the resume draws a different row "
+            "set and pays for the agent twice."
+        ),
+    ),
+    allow_host_grading: bool = typer.Option(
+        False,
+        "--allow-host-grading",
+        help=(
+            "When --resume grades a `driver: docker` row, grade it on this host anyway. "
+            "Grading cannot start a container, so such criteria run against a filesystem "
+            "lacking the container's paths and toolchain and may score differently than "
+            "the run did; those rows are stamped graded_on_host. Without this they are "
+            "refused and stay ungraded."
         ),
     ),
     max_parallel: int = typer.Option(
@@ -354,9 +380,80 @@ def run_command(
 
         coder-eval run tasks/*.yaml --tags golden,basic --exclude-tags example
     """
+    run_pipeline(
+        grade=True,
+        task_files=task_files,
+        preservation_mode=preservation_mode,
+        run_dir=run_dir,
+        resume=resume,
+        allow_host_grading=allow_host_grading,
+        max_parallel=max_parallel,
+        verbose=verbose,
+        log_file=log_file,
+        junit_xml=junit_xml,
+        tags=tags,
+        exclude_tags=exclude_tags,
+        include_skipped=include_skipped,
+        agent_type=agent_type,
+        model=model,
+        stream=stream,
+        backend=backend,
+        experiment=experiment,
+        sample=sample,
+        sample_per_stratum=sample_per_stratum,
+        repeats=repeats,
+        driver=driver,
+        set_overrides=set_overrides,
+    )
+
+
+def run_pipeline(
+    *,
+    grade: bool,
+    task_files: list[Path] | None,
+    preservation_mode: PreservationMode | None,
+    run_dir: Path | None,
+    resume: bool,
+    allow_host_grading: bool,
+    max_parallel: int,
+    verbose: bool,
+    log_file: Path | None,
+    junit_xml: Path | None,
+    tags: str | None,
+    exclude_tags: str | None,
+    include_skipped: bool,
+    agent_type: str | None,
+    model: str | None,
+    stream: str | None,
+    backend: str | None,
+    experiment: Path | None,
+    sample: int | None,
+    sample_per_stratum: int | None,
+    repeats: int | None,
+    driver: str | None,
+    set_overrides: list[str],
+) -> None:
+    """The shared body of ``coder-eval run`` and ``coder-eval execute``.
+
+    Everything below the Typer signature is identical for both commands; the only
+    difference is ``grade``, which decides whether success criteria are checked
+    (``run``) or the trajectory is captured and left unscored (``execute``). Both
+    commands are pure flag-parsing wrappers over this function, so a behavior
+    change can never apply to one and miss the other.
+    """
     # --resume needs an explicit run dir to resume into (auto-generated dirs are always fresh).
     if resume and run_dir is None:
         raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
+    # --allow-host-grading only reaches anything from inside the `if resume:`
+    # branch below, so without --resume it parsed, was accepted, and did nothing
+    # at all — no warning, no error. The sibling mode-scoped flag on the same
+    # feature (`evaluate --workspace`) hard-errors on exactly this misuse; two
+    # new flags behaving differently for one user mistake is the inconsistency.
+    if allow_host_grading and not resume:
+        raise typer.BadParameter(
+            "--allow-host-grading applies to --resume only (it decides how an executed-but-ungraded "
+            + "row is graded). A fresh `run` grades inside the driver the task asks for."
+        )
 
     # Parse tag filters
     include_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None
@@ -412,8 +509,10 @@ def run_command(
                 repeats=repeats,
                 verbose=verbose,
                 resume=resume,
+                allow_host_grading=allow_host_grading,
                 include_skipped=include_skipped,
                 junit_xml=junit_xml,
+                grade=grade,
             )
         )
     except KeyboardInterrupt:
@@ -437,8 +536,10 @@ async def _run_all_tasks(
     repeats: int | None = None,
     verbose: bool = False,
     resume: bool = False,
+    allow_host_grading: bool = False,
     include_skipped: bool = False,
     junit_xml: Path | None = None,
+    grade: bool = True,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -459,6 +560,7 @@ async def _run_all_tasks(
         experiment_path: Optional path to experiment YAML (default: experiments/default.yaml)
         junit_xml: Optional path to write a JUnit XML report to, after the run
             summary is persisted and before the failure exit-code gate.
+        grade: False for `coder-eval execute` — run and capture, score nothing.
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -484,6 +586,7 @@ async def _run_all_tasks(
         repeats=repeats,
         verbose=verbose,
         include_skipped=include_skipped,
+        grade=grade,
     )
 
     from ..telemetry import flush_telemetry, track_event
@@ -500,6 +603,7 @@ async def _run_all_tasks(
             "StreamMode": stream_mode or "none",
             "Resume": resume,
             "ExperimentProvided": experiment_path is not None,
+            "Grade": grade,
         },
     )
 
@@ -513,7 +617,14 @@ async def _run_all_tasks(
     try:
         # Always run through experiment layer (defaults to experiments/default.yaml)
         summary, failed_suite_gates = await _run_with_experiment(
-            all_task_files, config, experiment_path, stream_mode, max_parallel, resume=resume
+            all_task_files,
+            config,
+            experiment_path,
+            stream_mode,
+            max_parallel,
+            resume=resume,
+            grade=grade,
+            allow_host_grading=allow_host_grading,
         )
 
         # Aggregate task logs into run.log
@@ -540,7 +651,14 @@ async def _run_all_tasks(
         flush_telemetry()
 
     # Exit with non-zero code if any tasks failed, errored, or any suite failed its thresholds.
-    if summary.tasks_failed > 0 or summary.tasks_error > 0 or failed_suite_gates > 0:
+    #
+    # An ungraded row counts too, but only under `run`: `run` was asked for a
+    # verdict and did not produce one (the grade crashed, or --resume could not
+    # grade the row), which is a failure of the command even though the row is
+    # neither `failed` nor `error`. Under `execute` an ungraded row is the
+    # expected outcome for every task, so it must not fail the command.
+    ungraded_but_asked_to_grade = grade and summary.tasks_not_graded > 0
+    if summary.tasks_failed > 0 or summary.tasks_error > 0 or failed_suite_gates > 0 or ungraded_but_asked_to_grade:
         raise typer.Exit(1)
 
 
@@ -593,6 +711,179 @@ async def _run_with_callbacks(
     return result
 
 
+def _unreadable_row_placeholder(rt: ResolvedTask, error: Exception) -> EvaluationResult:
+    """A minimal ungraded row for a task whose recorded result cannot be read.
+
+    Exists so an unreadable row stays IN ``run.json`` and in
+    ``tasks_not_graded`` — the counter the exit gate reads. Dropping it silently
+    made a resume that graded nothing exit 0.
+    """
+    return EvaluationResult(
+        task_id=rt.task.task_id,
+        task_description=rt.task.description,
+        variant_id=rt.variant_id,
+        agent_type=str(rt.task.agent.type) if rt.task.agent and rt.task.agent.type else AgentKind.NONE.value,
+        started_at=datetime.now(),
+        final_status=FinalStatus.NOT_GRADED,
+        iteration_count=0,
+        error_message=f"Grading failed during --resume: the recorded result could not be read ({error})",
+    )
+
+
+async def _grade_resumed_tasks(
+    to_grade: list[ResolvedTask], *, allow_host_grading: bool = False
+) -> list[tuple[ResolvedTask, TaskResult]]:
+    """Grade the rows ``coder-eval execute`` left NOT_GRADED, in place.
+
+    Each task's trajectory and workspace are already on disk, so this runs the
+    criteria against them instead of re-running the agent — that reuse is the
+    whole reason to split ``execute`` from ``run``.
+
+    The task config comes from ``rt.task`` (this run's own 5-layer resolution),
+    not from the recorded one: ``--resume`` re-resolves the same task files, and
+    a config that drifted since the execute is already surfaced by the run
+    fingerprint warning above.
+
+    A task that cannot be graded is reported and folded back in with its ORIGINAL
+    ungraded result, so one bad row neither aborts the resume nor silently
+    vanishes from run.json — it stays visible as ``tasks_not_graded``, with the
+    reason on its ``error_message``. That covers three shapes: a helper raising,
+    a row too broken to read at all (skipped entirely — there is nothing to fold
+    back), and a re-grade that returns ``FinalStatus.ERROR``, which
+    ``Orchestrator.run()`` produces INSTEAD of raising and which would otherwise
+    make the row permanently un-regradeable.
+
+    Returns the graded rows; the caller's exit gate fails the command whenever
+    any row is still ungraded, so a resume that graded nothing never exits 0.
+    """
+    from ..orchestration.regrade import (
+        RegradeError,
+        back_up_pre_grade_record,
+        default_workspace,
+        load_prior_result,
+        regrade_in_place,
+        restore_pre_grade_record,
+    )
+
+    graded: list[tuple[ResolvedTask, TaskResult]] = []
+    for rt in to_grade:
+        # Inside the try: an unreadable row must skip like any other grading
+        # failure. Outside it, one bad task.json propagates out of the loop and
+        # aborts the whole resume BEFORE run_batch, so none of the `to_run`
+        # tasks execute either — the opposite of "one bad row never aborts".
+        prior: EvaluationResult | None = None
+        try:
+            prior = load_prior_result(rt.run_dir)
+            # The reference check lives inside regrade_in_place, so a caller
+            # cannot forget it.
+            workspace = default_workspace(rt.run_dir, prior)
+            # Preserve the ungraded record BEFORE the orchestrator overwrites
+            # task.json in this same directory.
+            back_up_pre_grade_record(rt.run_dir)
+            result = await regrade_in_place(
+                task=rt.task,
+                prior=prior,
+                workspace=workspace,
+                run_dir=rt.run_dir,
+                task_file=rt.task_file,
+                source_yaml=rt.source_yaml,
+                variant_id=rt.variant_id,
+                replicate_index=rt.replicate_index,
+                allow_host_grading=allow_host_grading,
+            )
+        except (RegradeError, OSError, RuntimeError, ValueError) as e:
+            console.print(f"[yellow]⚠[/] Could not grade {rt.task.task_id}: {e}")
+            if prior is None:
+                # The row could not even be read, so there is no recorded result
+                # to fold back — but dropping it entirely removes it from
+                # run.json AND from `tasks_not_graded`, which is what the exit
+                # gate counts, so a resume whose rows were all unreadable would
+                # report success. Stand in a minimal ungraded row instead: it
+                # keeps the task visible and keeps the command non-zero.
+                result = _unreadable_row_placeholder(rt, e)
+            else:
+                # Stamp the reason onto the row. Without it the failure survives
+                # only in this console line: the folded-back result keeps the
+                # execute phase's empty error_message, so run.json, the reports
+                # and CI show an ungraded row with no explanation.
+                result = prior
+                result.error_message = f"Grading failed during --resume: {e}"
+        else:
+            if result.final_status is FinalStatus.ERROR:
+                # An orchestrator-level grading crash is not a verdict about the
+                # run. Orchestrator.run() converts internal failures into a
+                # populated ERROR result rather than raising, so without this the
+                # `except` above never sees them and the ERROR row replaces a
+                # perfectly re-gradeable NOT_GRADED one — and ERROR is "complete"
+                # for both commands, so the row could never be graded again.
+                #
+                # Fixing the in-memory result is only half of it: _finalize_result
+                # already wrote the ERROR task.json into this same directory
+                # before returning, so run.json would say NOT_GRADED while the
+                # row on disk says ERROR — and the on-disk one is what a later
+                # --resume reads. Put the pre-grade record back.
+                restore_pre_grade_record(rt.run_dir)
+                console.print(
+                    f"[yellow]⚠[/] Grading {rt.task.task_id} errored ({result.error_message}); "
+                    + "keeping the ungraded row so it stays re-gradeable."
+                )
+                prior.error_message = f"Grading errored during --resume: {result.error_message}"
+                result = prior
+        graded.append(
+            (
+                rt,
+                TaskResult(
+                    task_id=rt.task.task_id,
+                    variant_id=rt.variant_id,
+                    result=result,
+                    duration=result.duration_seconds or 0.0,
+                    suite_id=rt.task.suite_id,
+                    row_id=rt.task.row_id,
+                    replicate_index=rt.replicate_index,
+                ),
+            )
+        )
+    return graded
+
+
+async def _apply_resume(
+    resolved: list[ResolvedTask], *, grade: bool, allow_host_grading: bool
+) -> tuple[list[ResolvedTask], list[TaskResult], list[ResolvedTask]]:
+    """Split a resumed run into what still needs running, and what is carried in.
+
+    Extracted from ``_run_with_experiment``, which answers several questions at
+    once; this one answers "what does the resume still owe?" and is where the
+    grading half of the answer lives.
+
+    Returns ``(to_run, prior_results, prior_resolved)``. ``resolved`` itself is
+    NOT narrowed — the suite rollups downstream need every task, run or not.
+    """
+    from ..orchestration.batch import clear_rerun_artifacts, partition_for_resume
+
+    part = partition_for_resume(resolved, grade=grade)
+    prior_results = list(part.prior_results)
+    prior_resolved = list(part.prior_resolved)
+    # A re-run task re-executes from scratch, so any leftover artifacts (only
+    # DIRECT_WRITE writes them live; a container killed mid-run leaves partials)
+    # are stale and could let a file-based criterion pass on the old output.
+    # to_grade is deliberately NOT cleared: its artifacts are the run's output
+    # and the very thing being graded.
+    cleared = clear_rerun_artifacts(part.to_run)
+    console.print(
+        f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, "
+        + f"running {len(part.to_run)} remaining"
+        + (f", grading {len(part.to_grade)} executed-but-ungraded" if part.to_grade else "")
+        + (f" (cleared {cleared} stale artifact dir(s))" if cleared else "")
+    )
+    # Grade the rows `execute` left behind, reusing the trajectory and workspace
+    # already on disk rather than paying for the agent twice. Folded in as
+    # prior_results so the summary covers them like any other.
+    for rt, tr in await _grade_resumed_tasks(part.to_grade, allow_host_grading=allow_host_grading):
+        prior_results.append(tr)
+        prior_resolved.append(rt)
+    return part.to_run, prior_results, prior_resolved
+
+
 async def _run_with_experiment(
     all_task_files: list[Path],
     config: BatchRunConfig,
@@ -600,6 +891,8 @@ async def _run_with_experiment(
     stream_mode: str | None,
     max_parallel: int,
     resume: bool = False,
+    grade: bool = True,
+    allow_host_grading: bool = False,
 ) -> tuple[RunSummary, int]:
     """Run tasks through the experiment resolution layer.
 
@@ -619,10 +912,8 @@ async def _run_with_experiment(
         RunSummary with aggregated results.
     """
     from ..orchestration.batch import (
-        clear_rerun_artifacts,
         compute_run_fingerprint,
         fingerprint_diff,
-        partition_for_resume,
         read_run_fingerprint,
         run_batch,
         write_run_fingerprint,
@@ -670,6 +961,23 @@ async def _run_with_experiment(
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
 
+    # Simulation tasks are rejected under `execute`, not silently degraded. The
+    # dialog loop reads criteria results to decide whether to keep talking, so an
+    # ungraded dialog would quietly change its own stopping behavior and produce a
+    # trajectory that is not the one `run` would have produced. Rejecting is a
+    # config error (exit 2), and it names the offending tasks.
+    if not grade:
+        simulated = sorted(
+            rt.task.task_id for rt in resolved if rt.task.simulation is not None and rt.task.simulation.enabled
+        )
+        if simulated:
+            raise typer.BadParameter(
+                "`coder-eval execute` does not support simulation tasks (their turn-continuation "
+                + "logic depends on criteria results): "
+                + ", ".join(simulated)
+                + ". Use `coder-eval run` for these."
+            )
+
     if skipped:
         console.print(
             f"[yellow]⚠[/] {len(skipped)} task file(s) skipped "
@@ -705,15 +1013,8 @@ async def _run_with_experiment(
     prior_results: list[TaskResult] = []
     prior_resolved: list[ResolvedTask] = []
     if resume:
-        to_run, prior_results, prior_resolved = partition_for_resume(resolved)
-        # A re-run task re-executes from scratch, so any leftover artifacts (only
-        # DIRECT_WRITE writes them live; a container killed mid-run leaves partials)
-        # are stale and could let a file-based criterion pass on the old output.
-        cleared = clear_rerun_artifacts(to_run)
-        console.print(
-            f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, "
-            + f"running {len(to_run)} remaining"
-            + (f" (cleared {cleared} stale artifact dir(s))" if cleared else "")
+        to_run, prior_results, prior_resolved = await _apply_resume(
+            resolved, grade=grade, allow_host_grading=allow_host_grading
         )
 
     # Print execution mode
@@ -745,6 +1046,12 @@ async def _run_with_experiment(
 
     # Per-suite pass-rate rollups for dataset-backed tasks (no-op when none were used).
     # Pass `resolved` through so suite_thresholds on each criterion can be evaluated.
+    # Skipped entirely under `execute`: a rollup aggregates per-criterion results,
+    # and there are none — running it would gate a suite on an empty aggregate and
+    # report a threshold failure for a run that was never measured.
+    if not grade:
+        return summary, 0
+
     from ..reports import write_suite_rollups
 
     rollups = write_suite_rollups(config.run_dir, task_results, resolved_tasks=resolved)

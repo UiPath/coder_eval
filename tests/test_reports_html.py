@@ -37,16 +37,21 @@ from coder_eval.reports_html import (
 )
 
 
-_CATEGORY_TO_CLASS = {"succeeded": "success", "failed": "failure", "error": "error"}
+# "ungraded" is the one category whose badge is legitimately neutral: the row
+# carries no verdict, so it must render as neither green nor red. Listing it
+# explicitly (rather than dropping the negative assertion below) keeps the guard
+# that no OTHER member falls through to the neutral fallback.
+_CATEGORY_TO_CLASS = {"succeeded": "success", "failed": "failure", "error": "error", "ungraded": "neutral"}
 
 
 @pytest.mark.parametrize("status", list(FinalStatus))
 def test_status_badge_dispatches_on_category(status: FinalStatus):
-    """Every FinalStatus member renders a non-neutral, category-correct badge."""
+    """Every FinalStatus member renders a category-correct badge, neutral only when intended."""
     badge = _status_badge(status)
     expected_cls = _CATEGORY_TO_CLASS[status.category]
     assert f'class="badge {expected_cls}"' in badge
-    assert "neutral" not in badge
+    if expected_cls != "neutral":
+        assert "neutral" not in badge
     # The human-readable label is the status value.
     assert status.value in badge
 
@@ -1229,16 +1234,20 @@ _EXPECTED_BADGE_CLASS = {
     FinalStatus.MAX_TURNS_EXHAUSTED: "failure",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "failure",
     FinalStatus.COST_BUDGET_EXCEEDED: "failure",
+    # Neutral on purpose — an ungraded row has no verdict to colour. See
+    # _CATEGORY_TO_CLASS above.
+    FinalStatus.NOT_GRADED: "neutral",
 }
 
 
 @pytest.mark.parametrize("status", list(FinalStatus))
 def test_status_badge_maps_every_member_to_its_category(status: FinalStatus):
-    """Every FinalStatus member gets a non-neutral badge matching its category."""
+    """Every FinalStatus member gets a badge matching its category, neutral only when intended."""
     badge = _status_badge(status)
     expected_cls = _EXPECTED_BADGE_CLASS[status]
     assert f'class="badge {expected_cls}"' in badge
-    assert "neutral" not in badge
+    if expected_cls != "neutral":
+        assert "neutral" not in badge
     assert status.value in badge
 
 
@@ -1252,3 +1261,79 @@ def test_status_badge_unknown_string_is_neutral():
     badge = _status_badge("LEGACY_UNKNOWN")
     assert 'class="badge neutral"' in badge
     assert "LEGACY_UNKNOWN" in badge
+
+
+class TestUngradedRenderingInHtml:
+    """The four ungraded changes to reports_html, only one of which had a test.
+
+    An all-ungraded ExperimentResult exercises the variant tile, the variant
+    table's denominator, `_variant_stddev_lines`' None filter and the per-task
+    comparison's switch to `format_score` in one pass.
+    """
+
+    @staticmethod
+    def _all_ungraded(variant_ids: list[str]) -> ExperimentResult:
+        summaries = [
+            TaskExperimentSummary(
+                task_id="t0",
+                variant_results=[
+                    VariantResult(
+                        variant_id=vid,
+                        task_id="t0",
+                        weighted_score=None,
+                        final_status=FinalStatus.NOT_GRADED,
+                        duration_seconds=1.0,
+                        total_tokens=100,
+                        iteration_count=1,
+                        total_assistant_turns=1,
+                    )
+                    for vid in variant_ids
+                ],
+                best_variant=variant_ids[0],
+                is_tie=True,
+                score_spread=0.0,
+            )
+        ]
+        aggregates = {
+            vid: VariantAggregate(
+                variant_id=vid,
+                tasks_run=3,
+                tasks_succeeded=0,
+                tasks_failed=0,
+                tasks_error=0,
+                tasks_not_graded=3,
+                average_score=None,
+                average_duration=12.0,
+            )
+            for vid in variant_ids
+        }
+        return ExperimentResult(
+            experiment_id="exp-ungraded",
+            description="d",
+            variant_ids=variant_ids,
+            task_summaries=summaries,
+            variant_aggregates=aggregates,
+            total_duration_seconds=30.0,
+        )
+
+    def test_the_variant_tile_names_the_fourth_bucket(self):
+        """Rendered only when non-zero, so an off-by-one on `> 0` is invisible on
+        a graded run — this is the only place it shows."""
+        html = HTMLReportGenerator.generate_experiment_html(self._all_ungraded(["v1"]), None)
+        assert "Not Graded" in html
+
+    def test_a_graded_run_does_not_grow_the_tile(self):
+        html = HTMLReportGenerator.generate_experiment_html(_experiment_result(["v1"]), None)
+        assert "Not Graded" not in html
+
+    def test_the_aggregate_table_accounts_for_every_task(self):
+        """Tasks Run / Succeeded / Failed / Errors stopped summing to tasks_run
+        on an ungraded run, with nothing on the page to say where the rest went."""
+        html = HTMLReportGenerator.generate_experiment_html(self._all_ungraded(["v1", "v2"]), None)
+        assert "<td>Not Graded</td>" in html
+
+    def test_no_surface_publishes_a_fabricated_zero(self):
+        """A run nothing measured must read `n/a`, never `0.0` or `0.0%`."""
+        html = HTMLReportGenerator.generate_experiment_html(self._all_ungraded(["v1"]), None)
+        assert "n/a" in html
+        assert "0.0%" not in html

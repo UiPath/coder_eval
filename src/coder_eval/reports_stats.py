@@ -16,6 +16,8 @@ from typing import NamedTuple
 
 from coder_eval.models import EvaluationResult, ExperimentResult, ExperimentVariant, TaskExperimentSummary
 
+from .path_utils import TASK_JSON_FILENAME
+
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +312,30 @@ class VariantSeries(NamedTuple):
     asst_turns: list[float]
 
 
+# environment_info keys the Environment table must NOT render as ordinary rows.
+# `installed_tools` has its own dedicated section; the rest are harness
+# bookkeeping the reader did not ask for — `command_base_path` is a full PATH
+# string on every row, and the graded_by_* provenance keys only appear on a
+# re-graded row where they would read as facts about the run itself.
+ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest"})
+
+
+def is_env_table_key(key: str) -> bool:
+    """Whether ``key`` belongs in a rendered Environment table."""
+    return key not in ENV_TABLE_EXCLUDE and not key.startswith("graded_by_")
+
+
+# What an ungraded row shows where a score would go. Deliberately not "0.000":
+# an ungraded task was never measured, and a zero is indistinguishable from a
+# task that was measured and scored nothing.
+UNGRADED_SCORE_TEXT = "n/a"
+
+
+def format_score(score: float | None) -> str:
+    """Render a weighted score for a report table, or ``n/a`` when ungraded."""
+    return UNGRADED_SCORE_TEXT if score is None else f"{score:.3f}"
+
+
 def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]:
     """Per-variant (scores, durations, tokens, assistant-turns) series, keyed by variant id.
 
@@ -324,7 +350,22 @@ def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]
             s = series.get(vr.variant_id)
             if s is None:  # a task result for a variant not in variant_ids
                 continue
-            s.scores.append(vr.weighted_score)
+            # Only the SCORE is dropped when there is none — never the row.
+            # Duration, tokens and assistant turns are facts about the run that
+            # grading has nothing to do with, and `execute`'s stated contract is
+            # that only the verdict is withheld. Skipping the row whole made an
+            # all-ungraded experiment render `Avg Duration | N/A | N/A` with the
+            # Tokens and Assistant Turns rows absent entirely.
+            #
+            # The series are consumed independently (each statistic reads one
+            # list), so they need not be index-aligned with each other;
+            # `paired_comparison` pairs across VARIANTS by task id, not by index
+            # into these lists. An earlier note here claimed an experiment is
+            # either entirely graded or entirely ungraded because `grade` is
+            # run-level — `run --resume` grades rows independently and folds a
+            # failed one back ungraded, so mixed experiments are real.
+            if vr.weighted_score is not None:
+                s.scores.append(vr.weighted_score)
             s.durations.append(vr.duration_seconds / vr.replicate_count)
             if vr.total_tokens is not None:
                 s.tokens.append(float(vr.total_tokens))
@@ -488,7 +529,7 @@ def load_variant_eval_results(
         if not task_dir.is_dir():
             continue
         for rep_subdir in sorted(task_dir.glob("[0-9][0-9]")):
-            task_json = rep_subdir / "task.json"
+            task_json = rep_subdir / TASK_JSON_FILENAME
             if task_json.exists():
                 try:
                     results.append(EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8")))

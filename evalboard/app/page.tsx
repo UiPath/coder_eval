@@ -379,8 +379,12 @@ export default async function Page({
                     <tbody>
                         {listing.rows.map((r) => {
                             const total = r.tasksRun;
-                            const pct = total
-                                ? (r.tasksSucceeded / total) * 100
+                            // Ungraded rows (`coder-eval execute`) leave BOTH
+                            // sides: the rate divides by tasksGraded, while the
+                            // Tasks column still reports everything that ran.
+                            const graded = r.tasksGraded;
+                            const pct = graded
+                                ? (r.tasksSucceeded / graded) * 100
                                 : null;
                             return (
                                 <tr
@@ -415,7 +419,7 @@ export default async function Page({
                                                 : "—"}
                                         </span>
                                         <span className="text-xs text-gray-500 ml-2 tabular-nums">
-                                            {r.tasksSucceeded}/{total}
+                                            {r.tasksSucceeded}/{graded}
                                         </span>
                                     </td>
                                     <td className="py-3 px-4 text-right tabular-nums text-gray-700">
@@ -517,8 +521,9 @@ export default async function Page({
                             <tbody>
                                 {adhoc.rows.map((r) => {
                                     const total = r.tasksRun;
-                                    const pct = total
-                                        ? (r.tasksSucceeded / total) * 100
+                                    const graded = r.tasksGraded;
+                                    const pct = graded
+                                        ? (r.tasksSucceeded / graded) * 100
                                         : null;
                                     return (
                                         <tr
@@ -558,7 +563,7 @@ export default async function Page({
                                                         : "—"}
                                                 </span>
                                                 <span className="text-xs text-gray-500 ml-2 tabular-nums">
-                                                    {r.tasksSucceeded}/{total}
+                                                    {r.tasksSucceeded}/{graded}
                                                 </span>
                                             </td>
                                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">

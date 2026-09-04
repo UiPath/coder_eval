@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 import typer
 
-from coder_eval.cli.plan_command import plan_command
+from coder_eval.cli.plan_command import run_plan
 from coder_eval.models import (
     AgentConfig,
     ExperimentDefinition,
@@ -73,7 +73,7 @@ class TestPlanCommandAgentNone:
             patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {}, 1)),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
-            plan_command(task_files=[task_file])
+            run_plan(task_files=[task_file])
 
         printed = [str(call) for call in mock_console.print.call_args_list]
         agent_lines = [p for p in printed if "Agent:" in p]
@@ -98,7 +98,7 @@ class TestPlanCommandAgentNone:
             patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {}, 1)),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
-            plan_command(task_files=[task_file])
+            run_plan(task_files=[task_file])
 
         printed = [str(call) for call in mock_console.print.call_args_list]
         agent_lines = [p for p in printed if "Agent:" in p]
@@ -124,7 +124,7 @@ class TestPlanCommandAgentNone:
             patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {}, 1)),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
-            plan_command(task_files=[task_file])
+            run_plan(task_files=[task_file])
 
         printed = [str(call) for call in mock_console.print.call_args_list]
         deferred_lines = [p for p in printed if "deferred" in p]
@@ -155,7 +155,7 @@ class TestPlanCommandExperiment:
             patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", exp_file),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
-            plan_command(task_files=[task_file], experiment=exp_file)
+            run_plan(task_files=[task_file], experiment=exp_file)
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "test-exp" in printed
@@ -185,7 +185,7 @@ class TestPlanCommandExperiment:
             patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", exp_file),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
-            plan_command(task_files=[task_file], experiment=exp_file)
+            run_plan(task_files=[task_file], experiment=exp_file)
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "sonnet-4" in printed
@@ -211,7 +211,7 @@ class TestPlanCommandExperiment:
             patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {}, 1)),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
-            plan_command(task_files=[task_file])
+            run_plan(task_files=[task_file])
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "test-exp" in printed
@@ -231,7 +231,7 @@ class TestPlanCommandExperiment:
             patch(f"{_EXP}.resolve_task_for_variant", return_value=(resolved_task, {}, 1)),
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
-            plan_command(task_files=[task_file])
+            run_plan(task_files=[task_file])
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "A larger task_timeout cannot extend the agent's single iteration" in printed
@@ -254,7 +254,7 @@ class TestPlanCommandExperiment:
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                plan_command(task_files=[task_file])
+                run_plan(task_files=[task_file])
 
             assert exc_info.value.exit_code == 1
 
@@ -280,7 +280,7 @@ class TestPlanCommandValidation:
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                plan_command(task_files=[task_file])
+                run_plan(task_files=[task_file])
 
             assert exc_info.value.exit_code == 1
 
@@ -305,7 +305,7 @@ class TestPlanCommandValidation:
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
             with pytest.raises(typer.Exit) as exc_info:
-                plan_command(task_files=[task_file], experiment=exp_file)
+                run_plan(task_files=[task_file], experiment=exp_file)
 
             assert exc_info.value.exit_code == 1
 

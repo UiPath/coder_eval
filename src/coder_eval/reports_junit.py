@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from .evaluation.judge_context import truncate
 from .models import FinalStatus, RunSummary, SuiteRollup
+from .path_utils import TASK_JSON_FILENAME
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ def _xml_safe(text: str) -> str:
     return _ILLEGAL_XML.sub("", text)
 
 
-def _category_of(status: str) -> Literal["succeeded", "failed", "error"]:
+def _category_of(status: str) -> Literal["succeeded", "failed", "error", "ungraded"]:
     """Map a serialized status string to a reporting category via the SSOT.
 
     Goes through ``FinalStatus(value).category`` (an explicit allowlist, CE018);
@@ -169,14 +170,14 @@ def _load_task_json(run_dir: Path, row: dict[str, Any], variant: str) -> dict[st
     replicate_index = row.get("replicate_index")
     task_dir = run_dir / variant / task_id
     if isinstance(replicate_index, int) and not isinstance(replicate_index, bool):
-        candidate = task_dir / f"{replicate_index:02d}" / "task.json"
+        candidate = task_dir / f"{replicate_index:02d}" / TASK_JSON_FILENAME
     else:
-        matches = sorted(task_dir.glob("*/task.json"))
+        matches = sorted(task_dir.glob(f"*/{TASK_JSON_FILENAME}"))
         # With no replicate index, picking one of several would misattribute
         # another replicate's failure detail to this row — degrade instead.
         if len(matches) > 1:
             return None
-        candidate = matches[0] if matches else task_dir / "task.json"
+        candidate = matches[0] if matches else task_dir / TASK_JSON_FILENAME
 
     try:
         # Belt-and-braces containment check (catches symlink escapes too).
@@ -301,6 +302,14 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
     status = _status_of(row)
     category = _category_of(status)
     if category == "succeeded":
+        return case
+
+    if category == "ungraded":
+        # `coder-eval execute`: the task ran but was deliberately not scored.
+        # <skipped> is JUnit's only "no verdict" element — reporting it as a
+        # <failure> would turn a healthy ungraded run red in CI, and reporting
+        # it as a pass would invent a verdict. _set_counts already counts these.
+        ET.SubElement(case, "skipped", {"message": "not graded (coder-eval execute)"})
         return case
 
     message = status if status in _KNOWN_STATUSES else f"unknown status: {status}"

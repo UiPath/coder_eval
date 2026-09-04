@@ -18,7 +18,7 @@ import { withinTurnBudget } from "./turns";
 import { humanizeTaskId } from "./format";
 import { mapWithConcurrency } from "./concurrency";
 import { DEFAULT_HARNESS, normalizeHarness, orderHarnesses } from "./harness";
-import { isPassStatus } from "./status";
+import { isGraded, isPassStatus } from "./status";
 import { taskCarriesRepoTag } from "./tags";
 import type { Window } from "./reviews-types";
 
@@ -81,7 +81,14 @@ export function turnBudgetRateForTasks(tasks: RunOverviewTask[]): number | null 
     for (const t of tasks) {
         const hasBudget = t.expectedTurns != null && t.expectedTurns >= 1;
         if (!hasBudget) continue; // unbudgeted tasks never count, success or fail
-        if (t.status !== "SUCCESS") {
+        // An ungraded row leaves BOTH sides, like every other rate in this app.
+        // A raw `!== "SUCCESS"` here put it in `eligible` and never in
+        // `withinBudget`, i.e. booked it as a budget MISS — so one
+        // `coder-eval execute` run published a measured-looking Turn Budget of
+        // 0%. `status` is a free string, so neither tsc nor assertNever could
+        // see it; the typed helper is the only thing that can.
+        if (!isGraded(t.status)) continue;
+        if (!isPassStatus(t.status)) {
             // A budgeted task that didn't succeed never stayed within budget.
             eligible += 1;
             continue;
@@ -111,7 +118,10 @@ export function withinExpectedTimeRateForTasks(
     let eligible = 0;
     let within = 0;
     for (const t of tasks) {
-        if (t.status !== "SUCCESS" || t.matureSkipped) continue;
+        // Behaviourally identical to the old raw literal (a non-pass already
+        // left both sides here), converted so this file has ONE rule for what
+        // "passed" means rather than two spellings of it.
+        if (!isPassStatus(t.status) || t.matureSkipped) continue;
         const verdict = withinExpectedTime(t.durationSeconds, t.expectedSeconds);
         if (verdict === null) continue; // unscored, or no duration → can't judge
         eligible += 1;
@@ -135,7 +145,7 @@ export function timePerPassedTaskForTasks(
     tasks: RunOverviewTask[],
 ): number | null {
     const executed = tasks.filter((t) => !t.matureSkipped);
-    const passed = executed.filter((t) => t.status === "SUCCESS").length;
+    const passed = executed.filter((t) => isPassStatus(t.status)).length;
     if (!passed) return null;
     const total = executed.reduce((a, t) => a + (t.durationSeconds ?? 0), 0);
     return total > 0 ? total / passed : null;
@@ -171,6 +181,10 @@ export interface RunListingRow {
     // Unfiltered, they are whole-run totals.
     tasksSucceeded: number;
     tasksRun: number;
+    // Rows that were actually scored. An ungraded row (`coder-eval execute`)
+    // leaves BOTH sides of every rate, so this — not tasksRun — is the pass-rate
+    // denominator. Equals tasksRun on any graded run.
+    tasksGraded: number;
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
     // Run-level harness (coder-eval AgentKind) for the Harness column; null on
@@ -189,6 +203,7 @@ export interface RunListingTotals {
     costPartial: boolean; // some matched runs had no cost (sum understates)
     tasksSucceeded: number;
     tasksRun: number;
+    tasksGraded: number; // the pass-rate denominator; see RunListingRow.tasksGraded
     durationSeconds: number | null; // null when no matched run recorded a duration
     durationPartial: boolean;
 }
@@ -201,11 +216,13 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
     let costRuns = 0;
     let tasksSucceeded = 0;
     let tasksRun = 0;
+    let tasksGraded = 0;
     let durationSeconds = 0;
     let durationRuns = 0;
     for (const r of rows) {
         tasksSucceeded += r.tasksSucceeded;
         tasksRun += r.tasksRun;
+        tasksGraded += r.tasksGraded;
         if (r.totalCostUsd != null) {
             costUsd += r.totalCostUsd;
             costRuns += 1;
@@ -220,6 +237,7 @@ export function summarizeListing(rows: RunListingRow[]): RunListingTotals {
         costPartial: costRuns > 0 && costRuns < rows.length,
         tasksSucceeded,
         tasksRun,
+        tasksGraded,
         durationSeconds: durationRuns > 0 ? durationSeconds : null,
         durationPartial: durationRuns > 0 && durationRuns < rows.length,
     };
@@ -786,7 +804,11 @@ export async function getOverview(
             runId: id,
             timestamp: date.getTime(),
             harness: runHarness,
-            successRate: (row.tasksSucceeded / row.tasksRun) * 100,
+            // Ungraded rows leave both sides; a fully ungraded run contributes
+            // no point rather than a fabricated 0%.
+            successRate: row.tasksGraded
+                ? (row.tasksSucceeded / row.tasksGraded) * 100
+                : null,
             turnBudgetRate: turnBudgetRateForTasks(scoped.tasks),
             withinExpectedTimeRate: withinExpectedTimeRateForTasks(
                 scoped.tasks,
@@ -830,11 +852,16 @@ export interface TagTaskRow {
     appearances: number;
     // Of `appearances`, how many were mature carry-forwards (not executed).
     matureSkips: number;
-    // `appearances - matureSkips`: the denominator behind passRate, carried on
-    // the row rather than re-derived by the renderer so the percentage and the
-    // caption that names its sample size can never describe different rules.
+    // Of `appearances`, how many ran but were never scored (`coder-eval
+    // execute`). Like a mature skip, such a row leaves BOTH sides of the rate.
+    ungraded: number;
+    // `appearances - matureSkips - ungraded`: the denominator behind passRate,
+    // carried on the row rather than re-derived by the renderer so the
+    // percentage and the caption that names its sample size can never describe
+    // different rules.
     executed: number;
-    // 0-100 over EXECUTED appearances only (appearances - matureSkips).
+    // 0-100 over MEASURED appearances only
+    // (appearances - matureSkips - ungraded).
     // null when nothing in the window actually ran, so the UI shows "—"
     // rather than a measured-looking 0% or 100%.
     passRate: number | null;
@@ -893,6 +920,7 @@ export function buildTagTaskRows(perRun: PerRun[], tag: string): TagTaskRow[] {
         skill: string | null;
         appearances: number;
         matureSkips: number;
+        ungraded: number;
         executedPasses: number;
         latestRunId: string;
         latestStatus: string | null;
@@ -939,6 +967,7 @@ export function buildTagTaskRows(perRun: PerRun[], tag: string): TagTaskRow[] {
                     skill: t.skill,
                     appearances: 0,
                     matureSkips: 0,
+                    ungraded: 0,
                     executedPasses: 0,
                     latestRunId: id,
                     latestStatus: t.status,
@@ -950,6 +979,11 @@ export function buildTagTaskRows(perRun: PerRun[], tag: string): TagTaskRow[] {
             entry.appearances += 1;
             if (t.matureSkipped) {
                 entry.matureSkips += 1;
+            } else if (!isGraded(t.status)) {
+                // Never scored, so it is neither a pass nor a miss. Counted like
+                // a mature skip: out of BOTH sides of the rate below, which is
+                // computed as appearances - matureSkips - ungraded.
+                entry.ungraded += 1;
             } else if (isPassStatus(t.status)) {
                 // lib/status.ts, not a raw "SUCCESS" literal: `status` is an
                 // untyped string, and this page's pass rate must move with
@@ -967,12 +1001,13 @@ export function buildTagTaskRows(perRun: PerRun[], tag: string): TagTaskRow[] {
         // `?? true` only satisfies Map.get's `| undefined`; it is not a real
         // "unknown ⇒ keep" case.)
         if (!(newestTagged.get(taskId) ?? true)) continue;
-        const executed = e.appearances - e.matureSkips;
+        const executed = e.appearances - e.matureSkips - e.ungraded;
         rows.push({
             taskId,
             skill: e.skill,
             appearances: e.appearances,
             matureSkips: e.matureSkips,
+            ungraded: e.ungraded,
             executed,
             passRate: executed > 0 ? (e.executedPasses / executed) * 100 : null,
             latestStatus: e.latestStatus,
@@ -1092,9 +1127,10 @@ function rowFromScoped(
 ): RunListingRow {
     return {
         id,
-        tasksSucceeded: scoped.tasks.filter((t) => t.status === "SUCCESS")
+        tasksSucceeded: scoped.tasks.filter((t) => isPassStatus(t.status))
             .length,
         tasksRun: scoped.tasks.length,
+        tasksGraded: scoped.tasks.filter((t) => isGraded(t.status)).length,
         totalCostUsd: scoped.totalCostUsd,
         taskDurationSeconds: scoped.taskDurationSeconds,
         harness: harness ?? null,
@@ -1204,9 +1240,11 @@ export function buildAdhocRows(
             id,
             title: title ?? null,
             startedAt: overview.startedAt ?? null,
-            tasksSucceeded: overview.tasks.filter((t) => t.status === "SUCCESS")
-                .length,
+            tasksSucceeded: overview.tasks.filter((t) =>
+                isPassStatus(t.status),
+            ).length,
             tasksRun: overview.tasks.length,
+            tasksGraded: overview.tasks.filter((t) => isGraded(t.status)).length,
             totalCostUsd: overview.totalCostUsd,
             taskDurationSeconds: overview.taskDurationSeconds,
             // Harness is a main-table-only (internal) column; ad-hoc rows omit it.

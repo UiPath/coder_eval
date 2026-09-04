@@ -12,6 +12,7 @@ import {
 } from "./overview";
 import { DEFAULT_HARNESS } from "./harness";
 import { DEFAULT_SOURCE, type Source } from "./sources";
+import { isGraded, isPassStatus } from "./status";
 import { taskCarriesRepoTag } from "./tags";
 import type { ComponentSha } from "./runs";
 
@@ -151,14 +152,17 @@ export function aggregate(perRun: PerRun[]): TrendsData {
             }
             if (!b.skill && t.skill) b.skill = t.skill;
             for (const tg of t.tags) b.tagSet.add(tg);
-            b.totalCount += 1;
+            // An ungraded row (`coder-eval execute`) was never scored, so it
+            // enters neither side of the pass rate. Counting it in totalCount
+            // alone would drag a task's trend down as if it had failed.
+            if (isGraded(t.status)) b.totalCount += 1;
             if (t.matureSkipped) b.matureSkips += 1;
             b.statuses.push({
                 runId: id,
                 status: t.status,
                 matureSkipped: t.matureSkipped ?? false,
             });
-            if (t.status === "SUCCESS") {
+            if (isPassStatus(t.status)) {
                 b.successCount += 1;
                 // A mature task the nightly skipped still counts as a pass, but
                 // it wasn't executed — its row carries 0 cost / 0 duration and

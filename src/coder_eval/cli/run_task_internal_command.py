@@ -34,6 +34,7 @@ from coder_eval.models import (
     CONTAINER_TASK_DIR,
     ConfigLineageEntry,
     PreservationMode,
+    SandboxConfig,
 )
 from coder_eval.orchestration.task_loader import load_task
 
@@ -49,6 +50,91 @@ def heartbeat_is_alive(current: str, last_counter: str, current_mtime: float, la
     arm covers bind-mount mtime latency (macOS gRPC-FUSE/VirtioFS) where mtime lags the write.
     """
     return bool(current and current != last_counter) or current_mtime > last_mtime
+
+
+def _arm_host_heartbeat_watchdog(output_dir: Path) -> None:
+    """Start the orphan-container reaper, but only inside the container.
+
+    A module-level function rather than an inline block so the only
+    process-lethal code in this command sits behind one named, testable seam
+    instead of being a side effect of the command body.
+    """
+    # Start the host-heartbeat watchdog: if the host process dies
+    # ungracefully (SIGKILL, Claude-Code Escape, crash) before it can
+    # `docker kill` us, the heartbeat file in output_dir goes stale and
+    # we self-exit -- otherwise the container would keep burning LLM
+    # budget orphaned. Daemon thread so it doesn't block normal shutdown.
+    import os as _os
+    import threading
+    import time
+
+    # ARMED ONLY INSIDE THE CONTAINER, and not even defined outside one. The
+    # watchdog's whole authority is `os._exit(137)` on the process it runs in,
+    # and the only process that may be reaped that way is the container's own
+    # disposable main -- there is no container to orphan anywhere else, so
+    # outside one the thread can do nothing but harm. It did: a test invoked
+    # this command in-process (legitimately -- the command must refuse a
+    # malformed context.json, and proving that means calling it) and the pytest
+    # worker inherited the thread, which found no heartbeat and 40s later exited
+    # the worker mid-way through an unrelated test file. It named a different
+    # test on each run and on each platform, carried no traceback, and took that
+    # worker's coverage data with it -- so the gate reported "65.13 < 80.00",
+    # naming neither the test nor the cause.
+    #
+    # Gated on CODER_EVAL_IN_CONTAINER (set by docker_runner on the container's
+    # argv), NOT on `driver`, for the same reason the reference-permission
+    # window is: this command rewrites `driver: docker` -> `tempdir` before
+    # building the in-container Orchestrator, so a driver-based gate would
+    # disarm itself on exactly the path that needs it. See
+    # `Sandbox.enforces_permission_windows`.
+    if _os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":
+
+        def _watch_host_heartbeat() -> None:
+            heartbeat = output_dir / HEARTBEAT_FILENAME
+            # Grace period for the host to write the first counter value.
+            time.sleep(HEARTBEAT_STALE_SECONDS)
+            last_counter = ""
+            last_mtime = 0.0
+            last_change = time.monotonic()
+            while True:
+                try:
+                    current = heartbeat.read_text(encoding="utf-8")
+                except (FileNotFoundError, OSError):
+                    current = ""
+                try:
+                    current_mtime = heartbeat.stat().st_mtime
+                except (FileNotFoundError, OSError):
+                    current_mtime = 0.0
+                now = time.monotonic()
+                if heartbeat_is_alive(current, last_counter, current_mtime, last_mtime):
+                    last_counter = current
+                    last_mtime = current_mtime
+                    last_change = now
+                if now - last_change > HEARTBEAT_STALE_SECONDS:
+                    logger.error(
+                        "Host heartbeat stale (>%ss); exiting to reap orphan container.",
+                        HEARTBEAT_STALE_SECONDS,
+                    )
+                    # os._exit skips atexit and IO flushing, so the error line
+                    # above would routinely be lost -- making a genuine
+                    # stale-heartbeat suicide indistinguishable from an external
+                    # SIGKILL in the archived logs. Flush best-effort first;
+                    # never let a flush failure stop the exit.
+                    import sys as _sys
+
+                    for _handler in logging.getLogger().handlers:
+                        with contextlib.suppress(Exception):
+                            _handler.flush()
+                    with contextlib.suppress(Exception):
+                        _sys.stdout.flush()
+                    with contextlib.suppress(Exception):
+                        _sys.stderr.flush()
+                    _os._exit(137)
+                time.sleep(HEARTBEAT_STALE_SECONDS / 4)
+
+        threading.Thread(target=_watch_host_heartbeat, daemon=True).start()
+    else:
+        logger.debug("Not in a container; host-heartbeat watchdog not armed.")
 
 
 def run_task_internal_command(
@@ -82,59 +168,7 @@ def run_task_internal_command(
     log_level = "DEBUG" if verbose else settings.log_level
     setup_logging(level=log_level)
 
-    # Start the host-heartbeat watchdog: if the host process dies
-    # ungracefully (SIGKILL, Claude-Code Escape, crash) before it can
-    # `docker kill` us, the heartbeat file in output_dir goes stale and
-    # we self-exit -- otherwise the container would keep burning LLM
-    # budget orphaned. Daemon thread so it doesn't block normal shutdown.
-    import os as _os
-    import threading
-    import time
-
-    def _watch_host_heartbeat() -> None:
-        heartbeat = output_dir / HEARTBEAT_FILENAME
-        # Grace period for the host to write the first counter value.
-        time.sleep(HEARTBEAT_STALE_SECONDS)
-        last_counter = ""
-        last_mtime = 0.0
-        last_change = time.monotonic()
-        while True:
-            try:
-                current = heartbeat.read_text(encoding="utf-8")
-            except (FileNotFoundError, OSError):
-                current = ""
-            try:
-                current_mtime = heartbeat.stat().st_mtime
-            except (FileNotFoundError, OSError):
-                current_mtime = 0.0
-            now = time.monotonic()
-            if heartbeat_is_alive(current, last_counter, current_mtime, last_mtime):
-                last_counter = current
-                last_mtime = current_mtime
-                last_change = now
-            if now - last_change > HEARTBEAT_STALE_SECONDS:
-                logger.error(
-                    "Host heartbeat stale (>%ss); exiting to reap orphan container.",
-                    HEARTBEAT_STALE_SECONDS,
-                )
-                # os._exit skips atexit and IO flushing, so the error line
-                # above would routinely be lost -- making a genuine
-                # stale-heartbeat suicide indistinguishable from an external
-                # SIGKILL in the archived logs. Flush best-effort first;
-                # never let a flush failure stop the exit.
-                import sys as _sys
-
-                for _handler in logging.getLogger().handlers:
-                    with contextlib.suppress(Exception):
-                        _handler.flush()
-                with contextlib.suppress(Exception):
-                    _sys.stdout.flush()
-                with contextlib.suppress(Exception):
-                    _sys.stderr.flush()
-                _os._exit(137)
-            time.sleep(HEARTBEAT_STALE_SECONDS / 4)
-
-    threading.Thread(target=_watch_host_heartbeat, daemon=True).start()
+    _arm_host_heartbeat_watchdog(output_dir)
 
     task_yaml = input_dir / "task.yaml"
     context_json = input_dir / "context.json"
@@ -146,13 +180,37 @@ def run_task_internal_command(
         raise typer.Exit(2)
 
     context = json.loads(context_json.read_text(encoding="utf-8"))
-    variant_id: str = context["variant_id"]
-    replicate_index: int = context.get("replicate_index", 0)
+    # Checked, not just annotated. `json.loads` returns `Any`, so pyright accepts
+    # `variant_id: str = context["variant_id"]` for a value that may be anything
+    # at all — the annotation reads like a guarantee and enforces nothing. A
+    # `"replicate_index": "00"` then reached `build_task_run_dir` typed as `int`.
+    # This is the host→container boundary; the comment below (about `grade`
+    # being the one raw value) was only true because these two looked checked.
+    variant_id = context["variant_id"]
+    if not isinstance(variant_id, str):
+        typer.echo(f"FATAL: context.json 'variant_id' must be a string, got {variant_id!r}", err=True)
+        raise typer.Exit(2)
+    replicate_index = context.get("replicate_index", 0)
+    if not isinstance(replicate_index, int) or isinstance(replicate_index, bool):
+        typer.echo(f"FATAL: context.json 'replicate_index' must be an integer, got {replicate_index!r}", err=True)
+        raise typer.Exit(2)
     # The host resolves the driver-derived default before dispatch; the container
     # obeys it verbatim. This command only ever runs inside the docker driver, so
     # a missing key falls back to the docker default (DIRECT_WRITE) — a deliberate
     # default, not version back-compat.
     preservation_mode = PreservationMode(context.get("preservation_mode", PreservationMode.DIRECT_WRITE.value))
+    # `coder-eval run` vs `coder-eval execute`, decided host-side. Defaults to
+    # True (grade) so a host that predates `execute` — which never writes the
+    # key — keeps its exact behavior.
+    # Coerced, not annotated, like every other value crossing this boundary —
+    # `grade` was once the only raw one, so a hand-edited or older-format
+    # `"grade": "false"` arrived as a truthy str typed as bool and silently
+    # graded a run that asked not to be graded.
+    grade_raw = context.get("grade", True)
+    if not isinstance(grade_raw, bool):
+        typer.echo(f"FATAL: context.json 'grade' must be a boolean, got {grade_raw!r}", err=True)
+        raise typer.Exit(2)
+    grade: bool = grade_raw
     # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
     # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
     # Absent -> None -> standard run_dir/artifacts workspace.
@@ -179,7 +237,18 @@ def run_task_internal_command(
     # We're already inside the container; another nested docker would be
     # both wrong and impossible (no docker CLI in image).
     if task.sandbox.driver == "docker":
-        task = task.model_copy(update={"sandbox": task.sandbox.model_copy(update={"driver": "tempdir"})})
+        # noqa: CE051 — the ONE legitimate rewrite. We are already inside the
+        # container the docker driver asked for, so the isolation the driver
+        # names is present, not bypassed; a nested docker would be both wrong
+        # and impossible (no docker CLI in the image).
+        # Re-validated rather than `model_copy(update=...)`, matching its sibling
+        # `regrade.grading_sandbox_config`: `update` skips BOTH pydantic and
+        # pyright, so a typo would produce a SandboxConfig violating its own
+        # `Literal` and only surface far downstream. Two driver-rewrite sites
+        # landing in one change with two different levels of type safety is how
+        # the weaker one becomes the pattern people copy.
+        rewritten = SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})  # noqa: CE051
+        task = task.model_copy(update={"sandbox": rewritten})
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -197,6 +266,7 @@ def run_task_internal_command(
         config_lineage=config_lineage,
         replicate_index=replicate_index,
         workspace_dir=workspace_dir,
+        grade=grade,
     )
 
     # Install the stdout-NDJSON stream callback so per-tool-call events

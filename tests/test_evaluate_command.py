@@ -20,7 +20,7 @@ def test_evaluate_command_success(tmp_path):
     (work_dir / "app.py").write_text("print('hello')")
 
     # Import and run command
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -28,7 +28,7 @@ def test_evaluate_command_success(tmp_path):
     with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
         # Should not raise - all criteria pass
         with pytest.raises(typer.Exit) as exc_info:
-            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+            run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
 
         assert exc_info.value.exit_code == 0
 
@@ -59,14 +59,14 @@ def test_evaluate_command_defaults_agent_type_when_missing(tmp_path):
     work_dir.mkdir()
     (work_dir / "app.py").write_text("print('hello')")
 
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
         with pytest.raises(typer.Exit) as exc_info:
-            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+            run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
         assert exc_info.value.exit_code == 0
 
 
@@ -85,7 +85,7 @@ def test_evaluate_command_maps_preserve_to_mode(tmp_path, preserve, expected_mod
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     captured: dict[str, PreservationMode] = {}
 
@@ -105,7 +105,7 @@ def test_evaluate_command_maps_preserve_to_mode(tmp_path, preserve, expected_mod
         patch("coder_eval.cli.evaluate_command.Orchestrator", _CapturingOrchestrator),
         pytest.raises(_StopError),
     ):
-        evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir, preserve=preserve)
+        run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir, preserve=preserve)
 
     assert captured["mode"] == PreservationMode(expected_mode)
 
@@ -119,7 +119,7 @@ def test_evaluate_command_failure(tmp_path):
     work_dir.mkdir()
 
     # Import and run command
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -127,7 +127,7 @@ def test_evaluate_command_failure(tmp_path):
     with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
         # Should fail - file doesn't exist
         with pytest.raises(typer.Exit) as exc_info:
-            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+            run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
 
         assert exc_info.value.exit_code == 1
 
@@ -140,14 +140,14 @@ def test_evaluate_command_informational_criterion_does_not_fail_exit(tmp_path):
     work_dir.mkdir()
     (work_dir / "app.py").write_text("print('hello')")  # gating criterion passes; missing.py absent
 
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
         with pytest.raises(typer.Exit) as exc_info:
-            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+            run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
 
         # The only gating criterion passed → exit 0, despite the weight=0 miss.
         assert exc_info.value.exit_code == 0
@@ -163,14 +163,14 @@ def test_evaluate_command_invalid_task_file(tmp_path):
     work_dir.mkdir()
 
     # Import and run command
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
         with pytest.raises(typer.Exit) as exc_info:
-            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+            run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
 
         assert exc_info.value.exit_code == 1
 
@@ -183,14 +183,14 @@ def test_evaluate_command_invalid_work_dir(tmp_path):
     work_dir = tmp_path / "nonexistent"
 
     # Import and run command
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
         with pytest.raises(typer.Exit) as exc_info:
-            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+            run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
 
         assert exc_info.value.exit_code == 1
 
@@ -205,14 +205,14 @@ def test_evaluate_command_multiple_criteria(tmp_path):
     (work_dir / "app.py").write_text("print('hello')")
 
     # Import and run command
-    from coder_eval.cli.evaluate_command import evaluate_command
+    from coder_eval.cli.evaluate_command import run_evaluation
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     with patch("coder_eval.cli.console.console.print"), patch("coder_eval.logging_config.setup_logging"):
         with pytest.raises(typer.Exit) as exc_info:
-            evaluate_command(task_file=task_file, work_dir=work_dir, run_dir=run_dir)
+            run_evaluation(task_or_run_dir=task_file, work_dir=work_dir, run_dir=run_dir)
 
         # All 3 criteria should pass
         assert exc_info.value.exit_code == 0

@@ -150,7 +150,7 @@ def _make_orchestrator(task: TaskDefinition, tmp_path: Path) -> Orchestrator:
 async def test_pre_run_skipped_when_empty(tmp_path):
     task = _make_task(pre_run=[])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_pre_run_commands()
@@ -173,7 +173,7 @@ async def test_pre_run_skipped_when_no_sandbox(tmp_path):
 async def test_pre_run_command_success(tmp_path):
     task = _make_task(pre_run=[PreRunCommand(command="echo '{\"ok\": true}'")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_pre_run_commands()
@@ -189,7 +189,7 @@ async def test_pre_run_command_success(tmp_path):
 async def test_pre_run_command_with_pipes(tmp_path):
     task = _make_task(pre_run=[PreRunCommand(command="echo hello world | tr a-z A-Z")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_pre_run_commands()
@@ -208,7 +208,7 @@ async def test_pre_run_multiple_commands(tmp_path):
         ]
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_pre_run_commands()
@@ -225,7 +225,7 @@ async def test_pre_run_cwd_is_sandbox(tmp_path):
 
     task = _make_task(pre_run=[PreRunCommand(command='python3 -c "import os; print(os.getcwd())"')])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = sandbox_dir
 
     await orch._run_pre_run_commands()
@@ -238,7 +238,7 @@ async def test_pre_run_cwd_is_sandbox(tmp_path):
 async def test_pre_run_streams_stdout_to_logger(tmp_path, caplog):
     task = _make_task(pre_run=[PreRunCommand(command="python3 -c \"print('line-one'); print('line-two')\"")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with caplog.at_level(logging.INFO, logger="coder_eval.orchestrator"):
@@ -263,7 +263,7 @@ async def test_pre_run_streams_stderr_as_warning(tmp_path, caplog):
         ]
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
@@ -277,7 +277,7 @@ async def test_pre_run_streams_stderr_as_warning(tmp_path, caplog):
 async def test_pre_run_output_truncated(tmp_path):
     task = _make_task(pre_run=[PreRunCommand(command="python3 -c \"print('x' * 200_000)\"")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_pre_run_commands()
@@ -296,7 +296,7 @@ async def test_pre_run_failure_raises_when_fail_on_error_true(tmp_path):
         pre_run=[PreRunCommand(command='python3 -c "import sys; sys.exit(1)"')],
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with pytest.raises(RuntimeError, match="Pre-run command failed"):
@@ -307,7 +307,7 @@ async def test_pre_run_failure_raises_when_fail_on_error_true(tmp_path):
 async def test_pre_run_timeout_raises_when_fail_on_error_true(tmp_path):
     task = _make_task(pre_run=[PreRunCommand(command="sleep 10", timeout=1)])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with pytest.raises(RuntimeError, match="timed out after 1s"):
@@ -320,7 +320,7 @@ async def test_pre_run_failure_result_captured_before_raise(tmp_path):
         pre_run=[PreRunCommand(command='python3 -c "import sys; sys.exit(2)"')],
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with pytest.raises(RuntimeError):
@@ -339,7 +339,7 @@ async def test_pre_run_subsequent_commands_skipped_after_abort(tmp_path):
         ],
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with pytest.raises(RuntimeError):
@@ -362,7 +362,7 @@ async def test_pre_run_failure_does_not_raise_when_fail_on_error_false(tmp_path)
         ],
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_pre_run_commands()
@@ -376,7 +376,7 @@ async def test_pre_run_spawn_exception_raises_when_fail_on_error_true(tmp_path):
     """Generic exceptions from create_subprocess_shell propagate as RuntimeError when fail_on_error=True."""
     task = _make_task(pre_run=[PreRunCommand(command="echo hi")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with (
@@ -399,7 +399,7 @@ async def test_pre_run_spawn_exception_does_not_raise_when_fail_on_error_false(t
         ]
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     real_shell = __import__("asyncio").create_subprocess_shell
@@ -428,7 +428,7 @@ async def test_pre_run_timeout_does_not_raise_when_fail_on_error_false(tmp_path)
         ],
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_pre_run_commands()

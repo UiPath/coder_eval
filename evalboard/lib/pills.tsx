@@ -1,4 +1,4 @@
-import { statusCategory } from "./status";
+import { assertNever, statusCategory, type StatusCategory } from "./status";
 
 // Shown on the green "Mature" status pill for a task that was skipped this run
 // (5 consecutive passes → re-validated only on its weekly slot) and carried
@@ -51,6 +51,23 @@ export function MaturePill() {
     );
 }
 
+// A switch with an assertNever default, so a new StatusCategory fails
+// `tsc --noEmit` here instead of quietly falling into whichever branch the
+// boolean expression happened to leave it in.
+function isFailureCategory(cat: StatusCategory): boolean {
+    switch (cat) {
+        case "failed":
+        case "error":
+            return true;
+        case "passed":
+        case "ungraded":
+        case "unknown":
+            return false;
+        default:
+            return assertNever(cat);
+    }
+}
+
 export function StatusPill({
     status,
     relabel = false,
@@ -66,7 +83,7 @@ export function StatusPill({
     // Flow-execution failures (Faulted/Failed) land in statusCategory's "failed"
     // bucket too. Only null/unknown stays grey.
     const cat = statusCategory(status);
-    const isFailure = !ok && (cat === "failed" || cat === "error");
+    const isFailure = !ok && isFailureCategory(cat);
     // Narrower list drives the relabel-to-"Failed" text so specific statuses
     // (e.g. MAX_TURNS_EXHAUSTED) keep their raw label while still showing red.
     const fail =
@@ -82,14 +99,20 @@ export function StatusPill({
           ? "bg-red-50 text-red-700 border-red-200"
           : "bg-gray-50 text-gray-600 border-gray-200";
     const raw = status ?? "—";
+    // NOT_GRADED gets a human label like every other status. Without it the grid
+    // rendered the raw enum token while its neighbours read "Passed"/"Failed" —
+    // and `isFailure` is already false for it, so the pill was correctly grey
+    // and incorrectly labelled.
     const label =
         relabel && ok
             ? "Passed"
             : relabel && status === "TIMEOUT"
               ? "Timed out"
-              : relabel && fail
-                ? "Failed"
-                : raw;
+              : relabel && cat === "ungraded"
+                ? "Not graded"
+                : relabel && fail
+                  ? "Failed"
+                  : raw;
     return (
         <span
             className={`inline-flex items-center whitespace-nowrap px-3 py-1 text-xs rounded-full border ${cls}`}

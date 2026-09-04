@@ -20,7 +20,7 @@ from .models import (
     row_cost_incomplete,
     sum_costs,
 )
-from .path_utils import build_task_run_dir
+from .path_utils import TASK_JSON_FILENAME, build_task_run_dir
 
 
 if TYPE_CHECKING:
@@ -237,8 +237,24 @@ def early_stop_gate_note(reason: str) -> str:
 
 
 def _pass_rate_lines(summary: RunSummary) -> list[str]:
-    """The pass rate over every dispatched task, plus the error share when non-zero."""
-    lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_run})"]
+    """The pass rate over every GRADED task, plus the error share when non-zero.
+
+    An ungraded run (``coder-eval execute``) has no pass rate at all, so it says
+    so rather than rendering ``0.0% (0/N)`` — which reads as a total failure.
+    """
+    # Only an ungraded run gets the explanatory line. An ordinary EMPTY run keeps
+    # its original "n/a (0/0)" rendering — the two are different facts.
+    #
+    # `pass_rate is None` rather than `not tasks_graded`: an execute night with a
+    # crashed row has tasks_graded > 0 (an ERROR row is category `error`, not
+    # `ungraded`, so it stays in the denominator) while still having measured
+    # nothing — and this line then rendered `0.0% (0/5)` plus `Error Share:
+    # 100.0%`, exactly the total-failure reading the guard exists to prevent.
+    # Deferring to the model keeps one rule for run.md, run.json and the
+    # evalboard instead of three.
+    if summary.tasks_not_graded and summary.pass_rate is None:
+        return [f"- **Pass Rate**: n/a — {summary.tasks_not_graded} task(s) executed without grading"]
+    lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_graded})"]
     if summary.tasks_error:
         lines.append(
             f"- **Error Share**: {_fmt_rate(summary.error_share)} of tasks never produced a "
@@ -389,6 +405,7 @@ class ReportGenerator:
             f"- **Succeeded**: {summary.tasks_succeeded}",
             failed_line,
             f"- **Errors**: {summary.tasks_error}",
+            *([f"- **Not Graded**: {summary.tasks_not_graded}"] if summary.tasks_not_graded else []),
             *_pass_rate_lines(summary),
         ]
 
@@ -725,7 +742,7 @@ class ReportGenerator:
         all_turns: list[TurnRecord] = []
 
         # Find all task.json files recursively to handle both flat and nested (experiment) layouts
-        for report_path in run_dir.rglob("task.json"):
+        for report_path in run_dir.rglob(TASK_JSON_FILENAME):
             if "artifacts" in report_path.parts or ".git" in report_path.parts:
                 continue
             try:
@@ -859,6 +876,10 @@ def _compute_suite_rollup(
     rows_passed = sum(1 for r in rows if r.result.final_status.category == "succeeded")
     rows_failed = sum(1 for r in rows if r.result.final_status.category == "failed")
     rows_error = sum(1 for r in rows if r.result.final_status.category == "error")
+    # An ungraded row was never measured, so it leaves BOTH sides of the rate —
+    # the same rule RunSummary.pass_rate and VariantAggregate.pass_rate follow.
+    rows_not_graded = sum(1 for r in rows if r.result.final_status.category == "ungraded")
+    rows_graded = rows_total - rows_not_graded
 
     scored = [r.result.weighted_score for r in rows if r.result.weighted_score is not None]
     average_weighted_score = sum(scored) / len(scored) if scored else None
@@ -900,8 +921,10 @@ def _compute_suite_rollup(
             per_rows = [
                 row.result.success_criteria_results[i] for row in rows if i < len(row.result.success_criteria_results)
             ]
-            suite_thresholds = getattr(criterion, "suite_thresholds", None)
-            description = getattr(criterion, "description", None)
+            # Both are declared on BaseSuccessCriterion, so they are typed
+            # attributes on every union member — no string probe needed.
+            suite_thresholds = criterion.suite_thresholds
+            description = criterion.description
             try:
                 checker_cls = CriterionRegistry.get_checker(ctype)
             except KeyError:
@@ -929,7 +952,12 @@ def _compute_suite_rollup(
     # Sample up to K failed/errored rows for error analysis
     failed_samples: list[FailedRowSummary] = []
     for row in rows:
-        if row.result.final_status.category == "succeeded":
+        # "succeeded" is not the only non-failure. An UNGRADED row was never
+        # measured, so it has no failure reasons to report and listing it here
+        # (in a field documented as failed/errored rows) contradicts the same
+        # function's own rule two blocks up, where it leaves both sides of the
+        # pass rate.
+        if row.result.final_status.category in ("succeeded", "ungraded"):
             continue
         if len(failed_samples) >= _FAILED_SAMPLE_LIMIT:
             break
@@ -945,7 +973,8 @@ def _compute_suite_rollup(
             if len(reasons) >= _FAILURE_REASONS_PER_ROW:
                 break
         task_json_path = (
-            build_task_run_dir(run_dir, variant_id, row.task_id, replicate_index=row.replicate_index) / "task.json"
+            build_task_run_dir(run_dir, variant_id, row.task_id, replicate_index=row.replicate_index)
+            / TASK_JSON_FILENAME
         )
         try:
             # Persist as POSIX — this value lands in suite.json and in
@@ -973,7 +1002,10 @@ def _compute_suite_rollup(
         rows_passed=rows_passed,
         rows_failed=rows_failed,
         rows_error=rows_error,
-        pass_rate=rows_passed / rows_total if rows_total else 0.0,
+        rows_not_graded=rows_not_graded,
+        # None, never 0.0: a suite where nothing was graded has no pass rate,
+        # and 0.0 renders as "0.0%" beside a full set of rows.
+        pass_rate=rows_passed / rows_graded if rows_graded else None,
         average_weighted_score=average_weighted_score,
         criterion_stats=criterion_stats,
         failed_samples=failed_samples,
@@ -989,10 +1021,15 @@ def _render_suite_markdown(rollup: SuiteRollup) -> str:
         "",
         f"**Variant**: `{rollup.variant_id}`",
         (
-            f"**Rows**: {rollup.rows_total} total — "
-            f"{rollup.rows_passed} passed, {rollup.rows_failed} failed, {rollup.rows_error} errored"
+            f"**Rows**: {rollup.rows_total} total — {rollup.rows_passed} passed, "
+            + f"{rollup.rows_failed} failed, {rollup.rows_error} errored"
+            + (f", {rollup.rows_not_graded} not graded" if rollup.rows_not_graded else "")
         ),
-        f"**Pass rate**: {rollup.pass_rate * 100:.1f}%",
+        (
+            f"**Pass rate**: {rollup.pass_rate * 100:.1f}% ({rollup.rows_passed}/{rollup.rows_graded})"
+            if rollup.pass_rate is not None
+            else "**Pass rate**: n/a (no rows were graded)"
+        ),
     ]
     if rollup.average_weighted_score is not None:
         lines.append(f"**Average weighted score**: {rollup.average_weighted_score:.3f}")
@@ -1187,12 +1224,12 @@ def write_suite_rollups(
         (suite_dir / "suite.md").write_text(_render_suite_markdown(rollup), encoding="utf-8")
         rollups.append(rollup)
         logger.info(
-            "Wrote suite rollup: variant=%s suite=%s pass_rate=%.1f%% (%d/%d) gate=%s",
+            "Wrote suite rollup: variant=%s suite=%s pass_rate=%s (%d/%d) gate=%s",
             variant_id,
             suite_id,
-            rollup.pass_rate * 100,
+            f"{rollup.pass_rate * 100:.1f}%" if rollup.pass_rate is not None else "n/a",
             rollup.rows_passed,
-            rollup.rows_total,
+            rollup.rows_graded,
             "PASS" if rollup.passed else "FAIL",
         )
     return rollups
