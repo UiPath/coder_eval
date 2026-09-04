@@ -4,7 +4,7 @@ description: >-
   Coder Eval is an open-source framework to evaluate, benchmark, and A/B-test AI
   coding agents and Claude Code skills in a sandbox — declarative YAML tasks,
   weighted scoring, cost/token telemetry, and CI gates for Claude Code, Codex,
-  Gemini, and OpenCode.
+  Gemini, OpenCode, and Pi.
 ---
 
 # Evaluate AI coding agents & Claude Code skills — Coder Eval
@@ -14,7 +14,7 @@ description: >-
 builders — with sandboxing, reproducibility, and data-driven analysis. It is not
 an "agentic coding" benchmark: it measures how effective *your* CLI and skills
 are when used by coding agents such as **Claude Code**, **Codex**, **Google
-Antigravity (Gemini)**, and **OpenCode**.
+Antigravity (Gemini)**, **OpenCode**, and **Pi**.
 
 If you have ever asked *"how do I test whether my Claude Code skill actually
 triggers?"*, *"how do I benchmark Claude Code vs. Codex on my own tasks?"*, or
@@ -30,14 +30,14 @@ triggers?"*, *"how do I benchmark Claude Code vs. Codex on my own tasks?"*, or
 - **Sandboxed execution** in isolated environments with resource limits
 - **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
 - **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), and OpenCode today, extensible via a plugin SPI
+- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), OpenCode, and Pi today, extensible via a plugin SPI
 - **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
 
 ## Use cases
 
 - **Benchmark coding agents** — score an agent across a suite of tasks with weighted pass/fail thresholds
-- **Compare models & configs** — A/B-test Claude Code vs. Codex vs. Gemini vs. OpenCode, model vs. model, tool-on vs. tool-off, prompt vs. prompt
+- **Compare models & configs** — A/B-test Claude Code vs. Codex vs. Gemini vs. OpenCode vs. Pi, model vs. model, tool-on vs. tool-off, prompt vs. prompt
 - **Test whether a Claude Code skill triggers** — verify an agent actually engages a
   target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style)
 - **Keep skills fresh in CI** — re-validate skills on every change or on a schedule; catch silent regressions when models, prompts, or the skills themselves drift
@@ -82,6 +82,7 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Codex](agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
+| [Pi](agents/PI.md) | Running the Pi agent on open-weight models |
 | [Run-Limit Parity](agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |

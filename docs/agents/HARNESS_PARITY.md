@@ -10,12 +10,12 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 ## The table
 
-| Limit | claude-code | codex | antigravity | opencode |
-|---|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
-| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) |
+| Limit | claude-code | codex | antigravity | opencode | pi |
+|---|---|---|---|---|---|
+| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native turn cap (the CLI's own `turn_start` agent-loop steps) |
+| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
+| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
+| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 
@@ -49,6 +49,14 @@ exists and is honored: `max_turns: N` allows N complete steps and cuts the run
 when step N+1 begins, with the completed steps' tokens intact. A step is one
 assistant generation and may carry several tool calls — so, as with claude-code,
 the same number is a looser tool-call budget than on the visible-turn backends.
+
+**Pi keeps a native unit too — its `turn_start` agent-loop steps.** Like OpenCode,
+`pi -p --mode json` runs a real multi-step agent loop per invocation and streams it
+(`turn_start` / `turn_end`), so `max_turns: N` allows N complete turns and cuts the
+run when turn N+1 begins, with the completed turns' tokens intact. Pi streams
+incrementally, so the cut genuinely stops spend mid-run. A Pi turn is one assistant
+generation and may carry several tool calls — the same looser budget as claude-code
+and OpenCode.
 
 **So holding `max_turns` constant across harnesses does not hold the budget
 constant.** If you are A/B-ing across backends and the cap is close to binding, that
@@ -165,15 +173,41 @@ plugin-root shape by lint rule CE045. The rule keys on that variable name only; 
 one, feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code,
 so the same requirement applies there and is unlinted.
 
+**OpenCode and Pi diverge further on `plugins`.** OpenCode honors only the *skills*
+half of a plugin (mapped to its `skills.paths` — see [OpenCode](OPENCODE.md)). Pi does
+**not read `plugins` at all in v1**: it warns and ignores them, so it cannot run
+activation suites yet — even though the CLI has a native `--skill <file|dir>` flag that
+a follow-up could wire `agent.plugins → --skill` onto. See
+[Pi § Known limitations](PI.md#known-limitations).
+
+## Pi enforces the tool/prompt knobs OpenCode drops
+
+Pi is the outlier in the enforcement direction — a capability *win*, not a gap:
+
+- **`allowed_tools` / `disallowed_tools` are ENFORCED** (`--tools` / `--exclude-tools`),
+  and **`system_prompt` is ENFORCED** (`--append-system-prompt`, semantics `append`).
+  OpenCode drops all three; Codex forwards `disallowed_tools` without SDK enforcement.
+- **`permission_mode` is NOT enforced** — Pi headless print mode auto-runs tools and
+  exposes only project-file trust (`--approve` / `--no-approve`), no tool-approval
+  mode; the sandbox driver is the isolation boundary (same as Codex/Antigravity).
+- **`system_prompt_file` is NOT read** (use inline `system_prompt`), matching
+  Codex/Antigravity.
+- **Built-in auto-retry.** Pi retries a transient/provider error *internally* (another
+  `agent_start` cycle in the same invocation, flagged `willRetry: true`), which the
+  harness folds into one turn. The internal retry is bounded by
+  `turn_timeout` / `task_timeout`.
+
+Full detail: [Pi](PI.md).
+
 ## Reproducing
 
 `tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more
 sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
 outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
-`--type antigravity` / `--type opencode` to check a backend against the contract
-above.
+`--type antigravity` / `--type opencode` / `--type pi` to check a backend against the
+contract above.
 
 ## Related
 
-- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md)
+- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md) · [Pi](PI.md)
 - [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) — the full `run_limits` schema
