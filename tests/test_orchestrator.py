@@ -2426,3 +2426,161 @@ async def test_cleanup_workspace_dir_none_uses_move_on_write(tmp_path):
     expected = run_dir / "artifacts" / task.task_id
     assert orchestrator.result.sandbox_path == str(expected)
     assert (expected / "out.txt").read_text(encoding="utf-8") == "x"
+
+
+@pytest.mark.asyncio
+async def test_evaluation_loop_prepends_headless_preamble(tmp_path):
+    """The non-simulated path tells the agent no user is present.
+
+    Task YAMLs used to carry hand-copied "Do NOT ask for approval" lines to get
+    this effect. That phrasing forbids asking without saying nobody is there, so
+    an agent could honor it and still stop at a consent gate. The orchestrator
+    states it once, for every headless run.
+    """
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from coder_eval.models import CriterionResult, EvaluationResult, SandboxConfig, TurnRecord
+    from coder_eval.orchestrator import HEADLESS_PREAMBLE
+
+    task = TaskDefinition.model_construct(
+        task_id="headless_preamble",
+        description="Test",
+        initial_prompt="Build the thing",
+        tags=[],
+        agent=ClaudeCodeAgentConfig.model_construct(
+            type=AgentKind.CLAUDE_CODE,
+            permission_mode="acceptEdits",
+            allowed_tools=None,
+            model=None,
+            max_turns=20,
+            turn_timeout=None,
+            ignore_patterns=[],
+        ),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
+        task_timeout=None,
+        reference=None,
+        simulation=None,
+    )
+
+    run_dir = tmp_path / "run" / "headless_preamble"
+    run_dir.mkdir(parents=True)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.result = EvaluationResult(
+        task_id="headless_preamble",
+        task_description="Test",
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = AsyncMock(
+        return_value=TurnRecord(
+            iteration=1,
+            user_input="x",
+            agent_output="done",
+            duration_seconds=1.0,
+            max_turns_exhausted=True,
+        )
+    )
+    orchestrator.agent = mock_agent
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    mock_checker = MagicMock()
+    mock_checker.check_all_async = AsyncMock(
+        return_value=[CriterionResult(criterion_type="file_exists", description="test", score=0.0)]
+    )
+    orchestrator.success_checker = mock_checker
+
+    with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
+        await orchestrator._evaluation_loop()
+
+    sent = mock_agent.communicate.call_args.args[0]
+    assert HEADLESS_PREAMBLE in sent
+    # Ordering matters: cwd, then the preamble, then the task's own instructions,
+    # which the preamble defers to.
+    assert sent.index("Your working directory is") < sent.index(HEADLESS_PREAMBLE) < sent.index("Build the thing")
+
+
+@pytest.mark.asyncio
+async def test_simulated_task_bypasses_the_headless_prompt_path(tmp_path):
+    """A simulated task has a live user, so it must not be told the run is headless.
+
+    The two paths are separate functions and the preamble is built in only one of
+    them, so delegating to the dialog loop is what keeps the preamble away from a
+    task that has someone to ask.
+    """
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from coder_eval.models import EvaluationResult, SandboxConfig, SimulationConfig
+
+    task = TaskDefinition.model_construct(
+        task_id="simulated_task",
+        description="Test",
+        initial_prompt="Build the thing",
+        tags=[],
+        agent=ClaudeCodeAgentConfig.model_construct(
+            type=AgentKind.CLAUDE_CODE,
+            permission_mode="acceptEdits",
+            allowed_tools=None,
+            model=None,
+            max_turns=20,
+            turn_timeout=None,
+            ignore_patterns=[],
+        ),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
+        task_timeout=None,
+        reference=None,
+        simulation=SimulationConfig(
+            enabled=True,
+            persona="user",
+            goal="get the agent to build the thing",
+            max_turns=5,
+            check_criteria="end_of_dialog",
+        ),
+    )
+
+    run_dir = tmp_path / "run" / "simulated_task"
+    run_dir.mkdir(parents=True)
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator.result = EvaluationResult(
+        task_id="simulated_task",
+        task_description="Test",
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    mock_agent = AsyncMock()
+    orchestrator.agent = mock_agent
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+    orchestrator.success_checker = MagicMock()
+
+    dialog = AsyncMock(return_value=True)
+    with (
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+        patch.object(Orchestrator, "_simulation_dialog_loop", dialog),
+    ):
+        await orchestrator._evaluation_loop()
+
+    dialog.assert_awaited_once()
+    # The headless prompt is built after the simulation branch returns, so the
+    # agent is never called from this loop.
+    mock_agent.communicate.assert_not_called()

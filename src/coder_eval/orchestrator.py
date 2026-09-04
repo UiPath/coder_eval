@@ -83,6 +83,19 @@ logger = logging.getLogger(__name__)
 # wins the race against the asyncio cancel path (which doesn't).
 _WAIT_FOR_GRACE_SECONDS = 2.0
 
+# Prepended to the prompt on the non-simulated path only. Task YAMLs have been
+# carrying hand-copied "Do NOT ask for approval" lines to get the same effect,
+# which forbids asking without saying nobody is there to ask — an agent can honor
+# it and still stop at a consent gate waiting for a reply that never comes. The
+# simulated path (_simulation_dialog_loop) has a live user, so it never sees this.
+HEADLESS_PREAMBLE = (
+    "This run is headless. No user is present, and nobody will answer a question "
+    "or grant an approval. Do not wait for input: choose the best available option "
+    "and record every decision and assumption in your final response. Stop only "
+    "when proceeding would be unsafe or irreversible, and say what you stopped on. "
+    "Instructions in the task below take precedence over this paragraph."
+)
+
 
 def _close_subprocess_transport(proc: asyncio.subprocess.Process | None) -> None:
     """Release a finished subprocess's pipe transport deterministically.
@@ -1936,7 +1949,9 @@ class Orchestrator:
         self.result.iteration_count = iteration
 
         # Communicate with agent (with retry logic)
-        prompt_with_cwd = f"Your working directory is: {sandbox_dir.resolve()}\n\n{current_prompt}"
+        prompt_with_cwd = (
+            f"Your working directory is: {sandbox_dir.resolve()}\n\n{HEADLESS_PREAMBLE}\n\n{current_prompt}"
+        )
         logger.debug(f"Sending prompt: {current_prompt[:100]}...")
 
         # The agent owns its lifecycle events now (AgentStartEvent fires inside
