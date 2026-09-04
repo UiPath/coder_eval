@@ -145,6 +145,17 @@ antigravity = [
 # fail at start() with a clear hint pointing back here.
 # See docs/agents/OPENCODE.md.
 opencode = []
+# Optional extra that enables Pi agent support.
+#
+# Deliberately EMPTY, exactly like `opencode` above. Pi ships as a Node CLI
+# (`npm install -g @earendil-works/pi-coding-agent`), and PiAgent drives that
+# binary over a subprocess reading `pi -p --mode json` — it imports no
+# third-party Python package. The extra exists to keep the opt-in surface
+# uniform across harnesses and to give the `npm install` prerequisite a single
+# home in the packaging metadata. Without the CLI on PATH the framework still
+# installs and runs; Pi tasks fail at start() with a clear hint pointing here.
+# See docs/agents/PI.md.
+pi = []
 
 [project.scripts]
 coder-eval = "coder_eval.cli:app"
