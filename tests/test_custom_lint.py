@@ -3764,3 +3764,57 @@ class TestCE051NoDriverOverride:
             'cfg.model_copy(update={"driver": "tempdir"})',
             filepath="src/coder_eval/models/sandbox.py",
         )
+
+
+class TestCE052ProcessLethalMustBeContainerGated:
+    """CE052 flags an `os._exit` that is not gated on being in the container."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/cli/run_task_internal_command.py"):
+        import ast
+
+        from tests.lint.rules.ce052_process_lethal_must_be_container_gated import (
+            ProcessLethalMustBeContainerGated,
+        )
+
+        return ProcessLethalMustBeContainerGated(filepath).check(ast.parse(src))
+
+    def test_flags_an_ungated_exit(self):
+        assert self._run("os._exit(137)")
+
+    def test_flags_it_under_an_unrelated_guard(self):
+        assert self._run("if stale:\n    os._exit(137)")
+
+    def test_flags_it_in_the_else_arm_of_the_container_guard(self):
+        """An inverted guard is the shape a well-meaning refactor produces."""
+        src = 'if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n    pass\nelse:\n    os._exit(137)'
+        assert self._run(src)
+
+    def test_allows_a_gated_exit(self):
+        src = 'if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n    os._exit(137)'
+        assert not self._run(src)
+
+    def test_allows_it_nested_deeper_inside_the_gate(self):
+        """The real site defines a function and a loop inside the guard."""
+        src = (
+            'if _os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n'
+            "\n"
+            "    def _watch() -> None:\n"
+            "        while True:\n"
+            "            if stale:\n"
+            "                _os._exit(137)\n"
+        )
+        assert not self._run(src)
+
+    def test_is_out_of_scope_outside_the_package(self):
+        assert not self._run("os._exit(137)", filepath="scripts/reap.py")
+
+    def test_the_real_module_is_clean(self):
+        """The rule must actually pass on the site it was written for — a rule
+        that only ever fires on synthetic input proves nothing about the tree."""
+        from pathlib import Path
+
+        path = Path("src/coder_eval/cli/run_task_internal_command.py")
+        source = path.read_text(encoding="utf-8")
+        assert not self._run(source, filepath=str(path))
+        assert "_os._exit(137)" in source, "the guarded call must still exist"

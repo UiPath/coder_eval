@@ -168,6 +168,27 @@ class TestInContainerGradeCoercion:
             ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")],
         )
 
+    def test_invoking_the_command_here_arms_no_process_lethal_watchdog(self, tmp_path: Path) -> None:
+        """The command's heartbeat watchdog reaps an ORPHANED CONTAINER by calling
+        `os._exit(137)` on itself. This suite invokes the command in-process, so an
+        unconditionally-armed thread exits the pytest WORKER instead — 40s later
+        (20s grace + 20s stale), inside whatever unrelated test that worker has
+        moved on to. It shipped that way: it killed a different test on each run
+        and on each platform, with no traceback, and the dead worker's lost
+        coverage data then failed the gate as `65.13 < 80.00`.
+
+        Asserted on the live thread list rather than by patching `threading`, so
+        the guard is proven at the only place that matters — whether a thread now
+        exists in this process.
+        """
+        import threading
+
+        before = {t.name for t in threading.enumerate()}
+        self._run_with_context(tmp_path, True)
+        leaked = [t for t in threading.enumerate() if t.name not in before and t.daemon]
+
+        assert not leaked, f"the command armed a process-lethal daemon thread outside a container: {leaked}"
+
     def test_a_non_boolean_grade_is_a_hard_error(self, tmp_path: Path) -> None:
         """A hand-edited or older-format `"grade": "false"` is a truthy str typed
         as bool, which would silently grade a run that asked not to be."""

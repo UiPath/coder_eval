@@ -91,50 +91,73 @@ def run_task_internal_command(
     import threading
     import time
 
-    def _watch_host_heartbeat() -> None:
-        heartbeat = output_dir / HEARTBEAT_FILENAME
-        # Grace period for the host to write the first counter value.
-        time.sleep(HEARTBEAT_STALE_SECONDS)
-        last_counter = ""
-        last_mtime = 0.0
-        last_change = time.monotonic()
-        while True:
-            try:
-                current = heartbeat.read_text(encoding="utf-8")
-            except (FileNotFoundError, OSError):
-                current = ""
-            try:
-                current_mtime = heartbeat.stat().st_mtime
-            except (FileNotFoundError, OSError):
-                current_mtime = 0.0
-            now = time.monotonic()
-            if heartbeat_is_alive(current, last_counter, current_mtime, last_mtime):
-                last_counter = current
-                last_mtime = current_mtime
-                last_change = now
-            if now - last_change > HEARTBEAT_STALE_SECONDS:
-                logger.error(
-                    "Host heartbeat stale (>%ss); exiting to reap orphan container.",
-                    HEARTBEAT_STALE_SECONDS,
-                )
-                # os._exit skips atexit and IO flushing, so the error line
-                # above would routinely be lost -- making a genuine
-                # stale-heartbeat suicide indistinguishable from an external
-                # SIGKILL in the archived logs. Flush best-effort first;
-                # never let a flush failure stop the exit.
-                import sys as _sys
+    # ARMED ONLY INSIDE THE CONTAINER, and not even defined outside one. The
+    # watchdog's whole authority is `os._exit(137)` on the process it runs in,
+    # and the only process that may be reaped that way is the container's own
+    # disposable main -- there is no container to orphan anywhere else, so
+    # outside one the thread can do nothing but harm. It did: a test invoked
+    # this command in-process (legitimately -- the command must refuse a
+    # malformed context.json, and proving that means calling it) and the pytest
+    # worker inherited the thread, which found no heartbeat and 40s later exited
+    # the worker mid-way through an unrelated test file. It named a different
+    # test on each run and on each platform, carried no traceback, and took that
+    # worker's coverage data with it -- so the gate reported "65.13 < 80.00",
+    # naming neither the test nor the cause.
+    #
+    # Gated on CODER_EVAL_IN_CONTAINER (set by docker_runner on the container's
+    # argv), NOT on `driver`, for the same reason the reference-permission
+    # window is: this command rewrites `driver: docker` -> `tempdir` before
+    # building the in-container Orchestrator, so a driver-based gate would
+    # disarm itself on exactly the path that needs it. See
+    # `Sandbox.enforces_permission_windows`.
+    if _os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":
 
-                for _handler in logging.getLogger().handlers:
+        def _watch_host_heartbeat() -> None:
+            heartbeat = output_dir / HEARTBEAT_FILENAME
+            # Grace period for the host to write the first counter value.
+            time.sleep(HEARTBEAT_STALE_SECONDS)
+            last_counter = ""
+            last_mtime = 0.0
+            last_change = time.monotonic()
+            while True:
+                try:
+                    current = heartbeat.read_text(encoding="utf-8")
+                except (FileNotFoundError, OSError):
+                    current = ""
+                try:
+                    current_mtime = heartbeat.stat().st_mtime
+                except (FileNotFoundError, OSError):
+                    current_mtime = 0.0
+                now = time.monotonic()
+                if heartbeat_is_alive(current, last_counter, current_mtime, last_mtime):
+                    last_counter = current
+                    last_mtime = current_mtime
+                    last_change = now
+                if now - last_change > HEARTBEAT_STALE_SECONDS:
+                    logger.error(
+                        "Host heartbeat stale (>%ss); exiting to reap orphan container.",
+                        HEARTBEAT_STALE_SECONDS,
+                    )
+                    # os._exit skips atexit and IO flushing, so the error line
+                    # above would routinely be lost -- making a genuine
+                    # stale-heartbeat suicide indistinguishable from an external
+                    # SIGKILL in the archived logs. Flush best-effort first;
+                    # never let a flush failure stop the exit.
+                    import sys as _sys
+
+                    for _handler in logging.getLogger().handlers:
+                        with contextlib.suppress(Exception):
+                            _handler.flush()
                     with contextlib.suppress(Exception):
-                        _handler.flush()
-                with contextlib.suppress(Exception):
-                    _sys.stdout.flush()
-                with contextlib.suppress(Exception):
-                    _sys.stderr.flush()
-                _os._exit(137)
-            time.sleep(HEARTBEAT_STALE_SECONDS / 4)
+                        _sys.stdout.flush()
+                    with contextlib.suppress(Exception):
+                        _sys.stderr.flush()
+                    _os._exit(137)
+                time.sleep(HEARTBEAT_STALE_SECONDS / 4)
 
-    threading.Thread(target=_watch_host_heartbeat, daemon=True).start()
+        threading.Thread(target=_watch_host_heartbeat, daemon=True).start()
+    else:
+        logger.debug("Not in a container; host-heartbeat watchdog not armed.")
 
     task_yaml = input_dir / "task.yaml"
     context_json = input_dir / "context.json"
