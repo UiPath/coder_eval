@@ -861,3 +861,74 @@ describe("parseMessages — reconciliation entry", () => {
         expect(recon.costUsd).toBeNull();
     });
 });
+
+describe("parseMessages — open-weight cost apportionment", () => {
+    // An assistant message carrying token buckets + a model, on a turn that
+    // reports a real per-turn total_cost_usd. Mirrors the Pi harness shape:
+    // real stream cost at the turn, models absent from the rate card.
+    function tokMsg(
+        model: string,
+        input: number,
+        output: number,
+        // Distinct started_at + message_id so separate generations are NOT
+        // collapsed into one emission row by the same-emission heuristic.
+        startSec = 0,
+        messageId?: string,
+    ) {
+        const ss = String(startSec).padStart(2, "0");
+        return {
+            role: "assistant",
+            started_at: `2026-01-01T00:00:${ss}.000Z`,
+            completed_at: `2026-01-01T00:00:${ss}.500Z`,
+            generation_duration_ms: 500,
+            content_blocks: [{ block_type: "text" as const, text: "x" }],
+            input_tokens: input,
+            output_tokens: output,
+            model,
+            message_id: messageId ?? `m-${startSec}`,
+        };
+    }
+
+    test("unpriced model + real turn cost: rows are filled and sum EXACTLY to the total", () => {
+        const turns: TurnEntry[] = [
+            {
+                model_used: "openrouter/unpriced-xyz",
+                token_usage: { total_cost_usd: 0.009 },
+                messages: [
+                    tokMsg("openrouter/unpriced-xyz", 300, 100, 0), // weight 400
+                    tokMsg("openrouter/unpriced-xyz", 100, 0, 2), //   weight 100
+                ],
+            },
+        ];
+        const rows = parseMessages(turns);
+        expect(rows).toHaveLength(2);
+        for (const r of rows) expect(r.costUsd).not.toBeNull();
+        const sum = rows.reduce((a, r) => a + (r.costUsd ?? 0), 0);
+        expect(sum).toBeCloseTo(0.009, 10); // exact to the cent and far beyond
+        // Apportioned by token share: first row 400/500, second 100/500.
+        expect(rows[0].costUsd).toBeCloseTo(0.009 * (400 / 500), 10);
+    });
+
+    test("unpriced model + NO turn cost: rows stay blank (—), not a misleading $0", () => {
+        const turns: TurnEntry[] = [
+            {
+                model_used: "openrouter/unpriced-xyz",
+                messages: [tokMsg("openrouter/unpriced-xyz", 300, 100)],
+            },
+        ];
+        expect(parseMessages(turns)[0].costUsd).toBeNull();
+    });
+
+    test("priced model is left on the rate card (apportionment never overrides)", () => {
+        const turns: TurnEntry[] = [
+            {
+                model_used: "gpt-5.6-terra",
+                token_usage: { total_cost_usd: 999 }, // absurd; must NOT leak into rows
+                messages: [tokMsg("gpt-5.6-terra", 1_000_000, 1_000_000)],
+            },
+        ];
+        const r = parseMessages(turns)[0];
+        // Rate card: 1M input @ $2 + 1M output @ $12 = $14, not the bogus 999.
+        expect(r.costUsd).toBeCloseTo(14, 6);
+    });
+});

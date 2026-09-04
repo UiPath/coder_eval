@@ -1609,6 +1609,9 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
     const out: MessageEvent[] = [];
     let order = 0;
     for (const turn of turns) {
+        // Index in `out` where this turn's rows begin, so the open-weight
+        // cost-apportionment pass below can address exactly this turn's rows.
+        const turnStart = out.length;
         // Resolve tool_use_id -> CommandEntry per iteration (the id is locally
         // unique). Used to pull execution time + result preview onto tool_use
         // blocks.
@@ -1997,6 +2000,49 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 }),
                 note: typeof msg.note === "string" ? msg.note : null,
             });
+        }
+
+        // Open-weight cost apportionment. A CLI harness that owns its provider
+        // (Pi and friends) reports a REAL per-turn `total_cost_usd` from its
+        // stream but runs models absent from the rate card, so `messageCostUsd`
+        // priced every row null and the Cost column dashes out even though the
+        // turn has a real bill. When the rate card priced NOTHING for this turn
+        // yet the backend reported a real total, distribute that total across
+        // this turn's rows in proportion to their tokens. The column then shows
+        // numbers that sum EXACTLY to the turn total (last row absorbs the
+        // rounding residual), and so to the task total. Priced harnesses
+        // (Claude / Codex / Bedrock) already have per-row figures and are left
+        // untouched — this only fills the gap, never overrides. Display-only:
+        // the authoritative task total still reads the backend aggregate, not a
+        // sum of these costUsd, so there is no double-count.
+        const turnRows = out.slice(turnStart);
+        const realCost = turn.token_usage?.total_cost_usd;
+        const anyPriced = turnRows.some((r) => r.costUsd != null);
+        if (
+            !anyPriced &&
+            typeof realCost === "number" &&
+            realCost > 0 &&
+            turnRows.length > 0
+        ) {
+            const weight = (r: MessageEvent) =>
+                (r.inputTokens ?? 0) +
+                (r.outputTokens ?? 0) +
+                (r.cacheWriteTokens ?? 0) +
+                (r.cacheReadTokens ?? 0);
+            const totalWeight = turnRows.reduce((a, r) => a + weight(r), 0);
+            if (totalWeight > 0) {
+                let allocated = 0;
+                turnRows.forEach((r, i) => {
+                    if (i === turnRows.length - 1) {
+                        // Last row takes the residual so the column sums exactly.
+                        r.costUsd = realCost - allocated;
+                    } else {
+                        const share = (realCost * weight(r)) / totalWeight;
+                        r.costUsd = share;
+                        allocated += share;
+                    }
+                });
+            }
         }
     }
     return out;
