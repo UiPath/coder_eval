@@ -147,6 +147,71 @@ class TestCE046EnvInfoSpreadsSuper:
 
 
 @pytest.mark.lint
+class TestCE047EmbeddedShimStdlibOnly:
+    """CE047 flags a non-stdlib import in a module embedded into generated shims."""
+
+    @staticmethod
+    def _run(src: str, *, embedded: bool = True):
+        import ast
+
+        from tests.lint.rules.ce047_embedded_shim_stdlib_only import EmbeddedShimStdlibOnly
+
+        path = "src/coder_eval/argv_match.py" if embedded else "src/coder_eval/invocation_log.py"
+        return EmbeddedShimStdlibOnly(path).check(ast.parse(src))
+
+    def test_flags_package_import(self):
+        assert self._run("from coder_eval.models import FlagMatch")
+        assert self._run("import coder_eval.models")
+
+    def test_flags_third_party_import(self):
+        assert self._run("import pydantic")
+        assert self._run("from pydantic import BaseModel")
+
+    def test_flags_relative_import(self):
+        assert self._run("from .models import FlagMatch")
+
+    def test_allows_stdlib(self):
+        assert not self._run("import re\nimport json")
+
+    def test_ignores_files_that_are_not_embedded(self):
+        # invocation_log.py renders the shim; it is not itself copied into one.
+        assert not self._run("from coder_eval.models import RecordedCli", embedded=False)
+
+    def test_flags_a_name_the_shim_binds_itself(self):
+        """The shim's own `def record` wins, and respond() swallows the TypeError,
+        so every invocation would silently get the fallback response."""
+        assert self._run("def record(argv):\n    return argv")
+        assert self._run("RULES = []")
+
+    def test_flags_a_renaming_import_onto_a_shim_global(self):
+        """An import binds a name too, so it is a collision route as much as a def."""
+        assert self._run("from typing import TypedDict as RULES")
+        assert self._run("import json as respond")
+
+    def test_allows_a_plain_stdlib_import_of_a_shim_global(self):
+        """`import sys` binds the very module the shim imports anyway."""
+        assert not self._run("import sys")
+        assert not self._run("import json")
+
+    def test_allows_a_colliding_name_that_is_not_module_level(self):
+        assert not self._run("def matcher():\n    record = 1\n    return record")
+
+    def test_the_rule_guards_a_file_that_actually_exists(self):
+        """A rule matching nothing passes vacuously while reading as a guarantee --
+        which is what a move of the embedded module would otherwise cause."""
+        from pathlib import Path
+
+        from coder_eval.invocation_log import EMBEDDED_MODULES
+        from tests.lint.rules.ce047_embedded_shim_stdlib_only import EmbeddedShimStdlibOnly
+
+        package = Path(__file__).resolve().parents[1] / "src" / "coder_eval"
+        for module in EMBEDDED_MODULES:
+            target = package / module
+            assert target.is_file(), f"EMBEDDED_MODULES names {module}, which does not exist"
+            assert EmbeddedShimStdlibOnly(str(target))._embedded, f"CE047 does not match {target}"
+
+
+@pytest.mark.lint
 class TestCE017ModelsLazyAgentImports:
     """CE017 flags only module-level agents/plugins imports inside models/."""
 

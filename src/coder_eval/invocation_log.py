@@ -6,7 +6,9 @@ shim template `SandboxConfig.record_cli` renders, and `parse_log`, which the
 
 The rendered script runs INSIDE the sandbox, where ``coder_eval`` is not
 installed, so it imports nothing from this package: its configuration arrives as
-embedded literals and everything else comes from the standard library.
+embedded literals, the argv matcher that dispatches its per-invocation responses
+arrives as embedded SOURCE (:mod:`coder_eval.argv_match`, stdlib-only for exactly
+that reason), and everything else comes from the standard library.
 
 Keeping the template here rather than inline in :mod:`coder_eval.sandbox` lets
 :func:`render_recorder` be exercised directly (render, execute, read the log)
@@ -15,6 +17,7 @@ without standing up a sandbox.
 
 import json
 import sys
+from importlib import resources
 
 from coder_eval.models import RecordedCli
 
@@ -22,6 +25,40 @@ from coder_eval.models import RecordedCli
 # Written beside the shims, inside the generated recorder directory, so the log
 # travels with them if the sandbox root moves.
 LOG_FILENAME = "calls.jsonl"
+
+# Modules whose SOURCE is spliced into a generated shim. Exported because lint
+# rule CE047 keeps their imports stdlib-only and their module-level names clear
+# of SHIM_GLOBALS: a rule that hardcodes its own copy of this list guards nothing
+# the day the module moves, and would pass vacuously rather than fail.
+EMBEDDED_MODULES = ("argv_match.py",)
+
+# Top-level names the generated shim binds itself, IMPORTS INCLUDED -- the
+# template imports before the splice and calls after it, so a collision breaks
+# the shim whichever side binds first: an embedded `sys = None` kills the
+# template's own `sys.stdout.write`, and an embedded `record` is rebound by the
+# template's definition further down. Either way respond() swallows the
+# resulting TypeError and EVERY invocation quietly falls back to the entry
+# defaults. Kept honest by a test that parses a rendered shim and asserts this
+# set is exactly what it binds, so the list cannot drift from the template.
+SHIM_GLOBALS = frozenset(
+    {
+        "json",
+        "os",
+        "sys",
+        "time",
+        "TOOL",
+        "EXIT_CODE",
+        "STDOUT_TEXT",
+        "STDERR_TEXT",
+        "RULES",
+        "SHIM_DIR",
+        "LOG_PATH",
+        "LOG_ERROR_PATH",
+        "record",
+        "respond",
+        "main",
+    }
+)
 
 _TEMPLATE = '''\
 #!{interpreter}
@@ -41,13 +78,16 @@ TOOL = {tool!r}
 EXIT_CODE = {exit_code!r}
 STDOUT_TEXT = {stdout!r}
 STDERR_TEXT = {stderr!r}
-
+# Per-invocation responses in declaration order, empty when the entry declared
+# none -- in which case every invocation gets the three defaults above.
+RULES = {rules!r}
+{matcher_source}
 SHIM_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(SHIM_DIR, {log_filename!r})
 LOG_ERROR_PATH = LOG_PATH + ".error"
 
 
-def record(argv, exit_code):
+def record(argv, exit_code, rule, rule_error):
     """Append this invocation to the log.
 
     Best-effort: a logging failure must never break the command the agent ran,
@@ -58,6 +98,17 @@ def record(argv, exit_code):
     exists instead of a flattened command line. stdin is deliberately never
     read: it would block whenever the sandbox leaves it on an open pipe, and in
     passthrough mode it would consume the payload the real tool needs.
+
+    `rule` is the index of the response rule that answered, recorded only when
+    one did. Without it, "no rule matched, so this is the default" and "rule 2
+    answered, and happens to look like the default" are indistinguishable in the
+    log -- the first question asked when an expected canned response does not
+    arrive.
+
+    `rule_error` is booked when rule evaluation RAISED, and it is what stops an
+    eval-config fault from reading as a clean no-match: the agent got fallback
+    output the task never described, so `cli_called` fails the whole log on it
+    rather than scoring a run whose responses were wrong.
     """
     entry = {{
         "ts": round(time.time(), 3),
@@ -65,6 +116,10 @@ def record(argv, exit_code):
         "argv": list(argv),
         "exit": exit_code,
     }}
+    if rule is not None:
+        entry["rule"] = rule
+    if rule_error is not None:
+        entry["rule_error"] = rule_error
     try:
         # ensure_ascii escapes non-ASCII and any stray surrogate from
         # undecodable argv bytes, so an exotic argument cannot make this write
@@ -82,25 +137,75 @@ def record(argv, exit_code):
             pass
 
 
-def main(argv):
-    """Record the invocation, then fail like the tool would with nothing behind it.
+def respond(argv):
+    """Pick this invocation's (exit code, stdout, stderr, rule index, rule error).
 
-    Nothing is executed: no network, no auth, no side effects. A test that needs
+    First matching rule wins; whatever no rule claims gets the defaults. The
+    matcher above is embedded only when RULES is non-empty, so this guard is
+    what keeps `select_rule` from being named when it was not embedded.
+    """
+    if not RULES:
+        return EXIT_CODE, STDOUT_TEXT, STDERR_TEXT, None, None
+    try:
+        selected = select_rule(RULES, list(argv))
+    except Exception as exc:
+        # Best-effort, like the log write: a matcher fault must not turn the stub
+        # into a crashing executable, which the agent would read as the tool
+        # itself breaking in a way the task never described. Unlike the log
+        # write it is also RETURNED, so the record says what happened -- an
+        # untraceable fallback here scores the task as if the agent had never
+        # made the call at all.
+        sys.stderr.write("coder_eval recorder: response matching failed: %r\\n" % (exc,))
+        return EXIT_CODE, STDOUT_TEXT, STDERR_TEXT, None, repr(exc)
+    if selected is None:
+        return EXIT_CODE, STDOUT_TEXT, STDERR_TEXT, None, None
+    index, rule = selected
+    return rule["exit"], rule["stdout"], rule["stderr"], index, None
+
+
+def main(argv):
+    """Answer the invocation from the canned responses, and record what happened.
+
+    Nothing is executed: no network, no auth, no side effects -- a response is
+    text the task author wrote, never the real tool's output. A test that needs
     the real tool's behavior recorded instead should supply its own wrapper under
-    mock_path_dirs -- proxying a live executable is a different job from stubbing
+    mock_path_dirs: proxying a live executable is a different job from stubbing
     one, and this shim deliberately does only the second.
     """
-    record(argv[1:], EXIT_CODE)
-    if STDOUT_TEXT:
-        sys.stdout.write(STDOUT_TEXT)
-    if STDERR_TEXT:
-        sys.stderr.write(STDERR_TEXT)
-    return EXIT_CODE
+    args = argv[1:]
+    exit_code, stdout_text, stderr_text, rule, rule_error = respond(args)
+    record(args, exit_code, rule, rule_error)
+    if stdout_text:
+        sys.stdout.write(stdout_text)
+    if stderr_text:
+        sys.stderr.write(stderr_text)
+    return exit_code
 
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
 '''
+
+
+# Marked off because the embedded copy is the only place this source exists at
+# runtime: whoever reads a generated shim needs to see which half is generated
+# glue and which half is a verbatim module they can go and look up.
+_MATCHER_SECTION = """
+# --- begin embedded coder_eval/argv_match.py ---------------------------------
+{source}
+# --- end embedded coder_eval/argv_match.py -----------------------------------
+"""
+
+
+def _matcher_source() -> str:
+    """The stdlib-only argv matcher, as source to embed in a shim.
+
+    Read as a package resource rather than reconstructed or re-implemented: the
+    shim must dispatch on the SAME matcher the ``cli_called`` criterion grades
+    with, and every transformation in between is a place the two could diverge.
+    """
+    (module,) = EMBEDDED_MODULES
+    return resources.files("coder_eval").joinpath(module).read_text(encoding="utf-8")
 
 
 def render_recorder(spec: RecordedCli, interpreter: str | None = None) -> str:
@@ -110,13 +215,28 @@ def render_recorder(spec: RecordedCli, interpreter: str | None = None) -> str:
     the running interpreter). A ``#!/usr/bin/env python3`` shebang resolves
     through the same PATH the recorder dir is prepended to, so `tool: python3`
     made the shim re-exec itself forever.
+
+    The matcher is embedded only when the entry declares ``responses``: a shim
+    that answers every invocation the same way never consults it, and leaving it
+    out keeps the common shim as small as it was before rules existed.
     """
+    rules = [
+        {
+            "when": response.when.match_spec,
+            "exit": response.exit_code,
+            "stdout": response.stdout,
+            "stderr": response.stderr,
+        }
+        for response in spec.responses
+    ]
     return _TEMPLATE.format(
         interpreter=interpreter or sys.executable,
         tool=spec.tool,
         exit_code=spec.exit_code,
         stdout=spec.stdout,
         stderr=spec.stderr,
+        rules=rules,
+        matcher_source=_MATCHER_SECTION.format(source=_matcher_source()) if rules else "",
         log_filename=LOG_FILENAME,
     )
 

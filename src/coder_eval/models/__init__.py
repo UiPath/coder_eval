@@ -20,6 +20,12 @@ from coder_eval.models.agent_config import (
     parse_agent_config,
 )
 
+# Argv matching (shared by cli_called and record_cli response rules)
+from coder_eval.models.cli_match import (
+    CliMatch,
+    FlagMatch,
+)
+
 # Container paths (leaf constants; re-exported so consumers obey CE001)
 from coder_eval.models.container_paths import (
     CONTAINER_INPUT_DIR,
@@ -47,7 +53,6 @@ from coder_eval.models.criteria import (
     FileContainsCriterion,
     FileExistsCriterion,
     FileMatchesRegexCriterion,
-    FlagMatch,
     JMESPathAssertion,
     JsonCheckCriterion,
     LivePolarity,
@@ -165,6 +170,7 @@ from coder_eval.models.routing import (
 from coder_eval.models.sandbox import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
+    CliResponse,
     DockerBuildConfig,
     DockerDriverConfig,
     NodeEnvConfig,
@@ -252,6 +258,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "ReferenceComparisonCriterion",
     "CommandExecutedCriterion",
     "CliCalledCriterion",
+    "CliMatch",
+    "CliResponse",
     "FlagMatch",
     "CommandsEfficiencyCriterion",
     "UiPathEvalCriterion",

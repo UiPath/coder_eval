@@ -567,7 +567,39 @@ Notes:
 - **The log is seeded empty**, so a correct run that legitimately calls nothing still satisfies a `max_count: 0` guard — while a *missing* log (mock never ran, or wrote elsewhere) still fails.
 - **stdin is never read** by the shim: reading it would block whenever the sandbox leaves stdin attached to an open pipe, hanging the task.
 - **Collisions are rejected.** If a `mock_path_dirs` entry already provides an executable of the same name, setup raises rather than letting directory order decide which one runs.
-- **It stubs a tool; it does not proxy one, and it does not serve per-invocation responses.** Recording a *real* executable on the way through, or returning different output per invocation, stays a hand-written mock under `mock_path_dirs` — both depend on state the harness cannot guarantee (the tool being installed, PATH order, live credentials, a fixture set).
+- **It stubs a tool; it does not proxy one.** Recording a *real* executable on the way through stays a hand-written mock under `mock_path_dirs` — that depends on state the harness cannot guarantee (the tool being installed, PATH order, live credentials).
+
+#### Answering each invocation differently
+
+An agent whose next step depends on what the tool just told it cannot be evaluated by a stub that replies the same way to everything it types. `responses` gives one shadowed executable a reply per invocation:
+
+```yaml
+sandbox:
+  record_cli:
+    - tool: uip
+      exit_code: 1                    # fallback: anything no rule claims
+      stderr: "uip: unknown command\n"
+      responses:
+        - when: {verb: "ixp dummy1"}
+          stdout: "response1\n"
+        - when: {verb: "ixp dummy2"}
+          stdout: "response2\n"
+        - when:                       # any cli_called facet, ANDed
+            verb: "ixp projects get"
+            positional: ["proj-1"]
+            flags: {model: gemini_2_5_pro}
+          stdout: '{"id": "proj-1", "name": "Invoices"}'
+        - when: {verb: "ixp projects get missing"}
+          exit_code: 4
+          stderr: "project not found\n"
+```
+
+- **`when` takes the same facets as [`cli_called`](#cli_called)** — `verb`, `verb_any_of`, `positional`, `flags`, `value_flags`, `ignore_flags` — evaluated by the same matcher, so the pattern that *serves* a response is the pattern that *grades* it. Always a mapping: a bare `when: "ixp dummy1"` is rejected (with the `{verb: ...}` spelling in the message), since a pattern has six facets and a lone string leaves which one you meant to infer.
+- **First match wins**, in declaration order: put the specific rule above the general one. An invocation no rule claims gets the entry's own `exit_code` / `stdout` / `stderr`.
+- **`exit_code` defaults to 0 on a rule** — the opposite of the entry default of 1. A rule exists because you described that invocation, so the natural reading is "and this is what it answers"; an undescribed one should still look like a tool that failed.
+- **`ignore_flags` is empty on a rule**, unlike the criterion's `[output]`: grading must not depend on a flag that changes nothing about the outcome, but a rule may legitimately answer differently for `--output json`. That is the one place a rule is *not* copy-pastable into a criterion — `flags: {output: ...}` is valid on a rule and rejected on the criterion, which ignores that flag by default.
+- **The log names the rule that answered** (`"rule": 1`), and omits the key when none did — the first thing you want to know when an expected canned response does not arrive.
+- **Still stateless.** A rule answers the same way however many times it matches; a counter would have to survive concurrent agent commands. For a tool whose reply must change over a run, hand-write a mock under `mock_path_dirs`.
 
 ## Template Sources
 
@@ -972,6 +1004,8 @@ Use this instead of `command_executed` or `file_matches_regex` when a test shado
 ```
 
 Do **not** shorten the verb instead. `verb: "ixp projects"` matches all of its subcommands, so a positive assertion that the agent *read* a project is equally satisfied by `ixp projects delete`. Two entries are rejected when one prefixes the other, since the shorter already accepts everything the longer does.
+
+**A verb holds subcommands only.** `verb: "ixp projects get --output json"` is rejected: the verb is compared against the *non-flag* arguments, so a flag inside it could never match — the criterion would score 0 against a log holding that exact call. Put it in `flags:` instead. (`head -1` still validates: a bare negative number is a value to the argument splitter, not a flag.)
 
 **The argument tail stays open.** `positional` is a prefix too, so `verb: "ixp projects list"` with `positional: ["proj-1"]` also matches `ixp projects list proj-1 dummy`. To require a specific tail, name every argument in it. `positional: []` is rejected — it would assert nothing.
 
