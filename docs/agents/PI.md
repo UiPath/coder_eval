@@ -25,8 +25,14 @@ and lets `EventCollector` build the `TurnRecord`, exactly like every other
 harness.
 
 Because Pi is model-agnostic, this is a cheap way to evaluate a broad set of
-open-weight models (Kimi, DeepSeek, GLM, …) through a single agent — and unlike
-OpenCode, Pi **enforces** `allowed_tools` / `disallowed_tools` / `system_prompt`.
+open-weight models (Kimi, DeepSeek, GLM, …) through a single agent. Pi **enforces
+`system_prompt`** (via `--append-system-prompt`) — a small win over OpenCode. It
+does **not** enforce `allowed_tools` / `disallowed_tools`: the shared config
+default uses Claude-namespaced tool names (`Bash`/`Read`/`Write`/…) that do not
+match Pi's lowercase built-ins (`bash`/`read`/`write`/…), so forwarding them would
+leave the agent with no tools at all. Like OpenCode / Codex / Antigravity, Pi
+therefore runs with its full native toolset and warns that these fields are
+unenforced.
 
 ## Setup
 
@@ -108,16 +114,25 @@ superset of the Antigravity `thinking_level`), defaulting to `medium`.
 
 ### Enforced config fields
 
-Unlike OpenCode, Pi **enforces** the standard tool/prompt knobs (a capability
-win):
+Pi forwards these config knobs to real CLI flags:
 
 | Field | Pi flag |
 |---|---|
-| `allowed_tools` | `--tools <csv>` |
-| `disallowed_tools` | `--exclude-tools <csv>` |
 | `system_prompt` | `--append-system-prompt <text>` (appended, semantics `append`) |
 | `thinking_level` | `--thinking <level>` |
 | `model` | `--model <provider/id>` |
+
+### Unenforced config fields
+
+`allowed_tools` / `disallowed_tools` are **not** forwarded. The shared config
+default (`experiments/default.yaml`) sets Claude-namespaced tool names
+(`Bash`/`Read`/`Write`/`Edit`/`Glob`/`Grep`/`Skill`), but Pi's built-in tools are
+lowercase and differently named (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`).
+Passing the PascalCase names to `--tools` would allowlist tools that do not exist
+in Pi, leaving the agent with **zero** tools. So — like OpenCode, Codex, and
+Antigravity — Pi ignores these fields, runs with its full native toolset, and
+warns at `start()` that they are unenforced. `permission_mode`, `plugins`, and
+`system_prompt_file` are unenforced too (see below).
 
 ## Permissions
 

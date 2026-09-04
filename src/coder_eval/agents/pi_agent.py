@@ -172,12 +172,22 @@ _PI_ARG_RENAME: dict[str, dict[str, str]] = {
     },
 }
 
-# Config fields the Pi CLI has no equivalent knob for (v1). `experiments/default.yaml`
-# sets `permission_mode` on every task, so warn once at start() rather than let a
-# task believe it constrained the agent. NOTE `allowed_tools`/`disallowed_tools`/
-# `system_prompt` are SUPPORTED (mapped to --tools/--exclude-tools/
+# Config fields the Pi CLI has no equivalent knob for (v1), OR that cannot be
+# safely forwarded. `experiments/default.yaml` sets `permission_mode` and
+# `allowed_tools` on every task, so warn once at start() rather than let a task
+# believe it constrained the agent. NOTE `system_prompt` IS supported (mapped to
 # --append-system-prompt) and thus deliberately NOT here.
-_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = ("plugins", "permission_mode", "system_prompt_file")
+_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
+    "plugins",
+    "permission_mode",
+    "system_prompt_file",
+    # Pi's built-in tool names are lowercase (bash/read/write/edit/grep/find/ls)
+    # and do not match the Claude-namespaced default (Bash/Read/Write/...), so
+    # forwarding them to --tools would allowlist nonexistent tools and strip the
+    # agent of ALL tools. Ignored like OpenCode/Codex/Antigravity do.
+    "allowed_tools",
+    "disallowed_tools",
+)
 
 # The full recognized Pi vocabulary (from `pi` 0.84.4). A clean exit that
 # recognized NOTHING from this set is vocabulary drift and is crashed rather than
@@ -756,10 +766,15 @@ class PiAgent(Agent[PiAgentConfig]):
             argv += ["--model", self.config.model]  # provider-prefixed form
         if self.config.thinking_level:
             argv += ["--thinking", self.config.thinking_level]
-        if self.config.allowed_tools:
-            argv += ["--tools", ",".join(self.config.allowed_tools)]  # ENFORCED (a win over OpenCode)
-        if self.config.disallowed_tools:
-            argv += ["--exclude-tools", ",".join(self.config.disallowed_tools)]
+        # allowed_tools / disallowed_tools are NOT forwarded. The shared config
+        # default (experiments/default.yaml) sets Claude-namespaced tool names
+        # (Bash/Read/Write/Edit/Glob/Grep/Skill), but Pi's built-in tools are
+        # lowercase and differently named (bash/read/write/edit/grep/find/ls).
+        # Passing the PascalCase names to `--tools` allowlists tools that do not
+        # exist in Pi, leaving the agent with ZERO tools ("I don't have tool
+        # access"). So, like OpenCode/Codex/Antigravity, these fields are treated
+        # as unenforced (see _UNSUPPORTED_CONFIG_FIELDS) and Pi runs with its full
+        # native toolset. Warned at start().
         if self.config.system_prompt:
             argv += ["--append-system-prompt", self.config.system_prompt]
         # user_input is a distinct argv element after `--` (never shell-interpolated).

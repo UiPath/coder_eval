@@ -321,15 +321,19 @@ class TestArgvConstruction:
         assert argv[-2] == "--"
         assert argv[-1] == "do the thing"
 
-    async def test_enforced_tool_and_prompt_flags(self, patch_exec, tmp_path):
+    async def test_tools_are_not_forwarded_but_system_prompt_is(self, patch_exec, tmp_path):
+        """allowed_tools/disallowed_tools are NOT forwarded: the shared config default
+        sets Claude-namespaced tool names (Bash/Read/...) that do not exist in Pi
+        (lowercase bash/read/...), so `--tools` would strip the agent of ALL tools.
+        Only `system_prompt` (a free-text string with no namespace) is forwarded."""
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(
             _agent(allowed_tools=["Read", "Write"], disallowed_tools=["Bash"], system_prompt="be terse"),
             tmp_path,
         )
         argv = captured["argv"]
-        assert argv[argv.index("--tools") + 1] == "Read,Write"
-        assert argv[argv.index("--exclude-tools") + 1] == "Bash"
+        assert "--tools" not in argv
+        assert "--exclude-tools" not in argv
         assert argv[argv.index("--append-system-prompt") + 1] == "be terse"
 
     async def test_user_input_is_a_post_dashdash_argv_element(self, patch_exec, tmp_path):
@@ -428,19 +432,19 @@ class TestUnsupportedConfigIsAnnounced:
         assert "plugins" in caplog.text
         assert "NOT enforced" in caplog.text
 
-    async def test_enforced_fields_are_never_named_as_unenforced(self, patch_exec, tmp_path, caplog):
-        """`permission_mode` always warns (it has a truthy default and is unenforced),
-        but the ENFORCED fields must never appear in the unenforced-fields warning."""
+    async def test_unenforced_fields_warn_but_system_prompt_does_not(self, patch_exec, tmp_path, caplog):
+        """allowed_tools/disallowed_tools are unenforced (Claude-namespaced default cannot
+        map to Pi's lowercase toolset) and MUST warn when set. `system_prompt` IS enforced
+        (--append-system-prompt) and must never appear in the unenforced-fields warning."""
         patch_exec(_FakeProcess(HAPPY_STREAM))
         with caplog.at_level("WARNING"):
             await _agent(allowed_tools=["Read"], disallowed_tools=["Bash"], system_prompt="be terse").start(
                 str(tmp_path)
             )
-        # The unenforced-fields warning must not name any ENFORCED field.
         warning = "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
-        assert "allowed_tools" not in warning
-        assert "disallowed_tools" not in warning
-        assert "system_prompt" not in warning  # neither system_prompt nor system_prompt_file set here
+        assert "allowed_tools" in warning
+        assert "disallowed_tools" in warning
+        assert "system_prompt" not in warning  # the enforced field is never named
 
 
 class TestAutoRetry:
