@@ -408,12 +408,17 @@ class PiAgentConfig(BaseAgentConfig):
 
     Enforced vs unenforced fields
     -----------------------------
-    ``allowed_tools`` → ``--tools``, ``disallowed_tools`` → ``--exclude-tools`` and
-    ``system_prompt`` → ``--append-system-prompt`` ARE enforced (a capability win
-    over OpenCode). ``permission_mode`` is NOT enforced (Pi headless print mode
-    auto-runs tools; the sandbox driver is the isolation boundary), ``plugins`` are
-    NOT injected (no activation suites in v1), and ``system_prompt_file`` is NOT
-    read — all three are warned about at ``start()``. See ``docs/agents/PI.md``.
+    ``system_prompt`` → ``--append-system-prompt`` IS enforced (a small capability
+    win over OpenCode). ``allowed_tools`` / ``disallowed_tools`` are NOT forwarded:
+    the shared config default sets Claude-namespaced tool names
+    (``Bash``/``Read``/…) that do not exist in Pi's lowercase toolset
+    (``bash``/``read``/…), so forwarding them to ``--tools`` would allowlist
+    nonexistent tools and strip the agent of ALL tools — like OpenCode/Codex/
+    Antigravity, Pi ignores them and runs with its full native toolset.
+    ``permission_mode`` is NOT enforced (Pi headless print mode auto-runs tools;
+    the sandbox driver is the isolation boundary), ``plugins`` are NOT injected
+    (no activation suites in v1), and ``system_prompt_file`` is NOT read — all are
+    warned about at ``start()``. See ``docs/agents/PI.md``.
     """
 
     type: Literal[AgentKind.PI]  # type: ignore[assignment]

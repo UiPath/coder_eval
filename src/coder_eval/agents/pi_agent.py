@@ -4,8 +4,7 @@ Drives the ``pi`` CLI in JSON print mode::
 
     pi -p --mode json --no-context-files --no-approve \
         --session-dir <D> --session-id <ID> [--model provider/id] \
-        [--thinking L] [--tools ...] [--exclude-tools ...] \
-        [--append-system-prompt S] -- <prompt>
+        [--thinking L] [--append-system-prompt S] -- <prompt>
 
 which streams **newline-delimited JSON events** on stdout. Each line is one
 event; this module reduces that stream into the standardized coder_eval event
@@ -524,15 +523,21 @@ class _PiTurnState:
     def _resolve_cost(self) -> float | None:
         """Decide the turn's cost: the stream's own accounting vs the rate card.
 
-        Pi reports a real per-call ``cost.total`` (spike-verified), which always
-        wins. The rate card fills only the gap where the stream reported no cost
-        at all; a genuinely free model resolves to the stream's 0.
+        Pi reports a real per-call ``cost.total`` (spike-verified), which wins for
+        any nonzero total. Two conservative fallbacks to the rate card:
+        - the stream reported no cost field at all (``saw_cost`` False), or
+        - it reported a cost field but the turn total came out exactly ``$0`` on a
+          model the rate card DOES price. A true $0 (free/promo response) and a
+          provider whose cost field is present-but-always-zero are indistinguishable
+          from the stream alone, so we prefer the rate card: understating cost would
+          silently defeat ``max_usd`` budget gates, which is the worse failure. A
+          genuinely free model (no rate-card entry) still resolves to the stream's 0.
         """
         rate = self._rate_card_cost()
         if not self.saw_cost:
             return rate
         if self.cost_usd == 0.0 and rate:
-            logger.warning(
+            logger.debug(
                 "pi: the stream reported $0 for a turn the rate card prices at $%.6f; using the rate card "
                 + "so the run total is not understated.",
                 rate,
@@ -639,7 +644,10 @@ class PiAgent(Agent[PiAgentConfig]):
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
         # Per-agent session, reused across communicate() calls for multi-turn /
-        # simulation continuity (assigned in start(), removed in stop()/kill()).
+        # simulation continuity (assigned in start(), removed in stop() — NOT in
+        # kill(), which the orchestrator's mid-turn backstop calls; dropping the
+        # dir there would break resume across a retried turn. _cleanup always
+        # calls stop() after any kill(), so the tempdir is still reclaimed).
         self._session_id: str | None = None
         self._session_dir: str | None = None
         self._process: asyncio.subprocess.Process | None = None

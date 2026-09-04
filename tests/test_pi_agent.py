@@ -488,7 +488,10 @@ class TestCooperativeStop:
 
         assert record.crashed is False
         assert proc.terminated is True
-        assert record.assistant_turn_count < 3
+        # should_stop() is True from the first check, which lands after the first
+        # streamed line (the `session` header) and before any turn completes — so
+        # the cut is at turn 0, not merely "fewer than the full 3".
+        assert record.assistant_turn_count == 0
 
     async def test_partial_record_is_returned_not_raised(self, patch_exec, tmp_path):
         proc = _RunningProcess(HAPPY_STREAM)
