@@ -15,7 +15,7 @@ drives it in **JSON print mode**:
 
 ```bash
 pi -p --mode json --no-context-files --no-approve \
-   --session-dir <dir> --session-id <id> -m <provider/model> "<prompt>"
+   --session-dir <dir> --session-id <id> --model <provider/id> -- "<prompt>"
 ```
 
 `--mode json` streams **newline-delimited JSON events** on stdout, one event per

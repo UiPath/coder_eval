@@ -665,6 +665,9 @@ class PiAgent(Agent[PiAgentConfig]):
         # A stable pre-assigned id (create-if-missing on turn 1, resume after).
         # The tempdir lives OUTSIDE the sandbox working dir and staged reference
         # dir, so it never pollutes graded files or trips reference-integrity.
+        # Drop any session dir from a prior start() first so re-starting the same
+        # agent instance cannot leak a tempdir.
+        self._cleanup_session_dir()
         self._session_id = f"coder-eval-{self.task_id}-{uuid4().hex[:8]}"
         self._session_dir = tempfile.mkdtemp(prefix="pi-session-")
         self._state = AgentState.WORKING

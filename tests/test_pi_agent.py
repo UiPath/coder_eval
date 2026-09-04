@@ -373,6 +373,20 @@ class TestSessionContinuity:
         assert not Path(session_dir).exists()
         assert agent._session_dir is None
 
+    async def test_restart_does_not_leak_the_prior_session_dir(self, patch_exec, tmp_path):
+        """Re-starting the same agent instance must remove the previous tempdir."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent()
+        await agent.start(str(tmp_path))
+        first = agent._session_dir
+        assert first is not None and Path(first).is_dir()
+
+        await agent.start(str(tmp_path))
+        second = agent._session_dir
+        assert second is not None and second != first
+        assert not Path(first).exists()  # the first dir was cleaned up, not leaked
+        await agent.stop()
+
 
 class TestEnvironmentInfo:
     def test_carries_semantics_and_pi_fields(self):
