@@ -214,10 +214,22 @@ success — the error names the unrecognized event types it saw. Intentional cut
 
 ## Running in Docker
 
-**Not supported yet — use the default `tempdir` driver.** Like OpenCode, Pi is a
-Node CLI that is not baked into `docker/Dockerfile`, and no Pi credentials are in
-the docker driver's `env_passthrough` allowlist. Run Pi tasks under `tempdir`
-(the default) on a host that has the CLI and its provider credentials.
+Pi **is supported under `--driver docker`.** The pinned Pi CLI is baked into
+`docker/Dockerfile` (`ARG PI_VERSION`, alongside the claude-code CLI), and
+`OPENROUTER_API_KEY` is forwarded into the container by the docker driver's
+default `env_passthrough` allowlist — so `--driver docker --type pi` runs
+end-to-end with no per-task `env_passthrough_extra`:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+uv run coder-eval run tasks/pi_smoke_test.yaml --driver docker
+```
+
+**Docker is the recommended driver for untrusted / adversarial Pi runs.** Pi's
+`permission_mode` is unenforced — headless print mode auto-runs tools — so the
+**container is the confinement boundary**. Under `tempdir` there is no such
+boundary; the agent runs with the host's own permissions. Prefer `--driver
+docker` whenever the task prompt or workspace is not fully trusted.
 
 ## Known limitations
 
@@ -238,8 +250,6 @@ the docker driver's `env_passthrough` allowlist. Run Pi tasks under `tempdir`
   cleanly as `max_turns_exhausted`. See
   [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant across
   harnesses.
-- **The `docker` sandbox driver is unsupported** — see
-  [Running in Docker](#running-in-docker).
 - **No sub-agent attribution.** Pi's CLI stream does not expose nested agent
   generations, so per-sub-agent token grouping (available for Claude and Codex) is
   not derivable.

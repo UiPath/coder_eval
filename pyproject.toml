@@ -152,9 +152,11 @@ opencode = []
 # binary over a subprocess reading `pi -p --mode json` — it imports no
 # third-party Python package. The extra exists to keep the opt-in surface
 # uniform across harnesses and to give the `npm install` prerequisite a single
-# home in the packaging metadata. Without the CLI on PATH the framework still
-# installs and runs; Pi tasks fail at start() with a clear hint pointing here.
-# See docs/agents/PI.md.
+# home in the packaging metadata. On `--driver docker` the pinned Pi CLI is baked
+# into docker/Dockerfile (like claude-code), so no host install is needed there;
+# on `tempdir`/host the `npm install` prerequisite above still applies. Without
+# the CLI on PATH the framework still installs and runs; Pi tasks fail at start()
+# with a clear hint pointing here. See docs/agents/PI.md.
 pi = []
 
 [project.scripts]
