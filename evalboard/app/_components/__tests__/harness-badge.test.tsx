@@ -18,6 +18,12 @@ describe("harnessShortLabel", () => {
         expect(harnessShortLabel("delegate-sdk")).toBe("Delegate");
     });
 
+    test("the Pi harness reads as Pi", () => {
+        // `agent.type` is "pi" (AgentKind.PI) in run.json; the badge shows the
+        // Pi mark and the short label "Pi".
+        expect(harnessShortLabel("pi")).toBe("Pi");
+    });
+
     test("an unknown harness falls back to its id rather than a wrong name", () => {
         expect(harnessShortLabel("some-new-agent")).toBe("some-new-agent");
     });
@@ -27,6 +33,11 @@ describe("HarnessBadge", () => {
     test("names the vendor in the alt text, not just the product", () => {
         render(<HarnessBadge harness="delegate-sdk" />);
         expect(screen.getByAltText("Delegate · UiPath")).toBeInTheDocument();
+    });
+
+    test("renders the Pi vendor mark with pi.dev in the alt text", () => {
+        render(<HarnessBadge harness="pi" />);
+        expect(screen.getByAltText("Pi · pi.dev")).toBeInTheDocument();
     });
 
     test("renders the id as text when there is no logo for it", () => {
