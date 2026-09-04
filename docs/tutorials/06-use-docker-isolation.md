@@ -19,8 +19,8 @@ For the complete reference, see [Docker Isolation](../DOCKER_ISOLATION.md).
 - **Isolation** — agent-generated code can't touch files or the network outside
   the sandbox.
 - **Reproducibility** — the image bakes in Python 3.13, Node 22 LTS, the Claude
-  CLI, `uv`, and the matching `coder_eval` version, so results don't drift with
-  host upgrades.
+  and Pi CLIs, the codex/antigravity/litellm agent SDKs, `uv`, and the matching
+  `coder_eval` version, so results don't drift with host upgrades.
 
 Aggregation (scores, reports, evalboard) still happens on the host — each
 container is a sealed "run one task → emit one `task.json`" worker.

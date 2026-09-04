@@ -296,7 +296,7 @@ Two things are missing, both deliberate rather than overlooked:
   `CLAUDE_CODE_VERSION` does — a release-process decision, not a one-line edit.
   (Node 22 is already present in the image, so the change itself is small.)
 - **No credentials would reach it.** The docker driver forwards host environment
-  variables through an explicit allowlist (`SandboxConfig.env_passthrough`),
+  variables through an explicit allowlist (`DockerDriverConfig.env_passthrough`),
   which carries per-harness blocks for Codex and Antigravity but none for
   OpenCode — so `OPENROUTER_API_KEY` and friends are not passed through, and
   `opencode auth login`'s credential file is not mounted. Even a custom image

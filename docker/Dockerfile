@@ -65,11 +65,11 @@ COPY experiments/default.yaml ./experiments/default.yaml
 # below always passes `--extra codex --extra antigravity --extra litellm`.
 #
 # `pi` IS baked above (pinned PI_VERSION) and its OPENROUTER_API_KEY provider
-# credential is in SandboxConfig.env_passthrough, so `--driver docker --type pi`
+# credential is in DockerDriverConfig.env_passthrough, so `--driver docker --type pi`
 # is supported. NOT every built-in agent ships here, though: `opencode` is
 # registered unconditionally but its CLI is a Node package
 # (`npm install -g opencode-ai`), absent from this image, and no OpenCode
-# credentials are in SandboxConfig.env_passthrough -- so `--driver docker` does
+# credentials are in DockerDriverConfig.env_passthrough -- so `--driver docker` does
 # not support it. Adding it means a pinned version that travels with the release
 # tag (as CLAUDE_CODE_VERSION / PI_VERSION do) plus an env_passthrough block; see
 # docs/agents/OPENCODE.md "Running in Docker".
