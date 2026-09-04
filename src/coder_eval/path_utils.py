@@ -69,8 +69,9 @@ def write_text_atomic(path: Path, text: str) -> None:
     that is strictly better than wedging finalization, and the litter is
     recognisable by its embedded pid.
 
-    Mode is ``0o666`` so the umask applies, giving the same 0644 a plain
-    ``write_text`` produced. Creating it 0600 broke the docker driver on Linux:
+    Mode is ``0o644`` — the same mode a plain ``write_text`` produced, and the
+    widest one that is never group- or world-*writable* whatever the umask.
+    Creating it 0600 broke the docker driver on Linux:
     the in-container orchestrator writes ``task.json`` as root straight into the
     bind-mounted host run dir, and the host then reads it back as the invoking
     uid — an unguarded read that raises ``PermissionError`` for every task. A
@@ -81,7 +82,7 @@ def write_text_atomic(path: Path, text: str) -> None:
     # predecessor, so O_EXCL can never collide with our own leftovers.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(tmp, flags, 0o666)
+    fd = os.open(tmp, flags, 0o644)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)

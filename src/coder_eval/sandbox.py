@@ -1315,6 +1315,12 @@ class Sandbox:
         indistinguishable to the criterion from a file that is not there, which
         is the same answer the template and mock-dir paths give, and raising
         here would book a config error as an agent crash (CE039).
+
+        Silent by design — :meth:`resolve_files` reports the escape ONCE per
+        criterion, naming the pattern the task author actually wrote. Logging
+        here instead named a resolved absolute path (uninformative: it is the
+        author's own string joined onto a tempdir) once per rejected glob
+        match, so a wide pattern produced a burst of near-identical warnings.
         """
         assert self.sandbox_dir is not None
         root = self.sandbox_dir.resolve()
@@ -1322,12 +1328,13 @@ class Sandbox:
             resolved = candidate.resolve()
         except OSError:
             return False
-        if resolved == root or root in resolved.parents:
-            return True
+        return resolved == root or root in resolved.parents
+
+    def _warn_escaped(self, path: str) -> None:
+        """Report that a criterion's declared path left the sandbox."""
         logger.warning(
-            "Criterion path %r resolves outside the sandbox (%s); treating it as no match.", str(candidate), root
+            "Criterion path %r resolves outside the sandbox (%s); treating it as no match.", path, self.sandbox_dir
         )
-        return False
 
     def resolve_files(self, path: str) -> list[Path]:
         """Resolve a criterion ``path`` to the sandbox files it addresses.
@@ -1363,7 +1370,10 @@ class Sandbox:
         # Literal first: an existing path is never reinterpreted as a pattern.
         candidate = self.sandbox_dir / path
         if candidate.exists():
-            return [candidate] if self._within_sandbox(candidate) else []
+            if self._within_sandbox(candidate):
+                return [candidate]
+            self._warn_escaped(path)
+            return []
 
         if not _is_glob(path):
             return []
@@ -1372,14 +1382,20 @@ class Sandbox:
         pinned = {segment for segment in path.split("/") if segment and not _is_glob(segment)}
 
         matches: list[Path] = []
+        escaped = False
         for match in self.sandbox_dir.glob(path):
-            if not match.is_file() or not self._within_sandbox(match):
+            if not match.is_file():
+                continue
+            if not self._within_sandbox(match):
+                escaped = True
                 continue
             discovered = [part for part in match.relative_to(self.sandbox_dir).parts if part not in pinned]
             if discovered and should_ignore_path(Path(*discovered), patterns):
                 continue
             matches.append(match)
 
+        if escaped:
+            self._warn_escaped(path)
         return sorted(matches)
 
     def resolved_path_label(self, path: str) -> str | None:

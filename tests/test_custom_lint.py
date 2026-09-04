@@ -3847,8 +3847,6 @@ class TestRuffExternalCoversEveryRule:
 
     def test_every_listed_id_is_well_formed(self):
         """Cheap guard against a typo silently widening the allowlist."""
-        import re
-
         bad = sorted(i for i in self._external() if not re.fullmatch(r"CE\d{3}", i))
         assert not bad, f"not a CE rule id: {bad}"
 

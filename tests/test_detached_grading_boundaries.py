@@ -14,6 +14,7 @@ Three boundaries, each shipped without a behavioural test:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -378,6 +379,10 @@ class TestAtomicWriteIsNotAnOverwritePrimitive:
 
         mode = target.stat().st_mode & 0o777
         assert mode & 0o044, f"task.json is not group/other-readable: {mode:#o}"
+        # Readable is the requirement; WRITABLE is not. A create mode of 0o666
+        # produced 0644 under the usual umask and a world-writable record under
+        # umask 0 — the widest mode that keeps the fix is 0o644.
+        assert not mode & 0o022, f"task.json is group/other-writable: {mode:#o}"
 
     def test_an_ordinary_write_still_works(self, tmp_path: Path) -> None:
         from coder_eval.path_utils import write_text_atomic
@@ -672,3 +677,24 @@ class TestCriterionPathsCannotEscapeTheSandbox:
 
         assert sandbox.resolve_files("proof.txt") == [work / "proof.txt"]
         assert sandbox.resolve_files("*.txt") == [work / "proof.txt"]
+
+    def test_the_escape_is_reported_once_naming_the_authored_pattern(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """One warning per criterion, naming the string the task author wrote.
+
+        Reporting from `_within_sandbox` instead fired once per rejected glob
+        match — a burst of near-identical lines for a wide pattern — and named
+        a resolved absolute path, which is just that same string joined onto a
+        tempdir.
+        """
+        sandbox, _ = self._sandbox(tmp_path)
+        for name in ("a.txt", "b.txt", "c.txt"):
+            (tmp_path / name).write_text("token", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="coder_eval.sandbox"):
+            assert sandbox.resolve_files("../*.txt") == []
+
+        escapes = [r for r in caplog.records if "resolves outside the sandbox" in r.getMessage()]
+        assert len(escapes) == 1, [r.getMessage() for r in escapes]
+        assert "'../*.txt'" in escapes[0].getMessage()
