@@ -46,13 +46,15 @@ care about. See [How it compares](https://coder-eval.com/docs/comparison).
 
 ## Watch the intro
 
-<p align="center">
-  <a href="https://www.youtube.com/watch?v=Iyq-5m1CnuI">
-    <img src="https://img.youtube.com/vi/Iyq-5m1CnuI/maxresdefault.jpg" alt="Video: Coder Eval — UiPath open-source framework to test AI coding agents" width="70%">
-  </a>
-</p>
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/6dc1c88e-e5b7-4fc5-ba9c-4b117efc8b54" controls>
+    <a href="https://www.youtube.com/watch?v=Iyq-5m1CnuI">
+      <img src="https://img.youtube.com/vi/Iyq-5m1CnuI/maxresdefault.jpg" alt="Video: Coder Eval — UiPath open-source framework to test AI coding agents" width="70%">
+    </a>
+  </video>
+</div>
 
-▶ **[Coder Eval: UiPath open-source framework to test AI Coding Agents](https://www.youtube.com/watch?v=Iyq-5m1CnuI)**
+▶ Also on YouTube: **[Coder Eval: UiPath open-source framework to test AI Coding Agents](https://www.youtube.com/watch?v=Iyq-5m1CnuI)**
 — what the framework does, and how a run works end to end.
 
 ## What you can do with it
