@@ -54,6 +54,8 @@ care about. See [How it compares](https://coder-eval.com/docs/comparison).
   </video>
 </div>
 
+🔊 **Turn the sound on** — GitHub's inline player always starts muted.
+
 ▶ Also on YouTube: **[Coder Eval: UiPath open-source framework to test AI Coding Agents](https://www.youtube.com/watch?v=Iyq-5m1CnuI)**
 — what the framework does, and how a run works end to end.
 
