@@ -14,7 +14,10 @@ built-in task, and read the result. ~5 minutes.
 
 - **Python 3.13+**
 - **[uv](https://docs.astral.sh/uv/)** — `brew install uv` (macOS) or `pip install uv`
-- **Claude CLI** — `brew install claude` ([install guide](https://docs.anthropic.com/claude/docs/claude-code))
+- **Claude CLI** — `brew install claude` ([install guide](https://docs.anthropic.com/claude/docs/claude-code)).
+  This tutorial uses the default `claude-code` agent; to run it on
+  [Codex](../agents/CODEX.md), [Antigravity](../agents/ANTIGRAVITY.md) or
+  [OpenCode](../agents/OPENCODE.md) instead, install that runtime in its place.
 - An **Anthropic API key**
 
 ## 1. Install
@@ -22,7 +25,7 @@ built-in task, and read the result. ~5 minutes.
 ```bash
 git clone https://github.com/UiPath/coder_eval.git
 cd coder_eval
-uv sync --extra dev
+uv sync
 ```
 
 > **Just want the CLI?** `uv tool install coder-eval` installs the released

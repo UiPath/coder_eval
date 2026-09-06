@@ -1,7 +1,7 @@
 [project]
 name = "coder-eval"
 version = "0.11.6"
-description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
+description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
@@ -9,7 +9,7 @@ authors = [{ name = "UiPath", email = "coder-eval@uipath.com" }]
 keywords = [
     "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
     "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
-    "gemini", "antigravity", "sandbox", "code-generation", "agent-evaluation",
+    "gemini", "antigravity", "opencode", "sandbox", "code-generation", "agent-evaluation",
     "llm-evaluation", "llm-eval", "ai-evaluation", "skills-evaluation",
     "claude-skills", "claude-code-skills", "agent-skills", "skillsbench",
     "agent-testing", "llmops",
