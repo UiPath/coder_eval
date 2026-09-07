@@ -123,14 +123,6 @@ codex = [
 # too (readelf -d | grep RELR must be empty / max GLIBC symbol <= the oldest
 # target's glibc). Note 0.1.16+ ships a fully STATIC localharness (no PT_INTERP, no
 # DT_NEEDED — hence its added musllinux tag), which retires this check entirely.
-# Why 0.1.8 and not 0.1.7: Windows Defender false-positives 0.1.7's bundled
-# localharness.exe as Misleading:Win32/Malgent and blocks its EXECUTION, so every
-# agent start on the Windows eval slice dies with `OSError: [WinError 225] ... the
-# file contains a virus or potentially unwanted software` (coder_eval_uipath builds
-# 13287452 / 13288171: 0/7 windows tasks). It is specific to 0.1.7's build — 0.1.8
-# and 0.1.16 launch clean on the same Defender that quarantines 0.1.7 — and an AV
-# exclusion is not available on the eval's Windows image (Defender config is
-# centrally managed there: elevated, yet Add-MpPreference fails with 0x800106ba).
 # Without this extra the framework still installs and runs; Antigravity-dependent
 # code paths fail at start() with a clear hint pointing back here.
 antigravity = [
