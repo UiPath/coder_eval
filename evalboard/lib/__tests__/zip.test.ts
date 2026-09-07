@@ -43,6 +43,31 @@ describe("createZip", () => {
         expect(files["task-1/artifacts/main.py"]).toBe("print('hi')\n");
     });
 
+    // The per-entry CRC-32 comes from node:zlib rather than a hand-rolled
+    // per-byte loop. `unzip -t` verifies every entry's checksum against the
+    // stored one, so a wrong CRC fails here rather than silently producing
+    // archives that only some readers reject.
+    test("stores a CRC-32 the system unzip accepts", async () => {
+        const zip = await createZip([
+            { name: "t/empty.txt", data: Buffer.alloc(0) },
+            { name: "t/small.txt", data: Buffer.from("hello") },
+            // Non-UTF8 bytes, so the checksum is over real binary content.
+            { name: "t/bin.dat", data: Buffer.from([0x00, 0xff, 0x80, 0x7f]) },
+            { name: "t/big.txt", data: Buffer.from("ab".repeat(100_000)) },
+        ]);
+        const dir = mkdtempSync(path.join(tmpdir(), "evalboard-zip-crc-"));
+        try {
+            const zipPath = path.join(dir, "a.zip");
+            writeFileSync(zipPath, zip);
+            const out = execFileSync("unzip", ["-t", zipPath], {
+                encoding: "utf-8",
+            });
+            expect(out).toMatch(/No errors detected/);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     test("compresses large repetitive payloads (DEFLATE, not STORE)", async () => {
         const big = Buffer.from("a".repeat(100_000));
         const zip = await createZip([{ name: "big.txt", data: big }]);

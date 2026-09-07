@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-// collectTaskFiles / collectRunFiles read RUNS_DIR, which lib/blob.ts resolves
+// collectTaskFiles reads RUNS_DIR, which lib/blob.ts resolves
 // from EVALBOARD_LOCAL_RUNS_DIR at *import* time. So each test stubs the env to
 // a throwaway runs dir, then dynamically imports a fresh module copy
 // (vi.resetModules) so RUNS_DIR picks up that path.
@@ -65,25 +65,5 @@ describe("collectTaskFiles", () => {
     test("returns null for a missing task", async () => {
         const { collectTaskFiles } = await loadRuns();
         expect(await collectTaskFiles(RUN, "nope")).toBeNull();
-    });
-});
-
-describe("collectRunFiles", () => {
-    test("returns run-level files + every task's files, minus noise", async () => {
-        const { collectRunFiles } = await loadRuns();
-        const files = await collectRunFiles(RUN);
-        const rels = files?.map((f) => f.relPath).sort();
-        expect(rels).toEqual([
-            "analysis.md",
-            `default/${TASK}/00/artifacts/main.py`,
-            `default/${TASK}/00/task.json`,
-            `default/${TASK}/00/task.log`,
-            "run.json",
-        ]);
-    });
-
-    test("returns null for a missing run", async () => {
-        const { collectRunFiles } = await loadRuns();
-        expect(await collectRunFiles("9999-99-99_00-00-00")).toBeNull();
     });
 });

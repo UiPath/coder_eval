@@ -1,4 +1,4 @@
-"""CE047: a module embedded into a generated sandbox shim stays stdlib-only and namespace-clean.
+"""CE048: a module embedded into a generated sandbox shim stays stdlib-only and namespace-clean.
 
 ``invocation_log.render_recorder`` splices the SOURCE of every module in
 ``invocation_log.EMBEDDED_MODULES`` into each ``record_cli`` shim that declares
@@ -34,7 +34,7 @@ from tests.lint.rules.base import BaseRule
 
 
 class EmbeddedShimStdlibOnly(BaseRule):
-    id = "CE047"
+    id = "CE048"
 
     # Derived from the writer's own list, so moving the module moves the rule
     # with it. A hardcoded second copy would match nothing after such a move and
@@ -60,7 +60,7 @@ class EmbeddedShimStdlibOnly(BaseRule):
             node,
             f"'{module}' is imported by a module embedded into generated sandbox shims, which run "
             "where coder_eval and its dependencies are not installed. Use the standard library, or "
-            f"add '{root}' to CE047's STDLIB_ALLOWED if it really is stdlib.",
+            f"add '{root}' to CE048's STDLIB_ALLOWED if it really is stdlib.",
         )
 
     def _check_name(self, node: ast.AST, name: str) -> None:

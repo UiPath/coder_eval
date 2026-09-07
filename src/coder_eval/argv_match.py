@@ -14,7 +14,7 @@ that drift.
 Everything here takes PLAIN DICTS rather than pydantic models, and imports
 nothing beyond the standard library: :func:`coder_eval.invocation_log.render_recorder`
 embeds this module's SOURCE into every generated shim, and that shim runs inside
-the sandbox, where ``coder_eval`` is not installed. Lint rule CE047 keeps the
+the sandbox, where ``coder_eval`` is not installed. Lint rule CE048 keeps the
 imports stdlib-only.
 
 :class:`MatchSpec` is what ``CliMatch.match_spec`` emits. It is a ``TypedDict``

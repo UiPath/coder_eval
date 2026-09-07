@@ -27,7 +27,7 @@ from coder_eval.models import RecordedCli
 LOG_FILENAME = "calls.jsonl"
 
 # Modules whose SOURCE is spliced into a generated shim. Exported because lint
-# rule CE047 keeps their imports stdlib-only and their module-level names clear
+# rule CE048 keeps their imports stdlib-only and their module-level names clear
 # of SHIM_GLOBALS: a rule that hardcodes its own copy of this list guards nothing
 # the day the module moves, and would pass vacuously rather than fail.
 EMBEDDED_MODULES = ("argv_match.py",)

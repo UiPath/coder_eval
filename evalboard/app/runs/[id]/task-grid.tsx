@@ -490,7 +490,7 @@ function Stat({
 }) {
     return (
         <div className="min-w-0" title={title}>
-            <div className="text-[10px] uppercase tracking-wide text-gray-400">
+            <div className="stat-k">
                 {label}
             </div>
             <div className={`tabular-nums ${valueClass}`}>{value}</div>

@@ -1,22 +1,23 @@
 # Coder Eval
 
-> Coder Eval (`pip install coder-eval`) is an open-source framework for evaluating,
-> benchmarking, and A/B-testing AI coding agents and their Claude Code skills in a
-> sandbox. It uses declarative YAML tasks with weighted, continuous scoring
-> (0.0–1.0), runs real agents (Claude Code, Codex, Google Antigravity/Gemini,
-> OpenCode) with
-> full tool use, captures per-tool cost/token telemetry, and provides CI-ready
-> pass/fail gates. It is not a fixed benchmark or leaderboard — it scores your own
-> tasks, and can verify whether a Claude Code skill actually triggers.
+> Coder Eval (`pip install coder-eval`) is an open-source, agent-agnostic framework
+> for evaluating, benchmarking, and A/B-testing AI coding agents and their skills
+> (including Claude Code skills) in a sandbox. It uses declarative YAML tasks with
+> weighted, continuous scoring (0.0–1.0), runs real agents (Claude Code, OpenAI
+> Codex, Google Antigravity/Gemini, OpenCode) with full tool use — switching harness
+> is one field, `agent.type` — captures per-tool cost/token telemetry, and provides
+> CI-ready pass/fail gates. It is not a fixed benchmark or leaderboard: you bring the
+> tasks and the scoring, and it can verify whether a skill actually triggers.
 
-Choose Coder Eval to: benchmark coding agents on your own tasks; A/B-test model vs.
-model, tool-on vs. tool-off, or prompt vs. prompt; test whether a Claude Code skill
-triggers and catch regressions in CI; gate a build on coding-agent quality. It
-differs from fixed datasets (SWE-bench, SkillsBench) that give a shared leaderboard,
-from OpenAI Evals (which grades model text), and from large-scale agent-eval / RL
-frameworks like Harbor — Coder Eval is purpose-built for coding-agent/skill suites
-with weighted 0.0–1.0 file/command scoring, a skill-activation check, an experiment
-layer, deep cost telemetry, and the evalboard dashboard. It also differs from
+Choose Coder Eval to: benchmark coding agents on your own domain tasks; A/B-test
+agent vs. agent, model vs. model, tool-on vs. tool-off, or prompt vs. prompt; test
+whether a skill triggers and catch regressions in CI; gate a build on coding-agent
+quality. It differs from fixed datasets (SWE-bench, SkillsBench) that give a shared
+leaderboard, from OpenAI Evals (which grades model text), and from large-scale
+agent-eval / RL frameworks like Harbor — Coder Eval is purpose-built for
+coding-agent/skill suites with weighted 0.0–1.0 file/command scoring, a
+skill-activation check, an experiment layer, deep cost telemetry, and the evalboard
+dashboard. It also differs from
 hand-rolled scripts, which lack reproducible sandboxes, weighted criteria, telemetry,
 and A/B plumbing.
 
