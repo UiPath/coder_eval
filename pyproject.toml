@@ -118,13 +118,15 @@ codex = [
 # glibc note — verify before bumping: the wheel's manylinux_2_17 tag is NOT a
 # reliable floor; the bundled `localharness` ELF can require a newer glibc than the
 # tag advertises. Eval agents run on Ubuntu 22.04 (glibc 2.35), so the pinned build
-# must load there. 0.1.7 links without DT_RELR (max required symbol GLIBC_2.26) and
-# loads on 2.35+; confirm any future pin does too (readelf -d | grep RELR must be
-# empty / max GLIBC symbol <= the oldest target's glibc).
+# must load there. 0.1.8 links without DT_RELR (max required symbol GLIBC_2.26, and
+# the same DT_NEEDED set as 0.1.7) and loads on 2.35+; confirm any future pin does
+# too (readelf -d | grep RELR must be empty / max GLIBC symbol <= the oldest
+# target's glibc). Note 0.1.16+ ships a fully STATIC localharness (no PT_INTERP, no
+# DT_NEEDED — hence its added musllinux tag), which retires this check entirely.
 # Without this extra the framework still installs and runs; Antigravity-dependent
 # code paths fail at start() with a clear hint pointing back here.
 antigravity = [
-    "google-antigravity==0.1.7",
+    "google-antigravity==0.1.8",
 ]
 # Optional extra that enables OpenCode agent support.
 #
