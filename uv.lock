@@ -536,7 +536,7 @@ requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.124" },
     { name = "click", specifier = ">=8.3.3" },
     { name = "defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.1" },
-    { name = "google-antigravity", marker = "extra == 'antigravity'", specifier = "==0.1.7" },
+    { name = "google-antigravity", marker = "extra == 'antigravity'", specifier = "==0.1.8" },
     { name = "httpx2", specifier = ">=2.12.0,<3.0.0" },
     { name = "jmespath", specifier = ">=1.1.0" },
     { name = "jsonschema", specifier = ">=4.26.0" },
@@ -877,7 +877,7 @@ wheels = [
 
 [[package]]
 name = "google-antigravity"
-version = "0.1.7"
+version = "0.1.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -889,11 +889,11 @@ dependencies = [
     { name = "websockets" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/aa/609ecaca0611519fe49094d7993e046f274c5d8622541d502b4a6b6bc8e5/google_antigravity-0.1.7-py3-none-macosx_11_0_arm64.whl", hash = "sha256:2707d823bba1dfc4c3384d7d78aea13eb25fdf8a28a8345944b38c16c1405c8a", size = 31644051, upload-time = "2026-07-16T21:03:58.157Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/d9/8936a14195c3d923c49f3ee4810ab9dd0655c9618814a7c35837734e075d/google_antigravity-0.1.7-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:c5070a0f9a6c4406ea460550ae1a543cfb7c9fc185b80921c31ea681aa645ec5", size = 37042570, upload-time = "2026-07-16T21:04:01.126Z" },
-    { url = "https://files.pythonhosted.org/packages/41/55/c5e11b0f91c70540a0e247c53de117c0986b167e94e205c131dc8fadcf76/google_antigravity-0.1.7-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:0958f4481dd4700a0a32acb948f959fb1858657038f103c5a0d067727010f71e", size = 39141605, upload-time = "2026-07-16T21:04:04.392Z" },
-    { url = "https://files.pythonhosted.org/packages/3f/80/1bd2f9ef2dc20b498186d6e888c09b86ce519748e85188c898d1c7bba77c/google_antigravity-0.1.7-py3-none-win_amd64.whl", hash = "sha256:c2a20d7a22b9ca086c570efce2d36b688ef15e30a371f7fbb93cd05aba49d563", size = 36434279, upload-time = "2026-07-16T21:04:07.246Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/3b/e2cf44fb9da8ac407199c1c351fcdc4876c0aece1b61123b2a439a36af66/google_antigravity-0.1.7-py3-none-win_arm64.whl", hash = "sha256:6acaa5ed047cb9bad6ad50992aea71616eff2a6767161b96aab5f7a1cd765ce5", size = 32907283, upload-time = "2026-07-16T21:04:10.104Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/5f/0f5d6b210faddb4e6d2b0c25072ae0b2430294f5dec0b4eabecc196ea32b/google_antigravity-0.1.8-py3-none-macosx_11_0_arm64.whl", hash = "sha256:be5a4853ae7cb7bff4fbba44073cbed96e1fdcdeebd9602b324bf3abe5614ab2", size = 31829862, upload-time = "2026-07-23T19:20:02.908Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/cb/2d74bfc57e9f7f579a97f8b445599639ac4a101bcf44bab2a9c58c1f634f/google_antigravity-0.1.8-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:06773b250668993cf59e3a90ba00f1d6fc52483612d9463aa3e71e4a2a30a20b", size = 37289461, upload-time = "2026-07-23T19:20:06.571Z" },
+    { url = "https://files.pythonhosted.org/packages/93/54/9972ecf8e0b5e3d12067550462078be9babf8dc0f686e80ffe70daef0cad/google_antigravity-0.1.8-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:bd912cc0ac74fef8026c227500b7de06b3749a78f0148b99d9033e8c952787e0", size = 39396935, upload-time = "2026-07-23T19:20:09.493Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/ee/52f63973142aa00b722d7d841b60991798352564538f8533c9eb27bb9546/google_antigravity-0.1.8-py3-none-win_amd64.whl", hash = "sha256:edc1690c3116d1da31b033951d62a56a005f73d13486ced1d11564c0b98ca244", size = 36678881, upload-time = "2026-07-23T19:20:13.11Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/f6/503b6efb48903cfca252fb22077c15849da302e3d3f4d7a7b7cd2438e146/google_antigravity-0.1.8-py3-none-win_arm64.whl", hash = "sha256:999bdc9ed8d413a6abff96b15105e72b7c596fcd7fce41448f6613ee0947a8b4", size = 33138761, upload-time = "2026-07-23T19:20:16.811Z" },
 ]
 
 [[package]]
