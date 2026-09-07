@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
     DEFAULT_SOURCE,
+    GHA_SOURCE,
     SCRIBE_SOURCE,
     SKILLS_SOURCE,
     SOURCES,
@@ -17,6 +18,14 @@ describe("source registry", () => {
     test("scribe reads its own container, not the skills nightly's", () => {
         expect(SCRIBE_SOURCE.container).toBe("aria-runs");
         expect(SCRIBE_SOURCE.container).not.toBe(SKILLS_SOURCE.container);
+    });
+
+    test("gha reads its own container, so the 14-day expiry rule cannot reach nightly history", () => {
+        // The storage account carries a lifecycle rule (`expire-runs-gha-14d`,
+        // prefixMatch `runs-gha/`) that DELETES blobs. Sharing a container with
+        // the skills nightly would put months of history behind that rule.
+        expect(GHA_SOURCE.container).toBe("runs-gha");
+        expect(GHA_SOURCE.container).not.toBe(SKILLS_SOURCE.container);
     });
 
     test("every source has a distinct id and container", () => {
@@ -39,6 +48,17 @@ describe("sourceById", () => {
     test("resolves a known id", () => {
         expect(sourceById("scribe")).toBe(SCRIBE_SOURCE);
         expect(sourceById("skills")).toBe(SKILLS_SOURCE);
+    });
+
+    // The gha source is reachable ONLY by `?src=gha` on a link pasted from a
+    // GitHub run summary — there is no tab and no listing to arrive from. So the
+    // id in that emitted link and the id in the registry are a two-place
+    // agreement with no UI in between to reveal a mismatch, and the coercion
+    // asserted below turns a typo in either into the wrong container's data
+    // rather than an error. This is the assertion that fails instead.
+    test("resolves the unlisted gha id to the gha container", () => {
+        expect(sourceById("gha")).toBe(GHA_SOURCE);
+        expect(sourceById("gha").container).toBe("runs-gha");
     });
 
     // Coercing rather than throwing is deliberate: a stray ?src= in a shared URL
@@ -99,6 +119,30 @@ describe("runsDirFor", () => {
 // and refresh-button), so a Node builtin import here fails `next build` with
 // UnhandledSchemeError — which tsc and vitest both happily pass. Catch it here so
 // the failure surfaces in a fast test rather than only in the production build.
+// The gha source is registered but deliberately absent from the header nav: a
+// run is reachable only by its direct link from the GitHub run that produced it.
+// That is what lets it skip a listing page — and evalboard/README.md warns that a
+// source WITH a tab needs its own `getAdhocRunListing` section or its uploads land
+// nowhere reachable. So adding the tab without the listing is the silent failure
+// this pins. If a tab is genuinely wanted, add the listing section first, then
+// delete this test.
+describe("unlisted sources", () => {
+    test("gha is registered but has no nav tab", async () => {
+        const { readFile } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const layout = await readFile(
+            join(process.cwd(), "app/layout.tsx"),
+            "utf-8",
+        );
+        expect(SOURCES).toContain(GHA_SOURCE);
+        expect(layout).not.toContain(`"/${GHA_SOURCE.id}"`);
+        // Guard against the pin rotting the other way: if NAV ever starts
+        // iterating SOURCES, registration alone would create the tab and the
+        // href check above would keep passing while the tab appeared.
+        expect(layout).not.toMatch(/NAV[\s\S]{0,200}SOURCES/);
+    });
+});
+
 describe("client-safety", () => {
     test("sources.ts imports no Node builtins", async () => {
         const { readFile } = await import("node:fs/promises");

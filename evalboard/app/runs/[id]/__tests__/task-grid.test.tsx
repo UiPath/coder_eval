@@ -11,6 +11,7 @@ function row(
 ): TaskResultSummary {
     return {
         taskId,
+        variantId: null,
         replicateIndex: null,
         status: "SUCCESS",
         weightedScore: 1.0,
@@ -470,5 +471,127 @@ describe("TaskGrid — replicates", () => {
         expect(
             within(tr).getByTitle(/1 of 2 replicates passed/i).textContent?.replace(/\s/g, ""),
         ).toBe("1/2✓");
+    });
+});
+
+describe("TaskGrid — variants", () => {
+    // A run with no variants must render exactly as it always has: no extra
+    // column, no extra chip, no ?v= on any link.
+    test("an ordinary run gains no variant column and no ?v= link", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[row("alpha", 3, 5), row("beta", 3, 5)]}
+            />,
+        );
+        const table = screen.getByRole("table");
+        expect(
+            within(table).queryByRole("columnheader", { name: /variant/i }),
+        ).toBeNull();
+        const link = within(table).getByRole("link", { name: /alpha/i });
+        expect(link.getAttribute("href")).not.toContain("v=");
+    });
+
+    test("a two-arm run shows the column and one row per arm", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[
+                    row("alpha", 3, 5, {
+                        variantId: "live-v1",
+                        status: "SUCCESS",
+                    }),
+                    row("alpha", 3, 5, {
+                        variantId: "preview-v2",
+                        status: "FAILURE",
+                    }),
+                ]}
+            />,
+        );
+        const table = screen.getByRole("table");
+        expect(
+            within(table).getByRole("columnheader", { name: /variant/i }),
+        ).toBeTruthy();
+        // Both arms survive: the collapse groups replicates, never arms.
+        expect(within(table).getAllByRole("link", { name: /alpha/i })).toHaveLength(
+            2,
+        );
+        expect(within(table).getByText("live-v1")).toBeTruthy();
+        expect(within(table).getByText("preview-v2")).toBeTruthy();
+    });
+
+    // Without ?v= both rows would open the same transcript, which is the exact
+    // failure this change exists to fix.
+    test("each arm's row links to its own arm", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[
+                    row("alpha", 3, 5, { variantId: "live-v1" }),
+                    row("alpha", 3, 5, { variantId: "preview-v2" }),
+                ]}
+            />,
+        );
+        const table = screen.getByRole("table");
+        const hrefs = within(table)
+            .getAllByRole("link", { name: /alpha/i })
+            .map((a) => a.getAttribute("href") ?? "");
+        expect(hrefs.some((h) => h.includes("v=live-v1"))).toBe(true);
+        expect(hrefs.some((h) => h.includes("v=preview-v2"))).toBe(true);
+    });
+});
+
+describe("TaskGrid — default ordering keeps a task's arms together", () => {
+    // The case that motivated the rule: one task's arms DISAGREE. Ranking rows
+    // independently sends the failing arm to the top and the passing arm to the
+    // bottom, which is precisely the comparison the run was made to show.
+    test("a task whose arms disagree still renders its two rows adjacent", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[
+                    row("alpha", null, null, { variantId: "A", status: "FAILURE" }),
+                    row("alpha", null, null, { variantId: "B", status: "SUCCESS" }),
+                    row("beta", null, null, { variantId: "A", status: "SUCCESS" }),
+                    row("beta", null, null, { variantId: "B", status: "SUCCESS" }),
+                ]}
+            />,
+        );
+        const order = screen
+            .getAllByRole("row")
+            .slice(1)
+            .map((tr) => tr.textContent ?? "");
+
+        // alpha's arms are rows 0 and 1: the failing task sorts first, and its
+        // passing arm comes with it rather than being ranked to the bottom.
+        expect(order[0]).toMatch(/alpha/i);
+        expect(order[1]).toMatch(/alpha/i);
+        expect(order[2]).toMatch(/beta/i);
+        expect(order[3]).toMatch(/beta/i);
+    });
+
+    test("a run without variants keeps failures-first, then task id", () => {
+        render(
+            <TaskGrid
+                sourceId="skills"
+                runId="r1"
+                tasks={[
+                    row("aaa", null, null, { status: "SUCCESS" }),
+                    row("mmm", null, null, { status: "FAILURE" }),
+                    row("zzz", null, null, { status: "SUCCESS" }),
+                ]}
+            />,
+        );
+        const order = screen
+            .getAllByRole("row")
+            .slice(1)
+            .map((tr) => tr.textContent ?? "");
+        expect(order[0]).toMatch(/mmm/i);
+        expect(order[1]).toMatch(/aaa/i);
+        expect(order[2]).toMatch(/zzz/i);
     });
 });

@@ -8,6 +8,10 @@
 export type ChipVariant = "skill" | "review" | "tag";
 export type ChipSize = "sm" | "md";
 
+// The colour/size utilities behind these tokens live in app/globals.css under
+// `@layer components`. A chip renders ~11k times on a nightly run page, and the
+// composed utility string (~130 chars each) was 1.4 MB of identical class text
+// in one response; short tokens move it into the cached stylesheet.
 const STYLES: Record<
     ChipVariant,
     {
@@ -19,22 +23,22 @@ const STYLES: Record<
     }
 > = {
     skill: {
-        idle: "bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100 font-medium",
-        active: "bg-indigo-600 text-white border-indigo-600 font-medium",
+        idle: "chip-skill",
+        active: "chip-skill-on",
         countIdle: "text-indigo-400",
         countActive: "text-indigo-100",
         title: "skill",
     },
     review: {
-        idle: "bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100",
-        active: "bg-rose-600 text-white border-rose-600",
+        idle: "chip-review",
+        active: "chip-review-on",
         countIdle: "text-rose-400",
         countActive: "text-white/80",
         title: "review tag",
     },
     tag: {
-        idle: "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100",
-        active: "bg-studio-blue/10 text-studio-blue border-studio-blue/30",
+        idle: "chip-tag",
+        active: "chip-tag-on",
         countIdle: "text-gray-400",
         countActive: "text-studio-blue/70",
         title: "task tag",
@@ -43,11 +47,11 @@ const STYLES: Record<
 
 // md gray-tag active uses solid studio-blue (the filter-rail chip variant);
 // sm gray-tag active uses the softer 10% tint baked into STYLES.
-const TAG_MD_ACTIVE = "bg-studio-blue text-white border-studio-blue";
+const TAG_MD_ACTIVE = "chip-tag-on-md";
 
 const SIZE_CLS: Record<ChipSize, string> = {
-    sm: "text-[10px] leading-none px-1.5 py-0.5",
-    md: "text-xs px-2 py-0.5",
+    sm: "chip-sm",
+    md: "chip-md",
 };
 
 export function ChipButton({
@@ -70,11 +74,11 @@ export function ChipButton({
     const s = STYLES[variant];
     const activeCls =
         variant === "tag" && size === "md" ? TAG_MD_ACTIVE : s.active;
-    // Strip hover utilities when there's no click handler — otherwise the
-    // non-interactive <span> branch shows a hover affordance it can't honor.
-    const idleCls = onClick ? s.idle : s.idle.replace(/\s?hover:\S+/g, "");
+    // `chip-act` arms the hover rules, and only the interactive branch gets it:
+    // a non-clickable <span> must not show an affordance it can't honor.
+    const idleCls = onClick ? `${s.idle} chip-act` : s.idle;
     const stateCls = active ? activeCls : idleCls;
-    const baseCls = `${SIZE_CLS[size]} rounded border transition-colors ${stateCls}`;
+    const baseCls = `chip ${SIZE_CLS[size]} ${stateCls}`;
     const tooltip = title ?? s.title;
     const inner = (
         <>

@@ -1,6 +1,6 @@
 # Run-Limit Parity
 
-One task file, run on three harnesses, must be the same task. `run_limits.max_turns`
+One task file, run on any harness, must be the same task. `run_limits.max_turns`
 was the field that broke that promise hardest: Claude Code enforced it, and Codex and
 Antigravity accepted it and never read it, so `max_turns: 6` ran capped on one
 backend and unbounded on the other two.
@@ -10,12 +10,12 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 ## The table
 
-| Limit | claude-code | codex | antigravity |
-|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) |
-| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` |
+| Limit | claude-code | codex | antigravity | opencode |
+|---|---|---|---|---|
+| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) |
+| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
+| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
+| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) |
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 
@@ -41,6 +41,14 @@ agent-loop turn, which absorbs an arbitrary number of *parallel* tool calls, so 
 same number bounds very different amounts of work: under a prompt that encourages
 batching, a cap of N here permits many more than N tool calls, where it buys exactly
 N on the other two.
+
+**OpenCode also keeps a native unit — its stream's own steps.** Unlike Codex and
+Antigravity, `opencode run` executes a real multi-step agent loop per invocation
+and streams it (`step_start` / `step_finish`), so the natural agent-loop unit
+exists and is honored: `max_turns: N` allows N complete steps and cuts the run
+when step N+1 begins, with the completed steps' tokens intact. A step is one
+assistant generation and may carry several tool calls — so, as with claude-code,
+the same number is a looser tool-call budget than on the visible-turn backends.
 
 **So holding `max_turns` constant across harnesses does not hold the budget
 constant.** If you are A/B-ing across backends and the cap is close to binding, that
@@ -162,9 +170,10 @@ so the same requirement applies there and is unlinted.
 `tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more
 sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
 outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
-`--type antigravity` to check a backend against the contract above.
+`--type antigravity` / `--type opencode` to check a backend against the contract
+above.
 
 ## Related
 
-- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md)
+- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md)
 - [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) — the full `run_limits` schema

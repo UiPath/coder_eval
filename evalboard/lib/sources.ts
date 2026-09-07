@@ -43,7 +43,26 @@ export const SCRIBE_SOURCE: Source = {
     container: "aria-runs",
 };
 
-export const SOURCES: readonly Source[] = [SKILLS_SOURCE, SCRIBE_SOURCE];
+// Ad-hoc runs uploaded by UiPath/skills' `run-coder-eval` workflow_dispatch, so a
+// debug run has a shareable link instead of only a downloadable artifact.
+//
+// DELIBERATELY UNLISTED: registered here but absent from `NAV` in app/layout.tsx,
+// so there is no tab and nothing enumerates it — a run is reachable only by the
+// direct link from the GitHub run that produced it, which is why the README's
+// `getAdhocRunListing` rule does not apply. Registration is still mandatory:
+// `sourceById` COERCES an unknown id to DEFAULT_SOURCE rather than throwing, so
+// without this entry `?src=gha` would read the nightly's container and 404.
+//
+// Its own container, not `runs` with a prefix: getAdhocRunListing loads per-run
+// metadata for every non-date-shaped id before truncating, and the 14-day expiry
+// rule (`expire-runs-gha-14d`) must never reach nightly history.
+export const GHA_SOURCE: Source = {
+    id: "gha",
+    label: "Ad-hoc (GH)",
+    container: "runs-gha",
+};
+
+export const SOURCES: readonly Source[] = [SKILLS_SOURCE, SCRIBE_SOURCE, GHA_SOURCE];
 
 /** Every surface that doesn't opt into a source reads the skills nightly. */
 export const DEFAULT_SOURCE = SKILLS_SOURCE;

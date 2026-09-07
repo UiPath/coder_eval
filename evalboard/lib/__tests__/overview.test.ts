@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+    adhocRunDate,
     avgRunSuccessRate,
     buildAdhocRows,
     buildTagTaskRows,
@@ -1204,5 +1205,54 @@ describe("projectRunRow", () => {
             );
             expect(scoped?.tasks).toHaveLength(2);
         });
+    });
+});
+
+// The front page used to load EVERY ad-hoc candidate before sorting — 165 runs
+// / ~294 MB of run.json — to render ten rows. The load is now bounded by an
+// id-derived date, so these pin the extraction that decides what gets read.
+describe("adhocRunDate", () => {
+    test("reads the date out of the ad-hoc id shapes actually in the container", () => {
+        const at = (id: string) => adhocRunDate(id)?.toISOString() ?? null;
+        // The dominant shape: `adhoc-` prefix + a full date_time.
+        expect(at("adhoc-2026-09-02_21-59-13")).toBe(
+            "2026-09-02T21:59:13.000Z",
+        );
+        // Legacy hand-named runs: leading date, no time -> start of that day.
+        expect(at("2026-05-28_skills-full-codex-gpt54")).toBe(
+            "2026-05-28T00:00:00.000Z",
+        );
+        // Date anywhere in the id, not just the head.
+        expect(at("haiku45-skills-suite-2026-05-28")).toBe(
+            "2026-05-28T00:00:00.000Z",
+        );
+    });
+
+    test("null for an id carrying no date", () => {
+        // These are always loaded rather than ordered out, since there is no
+        // key to order them by.
+        expect(adhocRunDate("sdk-live-r2-final")).toBeNull();
+        expect(adhocRunDate("adhoc-flow-v2-preview-20260820")).toBeNull();
+        expect(adhocRunDate("deploys")).toBeNull();
+    });
+
+    test("orders newest-first the same way run start_time does", () => {
+        const ids = [
+            "2026-05-28_skills-full-codex-gpt54",
+            "adhoc-2026-09-02_21-59-13",
+            "adhoc-2026-09-02_11-20-47",
+            "adhoc-2026-08-27_19-35-31",
+        ];
+        const sorted = [...ids].sort(
+            (a, b) =>
+                (adhocRunDate(b)?.getTime() ?? 0) -
+                (adhocRunDate(a)?.getTime() ?? 0),
+        );
+        expect(sorted).toEqual([
+            "adhoc-2026-09-02_21-59-13",
+            "adhoc-2026-09-02_11-20-47",
+            "adhoc-2026-08-27_19-35-31",
+            "2026-05-28_skills-full-codex-gpt54",
+        ]);
     });
 });

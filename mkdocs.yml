@@ -1,8 +1,9 @@
 site_name: Coder Eval
 site_description: >-
-  Evaluate & benchmark AI coding agents and Claude Code skills — a sandboxed,
-  reproducible framework with declarative YAML eval suites for Claude Code,
-  Codex & Gemini, A/B experiments, weighted scoring, and CI gates.
+  Evaluate and benchmark AI coding agents and their skills — a sandboxed,
+  agent-agnostic framework with declarative YAML eval suites for Claude Code,
+  Codex, Antigravity (Gemini) and OpenCode, A/B experiments, weighted scoring,
+  and CI gates.
 site_url: https://coder-eval.com/docs/
 repo_url: https://github.com/UiPath/coder_eval
 repo_name: UiPath/coder_eval
@@ -83,12 +84,13 @@ extra:
     agents/CLAUDE_CODE.md: "Configuring and running the default Claude Code agent"
     agents/CODEX.md: "Running the OpenAI Codex agent"
     agents/ANTIGRAVITY.md: "Running the Google Antigravity / Gemini agent"
+    agents/OPENCODE.md: "Running the OpenCode agent on open-weight models"
     agents/HARNESS_PARITY.md: "What each run_limits field means on every harness"
     AB_EXPERIMENTS.md: "Compare models / tools / prompts across the same tasks"
     DATASETS.md: "Fan a single task out over a dataset"
     DIALOG_MODE.md: "Evaluate agents in multi-turn conversation via a simulated user"
     DOCKER_ISOLATION.md: "The container sandbox driver, with custom images"
-    CI_GATE.md: "Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor"
+    CI_GATE.md: "Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, run reports"
     PLUGIN.md: "Install the Claude Code plugin — author, run, and analyze suites from inside the agent"
     EXTENDING.md: "Author a custom agent, criterion, or model pricing via the plugin SPI"
     REPORT_SCHEMA.md: "Field-level reference for run.json / variant.json / task.json"
@@ -112,6 +114,7 @@ nav:
       - Claude Code: agents/CLAUDE_CODE.md
       - Codex: agents/CODEX.md
       - Antigravity (Gemini): agents/ANTIGRAVITY.md
+      - OpenCode: agents/OPENCODE.md
       - Run-Limit Parity: agents/HARNESS_PARITY.md
   - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md

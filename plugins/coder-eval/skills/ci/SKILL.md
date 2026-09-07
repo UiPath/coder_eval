@@ -1,5 +1,5 @@
 ---
-description: Generate a GitHub Actions workflow that runs a coder-eval suite as a CI gate or on a schedule, using the published composite action — with the agent runtime, credentials, JUnit output and a score floor wired correctly.
+description: Generate a GitHub Actions workflow that runs a coder-eval suite as a CI gate or on a schedule, using the published composite action — with the agent runtime, credentials, JUnit output and the run reports wired correctly.
 disable-model-invocation: true
 allowed-tools: ["Read", "Glob", "Grep", "Write", "Bash"]
 ---
@@ -12,7 +12,7 @@ The user's request is: `$ARGUMENTS`
 
 Find the repository's task tree by following
 `${CLAUDE_PLUGIN_ROOT}/reference/repo-layout.md`, and check whether `.github/workflows/`
-exists. The paths you resolve here become the workflow's `tasks:` input in step 3 — that
+exists. The paths you resolve here become `args:` entries in the workflow in step 3 — that
 input is written from discovery, never from a fixed guess.
 
 If there is no `.github/` directory at all, say that this skill targets GitHub Actions
@@ -71,44 +71,46 @@ jobs:
           node-version: "20"
       - run: npm install -g @anthropic-ai/claude-code
 
-      - uses: UiPath/coder_eval@v0
+      - id: eval
+        uses: UiPath/coder_eval@v0
         with:
-          tasks: tasks/*.yaml
-          model: claude-haiku-4-5-20251001
-          junit-path: runs/ci/junit.xml
-          step-summary: true
-          minimum-task-score: "0.7"
+          run-dir: runs/ci
+          args: |
+            tasks/**/*.yaml
+            --model
+            claude-haiku-4-5-20251001
           env: |
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+
+      - if: always()
+        run: cat "${{ steps.eval.outputs.run-md-path }}" >> "$GITHUB_STEP_SUMMARY"
 ```
 
-Adjust `model:` and the cron to the repository. Pin the action at `@v0`, the moving major
+Adjust the model and the cron to the repository. Pin the action at `@v0`, the moving major
 tag. Then work through the four things the snippet cannot guess.
 
-### `tasks:` — from discovery, and never with `**`
+Note the shape of `args:`: the action promotes **none** of `coder-eval run`'s flags to a
+named input, so task paths and flags all go there, one argument per line, with a flag and
+its value on separate lines. There is no `tasks:`, `tags:` or `model:` input.
 
-The value above is a placeholder for whatever step 1 discovered. Substituting it is not
-just a rename, because **the action expands this input unquoted with `globstar` off**:
-bash word-splits *and* pathname-expands it before coder-eval ever sees it.
+### The task paths — from discovery
 
-- **A recursive `**` glob silently loses tasks.** With `globstar` off, `a/**/*.yaml`
-  degrades to `a/*/*.yaml` — so a tree with `a/top.yaml` and `a/sub/deep.yaml` runs
-  `deep.yaml` only, and the gate passes while never testing `top.yaml`. Nothing reports
-  this. Do not write `**` here, and keep this paragraph next to whatever you do write, or
-  the next reader will "simplify" it back.
-- **An unmatched glob is worse than a missing one.** `nullglob` is off too, so a pattern
-  matching nothing reaches the CLI as a literal string and hard-fails the whole run
-  (`Error: Task file not found: …`, exit 1).
+The value above is a placeholder for whatever step 1 discovered. `args:` entries are
+handed to the CLI **verbatim**: no word splitting, no pathname expansion. The CLI expands
+the globs itself, which makes this simpler than it looks:
 
-So emit **explicit per-depth globs, or an explicit file list** — and emit only the depths
-that actually match when you write the workflow. Check first; a fixed ladder of depths
-breaks any repository that does not happen to have tasks at every level.
+- **`**` works.** `tasks/**/*.yaml` is genuinely recursive, so one pattern covers a tree
+  of any depth. No per-depth ladder, no `globstar` caveat.
+- **A glob matching nothing fails loudly** with `No task files found!` and exit 1, rather
+  than reaching the CLI as a literal path.
+- **One path per line.** Two globs are two lines, not one space-separated string, which
+  would arrive as a single malformed argument.
 
-For a tree that happens to sit two levels deep, that looks like this — the paths are one
-repository's, shown to make the shape concrete, not a value to copy:
+So emit what step 1 found, one entry per line:
 
 ```yaml
-tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
+args: |
+  tests/tasks/**/*.yaml
 ```
 
 ### `version:` — conditional on the repository's pin
@@ -122,21 +124,21 @@ self-documenting.
 
 ### The experiment, if the suite runs through one
 
-If the repository's suite resolves through an experiment, the workflow must pass it via
-`extra-args` — again with the discovered path, not the illustrative one below:
+If the repository's suite resolves through an experiment, the workflow must pass it in
+`args` — two lines, and with the discovered path, not the illustrative one below:
 
 ```yaml
-extra-args: "-e tests/experiments/default.yaml"
+args: |
+  tests/tasks/**/*.yaml
+  -e
+  tests/experiments/default.yaml
 ```
 
-This is load-bearing rather than tidy: an experiment usually supplies `agent:` config, so
+This matters rather than being tidy: an experiment usually supplies `agent:` config, so
 omitting it silently changes what the run measures — the gate and the local run stop
 being the same test. If the repository has **several** experiments, ask which one the
 gate should use; a CI gate quietly running the wrong experiment is precisely the failure
 this exists to prevent.
-
-`extra-args` is a trusted input that is split on whitespace, so a path containing a space
-is unsafe there. Choose paths without spaces rather than discovering this in CI.
 
 ### Environment — including the skill source, if the suite is an activation suite
 
@@ -192,27 +194,23 @@ Never inline a key literal, and never commit one. If the repository has no
 
 ## Step 5 — Reports
 
-- `junit-path:` writes a JUnit XML report, which GitHub and most test-report tooling
-  ingest to show per-task pass/fail.
-- `step-summary: true` appends the run's markdown report to the job summary, so a
-  reviewer sees the scores without downloading anything.
+The action reports three paths as outputs and writes no report anywhere itself:
+
+- `junit-path` — the JUnit XML at `<run-dir>/junit.xml`, which GitHub and most
+  test-report tooling ingest to show per-task pass/fail.
+- `run-md-path` — the run's markdown report. Append it to the job summary, as the
+  snippet does, so a reviewer sees the scores without downloading anything. The action
+  deliberately does not do this for you: a workflow that has to redact the report first
+  cannot undo a write that already happened.
+- `run-dir` — the whole run directory.
 
 Consider uploading the run directory as an artifact on failure so a failing gate can be
 analyzed with `/coder-eval:analyze` afterwards.
 
-## Step 6 — Choose the floor
+The step's exit code is coder-eval's own: non-zero on any failed task. There is no score
+floor input; a suite that needs one gates on `run.json` in a following step.
 
-`minimum-task-score` is a strict floor: **every** scored task, in every variant, must
-reach it or the step fails. It sits on top of coder-eval's own exit code — the step fails
-if either coder-eval fails or any task scores below the floor. Leave it empty to disable
-it.
-
-Explain the tradeoff and let the user pick rather than choosing for them: a floor that is
-too high makes the gate flaky (agents are nondeterministic), one that is too low never
-catches anything. Suggest running the suite once, then setting the floor a little below
-the observed minimum.
-
-## Step 7 — Warn about fork PRs, and explain the two hardening lines
+## Step 6 — Warn about fork PRs, and explain the two hardening lines
 
 Evaluated tasks execute agent-generated code. Never run this under
 `pull_request_target` with secrets exposed to untrusted fork PRs — that combination

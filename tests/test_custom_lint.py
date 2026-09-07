@@ -105,6 +105,48 @@ class TestCE043NoCommandOutputTruncation:
 
 
 @pytest.mark.lint
+class TestCE046EnvInfoSpreadsSuper:
+    """CE046 flags a get_environment_info override that drops the base spread."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce046_env_info_spreads_super import EnvInfoSpreadsSuper
+
+        return EnvInfoSpreadsSuper("<test>").check(ast.parse(src))
+
+    def test_flags_bare_dict_override(self):
+        src = "class FooAgent:\n    def get_environment_info(self):\n        return {'foo_model': self.model}"
+        assert self._run(src)
+
+    def test_allows_super_spread(self):
+        src = (
+            "class FooAgent:\n    def get_environment_info(self):\n"
+            "        return {**super().get_environment_info(), 'foo_model': self.model}"
+        )
+        assert not self._run(src)
+
+    def test_allows_super_spread_via_dict_call(self):
+        src = (
+            "class FooAgent:\n    def get_environment_info(self):\n"
+            "        info = dict(super().get_environment_info())\n        return info"
+        )
+        assert not self._run(src)
+
+    def test_allows_base_that_emits_marker_directly(self):
+        # The base Agent.get_environment_info is the marker's source, not an override.
+        src = (
+            "class Agent:\n    def get_environment_info(self):\n"
+            "        return {'system_prompt_semantics': self.system_prompt_semantics}"
+        )
+        assert not self._run(src)
+
+    def test_ignores_classes_without_the_method(self):
+        assert not self._run("class FooAgent:\n    def other(self):\n        return {}")
+
+
+@pytest.mark.lint
 class TestCE017ModelsLazyAgentImports:
     """CE017 flags only module-level agents/plugins imports inside models/."""
 
@@ -1711,45 +1753,16 @@ class TestPluginArtifacts:
         # drops the `agent:` config it supplies, so the gate measures something other than
         # what the suite measures locally; and a `version:` input that ignores the repo's
         # pin runs the gate on a different CLI than the repo is authored against.
-        text = " ".join((PLUGIN_ROOT / "skills" / "ci" / "SKILL.md").read_text(encoding="utf-8").split())
-        assert "extra-args" in text and "experiment" in text, (
+        raw = (PLUGIN_ROOT / "skills" / "ci" / "SKILL.md").read_text(encoding="utf-8")
+        text = " ".join(raw.split())
+        # A standalone `-e` token, not the substring inside "coder-eval": the experiment
+        # now rides in `args`, one argument per line, so the flag stands on its own.
+        assert "-e" in raw.split() and "experiment" in text, (
             "the ci skill does not say how to pass an experiment through to the run — a "
             "suite that resolves through one silently measures something else without it"
         )
         assert "pin" in text, (
             "the ci skill no longer conditions the `version:` input on whether the repository pins a coder-eval version"
-        )
-
-    def test_ci_skill_does_not_recommend_a_recursive_task_glob(self):
-        # `action.yml` expands the `tasks:` input unquoted (`args+=($CE_TASKS)`) with
-        # globstar OFF, so `a/**/*.yaml` degrades to `a/*/*.yaml` and silently drops every
-        # top-level task — a depth-dependent "measured the wrong set" bug. nullglob is off
-        # too, so an unmatched depth pattern reaches the CLI literally and exits 1. Both
-        # reproduced by hand. The snippet must therefore show neither `**` in its tasks
-        # value nor a fixed ladder of depths.
-        skill = PLUGIN_ROOT / "skills" / "ci" / "SKILL.md"
-        assert "globstar" in skill.read_text(encoding="utf-8"), (
-            "the ci skill emits explicit globs but no longer says WHY — without the reason, "
-            "the next reader simplifies them back to `**` and loses the top-level tasks"
-        )
-
-        # Scoped to every surface CE026 already scans, not just the skill: the `ci` skill was
-        # taught to avoid `**` while five snippets across README.md, docs/CI_GATE.md and the
-        # CI tutorial still showed `tasks: tests/tasks/**/*.yaml`, so the plugin contradicted
-        # the repo's own onboarding docs — and those are the ones integrators copy.
-        from tests.lint.action_docs import default_doc_paths
-
-        offenders = [
-            f"{path}:{n}: {line.strip()}"
-            for path in default_doc_paths(Path(__file__).parent.parent)
-            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-            if re.search(r"^\s*tasks:.*\*\*", line)
-        ]
-        assert not offenders, (
-            "recursive `**` glob in a documented `tasks:` input value — the action word-splits "
-            "and pathname-expands that value with globstar off, so it silently drops every task "
-            "above the deepest matching level. Emit explicit per-depth globs or a file "
-            "list:\n\n" + "\n".join(f"  {o}" for o in offenders)
         )
 
     def test_check_skill_detects_before_scaffolding(self):
@@ -2250,7 +2263,7 @@ class TestCE026ActionDocSurfaces:
         from tests.lint.action_docs import action_input_names
 
         names = action_input_names(self.ACTION_YML)
-        assert {"tasks", "junit-path", "env"} <= names, names
+        assert {"args", "run-dir", "env"} <= names, names
 
     def test_catches_an_unknown_action_input(self, tmp_path: Path):
         from tests.lint.action_docs import find_unknown_action_inputs
@@ -3587,3 +3600,70 @@ class TestCE045PluginPathIsAPluginRoot:
             encoding="utf-8",
         )
         assert not self._offending_paths_in(task)
+
+
+@pytest.mark.lint
+class TestCE047AgentRosterParity:
+    """CE047 — every onboarding/marketing surface must name every built-in agent.
+
+    The roster is restated in prose on seven surfaces with nothing tying them to
+    the code, which is how OpenCode shipped while most of them still listed three
+    harnesses. Derives the expectation from `AgentKind` and asserts presence. A
+    whole-tree doc rule, so it lives here rather than in the AST-only runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_every_surface_names_every_builtin_agent(self):
+        from tests.lint.agent_roster_parity import ROSTER_SURFACES, find_roster_gaps
+
+        why = {rel: reason for rel, reason, _ in ROSTER_SURFACES}
+        gaps = find_roster_gaps(self.REPO_ROOT)
+        assert not gaps, (
+            "\nSurface(s) that never name a built-in agent — a reader is told it does not "
+            "exist. Add it to the prose, or (if it is not user-facing) add its kind to "
+            "NON_ROSTER_KINDS in tests/lint/agent_roster_parity.py:\n\n"
+            + "\n".join(
+                f"  {rel} ({why.get(rel, '?')}): missing {', '.join(names)}" for rel, names in sorted(gaps.items())
+            )
+        )
+
+    def test_every_builtin_kind_has_display_names(self):
+        # A new built-in agent must declare how it is spelled in prose, otherwise
+        # the presence check would silently fall back to matching its raw kind.
+        from tests.lint.agent_roster_parity import AGENT_DISPLAY_NAMES, roster_kinds
+
+        undeclared = [k for k in roster_kinds() if k not in AGENT_DISPLAY_NAMES]
+        assert not undeclared, f"add prose spellings to AGENT_DISPLAY_NAMES for: {undeclared}"
+
+    def test_roster_excludes_the_non_harness_kinds(self):
+        from tests.lint.agent_roster_parity import roster_kinds
+
+        kinds = roster_kinds()
+        assert "claude-code" in kinds and "opencode" in kinds
+        assert "none" not in kinds and "unknown" not in kinds
+
+    def test_catches_the_opencode_regression(self):
+        # The exact historical gap: a surface listing three of the four harnesses.
+        from tests.lint.agent_roster_parity import missing_agents_in
+
+        three_of_four = "runs Claude Code, Codex, or Antigravity (Gemini) in a sandbox"
+        assert missing_agents_in(three_of_four) == ["opencode"]
+
+    def test_model_name_counts_as_naming_the_antigravity_row(self):
+        from tests.lint.agent_roster_parity import missing_agents_in
+
+        assert missing_agents_in("Claude Code, Codex, Gemini, and OpenCode") == []
+
+    def test_extractors_narrow_to_the_marketing_region(self, tmp_path: Path):
+        from tests.lint.agent_roster_parity import _mkdocs_site_description, _pyproject_marketing_text
+
+        mkdocs = "site_name: X\nsite_description: >-\n  Claude Code and OpenCode\nnav:\n  - Codex: agents/codex.md\n"
+        region = _mkdocs_site_description(mkdocs)
+        assert "OpenCode" in region
+        assert "agents/codex.md" not in region  # the nav must not satisfy the check
+
+        pyproject = '[project]\ndescription = "Claude Code"\nkeywords = ["opencode"]\n[tool.x]\nz = "codex"\n'
+        region = _pyproject_marketing_text(pyproject)
+        assert "Claude Code" in region and "opencode" in region
+        assert "[tool.x]" not in region

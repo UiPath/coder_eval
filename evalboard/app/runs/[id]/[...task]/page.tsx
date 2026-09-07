@@ -7,7 +7,9 @@ import {
     readTaskDetail,
     readTaskReplicates,
     replicateDirName,
+    resolveVariantId,
 } from "@/lib/runs";
+import { DEFAULT_VARIANT_ID, isValidVariantId } from "@/lib/variants";
 import { readTaskReview } from "@/lib/reviews";
 import { sourceById } from "@/lib/sources";
 import { scalarParam, withSource } from "@/app/_lib/source-param";
@@ -37,10 +39,10 @@ export default async function TaskPage({
     searchParams,
 }: {
     params: Promise<{ id: string; task: string[] }>;
-    searchParams: Promise<{ r?: string; src?: string | string[] }>;
+    searchParams: Promise<{ r?: string; v?: string; src?: string | string[] }>;
 }) {
     const { id, task: taskSegments } = await params;
-    const { r, src } = await searchParams;
+    const { r, v, src } = await searchParams;
     // Which container this run lives in. Unknown/absent coerces to the skills
     // nightly, so every URL that predates the Scribe tab keeps resolving as-is.
     const source = sourceById(scalarParam(src));
@@ -52,28 +54,63 @@ export default async function TaskPage({
     const parsedR = Number(r);
     const replicate =
         r != null && Number.isInteger(parsedR) && parsedR >= 0 ? parsedR : 0;
-    const task = await readTaskDetail(id, taskId, replicate, source);
+    // Experiment arm from ?v=NAME. A run with variants stores each arm's content
+    // under its own <runId>/<variantId>/ subtree and repeats the task id once per
+    // arm, so without this both arms would resolve to the same transcript. An
+    // absent or malformed value names no arm, and resolveVariantId picks the
+    // task's first — `default` on an ordinary run, so every pre-variant URL
+    // resolves exactly as it did, and the leading arm on an experiment run,
+    // whose arms are named and would otherwise leave a bare link with nothing
+    // to match.
+    const variantId = await resolveVariantId(
+        id,
+        taskId,
+        isValidVariantId(v) ? v : null,
+        source,
+    );
+    const task = await readTaskDetail(id, taskId, replicate, source, variantId);
     if (!task) notFound();
 
     // Replicate indices available for this task — drives the run selector below.
     // [0] (or fewer) for a non-repeated task, so the selector self-hides.
-    const replicates = await readTaskReplicates(id, taskId, source);
+    const replicates = await readTaskReplicates(id, taskId, source, variantId);
 
-    // variant is always "default" here; the replicate selects the <NN>/ dir.
     // readTaskReview returns null for older runs that predate the review feature.
     const review = await readTaskReview(
         id,
-        "default",
+        variantId,
         taskId,
         replicateDirName(replicate),
         source,
     );
 
-    const log = await readLogTail(id, taskId, replicate, undefined, source);
+    const log = await readLogTail(
+        id,
+        taskId,
+        replicate,
+        undefined,
+        source,
+        variantId,
+    );
     const conversation = parseConversation(
-        await readConversationLog(id, taskId, replicate, undefined, source),
+        await readConversationLog(
+            id,
+            taskId,
+            replicate,
+            undefined,
+            source,
+            variantId,
+        ),
     );
     const { flowDebug } = task;
+    // Only a multi-variant run names its arm in a URL. Omitting the param on a
+    // default-arm run keeps every link byte-identical to what it was before
+    // variants were addressable.
+    const variantQuery =
+        variantId === DEFAULT_VARIANT_ID
+            ? ""
+            : `&v=${encodeURIComponent(variantId)}`;
+    const showVariant = variantId !== DEFAULT_VARIANT_ID;
 
     return (
         <div className="space-y-6">
@@ -86,6 +123,14 @@ export default async function TaskPage({
                 </Link>
                 <span className="text-gray-300">/</span>
                 <span className="font-mono text-gray-700">{taskId}</span>
+                {showVariant && (
+                    <>
+                        <span className="text-gray-300">/</span>
+                        <span className="font-mono text-gray-700">
+                            {variantId}
+                        </span>
+                    </>
+                )}
                 {replicates.length > 1 && (
                     <>
                         <span className="text-gray-300">/</span>
@@ -112,7 +157,7 @@ export default async function TaskPage({
                                 <Link
                                     key={ri}
                                     href={withSource(
-                                        `/runs/${id}/${taskId}?r=${ri}`,
+                                        `/runs/${id}/${taskId}?r=${ri}${variantQuery}`,
                                         source.id,
                                     )}
                                     // Keep the scroll position when switching runs
@@ -147,7 +192,7 @@ export default async function TaskPage({
                             href={withSource(
                                 `/api/download?run=${encodeURIComponent(
                                     id,
-                                )}&task=${encodeURIComponent(taskId)}`,
+                                )}&task=${encodeURIComponent(taskId)}${variantQuery}`,
                                 source.id,
                             )}
                             className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-studio-blue"
@@ -160,6 +205,7 @@ export default async function TaskPage({
                 <div className="text-xs text-gray-500 tabular-nums font-mono flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
                     <span>
                         {taskId} · run {id}
+                        {showVariant && ` · variant ${variantId}`}
                         {replicates.length > 1 && ` · replicate ${replicate}`}
                     </span>
                     {/* Component SHAs point at internal tooling; internal-only.

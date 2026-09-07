@@ -324,6 +324,29 @@ async function loadPerRunForId(
     };
 }
 
+// First `YYYY-MM-DD` (optionally `_HH-MM-SS`) anywhere in a run id. Ad-hoc ids
+// aren't date-SHAPED (parseRunIdDate anchors, so it rejects them) but almost all
+// still carry their date: `adhoc-2026-09-02_21-59-13`, `skills-2026-05-28`.
+const ADHOC_DATE_RE = /(\d{4})-(\d{2})-(\d{2})(?:_(\d{2})-(\d{2})-(\d{2}))?/;
+
+// Id-only start date for an ad-hoc run; null when the id carries no date. A
+// date-only id resolves to the start of its day, which can only lose a same-day
+// tie-break.
+export function adhocRunDate(id: string): Date | null {
+    const m = ADHOC_DATE_RE.exec(id);
+    if (!m) return null;
+    const [, y, mo, d, h, mi, s] = m;
+    const t = Date.UTC(
+        Number(y),
+        Number(mo) - 1,
+        Number(d),
+        Number(h ?? 0),
+        Number(mi ?? 0),
+        Number(s ?? 0),
+    );
+    return Number.isFinite(t) ? new Date(t) : null;
+}
+
 // Cache at per-run granularity, NOT per-window. A whole-window PerRun[] for
 // the 30d window exceeds unstable_cache's hard 2MB ceiling (≈400 tasks × ~20
 // runs), and on overflow Next.js drops the write AND hands back a truncated
@@ -333,24 +356,63 @@ async function loadPerRunForId(
 // windows + the trends page. The cross-run aggregation downstream is cheap
 // in-memory work, so leaving it uncached costs nothing.
 //
-// One cached loader per source, with `source.id` in the key parts. Run ids are
-// only unique WITHIN a container — both suites name runs `YYYY-MM-DD_HH-MM-SS`,
-// so a source-blind key would let a Scribe run and a skills run with the same
-// id serve each other's projection.
+// One cached loader per (source, run), with `source.id` in the key parts. Run
+// ids are only unique WITHIN a container — both suites name runs
+// `YYYY-MM-DD_HH-MM-SS`, so a source-blind key would let a Scribe run and a
+// skills run with the same id serve each other's projection.
+//
+// Per-run rather than per-source because `unstable_cache` fixes revalidate and
+// tags at construction: one shared loader can hold neither a per-run TTL nor a
+// per-run tag for the refresh button to evict.
 type PerRunLoader = (id: string) => Promise<PerRun>;
 
-const perRunLoaders = new Map<string, PerRunLoader>();
+// Keyed `<source>:<run>`; grows with history, not with traffic.
+const perRunLoaders = new Map<string, () => Promise<PerRun>>();
+
+// A run.json is written once, at the end of the run, so a finished run is
+// immutable. Its sidecars (meta.json, reviews, analysis) are not, which is what
+// `runCacheTag` is for.
+const SETTLED_AFTER_MS = 24 * 60 * 60 * 1000;
+// Recent enough that today's nightly may still be landing.
+const FRESH_REVALIDATE_SECONDS = 300;
+// Older than that: the read this avoids is a multi-MB run.json off Azure Files.
+const SETTLED_REVALIDATE_SECONDS = 24 * 60 * 60;
+
+// Cache tag for one run's projection, so POST /api/refresh can evict it;
+// without it the button would no-op for anything past SETTLED_AFTER_MS.
+export function runCacheTag(sourceId: string, runId: string): string {
+    return `evalboard-run:${sourceId}:${runId}`;
+}
+
+// Settled runs cache for a day, everything else for 5 minutes. An id carrying no
+// date at all is treated as fresh: those are hand-uploaded and re-uploaded far
+// more often than pipeline runs. Evaluated once per run per process, so a run
+// that settles while the process is up keeps the short TTL until restart.
+function perRunRevalidate(id: string): number {
+    const started = parseRunIdDate(id) ?? adhocRunDate(id);
+    if (started == null) return FRESH_REVALIDATE_SECONDS;
+    return Date.now() - started.getTime() > SETTLED_AFTER_MS
+        ? SETTLED_REVALIDATE_SECONDS
+        : FRESH_REVALIDATE_SECONDS;
+}
 
 function cachedLoadPerRunFor(source: Source): PerRunLoader {
-    const existing = perRunLoaders.get(source.id);
-    if (existing) return existing;
-    const loader = unstable_cache(
-        (id: string) => loadPerRunForId(id, source),
-        ["evalboard-per-run", source.id],
-        { revalidate: 300 },
-    );
-    perRunLoaders.set(source.id, loader);
-    return loader;
+    return (id: string) => {
+        const cacheKey = `${source.id}:${id}`;
+        let loader = perRunLoaders.get(cacheKey);
+        if (!loader) {
+            loader = unstable_cache(
+                () => loadPerRunForId(id, source),
+                ["evalboard-per-run", source.id, id],
+                {
+                    revalidate: perRunRevalidate(id),
+                    tags: [runCacheTag(source.id, id)],
+                },
+            );
+            perRunLoaders.set(cacheKey, loader);
+        }
+        return loader();
+    };
 }
 
 async function loadWindowDataInner(
@@ -1161,13 +1223,19 @@ export function buildAdhocRows(
     };
 }
 
+// Extra candidates loaded beyond `limit`, covering ids with no readable overview
+// (aborted uploads, the `deploys/` prefix) that then drop out of the rows.
+const ADHOC_LOAD_SLACK = 10;
+
 // The Ad-hoc runs section (front page, below the daily listing). "Ad-hoc" here
 // means "not a daily-pipeline run" — i.e. the id isn't date-shaped, which is
 // exactly the set listRunIdsInWindow excludes from the chart and main table.
-// Every ad-hoc candidate is loaded before sorting (the date lives in run.json,
-// not the id, so we can't window by id and still show the most recent): the
-// ad-hoc set is small by construction (manual uploads only) and per-run reads
-// are memoized for 5 min, so a warm front page pays no extra IO.
+//
+// Only the newest `limit + ADHOC_LOAD_SLACK` candidates are loaded, ordered by
+// the date in the id; loading all 165 to show ten rows cost ~294 MB per cold
+// render. run.json's `start_time` stays the authoritative sort, so the id only
+// decides what to READ. Ids with no date are always loaded, so they can never be
+// ordered out by a key they don't have.
 export async function getAdhocRunListing(
     limit: number | null,
     source: Source = DEFAULT_SOURCE,
@@ -1175,10 +1243,25 @@ export async function getAdhocRunListing(
     const ids = (await listRunIds(source)).filter(
         (id) => parseRunIdDate(id) == null,
     );
+    const dated: { id: string; at: number }[] = [];
+    const undated: string[] = [];
+    for (const id of ids) {
+        const at = adhocRunDate(id);
+        if (at == null) undated.push(id);
+        else dated.push({ id, at: at.getTime() });
+    }
+    dated.sort((a, b) => b.at - a.at);
+    // null limit = "load everything": allowed by the signature, never used.
+    const budget = limit == null ? dated.length : limit + ADHOC_LOAD_SLACK;
+    const loadedAll = budget >= dated.length;
+    const toLoad = [...undated, ...dated.slice(0, budget).map((d) => d.id)];
     const perRun = await mapWithConcurrency(
-        ids,
+        toLoad,
         FETCH_CONCURRENCY,
         cachedLoadPerRunFor(source),
     );
-    return buildAdhocRows(perRun, limit);
+    const listing = buildAdhocRows(perRun, limit);
+    // `total` drives "Show more", so a truncated load must report the candidate
+    // count or the section caps itself at the first page.
+    return loadedAll ? listing : { ...listing, total: ids.length };
 }

@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { SCRIBE_SOURCE } from "@/lib/sources";
+import { GHA_SOURCE, SCRIBE_SOURCE, SOURCES, runsDirFor } from "@/lib/sources";
 
 // The invariant these tests pin: run ids are only unique WITHIN a container.
 // Both suites name runs `YYYY-MM-DD_HH-MM-SS`, so a same-day skills run and
@@ -86,7 +86,11 @@ afterEach(async () => {
         else process.env[k] = savedEnv[k];
     }
     await fs.rm(localDir, { recursive: true, force: true });
-    await fs.rm(`${localDir}-scribe`, { recursive: true, force: true });
+    // Every sibling, derived rather than listed: a source added without a matching
+    // line here would leak its tree into the next test's listing assertions.
+    for (const s of SOURCES) {
+        await fs.rm(runsDirFor(localDir, s), { recursive: true, force: true });
+    }
 });
 
 describe("reader-layer source isolation", () => {
@@ -165,6 +169,47 @@ describe("reader-layer source isolation", () => {
 
         expect(await listRunIds()).toEqual([RUN_ID]);
         expect(await listRunIds(SCRIBE_SOURCE)).toEqual([RUN_ID, scribeOnly]);
+    });
+
+    // The gha source has no listing page and no tab, so `readRunSummary` by id is
+    // the ONLY reader it ever exercises — and a link pasted out of a GitHub run
+    // summary is the only way anyone arrives. If that read resolved against the
+    // default container it would render the skills nightly under the dispatcher's
+    // run id: a plausible-looking page, not a 404. Nothing else would catch it.
+    test("readRunSummary is scoped for the unlisted gha source too", async () => {
+        const ghaRun = path.join(runsDirFor(localDir, GHA_SOURCE), RUN_ID);
+        await fs.mkdir(ghaRun, { recursive: true });
+        await fs.writeFile(
+            path.join(ghaRun, "run.json"),
+            runJson({
+                tasksRun: 1,
+                tasksSucceeded: 1,
+                startTime: "2026-08-14T23:00:00Z",
+            }),
+        );
+
+        const { readRunSummary } = await loadRuns();
+        const gha = await readRunSummary(RUN_ID, GHA_SOURCE);
+        expect(gha?.tasksRun).toBe(1);
+        // The skills tree seeded in beforeEach has 100 under the same id.
+        expect((await readRunSummary(RUN_ID))?.tasksRun).toBe(100);
+
+        // And an id present only in gha must not render out of `runs`.
+        const ghaOnly = "2026-08-14_23-30-00";
+        await fs.mkdir(path.join(runsDirFor(localDir, GHA_SOURCE), ghaOnly), {
+            recursive: true,
+        });
+        await fs.writeFile(
+            path.join(runsDirFor(localDir, GHA_SOURCE), ghaOnly, "run.json"),
+            runJson({
+                tasksRun: 3,
+                tasksSucceeded: 3,
+                startTime: "2026-08-14T23:30:00Z",
+            }),
+        );
+        const { readRunSummary: fresh } = await loadRuns();
+        expect(await fresh(ghaOnly, GHA_SOURCE)).not.toBeNull();
+        expect(await fresh(ghaOnly)).toBeNull();
     });
 
     test("latestRunId is per source", async () => {

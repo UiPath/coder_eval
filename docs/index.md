@@ -1,24 +1,27 @@
 ---
-title: "Evaluate AI coding agents & Claude Code skills — Coder Eval"
+title: "Evaluate AI coding agents and their skills — Coder Eval"
 description: >-
-  Coder Eval is an open-source framework to evaluate, benchmark, and A/B-test AI
-  coding agents and Claude Code skills in a sandbox — declarative YAML tasks,
-  weighted scoring, cost/token telemetry, and CI gates for Claude Code, Codex,
-  and Gemini.
+  Coder Eval is Playwright for coding agents: an open-source, agent-agnostic
+  framework to evaluate, benchmark, and A/B-test AI coding agents and their skills
+  in a sandbox — declarative YAML tasks, weighted scoring, cost/token telemetry, and
+  CI gates for Claude Code, Codex, Antigravity (Gemini), and OpenCode.
 ---
 
-# Evaluate AI coding agents & Claude Code skills — Coder Eval
+# Evaluate AI coding agents and their skills — Coder Eval
 
-**Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an open-source framework for
-**evaluating AI coding agents and their skills** — built for CLI and skill
-builders — with sandboxing, reproducibility, and data-driven analysis. It is not
-an "agentic coding" benchmark: it measures how effective *your* CLI and skills
-are when used by coding agents such as **Claude Code**, **Codex**, and **Google
-Antigravity (Gemini)**.
+**Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an
+open-source, **agent-agnostic** framework for **evaluating AI coding agents and their
+skills** — built for benchmark authors, CLI builders, and skill builders — with
+sandboxing, reproducibility, and data-driven analysis. It runs a real agent —
+**Claude Code**, **OpenAI Codex**, **Google Antigravity (Gemini)**, or **OpenCode** —
+against declarative YAML tasks in a sandbox. Changing harness is one field
+(`agent.type`); the tasks, criteria, scoring, telemetry, and reports stay the same.
+It is **not a fixed leaderboard**: you bring the tasks and you bring the scoring.
 
-If you have ever asked *"how do I test whether my Claude Code skill actually
-triggers?"*, *"how do I benchmark Claude Code vs. Codex on my own tasks?"*, or
-*"how do I gate CI on coding-agent quality?"* — this is the framework for that.
+If you have ever asked *"how do I benchmark coding agents on my own domain tasks?"*,
+*"how do I test whether my skill actually triggers?"*, *"how do I compare Claude Code
+vs. Codex vs. Gemini vs. OpenCode on the same suite?"*, or *"how do I gate CI on
+coding-agent quality?"* — this is the framework for that.
 
 <p align="center">
   <img src="assets/hero.gif" alt="Coder Eval running a sandboxed coding-agent evaluation from a YAML task and browsing the scored result in evalboard" width="100%">
@@ -30,16 +33,17 @@ triggers?"*, *"how do I benchmark Claude Code vs. Codex on my own tasks?"*, or
 - **Sandboxed execution** in isolated environments with resource limits
 - **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
 - **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent abstraction** — Claude Code, Codex, and Antigravity (Gemini) today, extensible via a plugin SPI
+- **Agent-agnostic by design** — Claude Code, OpenAI Codex, Antigravity (Gemini), and OpenCode today; add your own harness through the plugin SPI
 - **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
 
 ## Use cases
 
 - **Benchmark coding agents** — score an agent across a suite of tasks with weighted pass/fail thresholds
-- **Compare models & configs** — A/B-test Claude Code vs. Codex vs. Gemini, model vs. model, tool-on vs. tool-off, prompt vs. prompt
-- **Test whether a Claude Code skill triggers** — verify an agent actually engages a
-  target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style)
+- **Compare models & configs** — A/B-test Claude Code vs. Codex vs. Gemini vs. OpenCode, model vs. model, tool-on vs. tool-off, prompt vs. prompt
+- **Test whether a skill triggers** — verify an agent actually engages a target
+  skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style), on
+  whichever harness your users run
 - **Keep skills fresh in CI** — re-validate skills on every change or on a schedule; catch silent regressions when models, prompts, or the skills themselves drift
 - **Gate CI on agent quality** — run the suite in GitHub Actions and fail the build on regressions
 - **Bring your own dataset** — fan one task out over many rows for larger benchmark suites
@@ -81,12 +85,13 @@ New here? Start with **[Tutorial 01 — Your First Evaluation](tutorials/01-firs
 | [Claude Code](agents/CLAUDE_CODE.md) | Configuring and running the default Claude Code agent |
 | [Codex](agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
+| [OpenCode](agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
 | [Run-Limit Parity](agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](DATASETS.md) | Fan a single task out over a dataset |
 | [Dialog Mode](DIALOG_MODE.md) | Evaluate agents in multi-turn conversation via a simulated user |
 | [Docker Isolation](DOCKER_ISOLATION.md) | The container sandbox driver, with custom images |
-| [CI Gate & GitHub Action](CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, score floor |
+| [CI Gate & GitHub Action](CI_GATE.md) | Run Coder Eval as a CI gate — the Marketplace Action, JUnit output, run reports |
 | [Claude Code Plugin](PLUGIN.md) | Install the Claude Code plugin — author, run, and analyze suites from inside the agent |
 | [Extending Coder Eval](EXTENDING.md) | Author a custom agent, criterion, or model pricing via the plugin SPI |
 | [Report Schema](REPORT_SCHEMA.md) | Field-level reference for run.json / variant.json / task.json |

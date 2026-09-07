@@ -60,9 +60,11 @@ The mechanics:
 - The simulator is a **tools-disabled Claude Code agent** with `allowed_tools: []`, an explicit
   deny-list, and no plugins or settings sources. It is pure text-in / text-out, and it **cannot see
   the sandbox** — no files, no terminal, no agent reasoning. Only what the agent writes in the chat.
-- The simulator runs on the run's resolved *evaluation* `ApiRoute` — the coding agent's own route
-  (`--backend direct` / `--backend bedrock`) unless `checker_context.api_route.route` overrides it
-  (see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context)). The **model** is separately
+- The simulator resolves its own `ApiRoute` independently of `checker_context.api_route` (that
+  override is judge-only — see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context)) — same
+  resolution as the coding agent's own route (`--backend direct` / `--backend bedrock`), including
+  the pin to a constant Claude backend when the agent itself runs on an open-weight LiteLLM route.
+  The **model** is separately
   pinned by `simulation.model` (see [Simulation](TASK_DEFINITION_GUIDE.md#simulation)), not inherited
   from the route — so an A/B varying the subject model doesn't silently vary the simulated user too.
 

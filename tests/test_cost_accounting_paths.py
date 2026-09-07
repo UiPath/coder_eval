@@ -259,7 +259,7 @@ class TestRowCostProjection:
         """UserSimulator pins model=None, so it bills at BEDROCK_MODEL.
 
         A task that pins ``agent.model`` would otherwise mis-bill every simulated
-        row. Here the subject is sonnet-5 ($3/$15) while the route is haiku-4.5
+        row. Here the subject is sonnet-5 ($2/$10) while the route is haiku-4.5
         ($1/$5), so the simulator must cost the haiku rate.
         """
         result = self._simulated(bedrock_model="claude-haiku-4-5-20251001")
@@ -269,8 +269,8 @@ class TestRowCostProjection:
     def test_simulator_falls_back_to_the_subject_model_off_bedrock(self):
         """A non-Bedrock route names no model on the record; the subject's is the best available."""
         result = self._simulated()
-        # sonnet-5 at $3/$15 per MTok.
-        assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(3.0 + 1.5)
+        # sonnet-5 at $2/$10 per MTok: 1M uncached input + 100K output.
+        assert eval_result_to_task_dict(result)["simulator_cost_usd"] == pytest.approx(2.0 + 1.0)
 
     def test_single_shot_row_has_no_simulator_cost(self):
         result = _result([_turn(1, TokenUsage(uncached_input_tokens=10, output_tokens=1, total_cost_usd=0.1))])

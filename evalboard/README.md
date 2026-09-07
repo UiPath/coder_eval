@@ -57,24 +57,78 @@ show up in the index — empty shells and the `latest` symlink are filtered out.
 
 `<task-id>` is the same string the eval framework writes to
 `task_results[].task_id` (e.g., `skill-flow-calculator`) and equals the
-subdir name under `<run-id>/default/`.
+subdir name under `<run-id>/<variant-id>/`.
+
+## Variants (A/B runs)
+
+A coder_eval experiment that declares `variants:` runs every task once per arm
+and writes each arm to its own subtree (`<run-id>/<variant-id>/<task-id>/<NN>/`),
+stamping `variant_id` on every `run.json` row. An experiment with no `variants:`
+still writes one arm, named `default` — which is why a single-arm run and a
+multi-arm run have the same shape on disk.
+
+Evalboard reads that directly:
+
+- The run page's **Pass rate tile reports one entry per arm** (side by side, so
+  the tile keeps the height of the single-arm version and the tiles beside it are
+  not stretched), and reports no pooled rate at all. A blended rate would average configurations that were
+  deliberately made to differ (and would move when the arms are merely
+  reordered), so on a variant run it is not a number anyone wants. The tile
+  states the observed `spread` between arms and nothing more.
+- **Total cost and Time keep their pooled totals** and carry the per-arm split on
+  their sub-line, in place of p50/p90. A run's spend is a real operational
+  number however many arms produced it, in a way a run's pass rate is not.
+- The task grid gains a **Variant** column and keeps one row per (task, arm).
+  Replicates of one arm still collapse into a single row; **arms never collapse
+  into each other** — that difference is the measurement. The default ordering
+  ranks a *task* by its worst arm rather than ranking each row on its own, so
+  failures still sort to the top while a task's arms stay adjacent. Ranking rows
+  independently splits exactly the pairs worth reading: a task whose arms
+  disagree ends up with one row at the top of the grid and the other at the
+  bottom.
+- Task detail is addressed by `?v=<variant-id>` alongside `?r=<replicate>`, so
+  each arm opens its own transcript, log, criteria and artifacts. A link that
+  names no arm resolves to the task's first — `default` on an ordinary run, the
+  leading arm on an experiment run, whose arms are all named and which therefore
+  has no `default` subtree for a bare link to land in. A link naming an arm the
+  run does not have is a 404, not a fallback: the point of addressing an arm is
+  that you get that arm or nothing.
+
+Every one of those is inert on a run without variants: the column is dropped, the
+tiles keep their existing pooled numbers and percentiles, and no link carries
+`?v=`. Cross-run comparison (two separate run ids) is a different feature and is
+not what this does.
+
+Statistics are deliberately not computed here. Whether a gap between arms is
+real is a question about variance, and coder_eval already answers it in the
+experiment report it writes beside `run.json` (`experiment.md` — win rates,
+per-task comparison, most divergent tasks, paired comparison with Welch t-test
+and bootstrap CIs).
 
 ## Sources
 
-A **source** is one blob container of runs, surfaced as its own tab
-(`lib/sources.ts`). One deployment serves all of them — the container is a
-runtime dimension threaded through the data layer as a trailing
+A **source** is one blob container of runs (`lib/sources.ts`), usually surfaced as
+its own tab. One deployment serves all of them — the container is a runtime
+dimension threaded through the data layer as a trailing
 `source: Source = DEFAULT_SOURCE` parameter, not a build-time env var:
 
 | Source | Container | Surface |
 |--------|-----------|---------|
 | `skills` (default) | `runs` | Everything not listed below |
 | `scribe` | `aria-runs` | `/scribe` |
+| `gha` | `runs-gha` | none — direct links only |
 
 Non-default sources are selected by a `?src=<id>` query param, which every
 run-scoped page and API route reads. An absent or unrecognised `src` resolves to
 the default source (`sourceById` coerces rather than throwing, so a stray param
 in a shared link degrades to the skills dashboard instead of an error page).
+
+**A source need not have a tab.** `NAV` in `app/layout.tsx` is a hardcoded array
+and does not iterate `SOURCES`, so `gha` is registered and deliberately unlisted:
+ad-hoc runs uploaded by UiPath/skills' `run-coder-eval` dispatch, reachable only
+by the direct link in the GitHub run summary, expiring after 14 days under the
+storage account's `expire-runs-gha-14d` rule. Registration is still mandatory —
+`sourceById` is the only path by which a container becomes reachable at all.
 
 Two invariants worth preserving if you add a source:
 
@@ -90,7 +144,11 @@ Two invariants worth preserving if you add a source:
   `listRunIdsInWindow` filter on `parseRunIdDate`, so such runs surface only in
   the ad-hoc section. A new source's page therefore needs its OWN
   `getAdhocRunListing` section, or ad-hoc uploads to that container land
-  nowhere reachable.
+  nowhere reachable — unless it is unlisted by design, like `gha`, where nothing
+  enumerates and `app/runs/[id]` reads by id on demand. Note also that
+  `getAdhocRunListing` loads per-run metadata for **every** non-date-shaped id in
+  the container before truncating to the display limit, so a source expecting a
+  steady stream of ad-hoc uploads needs its own container, not a prefix in `runs`.
 - **Local mode is per-source too.** `listRunIds` resolves
   `runsDirFor(RUNS_DIR, source)` when `EVALBOARD_LOCAL_RUNS_DIR` is set, so
   `/scribe` reads `<local>-scribe`. Listing off the bare local dir instead —
@@ -104,9 +162,10 @@ Two invariants worth preserving if you add a source:
 
 - `/api/file?run=<id>&path=<relpath>[&src=<source>]` serves `.flow`, `.uipx`,
   etc. with path-traversal guard (`resolveSafePath`).
-- `/api/download?run=<id>[&task=<id>][&src=<source>]` streams a zip of a task
-  folder (with `task`) or the whole run (without). Files are gathered by `collectTaskFiles`
-  / `collectRunFiles`, which reuse the `walkArtifacts` noise filter, and zipped
-  by `lib/zip.ts` (a dependency-free DEFLATE writer).
+- `/api/download?run=<id>[&task=<id>][&v=<variant>][&src=<source>]` streams a zip
+  of a task folder (with `task`, from the named arm) or the whole run (without).
+  Files are gathered by `collectTaskFiles` / `collectRunFiles`, which reuse the
+  `walkArtifacts` noise filter, and zipped by `lib/zip.ts` (a dependency-free
+  DEFLATE writer).
 - Pass rows render green (`bg-green-50 text-green-700`), failures render red
   (`bg-red-50 text-red-700`), on a white background.

@@ -163,8 +163,7 @@ jobs:
 The five steps above spell out the mechanics, but Coder Eval also ships a
 composite action — on the Marketplace as
 [**coder_eval**](https://github.com/marketplace/actions/coder_eval) — that
-bundles install + run + JUnit report + job-summary + fail-on-failure into one
-step:
+bundles install + run + JUnit report + fail-on-failure into one step:
 
 ```yaml
       - uses: actions/setup-node@v4      # the claude-code agent needs the Claude CLI…
@@ -173,8 +172,10 @@ step:
 
       - uses: UiPath/coder_eval@v0       # …then run the gate (pin @vX.Y.Z in production)
         with:
-          tasks: tests/tasks/*.yaml tests/tasks/*/*.yaml
-          model: claude-sonnet-5
+          args: |
+            tests/tasks/**/*.yaml
+            --model
+            claude-sonnet-5
           env: |
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
 ```

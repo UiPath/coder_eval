@@ -1,12 +1,17 @@
 "use client";
 
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useMemo, useState } from "react";
 import type { ActivationScore, TaskResultSummary } from "@/lib/runs";
 import type { ReviewIndexEntry } from "@/lib/reviews-types";
 import { fmtDuration, humanizeTaskId } from "@/lib/format";
 import { passBarClass, passClass } from "@/lib/pass-rate";
 import { perTaskPassCounts, statusCategory } from "@/lib/status";
+import {
+    DEFAULT_VARIANT_ID,
+    taskVariantKey,
+    variantsOf,
+} from "@/lib/variants";
 import { taskCarriesRepoTag } from "@/lib/tags";
 import { ChipLegend } from "@/app/_overview/tag-rail";
 import { CollapsibleRail } from "@/app/_components/collapsible-rail";
@@ -113,6 +118,23 @@ export function computeRunMetrics(tasks: TaskResultSummary[]): RunMetrics {
     };
 }
 
+// Per-arm rollup for a run that declares `variants:`. Reuses computeRunMetrics so
+// an arm's numbers come from exactly the same code as a single-arm run's.
+export function computeVariantMetrics(
+    tasks: TaskResultSummary[],
+): { variantId: string; metrics: RunMetrics }[] {
+    const ids = variantsOf(tasks);
+    if (ids.length < 2) return [];
+    return ids.map((variantId) => ({
+        variantId,
+        metrics: computeRunMetrics(
+            tasks.filter(
+                (t) => (t.variantId ?? DEFAULT_VARIANT_ID) === variantId,
+            ),
+        ),
+    }));
+}
+
 function parseTagsParam(raw: string | null): string[] {
     if (!raw) return [];
     return raw
@@ -151,6 +173,75 @@ function Metric({
     );
 }
 
+// Replaces the pooled number inside the Pass rate tile: a blended rate averages
+// configurations that were deliberately made to differ, and moves when the arms
+// are merely reordered. Spend and time keep their pooled totals instead, since a
+// run's cost is true however many arms produced it.
+//
+// Arms sit side by side because the tile is already double width; stacking them
+// made it the tallest thing in the row and stretched its neighbours.
+//
+// No significance test on purpose — that lives in experiment.md. "spread" states
+// the observed gap and claims nothing about it.
+
+// Per-TASK rate, matching the single-arm tile's rule (a task passes if any
+// replicate passed). Equals the per-row rate on a run without repeats.
+const variantRate = (m: RunMetrics) =>
+    m.taskTotal ? (m.taskPassed / m.taskTotal) * 100 : 0;
+
+function PassRateByVariant({
+    rows,
+}: {
+    rows: { variantId: string; metrics: RunMetrics }[];
+}) {
+    return (
+        <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
+            {rows.map(({ variantId, metrics: m }) => {
+                const pct = variantRate(m);
+                // null when the arm ran nothing → neutral, not a measured 0%.
+                const tone = m.taskTotal > 0 ? pct : null;
+                return (
+                    <div key={variantId}>
+                        <div className="flex items-baseline gap-2">
+                            <span className="font-mono text-xs text-gray-500 shrink-0">
+                                {variantId}
+                            </span>
+                            <span
+                                className={`text-2xl font-semibold tabular-nums ${passClass(tone)}`}
+                            >
+                                {pct.toFixed(0)}%
+                            </span>
+                            <span className="text-xs text-gray-500 tabular-nums">
+                                {m.taskPassed} / {m.taskTotal}
+                            </span>
+                        </div>
+                        <div className="mt-2 h-2 bg-gray-100 rounded-full overflow-hidden">
+                            <div
+                                className={`h-full ${passBarClass(tone)}`}
+                                style={{ width: `${pct}%` }}
+                            />
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+// The same quantity split by arm, for a pooled tile's sub-line. Arms missing the
+// value are dropped rather than rendered as a dash.
+export function variantSub(
+    rows: { variantId: string; metrics: RunMetrics }[],
+    pick: (m: RunMetrics) => string | null,
+): string | undefined {
+    const parts: string[] = [];
+    for (const { variantId, metrics } of rows) {
+        const v = pick(metrics);
+        if (v != null) parts.push(`${variantId} ${v}`);
+    }
+    return parts.length ? parts.join(" · ") : undefined;
+}
+
 export function RunView({
     runId,
     tasks,
@@ -182,7 +273,6 @@ export function RunView({
     // the one call site instead.
     sourceId: string;
 }) {
-    const router = useRouter();
     const pathname = usePathname();
     const searchParams = useSearchParams();
 
@@ -204,6 +294,29 @@ export function RunView({
     const q = searchParams.get("q") ?? "";
     const [showAllTags, setShowAllTags] = useState(false);
 
+    // Commit a filter change to the URL WITHOUT a server round-trip.
+    //
+    // Every reader of `tags` / `rtags` / `q` on this page is client-side (see
+    // `filtered` below); the server component reads only `src`. So
+    // `router.replace` bought nothing and cost a full re-render of a
+    // force-dynamic route to return markup this component recomputes anyway.
+    //
+    // The native History API keeps the URL shareable and the back button
+    // working; Next syncs `useSearchParams` off pushState/replaceState, so this
+    // component still re-renders. `replaceState` (not `push`) preserves the old
+    // behavior of not stacking a history entry per chip click.
+    const setSearchParams = useCallback(
+        (params: URLSearchParams) => {
+            const qs = params.toString();
+            window.history.replaceState(
+                null,
+                "",
+                qs ? `${pathname}?${qs}` : pathname,
+            );
+        },
+        [pathname],
+    );
+
     const updateParam = useCallback(
         (key: string, next: string[]) => {
             // Read the live URL on commit so a concurrent debounced write
@@ -211,12 +324,9 @@ export function RunView({
             const params = new URLSearchParams(window.location.search);
             if (next.length === 0) params.delete(key);
             else params.set(key, next.join(","));
-            const qs = params.toString();
-            router.replace(qs ? `${pathname}?${qs}` : pathname, {
-                scroll: false,
-            });
+            setSearchParams(params);
         },
-        [pathname, router],
+        [setSearchParams],
     );
 
     const toggleTag = useCallback(
@@ -248,9 +358,8 @@ export function RunView({
         params.delete("q");
         params.delete("tags");
         params.delete("rtags");
-        const qs = params.toString();
-        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-    }, [pathname, router]);
+        setSearchParams(params);
+    }, [setSearchParams]);
 
     // Skill is the primary group; everything else is a secondary tag. The
     // secondary "Tags" rail excludes the per-task skill so it doesn't echo
@@ -327,20 +436,34 @@ export function RunView({
     // the run actually did — distinct from the grid below, which collapses
     // replicates to one row per task. The count label spells out both numbers.
     const metrics = useMemo(() => computeRunMetrics(filtered), [filtered]);
+    // Empty on every ordinary run (fewer than two arms), which is what keeps the
+    // comparison strip out of the way until a run actually has something to
+    // compare.
+    const variantMetrics = useMemo(
+        () => computeVariantMetrics(filtered),
+        [filtered],
+    );
     // The run has repeated tasks iff the per-task and per-replicate totals
     // differ. When true, the Pass-rate and Failed tiles switch to per-task units
     // (with the per-replicate figures shown as a sub-line) so they never mix.
     const hasRepeats = metrics.taskTotal !== metrics.total;
+    const hasVariants = variantMetrics.length > 0;
+    const variantRates = variantMetrics.map((r) => variantRate(r.metrics));
 
-    // The grid collapses replicates to one row per task, so the count beside the
-    // "Tasks" header must report distinct tasks (not execution rows) to match it;
-    // when a run has replicates we also surface the execution count.
+    // The grid collapses replicates to one row per (task, arm), so the count
+    // beside the "Tasks" header must count the same thing to match it; when a run
+    // has replicates we also surface the execution count.
+    //
+    // Keying on the arm as well as the task is what keeps this honest on a
+    // multi-variant run: those rows are NOT collapsed in the grid, so counting
+    // distinct task ids would print "6 tasks" above twelve visible rows and then
+    // mislabel the other six as replicate executions.
     const taskCount = useMemo(
-        () => new Set(tasks.map((t) => t.taskId)).size,
+        () => new Set(tasks.map(taskVariantKey)).size,
         [tasks],
     );
     const filteredTaskCount = useMemo(
-        () => new Set(filtered.map((t) => t.taskId)).size,
+        () => new Set(filtered.map(taskVariantKey)).size,
         [filtered],
     );
     const hasReplicates = taskCount !== tasks.length;
@@ -395,8 +518,20 @@ export function RunView({
                                 · filtered
                             </span>
                         )}
+                        {hasVariants && (
+                            <span className="ml-2 text-gray-400 normal-case tracking-normal">
+                                {variantMetrics.length} arms · spread{" "}
+                                {(
+                                    Math.max(...variantRates) -
+                                    Math.min(...variantRates)
+                                ).toFixed(0)}{" "}
+                                pts
+                            </span>
+                        )}
                     </div>
-                    {(() => {
+                    {hasVariants ? (
+                        <PassRateByVariant rows={variantMetrics} />
+                    ) : (() => {
                         // With repeats, the headline is the per-TASK rate — a
                         // task counts as passed if any replicate passed — and the
                         // raw per-replicate rate moves to a sub-line. Single-shot
@@ -488,19 +623,33 @@ export function RunView({
                             : "—"
                     }
                     sub={
-                        metrics.costP50 != null && metrics.costP90 != null
-                            ? `p50 $${metrics.costP50.toFixed(2)} · p90 $${metrics.costP90.toFixed(2)}`
-                            : undefined
+                        // p50/p90 across pooled arms would describe a population
+                        // that does not exist.
+                        hasVariants
+                            ? variantSub(variantMetrics, (m) =>
+                                  m.cost != null
+                                      ? `$${m.cost.toFixed(2)}`
+                                      : null,
+                              )
+                            : metrics.costP50 != null && metrics.costP90 != null
+                              ? `p50 $${metrics.costP50.toFixed(2)} · p90 $${metrics.costP90.toFixed(2)}`
+                              : undefined
                     }
                 />
                 <Metric
                     label="Time"
                     value={fmtDuration(metrics.duration)}
                     sub={
-                        metrics.durationP50 != null &&
-                        metrics.durationP90 != null
-                            ? `p50 ${fmtDuration(metrics.durationP50)} · p90 ${fmtDuration(metrics.durationP90)}`
-                            : undefined
+                        hasVariants
+                            ? variantSub(variantMetrics, (m) =>
+                                  m.duration != null
+                                      ? fmtDuration(m.duration)
+                                      : null,
+                              )
+                            : metrics.durationP50 != null &&
+                                metrics.durationP90 != null
+                              ? `p50 ${fmtDuration(metrics.durationP50)} · p90 ${fmtDuration(metrics.durationP90)}`
+                              : undefined
                     }
                 />
             </div>
