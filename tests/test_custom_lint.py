@@ -1070,6 +1070,20 @@ class TestCE030DocSchemaParity:
             for field_name in fields:
                 assert field_name in real, f"EXEMPT[{model_name}] names non-field {field_name!r}"
 
+    def test_record_cli_models_are_registered_for_doc_parity(self):
+        """A future trim of the registry must fail rather than silently drop coverage.
+
+        `RecordedCli` / `CliResponse` are the `record_cli` authoring surface -- the
+        fields a task author writes by hand -- so an undocumented field on either is
+        exactly the P0/P1 shape CE030 exists to catch.
+        """
+        from coder_eval.models import CliResponse, RecordedCli
+        from tests.lint.doc_schema_parity import DOCUMENTED_MODELS
+
+        registered = {model for model, _ in DOCUMENTED_MODELS}
+        for model in (RecordedCli, CliResponse):
+            assert model in registered, f"{model.__name__} is no longer registered with CE030"
+
     def test_detects_an_undocumented_field(self):
         from pydantic import BaseModel, Field
 

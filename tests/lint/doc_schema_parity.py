@@ -12,10 +12,15 @@ Design choices, each load-bearing:
 * **Allowlist, not denylist.** A new field on a registered model that is neither
   documented nor exempted *fails* — which is the point. Adding a user-facing field
   now forces a doc update or a reasoned exemption in the same change.
-* **Explicit registry, no recursion.** Only the four registered models are
+* **Explicit registry, no recursion.** Only the six registered models are
   checked; nested models (``AgentConfig``, ``SandboxConfig``, criteria, …) are NOT
   walked. Walking them would silently expand the documentation commitment to
-  dozens of models nobody signed up for.
+  dozens of models nobody signed up for. ``CliMatch`` is deliberately absent for
+  that reason: its fields are documented in the ``cli_called`` reference, and
+  registering a third nested model under ``SandboxConfig`` would start exactly
+  the tree-walk this bullet exists to prevent. A new field on a registered model
+  fails ``make lint`` until it is documented or exempted -- that is the intent,
+  not a bug in the rule.
 * **Inline-code match, deliberately simple.** A field counts as documented when
   its bare name appears wrapped in Markdown inline-code backticks anywhere in the
   doc. This is a floor, not a proof — a field name that appears in an unrelated
@@ -35,7 +40,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from coder_eval.models import Dataset, RunLimits, SimulationConfig, TaskDefinition
+from coder_eval.models import CliResponse, Dataset, RecordedCli, RunLimits, SimulationConfig, TaskDefinition
 
 
 # Models the project commits to documenting, paired with the doc page that owns
@@ -46,6 +51,8 @@ DOCUMENTED_MODELS: list[tuple[type[BaseModel], str]] = [
     (RunLimits, "docs/TASK_DEFINITION_GUIDE.md"),
     (Dataset, "docs/TASK_DEFINITION_GUIDE.md"),
     (SimulationConfig, "docs/TASK_DEFINITION_GUIDE.md"),
+    (RecordedCli, "docs/TASK_DEFINITION_GUIDE.md"),
+    (CliResponse, "docs/TASK_DEFINITION_GUIDE.md"),
 ]
 
 # Fields deliberately absent from the user docs, with the reason each is not
