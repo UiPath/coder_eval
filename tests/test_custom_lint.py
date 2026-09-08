@@ -147,17 +147,17 @@ class TestCE046EnvInfoSpreadsSuper:
 
 
 @pytest.mark.lint
-class TestCE048EmbeddedShimStdlibOnly:
-    """CE048 flags a non-stdlib import, or a shim-global collision, in an embedded module."""
+class TestCE048SidecarShimStdlibOnly:
+    """CE048 flags a non-stdlib import in a module copied beside a generated shim."""
 
     @staticmethod
-    def _run(src: str, *, embedded: bool = True):
+    def _run(src: str, *, sidecar: bool = True):
         import ast
 
-        from tests.lint.rules.ce048_embedded_shim_stdlib_only import EmbeddedShimStdlibOnly
+        from tests.lint.rules.ce048_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 
-        path = "src/coder_eval/argv_match.py" if embedded else "src/coder_eval/invocation_log.py"
-        return EmbeddedShimStdlibOnly(path).check(ast.parse(src))
+        path = "src/coder_eval/argv_match.py" if sidecar else "src/coder_eval/invocation_log.py"
+        return SidecarShimStdlibOnly(path).check(ast.parse(src))
 
     def test_flags_package_import(self):
         assert self._run("from coder_eval.models import FlagMatch")
@@ -170,45 +170,34 @@ class TestCE048EmbeddedShimStdlibOnly:
     def test_flags_relative_import(self):
         assert self._run("from .models import FlagMatch")
 
+    def test_flags_a_future_import(self):
+        """The likeliest accidental addition -- and the one whose generic message
+        would have been actively misleading, since widening STDLIB_ALLOWED to admit
+        `__future__` retires the guard instead of fixing the import."""
+        violations = self._run("from __future__ import annotations")
+        assert violations
+        assert "drop the line" in violations[0].message
+
     def test_allows_stdlib(self):
         assert not self._run("import re\nimport json")
 
-    def test_ignores_files_that_are_not_embedded(self):
-        # invocation_log.py renders the shim; it is not itself copied into one.
-        assert not self._run("from coder_eval.models import RecordedCli", embedded=False)
-
-    def test_flags_a_name_the_shim_binds_itself(self):
-        """The shim's own `def record` wins, and respond() swallows the TypeError,
-        so every invocation would silently get the fallback response."""
-        assert self._run("def record(argv):\n    return argv")
-        assert self._run("RULES = []")
-
-    def test_flags_a_renaming_import_onto_a_shim_global(self):
-        """An import binds a name too, so it is a collision route as much as a def."""
-        assert self._run("from typing import TypedDict as RULES")
-        assert self._run("import json as respond")
-
-    def test_allows_a_plain_stdlib_import_of_a_shim_global(self):
-        """`import sys` binds the very module the shim imports anyway."""
-        assert not self._run("import sys")
-        assert not self._run("import json")
-
-    def test_allows_a_colliding_name_that_is_not_module_level(self):
-        assert not self._run("def matcher():\n    record = 1\n    return record")
+    def test_ignores_files_that_are_not_a_sidecar(self):
+        # invocation_log.py renders the shim; it is not itself copied beside one.
+        assert not self._run("from coder_eval.models import RecordedCli", sidecar=False)
 
     def test_the_rule_guards_a_file_that_actually_exists(self):
         """A rule matching nothing passes vacuously while reading as a guarantee --
-        which is what a move of the embedded module would otherwise cause."""
+        which is what a move of the sidecar module would otherwise cause."""
         from pathlib import Path
 
-        from coder_eval.invocation_log import EMBEDDED_MODULES
-        from tests.lint.rules.ce048_embedded_shim_stdlib_only import EmbeddedShimStdlibOnly
+        from coder_eval.models import SIDECAR_MODULES
+        from tests.lint.rules.ce048_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 
         package = Path(__file__).resolve().parents[1] / "src" / "coder_eval"
-        for module in EMBEDDED_MODULES:
+        for module in SIDECAR_MODULES:
             target = package / module
-            assert target.is_file(), f"EMBEDDED_MODULES names {module}, which does not exist"
-            assert EmbeddedShimStdlibOnly(str(target))._embedded, f"CE048 does not match {target}"
+            assert target.is_file(), f"SIDECAR_MODULES names {module}, which does not exist"
+            assert SidecarShimStdlibOnly(str(target))._sidecar, f"CE048 does not match {target}"
 
 
 @pytest.mark.lint

@@ -20,6 +20,7 @@ from coder_eval.invocation_log import parse_log, render_recorder
 from coder_eval.models import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
+    SIDECAR_MODULES,
     CliCalledCriterion,
     CliResponse,
     RecordedCli,
@@ -47,8 +48,12 @@ def _run_shim(sandbox_dir, tool: str, args: list[str]) -> subprocess.CompletedPr
     )
 
 
-# The two rendered shim shapes. Only the second splices in argv_match.py, so an
-# invariant asserted on the first alone proves nothing about the interesting half.
+# The two rendered shim shapes: the second emits the sidecar import block, the
+# first does not. Both are ASCII-only fixtures on purpose (see
+# test_rendered_shim_is_pure_ascii). Note neither shape carries argv_match.py's
+# body any more -- the sidecar's own "stubs, does not proxy" property is NOT
+# covered by the invariants asserted over these two shapes; CE048 covers its
+# imports, and nothing covers its exec surface.
 SHIM_SHAPES = (
     RecordedCli(tool="uip"),
     RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"}, stdout="ok")]),
@@ -484,14 +489,22 @@ class TestRenderedSource:
 
     @pytest.mark.parametrize("spec", SHIM_SHAPES, ids=("no_rules", "with_rules"))
     def test_rendered_shim_does_not_execute_anything(self, spec):
-        """It stubs a tool rather than proxying one: no subprocess, no exec."""
+        """It stubs a tool rather than proxying one: no subprocess, no exec.
+
+        Covers the TEMPLATE only. The sidecar the rules-bearing shape imports is
+        a separate file and is not asserted here.
+        """
         source = render_recorder(spec)
         for forbidden in ("subprocess", "execv", "execvp", "popen", "system("):
             assert forbidden not in source
 
     @pytest.mark.parametrize("spec", SHIM_SHAPES, ids=("no_rules", "with_rules"))
     def test_rendered_shim_imports_nothing_from_coder_eval(self, spec):
-        """It runs inside the sandbox, where this package is not installed."""
+        """It runs inside the sandbox, where this package is not installed.
+
+        `from argv_match import select_rule` is a SIBLING import of the sidecar
+        written beside the shim, not a package import, so it does not appear here.
+        """
         source = render_recorder(spec)
         imports = [
             line.strip()
@@ -504,9 +517,10 @@ class TestRenderedSource:
     def test_rendered_shim_is_pure_ascii(self, spec):
         """Written into arbitrary sandboxes and read by whatever python3 is there.
 
-        Parametrized over both shapes because only the rules-bearing one splices in
-        another module's source -- the half that can actually break any of these
-        three invariants, and the half the unparametrized versions never rendered.
+        Scoped to the ASCII-only SHIM_SHAPES fixtures: author-supplied `stdout` /
+        `stderr` may legitimately be any UTF-8, so only the TEMPLATE is
+        ASCII-constrained. Both shapes are rendered because only the second emits
+        the sidecar import block.
         """
         source = render_recorder(spec)
         source.encode("ascii")
@@ -522,6 +536,286 @@ class TestRenderedSource:
         assert [argv for argv, _ in usable] == [["a"]]
         # An argv that is not list[str] is unusable, not a non-match.
         assert unusable == 2
+
+
+class TestSidecarModule:
+    """The matcher reaches the shim as a SIBLING FILE, not as spliced source.
+
+    A shim that carries a copy of `argv_match.py` in its own namespace is one
+    accidental name collision away from every invocation silently falling back to
+    the entry defaults -- `respond()` swallows the resulting TypeError. Writing the
+    module beside the shim and importing it removes that class of failure, at the
+    cost of one more file the recorder directory must contain: these tests are what
+    keep that file actually landing there.
+    """
+
+    @staticmethod
+    def _spec_with_rules(tool: str = "uip") -> RecordedCli:
+        return RecordedCli(
+            tool=tool,
+            exit_code=1,
+            stderr="uip: unknown command\n",
+            responses=[
+                CliResponse(when={"verb": "ixp dummy1"}, stdout="response1\n"),
+                CliResponse(when={"verb": "ixp dummy2"}, stdout="response2\n"),
+            ],
+        )
+
+    def test_sidecar_lands_beside_a_rules_bearing_shim(self):
+        sandbox = _sandbox("sidecar_present", record_cli=[self._spec_with_rules()])
+        try:
+            recorder_dir = sandbox.setup() / RECORD_CLI_DIR
+            for module in SIDECAR_MODULES:
+                assert (recorder_dir / module).is_file(), f"{module} was not written beside the shim"
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_no_sidecar_without_rules(self):
+        """A shim that answers everything the same way never consults the matcher."""
+        sandbox = _sandbox("sidecar_absent", record_cli=[RecordedCli(tool="uip")])
+        try:
+            recorder_dir = sandbox.setup() / RECORD_CLI_DIR
+            for module in SIDECAR_MODULES:
+                assert not (recorder_dir / module).exists()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_sidecar_is_the_shipped_source_verbatim(self):
+        """Not a paraphrase: the shim's matcher IS coder_eval/argv_match.py."""
+        from coder_eval import argv_match
+
+        shipped = Path(argv_match.__file__).read_text(encoding="utf-8")
+        sandbox = _sandbox("sidecar_verbatim", record_cli=[self._spec_with_rules()])
+        try:
+            written = (sandbox.setup() / RECORD_CLI_DIR / "argv_match.py").read_text(encoding="utf-8")
+            assert written == shipped
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_a_rules_bearing_shim_dispatches_through_the_sidecar(self):
+        """End to end: the sibling import resolves, so per-rule dispatch works.
+
+        Every other assertion in this class is about a file existing. This one is
+        the proof the shim can actually IMPORT it from inside the sandbox.
+        """
+        sandbox = _sandbox("sidecar_dispatch", record_cli=[self._spec_with_rules()])
+        try:
+            sandbox_dir = sandbox.setup()
+            first = _run_shim(sandbox_dir, "uip", ["ixp", "dummy1"])
+            second = _run_shim(sandbox_dir, "uip", ["ixp", "dummy2"])
+            fallback = _run_shim(sandbox_dir, "uip", ["ixp", "nope"])
+
+            assert (first.returncode, first.stdout) == (0, "response1\n")
+            assert (second.returncode, second.stdout) == (0, "response2\n")
+            assert (fallback.returncode, fallback.stdout) == (1, "")
+            assert "unknown command" in fallback.stderr
+            # An ImportError would land here rather than on the exit code, since
+            # the shim would die before writing anything.
+            assert "ImportError" not in first.stderr
+
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            assert [record.get("rule") for record in records] == [0, 1, None]
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_the_template_is_what_suppresses_pycache(self, tmp_path):
+        """`sys.dont_write_bytecode = True` above the import, not the environment.
+
+        The sibling import would otherwise create `cli_mocks/__pycache__/` inside
+        the agent's sandbox -- a directory the agent can see and that a file_check
+        criterion or an artifact diff picks up. The negative half is load-bearing:
+        docker/Dockerfile already sets PYTHONDONTWRITEBYTECODE, and CI runners often
+        do too, so without it this test would pass wherever the template line was
+        deleted.
+        """
+        from coder_eval import argv_match
+
+        source = render_recorder(self._spec_with_rules())
+        stripped = source.replace("sys.dont_write_bytecode = True\n", "", 1)
+        assert stripped != source, "the suppression line moved; update this test"
+
+        # PYTHONDONTWRITEBYTECODE would mask the template line in BOTH halves;
+        # PYTHONPYCACHEPREFIX would send the negative half's bytecode to a shadow
+        # tree and fail it spuriously. Neither may leak in from the developer's env.
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
+
+        for name, shim_source, expect_pycache in (("with", source, False), ("without", stripped, True)):
+            work = tmp_path / name
+            work.mkdir()
+            (work / "argv_match.py").write_text(Path(argv_match.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+            shim = work / "uip"
+            shim.write_text(shim_source, encoding="utf-8", newline="\n")
+            proc = subprocess.run(
+                [sys.executable, str(shim), "ixp", "dummy1"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                check=False,
+            )
+            assert proc.stdout == "response1\n", f"the {name} shim did not dispatch: {proc.stderr}"
+            assert (work / "__pycache__").exists() is expect_pycache
+
+    def test_a_rules_less_and_a_rules_bearing_entry_coexist(self):
+        """One sandbox, one sidecar, two shims -- only one of which imports it."""
+        sandbox = _sandbox(
+            "sidecar_mixed",
+            record_cli=[self._spec_with_rules(), RecordedCli(tool="curl", exit_code=7)],
+        )
+        try:
+            sandbox_dir = sandbox.setup()
+            assert (sandbox_dir / RECORD_CLI_DIR / "argv_match.py").is_file()
+            assert _run_shim(sandbox_dir, "uip", ["ixp", "dummy1"]).stdout == "response1\n"
+            assert _run_shim(sandbox_dir, "curl", ["https://example.com"]).returncode == 7
+            records = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))
+            assert [record["tool"] for record in records] == ["uip", "curl"]
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_a_second_rules_bearing_entry_does_not_collide_on_the_sidecar(self):
+        """Identical bytes, so a second write is not a collision -- which is why the
+        per-tool `exists()` pre-check was NOT widened to cover the sidecar.
+
+        Asserts the OUTCOME (no raise, correct content, both shims present), not a
+        write count: rewriting the same bytes N times is indistinguishable here and
+        is equally correct.
+        """
+        from coder_eval import argv_match
+
+        sandbox = _sandbox(
+            "sidecar_twice",
+            record_cli=[self._spec_with_rules("uip"), self._spec_with_rules("aip")],
+        )
+        try:
+            recorder_dir = sandbox.setup() / RECORD_CLI_DIR
+            assert (recorder_dir / "argv_match.py").read_text(encoding="utf-8") == Path(argv_match.__file__).read_text(
+                encoding="utf-8"
+            )
+            assert (recorder_dir / "uip").is_file()
+            assert (recorder_dir / "aip").is_file()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_a_re_setup_does_not_leave_a_stale_sidecar(self, tmp_path):
+        """The recorder dir is wiped every setup, so a sidecar cannot outlive the
+        entry that asked for it.
+
+        Uses an explicit `target_dir`, like the two stale-state tests above: a
+        default tempdir sandbox gets a FRESH mkdtemp per setup(), so it never
+        re-enters the `shutil.rmtree(recorder_dir)` branch this is about, and the
+        assertion would hold with that branch deleted.
+        """
+        target = tmp_path / "artifacts"
+        with_rules = _sandbox("sidecar_resetup", record_cli=[self._spec_with_rules()])
+        with_rules.setup(target_dir=target)
+        assert (target / RECORD_CLI_DIR / "argv_match.py").is_file()
+
+        plain = _sandbox("sidecar_resetup", record_cli=[RecordedCli(tool="uip")])
+        plain.setup(target_dir=target)
+        assert not (target / RECORD_CLI_DIR / "argv_match.py").exists(), (
+            "the previous setup's sidecar survived into a run that declares no rules"
+        )
+
+    def test_a_broken_sidecar_still_records_the_invocation(self):
+        """A shim whose matcher will not import must NOT become a tool that runs and
+        records nothing.
+
+        Splicing made this state unreachable -- there was no import to fail. An
+        empty log reads exactly like "the agent never called it", which is the one
+        reading `cli_called` works hardest to prevent (the log is seeded so missing
+        and empty differ, a sentinel covers dropped writes, unusable records are
+        counted). So the import is guarded and the fault is booked on every record.
+        """
+        sandbox = _sandbox("sidecar_broken", record_cli=[self._spec_with_rules()])
+        try:
+            sandbox_dir = sandbox.setup()
+            (sandbox_dir / RECORD_CLI_DIR / "argv_match.py").unlink()
+
+            proc = _run_shim(sandbox_dir, "uip", ["ixp", "dummy1"])
+            # The entry defaults, not the rule's response: the matcher is gone.
+            assert proc.returncode == 1
+            assert proc.stdout == ""
+
+            record = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))[0]
+            assert record["argv"] == ["ixp", "dummy1"], "the invocation went unrecorded"
+            assert "ModuleNotFoundError" in record["sidecar_error"]
+            assert "rule" not in record
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_a_broken_sidecar_cannot_let_a_negative_guard_pass(self):
+        """The consequence that makes the guard above load-bearing.
+
+        With the invocation unrecorded, `max_count: 0` over the very call the task
+        forbids scored 1.0 with no error -- a silent false PASS.
+        """
+        sandbox = _sandbox("sidecar_broken_guard", record_cli=[self._spec_with_rules()])
+        try:
+            sandbox_dir = sandbox.setup()
+            (sandbox_dir / RECORD_CLI_DIR / "argv_match.py").unlink()
+            _run_shim(sandbox_dir, "uip", ["ixp", "dummy1"])
+
+            forbidden = CliCalledCriterion(
+                description="must not call dummy1", verb="ixp dummy1", min_count=0, max_count=0
+            )
+            result = SuccessChecker(sandbox).check(forbidden)
+            assert result.score == 0.0
+            assert "matcher" in (result.error or "").lower() or "sidecar" in (result.error or "").lower()
+
+            # And a POSITIVE criterion must not read as a clean pass either: the
+            # agent saw the fallback, not the response the task described.
+            wanted = CliCalledCriterion(description="called dummy1", verb="ixp dummy1", min_count=1)
+            assert SuccessChecker(sandbox).check(wanted).score == 0.0
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_the_recorder_dir_does_not_shadow_the_sidecars_own_stdlib_imports(self):
+        """argv_match.py imports `re` and `typing`, and the recorder dir is writable
+        by the agent AND holds a shim per declared tool. With that directory at the
+        HEAD of sys.path, a tool named `typing.py` broke every rules-bearing shim in
+        the sandbox -- so the sidecar dir is appended, not prepended.
+        """
+        sandbox = _sandbox(
+            "sidecar_shadow",
+            record_cli=[RecordedCli(tool="typing.py"), self._spec_with_rules()],
+        )
+        try:
+            sandbox_dir = sandbox.setup()
+            proc = _run_shim(sandbox_dir, "uip", ["ixp", "dummy1"])
+            assert (proc.returncode, proc.stdout) == (0, "response1\n"), f"shadowed: {proc.stderr}"
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    def test_the_sidecar_import_survives_pythonsafepath(self):
+        """PYTHONSAFEPATH=1 clears sys.path[0] -- the entire reason SHIM_DIR is put on
+        the path explicitly. Asserted at RUNTIME, not just textually."""
+        sandbox = _sandbox("sidecar_safepath", record_cli=[self._spec_with_rules()])
+        try:
+            sandbox_dir = sandbox.setup()
+            proc = subprocess.run(
+                [sys.executable, str(sandbox_dir / RECORD_CLI_DIR / "uip"), "ixp", "dummy1"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                cwd=os.path.dirname(os.path.abspath(os.sep)),
+                env={**os.environ, "PYTHONSAFEPATH": "1"},
+                check=False,
+            )
+            assert (proc.returncode, proc.stdout) == (0, "response1\n"), f"safepath broke it: {proc.stderr}"
+        finally:
+            sandbox.cleanup(preserve=False)
+
+    @pytest.mark.parametrize("tool", ["argv_match.py", "ARGV_MATCH.PY"])
+    def test_a_tool_named_like_a_sidecar_is_rejected(self, tool):
+        """Case-folded: APFS and NTFS are case-insensitive, so the sidecar write
+        would clobber the agent's shim without the per-tool exists() guard firing."""
+        with pytest.raises(ValidationError, match="collides with a module"):
+            RecordedCli(tool=tool)
+
+    def test_a_tool_named_like_a_sidecar_without_the_extension_is_allowed(self):
+        """An extensionless file is not importable, so it cannot shadow the sidecar.
+        The guard must not over-reach into names that are safe."""
+        assert RecordedCli(tool="argv_match").tool == "argv_match"
 
 
 class TestPerInvocationResponses:
@@ -689,24 +983,38 @@ class TestPerInvocationResponses:
         finally:
             sandbox.cleanup(preserve=False)
 
-    def test_matcher_is_embedded_only_when_rules_exist(self):
-        """A shim with no rules never consults the matcher, so it does not carry it."""
+    def test_rendered_shim_imports_the_sidecar_only_when_rules_exist(self):
+        """A shim with no rules never consults the matcher, so it does not import it.
+
+        Neither shape may carry the matcher's BODY: the whole point of the sidecar
+        is that the shim references a sibling file instead of a spliced copy.
+        """
         plain = render_recorder(RecordedCli(tool="uip"))
         with_rules = render_recorder(RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})]))
-        assert "argv_match.py" not in plain
+        assert "from argv_match import select_rule" not in plain
+        assert "from argv_match import select_rule" in with_rules
         assert "def argv_matches" not in plain
-        assert "def argv_matches" in with_rules
-        # Both must be valid Python: the embedded half lands mid-file.
+        assert "def argv_matches" not in with_rules
         compile(plain, "shim", "exec")
         compile(with_rules, "shim", "exec")
 
-    def test_embedded_matcher_is_the_shipped_source_verbatim(self):
-        """Not a paraphrase: the shim's matcher IS coder_eval/argv_match.py."""
-        from coder_eval import argv_match
+    def test_the_shim_dir_is_put_on_sys_path_before_the_sidecar_import(self):
+        """SHIM_DIR must be assigned ABOVE the import block that reads it, and the
+        path must be set up before the import runs.
 
-        shipped = Path(argv_match.__file__).read_text(encoding="utf-8")
-        rendered = render_recorder(RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})]))
-        assert shipped.strip() in rendered
+        The runtime proof is
+        TestSidecarModule::test_the_sidecar_import_survives_pythonsafepath; this
+        pins the ordering the template depends on, which a reordering edit would
+        otherwise break only under PYTHONSAFEPATH=1.
+        """
+        source = render_recorder(RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})]))
+        assigned = source.index("SHIM_DIR = os.path.dirname")
+        appended = source.index("sys.path.append(SHIM_DIR)")
+        imported = source.index("from argv_match import select_rule")
+        assert assigned < appended < imported
+        # Appended, never prepended: the recorder dir is agent-writable, so at the
+        # head of sys.path it shadows the sidecar's own stdlib imports.
+        assert "sys.path.insert(0, SHIM_DIR)" not in source
 
     def test_response_rule_needs_a_facet(self):
         """A catch-all rule is the entry's own default; two ways to say it is one too many."""
@@ -758,29 +1066,6 @@ class TestPerInvocationResponses:
         beyond its verb does NOT claim everything a later rule would, and two
         rules parsing argv differently cannot be compared by verb prefix at all."""
         assert len(RecordedCli(tool="uip", responses=responses).responses) == 2
-
-    def test_shim_globals_lists_exactly_what_the_template_binds(self):
-        """CE047 rejects an embedded module that binds one of these names, so a
-        name the template binds but this set omits is an unguarded collision --
-        which is how `sys`, `json`, `os` and `time` were missed the first time."""
-        import ast
-
-        from coder_eval.invocation_log import SHIM_GLOBALS
-
-        # The rules-less shape: it binds only the template's own names, whereas
-        # the spliced one also carries the embedded module's.
-        tree = ast.parse(render_recorder(RecordedCli(tool="uip")))
-        bound: set[str] = set()
-        for statement in tree.body:
-            if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                bound.add(statement.name)
-            elif isinstance(statement, ast.Assign):
-                bound.update(t.id for t in statement.targets if isinstance(t, ast.Name))
-            elif isinstance(statement, ast.Import):
-                bound.update(a.asname or a.name.split(".")[0] for a in statement.names)
-            elif isinstance(statement, ast.ImportFrom):
-                bound.update(a.asname or a.name for a in statement.names)
-        assert bound == set(SHIM_GLOBALS)
 
     def test_a_bare_string_when_is_rejected_with_the_fix(self):
         """One shape for a pattern. A lone string leaves which of six facets it sets

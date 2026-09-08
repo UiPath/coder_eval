@@ -6,7 +6,8 @@ and sandbox.py could not import from criteria.py in any case (criteria.py alread
 takes ``RECORD_CLI_LOG`` from sandbox.py).
 
 The matching *semantics* live in :mod:`coder_eval.argv_match`, which is
-stdlib-only because its source is embedded into generated shims. This module
+stdlib-only because it is copied beside every generated shim that serves
+per-invocation responses and imported there as a sibling. This module
 holds the authoring surface — the pydantic models and the validators that reject
 a pattern which cannot mean what it looks like — and lowers it to the plain spec
 dict that engine consumes.

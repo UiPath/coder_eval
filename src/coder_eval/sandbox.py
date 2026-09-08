@@ -14,10 +14,11 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 from .fs_permissions import RESTRICTED_MODE, set_permissions
-from .invocation_log import render_recorder
+from .invocation_log import render_recorder, sidecar_source
 from .models import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
+    SIDECAR_MODULES,
     RepoSource,
     SandboxConfig,
     StarterFilesSource,
@@ -562,11 +563,15 @@ class Sandbox:
     def _generate_cli_recorders(self) -> None:
         """Write a recording shim for every ``SandboxConfig.record_cli`` entry.
 
-        Each shim is a self-contained Python script — it must run inside the
-        sandbox, where ``coder_eval`` is not installed, so it imports nothing
-        from this package and carries its configuration as embedded literals.
-        A ``.cmd`` twin is written beside it so a bare ``uip`` also resolves
-        through Windows PATHEXT lookup on the tempdir driver.
+        Each shim runs inside the sandbox, where ``coder_eval`` is not
+        installed, so it carries its configuration as literals and imports
+        nothing installed. An entry that declares ``responses`` also gets every
+        :data:`SIDECAR_MODULES` file written into the recorder directory beside
+        it — the argv matcher it dispatches on, which it imports as a sibling
+        rather than the harness splicing that source into the shim. A rules-less
+        entry needs no matcher, so no sidecar is written for it.
+        A ``.cmd`` twin is written beside each shim so a bare ``uip`` also
+        resolves through Windows PATHEXT lookup on the tempdir driver.
 
         Raises:
             RuntimeError: a task's own ``mock_path_dirs`` already provides an
@@ -632,6 +637,12 @@ class Sandbox:
             # what makes the bit real for PATH lookup, but the shim must be
             # executable even if the recorder dir is consumed some other way.
             shim.chmod(shim.stat().st_mode | 0o111)
+            # Only a rules-bearing shim imports the matcher. Written once per such
+            # entry with identical bytes, so two of them is not a collision — which
+            # is why the `exists()` pre-check above stays scoped to the tool name.
+            if spec.responses:
+                for module in SIDECAR_MODULES:
+                    (recorder_dir / module).write_text(sidecar_source(module), encoding="utf-8", newline="\n")
             # `python "%~dp0<tool>" %*` — the extensionless script beside this file.
             cmd_lines = [
                 "@echo off",

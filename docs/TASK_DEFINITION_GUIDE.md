@@ -599,6 +599,7 @@ sandbox:
 - **`exit_code` defaults to 0 on a rule** — the opposite of the entry default of 1. A rule exists because you described that invocation, so the natural reading is "and this is what it answers"; an undescribed one should still look like a tool that failed.
 - **`ignore_flags` is empty on a rule**, unlike the criterion's `[output]`: grading must not depend on a flag that changes nothing about the outcome, but a rule may legitimately answer differently for `--output json`. That is the one place a rule is *not* copy-pastable into a criterion — `flags: {output: ...}` is valid on a rule and rejected on the criterion, which ignores that flag by default.
 - **The log names the rule that answered** (`"rule": 1`), and omits the key when none did — the first thing you want to know when an expected canned response does not arrive.
+- **The recorder directory also holds `argv_match.py`** — the matcher module the shim imports as a sibling, written there only for entries that declare `responses`. It is regenerated on every sandbox setup, so do not edit it, and do not declare a `tool` that would shadow it (the name is rejected).
 - **Still stateless.** A rule answers the same way however many times it matches; a counter would have to survive concurrent agent commands. For a tool whose reply must change over a run, hand-write a mock under `mock_path_dirs`.
 
 ## Template Sources

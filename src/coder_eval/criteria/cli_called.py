@@ -86,6 +86,27 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
 
         usable, unusable = parse_log(content)
 
+        # Booked on every record when the shim could not IMPORT its matcher, so
+        # no rule was ever tried and the agent saw the entry defaults throughout.
+        # Scored 0.0 rather than raised, unlike `rule_error` below: the sidecar
+        # lives in the agent-writable recorder directory, so an agent can cause
+        # this, and escalating would hand it a way to turn a failing run into an
+        # ERROR. The records themselves are still trustworthy -- the shim keeps
+        # logging -- which is what stops a `max_count: 0` guard passing on a
+        # forbidden call that would otherwise have gone unrecorded entirely.
+        broken = [record for _, record in usable if record.get("sidecar_error") is not None]
+        if broken:
+            return CriterionResult(
+                criterion_type=criterion.type,
+                description=criterion.description,
+                score=0.0,
+                error=(
+                    f"Recorder could not import its matcher module on {len(broken)} invocation(s), so no "
+                    f"response rule was tried and the agent saw the entry defaults throughout. "
+                    f"First: {broken[0].get('sidecar_error')!r}"
+                ),
+            )
+
         # The shim books this when its own rule evaluation raised. Defense in
         # depth (FlagMatch compiles at load), but if it ever fires, the responses
         # the agent saw were not the ones the task described, so no verdict over

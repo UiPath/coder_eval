@@ -170,6 +170,8 @@ from coder_eval.models.routing import (
 from coder_eval.models.sandbox import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
+    RECORD_CLI_LOG_NAME,
+    SIDECAR_MODULES,
     CliResponse,
     DockerBuildConfig,
     DockerDriverConfig,
@@ -306,6 +308,8 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "RecordedCli",
     "RECORD_CLI_DIR",
     "RECORD_CLI_LOG",
+    "RECORD_CLI_LOG_NAME",
+    "SIDECAR_MODULES",
     "ResourceLimits",
     "validate_template_sources_list",
     # Telemetry

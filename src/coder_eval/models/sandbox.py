@@ -316,6 +316,11 @@ RECORD_CLI_DIR = "cli_mocks"
 RECORD_CLI_LOG_NAME = "calls.jsonl"
 RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/{RECORD_CLI_LOG_NAME}"
 
+# Modules copied into the recorder directory beside each shim that declares
+# response rules. The shim imports them as siblings, so they must be
+# stdlib-only (lint rule CE048) -- they run where coder_eval is not installed.
+SIDECAR_MODULES: tuple[str, ...] = ("argv_match.py",)
+
 # Shadowing any of these breaks the harness rather than the tool under test: the
 # shim is a script run by an interpreter, and its directory goes FIRST on a PATH
 # the orchestrator also reuses for run_command criteria. `tool: python3` made the
@@ -494,8 +499,23 @@ class RecordedCli(BaseModel):
                 + f"Reserved: {reserved}"
             )
             raise ValueError(msg)
-        if v == RECORD_CLI_LOG_NAME:
+        # Folded for the same reason as the reserved set: on a case-insensitive
+        # filesystem `CALLS.JSONL` is the seeded log, and the shim write would hit
+        # it -- reported as a confusing duplicate-filename error at setup instead.
+        if v.lower() == RECORD_CLI_LOG_NAME:
             raise ValueError(f"record_cli tool {v!r} would overwrite the invocation log criteria read")
+        # Case-folded like the reserved check above: APFS and NTFS are
+        # case-insensitive, so `ARGV_MATCH.PY` names the same inode as the
+        # sidecar. The sidecar write would then clobber the agent's shim without
+        # `_generate_cli_recorders`' per-tool exists() guard ever firing.
+        if v.lower() in {module.lower() for module in SIDECAR_MODULES}:
+            names = ", ".join(sorted(SIDECAR_MODULES))
+            msg = (
+                f"record_cli tool {v!r} collides with a module the recorder writes beside the shim "
+                f"({names}); the shim imports it as a sibling, so shadowing it breaks response "
+                "dispatch for every entry. Declare a different name."
+            )
+            raise ValueError(msg)
         if v.lower().endswith((".cmd", ".bat")):
             raise ValueError(f"record_cli tool {v!r} collides with the generated Windows twin; declare the bare name")
         return v

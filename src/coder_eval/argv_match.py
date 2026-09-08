@@ -1,9 +1,5 @@
 """Structured argv matching: the one engine both CLI surfaces share.
 
-ASCII-only by rule, not by accident: this module's source is spliced into
-generated shims, and `test_rendered_shim_is_pure_ascii` covers the spliced
-shape, so an em-dash here fails that test rather than a sandbox somewhere.
-
 Two places ask the same question about one invocation. The ``cli_called``
 criterion reads a recorded ``argv`` back afterwards and asks *did this happen*;
 a ``record_cli`` response rule asks it live, inside the sandbox, to choose which
@@ -12,10 +8,11 @@ rule and again in the criterion that grades it must get one semantic, not two
 that drift.
 
 Everything here takes PLAIN DICTS rather than pydantic models, and imports
-nothing beyond the standard library: :func:`coder_eval.invocation_log.render_recorder`
-embeds this module's SOURCE into every generated shim, and that shim runs inside
-the sandbox, where ``coder_eval`` is not installed. Lint rule CE048 keeps the
-imports stdlib-only.
+nothing beyond the standard library: ``Sandbox._generate_cli_recorders`` copies
+this file into the recorder directory as a SIDECAR beside every shim that
+declares response rules, and that shim imports it as a sibling while running
+inside the sandbox, where ``coder_eval`` is not installed. Lint rule CE048 keeps
+the imports stdlib-only.
 
 :class:`MatchSpec` is what ``CliMatch.match_spec`` emits. It is a ``TypedDict``
 rather than a bare dict on purpose: it is the seam where every guarantee the
