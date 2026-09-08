@@ -210,6 +210,122 @@ class TestCiSmokePassContract:
         )
 
 
+class TestRecordCliProbeIntegrity:
+    """The probe's detectors must stay wired to the stub they detect.
+
+    Mirrors TestAntiCheatProbeIntegrity: a probe whose detector drifts from the
+    thing it detects reports a pass forever, including after a real regression.
+    These turn the task's own prose invariants into tests.
+
+    Reads the task through `TaskDefinition` rather than raw YAML, so every default
+    (a rule's `exit_code`, an omitted `stdout`) comes from the models instead of
+    being hand-copied here -- a copied default stops matching the shim silently.
+    """
+
+    TASK = Path("tasks/record_cli_responses.yaml")
+    LOG = "cli_mocks/calls.jsonl"
+
+    def _task(self) -> TaskDefinition:
+        if not self.TASK.exists():
+            pytest.skip("probe task not present")
+        return TaskDefinition(**yaml.safe_load(self.TASK.read_text(encoding="utf-8")))
+
+    def _entry(self, task: TaskDefinition):
+        entries = task.sandbox.record_cli
+        assert len(entries) == 1, (
+            f"this probe's tests assume exactly one record_cli entry, found {len(entries)}. "
+            "Adding a second stubbed tool means teaching them which entry to read."
+        )
+        return entries[0]
+
+    def test_dispatch_is_proved_by_a_criterion_the_agent_cannot_influence(self):
+        """The authoritative detector, and the reason it exists.
+
+        `cli_called` matches argv only, so it passes whether a rule answered or the
+        entry fallback did. And `captured.txt` is forgeable: this YAML is serialised
+        to /work/input and mounted at /work/task_dir, both readable, so an agent that
+        found empty stdout could `cat` the response strings and transcribe them.
+        A codegen regression that renders `RULES = []` raises nothing, so neither
+        `rule_error` nor `sidecar_error` is booked either. Only the `"rule": N` key,
+        which the shim writes solely when rule N actually answered, catches that --
+        so the probe must keep asserting on the log itself.
+        """
+        task = self._task()
+        log_checks = [c for c in task.success_criteria if c.type == "file_contains" and c.path == self.LOG]
+        assert log_checks, (
+            f"no file_contains criterion reads {self.LOG!r}. Without it this probe reports SUCCESS "
+            "when per-invocation dispatch is dead but the agent still ran the commands."
+        )
+        wanted = {needle for c in log_checks for needle in c.includes}
+        for index in range(len(self._entry(task).responses)):
+            assert f'"rule": {index}' in wanted, (
+                f"the log criterion does not require '\"rule\": {index}', so responses[{index}] "
+                "could never answer and the probe would still pass"
+            )
+
+    def test_the_expected_strings_come_from_the_stub_not_the_prompt(self):
+        """Keeps the response strings out of the prompt.
+
+        This does NOT make them unobtainable -- the task YAML is readable in the
+        sandbox, which is why the log criterion above is the authoritative detector.
+        It removes the cheapest transcription path: a prompt that named the strings
+        would let an agent satisfy `captured.txt` without running anything at all.
+        """
+        task = self._task()
+        served = {rule.stdout.strip() for rule in self._entry(task).responses}
+        wanted = [
+            needle
+            for c in task.success_criteria
+            if c.type == "file_contains" and c.path == "captured.txt"
+            for needle in c.includes
+        ]
+
+        assert wanted, "the probe no longer checks what the agent captured"
+        for needle in wanted:
+            assert any(needle in text for text in served), (
+                f"captured.txt wants {needle!r} but no record_cli response serves it"
+            )
+            assert needle not in task.initial_prompt, (
+                f"{needle!r} appears in initial_prompt, so the criterion is satisfiable by "
+                "transcription without the agent running the tool at all"
+            )
+
+    def test_every_asserted_verb_has_a_matching_response_rule(self):
+        """Pins each cli_called detector to a rule, the way the anti-cheat probe pins
+        its regex to its canary."""
+        task = self._task()
+        rule_verbs = {
+            tuple(tokens) for rule in self._entry(task).responses for tokens in rule.when.match_spec["verb_spellings"]
+        }
+        asserted = [c for c in task.success_criteria if c.type == "cli_called"]
+
+        assert asserted, "the probe no longer asserts any invocation"
+        for criterion in asserted:
+            for tokens in criterion.verb_spellings:
+                assert tuple(tokens) in rule_verbs, (
+                    f"cli_called asserts verb {' '.join(tokens)!r}, which no response rule serves — "
+                    "the probe would pass on the entry fallback and prove nothing about dispatch"
+                )
+
+    def test_the_fallback_differs_from_every_rule(self):
+        """ "Every rule served the entry default" must be distinguishable from a pass.
+
+        Defaults come from the models, not from literals here: `CliResponse.exit_code`
+        defaults to 0 while `RecordedCli.exit_code` defaults to 1, and neither rule in
+        the task sets one, so a hand-copied default that drifted would leave this
+        comparing a tuple the shim never serves.
+        """
+        entry = self._entry(self._task())
+        fallback = (entry.exit_code, entry.stdout, entry.stderr)
+
+        for index, rule in enumerate(entry.responses):
+            served = (rule.exit_code, rule.stdout, rule.stderr)
+            assert served != fallback, (
+                f"responses[{index}] is byte-identical to the entry fallback, so this probe cannot "
+                "tell per-rule dispatch from no dispatch at all"
+            )
+
+
 class TestAntiCheatProbeIntegrity:
     """The probe's leak detector must stay wired to its own canary."""
 

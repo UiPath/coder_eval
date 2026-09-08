@@ -469,16 +469,16 @@ jobs:
       AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
-      # tasks_run for --tags smoke-pass. 7 task files (hello_date, dataset_example,
+      # tasks_run for --tags smoke-pass. 8 task files (hello_date, dataset_example,
       # smoke_llm_judge, smoke_agent_judge, byod_smoke_test, agentless_smoke_test,
-      # anti_cheat_reference); dataset_example fans out to 2 inline rows, so 8
-      # sub-tasks. If you add/remove a smoke-pass task or change the dataset row
-      # count, bump these.
+      # anti_cheat_reference, record_cli_responses); dataset_example fans out to 2
+      # inline rows, so 9 sub-tasks. If you add/remove a smoke-pass task or change
+      # the dataset row count, bump these.
       #
       # anti_cheat_reference lives in a SUBDIRECTORY, which `tasks/*.yaml` does not
       # match — the smoke-pass step names its path explicitly. Keep that in sync.
-      EXPECTED_SMOKE_PASS_RUN: "8"
-      EXPECTED_SMOKE_PASS_SUCCEEDED: "8"
+      EXPECTED_SMOKE_PASS_RUN: "9"
+      EXPECTED_SMOKE_PASS_SUCCEEDED: "9"
       # smoke-fail bucket: three tasks expected to fail.
       #   1. smoke_negative_path: file_contains criterion is unsatisfiable
       #      (sentinel-string regression detection for success-checker).
@@ -549,6 +549,9 @@ jobs:
       # explicitly. anti_cheat_reference is the adversarial probe that the agent
       # cannot read the reference solution during its turn; it needs the
       # coder-eval-agent image built above (it is a driver: docker task).
+      # record_cli_responses is the record_cli per-invocation-response probe and
+      # is also driver: docker, so it needs that same image; it is flat in
+      # tasks/, so the glob already matches it.
       - name: Run smoke-pass bucket (expect all to succeed)
         run: |
           .venv/bin/coder-eval run tasks/*.yaml tasks/anti_cheat_reference/*.yaml \

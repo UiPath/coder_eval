@@ -52,9 +52,10 @@ would drop them from those runs.
 | `smoke` | Umbrella over the pass + fail buckets | ad hoc |
 
 Members: `hello_date`, `agentless_smoke_test`, `byod_smoke_test`,
-`dataset_example`, `smoke_agent_judge`, `smoke_llm_judge`, `smoke_negative_path`,
-`smoke_budget_exceeded`, `smoke_cost_budget_exceeded`, `smoke_task_timeout`,
-`smoke_variants`, `token_check`.
+`dataset_example`, `record_cli_responses`, `smoke_agent_judge`,
+`smoke_llm_judge`, `smoke_negative_path`, `smoke_budget_exceeded`,
+`smoke_cost_budget_exceeded`, `smoke_task_timeout`, `smoke_variants`,
+`token_check`.
 
 ## Support subdirectories
 
