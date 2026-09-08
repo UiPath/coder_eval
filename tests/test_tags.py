@@ -213,6 +213,38 @@ class TestCiSmokePassContract:
         )
 
 
+class TestTasksReadmeSmokeMembers:
+    """tasks/README.md calls itself "the map", and its smoke Members list had no sensor.
+
+    It had already decayed (`opencode_smoke_test` was tagged `smoke` and missing) --
+    the same silent-decay class `TestCiSmokePassContract` guards for the CI counts.
+    """
+
+    README = Path("tasks/README.md")
+
+    def test_every_root_smoke_task_is_listed(self):
+        if not self.README.exists():
+            pytest.skip("tasks/README.md not present")
+        tagged = set()
+        for task_file in sorted(Path("tasks").glob("*.yaml")):
+            try:
+                task = TaskDefinition(**yaml.safe_load(task_file.read_text(encoding="utf-8")))
+            except Exception:  # malformed tasks are other tests' business
+                continue
+            if any(tag.startswith("smoke") for tag in task.tags):
+                tagged.add(task_file.stem)
+
+        text = self.README.read_text(encoding="utf-8")
+        assert "Members:" in text, "the smoke Members list is gone; update this test"
+        block = text.split("Members:", 1)[1].split("\n\n", 1)[0]
+        listed = set(re.findall(r"`([^`]+)`", block))
+
+        assert not tagged - listed, (
+            f"tasks/README.md's smoke Members list omits {sorted(tagged - listed)}. "
+            "The README is the map for this directory; add the task or drop the tag."
+        )
+
+
 class TestRecordCliProbeIntegrity:
     """The probe's detectors must stay wired to the stub they detect.
 

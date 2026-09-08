@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from coder_eval.argv_match import split_flags
 from coder_eval.evaluation.checker import SuccessChecker
-from coder_eval.models import CliCalledCriterion, SandboxConfig
+from coder_eval.models import CliCalledCriterion, CriterionResult, SandboxConfig
 from coder_eval.sandbox import Sandbox
 
 
@@ -448,6 +448,76 @@ class TestLogHandling:
         result = SuccessChecker(sandbox).check(criterion)
         assert result.score == 0.0
         assert "1 unusable record" in (result.error or "")
+
+
+class TestNoEscalationOnAgentControlledContent:
+    """The log is agent-writable, so NOTHING in it may raise.
+
+    The sensor for the defect this guard was written after: `rule_error` was made to
+    raise `CheckerMisuseError` on the premise that only a task author could produce
+    it. `CheckerMisuseError` is in `criteria/base.py::_ESCALATING_EXCEPTIONS`, so it
+    propagates to `FinalStatus.ERROR`, whose category is "error" and not "failed" --
+    the run is discarded instead of counted against the agent. One appended line
+    bought that.
+
+    A checker over sandbox content has exactly two honest outcomes: a `CriterionResult`
+    with a score, or a crash that is a coder_eval bug. It may never convert what an
+    agent WROTE into a harness-fault verdict. Enumerated rather than fuzzed so each
+    case names the shape it stands for.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            ("crafted rule_error", json.dumps({"argv": [], "rule_error": "TypeError()"})),
+            ("crafted sidecar_error", json.dumps({"argv": [], "sidecar_error": "ImportError()"})),
+            ("non-string rule_error", json.dumps({"argv": [], "rule_error": {"nested": True}})),
+            ("rule_error on a real call", json.dumps({"argv": ["ixp", "dummy1"], "rule_error": 1})),
+            ("both fault keys at once", json.dumps({"argv": [], "rule_error": "a", "sidecar_error": "b"})),
+            ("not json", "}{ not json at all"),
+            ("json but not an object", json.dumps([1, 2, 3])),
+            ("argv not a list", json.dumps({"argv": "ixp dummy1"})),
+            ("argv not all strings", json.dumps({"argv": ["ixp", 7]})),
+            ("empty file", ""),
+            ("only whitespace", "   \n\n  "),
+            ("huge argv", json.dumps({"argv": ["x" * 20000]})),
+            ("surrogates in argv", json.dumps({"argv": ["\udcff"]})),
+        ],
+    )
+    def test_no_log_content_can_make_the_checker_raise(self, sandbox_with_log, label, content):
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(content + "\n", encoding="utf-8")
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+
+        assert isinstance(result, CriterionResult), f"{label} produced no scored result"
+        assert result.score in (0.0, 1.0), f"{label} produced a non-binary score"
+
+    def test_a_negative_guard_still_fails_on_every_untrustworthy_log(self, sandbox_with_log):
+        """The other half: refusing to raise must not become refusing to fail.
+
+        A `max_count: 0` guard passing vacuously on a log the agent damaged is the
+        mirror-image defect, and the reason all five paths score 0.0 rather than
+        being skipped.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        forbidden = CliCalledCriterion(
+            description="must not delete", log=LOG, verb="ixp fields delete", min_count=0, max_count=0
+        )
+        for content in (
+            json.dumps({"argv": [], "rule_error": "TypeError()"}),
+            json.dumps({"argv": [], "sidecar_error": "ImportError()"}),
+            "unparseable",
+        ):
+            log_path.write_text(content + "\n", encoding="utf-8")
+            result = SuccessChecker(sandbox).check(forbidden)
+            assert result.score == 0.0, f"a negative guard passed on: {content}"
+            assert result.error, "an untrustworthy log must say why"
 
 
 class TestArgvNormalization:

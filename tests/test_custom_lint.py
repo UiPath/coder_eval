@@ -1070,6 +1070,27 @@ class TestCE030DocSchemaParity:
             for field_name in fields:
                 assert field_name in real, f"EXEMPT[{model_name}] names non-field {field_name!r}"
 
+    def test_claude_md_names_every_registered_model(self):
+        """CLAUDE.md carries a prose copy of the CE030 registry, and it had already
+        gone stale (four names after a sixth was registered).
+
+        Nothing sensed it, because CE030 checks model FIELDS against a doc page, not
+        its own registry against CLAUDE.md. A prose copy of a registry with no sensor
+        decays silently, which is the whole failure class CE030 exists for.
+        """
+        from tests.lint.doc_schema_parity import DOCUMENTED_MODELS
+
+        text = (self.REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        sentence = next(
+            (line for line in text.splitlines() if "models CE030 tracks" in line),
+            None,
+        )
+        assert sentence, "CLAUDE.md no longer describes CE030's tracked models; update this test"
+        for model, _ in DOCUMENTED_MODELS:
+            assert f"`{model.__name__}`" in sentence, (
+                f"CLAUDE.md's CE030 list omits {model.__name__}, which is registered in tests/lint/doc_schema_parity.py"
+            )
+
     def test_record_cli_models_are_registered_for_doc_parity(self):
         """A future trim of the registry must fail rather than silently drop coverage.
 
