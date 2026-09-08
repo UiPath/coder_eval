@@ -75,6 +75,7 @@ from typing import Any, ClassVar, Literal, NoReturn
 from uuid import uuid4
 
 from coder_eval.agent import Agent
+from coder_eval.agents.opencode_agent import _plugin_skill_dirs  # shared plugin->skills resolver
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -175,9 +176,9 @@ _PI_ARG_RENAME: dict[str, dict[str, str]] = {
 # safely forwarded. `experiments/default.yaml` sets `permission_mode` and
 # `allowed_tools` on every task, so warn once at start() rather than let a task
 # believe it constrained the agent. NOTE `system_prompt` IS supported (mapped to
-# --append-system-prompt) and thus deliberately NOT here.
+# --append-system-prompt) and `plugins` IS supported (each resolved skills dir is
+# mapped to a `--skill <dir>` argument), so neither is here.
 _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
-    "plugins",
     "permission_mode",
     "system_prompt_file",
     # Pi's built-in tool names are lowercase (bash/read/write/edit/grep/find/ls)
@@ -294,6 +295,13 @@ class _PiTurnState:
         # message can name what it actually saw.
         self.recognized_events = 0
         self.unrecognized_types: set[str] = set()
+        # Warn-once guard for token-accounting drift. The event-vocabulary check
+        # catches renamed EVENT types, but not a renamed/absent `usage` field or a
+        # bucket whose type changed — those silently coerce to 0 (see `_as_int`) and
+        # would zero out the run's tokens/cost, blinding max_total_tokens / max_usd
+        # gates. Mirrors OpenCode's `_warn_token_shape` (its escape hatch shipped
+        # with this warning; Pi's earlier cut kept the hatch but dropped the warn).
+        self.warned_token_shape = False
 
         self._emit: Callable[[StreamEvent], None] = lambda _e: None
 
@@ -310,6 +318,23 @@ class _PiTurnState:
     # --- event handlers ----------------------------------------------------
 
     def on_turn_start(self) -> None:
+        # A prior step's `turn_start` with no `turn_end` — a generation aborted
+        # mid-turn (the defining willRetry case: a provider error before the
+        # assistant message completed). Close its dangling TurnStartEvent before
+        # opening the next, or the stream carries N starts and N-1 ends, breaking
+        # the one-pair-per-inner-turn contract renderers depend on. `finalize`
+        # closes only the LAST open turn, so it cannot cover this.
+        if self.turn_open:
+            self.turn_open = False
+            self.emit(
+                TurnEndEvent(
+                    task_id=self.task_id,
+                    thread_id=self.thread_id,
+                    turn_id=self.turn_id,
+                    status=TurnEndStatus.CRASHED,
+                    tokens=None,
+                )
+            )
         self.turn_count += 1
         self.turn_open = True
         self.turn_id = f"turn_{self.turn_count}"
@@ -414,6 +439,13 @@ class _PiTurnState:
             )
         )
 
+    def _warn_token_shape(self, message: str, *args: Any) -> None:
+        """Log a token-accounting anomaly at most once per turn (not once per bucket/step)."""
+        if self.warned_token_shape:
+            return
+        self.warned_token_shape = True
+        logger.warning("pi: unexpected token accounting — " + message, *args)
+
     def _as_int(self, value: Any) -> int:
         """Coerce one stream-supplied token count; count a non-number as 0.
 
@@ -421,12 +453,20 @@ class _PiTurnState:
         ``communicate``'s ``except Exception`` turns into an ``AgentCrashError``
         (categorized ``AGENT_CRASH``, ``max_retries=2``), burning three attempts
         on one mistyped bucket. A bool is never a token count (``int(True) == 1``).
+
+        ``None`` is a legitimately-absent bucket (silent). Any OTHER unparseable
+        value is a schema drift and warns once — otherwise a changed bucket type
+        would silently zero the turn's tokens and cost.
         """
+        if value is None:
+            return 0
         if isinstance(value, bool) or not isinstance(value, int | float | str):
+            self._warn_token_shape("token count had unexpected type %s (%r); counted as 0", type(value).__name__, value)
             return 0
         try:
             return int(value)
         except (TypeError, ValueError):
+            self._warn_token_shape("token count %r was not parseable as an int; counted as 0", value)
             return 0
 
     def on_turn_end(self, obj: dict[str, Any]) -> None:
@@ -439,8 +479,13 @@ class _PiTurnState:
         self.turn_open = False
         message = obj.get("message")
         message = message if isinstance(message, dict) else {}
-        usage = message.get("usage")
-        usage = usage if isinstance(usage, dict) else {}
+        raw_usage = message.get("usage")
+        if not isinstance(raw_usage, dict) or not raw_usage:
+            # A completed step that booked no usage object at all — a renamed or
+            # absent `usage` (which the event-vocabulary check cannot see). Its
+            # tokens/cost silently resolve to 0; say so once.
+            self._warn_token_shape("turn_end carried no usage object; this step's tokens/cost counted as 0")
+        usage = raw_usage if isinstance(raw_usage, dict) else {}
 
         step_in = self._as_int(usage.get("input"))
         raw_out = self._as_int(usage.get("output"))
@@ -467,6 +512,15 @@ class _PiTurnState:
         finish = message.get("stopReason")
         if isinstance(finish, str) and finish:
             self.stop_reason = finish
+        # Capture a terminal provider error so a `pi -p` that exits 0 after
+        # exhausting retries still surfaces WHY (finalize reads error_message into
+        # result_summary.result). Reset on a non-error turn so an intermediate
+        # retry error that a later cycle recovered from never leaks into the result.
+        if finish == "error":
+            err = message.get("errorMessage")
+            self.error_message = err if isinstance(err, str) and err else "pi reported stopReason=error"
+        else:
+            self.error_message = None
 
         started = self.turn_started_at or datetime.now()
         completed = datetime.now()
@@ -643,6 +697,9 @@ class PiAgent(Agent[PiAgentConfig]):
         self.working_directory: str | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
+        # Skills-parent dirs resolved from `agent.plugins`, passed to `pi --skill`
+        # (Pi discovers `<name>/SKILL.md` recursively). Assigned in start().
+        self._skill_dirs: list[str] = []
         # Per-agent session, reused across communicate() calls for multi-turn /
         # simulation continuity (assigned in start(), removed in stop() — NOT in
         # kill(), which the orchestrator's mid-turn backstop calls; dropping the
@@ -676,6 +733,18 @@ class PiAgent(Agent[PiAgentConfig]):
                 "pi: %s set but NOT enforced — the CLI has no equivalent knob in JSON print mode, so the run is "
                 + "unconstrained by them; do not rely on them as a boundary (see docs/agents/PI.md).",
                 ", ".join(ignored),
+            )
+        # Resolve `agent.plugins` -> skills dirs and load them via `pi --skill`.
+        # Loudly logs when plugins were declared but nothing resolved (the run
+        # would otherwise measure the model WITHOUT the skill under test).
+        self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger, harness="pi")
+        if self._skill_dirs:
+            logger.info("pi: loading %d skill dir(s) via --skill: %s", len(self._skill_dirs), self._skill_dirs)
+        elif self.config.plugins:
+            logger.warning(
+                "pi: %d plugin(s) declared but 0 skill dir(s) resolved — the agent will run WITHOUT them "
+                + "(see docs/agents/PI.md).",
+                len(self.config.plugins),
             )
         self.working_directory = working_directory
         self._env_path_prepend = list(env_path_prepend or [])
@@ -745,6 +814,10 @@ class PiAgent(Agent[PiAgentConfig]):
         }
         if self._session_id:
             info["pi_session_id"] = self._session_id
+        if self._skill_dirs:
+            # Recorded per task so a run's report can confirm the skills under test
+            # actually reached the agent.
+            info["pi_skill_paths"] = list(self._skill_dirs)
         return info
 
     # --- command construction ---------------------------------------------
@@ -774,6 +847,11 @@ class PiAgent(Agent[PiAgentConfig]):
             argv += ["--model", self.config.model]  # provider-prefixed form
         if self.config.thinking_level:
             argv += ["--thinking", self.config.thinking_level]
+        for skill_dir in self._skill_dirs:
+            # Additive skill load (from agent.plugins). Pi lists each skill's
+            # name+description in the system prompt and the agent `read`s the full
+            # SKILL.md on demand — the OpenCode/Codex `plugins` mechanism, Pi-native.
+            argv += ["--skill", skill_dir]
         # allowed_tools / disallowed_tools are NOT forwarded. The shared config
         # default (experiments/default.yaml) sets Claude-namespaced tool names
         # (Bash/Read/Write/Edit/Glob/Grep/Skill), but Pi's built-in tools are

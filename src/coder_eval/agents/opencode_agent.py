@@ -306,17 +306,21 @@ def _manifest_skill_dirs(root: Path) -> list[Path]:
 def _plugin_skill_dirs(
     plugins: Sequence[Mapping[str, Any]] | None,
     log: logging.Logger | logging.LoggerAdapter[Any] = logger,
+    harness: str = "opencode",
 ) -> list[str]:
-    """Resolve ``plugins:`` entries to OpenCode ``skills.paths`` directories.
+    """Resolve ``plugins:`` entries to skill-directory paths for a CLI harness.
 
-    Every way this can come up empty is logged rather than passed over: a plugin
-    whose skills never reach the agent still *looks* like a normal run, which is
-    precisely the failure this function exists to close.
+    Returns the skills-parent directories (each holding ``<name>/SKILL.md``) that
+    a ``type: local`` plugin root declares. Shared by OpenCode (``skills.paths``
+    in ``OPENCODE_CONFIG_CONTENT``) and Pi (a ``--skill <dir>`` argument each);
+    ``harness`` only labels the diagnostics. Every way this can come up empty is
+    logged rather than passed over: a plugin whose skills never reach the agent
+    still *looks* like a normal run, which is precisely the failure this closes.
     """
     resolved: list[str] = []
     for plugin in plugins or []:
         if not isinstance(plugin, Mapping) or plugin.get("type") != "local":
-            log.warning("opencode: ignoring non-local plugin entry %r — only `type: local` maps to skills.", plugin)
+            log.warning(f"{harness}: ignoring non-local plugin entry %r — only `type: local` maps to skills.", plugin)
             continue
         path_str = plugin.get("path")
         if not path_str:
@@ -326,7 +330,7 @@ def _plugin_skill_dirs(
         if not root.is_dir():
             hint = "env var likely unset" if "$" in expanded else "path does not exist"
             log.warning(
-                "opencode: plugin skills path did not resolve: %r -> %r (%s); no skills injected from it",
+                f"{harness}: plugin skills path did not resolve: %r -> %r (%s); no skills injected from it",
                 path_str,
                 expanded,
                 hint,
@@ -344,7 +348,7 @@ def _plugin_skill_dirs(
         for directory in candidates:
             if next(directory.glob(f"*/{_SKILL_FILE}"), None) is None:
                 log.warning(
-                    "opencode: no <name>/%s directly under %s (from plugin %r) — the CLI still scans it "
+                    f"{harness}: no <name>/%s directly under %s (from plugin %r) — the CLI still scans it "
                     + "recursively, but check the plugin path points at a skills root",
                     _SKILL_FILE,
                     directory,

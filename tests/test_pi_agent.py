@@ -428,9 +428,19 @@ class TestUnsupportedConfigIsAnnounced:
     async def test_start_warns_about_unenforced_fields(self, patch_exec, tmp_path, caplog):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         with caplog.at_level("WARNING"):
-            await _agent(plugins=[{"type": "local", "path": "/x"}]).start(str(tmp_path))
-        assert "plugins" in caplog.text
+            await _agent(permission_mode="plan").start(str(tmp_path))
+        assert "permission_mode" in caplog.text
         assert "NOT enforced" in caplog.text
+
+    async def test_plugins_that_do_not_resolve_warn_loudly(self, patch_exec, tmp_path, caplog):
+        """plugins IS supported now (-> --skill), but a path that resolves to no skills
+        must warn — else the run silently measures the model WITHOUT the skill."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        with caplog.at_level("WARNING"):
+            await _agent(plugins=[{"type": "local", "path": "/no/such/dir"}]).start(str(tmp_path))
+        assert "0 skill dir(s) resolved" in caplog.text or "did not resolve" in caplog.text
+        # plugins is no longer named in the "NOT enforced" warning.
+        assert "plugins" not in "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
 
     async def test_unenforced_fields_warn_but_system_prompt_does_not(self, patch_exec, tmp_path, caplog):
         """allowed_tools/disallowed_tools are unenforced (Claude-namespaced default cannot
@@ -822,3 +832,120 @@ class TestZeroUsageTurn:
         patch_exec(_FakeProcess(stream))
         record = await _run(_agent(), tmp_path)
         assert record.crashed is False
+
+
+# --- review fixes: token-drift warn (#1), dangling-turn close (#2), error capture (#3) ---
+
+
+def _turn_end_error(msg: str = "404: blocked by guardrail") -> str:
+    """A `turn_end` whose provider errored (the willRetry / terminal-failure shape)."""
+    return json.dumps(
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "usage": {"input": 5, "output": 2, "totalTokens": 7, "cost": {"total": 0.0}},
+                "stopReason": "error",
+                "errorMessage": msg,
+            },
+            "toolResults": [],
+        }
+    )
+
+
+class TestReviewFixes:
+    async def test_dangling_turn_start_is_closed_on_next_turn_start(self, patch_exec, tmp_path):
+        """#2: a turn_start with no turn_end (a mid-turn retry abort) must be closed
+        when the next turn_start arrives, so TurnStart/TurnEnd stay balanced."""
+        stream = [
+            _turn_start(),  # turn 1 opens, then aborts mid-generation (no turn_end)
+            _turn_start(),  # turn 2 opens -> must close turn 1 first
+            _turn_end(inp=10, out=5),  # turn 2 ends cleanly
+            json.dumps({"type": "agent_settled"}),
+        ]
+        patch_exec(_FakeProcess(stream))
+        recorder = _EventRecorder()
+        await _run(_agent(), tmp_path, stream_callback=recorder)
+        starts = [e for e in recorder.events if isinstance(e, TurnStartEvent)]
+        ends = [e for e in recorder.events if isinstance(e, TurnEndEvent)]
+        assert len(starts) == len(ends) == 2  # balanced despite the aborted turn
+
+    async def test_terminal_error_is_surfaced_in_result(self, patch_exec, tmp_path):
+        """#3: a `pi` run that ends on an error surfaces WHY in result_summary.result."""
+        stream = [_turn_start(), _turn_end_error("404: blocked by guardrail"), json.dumps({"type": "agent_settled"})]
+        patch_exec(_FakeProcess(stream))
+        record = await _run(_agent(), tmp_path)
+        assert record.crashed is False
+        assert record.result_summary is not None
+        assert "blocked by guardrail" in (record.result_summary.result or "")
+
+    def test_error_message_resets_on_a_recovered_turn(self):
+        """#3: an intermediate error a later cycle recovers from must not leak into the result."""
+        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m")
+        state.on_turn_end(json.loads(_turn_end_error("transient")))
+        assert state.error_message == "transient"
+        state.on_turn_end(json.loads(_turn_end(inp=5, out=2)))  # a later, successful turn
+        assert state.error_message is None
+
+    async def test_bad_token_bucket_warns_once(self, patch_exec, tmp_path, caplog):
+        """#1: a bucket whose type drifted (here a dict) coerces to 0 but warns, once."""
+        bad = json.dumps(
+            {
+                "type": "turn_end",
+                "message": {
+                    "role": "assistant",
+                    "usage": {"input": {"nested": 1}, "output": 2, "cost": {"total": 0.0}},
+                    "stopReason": "stop",
+                },
+                "toolResults": [],
+            }
+        )
+        stream = [_turn_start(), bad, _turn_start(), bad, json.dumps({"type": "agent_settled"})]
+        patch_exec(_FakeProcess(stream))
+        with caplog.at_level("WARNING"):
+            await _run(_agent(), tmp_path)
+        warns = [r for r in caplog.records if "unexpected token accounting" in r.getMessage()]
+        assert len(warns) == 1  # warn-once, not once per bucket/step
+
+    async def test_missing_usage_object_warns(self, patch_exec, tmp_path, caplog):
+        """#1: a completed turn_end with no `usage` object at all (a rename) warns."""
+        no_usage = json.dumps(
+            {"type": "turn_end", "message": {"role": "assistant", "stopReason": "stop"}, "toolResults": []}
+        )
+        stream = [_turn_start(), no_usage, json.dumps({"type": "agent_settled"})]
+        patch_exec(_FakeProcess(stream))
+        with caplog.at_level("WARNING"):
+            await _run(_agent(), tmp_path)
+        assert any("no usage object" in r.getMessage() for r in caplog.records)
+
+
+class TestSkillInjection:
+    """agent.plugins -> `pi --skill <dir>` (mirrors OpenCode/Codex plugin->skills)."""
+
+    def _plugin_root(self, tmp_path):
+        # A Claude-plugin root: <root>/skills/<name>/SKILL.md (manifest-default layout).
+        root = tmp_path / "plug"
+        skill = root / "skills" / "demo-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: demo-skill\ndescription: demo\n---\n# Demo\n")
+        return root
+
+    async def test_resolved_plugin_emits_skill_arg(self, patch_exec, tmp_path):
+        root = self._plugin_root(tmp_path)
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path)
+        argv = captured["argv"]
+        assert "--skill" in argv
+        # Points at the skills-PARENT dir (Pi discovers <name>/SKILL.md recursively).
+        assert argv[argv.index("--skill") + 1] == str((root / "skills").resolve())
+
+    async def test_no_plugins_means_no_skill_arg(self, patch_exec, tmp_path):
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+        assert "--skill" not in captured["argv"]
+
+    async def test_skill_paths_recorded_in_environment_info(self, patch_exec, tmp_path):
+        root = self._plugin_root(tmp_path)
+        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
+        await agent.start(str(tmp_path))
+        assert agent.get_environment_info()["pi_skill_paths"] == [str((root / "skills").resolve())]
