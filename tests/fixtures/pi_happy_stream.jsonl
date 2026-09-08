@@ -1,4 +1,4 @@
-{"type":"session","version":3,"id":"01a06be7-fbbf-7641-9680-be47d4693f73","timestamp":"2026-09-04T10:12:40.511Z","cwd":"/private/tmp/claude-501/-Users-carles-pull-request-coder-eval/a0b3ca95-4a6c-49f2-b1df-fbf2641a4a6c/scratchpad/pi_bg"}
+{"type":"session","version":3,"id":"01a06be7-fbbf-7641-9680-be47d4693f73","timestamp":"2026-09-04T10:12:40.511Z","cwd":"/work"}
 {"type":"agent_start"}
 {"type":"turn_start"}
 {"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Create a file named hello.txt containing exactly the word hi using the write tool. Then read it back with the read tool and state the contents."}],"timestamp":1788516760585}}
