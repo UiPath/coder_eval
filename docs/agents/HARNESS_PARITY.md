@@ -126,14 +126,23 @@ This field breaks it silently.
 
 | | claude-code | codex | antigravity | pi |
 |---|---|---|---|---|
-| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted | **required** |
-| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted | **loads nothing** |
+| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted | accepted |
+| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted | **loads, but undetected** † |
 
 claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
 live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
 parents the skill directories and no skill loads. Codex
 (`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
 both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
+
+† Pi uses the shared `_plugin_skill_dirs` resolver, whose bare-dir fallback resolves a
+bare skills directory to itself and passes it as `--skill <dir>`, so the skill *does*
+load and the agent can use it. But `skill_triggered` detects engagement by matching a
+`skills/<name>/` segment in the read path (`_SKILL_PATH_RE`), which a bare dir lacks — so
+an **activation suite** on a bare dir still scores recall 0 even though the skill ran.
+Net effect for activation suites is therefore the same silent-0 as claude-code, via a
+different mechanism; use the plugin-root shape (lint rule CE045 holds `SKILL_SOURCE_PATH`
+to it for exactly this reason).
 
 So `.claude/skills` works on two backends out of three and fails on the third — and
 fails without an error. The agent simply is not offered the skill, every positive row

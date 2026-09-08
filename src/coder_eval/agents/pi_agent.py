@@ -526,7 +526,10 @@ class _PiTurnState:
         # max_total_tokens / max_usd. Warn once, mirroring OpenCode's `tokens.total`
         # guard; only when the field is actually present (older streams omit it).
         reported_total = usage.get("totalTokens")
-        if isinstance(reported_total, int) and not isinstance(reported_total, bool):
+        # Accept int OR float (a `123.0`-shaped total is itself a plausible drift and
+        # _as_int accepts floats for the buckets); the numeric compare below is
+        # exact for whole values (123.0 == 123).
+        if isinstance(reported_total, int | float) and not isinstance(reported_total, bool):
             expected_total = step_in + raw_out + step_cw + step_cr
             if reported_total != expected_total:
                 self._warn_token_shape(
@@ -1132,9 +1135,16 @@ class PiAgent(Agent[PiAgentConfig]):
         # COMPLETED (FinalStatus.FAILURE, category "failed") — silently depressing
         # the measured pass rate. Crashing routes it through _communicate_with_retry
         # and, if unrecovered, to FinalStatus.ERROR (category "error", excluded from
-        # outcomes). error_message is reset on any non-error turn, so this fires only
-        # when the FINAL turn errored. Mirrors opencode_agent._settle_turn.
-        if state.error_message is not None:
+        # outcomes). Mirrors opencode_agent._settle_turn.
+        #
+        # Gated on intentional cuts like the two crash arms below: `error_message`
+        # is set at an error `turn_end` and cleared only by a LATER non-error
+        # `turn_end`, but a `max_turns` / `should_stop` cut can fire at the next
+        # `turn_start` (before that clearing `turn_end` ever arrives), leaving a
+        # stale error from a turn pi was still retrying. Without the guard that
+        # clean, budget-exhausted cut would crash + burn retries, contradicting the
+        # documented "finalizes cleanly as max_turns_exhausted, no crash" contract.
+        if state.error_message is not None and not stopped_early and not state.max_turns_exhausted:
             self._crash_turn(state, collector, f"Pi error: {state.error_message}")
 
         # A non-zero exit with no intentional cut means the turn died.

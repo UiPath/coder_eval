@@ -157,27 +157,6 @@ class _ExplodingRunningProcess(_RunningProcess):
         raise ValueError("Separator is not found, and chunk exceed the limit")
 
 
-class _HangingProcess(_RunningProcess):
-    """Emits its lines then blocks in ``readline`` (and ``wait``) until killed.
-
-    Models a CLI wedged mid-turn: no EOF, no exit, ``returncode`` stays ``None`` —
-    the shape a cancel or the turn deadline must cut rather than wait out. The
-    plain ``_RunningProcess`` inherits ``_FakeProcess.readline``, which returns EOF
-    and SETS ``returncode`` the moment its lines run out, so the reaper would see a
-    finished process and never fire.
-    """
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        await self._exited.wait()
-        return b""
-
-    async def read(self) -> bytes:
-        await self._exited.wait()
-        return self._stderr
-
-
 @pytest.fixture
 def patch_exec(monkeypatch: pytest.MonkeyPatch):
     """Patch subprocess spawn; return a dict capturing the argv used."""
@@ -949,6 +928,20 @@ class TestTurnLifecycleAndTokenTelemetry:
         partial = agent.pending_turn
         assert partial is not None
         assert partial.crashed is True
+
+    async def test_max_turns_cut_after_an_error_turn_finalizes_cleanly(self, patch_exec, tmp_path):
+        """A max_turns cut landing right after an error turn_end (pi still retrying,
+        so error_message is set but not yet cleared) must finalize as
+        max_turns_exhausted — NOT crash on the stale error. Guards the documented
+        'no crash, no retry' contract; without the intentional-cut gate the error
+        arm would fire on a clean budget exhaustion."""
+        # turn 1 errors; turn 2's turn_start trips max_turns=1 before any clean
+        # turn_end can clear error_message.
+        stream = [_turn_start(), _turn_end_error("transient 429"), _turn_start(), _turn_end(inp=1, out=1)]
+        patch_exec(_FakeProcess(stream))
+        record = await _run(_agent(), tmp_path, max_turns=1)
+        assert record.max_turns_exhausted is True
+        assert record.crashed is False
 
     def test_error_message_resets_on_a_recovered_turn(self):
         """#3: an intermediate error a later cycle recovers from must not leak into the result."""

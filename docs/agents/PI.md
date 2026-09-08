@@ -242,9 +242,13 @@ docker` whenever the task prompt or workspace is not fully trusted.
   resolver OpenCode uses — and recorded as `pi_skill_paths` in `environment_info`.
   Pi therefore **can run activation suites**: `skill_triggered` detects Pi's
   engagement agent-agnostically (the agent `read`s the full `SKILL.md`, a
-  `read`→`Read` call whose `path` matches `skills/<name>/`). Requires the
-  plugin-root shape (`<path>/skills/<name>/SKILL.md`), like claude-code. A plugin's
-  non-skill assets (agents/hooks/commands/MCP) are not wired.
+  `read`→`Read` call whose `path` matches `skills/<name>/`). Use the **plugin-root
+  shape** (`<path>/skills/<name>/SKILL.md`) for activation suites: a bare skills dir
+  still *loads* (the resolver's fallback passes it as `--skill <dir>`), but the read
+  path then lacks the `skills/<name>/` segment `skill_triggered` matches on, so the
+  suite scores recall 0 even though the skill ran — see
+  [Harness Parity § plugin-path depth](HARNESS_PARITY.md). A plugin's non-skill
+  assets (agents/hooks/commands/MCP) are not wired.
 - **`system_prompt_file` is not read.** Use `system_prompt` (inline) instead — it
   is enforced via `--append-system-prompt`. `system_prompt_file` is warned about
   at `start()` (matching Codex/Antigravity, which also do not read the file form).
