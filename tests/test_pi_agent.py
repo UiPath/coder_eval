@@ -25,6 +25,7 @@ import pytest
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, AssistantMessage, PiAgentConfig
+from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -140,6 +141,41 @@ class _RunningProcess(_FakeProcess):
     def kill(self) -> None:
         self.killed = True
         self._exited.set()
+
+
+class _ExplodingRunningProcess(_RunningProcess):
+    """Raises from ``readline`` mid-stream AND stays alive, like the real CLI.
+
+    ``_ExplodingProcess`` inherits the plain fake's ``wait()``, which reports an
+    exit code the instant it is awaited — so it can never model the case that
+    matters for teardown: the read loop dying while the CLI is still streaming.
+    """
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        raise ValueError("Separator is not found, and chunk exceed the limit")
+
+
+class _HangingProcess(_RunningProcess):
+    """Emits its lines then blocks in ``readline`` (and ``wait``) until killed.
+
+    Models a CLI wedged mid-turn: no EOF, no exit, ``returncode`` stays ``None`` —
+    the shape a cancel or the turn deadline must cut rather than wait out. The
+    plain ``_RunningProcess`` inherits ``_FakeProcess.readline``, which returns EOF
+    and SETS ``returncode`` the moment its lines run out, so the reaper would see a
+    finished process and never fire.
+    """
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        await self._exited.wait()
+        return b""
+
+    async def read(self) -> bytes:
+        await self._exited.wait()
+        return self._stderr
 
 
 @pytest.fixture
@@ -1006,3 +1042,135 @@ class TestSkillInjection:
         agent = _agent(plugins=[{"type": "local", "path": str(root)}])
         await agent.start(str(tmp_path))
         assert agent.get_environment_info()["pi_skill_paths"] == [str((root / "skills").resolve())]
+
+
+class TestTurnAlwaysReapsTheCli:
+    """No exit from ``communicate()`` may leave the CLI running. ``AgentCrashError``
+    is categorized AGENT_CRASH (max_retries=2) and the orchestrator's attempt-failure
+    hook only drains ``pending_turn`` — it never kills the agent. An abandoned CLI
+    therefore means attempt 2 spawns a SECOND ``pi`` editing the very files the
+    criteria are about to score. The graceful ``kill()`` covers the intentional cuts
+    and the timeout; these pin the two paths that reach ``finally`` with a live child.
+    """
+
+    async def test_read_loop_crash_kills_the_cli(self, patch_exec, tmp_path):
+        """``_crash_turn`` is synchronous and raises — nothing below it reaps."""
+        proc = _ExplodingRunningProcess([_turn_start()])
+        patch_exec(proc)
+        with pytest.raises(AgentCrashError, match="Pi turn failed"):
+            await _run(_agent(), tmp_path)
+        assert proc.killed is True
+
+    async def test_external_cancel_kills_the_cli(self, patch_exec, tmp_path):
+        """Teardown must survive a CancelledError in flight (no await), or the child
+        outlives an interrupted turn."""
+        proc = _HangingProcess([_turn_start()])
+        patch_exec(proc)
+        agent = _agent()
+        await agent.start(str(tmp_path))
+        task = asyncio.ensure_future(agent.communicate("do the thing"))
+        await asyncio.sleep(0.05)  # let it spawn and read the first event
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert proc.killed is True
+
+    async def test_a_clean_turn_kills_nothing(self, patch_exec, tmp_path):
+        """The happy path is unchanged: the CLI exited, so the reaper is a no-op."""
+        proc = _FakeProcess(HAPPY_STREAM)
+        captured = patch_exec(proc)
+        await _run(_agent(), tmp_path)
+        assert proc.killed is False
+        assert captured["killpg"] == []
+
+
+class TestExternalCancel:
+    async def test_cancel_parks_partial_and_reraises(self, patch_exec, tmp_path):
+        """The watchdog's CancelledError must not swallow captured telemetry: the
+        partial is parked, the terminal event says CRASHED, and the cancellation
+        still propagates."""
+        proc = _HangingProcess([_turn_start()])
+        patch_exec(proc)
+        agent = _agent()
+        await agent.start(str(tmp_path))
+        recorder = _EventRecorder()
+        task = asyncio.ensure_future(agent.communicate("do the thing", stream_callback=recorder))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert len(ends) == 1
+        assert ends[0].status is AgentEndStatus.CRASHED
+        assert ends[0].crash_reason == "turn cancelled"
+        assert proc.killed is True  # not abandoned mid-stream — see TestTurnAlwaysReapsTheCli
+
+
+def _turn_end_no_cost(*, inp: int, out: int) -> str:
+    """A `turn_end` whose usage object omits the `cost` key (provider/auth mode that
+    reports no cost) — so `_resolve_cost` must fall back to the rate card."""
+    return json.dumps(
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "usage": {"input": inp, "output": out, "totalTokens": inp + out},
+                "stopReason": "stop",
+            },
+            "toolResults": [],
+        }
+    )
+
+
+class TestCostFallsBackToTheRateCard:
+    _SETTLED = json.dumps({"type": "agent_settled"})
+
+    async def test_stream_cost_wins_when_reported(self, patch_exec, tmp_path):
+        """The provider's own accounting beats a static headline rate."""
+        stream = [_turn_start(), _turn_end(inp=1000, out=500, cost=0.5), self._SETTLED]
+        patch_exec(_FakeProcess(stream))
+        record = await _run(_agent(), tmp_path)
+        assert record.token_usage is not None
+        assert record.token_usage.total_cost_usd == pytest.approx(0.5)
+
+    async def test_missing_cost_is_priced_from_the_rate_card(self, patch_exec, tmp_path):
+        """No `cost` key at all — without the fallback the turn books tokens with no money."""
+        stream = [_turn_start(), _turn_end_no_cost(inp=1000, out=500), self._SETTLED]
+        patch_exec(_FakeProcess(stream))
+        record = await _run(_agent(), tmp_path)
+        expected = calculate_cost("openrouter/moonshotai/kimi-k3", uncached_input_tokens=1000, output_tokens=500)
+        assert expected is not None and expected > 0
+        assert record.token_usage is not None
+        assert record.token_usage.total_cost_usd == pytest.approx(expected)
+
+    async def test_unpriced_model_reports_no_cost(self, patch_exec, tmp_path):
+        """`None` (not 0.0) so "unpriceable" stays distinct from "ran for free"."""
+        stream = [_turn_start(), _turn_end_no_cost(inp=10, out=5), self._SETTLED]
+        patch_exec(_FakeProcess(stream))
+        record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        assert record.token_usage is not None
+        assert record.token_usage.total_cost_usd is None
+
+    async def test_zero_reported_cost_on_a_priced_model_uses_the_rate_card(self, patch_exec, tmp_path, caplog):
+        """A reported $0 on a model the rate card prices is a subscription/registry
+        gap, not a free run — latching on it would book real tokens with no money."""
+        stream = [_turn_start(), _turn_end(inp=1000, out=500, cost=0.0), self._SETTLED]
+        patch_exec(_FakeProcess(stream))
+        with caplog.at_level("DEBUG"):
+            record = await _run(_agent(), tmp_path)
+        expected = calculate_cost("openrouter/moonshotai/kimi-k3", uncached_input_tokens=1000, output_tokens=500)
+        assert expected is not None and expected > 0
+        assert record.token_usage is not None
+        assert record.token_usage.total_cost_usd == pytest.approx(expected)
+        assert "not understated" in caplog.text
+
+    async def test_zero_reported_cost_on_an_unpriced_model_stays_zero(self, patch_exec, tmp_path):
+        """With no rate to fall back to, the stream's 0 is the best information we have."""
+        stream = [_turn_start(), _turn_end(inp=10, out=5, cost=0.0), self._SETTLED]
+        patch_exec(_FakeProcess(stream))
+        record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        assert record.token_usage is not None
+        assert record.token_usage.total_cost_usd == 0.0
