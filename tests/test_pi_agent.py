@@ -945,6 +945,9 @@ class TestSkillInjection:
         assert "--skill" not in captured["argv"]
 
     async def test_skill_paths_recorded_in_environment_info(self, patch_exec, tmp_path):
+        # Installs the shutil.which("pi") patch so start() doesn't require the real
+        # CLI on PATH (CI has no pi binary); we only assert on recorded skill paths.
+        patch_exec(_FakeProcess(HAPPY_STREAM))
         root = self._plugin_root(tmp_path)
         agent = _agent(plugins=[{"type": "local", "path": str(root)}])
         await agent.start(str(tmp_path))
