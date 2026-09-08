@@ -38,9 +38,8 @@ import os
 import shutil
 import signal
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
 from typing import Any, ClassVar, Literal, NoReturn
 
 from coder_eval.agent import Agent
@@ -77,8 +76,8 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.utils import expand_env_vars
 
+from ._skills import _plugin_skill_dirs
 from .registry import AgentRegistry
 
 
@@ -222,9 +221,6 @@ _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
 # Only the skills half of a plugin is honored. A Claude plugin's agents, hooks,
 # commands and MCP servers have no OpenCode equivalent and are still dropped.
 _CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
-_PLUGIN_MANIFEST_RELPATH = (".claude-plugin", "plugin.json")
-_DEFAULT_PLUGIN_SKILLS_SUBDIR = "skills"
-_SKILL_FILE = "SKILL.md"
 
 # ToolEndStatus -> CommandTelemetry.result_status (the persisted tri-state).
 _RESULT_STATUS: dict[ToolEndStatus, Literal["success", "error", "unknown"]] = {
@@ -274,90 +270,6 @@ def _canonical_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
     if not rename:
         return params
     return {rename.get(key, key): value for key, value in params.items()}
-
-
-def _manifest_skill_dirs(root: Path) -> list[Path]:
-    """Skill directories a Claude-plugin root declares, in manifest order.
-
-    Reads the ``skills`` field of ``<root>/.claude-plugin/plugin.json`` (a string
-    or a list of strings, each relative to the root) and falls back to the
-    convention default ``<root>/skills`` when the manifest is absent, unreadable,
-    or declares none. Honoring the manifest rather than hardcoding ``skills/``
-    keeps a plugin that relocates its skills working on both harnesses.
-    """
-    manifest = root.joinpath(*_PLUGIN_MANIFEST_RELPATH)
-    declared: list[str] = []
-    if manifest.is_file():
-        try:
-            data: Any = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            data = None
-        if isinstance(data, dict):
-            value = data.get("skills")
-            if isinstance(value, str):
-                declared = [value]
-            elif isinstance(value, list):
-                declared = [entry for entry in value if isinstance(entry, str)]
-    if not declared:
-        declared = [_DEFAULT_PLUGIN_SKILLS_SUBDIR]
-    return [(root / relative).resolve() for relative in declared]
-
-
-def _plugin_skill_dirs(
-    plugins: Sequence[Mapping[str, Any]] | None,
-    log: logging.Logger | logging.LoggerAdapter[Any] = logger,
-    harness: str = "opencode",
-) -> list[str]:
-    """Resolve ``plugins:`` entries to skill-directory paths for a CLI harness.
-
-    Returns the skills-parent directories (each holding ``<name>/SKILL.md``) that
-    a ``type: local`` plugin root declares. Shared by OpenCode (``skills.paths``
-    in ``OPENCODE_CONFIG_CONTENT``) and Pi (a ``--skill <dir>`` argument each);
-    ``harness`` only labels the diagnostics. Every way this can come up empty is
-    logged rather than passed over: a plugin whose skills never reach the agent
-    still *looks* like a normal run, which is precisely the failure this closes.
-    """
-    resolved: list[str] = []
-    for plugin in plugins or []:
-        if not isinstance(plugin, Mapping) or plugin.get("type") != "local":
-            log.warning(f"{harness}: ignoring non-local plugin entry %r — only `type: local` maps to skills.", plugin)
-            continue
-        path_str = plugin.get("path")
-        if not path_str:
-            continue
-        expanded = expand_env_vars(str(path_str))
-        root = Path(expanded).resolve()
-        if not root.is_dir():
-            hint = "env var likely unset" if "$" in expanded else "path does not exist"
-            log.warning(
-                f"{harness}: plugin skills path did not resolve: %r -> %r (%s); no skills injected from it",
-                path_str,
-                expanded,
-                hint,
-            )
-            continue
-        candidates = [directory for directory in _manifest_skill_dirs(root) if directory.is_dir()]
-        # A path that is ALREADY a bare skills directory (<root>/<name>/SKILL.md)
-        # has no `skills/` subdir, so use it as-is. Deliberately not a fallback for
-        # a root that HAS one: `skills.paths` is scanned recursively and a repo
-        # root can contain self-referential symlinks (UiPath/skills has
-        # `plugins/uipath -> ..`), which resolves skills through an arbitrary path
-        # and silently drops duplicate names.
-        if not candidates:
-            candidates = [root]
-        for directory in candidates:
-            if next(directory.glob(f"*/{_SKILL_FILE}"), None) is None:
-                log.warning(
-                    f"{harness}: no <name>/%s directly under %s (from plugin %r) — the CLI still scans it "
-                    + "recursively, but check the plugin path points at a skills root",
-                    _SKILL_FILE,
-                    directory,
-                    path_str,
-                )
-            as_text = str(directory)
-            if as_text not in resolved:
-                resolved.append(as_text)
-    return resolved
 
 
 class _OpenCodeTurnState:

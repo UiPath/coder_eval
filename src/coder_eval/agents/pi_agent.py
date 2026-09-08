@@ -76,7 +76,7 @@ from typing import Any, ClassVar, Literal, NoReturn
 from uuid import uuid4
 
 from coder_eval.agent import Agent
-from coder_eval.agents.opencode_agent import _plugin_skill_dirs  # shared plugin->skills resolver
+from coder_eval.agents._skills import _plugin_skill_dirs  # shared plugin->skills resolver
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -117,9 +117,11 @@ logger = logging.getLogger(__name__)
 
 # Grace period between SIGTERM and SIGKILL when tearing down the CLI subprocess.
 # Doubles as the post-EOF exit grace in _settle_turn when no turn deadline is
-# configured. Genuinely OpenCode-module-private (not exported), so re-declared
-# here at the same value rather than imported (a shared-module hoist is out of
-# scope); STDOUT_LINE_LIMIT_BYTES, which IS canonical, is imported above.
+# configured. Re-declared here at the same value as OpenCode's rather than shared:
+# the full nd-JSON-CLI driver hoist that would unify the two harnesses' teardown
+# constants and reducers is a tracked follow-up; the shared plugin->skills resolver
+# already lives in `agents/_skills.py`. STDOUT_LINE_LIMIT_BYTES, which IS canonical,
+# is imported above.
 _TERM_GRACE_SECONDS = 5.0
 
 # SIGKILL does not exist on Windows (where the process-group sweep is a no-op
