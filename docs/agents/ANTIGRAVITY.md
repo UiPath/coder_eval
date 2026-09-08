@@ -27,7 +27,7 @@ working directory — both required for an unattended eval.
 pip install 'coder-eval[antigravity]'
 ```
 
-This pulls in `google-antigravity` (pinned to `0.1.7`), whose wheel bundles the
+This pulls in `google-antigravity` (pinned to `0.1.8`), whose wheel bundles the
 platform `localharness` binary. As with the other agents the SDK is imported lazily
 — a base install without the extra still runs end-to-end; Antigravity tasks fail at
 dispatch with a clear hint to install the extra.
