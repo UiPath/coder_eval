@@ -295,17 +295,18 @@ Two things are missing, both deliberate rather than overlooked:
   pinned version that travels with the coder_eval release tag the way
   `CLAUDE_CODE_VERSION` does — a release-process decision, not a one-line edit.
   (Node 22 is already present in the image, so the change itself is small.)
-- **No credentials would reach it.** The docker driver forwards host environment
-  variables through an explicit allowlist (`DockerDriverConfig.env_passthrough`),
-  which carries per-harness blocks for Codex and Antigravity but none for
-  OpenCode — so `OPENROUTER_API_KEY` and friends are not passed through, and
-  `opencode auth login`'s credential file is not mounted. Even a custom image
-  with the CLI baked in would authenticate against nothing.
+- **Env auth partly reaches it; file auth does not.** `OPENROUTER_API_KEY` **is**
+  now in the default allowlist (`DockerDriverConfig.env_passthrough` — added for
+  Pi), so a custom image with the OpenCode CLI baked in *would* authenticate
+  against an OpenRouter model. But `opencode auth login`'s credential file is not
+  mounted, so any provider OpenCode authenticates via that file (not env) still
+  reaches nothing.
 
-Until both land, run OpenCode tasks under `tempdir` (the default) on a host that
-has the CLI and its provider credentials. If you need container isolation now,
-build your own image from `docker/Dockerfile` with the `npm install -g` line
-added and pass the credentials via `sandbox.env_passthrough_extra`.
+Until the CLI is baked in, run OpenCode tasks under `tempdir` (the default) on a
+host that has the CLI and its provider credentials. If you need container
+isolation now, build your own image from `docker/Dockerfile` with the
+`npm install -g` line added; `OPENROUTER_API_KEY` already forwards by default, and
+any other provider credential can be added via `sandbox.env_passthrough_extra`.
 
 ## Known limitations
 
@@ -324,10 +325,10 @@ added and pass the credentials via `sandbox.env_passthrough_extra`.
   visible-turn unit Codex/Antigravity use — see
   [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant
   across harnesses.
-- **The `docker` sandbox driver is unsupported.** The CLI is not in the image and
-  no OpenCode credentials are in the `env_passthrough` allowlist — see
-  [Running in Docker](#running-in-docker) for the workaround and what it would
-  take to close.
+- **The `docker` sandbox driver is unsupported.** The CLI is not in the image
+  (`OPENROUTER_API_KEY` is now forwarded by default, added for Pi, but the OpenCode
+  CLI itself is still absent) — see [Running in Docker](#running-in-docker) for the
+  workaround and what it would take to close.
 - **No sub-agent attribution.** OpenCode's CLI stream does not expose nested agent
   generations, so per-sub-agent token grouping (available for Claude and Codex) is
   not derivable.

@@ -68,9 +68,10 @@ COPY experiments/default.yaml ./experiments/default.yaml
 # credential is in DockerDriverConfig.env_passthrough, so `--driver docker --type pi`
 # is supported. NOT every built-in agent ships here, though: `opencode` is
 # registered unconditionally but its CLI is a Node package
-# (`npm install -g opencode-ai`), absent from this image, and no OpenCode
-# credentials are in DockerDriverConfig.env_passthrough -- so `--driver docker` does
-# not support it. Adding it means a pinned version that travels with the release
+# (`npm install -g opencode-ai`), absent from this image -- so `--driver docker`
+# does not support it. (OPENROUTER_API_KEY IS now in env_passthrough, added for Pi,
+# so an OpenCode env-auth run would authenticate once the CLI is baked; the CLI is
+# the remaining blocker.) Adding it means a pinned version that travels with the release
 # tag (as CLAUDE_CODE_VERSION / PI_VERSION do) plus an env_passthrough block; see
 # docs/agents/OPENCODE.md "Running in Docker".
 #

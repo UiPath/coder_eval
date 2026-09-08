@@ -131,8 +131,9 @@ lowercase and differently named (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`
 Passing the PascalCase names to `--tools` would allowlist tools that do not exist
 in Pi, leaving the agent with **zero** tools. So — like OpenCode, Codex, and
 Antigravity — Pi ignores these fields, runs with its full native toolset, and
-warns at `start()` that they are unenforced. `permission_mode`, `plugins`, and
-`system_prompt_file` are unenforced too (see below).
+warns at `start()` that they are unenforced. `permission_mode` and
+`system_prompt_file` are unenforced too (see below); `plugins` **is** honored for
+its skills half (each resolved skills dir → a `--skill <dir>` arg).
 
 ## Permissions
 
@@ -235,13 +236,15 @@ docker` whenever the task prompt or workspace is not fully trusted.
 
 - **`permission_mode` is not enforced.** Pi headless print mode auto-runs tools;
   the sandbox driver is the isolation boundary (same as Codex/Antigravity).
-- **`plugins` / skills are not injected.** Pi has a native `--skill` flag, but v1
-  does not wire `agent.plugins → --skill` (two things are still unverified: whether
-  Pi reads a Claude-style `<dir>/skills/<name>/SKILL.md` layout, and the
-  `skill_triggered` engagement-detection branch Pi would need). Declared plugins
-  are warned about and ignored. **Consequence: Pi cannot run activation suites in
-  v1.** Follow-up: map each resolved skill dir to a `--skill <dir>` arg and add a
-  Pi branch to `skill_triggered`.
+- **`plugins` skills are injected via `--skill`.** Each `type: local` plugin root
+  is resolved to its skills dir (`<root>/skills`, holding `<name>/SKILL.md`) and
+  passed to the CLI as a `--skill <dir>` argument — the same `_plugin_skill_dirs`
+  resolver OpenCode uses — and recorded as `pi_skill_paths` in `environment_info`.
+  Pi therefore **can run activation suites**: `skill_triggered` detects Pi's
+  engagement agent-agnostically (the agent `read`s the full `SKILL.md`, a
+  `read`→`Read` call whose `path` matches `skills/<name>/`). Requires the
+  plugin-root shape (`<path>/skills/<name>/SKILL.md`), like claude-code. A plugin's
+  non-skill assets (agents/hooks/commands/MCP) are not wired.
 - **`system_prompt_file` is not read.** Use `system_prompt` (inline) instead — it
   is enforced via `--append-system-prompt`. `system_prompt_file` is warned about
   at `start()` (matching Codex/Antigravity, which also do not read the file form).

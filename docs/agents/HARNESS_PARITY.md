@@ -124,10 +124,10 @@ whose cap fires should not look like a task whose harness hung.
 Not a run limit, but the same promise: one task file, three harnesses, same meaning.
 This field breaks it silently.
 
-| | claude-code | codex | antigravity |
-|---|---|---|---|
-| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted |
-| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted |
+| | claude-code | codex | antigravity | pi |
+|---|---|---|---|---|
+| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted | **required** |
+| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted | **loads nothing** |
 
 claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
 live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
@@ -173,12 +173,11 @@ plugin-root shape by lint rule CE045. The rule keys on that variable name only; 
 one, feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code,
 so the same requirement applies there and is unlinted.
 
-**OpenCode and Pi diverge further on `plugins`.** OpenCode honors only the *skills*
-half of a plugin (mapped to its `skills.paths` — see [OpenCode](OPENCODE.md)). Pi does
-**not read `plugins` at all in v1**: it warns and ignores them, so it cannot run
-activation suites yet — even though the CLI has a native `--skill <file|dir>` flag that
-a follow-up could wire `agent.plugins → --skill` onto. See
-[Pi § Known limitations](PI.md#known-limitations).
+**OpenCode and Pi both honor the *skills* half of a plugin.** OpenCode maps each
+local plugin root to its `skills.paths`; Pi maps each to a `--skill <dir>` argument —
+both via the same `_plugin_skill_dirs` resolver — so both **can** run activation
+suites. A plugin's non-skill assets (agents/hooks/commands/MCP servers) are dropped on
+both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
 
 ## Pi enforces `system_prompt` but not the tool allowlists
 

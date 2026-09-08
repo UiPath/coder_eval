@@ -416,9 +416,10 @@ class PiAgentConfig(BaseAgentConfig):
     nonexistent tools and strip the agent of ALL tools — like OpenCode/Codex/
     Antigravity, Pi ignores them and runs with its full native toolset.
     ``permission_mode`` is NOT enforced (Pi headless print mode auto-runs tools;
-    the sandbox driver is the isolation boundary), ``plugins`` are NOT injected
-    (no activation suites in v1), and ``system_prompt_file`` is NOT read — all are
-    warned about at ``start()``. See ``docs/agents/PI.md``.
+    the sandbox driver is the isolation boundary) and ``system_prompt_file`` is NOT
+    read — both warned about at ``start()``. ``plugins`` skills ARE injected (each
+    resolved skills dir → a ``--skill <dir>`` arg, recorded as ``pi_skill_paths`` in
+    ``environment_info``), so Pi can run activation suites. See ``docs/agents/PI.md``.
     """
 
     type: Literal[AgentKind.PI]  # type: ignore[assignment]
