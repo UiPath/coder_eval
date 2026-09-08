@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 from coder_eval.argv_match import split_flags
-from coder_eval.errors import CheckerMisuseError
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CliCalledCriterion, SandboxConfig
 from coder_eval.sandbox import Sandbox
@@ -272,23 +271,27 @@ class TestCounts:
 
 
 class TestLogHandling:
-    """The five ways this checker refuses to score a log, and why they differ.
+    """The five ways this checker refuses to score a log, and why they are UNIFORM.
 
-    Four score a gating 0.0 and one RAISES, on purpose. A missing log, a write
-    sentinel, a `sidecar_error` and an unusable record are all things an AGENT can
-    cause (`rm` the log, fill the disk, delete the matcher beside the shim, append
-    garbage), so escalating any of them would hand an agent a way to turn a failing
-    run into a `FinalStatus.ERROR`. Only `rule_error` is unreachable that way -- its
-    sole producer is a rule the task author wrote that faulted inside the shim -- so
-    it is the only one booked as an eval-config fault rather than agent behaviour.
-    The 0.0 assertions below are therefore deliberate, not an oversight.
+    All five return a gating 0.0, and none raises. A missing log, a write sentinel,
+    a `sidecar_error`, an unusable record and a `rule_error` are every one of them
+    things an AGENT can cause -- the whole recorder directory lives inside the
+    sandbox it writes to (`rm` the log, fill the disk, delete the matcher beside the
+    shim, append garbage, append a crafted `rule_error` record). So none of them may
+    escalate: a `FinalStatus.ERROR` reads as "harness broken, discard this data
+    point", which is a strictly better outcome for a failing agent than FAILED.
+
+    An earlier revision raised `CheckerMisuseError` on `rule_error`, believing only a
+    task author could produce it. `test_a_crafted_rule_error_cannot_launder_a_failure`
+    is the regression test for that. The authoring concern it was addressing is
+    handled at LOAD time instead, by `RecordedCli._validate_responses_are_evaluable`.
     """
 
-    def test_a_shim_rule_fault_escalates_instead_of_scoring_zero(self, sandbox_with_log):
-        """An eval-config fault must not be scored as though the agent failed.
+    def test_a_shim_rule_fault_scores_zero_without_escalating(self, sandbox_with_log):
+        """The log cannot be trusted, so the criterion fails -- but it must not raise.
 
-        Goes through SuccessChecker rather than `_check_impl`, because the
-        escalation lives in `handle_criterion_errors`' `_ESCALATING_EXCEPTIONS`.
+        Goes through SuccessChecker, not `_check_impl`, so an escalation would
+        actually propagate here via `handle_criterion_errors`.
         """
         sandbox, sandbox_dir = sandbox_with_log
         record = _call(["ixp", "dummy1"])
@@ -296,10 +299,11 @@ class TestLogHandling:
         _write_log(sandbox_dir, [record])
 
         criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
-        with pytest.raises(CheckerMisuseError, match="eval-config fault"):
-            SuccessChecker(sandbox).check(criterion)
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "could not evaluate its response rules" in (result.error or "")
 
-    def test_a_non_string_rule_error_still_escalates(self, sandbox_with_log):
+    def test_a_non_string_rule_error_still_scores_zero(self, sandbox_with_log):
         """`parse_log` only validates `argv`, so `rule_error` may be any JSON value.
         The message formats it with !r and must not call string methods on it."""
         sandbox, sandbox_dir = sandbox_with_log
@@ -308,8 +312,29 @@ class TestLogHandling:
         _write_log(sandbox_dir, [record])
 
         criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
-        with pytest.raises(CheckerMisuseError, match="42"):
-            SuccessChecker(sandbox).check(criterion)
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "42" in (result.error or "")
+
+    def test_a_crafted_rule_error_cannot_launder_a_failure(self, sandbox_with_log):
+        """Regression: `rule_error` used to RAISE, on the premise that only a task
+        author could cause it. The log is agent-writable, so one appended line turned
+        an honest FAILED into a FinalStatus.ERROR -- i.e. "discard this data point".
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        # The agent never ran the required command, so this must fail.
+        _write_log(sandbox_dir, [])
+        criterion = CliCalledCriterion(description="must have called dummy1", log=LOG, verb="ixp dummy1")
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+        log_path = sandbox_dir / LOG
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"argv": [], "rule_error": "TypeError()"}) + "\n")
+
+        # Still a failure, and specifically NOT an exception.
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0, "tampering must not improve the verdict"
+        assert result.error is not None
 
     def test_a_rule_error_on_an_unusable_record_takes_the_zero_path(self, sandbox_with_log):
         """`faults` is built from `usable` only, so a fault on a record whose argv is
@@ -353,6 +378,28 @@ class TestLogHandling:
         result = SuccessChecker(sandbox).check(criterion)
         assert result.score == 0.0
         assert "could not write" in (result.error or "")
+
+    def test_a_fault_on_one_tool_does_not_fail_another_tools_criterion(self, sandbox_with_log):
+        """One log serves every shadowed tool, so the fault checks are scoped.
+
+        A `uip` shim that could not import its matcher says nothing about whether
+        the agent ran `curl`, and failing that guard would report an error message
+        about response dispatch to an author who never declared a response rule.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        broken = _call(["ixp", "dummy1"], tool="uip")
+        broken["sidecar_error"] = "ModuleNotFoundError()"
+        _write_log(sandbox_dir, [broken, _call(["https://example.com"], tool="curl", exit_code=7)])
+
+        curl = CliCalledCriterion(
+            description="fetched the url", log=LOG, tool="curl", positional=["https://example.com"], min_count=1
+        )
+        assert SuccessChecker(sandbox).check(curl).score == 1.0
+
+        uip = CliCalledCriterion(description="called dummy1", log=LOG, tool="uip", verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(uip)
+        assert result.score == 0.0
+        assert "could not import its matcher" in (result.error or "")
 
     def test_missing_log_fails_even_a_negative_guard(self, sandbox_with_log):
         """A missing log is a harness fault, so `max_count: 0` must NOT pass on it.

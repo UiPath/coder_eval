@@ -41,6 +41,7 @@ the format the `cli_called` success criterion reads. Do not edit: regenerated on
 every sandbox setup.
 """
 
+import importlib.util
 import json
 import os
 import sys
@@ -183,20 +184,34 @@ if __name__ == "__main__":
 # longer exists -- the one failure the write side would not catch.
 _SIDECAR_IMPORT = f"""\
 # {_SIDECAR_MODULE} is written beside this shim by coder_eval SandboxConfig.record_cli.
-# SHIM_DIR goes on sys.path explicitly rather than trusting sys.path[0]: the
-# agent's environment is inherited, and PYTHONSAFEPATH=1 clears that entry. It is
-# APPENDED, and any existing copy of it dropped first, because this directory is
-# agent-writable and holds a file per shadowed tool -- at the head of sys.path a
-# tool named `typing.py` would shadow the matcher's OWN stdlib imports and break
-# every rules-bearing shim in the sandbox. Bytecode is off first, so importing a
-# sibling cannot leave a __pycache__/ directory here for a file_check criterion
-# or an artifact diff to trip over.
+# Loaded by ABSOLUTE PATH, not by name: a plain `import {_SIDECAR_MODULE_STEM}` resolves
+# through sys.path, so an unrelated {_SIDECAR_MODULE_STEM} earlier on it (PYTHONPATH, the
+# cwd, site-packages) would win over the file written beside this shim -- silently
+# on a module that happens to export select_rule.
+#
+# This directory is dropped from sys.path first, and deliberately NOT re-added:
+# it is agent-writable and holds one file per shadowed tool, so a tool named
+# `typing.py` here would shadow the matcher's OWN stdlib imports (which still
+# resolve through sys.path while it executes) and break every rules-bearing shim
+# in the sandbox. Comparison is by realpath because sys.path[0] is resolved
+# while SHIM_DIR, from abspath(__file__), is not.
+#
+# Bytecode is off first, so loading the sidecar cannot leave a __pycache__/
+# directory here for a file_check criterion or an artifact diff to trip over.
 sys.dont_write_bytecode = True
 _here = os.path.realpath(SHIM_DIR)
 sys.path[:] = [_p for _p in sys.path if os.path.realpath(_p or ".") != _here]
-sys.path.append(SHIM_DIR)
 try:
-    from {_SIDECAR_MODULE_STEM} import select_rule
+    # A private module name, so this never collides in sys.modules with a real
+    # {_SIDECAR_MODULE_STEM} the sandbox may legitimately have installed.
+    _spec = importlib.util.spec_from_file_location(
+        "_coder_eval_{_SIDECAR_MODULE_STEM}", os.path.join(SHIM_DIR, {_SIDECAR_MODULE!r})
+    )
+    if _spec is None or _spec.loader is None:
+        raise ImportError("could not build a module spec for the argv matcher sidecar")
+    _sidecar = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_sidecar)
+    select_rule = _sidecar.select_rule
 except Exception as _exc:
     # Never fatal: a shim that dies here is a tool that is ON PATH, answers
     # nothing, and RECORDS NOTHING -- byte-identical in the log to a call the

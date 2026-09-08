@@ -637,12 +637,6 @@ class Sandbox:
             # what makes the bit real for PATH lookup, but the shim must be
             # executable even if the recorder dir is consumed some other way.
             shim.chmod(shim.stat().st_mode | 0o111)
-            # Only a rules-bearing shim imports the matcher. Written once per such
-            # entry with identical bytes, so two of them is not a collision — which
-            # is why the `exists()` pre-check above stays scoped to the tool name.
-            if spec.responses:
-                for module in SIDECAR_MODULES:
-                    (recorder_dir / module).write_text(sidecar_source(module), encoding="utf-8", newline="\n")
             # `python "%~dp0<tool>" %*` — the extensionless script beside this file.
             cmd_lines = [
                 "@echo off",
@@ -656,11 +650,22 @@ class Sandbox:
                 newline="",
             )
 
+        # Once for the whole directory, not once per entry: every rules-bearing shim
+        # imports the same sidecar, so writing it inside the loop above just rewrote
+        # identical bytes N times. Skipped entirely when no entry declares rules --
+        # such a shim never consults the matcher and needs no sibling file.
+        sidecars = sorted(SIDECAR_MODULES) if any(spec.responses for spec in self.config.record_cli) else []
+        for module in sidecars:
+            (recorder_dir / module).write_text(sidecar_source(module), encoding="utf-8", newline="\n")
+
         summary = ", ".join(
             f"{s.tool}(exit {s.exit_code}" + (f", {len(s.responses)} rule(s)" if s.responses else "") + ")"
             for s in self.config.record_cli
         )
-        logger.info(f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/: {summary}")
+        # Names the sidecar: an operator debugging a `sidecar_error` needs setup-time
+        # confirmation that the file was actually written.
+        beside = f" (+ {', '.join(sidecars)})" if sidecars else ""
+        logger.info(f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/{beside}: {summary}")
 
     def _apply_starter_files_source(self, source: StarterFilesSource) -> None:
         """Create inline starter files in sandbox with overwrite tracking.

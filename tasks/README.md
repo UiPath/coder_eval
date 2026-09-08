@@ -27,6 +27,7 @@ docs.
 | `inline_starter_example` | inline starter files |
 | `sentiment_classification` | `classification_match` + a JSONL dataset (`datasets/`) |
 | `mock_path_dirs_smoke` | mocking CLIs on `PATH` (uses `mock_path_dirs_template_dir/`) |
+| `record_cli_responses` | `record_cli` per-invocation `responses` + `cli_called` grading (`driver: docker`) |
 | `test_sandbox` | the smallest possible sandbox task |
 
 ## `agents/` — agent feature-tests

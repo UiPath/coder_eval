@@ -29,6 +29,12 @@ Design choices, each load-bearing:
   catch *entirely undocumented* fields, and a fuzzier "documented in the right
   section" rule invites false passes that erode trust in the gate.
 
+  A corollary for models that share a vocabulary: ``RecordedCli`` and
+  ``CliResponse`` both declare ``exit_code`` / ``stdout`` / ``stderr``, so
+  registering the second only newly guards ``when``, and a FUTURE field on either
+  that reuses a name the other already documents passes without its own doc line.
+  Still net-positive, but do not read a green gate here as per-model coverage.
+
 Like CE027/CE029, this is intentionally NOT a ``BaseRule`` registered in
 ``tests/lint/runner.py`` (that runner is AST-only over ``.py`` files); it reasons
 over Markdown and is wired as ``tests/test_custom_lint.py::TestCE030DocSchemaParity``.

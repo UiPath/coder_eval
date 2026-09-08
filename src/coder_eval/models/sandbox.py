@@ -478,6 +478,52 @@ class RecordedCli(BaseModel):
                 raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _validate_responses_are_evaluable(self) -> RecordedCli:
+        """Prove every rule can actually be MATCHED, not merely parsed.
+
+        The shim catches a matcher fault so a broken rule cannot turn the stub into
+        a crashing executable, and books ``rule_error`` on the record. But
+        ``cli_called`` can only score that 0.0 -- the log lives in the sandbox the
+        agent writes to, so a fault there cannot be attributed to the task author
+        and must not escalate (see the comment in ``criteria/cli_called.py``).
+
+        So the attribution has to happen HERE, before a sandbox exists and where
+        nothing the agent does can participate: run the real matcher over each rule
+        and let an unevaluable spec be a load-time ValidationError. Exercises both
+        branches -- an argv rebuilt from the rule's own pattern (so the rule
+        matches) and an empty argv (so it does not) -- because a predicate can raise
+        on one path and not the other.
+        """
+        from coder_eval.argv_match import select_rule
+
+        if not self.responses:
+            return self
+        # Building the probe argvs reads the same spec the matcher will, so it sits
+        # INSIDE the guard: a spec malformed enough to break this loop is exactly
+        # the kind that must surface as a clean authoring error, not a TypeError
+        # escaping a validator.
+        try:
+            rules = [
+                {"when": response.when.match_spec, "exit": response.exit_code, "stdout": "", "stderr": ""}
+                for response in self.responses
+            ]
+            probes: list[list[str]] = [[]]
+            for spec in (rule["when"] for rule in rules):
+                for spelling in spec["verb_spellings"] or [[]]:
+                    probes.append([*spelling, *(spec["positional"] or [])])
+            for argv in probes:
+                select_rule(rules, argv)  # type: ignore[arg-type]
+        except Exception as exc:
+            msg = (
+                f"record_cli tool {self.tool!r}: a response rule cannot be evaluated "
+                f"({type(exc).__name__}: {exc}). The generated shim would swallow this and serve "
+                "the entry fallback for every invocation, so the agent would never see the "
+                "responses this task describes. Fix the `when:` pattern."
+            )
+            raise ValueError(msg) from exc
+        return self
+
     @field_validator("tool")
     @classmethod
     def validate_tool_name(cls, v: str) -> str:

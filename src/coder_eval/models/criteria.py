@@ -449,15 +449,24 @@ class CliCalledCriterion(BaseSuccessCriterion):
     that answered), which is reporting only, plus two keys that are NOT ignored
     because each means the responses the agent saw were not the ones the task
     described: ``sidecar_error`` (the shim could not import its matcher module)
-    fails the criterion, and ``rule_error`` (rule evaluation raised) raises
-    :class:`~coder_eval.errors.CheckerMisuseError` -- the only one of the two an
-    agent cannot cause, so the only one booked as an eval-config fault rather
-    than agent behaviour.
+    and ``rule_error`` (rule evaluation raised). Both fail the criterion. Neither
+    escalates, because the recorder directory sits inside the sandbox the agent
+    writes to, so both are agent-reachable; an authoring mistake is caught
+    earlier instead, by :class:`~coder_eval.models.RecordedCli`'s load-time
+    check that every response rule is evaluable.
 
     Why not ``file_matches_regex`` over a flattened log line: a flat line cannot
     express "verb X was called AND flag Y had value Z" without stacked
     lookaheads, cannot tell a quoted argument containing spaces from two
     arguments, and cannot stop a match from running across shell operators.
+
+    EVIDENCE, NOT ATTESTATION. The log is an ordinary file in the sandbox the
+    agent writes to, so an agent that wants to can append a record for a call it
+    never made, or delete one it did. This criterion is built to keep an HONEST
+    run honest -- a missing or unreadable log fails rather than passing a
+    ``max_count: 0`` guard vacuously -- not to withstand an adversary. Do not
+    build an anti-cheat control on it; see ``tasks/anti_cheat_reference`` and
+    docs/DOCKER_ISOLATION.md for what that requires.
 
     Pure data model - checking logic in CliCalledChecker._check_impl()
 

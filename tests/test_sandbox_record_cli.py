@@ -15,9 +15,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.errors import CheckerMisuseError
 from coder_eval.evaluation.checker import SuccessChecker
-from coder_eval.invocation_log import parse_log, render_recorder
+from coder_eval.invocation_log import parse_log, render_recorder, sidecar_source
 from coder_eval.models import (
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
@@ -499,6 +498,23 @@ class TestRenderedSource:
         for forbidden in ("subprocess", "execv", "execvp", "popen", "system("):
             assert forbidden not in source
 
+    @pytest.mark.parametrize("module", SIDECAR_MODULES)
+    def test_the_sidecar_does_not_execute_anything_either(self, module):
+        """Restores coverage the sidecar refactor silently dropped.
+
+        While `argv_match.py` was SPLICED into the shim,
+        `test_rendered_shim_does_not_execute_anything` scanned its body too. As a
+        separate file it is no longer in that scan, and CE048 cannot stand in:
+        `os` is on its STDLIB_ALLOWED (the matcher genuinely needs it), so
+        `os.system(...)` in the sidecar would pass lint, typecheck, and ship into
+        every sandbox. "It stubs a tool; it does not proxy one" is a documented
+        promise in docs/TASK_DEFINITION_GUIDE.md -- this is what keeps it true for
+        the half most likely to grow.
+        """
+        source = sidecar_source(module)
+        for forbidden in ("subprocess", "execv", "execvp", "popen", "system("):
+            assert forbidden not in source, f"{module} reaches a subprocess via {forbidden!r}"
+
     @pytest.mark.parametrize("spec", SHIM_SHAPES, ids=("no_rules", "with_rules"))
     def test_rendered_shim_imports_nothing_from_coder_eval(self, spec):
         """It runs inside the sandbox, where this package is not installed.
@@ -739,7 +755,9 @@ class TestSidecarModule:
 
             record = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))[0]
             assert record["argv"] == ["ixp", "dummy1"], "the invocation went unrecorded"
-            assert "ModuleNotFoundError" in record["sidecar_error"]
+            # FileNotFoundError, not ModuleNotFoundError: the sidecar is loaded by
+            # absolute path, so a missing file never reaches the import machinery.
+            assert "FileNotFoundError" in record["sidecar_error"]
             assert "rule" not in record
         finally:
             sandbox.cleanup(preserve=False)
@@ -787,6 +805,45 @@ class TestSidecarModule:
         finally:
             sandbox.cleanup(preserve=False)
 
+    @pytest.mark.parametrize("via", ["pythonpath", "cwd"])
+    def test_an_unrelated_argv_match_earlier_on_sys_path_cannot_hijack_dispatch(self, tmp_path, via):
+        """The sidecar is loaded by ABSOLUTE PATH, not resolved by name.
+
+        A plain `import argv_match` obeys sys.path order, so an unrelated (or
+        planted) argv_match in the cwd, on PYTHONPATH, or in site-packages would
+        win over the file written beside the shim -- and silently, if it happens to
+        export `select_rule`. Then every canned response the task described is
+        replaced by whatever that module returns.
+        """
+        impostor = tmp_path / "elsewhere"
+        impostor.mkdir()
+        (impostor / "argv_match.py").write_text(
+            "def select_rule(rules, argv):\n    return (0, {'exit': 0, 'stdout': 'HIJACKED\\n', 'stderr': ''})\n",
+            encoding="utf-8",
+        )
+
+        sandbox = _sandbox(f"sidecar_hijack_{via}", record_cli=[self._spec_with_rules()])
+        try:
+            sandbox_dir = sandbox.setup()
+            env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+            if via == "pythonpath":
+                env["PYTHONPATH"] = str(impostor)
+            proc = subprocess.run(
+                [sys.executable, str(sandbox_dir / RECORD_CLI_DIR / "uip"), "ixp", "dummy1"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                cwd=str(impostor) if via == "cwd" else None,
+                env=env,
+                check=False,
+            )
+            assert proc.stdout == "response1\n", f"dispatch was hijacked via {via}: {proc.stdout!r}"
+            record = _records((sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8"))[0]
+            assert "sidecar_error" not in record
+            assert record["rule"] == 0
+        finally:
+            sandbox.cleanup(preserve=False)
+
     def test_the_sidecar_import_survives_pythonsafepath(self):
         """PYTHONSAFEPATH=1 clears sys.path[0] -- the entire reason SHIM_DIR is put on
         the path explicitly. Asserted at RUNTIME, not just textually."""
@@ -805,6 +862,46 @@ class TestSidecarModule:
             assert (proc.returncode, proc.stdout) == (0, "response1\n"), f"safepath broke it: {proc.stderr}"
         finally:
             sandbox.cleanup(preserve=False)
+
+    def test_an_unevaluable_response_rule_is_rejected_at_load(self, monkeypatch):
+        """The authoring fault that `rule_error` used to escalate for, caught where
+        the agent cannot participate.
+
+        `cli_called` can only score a `rule_error` 0.0 -- the log is agent-writable,
+        so a fault there cannot be attributed to the task author. Attribution has to
+        happen before a sandbox exists, so `RecordedCli` runs the real matcher over
+        every rule at load time.
+        """
+        from coder_eval.models import cli_match
+
+        original = cli_match.CliMatch.match_spec.fget
+        assert original is not None
+        # Stand in for any spec the matcher cannot evaluate. Reached in production
+        # only by a coder_eval bug, which is precisely why nothing else covers it.
+        monkeypatch.setattr(
+            cli_match.CliMatch,
+            "match_spec",
+            property(lambda self: {**original(self), "verb_spellings": 5}),
+        )
+        with pytest.raises(ValidationError, match="cannot be evaluated"):
+            RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})])
+
+    def test_evaluable_rules_are_not_rejected(self):
+        """The load-time guard must not over-reach: every shape the authoring surface
+        accepts has to survive it."""
+        spec = RecordedCli(
+            tool="uip",
+            responses=[
+                CliResponse(when={"verb": "ixp dummy1"}, stdout="a"),
+                CliResponse(when={"verb_any_of": ["ixp x", "ixp y"]}, stdout="b"),
+                CliResponse(
+                    when={"verb": "ixp projects get", "positional": ["p1"], "flags": {"model": "pro"}},
+                    stdout="c",
+                ),
+                CliResponse(when={"positional": ["bare"]}, stdout="d"),
+            ],
+        )
+        assert len(spec.responses) == 4
 
     @pytest.mark.parametrize("tool", ["argv_match.py", "ARGV_MATCH.PY"])
     def test_a_tool_named_like_a_sidecar_is_rejected(self, tool):
@@ -950,7 +1047,7 @@ class TestPerInvocationResponses:
         finally:
             sandbox.cleanup(preserve=False)
 
-    def test_a_rule_evaluation_fault_is_recorded_and_escalates_the_grading(self):
+    def test_a_rule_evaluation_fault_is_recorded_and_fails_the_grading(self):
         """The shim swallows a matcher fault so the stub does not crash, but the
         record must say so: without it, an eval-config fault is byte-identical to a
         legitimate no-match and the task scores as if the agent never made the call.
@@ -977,12 +1074,14 @@ class TestPerInvocationResponses:
             assert "rule" not in record
             assert "TypeError" in record["rule_error"]
 
-            # Escalates rather than scoring: only a task author's own spec can
-            # fault inside the shim, so it is an eval-config error, not agent
-            # behaviour. The assertions above are about the SHIM and are unchanged.
+            # Scores 0.0 and does NOT escalate: this test reaches the state by
+            # editing the shim, which is exactly what an agent can also do, so an
+            # escalation here would be a FinalStatus.ERROR an agent could trigger
+            # at will. The assertions above are about the SHIM and are unchanged.
             criterion = CliCalledCriterion(description="called dummy1", verb="ixp dummy1")
-            with pytest.raises(CheckerMisuseError, match="eval-config fault"):
-                SuccessChecker(sandbox).check(criterion)
+            result = SuccessChecker(sandbox).check(criterion)
+            assert result.score == 0.0
+            assert "could not evaluate its response rules" in (result.error or "")
         finally:
             sandbox.cleanup(preserve=False)
 
@@ -994,8 +1093,10 @@ class TestPerInvocationResponses:
         """
         plain = render_recorder(RecordedCli(tool="uip"))
         with_rules = render_recorder(RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})]))
-        assert "from argv_match import select_rule" not in plain
-        assert "from argv_match import select_rule" in with_rules
+        assert "argv_match.py" not in plain
+        assert "argv_match.py" in with_rules
+        assert "select_rule = _sidecar.select_rule" not in plain
+        assert "select_rule = _sidecar.select_rule" in with_rules
         assert "def argv_matches" not in plain
         assert "def argv_matches" not in with_rules
         compile(plain, "shim", "exec")
@@ -1012,12 +1113,16 @@ class TestPerInvocationResponses:
         """
         source = render_recorder(RecordedCli(tool="uip", responses=[CliResponse(when={"verb": "ixp dummy1"})]))
         assigned = source.index("SHIM_DIR = os.path.dirname")
-        appended = source.index("sys.path.append(SHIM_DIR)")
-        imported = source.index("from argv_match import select_rule")
-        assert assigned < appended < imported
-        # Appended, never prepended: the recorder dir is agent-writable, so at the
-        # head of sys.path it shadows the sidecar's own stdlib imports.
+        pruned = source.index("sys.path[:] = ")
+        loaded = source.index("spec_from_file_location")
+        assert assigned < pruned < loaded
+        # The recorder dir is agent-writable, so it must never sit on sys.path
+        # while the sidecar executes -- a `typing.py` shim there would shadow the
+        # matcher's own stdlib imports.
         assert "sys.path.insert(0, SHIM_DIR)" not in source
+        assert "sys.path.append(SHIM_DIR)" not in source
+        # And the sidecar is never resolved by NAME, which sys.path order decides.
+        assert "from argv_match import" not in source
 
     def test_response_rule_needs_a_facet(self):
         """A catch-all rule is the entry's own default; two ways to say it is one too many."""
