@@ -278,6 +278,21 @@ class TestToolNormalization:
         assert record.commands[0].tool_name == "Bash"
         assert record.commands[0].parameters == {"command": "pytest -q"}
 
+    async def test_find_maps_to_glob(self, patch_exec, tmp_path):
+        # Pi's search-by-pattern tool is `find` (not `glob`); it must normalize to
+        # the canonical `Glob` so command_executed / commands_efficiency criteria
+        # written against `Glob` score on a Pi run that searched.
+        stream = [
+            _turn_start(),
+            _tool_start("f:0", "find", {"pattern": "**/*.py"}),
+            _tool_end("f:0", "find", "ok"),
+            _turn_end(inp=10, out=5),
+            json.dumps({"type": "agent_settled"}),
+        ]
+        patch_exec(_FakeProcess(stream))
+        record = await _run(_agent(), tmp_path)
+        assert record.commands[0].tool_name == "Glob"
+
     async def test_unknown_tool_passes_through(self, patch_exec, tmp_path):
         stream = [
             _turn_start(),
@@ -405,6 +420,19 @@ class TestEnvironmentInfo:
         assert "pi_session_id" not in agent.get_environment_info()
         await agent.start(str(tmp_path))
         assert agent.get_environment_info()["pi_session_id"].startswith("coder-eval-t1-")
+
+    async def test_dataset_row_task_id_is_sanitized_in_session_id(self, patch_exec, tmp_path):
+        # Dataset-row tasks have path-shaped ids ("suite/row_1"); pi derives its
+        # session file from --session-id under --session-dir, so a raw '/' would
+        # resolve to a non-existent subdir and fail the row. The id must carry no
+        # path separator.
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        config = PiAgentConfig(type="pi", model="openrouter/moonshotai/kimi-k3")
+        agent = PiAgent(config, task_id="suite/row_1")
+        await _run(agent, tmp_path)
+        sid = captured["argv"][captured["argv"].index("--session-id") + 1]
+        assert "/" not in sid and "\\" not in sid
+        assert sid.startswith("coder-eval-suite_row_1-")
 
 
 class TestSandboxEnvironment:
@@ -870,14 +898,18 @@ class TestReviewFixes:
         ends = [e for e in recorder.events if isinstance(e, TurnEndEvent)]
         assert len(starts) == len(ends) == 2  # balanced despite the aborted turn
 
-    async def test_terminal_error_is_surfaced_in_result(self, patch_exec, tmp_path):
-        """#3: a `pi` run that ends on an error surfaces WHY in result_summary.result."""
+    async def test_terminal_error_crashes_the_turn(self, patch_exec, tmp_path):
+        """A terminal provider error (stopReason=error that survived pi's internal
+        retries) crashes the turn so it books as ERROR (retryable / excluded from
+        outcomes), not a clean COMPLETED FAILURE. Mirrors opencode_agent."""
         stream = [_turn_start(), _turn_end_error("404: blocked by guardrail"), json.dumps({"type": "agent_settled"})]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
-        assert record.crashed is False
-        assert record.result_summary is not None
-        assert "blocked by guardrail" in (record.result_summary.result or "")
+        agent = _agent()
+        with pytest.raises(AgentCrashError, match="blocked by guardrail"):
+            await _run(agent, tmp_path)
+        partial = agent.pending_turn
+        assert partial is not None
+        assert partial.crashed is True
 
     def test_error_message_resets_on_a_recovered_turn(self):
         """#3: an intermediate error a later cycle recovers from must not leak into the result."""
@@ -917,6 +949,28 @@ class TestReviewFixes:
         with caplog.at_level("WARNING"):
             await _run(_agent(), tmp_path)
         assert any("no usage object" in r.getMessage() for r in caplog.records)
+
+    async def test_all_zero_usage_object_warns(self, patch_exec, tmp_path, caplog):
+        """A turn_end that DID carry a usage object but whose every bucket is 0 (the
+        rename-each-key-to-0 drift shape) warns once — otherwise tokens and cost
+        silently vanish and max_usd / max_total_tokens go blind."""
+        zero = json.dumps(
+            {
+                "type": "turn_end",
+                "message": {
+                    "role": "assistant",
+                    "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                    "stopReason": "stop",
+                },
+                "toolResults": [],
+            }
+        )
+        stream = [_turn_start(), zero, json.dumps({"type": "agent_settled"})]
+        patch_exec(_FakeProcess(stream))
+        with caplog.at_level("WARNING"):
+            record = await _run(_agent(), tmp_path)
+        assert record.crashed is False  # score, don't crash (documented Pi policy)
+        assert any("all-zero token buckets" in r.getMessage() for r in caplog.records)
 
 
 class TestSkillInjection:

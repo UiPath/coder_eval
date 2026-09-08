@@ -65,6 +65,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import tempfile
@@ -146,7 +147,10 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "edit": "Edit",
     "patch": "Edit",
     "multiedit": "Edit",
-    "glob": "Glob",
+    # Pi's search tool is `find` (glob-by-pattern), NOT `glob` — mapping it to the
+    # canonical `Glob` keeps command_executed / commands_efficiency criteria
+    # comparable across harnesses. There is no `glob` tool in Pi's built-in set.
+    "find": "Glob",
     "grep": "Grep",
     "list": "LS",
     "ls": "LS",
@@ -496,6 +500,15 @@ class _PiTurnState:
         # fold it into the turn total (the per-message record keeps it separately).
         step_out = raw_out + step_reasoning
 
+        # A turn_end that DID carry a usage object but whose every bucket resolves
+        # to 0 is the drift shape the whole-object check above cannot see: keys
+        # renamed by a CLI upgrade each coerce to 0 (see `_as_int`), tokens and cost
+        # silently vanish, and `max_usd` / `max_total_tokens` can never trip. Warn
+        # once (score, don't crash — the documented Pi policy). OpenCode guards the
+        # same gap with `steps_finished > 0 and usage.is_empty()`.
+        if raw_usage and step_in == raw_out == step_reasoning == step_cw == step_cr == 0:
+            self._warn_token_shape("turn_end usage object had all-zero token buckets; this step booked 0 tokens/cost")
+
         self.usage = TokenUsage(
             uncached_input_tokens=self.usage.uncached_input_tokens + step_in,
             output_tokens=self.usage.output_tokens + step_out,
@@ -755,7 +768,13 @@ class PiAgent(Agent[PiAgentConfig]):
         # Drop any session dir from a prior start() first so re-starting the same
         # agent instance cannot leak a tempdir.
         self._cleanup_session_dir()
-        self._session_id = f"coder-eval-{self.task_id}-{uuid4().hex[:8]}"
+        # Sanitize task_id before it reaches pi's `--session-id`: dataset-row tasks
+        # have path-shaped ids ("suite/row_3", set in task_loader) and pi derives
+        # its session file from the id under `--session-dir`, so a raw '/' would
+        # resolve to a non-existent subdir and fail the row before any work. Keep
+        # only the safe id charset (mirrors sandbox.py's flatten, but stricter).
+        safe_task_id = re.sub(r"[^A-Za-z0-9._-]", "_", self.task_id)
+        self._session_id = f"coder-eval-{safe_task_id}-{uuid4().hex[:8]}"
         self._session_dir = tempfile.mkdtemp(prefix="pi-session-")
         self._state = AgentState.WORKING
 
@@ -1085,6 +1104,17 @@ class PiAgent(Agent[PiAgentConfig]):
         if stderr_drain is not None:
             with contextlib.suppress(TimeoutError):
                 stderr_bytes = await asyncio.wait_for(asyncio.shield(stderr_drain), timeout=_DRAIN_SECONDS)
+
+        # A terminal provider error (stopReason=error that survived pi's internal
+        # retries) is infrastructure failure, not an agent failure. `pi -p` exits 0
+        # after exhausting retries, so without this the turn books as a clean
+        # COMPLETED (FinalStatus.FAILURE, category "failed") — silently depressing
+        # the measured pass rate. Crashing routes it through _communicate_with_retry
+        # and, if unrecovered, to FinalStatus.ERROR (category "error", excluded from
+        # outcomes). error_message is reset on any non-error turn, so this fires only
+        # when the FINAL turn errored. Mirrors opencode_agent._settle_turn.
+        if state.error_message is not None:
+            self._crash_turn(state, collector, f"Pi error: {state.error_message}")
 
         # A non-zero exit with no intentional cut means the turn died.
         if proc.returncode not in (0, None) and not stopped_early and not state.max_turns_exhausted:
