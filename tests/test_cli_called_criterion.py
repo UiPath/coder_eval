@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from coder_eval.argv_match import split_flags
+from coder_eval.errors import CheckerMisuseError
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import CliCalledCriterion, SandboxConfig
 from coder_eval.sandbox import Sandbox
@@ -271,6 +272,88 @@ class TestCounts:
 
 
 class TestLogHandling:
+    """The five ways this checker refuses to score a log, and why they differ.
+
+    Four score a gating 0.0 and one RAISES, on purpose. A missing log, a write
+    sentinel, a `sidecar_error` and an unusable record are all things an AGENT can
+    cause (`rm` the log, fill the disk, delete the matcher beside the shim, append
+    garbage), so escalating any of them would hand an agent a way to turn a failing
+    run into a `FinalStatus.ERROR`. Only `rule_error` is unreachable that way -- its
+    sole producer is a rule the task author wrote that faulted inside the shim -- so
+    it is the only one booked as an eval-config fault rather than agent behaviour.
+    The 0.0 assertions below are therefore deliberate, not an oversight.
+    """
+
+    def test_a_shim_rule_fault_escalates_instead_of_scoring_zero(self, sandbox_with_log):
+        """An eval-config fault must not be scored as though the agent failed.
+
+        Goes through SuccessChecker rather than `_check_impl`, because the
+        escalation lives in `handle_criterion_errors`' `_ESCALATING_EXCEPTIONS`.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        record = _call(["ixp", "dummy1"])
+        record["rule_error"] = "TypeError('argument of type int is not iterable')"
+        _write_log(sandbox_dir, [record])
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        with pytest.raises(CheckerMisuseError, match="eval-config fault"):
+            SuccessChecker(sandbox).check(criterion)
+
+    def test_a_non_string_rule_error_still_escalates(self, sandbox_with_log):
+        """`parse_log` only validates `argv`, so `rule_error` may be any JSON value.
+        The message formats it with !r and must not call string methods on it."""
+        sandbox, sandbox_dir = sandbox_with_log
+        record = _call(["ixp", "dummy1"])
+        record["rule_error"] = 42
+        _write_log(sandbox_dir, [record])
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        with pytest.raises(CheckerMisuseError, match="42"):
+            SuccessChecker(sandbox).check(criterion)
+
+    def test_a_rule_error_on_an_unusable_record_takes_the_zero_path(self, sandbox_with_log):
+        """`faults` is built from `usable` only, so a fault on a record whose argv is
+        unreadable is counted as unusable instead -- scored 0.0, never raised."""
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            json.dumps({"tool": "uip", "argv": "not-a-list", "rule_error": "TypeError()"}) + "\n",
+            encoding="utf-8",
+        )
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "unusable record" in (result.error or "")
+
+    def test_an_explicit_null_rule_error_is_not_a_fault(self, sandbox_with_log):
+        """`is not None`, not truthiness: a record carrying `rule_error: null` is a
+        clean record and must score normally."""
+        sandbox, sandbox_dir = sandbox_with_log
+        record = _call(["ixp", "dummy1"])
+        record["rule_error"] = None
+        _write_log(sandbox_dir, [record])
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_the_write_failure_sentinel_still_scores_zero(self, sandbox_with_log):
+        """The one refuse-to-score path with no test before now.
+
+        An agent can cause it (fill the disk, chmod the recorder dir), so it stays a
+        gating 0.0 rather than joining the escalating path above.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "dummy1"])])
+        (sandbox_dir / f"{LOG}.error").write_text(
+            "OSError(28, 'No space left on device') ['ixp', 'dummy2']\n", encoding="utf-8"
+        )
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "could not write" in (result.error or "")
+
     def test_missing_log_fails_even_a_negative_guard(self, sandbox_with_log):
         """A missing log is a harness fault, so `max_count: 0` must NOT pass on it.
 

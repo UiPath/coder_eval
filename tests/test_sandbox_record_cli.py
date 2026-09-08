@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from coder_eval.errors import CheckerMisuseError
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.invocation_log import parse_log, render_recorder
 from coder_eval.models import (
@@ -949,7 +950,7 @@ class TestPerInvocationResponses:
         finally:
             sandbox.cleanup(preserve=False)
 
-    def test_a_rule_evaluation_fault_is_recorded_and_fails_the_grading(self):
+    def test_a_rule_evaluation_fault_is_recorded_and_escalates_the_grading(self):
         """The shim swallows a matcher fault so the stub does not crash, but the
         record must say so: without it, an eval-config fault is byte-identical to a
         legitimate no-match and the task scores as if the agent never made the call.
@@ -976,10 +977,12 @@ class TestPerInvocationResponses:
             assert "rule" not in record
             assert "TypeError" in record["rule_error"]
 
+            # Escalates rather than scoring: only a task author's own spec can
+            # fault inside the shim, so it is an eval-config error, not agent
+            # behaviour. The assertions above are about the SHIM and are unchanged.
             criterion = CliCalledCriterion(description="called dummy1", verb="ixp dummy1")
-            result = SuccessChecker(sandbox).check(criterion)
-            assert result.score == 0.0
-            assert "could not evaluate its response rules" in (result.error or "")
+            with pytest.raises(CheckerMisuseError, match="eval-config fault"):
+                SuccessChecker(sandbox).check(criterion)
         finally:
             sandbox.cleanup(preserve=False)
 

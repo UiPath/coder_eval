@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from coder_eval.argv_match import argv_matches
 from coder_eval.criteria.base import BaseCriterion, CheckContext, register_criterion
+from coder_eval.errors import CheckerMisuseError
 from coder_eval.invocation_log import parse_log
 from coder_eval.models import CliCalledCriterion, CriterionResult
 
@@ -107,21 +108,33 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
                 ),
             )
 
-        # The shim books this when its own rule evaluation raised. Defense in
-        # depth (FlagMatch compiles at load), but if it ever fires, the responses
-        # the agent saw were not the ones the task described, so no verdict over
-        # this log means anything -- same treatment as the write-failure sentinel.
+        # The shim books this when its own rule evaluation RAISED. Defense in depth
+        # (FlagMatch compiles at load), but if it fires, the responses the agent saw
+        # were not the ones the task described, so no verdict over this log means
+        # anything.
+        #
+        # THE ONE PATH HERE THAT RAISES, and deliberately not uniform with the other
+        # four. Five things make this checker refuse to score a log:
+        #
+        #   missing log          score 0.0   an agent can `rm` it
+        #   write sentinel       score 0.0   an agent can fill the disk or chmod the dir
+        #   sidecar_error        score 0.0   an agent can delete the matcher beside the shim
+        #   unusable records     score 0.0   an agent can append garbage to the log
+        #   rule_error           RAISES      only a task author's spec can cause it
+        #
+        # The four scored 0.0 are all agent-REACHABLE, so escalating them would hand
+        # an agent a way to convert a failing run into a FinalStatus.ERROR. This one
+        # is not reachable that way: its only producer is a rule the task author
+        # wrote that faulted inside the shim -- a pure eval-config error, which must
+        # not be booked as an agent failure. Do not "fix" the other four to match.
         faults = [record for _, record in usable if record.get("rule_error") is not None]
         if faults:
-            return CriterionResult(
-                criterion_type=criterion.type,
-                description=criterion.description,
-                score=0.0,
-                error=(
-                    f"Recorder could not evaluate its response rules on {len(faults)} invocation(s), so the "
-                    f"agent saw fallback output the task did not describe. First: {faults[0].get('rule_error')!r}"
-                ),
+            msg = (
+                f"record_cli could not evaluate its response rules on {len(faults)} invocation(s) in "
+                f"'{criterion.log}', so the agent saw fallback output the task never described. This is an "
+                f"eval-config fault, not an agent failure. First: {faults[0].get('rule_error')!r}"
             )
+            raise CheckerMisuseError(msg)
 
         if unusable:
             # A record we cannot read might BE the call a max_count: 0 guard

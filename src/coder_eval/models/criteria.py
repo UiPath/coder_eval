@@ -445,6 +445,15 @@ class CliCalledCriterion(BaseSuccessCriterion):
     Only ``argv`` is required. ``tool`` enables one log to serve several shadowed
     executables; ``exit`` and ``ts`` are recorded for reporting, not matched.
 
+    A generated ``record_cli`` shim adds ``rule`` (the index of the response rule
+    that answered), which is reporting only, plus two keys that are NOT ignored
+    because each means the responses the agent saw were not the ones the task
+    described: ``sidecar_error`` (the shim could not import its matcher module)
+    fails the criterion, and ``rule_error`` (rule evaluation raised) raises
+    :class:`~coder_eval.errors.CheckerMisuseError` -- the only one of the two an
+    agent cannot cause, so the only one booked as an eval-config fault rather
+    than agent behaviour.
+
     Why not ``file_matches_regex`` over a flattened log line: a flat line cannot
     express "verb X was called AND flag Y had value Z" without stacked
     lookaheads, cannot tell a quoted argument containing spaces from two
