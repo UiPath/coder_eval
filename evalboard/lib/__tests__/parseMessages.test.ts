@@ -909,6 +909,22 @@ describe("parseMessages — open-weight cost apportionment", () => {
         expect(rows[0].costUsd).toBeCloseTo(0.009 * (400 / 500), 10);
     });
 
+    test("provider_call_costs present (LiteLLM/OpenCode): NOT apportioned — cost lives in the ProviderCall table", () => {
+        const turns: TurnEntry[] = [
+            {
+                model_used: "openrouter/unpriced-xyz",
+                token_usage: { total_cost_usd: 0.009 },
+                // The open-weight actual-cost join already booked this turn's real
+                // cost per-call; apportioning the turn total onto message rows too
+                // would surface the same money twice.
+                provider_call_costs: [{ cost_usd: 0.009, input_tokens: 300, output_tokens: 100 }],
+                messages: [tokMsg("openrouter/unpriced-xyz", 300, 100, 0)],
+            },
+        ];
+        // Unpriced model + a per-call audit → the row stays blank, NOT apportioned.
+        expect(parseMessages(turns)[0].costUsd).toBeNull();
+    });
+
     test("unpriced model + NO turn cost: rows stay blank (—), not a misleading $0", () => {
         const turns: TurnEntry[] = [
             {

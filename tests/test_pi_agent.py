@@ -917,7 +917,10 @@ def _turn_end_error(msg: str = "404: blocked by guardrail") -> str:
     )
 
 
-class TestReviewFixes:
+class TestTurnLifecycleAndTokenTelemetry:
+    """Turn open/close balance, terminal-error surfacing, and the token-shape
+    guards that keep a CLI-schema drift from silently zeroing tokens/cost."""
+
     async def test_dangling_turn_start_is_closed_on_next_turn_start(self, patch_exec, tmp_path):
         """#2: a turn_start with no turn_end (a mid-turn retry abort) must be closed
         when the next turn_start arrives, so TurnStart/TurnEnd stay balanced."""
@@ -1007,6 +1010,29 @@ class TestReviewFixes:
             record = await _run(_agent(), tmp_path)
         assert record.crashed is False  # score, don't crash (documented Pi policy)
         assert any("all-zero token buckets" in r.getMessage() for r in caplog.records)
+
+    async def test_total_tokens_mismatch_warns(self, patch_exec, tmp_path, caplog):
+        """The stream's own totalTokens must reconcile with input+output+cacheRead+
+        cacheWrite; a mismatch (a bucket renamed/moved under a CLI upgrade) warns
+        once instead of silently mis-booking tokens/cost."""
+        bad = json.dumps(
+            {
+                "type": "turn_end",
+                "message": {
+                    "role": "assistant",
+                    # buckets sum to 15, but the stream claims 999 — schema drift.
+                    "usage": {"input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 999},
+                    "stopReason": "stop",
+                },
+                "toolResults": [],
+            }
+        )
+        stream = [_turn_start(), bad, json.dumps({"type": "agent_settled"})]
+        patch_exec(_FakeProcess(stream))
+        with caplog.at_level("WARNING"):
+            record = await _run(_agent(), tmp_path)
+        assert record.crashed is False
+        assert any("does not reconcile" in r.getMessage() for r in caplog.records)
 
 
 class TestSkillInjection:

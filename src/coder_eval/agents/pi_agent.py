@@ -517,6 +517,25 @@ class _PiTurnState:
             cache_creation_input_tokens=self.usage.cache_creation_input_tokens + step_cw,
             cache_read_input_tokens=self.usage.cache_read_input_tokens + step_cr,
         )
+        # Cross-check the stream's OWN `totalTokens` against the buckets we summed.
+        # Pi's invariant is totalTokens == input + output + cacheRead + cacheWrite
+        # (reasoning is billed at the output rate but excluded from this field, so
+        # compare against raw_out, not step_out). A mismatch means a bucket was
+        # renamed or its meaning moved under a CLI upgrade — exactly the drift the
+        # per-bucket `_as_int` coercion would otherwise absorb silently, blinding
+        # max_total_tokens / max_usd. Warn once, mirroring OpenCode's `tokens.total`
+        # guard; only when the field is actually present (older streams omit it).
+        reported_total = usage.get("totalTokens")
+        if isinstance(reported_total, int) and not isinstance(reported_total, bool):
+            expected_total = step_in + raw_out + step_cw + step_cr
+            if reported_total != expected_total:
+                self._warn_token_shape(
+                    "turn_end totalTokens=%d does not reconcile with input+output+cacheRead+cacheWrite=%d — "
+                    + "a bucket may have been renamed or its meaning moved; re-check docs/agents/PI.md before "
+                    + "trusting cost",
+                    reported_total,
+                    expected_total,
+                )
         cost = usage.get("cost")
         if isinstance(cost, dict):
             total = cost.get("total")

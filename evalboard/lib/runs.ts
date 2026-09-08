@@ -2015,11 +2015,21 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
         // untouched — this only fills the gap, never overrides. Display-only:
         // the authoritative task total still reads the backend aggregate, not a
         // sum of these costUsd, so there is no double-count.
+        // EXCLUDED: turns carrying a `provider_call_costs` audit (the LiteLLM route
+        // + OpenCode's open-weight join) book the real per-call cost in the separate
+        // ProviderCall table by design. Apportioning the turn total onto message
+        // rows too would surface the SAME money twice — once per-row here, once
+        // itemised there — reversing the documented "actual cost is no longer
+        // distributed onto transcript messages" decision for every historical
+        // LiteLLM/OpenCode run. Only a stream-native total with NO per-call audit
+        // (Pi and friends) is apportioned.
         const turnRows = out.slice(turnStart);
         const realCost = turn.token_usage?.total_cost_usd;
         const anyPriced = turnRows.some((r) => r.costUsd != null);
+        const hasPerCallActuals = (turn.provider_call_costs?.length ?? 0) > 0;
         if (
             !anyPriced &&
+            !hasPerCallActuals &&
             typeof realCost === "number" &&
             realCost > 0 &&
             turnRows.length > 0
