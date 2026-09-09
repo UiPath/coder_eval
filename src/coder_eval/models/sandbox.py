@@ -256,6 +256,11 @@ class DockerDriverConfig(BaseModel):
             # selects the Gemini model when agent.model is unset.
             "GEMINI_API_KEY",
             "ANTIGRAVITY_MODEL",
+            # Pi agent provider credential — Pi addresses models as `provider/id`
+            # and reads OpenRouter's key from the env. The baked pi CLI + this
+            # passthrough make `--driver docker --type pi` work; without it the
+            # in-container pi has no credential and every turn fails auth.
+            "OPENROUTER_API_KEY",
             # User HOME used to keep ~/.claude resolution symmetric with the host.
             # See docs/DOCKER_ISOLATION.md "HOME is forwarded by default" for the
             # contract. tl;dr: Path.home() inside the container returns the

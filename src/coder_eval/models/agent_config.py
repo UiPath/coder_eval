@@ -381,6 +381,55 @@ class OpenCodeAgentConfig(BaseAgentConfig):
     )
 
 
+# Pi's ``--thinking`` reasoning-effort set. A STRICT SUPERSET of ThinkingLevel
+# (adds ``off``/``xhigh``/``max``), so Pi gets its own literal rather than reusing
+# the 4-value one — reuse would forbid valid Pi levels. Spike-confirmed against
+# ``pi --help`` on Pi 0.84.4.
+type PiThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class PiAgentConfig(BaseAgentConfig):
+    """Pi agent configuration (the ``pi`` Node coding agent — https://pi.dev/).
+
+    Drives the ``pi`` CLI in JSON print mode
+    (``pi -p --mode json``), which streams newline-delimited JSON events on
+    stdout. ``model`` is Pi's provider-prefixed ``provider/model`` form (e.g.
+    ``openrouter/moonshotai/kimi-k3``) and is passed through verbatim via
+    ``--model`` (no separate ``--provider`` needed).
+
+    Session continuity (multi-turn / simulation)
+    --------------------------------------------
+    Each ``communicate()`` is one ``pi`` subprocess. A standard task reaches its
+    solution inside a single ``communicate()`` (Pi runs its own multi-step agent
+    loop). A simulation/dialog task calls ``communicate()`` once per user turn and
+    relies on the agent remembering prior turns — so ``PiAgent`` reuses a per-agent
+    ``--session-dir`` + stable ``--session-id`` on every invocation (create-if-missing
+    on turn 1, resume after), mirroring OpenCode's ``--session`` continuity.
+
+    Enforced vs unenforced fields
+    -----------------------------
+    ``system_prompt`` → ``--append-system-prompt`` IS enforced (a small capability
+    win over OpenCode). ``allowed_tools`` / ``disallowed_tools`` are NOT forwarded:
+    the shared config default sets Claude-namespaced tool names
+    (``Bash``/``Read``/…) that do not exist in Pi's lowercase toolset
+    (``bash``/``read``/…), so forwarding them to ``--tools`` would allowlist
+    nonexistent tools and strip the agent of ALL tools — like OpenCode/Codex/
+    Antigravity, Pi ignores them and runs with its full native toolset.
+    ``permission_mode`` is NOT enforced (Pi headless print mode auto-runs tools;
+    the sandbox driver is the isolation boundary) and ``system_prompt_file`` is NOT
+    read — both warned about at ``start()``. ``plugins`` skills ARE injected (each
+    resolved skills dir → a ``--skill <dir>`` arg, recorded as ``pi_skill_paths`` in
+    ``environment_info``), so Pi can run activation suites. See ``docs/agents/PI.md``.
+    """
+
+    type: Literal[AgentKind.PI]  # type: ignore[assignment]
+
+    thinking_level: PiThinkingLevel = Field(
+        default="medium",
+        description="Pi reasoning effort passed as --thinking (off/minimal/low/medium/high/xhigh/max).",
+    )
+
+
 class NoneAgentConfig(BaseAgentConfig):
     """No-op ("agentless") agent configuration.
 
@@ -405,7 +454,12 @@ class NoneAgentConfig(BaseAgentConfig):
 # Only includes the concrete subclasses (not BaseAgentConfig) since the discriminator
 # must be a Literal type. BaseAgentConfig is returned by parse_agent_config when type=None.
 type AgentConfig = Annotated[
-    ClaudeCodeAgentConfig | CodexAgentConfig | AntigravityAgentConfig | OpenCodeAgentConfig | NoneAgentConfig,
+    ClaudeCodeAgentConfig
+    | CodexAgentConfig
+    | AntigravityAgentConfig
+    | OpenCodeAgentConfig
+    | PiAgentConfig
+    | NoneAgentConfig,
     Field(discriminator="type"),
 ]
 

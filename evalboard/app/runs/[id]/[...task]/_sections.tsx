@@ -279,7 +279,7 @@ const MSG_GRID =
 // figure, not the SDK's cumulative per-turn cost). Token-column copy is shared
 // via TOKEN_COLUMN_HELP so the timeline and the run grid stay consistent.
 const MESSAGE_COST_HELP =
-    "Per-message cost: this message's recorded tokens priced at list rates — the cost of this single API call. The SDK reports only a cumulative per-turn figure, so these need not sum exactly to the task's total cost (the authoritative SDK number) shown above. Blank when the model is unpriced or no per-message tokens were recorded.";
+    "Per-message cost: this message's recorded tokens priced at list rates — the cost of this single API call. The SDK reports only a cumulative per-turn figure, so these need not sum exactly to the task's total cost (the authoritative SDK number) shown above. For a harness that reports a real per-turn cost on an unpriced model (e.g. Pi on an open-weight model), the turn's real cost is instead apportioned across its rows by token share, so those rows DO sum to the turn total. Blank only when neither a list price nor a real turn cost is available, or no per-message tokens were recorded.";
 
 function messageKind(blockTypes: MessageEvent["blockTypes"]): string {
     const set = new Set(blockTypes);

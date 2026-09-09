@@ -3647,13 +3647,27 @@ class TestCE047AgentRosterParity:
         # The exact historical gap: a surface listing three of the four harnesses.
         from tests.lint.agent_roster_parity import missing_agents_in
 
-        three_of_four = "runs Claude Code, Codex, or Antigravity (Gemini) in a sandbox"
+        three_of_four = "runs Claude Code, Codex, Antigravity (Gemini), or Pi in a sandbox"
         assert missing_agents_in(three_of_four) == ["opencode"]
 
     def test_model_name_counts_as_naming_the_antigravity_row(self):
         from tests.lint.agent_roster_parity import missing_agents_in
 
-        assert missing_agents_in("Claude Code, Codex, Gemini, and OpenCode") == []
+        assert missing_agents_in("Claude Code, Codex, Gemini, OpenCode, and Pi") == []
+
+    def test_short_name_is_not_satisfied_by_a_substring(self):
+        # The matcher is word-boundary anchored, so the 2-char "Pi" row is NOT
+        # satisfied by an incidental bigram in unrelated prose — the exact
+        # false-negative that let a stale roster ship undetected for Pi.
+        from tests.lint.agent_roster_parity import missing_agents_in
+
+        for decoy in ("anthropic models", "see the ci-pipeline.md guide", "the harness copies files"):
+            assert missing_agents_in(decoy, kinds=["pi"]) == ["pi"]
+        # A standalone mention (any surrounding punctuation) DOES satisfy it.
+        assert missing_agents_in("runs Pi in a sandbox", kinds=["pi"]) == []
+        assert missing_agents_in("… OpenCode, or Pi —", kinds=["pi"]) == []
+        # The hyphenated packaging spelling satisfies the claude-code row.
+        assert missing_agents_in("coder-eval[claude-code]", kinds=["claude-code"]) == []
 
     def test_extractors_narrow_to_the_marketing_region(self, tmp_path: Path):
         from tests.lint.agent_roster_parity import _mkdocs_site_description, _pyproject_marketing_text

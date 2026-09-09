@@ -44,3 +44,10 @@ class TestEnvPassthroughExtra:
         extras = ["TOKEN_A", "TOKEN_B", "TOKEN_C"]
         cfg = DockerDriverConfig(env_passthrough_extra=extras)
         assert cfg.env_passthrough_extra == extras
+
+    def test_openrouter_api_key_in_default_allowlist(self):
+        """Pi's provider credential ships in the default env_passthrough so a
+        `--driver docker --type pi` run authenticates without a per-task
+        env_passthrough_extra. Read the default off the model so the assertion
+        survives future additions to the allowlist."""
+        assert "OPENROUTER_API_KEY" in DockerDriverConfig().env_passthrough

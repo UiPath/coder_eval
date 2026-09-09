@@ -36,6 +36,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Pi Node CLI, pinned — same rationale as the Claude Code pin above (the agent
+# binary is a dominant non-model driver of results; @latest would freeze
+# nondeterministically under layer caching). Node 22 + npm are already present.
+ARG PI_VERSION=0.84.4
+RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}
+
 # uv: matches host sandbox.py's `uv venv` + `uv pip install` fast path
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
@@ -58,12 +64,16 @@ COPY experiments/default.yaml ./experiments/default.yaml
 # come from public PyPI, so this needs no private-index credentials. The RUN
 # below always passes `--extra codex --extra antigravity --extra litellm`.
 #
-# NOT every built-in agent ships here: `opencode` is registered unconditionally
-# but its CLI is a Node package (`npm install -g opencode-ai`), absent from this
-# image, and no OpenCode credentials are in SandboxConfig.env_passthrough -- so
-# `--driver docker` does not support it. Adding it means a pinned version that
-# travels with the release tag (as CLAUDE_CODE_VERSION does) plus an
-# env_passthrough block; see docs/agents/OPENCODE.md "Running in Docker".
+# `pi` IS baked above (pinned PI_VERSION) and its OPENROUTER_API_KEY provider
+# credential is in DockerDriverConfig.env_passthrough, so `--driver docker --type pi`
+# is supported. NOT every built-in agent ships here, though: `opencode` is
+# registered unconditionally but its CLI is a Node package
+# (`npm install -g opencode-ai`), absent from this image -- so `--driver docker`
+# does not support it. (OPENROUTER_API_KEY IS now in env_passthrough, added for Pi,
+# so an OpenCode env-auth run would authenticate once the CLI is baked; the CLI is
+# the remaining blocker.) Adding it means a pinned version that travels with the release
+# tag (as CLAUDE_CODE_VERSION / PI_VERSION do) plus an env_passthrough block; see
+# docs/agents/OPENCODE.md "Running in Docker".
 #
 # CODER_EVAL_UV_EXTRAS carries ADDITIONAL opt-in extras on top of those; it
 # defaults to none. `make docker-image-full` passes `--extra uipath`, which
