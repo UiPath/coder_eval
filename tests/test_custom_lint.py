@@ -13,7 +13,7 @@ Run just these tests:
 import json
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -3980,3 +3980,114 @@ class TestCE047AgentRosterParity:
         region = _pyproject_marketing_text(pyproject)
         assert "Claude Code" in region and "opencode" in region
         assert "[tool.x]" not in region
+
+
+@pytest.mark.lint
+class TestCE055NoAbsoluteCriterionPath:
+    """CE055 — a criterion `path:` in `tasks/` must be sandbox-relative.
+
+    Criterion paths are joined onto the sandbox root, and joining an ABSOLUTE
+    path discards that root: `Path(sandbox) / "/opt/marker"` is `/opt/marker`.
+    Containment then refuses it, so the criterion can never match no matter what
+    the agent does.
+
+    Two in-tree tasks were broken this way, and the failure mode is why a static
+    rule earns its place on top of the runtime guard:
+
+    * `tasks/byod_smoke_test.yaml` checked `/opt/byod_marker`. It IS in a CI
+      bucket, and CI reported `Results: 7/8 succeeded` with a gating 0.0 reading
+      "file does not exist" for a file that plainly existed. The real cause sat
+      in a warning inside a task log.
+    * `tasks/dockerfile_build_example/dockerfile_build_example.yaml` checked
+      `/opt/greeting.txt` and `/opt/secret_check.txt`. It is in NO bucket, so
+      nothing ran it at all — the runtime guard, however loud, is never reached.
+
+    That second case is the argument: a runtime error only fires for tasks
+    somebody runs, and this repo ships example tasks that CI does not. This rule
+    reads the YAML.
+
+    The fix is never "make containment allow it". An absolute path here is a
+    claim about the container IMAGE rather than about anything the agent produced
+    in its workspace, and `run_command` (`test -f /opt/marker`) states that
+    directly — while staying inside the trust gate that governs recorded shell on
+    the detached grading path.
+    """
+
+    ROOT = Path(__file__).parent.parent
+
+    @staticmethod
+    def _absolute_paths(task) -> list[str]:
+        """Criterion paths that are absolute, hence unreachable inside a sandbox.
+
+        Read off each criterion's own `path` field via `isinstance` narrowing on
+        the union rather than a `getattr(c, "path", None)` probe: an untyped
+        string probe over a discriminated union is invisible to pyright, so a
+        field rename would silently degrade this rule to a permanent no-op —
+        which is exactly what CE050 exists to prevent.
+        """
+        from coder_eval.models import (
+            ClassificationMatchCriterion,
+            FileCheckCriterion,
+            FileContainsCriterion,
+            FileExistsCriterion,
+            FileMatchesRegexCriterion,
+            JsonCheckCriterion,
+        )
+
+        path_bearing = (
+            ClassificationMatchCriterion,
+            FileCheckCriterion,
+            FileContainsCriterion,
+            FileExistsCriterion,
+            FileMatchesRegexCriterion,
+            JsonCheckCriterion,
+        )
+        offenders = []
+        for c in task.success_criteria:
+            if not isinstance(c, path_bearing):
+                continue
+            # PurePosixPath, not Path: the rule must give the same answer on a
+            # Windows checkout, where `Path("/opt/x").is_absolute()` is False.
+            if PurePosixPath(c.path).is_absolute():
+                offenders.append(f"{type(c).__name__}(path={c.path!r})")
+        return offenders
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_tasks_use_sandbox_relative_criterion_paths(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        offenders = self._absolute_paths(task)
+        assert not offenders, (
+            f"{path}: criterion path(s) {offenders} are absolute. Joining an absolute path onto the "
+            "sandbox root discards the root, so containment refuses it and the criterion can never "
+            "match. To assert on a file baked into the container image, use a `run_command` "
+            "criterion (e.g. `test -f /opt/marker`)."
+        )
+
+    def test_detects_an_absolute_criterion_path(self):
+        """The rule's own sensor — without this, an empty `tasks/` would 'pass'."""
+        from coder_eval.models import FileExistsCriterion, TaskDefinition
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            success_criteria=[FileExistsCriterion(description="c", path="/opt/byod_marker")],
+        )
+        assert self._absolute_paths(task) == ["FileExistsCriterion(path='/opt/byod_marker')"]
+
+    def test_allows_a_relative_path(self):
+        from coder_eval.models import FileExistsCriterion, TaskDefinition
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            success_criteria=[FileExistsCriterion(description="c", path="build/out.txt")],
+        )
+        assert self._absolute_paths(task) == []

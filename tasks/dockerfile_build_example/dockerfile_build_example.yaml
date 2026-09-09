@@ -60,16 +60,24 @@ success_criteria:
     description: Agent created done.txt
     weight: 1.0
 
+  # The two build-time assertions below use `run_command`, not the path-based
+  # criteria, and the reason is structural: criterion paths are SANDBOX-RELATIVE,
+  # and joining an absolute path onto the sandbox root discards the prefix. Both
+  # files are baked into the IMAGE at build time and live outside the agent's
+  # workspace, so a `path:` of `/opt/...` escapes containment and is refused as a
+  # config error. A shell test states the claim these criteria are actually
+  # making: something about the container, not about what the agent produced.
+
   # build.args took effect (GREETING was baked at build time).
-  # weight 0 -> informational: verifies the build, doesn't score the agent.
-  - type: file_contains
-    path: /opt/greeting.txt
-    includes: ["built with a custom --build-arg"]
+  - type: run_command
+    command: grep -q "built with a custom --build-arg" /opt/greeting.txt
+    timeout: 10
     description: "build.args -> --build-arg GREETING reached the Dockerfile"
     weight: 1.0
 
   # build.secrets took effect (the --secret mount ran; value never leaked).
-  - type: file_exists
-    path: /opt/secret_check.txt
+  - type: run_command
+    command: test -f /opt/secret_check.txt
+    timeout: 10
     description: "build.secrets -> --secret mount ran during build"
     weight: 1.0
