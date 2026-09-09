@@ -11,6 +11,7 @@ Everything here runs against the agentless task — deterministic, no API key.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -616,6 +617,19 @@ def post_run_task(tmp_path: Path) -> Path:
     return task_file
 
 
+def _plain(output: str) -> str:
+    """CLI output with Rich's decoration removed, as one line.
+
+    Two things defeat a naive substring assertion on a Typer/Rich error panel,
+    and CI hit BOTH while the local runner hit neither: Rich colorizes what
+    looks like an option, so `rm -f proof.txt` arrives as
+    `rm \x1b[1;32m-f\x1b[0m proof.txt`; and the panel hard-wraps to the
+    terminal width, so on the Windows runner the same command was split across
+    two boxed lines. Strip the escapes and the box, then collapse whitespace.
+    """
+    return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).replace("\u2502", " ").split())
+
+
 def _post_run_commands(task_dir: Path) -> list[str]:
     """The recorded post_run commands.
 
@@ -727,7 +741,7 @@ def test_an_in_place_grade_refuses_a_recorded_post_run_without_consent(tmp_path:
     task_dir = _task_dir(run_dir)
 
     result = _invoke(["evaluate", str(task_dir)], expect_exit=2)
-    assert "rm -f proof.txt" in result.output, "the refusal must name the command it refused"
+    assert "rm -f proof.txt" in _plain(result.output), "the refusal must name the command it refused"
     assert _proof(task_dir).is_file(), "refused, yet the command ran anyway"
 
 

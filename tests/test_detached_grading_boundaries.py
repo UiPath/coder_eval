@@ -24,6 +24,7 @@ import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
+from coder_eval.errors.checker_misuse import CheckerMisuseError
 from coder_eval.models import (
     AgentKind,
     CriterionResult,
@@ -747,18 +748,41 @@ class TestCriterionPathsCannotEscapeTheSandbox:
         sandbox.sandbox_dir = work
         return sandbox, work
 
-    def test_an_absolute_path_resolves_to_nothing(self, tmp_path: Path) -> None:
+    def test_an_absolute_path_is_refused_as_a_config_error(self, tmp_path: Path) -> None:
+        """Refused, not silently scored 0.0.
+
+        This used to return `[]`, which the checker reports as "file does not
+        exist" — a gating verdict about the AGENT for a file that plainly does
+        exist and that no agent behaviour could ever put inside the sandbox.
+        `tasks/byod_smoke_test.yaml` was broken exactly that way for several
+        commits (it checks `/opt/byod_marker`, baked into the BYOD image) and
+        the only signal was a warning in the task log. CE039 names this
+        distinction; `CheckerMisuseError` is its signal.
+        """
         sandbox, _ = self._sandbox(tmp_path)
         outside = tmp_path / "outside.txt"
         outside.write_text("payload", encoding="utf-8")
 
-        assert sandbox.resolve_files(str(outside)) == []
+        with pytest.raises(CheckerMisuseError, match="outside the sandbox"):
+            sandbox.resolve_files(str(outside))
 
-    def test_a_dotdot_traversal_resolves_to_nothing(self, tmp_path: Path) -> None:
+    def test_a_dotdot_traversal_is_refused_as_a_config_error(self, tmp_path: Path) -> None:
         sandbox, _ = self._sandbox(tmp_path)
         (tmp_path / "outside.txt").write_text("payload", encoding="utf-8")
 
-        assert sandbox.resolve_files("../outside.txt") == []
+        with pytest.raises(CheckerMisuseError, match="outside the sandbox"):
+            sandbox.resolve_files("../outside.txt")
+
+    def test_an_absent_absolute_path_is_an_ordinary_miss(self, tmp_path: Path) -> None:
+        """The guard keys on the file EXISTING outside, not on the path shape.
+
+        A criterion naming an absolute path that is simply not there is an
+        ordinary failing verdict — the agent was asked for something and did not
+        produce it. Raising on that would turn every such row into an ERROR.
+        """
+        sandbox, _ = self._sandbox(tmp_path)
+
+        assert sandbox.resolve_files(str(tmp_path / "never-created.txt")) == []
 
     def test_a_glob_cannot_escape_either(self, tmp_path: Path) -> None:
         sandbox, _ = self._sandbox(tmp_path)
@@ -791,6 +815,6 @@ class TestCriterionPathsCannotEscapeTheSandbox:
         with caplog.at_level(logging.WARNING, logger="coder_eval.sandbox"):
             assert sandbox.resolve_files("../*.txt") == []
 
-        escapes = [r for r in caplog.records if "resolves outside the sandbox" in r.getMessage()]
+        escapes = [r for r in caplog.records if "outside the sandbox" in r.getMessage()]
         assert len(escapes) == 1, [r.getMessage() for r in escapes]
         assert "'../*.txt'" in escapes[0].getMessage()

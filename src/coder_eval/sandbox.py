@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
+from .errors.checker_misuse import CheckerMisuseError
 from .fs_permissions import RESTRICTED_MODE, set_permissions
 from .invocation_log import render_recorder
 from .models import (
@@ -1331,9 +1332,43 @@ class Sandbox:
         return resolved == root or root in resolved.parents
 
     def _warn_escaped(self, path: str) -> None:
-        """Report that a criterion's declared path left the sandbox."""
+        """Report that some GLOB matches left the sandbox and were dropped.
+
+        A warning, not an error, only because a glob is a search: filtering out
+        the matches that escaped (a symlink pointing out of the tree, say) while
+        keeping the ones inside is the useful behaviour. The literal branch is
+        the opposite case and raises — see ``_reject_escaped``.
+        """
         logger.warning(
-            "Criterion path %r resolves outside the sandbox (%s); treating it as no match.", path, self.sandbox_dir
+            "Criterion path %r matched files outside the sandbox (%s); those matches were dropped.",
+            path,
+            self.sandbox_dir,
+        )
+
+    def _reject_escaped(self, path: str, candidate: Path) -> None:
+        """Refuse a criterion path that names an existing file OUTSIDE the sandbox.
+
+        Returning ``[]`` here booked an eval-CONFIG error as an agent failure:
+        the criterion scored a gating 0.0 with "file does not exist" for a file
+        that plainly does exist, and the only other signal was a WARNING in the
+        task log. `tasks/byod_smoke_test.yaml` was broken exactly that way — it
+        checks `/opt/byod_marker`, baked into the BYOD image, and joining an
+        absolute path discards the sandbox prefix, so containment dropped it and
+        the suite reported a 0.0 nobody could explain from the score alone.
+
+        No agent behaviour can ever satisfy such a path, so it is not a verdict
+        about the agent. That is precisely the distinction CE039 exists to
+        enforce, and `CheckerMisuseError` is its prescribed signal.
+
+        Note the guard fires only when the escaping path EXISTS. A criterion
+        naming a merely-absent absolute path still resolves to "no match", which
+        is an ordinary failing verdict, not a misconfiguration.
+        """
+        raise CheckerMisuseError(
+            f"Criterion path {path!r} resolves to {candidate}, outside the sandbox ({self.sandbox_dir}). "
+            + "Criterion paths are sandbox-relative; an absolute path is joined onto the sandbox root, "
+            + "which discards the prefix. To assert on a file baked into the container image rather than "
+            + "produced by the agent, use a `run_command` criterion (e.g. `test -f /opt/marker`)."
         )
 
     def resolve_files(self, path: str) -> list[Path]:
@@ -1372,8 +1407,7 @@ class Sandbox:
         if candidate.exists():
             if self._within_sandbox(candidate):
                 return [candidate]
-            self._warn_escaped(path)
-            return []
+            self._reject_escaped(path, candidate)
 
         if not _is_glob(path):
             return []
