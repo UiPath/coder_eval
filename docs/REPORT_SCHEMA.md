@@ -46,6 +46,7 @@ run-level summary; full per-replicate detail lives in each `task.json`.
 | `total_duration_seconds` | `float` | Wall-clock. |
 | `tasks_run` | `int` | Total replicates executed. |
 | `tasks_succeeded` / `tasks_failed` / `tasks_error` | `int` | Category counts. **Invariant:** these three plus `tasks_not_graded` sum to `tasks_run`. |
+| `tasks_measured` | `int` | Rows carrying a criteria verdict (`weighted_score is not None`). NOT a bucket and not part of the task-count invariant: it is the evidence that gates `pass_rate` / `error_share`, because the four category buckets cannot tell a graded `FAILURE` from a `TIMEOUT` no criterion ever saw. Defaults to `0`, inert on pre-`execute` `run.json` (where `tasks_not_graded` is `0`). |
 | `tasks_not_graded` | `int` | Tasks run by `coder-eval execute` — executed, deliberately unscored. Excluded from **both** sides of `pass_rate`. Defaults to `0`, so pre-`execute` `run.json` still parses. |
 | `tasks_token_budget_exceeded` / `tasks_cost_budget_exceeded` | `int` | Sub-counters of `tasks_failed` (not part of the invariant). |
 | `skipped_tasks` | `list[{path, reason}]` | Load failures / `skip: true` opt-outs. |
@@ -62,7 +63,7 @@ publishing different numbers for the same run.
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `pass_rate` | `float \| None` | `tasks_succeeded / tasks_graded` — errors are in the denominator, counted as misses; ungraded tasks are in neither. `None` when the run is empty, **or when no row produced a verdict at all** — an `execute` night whose only non-ungraded rows are crashes was never measured, and reporting `0.0%` there reads as a total failure. |
-| `error_share` | `float \| None` | `tasks_error / tasks_graded`. Diagnostic only; never adjusts the rate. |
+| `error_share` | `float \| None` | `tasks_error / tasks_graded`. Diagnostic only; never adjusts the rate. `None` under exactly the same condition as `pass_rate` — a run that measured nothing has no error share either. |
 | `tasks_graded` | `int` | `tasks_run - tasks_not_graded`. The denominator of both rates above. |
 | `total_cost_usd` | `float \| None` | **The bill**: agent + judge + simulator, summed over the rows. `None` when nothing could be priced. |
 | `agent_cost_usd` | `float \| None` | Subject-agent spend alone. The harness-vs-harness comparison figure — judge spend is a property of the suite's criteria and identical across harnesses, so leaving it in would make two harnesses look closer than they are. |
@@ -273,7 +274,7 @@ Written for dataset-backed suites; its `passed` flag drives the CI exit code.
 | --- | --- | --- |
 | `suite_id` / `variant_id` | `str` | Identity. |
 | `rows_total` / `rows_passed` / `rows_failed` / `rows_error` / `rows_not_graded` | `int` | Row counts. **Invariant:** the four category counts sum to `rows_total`. `rows_not_graded` defaults to `0`. |
-| `pass_rate` | `float \| null` | `rows_passed / rows_graded` — ungraded rows leave both sides, matching `RunSummary.pass_rate`. `null` when nothing was graded (0/0 is unknown, not 0%). |
+| `pass_rate` | `float \| null` | `rows_passed / rows_graded` — ungraded rows leave both sides, matching `RunSummary.pass_rate`. `null` when nothing was graded (0/0 is unknown, not 0%) **and** when no row produced a verdict, via the same shared `nothing_was_measured` helper the other two rates use. |
 | `rows_graded` | `int` | `rows_total - rows_not_graded`. The denominator above, serialized so a consumer never has to re-derive it. |
 | `average_weighted_score` | `float \| null` | Mean row score. |
 | `criterion_stats` | `list[{criterion_type, rows_evaluated, average_score, error_count}]` | Per-criterion summary. |

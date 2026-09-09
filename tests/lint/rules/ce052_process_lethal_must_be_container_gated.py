@@ -67,7 +67,7 @@ class ProcessLethalMustBeContainerGated(BaseRule):
 
     def __init__(self, filepath: str) -> None:
         super().__init__(filepath)
-        # `(^|sep)` so a repo-relative path is in scope too; see CE047.
+        # `(^|sep)` so a repo-relative path is in scope too; see CE054.
         self._in_scope = bool(re.search(r"(?:^|[/\\])src[/\\]coder_eval[/\\]", filepath))
         # Tests of enclosing `if`/`elif` statements, innermost last.
         self._guards: list[ast.expr] = []

@@ -2,6 +2,97 @@
 
 <!-- version list -->
 
+## v0.11.7 (2026-09-08)
+
+### Bug Fixes
+
+- **deps**: Bump google-antigravity 0.1.7 -> 0.1.8 (Defender FP on the harness)
+  ([#158](https://github.com/UiPath/coder_eval/pull/158),
+  [`48a4d53`](https://github.com/UiPath/coder_eval/commit/48a4d5375f5cf0ce12f956ba77cbe4d48e4be543))
+
+- **deps**: Bump google-antigravity to 0.1.8 to clear a Defender false positive on the bundled
+  harness [PILOT-7463] ([#158](https://github.com/UiPath/coder_eval/pull/158),
+  [`48a4d53`](https://github.com/UiPath/coder_eval/commit/48a4d5375f5cf0ce12f956ba77cbe4d48e4be543))
+
+- **docs**: Update Antigravity version in docs
+  ([#158](https://github.com/UiPath/coder_eval/pull/158),
+  [`48a4d53`](https://github.com/UiPath/coder_eval/commit/48a4d5375f5cf0ce12f956ba77cbe4d48e4be543))
+
+- **evalboard**: Always show every known harness in the filter
+  ([#152](https://github.com/UiPath/coder_eval/pull/152),
+  [`5e7d2b6`](https://github.com/UiPath/coder_eval/commit/5e7d2b6e69de43fbfc0c961e43c8b540da5b403f))
+
+- **evalboard**: Stop counting one model as two in the run header
+  ([#152](https://github.com/UiPath/coder_eval/pull/152),
+  [`5e7d2b6`](https://github.com/UiPath/coder_eval/commit/5e7d2b6e69de43fbfc0c961e43c8b540da5b403f))
+
+- **pricing**: Refresh the rate card and add gemini 3.7/3.8 Flash
+  ([#155](https://github.com/UiPath/coder_eval/pull/155),
+  [`be98f9d`](https://github.com/UiPath/coder_eval/commit/be98f9d4bd02e12482f16cec3a57ab5c54be8149))
+
+### Documentation
+
+- Add intro video and make the README agent-agnostic
+  ([#157](https://github.com/UiPath/coder_eval/pull/157),
+  [`d715f85`](https://github.com/UiPath/coder_eval/commit/d715f856e32289be068dda7049251486660496ec))
+
+- Widen the framing past skills-only and guard the agent roster with CE047
+  ([#157](https://github.com/UiPath/coder_eval/pull/157),
+  [`d715f85`](https://github.com/UiPath/coder_eval/commit/d715f856e32289be068dda7049251486660496ec))
+
+- **deps**: Drop the Defender rationale from the antigravity pin comment
+  ([#158](https://github.com/UiPath/coder_eval/pull/158),
+  [`48a4d53`](https://github.com/UiPath/coder_eval/commit/48a4d5375f5cf0ce12f956ba77cbe4d48e4be543))
+
+- **evalboard**: Trim the comments added by this branch
+  ([#152](https://github.com/UiPath/coder_eval/pull/152),
+  [`5e7d2b6`](https://github.com/UiPath/coder_eval/commit/5e7d2b6e69de43fbfc0c961e43c8b540da5b403f))
+
+- **pricing**: Trim the rate-card comments to what affects an edit
+  ([#155](https://github.com/UiPath/coder_eval/pull/155),
+  [`be98f9d`](https://github.com/UiPath/coder_eval/commit/be98f9d4bd02e12482f16cec3a57ab5c54be8149))
+
+- **readme**: Add intro video and make the README agent-agnostic
+  ([#157](https://github.com/UiPath/coder_eval/pull/157),
+  [`d715f85`](https://github.com/UiPath/coder_eval/commit/d715f856e32289be068dda7049251486660496ec))
+
+- **readme**: Play the intro video inline, with YouTube as the fallback
+  ([#157](https://github.com/UiPath/coder_eval/pull/157),
+  [`d715f85`](https://github.com/UiPath/coder_eval/commit/d715f856e32289be068dda7049251486660496ec))
+
+- **readme**: Tell viewers to unmute the inline video
+  ([#157](https://github.com/UiPath/coder_eval/pull/157),
+  [`d715f85`](https://github.com/UiPath/coder_eval/commit/d715f856e32289be068dda7049251486660496ec))
+
+- **stub**: Make the Pages stub and package metadata agent-agnostic
+  ([#157](https://github.com/UiPath/coder_eval/pull/157),
+  [`d715f85`](https://github.com/UiPath/coder_eval/commit/d715f856e32289be068dda7049251486660496ec))
+
+- **tutorial**: Stop sending first-timers through the contributor toolchain
+  ([#157](https://github.com/UiPath/coder_eval/pull/157),
+  [`d715f85`](https://github.com/UiPath/coder_eval/commit/d715f856e32289be068dda7049251486660496ec))
+
+### Features
+
+- **evalboard**: Add loading skeletons to the slow routes
+  ([#152](https://github.com/UiPath/coder_eval/pull/152),
+  [`5e7d2b6`](https://github.com/UiPath/coder_eval/commit/5e7d2b6e69de43fbfc0c961e43c8b540da5b403f))
+
+### Performance Improvements
+
+- **evalboard**: Cut page load time and show loading state while pages load
+  ([#152](https://github.com/UiPath/coder_eval/pull/152),
+  [`5e7d2b6`](https://github.com/UiPath/coder_eval/commit/5e7d2b6e69de43fbfc0c961e43c8b540da5b403f))
+
+- **evalboard**: Move repeated per-row utility classes into the stylesheet
+  ([#152](https://github.com/UiPath/coder_eval/pull/152),
+  [`5e7d2b6`](https://github.com/UiPath/coder_eval/commit/5e7d2b6e69de43fbfc0c961e43c8b540da5b403f))
+
+- **evalboard**: Stop re-reading the whole run store on every render
+  ([#152](https://github.com/UiPath/coder_eval/pull/152),
+  [`5e7d2b6`](https://github.com/UiPath/coder_eval/commit/5e7d2b6e69de43fbfc0c961e43c8b540da5b403f))
+
+
 ## v0.11.6 (2026-09-01)
 
 ### Bug Fixes

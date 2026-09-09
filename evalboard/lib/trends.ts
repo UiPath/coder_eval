@@ -26,7 +26,12 @@ export interface TaskTrend {
     tags: string[];
     totalRuns: number;
     successRuns: number;
-    passRate: number; // 0-1
+    // `number | null`, not `number`: with ungraded rows excluded from the
+    // denominator, a task whose every row in the window is NOT_GRADED has no
+    // pass rate at all. A `0` here published a fabricated 0% that sorted to the
+    // top of the default (ascending passRate) Trends view — see CE049, and the
+    // `number | null` this file's siblings overview.ts / watchlist.ts already use.
+    passRate: number | null; // 0-1, or null when nothing in the window was graded
     avgDurationSeconds: number | null; // SUCCESS runs only
     avgCostUsd: number | null; // SUCCESS runs only
     avgActualCommands: number | null; // SUCCESS runs only
@@ -193,7 +198,7 @@ export function aggregate(perRun: PerRun[]): TrendsData {
             tags: [...b.tagSet],
             totalRuns: b.totalCount,
             successRuns: b.successCount,
-            passRate: b.totalCount > 0 ? b.successCount / b.totalCount : 0,
+            passRate: b.totalCount > 0 ? b.successCount / b.totalCount : null,
             avgDurationSeconds: avg(b.durations),
             avgCostUsd: avg(b.costs),
             avgActualCommands: avg(b.tools),
@@ -211,10 +216,14 @@ export function aggregate(perRun: PerRun[]): TrendsData {
     }
 
     // Default sort: lowest pass rate first (worst offenders up top), then by
-    // total run count desc, then taskId for determinism.
+    // total run count desc, then taskId for determinism. An UNMEASURED task
+    // (passRate null) sorts LAST, not first: it is not the worst offender, it
+    // is not an offender at all, and `a.passRate - b.passRate` over a
+    // fabricated 0 put it at the very top of the page.
+    const rank = (p: number | null) => (p == null ? Infinity : p);
     trends.sort(
         (a, b) =>
-            a.passRate - b.passRate ||
+            rank(a.passRate) - rank(b.passRate) ||
             b.totalRuns - a.totalRuns ||
             a.taskId.localeCompare(b.taskId),
     );

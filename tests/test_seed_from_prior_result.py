@@ -270,11 +270,30 @@ def test_grading_cannot_overturn_an_execution_fact() -> None:
         FinalStatus.ERROR,
         FinalStatus.TIMEOUT,
         FinalStatus.BUILD_FAILED,
-        FinalStatus.MAX_TURNS_EXHAUSTED,
         FinalStatus.TOKEN_BUDGET_EXCEEDED,
         FinalStatus.COST_BUDGET_EXCEEDED,
     ):
         assert status.is_execution_fact, f"{status} describes the run, so grading must preserve it"
+
+
+def test_max_turns_exhausted_is_not_an_execution_fact() -> None:
+    """The one status that reads like an execution fact and is not one.
+
+    It is SUBORDINATE to the verdict: `run` returns SUCCESS for a max-turns
+    trajectory whose criteria pass and only falls through to this status when
+    they do not — which is why `_terminal_status` puts the `grade=False` arm
+    above it. The table said True while that method's docstring argued the
+    opposite, so a prior max-turns row re-graded through `evaluate` was written
+    back as MAX_TURNS_EXHAUSTED *holding weighted_score 1.000* and exited 1 — a
+    combination `run` can never produce for the same trajectory.
+
+    Its own test, not a line in the loop above, because the two statements
+    ("grading may not launder a crash into a pass" and "grading decides this
+    one") are different contracts that happened to share a fixture.
+    """
+    assert not FinalStatus.MAX_TURNS_EXHAUSTED.is_execution_fact
+    # The fact is not lost; it just lives somewhere a verdict cannot contradict.
+    assert "max_turns_exhausted" in EvaluationResult.model_fields
 
 
 def test_seeding_is_a_no_op_without_a_prior_result(tmp_path: Path) -> None:

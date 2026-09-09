@@ -1,4 +1,4 @@
-"""CE047: every ``environment_info`` key that is READ must also be WRITTEN.
+"""CE054: every ``environment_info`` key that is READ must also be WRITTEN.
 
 ``EvaluationResult.environment_info`` is a ``dict[str, Any]`` bag, so nothing —
 not pydantic, not pyright — connects the site that writes a key to the site that
@@ -16,7 +16,7 @@ gate in the repo was green.
 This is deliberately a one-way check. An unread key is ordinary (recorded for a
 human or a downstream consumer); an unwritten key is always a bug.
 
-Use ``# noqa: CE047`` for a key genuinely supplied from outside this repo.
+Use ``# noqa: CE054`` for a key genuinely supplied from outside this repo.
 """
 
 import ast
@@ -57,7 +57,7 @@ def _written_keys() -> set[str]:
 
 
 class EnvInfoKeyRoundTrip(BaseRule):
-    id = "CE047"
+    id = "CE054"
 
     # `(^|sep)`, not a bare leading separator: a repo-relative path
     # ("src/coder_eval/x.py") is how every caller in tests/ addresses a file,
@@ -115,7 +115,7 @@ class EnvInfoKeyRoundTrip(BaseRule):
             node,
             f"environment_info key {key!r} is read here but never written anywhere in src/coder_eval. "
             + "A reader with no writer is silently inert — it returns None, the guard takes its early "
-            + "return, and the feature reports success while doing nothing (see CE047's docstring for "
+            + "return, and the feature reports success while doing nothing (see CE054's docstring for "
             + "the anti-cheat guard that shipped this way). Add the write, or list the key in "
             + "_EXTERNALLY_WRITTEN with the out-of-tree producer that supplies it.",
         )

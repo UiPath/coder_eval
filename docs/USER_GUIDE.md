@@ -114,10 +114,18 @@ What it owes each task depends on what it finds in that task's `task.json`:
 | --- | --- | --- |
 | No `task.json`, unreadable, or no `final_status` | re-run | re-run |
 | `NOT_GRADED` | **grade in place** | already complete |
+| An execution fact (`TIMEOUT`, a budget stop) with no verdict AND an agent phase that ran | **grade in place** | already complete |
 | Any other status, **including `FAILURE` / `ERROR`** | already complete | already complete |
+| `BUILD_FAILED`, or any row whose `iteration_count` is `0` | already complete | already complete |
 
 **"Finished" is relative to the resuming command.** A `NOT_GRADED` row owes
-`execute` nothing — it finished executing — but owes `run` a grade. So
+`execute` nothing — it finished executing — but owes `run` a grade. The test is
+the row's **evidence**, not its label: an `execute` row that also tripped a run
+limit lands unscored with category `error`/`failed`, and it is owed a grade just
+the same. But evidence of "no verdict" is not enough on its own — a container
+that died before writing `task.json` also has none, and it never ran an agent
+phase to grade, so a row must ALSO show `iteration_count > 0` (or say
+`NOT_GRADED` outright) before `run --resume` will grade it. So
 `run --resume` runs the criteria against the trajectory and workspace already on
 disk instead of re-running the agent, which is the whole reason to split the two
 commands:

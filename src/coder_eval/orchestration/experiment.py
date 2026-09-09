@@ -1018,6 +1018,10 @@ def aggregate_results(
             tasks_not_graded=sum(1 for v in vr_list if v.final_status.category == "ungraded"),
             tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
             tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
+            # Verdict evidence for pass_rate. A TIMEOUT lands in the `failed`
+            # bucket without any criterion having run, so the buckets alone
+            # cannot answer "was this variant measured at all".
+            tasks_measured=sum(1 for v in vr_list if v.weighted_score is not None),
             # Mean over GRADED rows only, and None when there are none: a clean
             # execute run has no average score, and reporting 0.000 next to
             # "Pass Rate: n/a" is a number indistinguishable from "scored zero".

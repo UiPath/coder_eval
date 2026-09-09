@@ -615,8 +615,10 @@ class Orchestrator:
 
         self._seed_from_prior_result()
 
-        # Calculate task log path
-        task_log_file = task_log_path(self.run_dir)
+        # Calculate task log path. A re-grade gets its own file: `prior_result`
+        # means the agent phase already ran and its trajectory log is sitting in
+        # this very directory, and `task_log_handler` opens `mode="w"`.
+        task_log_file = task_log_path(self.run_dir, regrade=self.prior_result is not None)
         task_log_file.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
         # Use context manager for automatic log handler management
@@ -1030,6 +1032,77 @@ class Orchestrator:
         except Exception:
             logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
 
+    def _finalize_weighted_score(self) -> None:
+        """Write ``weighted_score``, or ``None`` when this run was not graded.
+
+        Wrapped because `_finalize_result` runs inside `run()`'s finally — an
+        unguarded raise here would skip persistence and lose task.json. The
+        other `calculate_weighted_score` calls (the simulation path) run inside
+        `run()`'s try, whose broad `except Exception` already converts a raise
+        into a populated ERROR result, so they intentionally stay unwrapped.
+        """
+        assert self.result is not None
+        assert self.task.agent is not None
+        try:
+            if self.grade:
+                self.result.calculate_weighted_score(self.task.success_criteria)
+            else:
+                # Explicit None, NOT the 0.0 calculate_weighted_score writes for
+                # an empty results list — that value is indistinguishable from a
+                # task that was graded and scored zero, and every downstream
+                # `score or 0.0` would launder it into a real-looking failure
+                # (CE049).
+                self.result.weighted_score = None
+        except ValueError as e:
+            logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
+            self.result.weighted_score = None
+            self.result.final_status = FinalStatus.ERROR
+            self.result.error_message = str(e)
+            self.result.error_details = create_error_context(
+                error=e,
+                task_id=self.task.task_id,
+                attempt=max(self.result.iteration_count, 1),
+                component="orchestrator.finalize.weighted_score",
+                agent_name=self._agent_name,
+            )
+
+    def _finalize_regrade_timing(self) -> None:
+        """On a re-grade, keep the AGENT run's timing and artifacts pointer.
+
+        No-op on an ordinary run. A 10-minute run re-graded in 2s would
+        otherwise report 2s into `average_duration`, the report tables and the
+        evalboard; the grading pass's own cost is preserved alongside rather
+        than discarded, so a slow judge stays visible.
+        """
+        assert self.result is not None
+        if self.prior_result is None:
+            return
+        self.result.environment_info["grading_duration_seconds"] = round(self.result.duration_seconds, 3)
+        self.result.duration_seconds = self.prior_result.duration_seconds
+        self._restore_prior_artifacts_pointer()
+
+    def _restore_prior_artifacts_pointer(self) -> None:
+        """Put the RUN's ``sandbox_path`` back after a re-grade overwrote it.
+
+        ``_seed_from_prior_result`` carries the pointer on purpose, then the
+        grading pass overwrites it twice on the ``--copy`` path — ``_setup``
+        writes the grading tempdir, and ``_cleanup`` writes either the preserved
+        copy or ``None``. Since ``evaluate <run_dir>`` writes the result back
+        into the ORIGINAL ``task.json``, one ``--copy`` grade left the run
+        pointing at another run's artifacts (or at nothing), and the NEXT
+        ``evaluate <run_dir>`` then failed ``default_workspace``'s containment
+        guard — a re-grade that permanently broke re-grading.
+
+        Same shape as the ``duration_seconds`` restore above: the grading pass
+        may not overwrite a fact about the run it grades. A prior ``None`` is
+        left alone, so an adopted in-place grade that discovered a real
+        workspace still records it.
+        """
+        assert self.result is not None
+        assert self.prior_result is not None
+        if self.prior_result.sandbox_path is not None:
+            self.result.sandbox_path = self.prior_result.sandbox_path
+
     def _finalize_result(self, start_time: float) -> None:
         """Finalize the evaluation result: scores, telemetry, and persistence."""
         if not self.result:
@@ -1048,36 +1121,14 @@ class Orchestrator:
         # Re-grade: the row keeps the agent run's duration (see
         # _seed_from_prior_result). The grading pass's own cost is preserved
         # alongside rather than discarded, so a slow judge is still visible.
-        if self.prior_result is not None:
-            self.result.environment_info["grading_duration_seconds"] = round(self.result.duration_seconds, 3)
-            self.result.duration_seconds = self.prior_result.duration_seconds
+        self._finalize_regrade_timing()
 
         # Weighted score. This call site is wrapped because _finalize_result runs
         # inside run()'s finally — an unguarded raise here would skip persistence and
         # lose task.json. The other calculate_weighted_score calls (the simulation
         # path) run inside run()'s try, whose broad `except Exception` already converts
         # a raise into a populated ERROR result, so they intentionally stay unwrapped.
-        try:
-            if self.grade:
-                self.result.calculate_weighted_score(self.task.success_criteria)
-            else:
-                # Explicit None, NOT the 0.0 calculate_weighted_score writes for an
-                # empty results list — that value is indistinguishable from a task
-                # that was graded and scored zero, and every downstream `score or
-                # 0.0` would launder it into a real-looking failure.
-                self.result.weighted_score = None
-        except ValueError as e:
-            logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
-            self.result.weighted_score = None
-            self.result.final_status = FinalStatus.ERROR
-            self.result.error_message = str(e)
-            self.result.error_details = create_error_context(
-                error=e,
-                task_id=self.task.task_id,
-                attempt=max(self.result.iteration_count, 1),
-                component="orchestrator.finalize.weighted_score",
-                agent_name=self._agent_name,
-            )
+        self._finalize_weighted_score()
 
         # Command statistics
         if self.result.iterations:
@@ -1465,6 +1516,43 @@ class Orchestrator:
                 + f"({current[:12]}...). Refusing to grade against a reference the agent may have written."
             )
 
+    def _arm_early_stop(self) -> None:
+        """Build the early-stop watcher, once, when the task arms one.
+
+        Sits BEFORE `_setup`'s evaluate-only early return, so an armed
+        evaluate-only re-grade builds an inert (never-fed) watcher — harmless,
+        and keeps a single creation point.
+        """
+        if not early_stop_active(self.task):
+            return
+        if self.grade:
+            self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
+            return
+        # Early stop cuts the run once coder-eval's own criteria decide the
+        # outcome. Under `execute` there is no outcome to decide and the
+        # trajectory is the deliverable (an external harness grades it), so an
+        # armed criterion must not truncate it. Same effect as the
+        # run_limits.stop_early kill switch, decided one layer up.
+        logger.info(
+            "Grading disabled (execute mode): early-stop is armed but stays disabled; "
+            + "the full trajectory is the deliverable."
+        )
+
+    def _restore_recorded_command_path(self) -> None:
+        """Re-apply the graded run's own PATH before its criteria run.
+
+        PATH parity with the run being graded. `_sync_sandbox_command_path_with_
+        agent` recorded the agent's effective PATH; no agent runs on the
+        evaluate-only path, so restore it explicitly or `run_command` criteria
+        resolve binaries against ambient PATH and can disagree with the original
+        verdict.
+        """
+        assert self.result is not None
+        assert self.sandbox is not None
+        restored_path = self.result.environment_info.get("command_base_path")
+        if isinstance(restored_path, str) and restored_path:
+            self.sandbox.set_command_base_path(self._sanitize_restored_path(restored_path))
+
     async def _setup(self) -> None:
         """Set up all components for evaluation.
 
@@ -1482,19 +1570,7 @@ class Orchestrator:
         # thrown). This sits BEFORE the evaluate-only early return below, so an
         # armed evaluate-only re-grade builds an inert (never-fed) watcher —
         # harmless, and keeps a single creation point.
-        if early_stop_active(self.task):
-            if self.grade:
-                self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
-            else:
-                # Early stop cuts the run once coder-eval's own criteria decide the
-                # outcome. Under `execute` there is no outcome to decide and the
-                # trajectory is the deliverable (an external harness grades it), so
-                # an armed criterion must not truncate it. Same effect as the
-                # run_limits.stop_early kill switch, decided one layer up.
-                logger.info(
-                    "Grading disabled (execute mode): early-stop is armed but stays disabled; "
-                    + "the full trajectory is the deliverable."
-                )
+        self._arm_early_stop()
 
         # Stage the reference BEFORE either branch returns: judge criteria with
         # include_reference=true (and any $REFERENCE_DIR/... file entry) expect it
@@ -1507,13 +1583,7 @@ class Orchestrator:
             self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
-            # PATH parity with the run being graded. _sync_sandbox_command_path_
-            # with_agent recorded the agent's effective PATH; no agent runs here,
-            # so restore it explicitly or `run_command` criteria resolve binaries
-            # against ambient PATH and can disagree with the original verdict.
-            restored_path = self.result.environment_info.get("command_base_path")
-            if isinstance(restored_path, str) and restored_path:
-                self.sandbox.set_command_base_path(self._sanitize_restored_path(restored_path))
+            self._restore_recorded_command_path()
 
             self._resolve_routes()
             self._record_route_environment_info()
@@ -1610,9 +1680,22 @@ class Orchestrator:
         # Save agent config on result (copy to prevent mutation of shared reference)
         self.result.agent_config = self.task.agent.model_copy(deep=True)
 
-        # Re-capture environment_info with sandbox path (for CLAUDE.md hash)
-        self.result.environment_info = get_version_info(
-            sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
+        # Re-capture environment_info with sandbox path (for CLAUDE.md hash).
+        #
+        # UPDATE, never rebind. `get_version_info` returns a FRESH dict, so
+        # assigning it here discarded every key written earlier in `_setup` —
+        # and `_stage_reference` runs earlier and writes `reference_digest`
+        # there. The digest therefore never reached task.json, which left
+        # `regrade.verify_reference_unchanged` taking its "recorded no digest"
+        # early return on every real run: the answer-key anti-cheat was a
+        # permanent no-op that CE054 could not see, because a write DID exist
+        # in `src/` — it was just dead. Merging keeps the sandbox-derived
+        # capture authoritative for the keys it owns without deleting anyone
+        # else's.
+        self.result.environment_info.update(
+            get_version_info(
+                sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
+            )
         )
 
         # Record API routing mode (shared between normal + evaluate-only paths)
@@ -3119,6 +3202,18 @@ class Orchestrator:
             )
         return True
 
+    def _unpreserved_sandbox_path(self) -> str | None:
+        """What ``sandbox_path`` should say under ``PreservationMode.NONE``.
+
+        ``None`` for a sandbox `cleanup()` is about to delete — pointing at a
+        tempdir that no longer exists is worse than pointing nowhere. But an
+        ADOPTED sandbox belongs to the caller and survives cleanup, so its path
+        is not stale, and clearing it would strip the graded row of the
+        artifacts pointer a second grade needs to find the workspace.
+        """
+        assert self.sandbox is not None
+        return str(self.sandbox.sandbox_dir) if self.sandbox.was_adopted else None
+
     async def _cleanup(self) -> None:
         """Clean up all resources."""
         # Stop agent
@@ -3182,15 +3277,7 @@ class Orchestrator:
                     await asyncio.to_thread(self.sandbox.grant_read_access)
                     logger.info(f"Sandbox preserved (in-place): {self.sandbox.sandbox_dir}")
                 elif self.preservation_mode == PreservationMode.NONE and self.result:
-                    if self.sandbox.was_adopted:
-                        # An adopted sandbox belongs to the caller and survives
-                        # cleanup(), so the path is not stale — and clearing it
-                        # would strip the graded row of its artifacts pointer
-                        # (which a second grade needs to find the workspace).
-                        self.result.sandbox_path = str(self.sandbox.sandbox_dir)
-                    else:
-                        # Sandbox will be deleted by cleanup() below; clear stale path.
-                        self.result.sandbox_path = None
+                    self.result.sandbox_path = self._unpreserved_sandbox_path()
                 elif self.result:
                     # Defensive: a future PreservationMode member with no arm here
                     # would otherwise silently fall through. Treat as no-preserve.

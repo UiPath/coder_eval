@@ -97,7 +97,7 @@ def _union_receiver(node: ast.expr) -> bool:
 class NoUnionGetattrProbe(BaseRule):
     id = "CE050"
 
-    # `(^|sep)` so a repo-relative path is in scope too; see CE047.
+    # `(^|sep)` so a repo-relative path is in scope too; see CE054.
     _SRC_PATH = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")
     _fields: set[str] | None = None
 

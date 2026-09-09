@@ -1,4 +1,4 @@
-# Coder Eval — evaluate & benchmark AI coding agents and Claude Code skills
+# Coder Eval — evaluate and benchmark AI coding agents and their skills
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![GitHub Marketplace](https://img.shields.io/badge/marketplace-coder__eval-2ea44f.svg)](https://github.com/marketplace/actions/coder_eval)
@@ -8,21 +8,28 @@
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
 
-**Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an open-source framework for
-**evaluating and benchmarking AI coding agents and their skills** — built for CLI
-and skill builders — with sandboxing, reproducibility, and data-driven analysis.
-It runs a real agent (**Claude Code**, **Codex**, **Google Antigravity /
-Gemini**, or **OpenCode**) in a sandbox against declarative YAML tasks, then scores the files and
-commands it actually produced. Not an "agentic coding" benchmark: it measures how
-effective your CLI and skills are when used by coding agents.
+<p align="center">
+  <strong>Playwright for coding agents</strong> — one declarative test file, any agent
+  runtime, a real sandbox, and a pass/fail gate in CI.
+</p>
 
-Reach for it when you want to **test whether a Claude Code skill triggers**,
-**A/B-test Claude Code vs. Codex vs. Gemini vs. OpenCode** (or model vs. model,
-prompt vs. prompt), or **gate CI on coding-agent quality**. Unlike fixed datasets (SWE-bench,
-SkillsBench) that rank models on a shared leaderboard, Coder Eval evaluates the
-tasks, skills, and workflows *you* ship — with weighted 0.0–1.0 criteria, a
-`skill_triggered` activation check, an A/B experiment layer, and per-tool cost
-telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
+**Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an
+open-source, **agent-agnostic** framework for **evaluating and benchmarking AI coding
+agents and their skills** — built for benchmark authors, CLI builders, and skill
+builders — with sandboxing, reproducibility, and data-driven analysis. It runs a real
+agent — **Claude Code**, **OpenAI Codex**, **Google Antigravity (Gemini)**, or
+**OpenCode** — in a sandbox against declarative YAML tasks, then scores the files and
+commands it actually produced. Changing harness is one field (`agent.type`); the
+tasks, criteria, scoring, telemetry, and reports stay the same.
+
+Reach for it when you want to **benchmark agents on your own domain tasks**,
+**test whether a skill triggers** in the agent you ship for, **A/B-test Claude Code
+vs. Codex vs. Gemini vs. OpenCode** (or model vs. model, prompt vs. prompt), or
+**gate CI on coding-agent quality**. It is **not a fixed leaderboard**: unlike
+SWE-bench or SkillsBench, which rank models on a shared task set, you bring the tasks
+and you bring the scoring — weighted 0.0–1.0 criteria, a `skill_triggered` activation
+check, an A/B experiment layer, and per-tool cost telemetry, over whatever work *you*
+care about. See [How it compares](https://coder-eval.com/docs/comparison).
 📚 **Full docs:** **[coder-eval.com/docs](https://coder-eval.com/docs)**.
 
 <p align="center">
@@ -33,15 +40,30 @@ telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
 - **Sandboxed execution** in isolated environments with resource limits
 - **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
 - **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent abstraction** — Claude Code, Codex, Antigravity (Gemini), and OpenCode today, extensible via a plugin SPI
+- **Agent-agnostic by design** — Claude Code, OpenAI Codex, Antigravity (Gemini), and OpenCode today; add your own harness through the plugin SPI
 - **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
+
+## Watch the intro
+
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/6dc1c88e-e5b7-4fc5-ba9c-4b117efc8b54" controls>
+    <a href="https://www.youtube.com/watch?v=Iyq-5m1CnuI">
+      <img src="https://img.youtube.com/vi/Iyq-5m1CnuI/maxresdefault.jpg" alt="Video: Coder Eval — UiPath open-source framework to test AI coding agents" width="70%">
+    </a>
+  </video>
+</div>
+
+🔊 **Turn the sound on** — GitHub's inline player always starts muted.
+
+▶ Also on YouTube: **[Coder Eval: UiPath open-source framework to test AI Coding Agents](https://www.youtube.com/watch?v=Iyq-5m1CnuI)**
+— what the framework does, and how a run works end to end.
 
 ## What you can do with it
 
 - **Benchmark coding agents** — score an agent across a suite of tasks with weighted scoring and pass/fail thresholds
 - **Compare models & configs** — A/B-test Claude vs. Codex vs. Gemini vs. OpenCode, model vs. model, tool-on vs. tool-off, prompt vs. prompt
-- **Evaluate skills** — verify an agent actually engages a target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style)
+- **Evaluate skills** — verify an agent actually engages a target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style), on whichever harness your users run
 - **Keep skills up to date in CI** — re-validate your skills on every change or on a schedule; catch silent regressions when models, prompts, or the skills themselves drift
 - **Gate CI on agent quality** — run the suite in GitHub Actions and fail the build on regressions
 - **Bring your own dataset** — fan one task out over many rows for larger benchmark suites
@@ -53,15 +75,27 @@ telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
 
 ## Quick Start
 
-**Prerequisites:** Python 3.13+, [uv](https://docs.astral.sh/uv/) 0.8+, and the
-[Claude CLI](https://docs.anthropic.com/claude/docs/claude-code) (`brew install claude`).
-Developed on macOS; CI runs on Linux.
+**Prerequisites:** Python 3.13+, [uv](https://docs.astral.sh/uv/) 0.8+, and **the
+runtime of at least one coding agent** — plus that agent's own model credentials.
+Pick the agent you want to evaluate; two of the four ship with a Coder Eval extra,
+the other two are separate CLIs you install yourself:
+
+| Agent | `agent.type` | Runtime | Guide |
+| --- | --- | --- | --- |
+| Claude Code (default) | `claude-code` | `brew install claude` — separate CLI | [Claude Code](docs/agents/CLAUDE_CODE.md) |
+| OpenAI Codex | `codex` | `uv sync --extra codex` — the extra ships the Codex SDK + CLI | [Codex](docs/agents/CODEX.md) |
+| Google Antigravity (Gemini) | `antigravity` | `uv sync --extra antigravity` — the extra ships the harness binary | [Antigravity](docs/agents/ANTIGRAVITY.md) |
+| OpenCode (open-weight models) | `opencode` | `npm install -g opencode-ai` — separate CLI | [OpenCode](docs/agents/OPENCODE.md) |
+
+The examples below use the default `claude-code` agent. Developed on macOS; CI runs on
+Linux.
 
 ```bash
 git clone https://github.com/UiPath/coder_eval.git
 cd coder_eval
 
-uv sync --extra dev          # install core + dev tools
+uv sync                      # install the framework (add --extra codex /
+                             # --extra antigravity for those runtimes)
 cp .env.example .env         # then set ANTHROPIC_API_KEY — or skip that: an
                              # existing Claude Code login (`claude login`) is
                              # picked up automatically
@@ -73,13 +107,14 @@ uv run coder-eval report runs/latest           # view the result
 
 New here? Follow **[Tutorial 01 — Your First Evaluation](docs/tutorials/01-first-evaluation.md)**.
 
-The optional `[uipath]` extra (`uv sync --extra dev --extra uipath`) adds the in-host
-`uipath` SDK for local sandbox parity; it installs from public PyPI (no credentials
-required). Without it the framework runs end-to-end; uipath-dependent features fail
-at dispatch with a clear hint.
+Two more extras you only need on purpose: `--extra dev` adds the contributor
+toolchain (pytest, ruff, pyright, pre-commit — see
+[CONTRIBUTING.md](CONTRIBUTING.md)), and `--extra uipath` adds the in-host `uipath`
+SDK for local sandbox parity (public PyPI, no credentials). Without either, the
+framework still runs end-to-end.
 
-**Using Coder Eval in CI or another project?** Install the published package
-instead of cloning:
+**Just want the CLI, without cloning?** Install the published package — this is also
+what a CI job or another repo does:
 
 ```bash
 uv tool install coder-eval    # puts the `coder-eval` CLI on your PATH,
@@ -98,9 +133,10 @@ the full setup.
 
 ## Use inside Claude Code
 
-This repo is also a **Claude Code plugin marketplace**, so the whole loop —
-scaffold a suite, author a task, check whether a skill triggers, read the
-results — runs inside the agent:
+Coder Eval evaluates any of the supported agents, and it also ships an authoring
+front-end for one of them: this repo is a **Claude Code plugin marketplace**, so the
+whole loop — scaffold a suite, author a task, check whether a skill triggers, read the
+results — runs inside Claude Code. The suites you author this way run on every harness:
 
 ```
 /plugin marketplace add UiPath/coder_eval
@@ -275,9 +311,13 @@ success_criteria:
     description: "Script must execute successfully"
 ```
 
-Tasks can omit the `agent` section entirely — defaults resolve from the experiment
-layer (`experiments/default.yaml`). For the full schema and every criterion type,
-see the [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md).
+`agent.type` is the only harness-specific line: swap it for `codex`, `antigravity`, or
+`opencode` — or override it per run with `coder-eval run … -D agent.type=opencode` — and
+the same criteria score the same way. Tasks can omit the `agent` section entirely —
+defaults resolve from the experiment layer (`experiments/default.yaml`). For the full
+schema and every criterion type, see the
+[Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md); for what each `run_limits` field
+means on each harness, see [Run-Limit Parity](docs/agents/HARNESS_PARITY.md).
 
 > **Tip:** With the [Claude Code plugin](docs/PLUGIN.md) installed, use
 > `/coder-eval:task` to scaffold a task from a natural-language description, and
@@ -301,8 +341,11 @@ extension points (new criteria, new agents).
 - **Tasks execute real code** — run untrusted tasks only under the container driver
   (see [Docker Isolation](docs/DOCKER_ISOLATION.md)); the `tempdir` driver is not a
   security boundary.
-- **Bring your own model credentials** — Anthropic, Bedrock, or Gemini keys; Coder Eval
-  does not proxy or supply model access.
+- **Bring your own agent runtime and model credentials** — Coder Eval never supplies
+  model access, and it only ships an agent runtime where an extra says so (`codex`,
+  `antigravity`); Claude Code and OpenCode are separate CLIs. Supply the runtime (see
+  [Quick Start](#quick-start)) and the keys it needs — Anthropic, Bedrock, OpenAI,
+  Gemini, or an OpenRouter key for open-weight models via OpenCode.
 - **Python 3.13+ only.**
 
 ## Support & security
@@ -318,6 +361,8 @@ extension points (new criteria, new agents).
 
 ## Acknowledgments
 
-Built with the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk),
-[Pydantic](https://pydantic.dev/), [Typer](https://typer.tiangolo.com/), and
-[Rich](https://rich.readthedocs.io/).
+Built with [Pydantic](https://pydantic.dev/), [Typer](https://typer.tiangolo.com/),
+and [Rich](https://rich.readthedocs.io/), on top of the harnesses it drives — the
+[Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk), the
+[Codex SDK](https://github.com/openai/codex), [Google Antigravity](https://antigravity.google/),
+and [OpenCode](https://opencode.ai).

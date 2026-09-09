@@ -350,8 +350,21 @@ def _owes_a_grade(result: EvaluationResult) -> bool:
 
     A row that carries a criteria vector or a score has been graded, whatever its
     status, so a genuine FAILURE/ERROR from ``run`` is untouched.
+
+    "Executed" is a required half, not decoration. Evidence of *no verdict* alone
+    was too broad: ``DockerRunner._write_synthetic_task_json`` writes an ERROR /
+    BUILD_FAILED row for a container that died before producing task.json, and
+    those carry no verdict either — so a plain ``run --resume`` routed every
+    dead container and every failed image build into grading, where the fold-back
+    replaced the real diagnostic ("Container exited with code 137 without
+    producing task.json") with a wrong-cause grading error, and left the on-disk
+    record and run.json disagreeing about the same row. ``NOT_GRADED`` announces
+    itself and is always owed; an execution-fact status must also show that an
+    agent phase happened at all.
     """
-    return result.weighted_score is None and not result.success_criteria_results
+    if result.weighted_score is not None or result.success_criteria_results:
+        return False
+    return result.final_status is FinalStatus.NOT_GRADED or result.iteration_count > 0
 
 
 def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = True) -> ResumePartition:
@@ -734,6 +747,10 @@ def build_run_summary(
         tasks_not_graded=sum(1 for s in statuses if s.category == "ungraded"),
         tasks_token_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.TOKEN_BUDGET_EXCEEDED),
         tasks_cost_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.COST_BUDGET_EXCEEDED),
+        # Verdict evidence for pass_rate / error_share. A TIMEOUT lands in the
+        # `failed` bucket without any criterion having run, so the buckets alone
+        # cannot answer "was this run measured at all".
+        tasks_measured=sum(1 for r in task_results if r.result.weighted_score is not None),
         skipped_tasks=skipped_tasks or [],
         max_parallel=max_parallel,
         task_results=[

@@ -3610,8 +3610,8 @@ class TestCE045PluginPathIsAPluginRoot:
         assert not self._offending_paths_in(task)
 
 
-class TestCE047EnvInfoKeyRoundTrip:
-    """CE047 fires when an environment_info key is read with no writer anywhere.
+class TestCE054EnvInfoKeyRoundTrip:
+    """CE054 fires when an environment_info key is read with no writer anywhere.
 
     The rule shipped with only the whole-tree "finds nothing" scan, which cannot
     tell a rule that is CORRECT from one that can never fire — the exact failure
@@ -3624,7 +3624,7 @@ class TestCE047EnvInfoKeyRoundTrip:
     def _run(src: str, filepath: str = "src/coder_eval/orchestrator.py"):
         import ast
 
-        from tests.lint.rules.ce047_env_info_key_round_trip import EnvInfoKeyRoundTrip
+        from tests.lint.rules.ce054_env_info_key_round_trip import EnvInfoKeyRoundTrip
 
         return EnvInfoKeyRoundTrip(filepath).check(ast.parse(src))
 
@@ -3825,8 +3825,8 @@ class TestRuffExternalCoversEveryRule:
 
     `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid
     rule code" for a suppression it does not own. It was hand-maintained and had
-    fallen ~14 ids behind — including CE047 and CE048, whose own docstrings
-    advertise `# noqa: CE047` / `# noqa: CE048` as the supported escape hatch. So
+    fallen ~14 ids behind — including CE054 and CE048, whose own docstrings
+    advertise `# noqa: CE054` / `# noqa: CE048` as the supported escape hatch. So
     the first person to use the documented exemption got a red `make check`
     instead, for doing exactly what the rule told them to.
     """
@@ -3899,3 +3899,70 @@ class TestCE053NoRunRecordFilenameLiteral:
             if NoRunRecordFilenameLiteral(str(path)).check(tree):
                 offenders.append(str(path))
         assert not offenders, offenders
+
+
+@pytest.mark.lint
+class TestCE047AgentRosterParity:
+    """CE047 — every onboarding/marketing surface must name every built-in agent.
+
+    The roster is restated in prose on seven surfaces with nothing tying them to
+    the code, which is how OpenCode shipped while most of them still listed three
+    harnesses. Derives the expectation from `AgentKind` and asserts presence. A
+    whole-tree doc rule, so it lives here rather than in the AST-only runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_every_surface_names_every_builtin_agent(self):
+        from tests.lint.agent_roster_parity import ROSTER_SURFACES, find_roster_gaps
+
+        why = {rel: reason for rel, reason, _ in ROSTER_SURFACES}
+        gaps = find_roster_gaps(self.REPO_ROOT)
+        assert not gaps, (
+            "\nSurface(s) that never name a built-in agent — a reader is told it does not "
+            "exist. Add it to the prose, or (if it is not user-facing) add its kind to "
+            "NON_ROSTER_KINDS in tests/lint/agent_roster_parity.py:\n\n"
+            + "\n".join(
+                f"  {rel} ({why.get(rel, '?')}): missing {', '.join(names)}" for rel, names in sorted(gaps.items())
+            )
+        )
+
+    def test_every_builtin_kind_has_display_names(self):
+        # A new built-in agent must declare how it is spelled in prose, otherwise
+        # the presence check would silently fall back to matching its raw kind.
+        from tests.lint.agent_roster_parity import AGENT_DISPLAY_NAMES, roster_kinds
+
+        undeclared = [k for k in roster_kinds() if k not in AGENT_DISPLAY_NAMES]
+        assert not undeclared, f"add prose spellings to AGENT_DISPLAY_NAMES for: {undeclared}"
+
+    def test_roster_excludes_the_non_harness_kinds(self):
+        from tests.lint.agent_roster_parity import roster_kinds
+
+        kinds = roster_kinds()
+        assert "claude-code" in kinds and "opencode" in kinds
+        assert "none" not in kinds and "unknown" not in kinds
+
+    def test_catches_the_opencode_regression(self):
+        # The exact historical gap: a surface listing three of the four harnesses.
+        from tests.lint.agent_roster_parity import missing_agents_in
+
+        three_of_four = "runs Claude Code, Codex, or Antigravity (Gemini) in a sandbox"
+        assert missing_agents_in(three_of_four) == ["opencode"]
+
+    def test_model_name_counts_as_naming_the_antigravity_row(self):
+        from tests.lint.agent_roster_parity import missing_agents_in
+
+        assert missing_agents_in("Claude Code, Codex, Gemini, and OpenCode") == []
+
+    def test_extractors_narrow_to_the_marketing_region(self, tmp_path: Path):
+        from tests.lint.agent_roster_parity import _mkdocs_site_description, _pyproject_marketing_text
+
+        mkdocs = "site_name: X\nsite_description: >-\n  Claude Code and OpenCode\nnav:\n  - Codex: agents/codex.md\n"
+        region = _mkdocs_site_description(mkdocs)
+        assert "OpenCode" in region
+        assert "agents/codex.md" not in region  # the nav must not satisfy the check
+
+        pyproject = '[project]\ndescription = "Claude Code"\nkeywords = ["opencode"]\n[tool.x]\nz = "codex"\n'
+        region = _pyproject_marketing_text(pyproject)
+        assert "Claude Code" in region and "opencode" in region
+        assert "[tool.x]" not in region

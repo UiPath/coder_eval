@@ -987,6 +987,31 @@ def row_cost_incomplete(row: Mapping[str, Any]) -> bool:
     return row.get("cost_complete") is False
 
 
+def nothing_was_measured(*, not_graded: int, measured: int) -> bool:
+    """True when a run/variant/suite has ungraded rows and NO row produced a verdict.
+
+    The one definition of "this rate has no numerator to be a fraction of",
+    shared by ``RunSummary``, ``VariantAggregate`` and ``SuiteRollup`` because
+    three copies of a published rate is how one surface reports ``n/a`` and
+    another reports ``0.0%`` for the same run. That already happened: the guard
+    shipped on ``RunSummary`` only, so a 10-task ``execute`` run with one crash
+    rendered ``Pass Rate: n/a`` in ``run.md`` and ``Pass Rate: 0.0%`` in
+    ``experiment.md``.
+
+    ``measured`` is COUNTED EVIDENCE — rows that actually carry a criteria
+    verdict — not a bucket count. The first version of this test used
+    ``tasks_succeeded + tasks_failed == 0`` and was wrong for the same reason
+    the bug it fixed was wrong: ``TIMEOUT`` and the two budget stops are
+    category ``failed`` and reachable under ``execute`` (``_check_run_limits``
+    still runs on the ungraded branch), so ONE timed-out row in a 100-task
+    ungraded night read as "something was measured" and published
+    ``pass_rate: 0.0`` — a real 0% point on the evalboard trend for a run that
+    graded nothing. A bucket is where a row landed; only the verdict says
+    whether a criterion ever ran.
+    """
+    return not_graded > 0 and measured == 0
+
+
 def sum_costs(*components: float | None) -> float | None:
     """Add whichever cost components were priced. ``None`` when none were.
 
@@ -1104,6 +1129,22 @@ class RunSummary(BaseModel):
         ),
     )
 
+    # Verdict evidence, NOT a bucket and NOT part of the invariant: how many
+    # rows actually carry a weighted_score. `pass_rate` / `error_share` need it
+    # because the four category buckets cannot tell a graded FAILURE from a
+    # TIMEOUT that no criterion ever saw. Symmetric with
+    # VariantAggregate.tasks_measured so the three published rates read the same
+    # input. Defaulted for old run.json, where tasks_not_graded is 0 and the
+    # gate is therefore inert.
+    tasks_measured: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Rows carrying a criteria verdict (weighted_score is not None). "
+            "Gates pass_rate / error_share: nothing measured means no rate, not a 0% one."
+        ),
+    )
+
     # Informational sub-counters: subsets of tasks_failed (NOT part of the
     # task_count invariant). Default 0 so old serialized RunSummary JSON
     # without these fields deserialises cleanly.
@@ -1182,10 +1223,13 @@ class RunSummary(BaseModel):
         ``error_share 1.0`` — a measured-looking total failure for a run that was
         never measured at all, and a real 0% point on the evalboard trend.
 
-        The test is evidence again: if not one row reached a pass or a fail, the
-        rate has no numerator to be a fraction of.
+        Evidence comes from ``tasks_measured``, not from the buckets: a row
+        carries a verdict iff its ``weighted_score`` is set. Deriving it from
+        ``tasks_succeeded + tasks_failed`` instead read a single ``TIMEOUT``
+        (category ``failed``, and reachable under ``execute``) as proof that the
+        run was measured. See ``nothing_was_measured``.
         """
-        return self.tasks_not_graded > 0 and (self.tasks_succeeded + self.tasks_failed) == 0
+        return nothing_was_measured(not_graded=self.tasks_not_graded, measured=self.tasks_measured)
 
     # Derived run metrics: computed_fields over the stored counts and
     # ``task_results``, so they serialize into run.json while staying impossible to

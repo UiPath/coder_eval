@@ -1320,7 +1320,9 @@ class TestAnUnmeasuredRunPublishesNoRate:
     """
 
     @staticmethod
-    def _summary(*, succeeded: int, failed: int, error: int, not_graded: int) -> RunSummary:
+    def _summary(
+        *, succeeded: int, failed: int, error: int, not_graded: int, measured: int | None = None
+    ) -> RunSummary:
         return RunSummary(
             run_id="2026-01-01_00-00-00",
             start_time=datetime(2026, 1, 1),
@@ -1331,6 +1333,11 @@ class TestAnUnmeasuredRunPublishesNoRate:
             tasks_failed=failed,
             tasks_error=error,
             tasks_not_graded=not_graded,
+            # Verdict evidence, not a bucket: a graded row carries a
+            # weighted_score, and a TIMEOUT / budget stop lands in `failed`
+            # without one. The fixture derives it from the two buckets that
+            # imply a verdict, so `measured=0` is expressible by passing it.
+            tasks_measured=succeeded + failed if measured is None else measured,
             task_results=[],
             framework_version="0.1.0",
             environment_info={},
@@ -1358,6 +1365,16 @@ class TestAnUnmeasuredRunPublishesNoRate:
 
         assert summary.pass_rate == 3 / 5
         assert summary.error_share == 1 / 5
+
+    def test_one_timed_out_row_is_not_evidence_that_anything_was_measured(self):
+        """TIMEOUT and the budget stops are category `failed` and reachable
+        under `execute`, so a bucket-count test read one of them as proof the
+        run was measured and published pass_rate 0.0 for a 100-task night that
+        graded nothing."""
+        summary = self._summary(succeeded=0, failed=1, error=0, not_graded=99, measured=0)
+
+        assert summary.pass_rate is None
+        assert summary.error_share is None
 
     def test_an_ordinary_graded_run_is_untouched(self):
         summary = self._summary(succeeded=2, failed=1, error=1, not_graded=0)

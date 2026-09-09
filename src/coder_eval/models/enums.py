@@ -100,7 +100,17 @@ _EXECUTION_FACT_STATUSES: dict[FinalStatus, bool] = {
     FinalStatus.ERROR: True,
     FinalStatus.BUILD_FAILED: True,
     FinalStatus.TIMEOUT: True,
-    FinalStatus.MAX_TURNS_EXHAUSTED: True,
+    # False, and it must stay False: MAX_TURNS_EXHAUSTED is SUBORDINATE to the
+    # verdict, not a fact that outranks it. `run` returns SUCCESS for a
+    # max-turns trajectory whose criteria pass and only falls through to this
+    # status when they do not — see `Orchestrator._terminal_status`, whose
+    # docstring already argued exactly this while this table said the opposite.
+    # With True, a prior max-turns row re-graded through `evaluate` was pinned
+    # at MAX_TURNS_EXHAUSTED *while holding weighted_score 1.000* and exited 1:
+    # a combination `run` can never produce for the same trajectory. The fact
+    # itself is not lost — it lives on `EvaluationResult.max_turns_exhausted`,
+    # which `_seed_from_prior_result` carries.
+    FinalStatus.MAX_TURNS_EXHAUSTED: False,
     FinalStatus.TOKEN_BUDGET_EXCEEDED: True,
     FinalStatus.COST_BUDGET_EXCEEDED: True,
 }

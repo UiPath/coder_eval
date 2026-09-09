@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 
 TASK_LOG_FILENAME = "task.log"
 
+# Where a RE-GRADE's log goes. `task_log_handler` opens its file `mode="w"`, so
+# pointing a detached/resumed grade at task.log truncated the agent trajectory
+# log the run had already paid for — thousands of lines replaced by the grading
+# pass's handful. That directly contradicts `_apply_resume`'s own contract
+# ("to_grade is deliberately NOT cleared: its artifacts are the run's output and
+# the very thing being graded"), and task.log is a documented run artifact.
+GRADE_LOG_FILENAME = "grade.log"
+
 # The per-task result record, and the pre-grade snapshot a detached grade keeps
 # beside it. Module-level because ~12 sites name them — including three that
 # `rglob` for the first — and two half-copies of the same string in different
@@ -161,9 +169,15 @@ def ignore_patterns_and_symlinks(patterns: list[str]) -> Callable[[str, list[str
     return _ignore
 
 
-def task_log_path(run_dir: Path) -> Path:
-    """Per-task log file path inside a task run directory."""
-    return run_dir / TASK_LOG_FILENAME
+def task_log_path(run_dir: Path, *, regrade: bool = False) -> Path:
+    """Per-task log file path inside a task run directory.
+
+    ``regrade=True`` returns the ``grade.log`` sibling instead. The caller is a
+    grading pass over a trajectory that already exists on disk, and the log
+    handler truncates whatever file it is given — so the two passes must not
+    share one.
+    """
+    return run_dir / (GRADE_LOG_FILENAME if regrade else TASK_LOG_FILENAME)
 
 
 def generate_run_id() -> str:

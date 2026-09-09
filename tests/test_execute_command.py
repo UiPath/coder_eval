@@ -105,6 +105,9 @@ def test_ungraded_does_not_dilute_a_partially_graded_run() -> None:
         tasks_failed=0,
         tasks_error=0,
         tasks_not_graded=3,
+        # The one succeeded row carries a verdict — that is what makes the rate
+        # real rather than fabricated.
+        tasks_measured=1,
         task_results=[],
         framework_version="test",
     )

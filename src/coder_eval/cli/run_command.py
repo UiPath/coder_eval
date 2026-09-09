@@ -806,8 +806,19 @@ async def _grade_resumed_tasks(
                 # only in this console line: the folded-back result keeps the
                 # execute phase's empty error_message, so run.json, the reports
                 # and CI show an ungraded row with no explanation.
+                #
+                # APPEND, don't replace. "Keeps the execute phase's empty
+                # error_message" holds for a NOT_GRADED row and not for one that
+                # already carries an execution fact — a container-death row
+                # arrives here with "Container exited with code 137 without
+                # producing task.json", and overwriting it published a message
+                # naming the wrong cause while the on-disk record still named
+                # the right one.
                 result = prior
-                result.error_message = f"Grading failed during --resume: {e}"
+                grading_note = f"Grading failed during --resume: {e}"
+                result.error_message = (
+                    f"{result.error_message}\n{grading_note}" if result.error_message else grading_note
+                )
         else:
             if result.final_status is FinalStatus.ERROR:
                 # An orchestrator-level grading crash is not a verdict about the
@@ -882,6 +893,29 @@ async def _apply_resume(
         prior_results.append(tr)
         prior_resolved.append(rt)
     return part.to_run, prior_results, prior_resolved
+
+
+def _reject_simulation_under_execute(resolved: list[ResolvedTask], *, grade: bool) -> None:
+    """Refuse a simulation task under ``execute`` rather than degrading it.
+
+    The dialog loop reads criteria results to decide whether to keep talking, so
+    an ungraded dialog would quietly change its own stopping behaviour and
+    produce a trajectory that is not the one `run` would have produced. A
+    resolution-time config error (exit 2), sitting with the other
+    resolution-time validations, and it names the offending tasks.
+    """
+    if grade:
+        return
+    simulated = sorted(
+        rt.task.task_id for rt in resolved if rt.task.simulation is not None and rt.task.simulation.enabled
+    )
+    if simulated:
+        raise typer.BadParameter(
+            "`coder-eval execute` does not support simulation tasks (their turn-continuation "
+            + "logic depends on criteria results): "
+            + ", ".join(simulated)
+            + ". Use `coder-eval run` for these."
+        )
 
 
 async def _run_with_experiment(
@@ -961,22 +995,7 @@ async def _run_with_experiment(
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
 
-    # Simulation tasks are rejected under `execute`, not silently degraded. The
-    # dialog loop reads criteria results to decide whether to keep talking, so an
-    # ungraded dialog would quietly change its own stopping behavior and produce a
-    # trajectory that is not the one `run` would have produced. Rejecting is a
-    # config error (exit 2), and it names the offending tasks.
-    if not grade:
-        simulated = sorted(
-            rt.task.task_id for rt in resolved if rt.task.simulation is not None and rt.task.simulation.enabled
-        )
-        if simulated:
-            raise typer.BadParameter(
-                "`coder-eval execute` does not support simulation tasks (their turn-continuation "
-                + "logic depends on criteria results): "
-                + ", ".join(simulated)
-                + ". Use `coder-eval run` for these."
-            )
+    _reject_simulation_under_execute(resolved, grade=grade)
 
     if skipped:
         console.print(

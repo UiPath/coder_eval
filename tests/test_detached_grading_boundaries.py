@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 from coder_eval.cli import app
 from coder_eval.models import (
     AgentKind,
+    CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
     FinalStatus,
@@ -151,6 +152,50 @@ class TestDockerGradeBoundary:
 
     def test_a_graded_run_short_circuits(self, tmp_path: Path) -> None:
         _docker_runner(grade=True, tmp_path=tmp_path)._assert_grade_honored(_result(FinalStatus.SUCCESS))
+
+    def test_an_execution_fact_carrying_a_verdict_is_still_refused(self, tmp_path: Path) -> None:
+        """The guard keys on EVIDENCE, and until now nothing proved it.
+
+        Every fixture above builds a result with neither a criteria vector nor a
+        score, so `graded_anyway` was `False` in all four tests — replacing that
+        whole expression with a literal `False` left the suite fully green, i.e.
+        the defect it exists for could be reintroduced silently. A stale image
+        returning a fully graded MAX_TURNS_EXHAUSTED row is exactly the case the
+        exemption must NOT cover: a fresh image reports that status with no
+        verdict attached.
+        """
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        graded = _result(FinalStatus.MAX_TURNS_EXHAUSTED)
+        graded.weighted_score = 1.0
+        graded.success_criteria_results = [
+            CriterionResult(criterion_type="file_exists", description="x", score=1.0, weight=1.0)
+        ]
+
+        runner_ = _docker_runner(grade=False, tmp_path=tmp_path)
+        with pytest.raises(DockerRunError, match="predates `execute`"):
+            runner_._assert_grade_honored(graded)
+
+    def test_the_refused_record_is_quarantined_off_task_json(self, tmp_path: Path) -> None:
+        """Refusing in memory is not enough while the graded bytes stay on disk.
+
+        A later `execute --resume` / `aggregate` reads task.json straight off the
+        filesystem, so leaving it in place folds in exactly the row this guard
+        declined to publish. The rename was shipped with 0% coverage — all four
+        tests left `task_json` at its `None` default, so the block never ran.
+        """
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        task_json = tmp_path / TASK_JSON_FILENAME
+        task_json.write_text('{"final_status": "SUCCESS"}', encoding="utf-8")
+
+        runner_ = _docker_runner(grade=False, tmp_path=tmp_path)
+        with pytest.raises(DockerRunError):
+            runner_._assert_grade_honored(_result(FinalStatus.SUCCESS), task_json=task_json)
+
+        assert not task_json.exists(), "the refused record must not stay readable as task.json"
+        sidecar = task_json.with_suffix(task_json.suffix + ".graded")
+        assert sidecar.read_text(encoding="utf-8") == '{"final_status": "SUCCESS"}'
 
 
 class TestInContainerGradeCoercion:
@@ -452,6 +497,48 @@ def test_the_reference_digest_is_computed_over_a_staged_copy(tmp_path: Path) -> 
     assert _staged_digest(source) == recorded
     # And the naive comparison this replaced would have failed.
     assert digest_tree(source) != recorded
+
+
+def test_the_reference_digest_survives_a_real_run_to_task_json(tmp_path: Path) -> None:
+    """The round trip, not the helper in isolation.
+
+    `_stage_reference` wrote the digest into `environment_info` and `_setup`
+    then REBOUND the whole dict from `get_version_info()` a hundred lines later,
+    so the key never reached task.json. `verify_reference_unchanged` therefore
+    took its "recorded no reference_digest" early return on every real run — the
+    answer-key anti-cheat was a permanent no-op, and CE054 could not see it
+    because a write did exist in `src/`; it was just dead. The two tests above
+    exercise `_staged_digest` alone and pass either way, which is how the wipe
+    shipped.
+    """
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    (reference / "solution.txt").write_text("answer\n", encoding="utf-8")
+
+    task_yaml = tmp_path / "t.yaml"
+    task_yaml.write_text(
+        "task_id: digest_round_trip\n"
+        "description: d\n"
+        "agent:\n  type: none\n"
+        "sandbox:\n  driver: tempdir\n"
+        "reference:\n  directory: reference\n"
+        "success_criteria:\n"
+        "  - type: file_exists\n"
+        "    path: nothing.txt\n"
+        '    description: "deliberately fails; the digest must be recorded either way"\n',
+        encoding="utf-8",
+    )
+
+    run_dir = tmp_path / "run"
+    # Exit code is not the point (the criterion deliberately fails); the
+    # persisted record is.
+    runner.invoke(app, ["run", str(task_yaml), "--run-dir", str(run_dir)])
+
+    rows = sorted(run_dir.rglob(TASK_JSON_FILENAME))
+    assert len(rows) == 1, rows
+    env = json.loads(rows[0].read_text(encoding="utf-8"))["environment_info"]
+    assert "reference_digest" in env, f"the digest never reached task.json: {sorted(env)}"
+    assert isinstance(env["reference_digest"], str) and env["reference_digest"]
 
 
 def test_a_reference_edited_since_the_run_is_still_caught(tmp_path: Path) -> None:

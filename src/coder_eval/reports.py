@@ -17,6 +17,7 @@ from .models import (
     TaskResult,
     ThresholdCheck,
     eval_overhead_cost,
+    nothing_was_measured,
     row_cost_incomplete,
     sum_costs,
 )
@@ -882,6 +883,10 @@ def _compute_suite_rollup(
     rows_graded = rows_total - rows_not_graded
 
     scored = [r.result.weighted_score for r in rows if r.result.weighted_score is not None]
+    # Verdict evidence, distinct from `rows_graded` (a bucket complement): the
+    # gate `nothing_was_measured` needs, since a TIMEOUT counts as graded while
+    # no criterion ever ran on it.
+    rows_measured = len(scored)
     average_weighted_score = sum(scored) / len(scored) if scored else None
 
     # Per-criterion-type tallies (scores + errors) for the type-level summary.
@@ -1004,8 +1009,15 @@ def _compute_suite_rollup(
         rows_error=rows_error,
         rows_not_graded=rows_not_graded,
         # None, never 0.0: a suite where nothing was graded has no pass rate,
-        # and 0.0 renders as "0.0%" beside a full set of rows.
-        pass_rate=rows_passed / rows_graded if rows_graded else None,
+        # and 0.0 renders as "0.0%" beside a full set of rows. Routed through
+        # the SAME helper as RunSummary and VariantAggregate — this site was
+        # the third copy of the formula and had no ungraded guard at all, so a
+        # suite whose only non-ungraded row was a TIMEOUT published 0.0%.
+        pass_rate=(
+            None
+            if nothing_was_measured(not_graded=rows_not_graded, measured=rows_measured)
+            else (rows_passed / rows_graded if rows_graded else None)
+        ),
         average_weighted_score=average_weighted_score,
         criterion_stats=criterion_stats,
         failed_samples=failed_samples,

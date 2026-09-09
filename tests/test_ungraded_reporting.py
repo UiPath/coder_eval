@@ -35,6 +35,8 @@ def _summary(**kwargs: object) -> RunSummary:
         "tasks_failed": 0,
         "tasks_error": 0,
         "tasks_not_graded": 1,
+        # Verdict evidence: this fixture's one succeeded row carries a score.
+        "tasks_measured": 1,
         "task_results": [],
         "framework_version": "test",
     }
@@ -50,6 +52,8 @@ def _aggregate(**kwargs: object) -> VariantAggregate:
         "tasks_failed": 0,
         "tasks_error": 0,
         "tasks_not_graded": 1,
+        # Verdict evidence: this fixture's one succeeded row carries a score.
+        "tasks_measured": 1,
         "average_score": 1.0,
         "average_duration": 1.0,
     }
@@ -74,8 +78,38 @@ def test_variant_aggregate_pass_rate_divides_by_graded_not_run() -> None:
 
 
 def test_variant_aggregate_has_no_pass_rate_when_nothing_was_graded() -> None:
-    agg = _aggregate(tasks_run=2, tasks_succeeded=0, tasks_not_graded=2)
+    agg = _aggregate(tasks_run=2, tasks_succeeded=0, tasks_not_graded=2, tasks_measured=0)
     assert agg.pass_rate is None, "0/0 is unknown, not 0%"
+
+
+def test_variant_aggregate_has_no_pass_rate_when_the_only_non_ungraded_row_is_a_timeout() -> None:
+    """The bug the shared helper exists for.
+
+    TIMEOUT and the two budget stops are category ``failed`` and reachable under
+    ``execute`` (``_check_run_limits`` still runs on the ungraded branch), so a
+    bucket-count test read one timed-out row in a 100-task ungraded night as
+    proof the run was measured and published ``pass_rate 0.0`` — a real 0% point
+    on the evalboard trend for a run that graded nothing.
+    """
+    agg = _aggregate(tasks_run=100, tasks_succeeded=0, tasks_failed=1, tasks_not_graded=99, tasks_measured=0)
+    assert agg.pass_rate is None
+
+
+def test_the_three_published_pass_rates_agree_on_one_set_of_counts() -> None:
+    """RunSummary, VariantAggregate and SuiteRollup are three surfaces for the
+    same rate, and the ungraded guard shipped on ONE of them: the same 10-task
+    execute run with a crash rendered "Pass Rate: n/a" in run.md and
+    "Pass Rate: 0.0%" in experiment.md. They now share one formula, and this is
+    the test that says so."""
+    from coder_eval.models import nothing_was_measured
+
+    summary = _summary(tasks_run=10, tasks_succeeded=0, tasks_error=1, tasks_not_graded=9, tasks_measured=0)
+    aggregate = _aggregate(tasks_run=10, tasks_succeeded=0, tasks_error=1, tasks_not_graded=9, tasks_measured=0)
+
+    assert nothing_was_measured(not_graded=9, measured=0) is True
+    assert summary.pass_rate is None
+    assert summary.error_share is None
+    assert aggregate.pass_rate is None
 
 
 def test_variant_aggregate_serializes_its_denominator() -> None:
@@ -122,7 +156,7 @@ def test_markdown_pass_rate_uses_the_graded_denominator() -> None:
 def test_markdown_reports_no_rate_at_all_for_a_fully_ungraded_run() -> None:
     from coder_eval.reports import _pass_rate_lines
 
-    text = "\n".join(_pass_rate_lines(_summary(tasks_succeeded=0, tasks_not_graded=2)))
+    text = "\n".join(_pass_rate_lines(_summary(tasks_succeeded=0, tasks_not_graded=2, tasks_measured=0)))
 
     assert "n/a" in text
     assert "0.0%" not in text, "a run that was never measured has no rate, not a 0% one"

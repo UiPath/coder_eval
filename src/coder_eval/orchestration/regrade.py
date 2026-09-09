@@ -241,20 +241,36 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
     than failing here: grading the WRONG directory makes every path-relative
     criterion fail as a locating artifact rather than as a verdict, and it
     reports that as an ordinary score.
+
+    **Every** return goes through ``_contained``, checked against ``run_dir``.
+    The containment check originally covered one branch of four and rooted the
+    ``task_id`` case at ``artifacts/`` rather than at the run directory, which
+    made it vacuous the moment ``artifacts`` was ITSELF a symlink — and
+    ``artifacts/`` is attacker-supplied for a shared run dir just like
+    ``sandbox_path`` and ``task_id``. The escaped tree then became the grading
+    root via ``Sandbox.adopt``, `run_command` criteria ran with it as cwd, and
+    the resulting verdict — criterion detail text included — was written back
+    into the run's own ``task.json``.
     """
+
+    def _contained(candidate: Path, description: str) -> Path:
+        # One chokepoint, one root. `run_dir` is the operator-supplied path; a
+        # candidate is only ever derived from the untrusted record.
+        if not _is_within(candidate, run_dir):
+            raise RegradeError(
+                f"{description} resolves outside the run directory ({run_dir}). "
+                + "Pass --workspace explicitly to grade a directory outside the run."
+            )
+        return candidate
+
     if prior.sandbox_path:
         recorded = Path(prior.sandbox_path)
         if recorded.is_dir():
-            if not _is_within(recorded, run_dir):
-                # An absolute path out of the run's own task.json, which is
-                # untrusted input for a shared run dir. Criteria execute with
-                # cwd there and may mutate it, so an out-of-tree location has to
-                # be the operator's explicit choice.
-                raise RegradeError(
-                    f"The recorded sandbox_path ({recorded}) is outside the run directory "
-                    + f"({run_dir}). Pass --workspace explicitly to grade it."
-                )
-            return recorded
+            # An absolute path out of the run's own task.json, which is
+            # untrusted input for a shared run dir. Criteria execute with cwd
+            # there and may mutate it, so an out-of-tree location has to be the
+            # operator's explicit choice.
+            return _contained(recorded, f"The recorded sandbox_path ({recorded})")
 
     artifacts = run_dir / ARTIFACTS_DIRNAME
     if not artifacts.is_dir():
@@ -263,31 +279,28 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
             + f"({prior.sandbox_path or 'unset'}) is gone. The run was probably made with "
             + "--preservation-mode NONE."
         )
+    # Checked before anything is derived from it: a symlinked `artifacts/` makes
+    # every check rooted at `artifacts` tautological.
+    _contained(artifacts, f"The artifacts directory ({artifacts})")
+
     # The exact path, not a heuristic. `task_id` may contain "/" (dataset rows
     # are "<suite>/<row>"), so "the single child of artifacts/" resolves one
     # level too high for every row task.
     #
-    # Containment-checked like the sandbox_path branch above, and for the same
-    # reason: `task_id` is an unvalidated string out of the run's own task.json,
-    # so `"../../../../home/victim"` joins to a real directory that `is_dir()`
-    # happily confirms. Every run_command criterion then executes with that as
-    # its cwd. The two branches read the same untrusted record; only one of them
-    # used to check.
+    # `task_id` is an unvalidated string out of the run's own task.json, so
+    # `"../../../../home/victim"` joins to a real directory that `is_dir()`
+    # happily confirms.
     by_task_id = artifacts / prior.task_id
     if by_task_id.is_dir():
-        if not _is_within(by_task_id, artifacts):
-            raise RegradeError(
-                f"The recorded task_id ({prior.task_id!r}) resolves outside {artifacts}. "
-                + "Pass --workspace explicitly to grade a directory outside the run."
-            )
-        return by_task_id
+        return _contained(by_task_id, f"The recorded task_id ({prior.task_id!r})")
 
     children = [p for p in sorted(artifacts.iterdir()) if p.is_dir()]
     if not children:
         # A flat artifacts dir (no subdirectory) means the workspace IS artifacts/.
         return artifacts
     if len(children) == 1:
-        return children[0]
+        # A symlinked child escapes just as well as a symlinked artifacts/.
+        return _contained(children[0], f"The only directory under {artifacts} ({children[0].name})")
     raise RegradeError(
         f"Cannot tell which directory under {artifacts} is the workspace: no {prior.task_id!r} "
         + f"child, and {len(children)} candidates ({', '.join(p.name for p in children)}). "

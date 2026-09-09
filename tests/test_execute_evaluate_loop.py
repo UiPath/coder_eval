@@ -32,6 +32,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_default_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep an omitted ``--run-dir`` inside ``tmp_path``.
+
+    ``evaluate`` grades into a FRESH run directory (that is what leaves the
+    graded row's own ``task.log`` alone), and every ``evaluate`` call below
+    omits ``--run-dir`` because the flag is not what the test is about. Without
+    this, each one created a repo-relative ``runs/<second-resolution-timestamp>/``
+    — littering the working tree, and colliding between xdist workers that
+    happen to reach the same second.
+    """
+    from coder_eval.cli import run_helpers
+
+    monkeypatch.setattr(run_helpers.settings, "runs_dir", tmp_path / "default-runs")
+
+
 def _task_dir(run_dir: Path) -> Path:
     matches = sorted(p.parent for p in run_dir.glob("**/task.json"))
     assert len(matches) == 1, f"expected exactly one task.json under {run_dir}, got {matches}"
@@ -478,3 +494,81 @@ def test_a_detached_grade_keeps_the_runs_api_routing_not_the_graders(tmp_path: P
         "the grade overwrote the RUN's recorded routing with the grading host's"
     )
     assert after.get("graded_by_api_routing"), "the grader's own route must still be recorded, just not in place"
+
+
+def test_an_explicit_task_file_over_a_run_dir_grades_with_the_given_criteria(tmp_path: Path) -> None:
+    """`evaluate <task.yaml> <run_dir>` — the third documented shape, and the
+    one `evaluate`'s own help text calls the main reason to keep `execute` and
+    `evaluate` separate at all ("iterate on criteria against a run you already
+    paid for").
+
+    It shipped with no behavioural test: `test_evaluate_target.py` asserts the
+    pure resolver returns RUN_DIR with `task_file` set and never invokes the
+    command, so nothing proved the SUPPLIED criteria actually win over the
+    recorded ones, nor that the run's own trajectory is still the thing graded.
+    """
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    executed = _row(task_dir)
+
+    # An edited copy whose criterion names a file the run never produced, so a
+    # verdict that follows the recorded config is distinguishable from one that
+    # follows this file.
+    edited = tmp_path / "edited.yaml"
+    edited.write_text(
+        AGENTLESS_TASK.read_text(encoding="utf-8").replace("path: proof.txt", "path: never_written.txt"),
+        encoding="utf-8",
+    )
+
+    _invoke(["evaluate", str(edited), str(task_dir)], expect_exit=1)
+    regraded = _row(task_dir)
+
+    assert regraded["final_status"] == FinalStatus.FAILURE.value, (
+        "the supplied task file must override the run's recorded criteria"
+    )
+    assert [c["score"] for c in regraded["success_criteria_results"]] == [0.0, 0.0]
+    # The trajectory is still the RUN's. Grading with a different task file
+    # changes what is asked of the run, never what the run did.
+    assert regraded["iterations"] == executed["iterations"]
+    assert regraded["duration_seconds"] == executed["duration_seconds"]
+
+
+def test_a_re_grade_does_not_truncate_the_runs_own_task_log(tmp_path: Path) -> None:
+    """`run --resume` grades into the row's OWN directory, and
+    `task_log_handler` opens its file `mode="w"`. Pointing it at `task.log`
+    replaced the agent trajectory log the run had already paid for with the
+    grading pass's handful of lines — while `_apply_resume`'s own contract says
+    "to_grade is deliberately NOT cleared: its artifacts are the run's output
+    and the very thing being graded"."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_log = _task_dir(run_dir) / "task.log"
+    sentinel = "AGENT RUN LOG — the trajectory this run paid for\n"
+    task_log.write_text(sentinel, encoding="utf-8")
+
+    _invoke(["run", str(AGENTLESS_TASK), "--run-dir", str(run_dir), "--resume"])
+
+    assert task_log.read_text(encoding="utf-8") == sentinel, "the re-grade truncated the agent's task.log"
+    assert (_task_dir(run_dir) / "grade.log").is_file(), "the grading pass must log somewhere"
+
+
+def test_a_copy_grade_leaves_the_runs_artifacts_pointer_alone(tmp_path: Path) -> None:
+    """`--copy` grades in a tempdir, and `_setup` + `_cleanup` both wrote that
+    tempdir into `sandbox_path` — which `_write_back` then persisted into the
+    ORIGINAL task.json. The run then pointed at another run's artifacts, and the
+    NEXT `evaluate <run_dir>` failed `default_workspace`'s containment guard: a
+    re-grade that permanently broke re-grading."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    recorded = _row(task_dir)["sandbox_path"]
+
+    # --copy re-runs the recorded provisioning + pre_run, which is exactly what
+    # the trust gate covers, so the consent flag is part of this shape.
+    _invoke(["evaluate", str(task_dir), "--copy", "--allow-recorded-commands"])
+    assert _row(task_dir)["sandbox_path"] == recorded, "the grading copy's path replaced the run's"
+
+    # The consequence, asserted directly rather than inferred from the field.
+    _invoke(["evaluate", str(task_dir)])
+    assert _row(task_dir)["final_status"] == FinalStatus.SUCCESS.value

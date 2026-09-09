@@ -1,7 +1,7 @@
 [project]
 name = "coder-eval"
-version = "0.11.6"
-description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity) with sandboxed, reproducible YAML task suites."
+version = "0.11.7"
+description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode) with sandboxed, reproducible YAML task suites."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
@@ -9,7 +9,7 @@ authors = [{ name = "UiPath", email = "coder-eval@uipath.com" }]
 keywords = [
     "ai", "llm", "agent", "coding-agent", "evaluation", "eval", "evals",
     "benchmark", "swe-bench", "claude", "claude-code", "codex", "anthropic",
-    "gemini", "antigravity", "sandbox", "code-generation", "agent-evaluation",
+    "gemini", "antigravity", "opencode", "sandbox", "code-generation", "agent-evaluation",
     "llm-evaluation", "llm-eval", "ai-evaluation", "skills-evaluation",
     "claude-skills", "claude-code-skills", "agent-skills", "skillsbench",
     "agent-testing", "llmops",
@@ -118,13 +118,15 @@ codex = [
 # glibc note — verify before bumping: the wheel's manylinux_2_17 tag is NOT a
 # reliable floor; the bundled `localharness` ELF can require a newer glibc than the
 # tag advertises. Eval agents run on Ubuntu 22.04 (glibc 2.35), so the pinned build
-# must load there. 0.1.7 links without DT_RELR (max required symbol GLIBC_2.26) and
-# loads on 2.35+; confirm any future pin does too (readelf -d | grep RELR must be
-# empty / max GLIBC symbol <= the oldest target's glibc).
+# must load there. 0.1.8 links without DT_RELR (max required symbol GLIBC_2.26, and
+# the same DT_NEEDED set as 0.1.7) and loads on 2.35+; confirm any future pin does
+# too (readelf -d | grep RELR must be empty / max GLIBC symbol <= the oldest
+# target's glibc). Note 0.1.16+ ships a fully STATIC localharness (no PT_INTERP, no
+# DT_NEEDED — hence its added musllinux tag), which retires this check entirely.
 # Without this extra the framework still installs and runs; Antigravity-dependent
 # code paths fail at start() with a clear hint pointing back here.
 antigravity = [
-    "google-antigravity==0.1.7",
+    "google-antigravity==0.1.8",
 ]
 # Optional extra that enables OpenCode agent support.
 #
@@ -256,6 +258,7 @@ external = [
     "CE051",
     "CE052",
     "CE053",
+    "CE054",
 ]  # custom architectural lint rules (tests/lint/)
 
 [tool.ruff.lint.pylint]

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 from coder_eval.models.enums import FinalStatus
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.mutations import PromptMutation
-from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
+from coder_eval.models.results import ConfigLineageEntry, EvaluationResult, nothing_was_measured
 from coder_eval.models.sandbox import SandboxConfig
 from coder_eval.models.tasks import PostRunCommand, PreRunCommand, TaskDefinition
 from coder_eval.models.templates import TemplateSource
@@ -256,6 +256,16 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
         ge=0,
         description="Subset of tasks_failed where run_limits cost cap tripped.",
     )
+    # Verdict evidence, NOT a bucket: how many rows actually carry a
+    # weighted_score. `pass_rate` needs it because the four category buckets
+    # cannot tell a graded FAILURE from a TIMEOUT that no criterion ever saw.
+    # Defaulted so an experiment.json written before this field still parses —
+    # and inert on those, since they predate the ungraded bucket entirely.
+    tasks_measured: int = Field(
+        default=0,
+        ge=0,
+        description="Rows carrying a criteria verdict (weighted_score is not None). Gates pass_rate.",
+    )
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> VariantAggregate:
@@ -280,8 +290,17 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     def pass_rate(self) -> float | None:
         """``tasks_succeeded / tasks_graded`` as a 0-1 fraction. ``None`` when nothing was graded.
 
-        Mirrors ``RunSummary.pass_rate``: ungraded tasks leave both sides.
+        Mirrors ``RunSummary.pass_rate``: ungraded tasks leave both sides, AND a
+        variant where no row produced a verdict has no rate at all. The mirror
+        used to be a claim rather than a fact — this property said "Mirrors
+        RunSummary.pass_rate" while implementing only half of it, so the same
+        10-task execute run with one crash gave ``None`` in ``run.json`` and
+        ``0.0`` here, which ``reports_experiment`` rendered as
+        "Pass Rate: 0.0% (0/1)". Both now route through
+        ``nothing_was_measured``.
         """
+        if nothing_was_measured(not_graded=self.tasks_not_graded, measured=self.tasks_measured):
+            return None
         return self.tasks_succeeded / self.tasks_graded if self.tasks_graded else None
 
 

@@ -35,7 +35,7 @@ def _run_record_filenames() -> set[str]:
 class NoRunRecordFilenameLiteral(BaseRule):
     id = "CE053"
 
-    # `(^|sep)` so a repo-relative path is in scope too; see CE047.
+    # `(^|sep)` so a repo-relative path is in scope too; see CE054.
     _SRC_PATH = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")
     # The module that DEFINES them, and the container-path module that mirrors
     # the in-container layout as its own vocabulary.

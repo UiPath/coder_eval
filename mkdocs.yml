@@ -1,8 +1,9 @@
 site_name: Coder Eval
 site_description: >-
-  Evaluate & benchmark AI coding agents and Claude Code skills — a sandboxed,
-  reproducible framework with declarative YAML eval suites for Claude Code,
-  Codex & Gemini, A/B experiments, weighted scoring, and CI gates.
+  Evaluate and benchmark AI coding agents and their skills — a sandboxed,
+  agent-agnostic framework with declarative YAML eval suites for Claude Code,
+  Codex, Antigravity (Gemini) and OpenCode, A/B experiments, weighted scoring,
+  and CI gates.
 site_url: https://coder-eval.com/docs/
 repo_url: https://github.com/UiPath/coder_eval
 repo_name: UiPath/coder_eval
