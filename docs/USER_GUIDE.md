@@ -200,9 +200,15 @@ rebuilding the task from it means the run dir decides what runs on your host,
 with your environment. So two things are refused rather than assumed:
 
 - A recorded config that carries shell (`run_command` criteria, `agent_judge`,
-  `uipath_eval`, and on the `--copy` path `pre_run`/`post_run`) needs
+  `uipath_eval`, an authored `post_run`, and on the `--copy` path `pre_run`) needs
   `--allow-recorded-commands`. The message names every command first. Passing the
   task file explicitly bypasses this — that config came from you.
+
+  `post_run` is scanned on **both** paths, because it now runs on both — but a
+  command your own `experiments/default.yaml` contributes to every task is
+  exempt. The record did not choose it, running it is exactly what your own
+  config does on every run, and prompting on it would fire for 100% of run
+  directories — a refusal that always fires stops being read.
 - A run made with `driver: docker` needs `--allow-host-grading`. Grading cannot
   start a container, and such a task's criteria address container paths and
   toolchains; on your host they score `0.0` for a run that passed. An opted-in

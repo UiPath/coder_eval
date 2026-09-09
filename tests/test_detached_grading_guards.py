@@ -283,3 +283,80 @@ def test_the_actual_cost_join_is_skipped_on_a_re_grade(tmp_path: Path) -> None:
         orch._join_litellm_actual_cost()
 
     apply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_container_run_records_the_driver_it_was_authored_with(tmp_path: Path, monkeypatch) -> None:
+    """`task_config.resolved` must describe the task as AUTHORED, not as rewritten.
+
+    `run_task_internal_command` rewrites `driver: docker` -> `tempdir` before
+    building the in-container Orchestrator — the one legitimate rewrite, since we
+    are already inside the container the driver asked for. But the Orchestrator
+    then recorded the REWRITTEN copy, so a docker run's own `task.json` claimed
+    `driver: tempdir`.
+
+    That fed straight into the gate that reads the driver back out of the record:
+    `evaluate <run_dir>` on a container row skipped the host-grading refusal AND
+    the `graded_on_host` stamp, and graded a container task against the host
+    filesystem silently. Verified against a real docker run before the fix: a
+    `driver: docker` task re-graded on the host, unprompted and unstamped.
+
+    `recorded_task` is the seam, exercised here without needing docker.
+    """
+    from coder_eval.config import settings
+    from coder_eval.models import (
+        ApiBackend,
+        FileExistsCriterion,
+        SandboxConfig,
+        TaskDefinition,
+        parse_agent_config,
+    )
+    from coder_eval.orchestrator import Orchestrator
+
+    monkeypatch.setattr(settings, "api_backend", ApiBackend.DIRECT)
+
+    def _task(driver: str) -> TaskDefinition:
+        return TaskDefinition(
+            task_id="driver_record_probe",
+            description="d",
+            agent=parse_agent_config(type="none"),
+            sandbox=SandboxConfig(driver=driver),
+            success_criteria=[FileExistsCriterion(description="c", path="nope.txt")],
+            pre_run=[],
+            post_run=[],
+        )
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    # Exactly the container's shape: RUN as tempdir, RECORD as docker.
+    orch = Orchestrator(
+        task=_task("tempdir"),
+        recorded_task=_task("docker"),
+        run_dir=run_dir,
+        variant_id="v",
+    )
+    await orch.run()
+
+    assert orch.result is not None
+    assert orch.result.task_config is not None
+    assert orch.result.task_config.resolved["sandbox"]["driver"] == "docker", (
+        "the record denied the task ever used docker, which disarms the host-grading gate"
+    )
+    # The run itself really did use tempdir — the rewrite is not undone, only unrecorded.
+    assert orch.task.sandbox.driver == "tempdir"
+
+
+def test_the_recorded_task_defaults_to_the_task_being_run(tmp_path: Path) -> None:
+    """Every caller but the in-container one passes nothing, and must be unaffected."""
+    from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition, parse_agent_config
+    from coder_eval.orchestrator import Orchestrator
+
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        agent=parse_agent_config(type="none"),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(description="c", path="o")],
+    )
+    orch = Orchestrator(task=task, run_dir=tmp_path, variant_id="v")
+    assert orch.recorded_task is task

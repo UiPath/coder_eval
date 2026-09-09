@@ -146,10 +146,12 @@ def _resolve_run_dir_or_work_dir(
             task, source_yaml = load_task(target.task_file)
             console.print(f"[dim]Grading with {target.task_file} (overrides the run's recorded config).[/dim]")
         else:
-            # pre_run/post_run and the sandbox's installers both run only on the
-            # --copy path (an adopted workspace must not have its hooks re-run
-            # over the agent's deliverables, and `adopt` installs nothing), so
-            # in place they are not capabilities the run dir can reach.
+            # pre_run and the sandbox's installers both run only on the --copy
+            # path (an adopted workspace must not have pre_run re-run over the
+            # agent's deliverables, and `adopt` installs nothing), so in place
+            # they are not capabilities the run dir can reach. post_run is NOT
+            # one of them — it belongs to the grading phase and runs on both
+            # paths, so `embedded_commands` scans it unconditionally.
             #
             # Derived through the SAME function `run_evaluation` uses, not
             # restated. This value decides whether recorded shell is refused, so

@@ -572,3 +572,186 @@ def test_a_copy_grade_leaves_the_runs_artifacts_pointer_alone(tmp_path: Path) ->
     # The consequence, asserted directly rather than inferred from the field.
     _invoke(["evaluate", str(task_dir)])
     assert _row(task_dir)["final_status"] == FinalStatus.SUCCESS.value
+
+
+# ---------------------------------------------------------------------------
+# post_run belongs to the GRADING phase
+#
+# `post_run` is defined as running "after the evaluation verdict is finalized",
+# and it may mutate the workspace. Under `execute` there is no verdict to come
+# after, so running it there inverted its own contract AND broke the round-trip
+# guarantee: the criteria had not read the tree yet, so `evaluate` graded a
+# workspace `post_run` had already modified. `execute` now DEFERS it to whichever
+# command grades.
+# ---------------------------------------------------------------------------
+
+# Deliberately destructive, and destructive of the exact file the criteria read.
+# A `post_run` that mutates something no criterion observes (`rm -rf
+# node_modules` on a pure-python task — the shape that shipped) cannot tell the
+# two orderings apart, which is precisely why the defect survived: the in-tree
+# tasks all got away with it.
+_POST_RUN_TASK = """
+task_id: post_run_phase_probe
+description: "post_run deletes the file the criteria read, so ORDER decides the verdict."
+tags: [smoke]
+agent:
+  type: none
+sandbox:
+  driver: tempdir
+pre_run:
+  - command: "printf ok > proof.txt"
+post_run:
+  - command: "rm -f proof.txt"
+success_criteria:
+  - type: file_exists
+    path: proof.txt
+    description: "Present iff the criteria ran BEFORE post_run."
+"""
+
+
+@pytest.fixture
+def post_run_task(tmp_path: Path) -> Path:
+    task_file = tmp_path / "post_run_phase_probe.yaml"
+    task_file.write_text(_POST_RUN_TASK, encoding="utf-8")
+    return task_file
+
+
+def _post_run_commands(task_dir: Path) -> list[str]:
+    """The recorded post_run commands.
+
+    Never compared as a whole list: `experiments/default.yaml` appends its own
+    `rm -rf node_modules .npm-prefix` (cleanup-last, per post_run's reverse
+    append order), so pinning the full list would assert the layer merge rather
+    than the phase these tests are about — and would break the day a baseline
+    default changes.
+    """
+    return [r["command"] for r in _row(task_dir)["post_run_results"]]
+
+
+def _proof(task_dir: Path) -> Path:
+    artifacts = sorted((task_dir / "artifacts").glob("*"))
+    assert len(artifacts) == 1, f"expected one preserved workspace, got {artifacts}"
+    return artifacts[0] / "proof.txt"
+
+
+def test_a_destructive_post_run_does_not_change_the_verdict_across_the_split(
+    tmp_path: Path, post_run_task: Path
+) -> None:
+    """The round-trip guarantee, on the one task shape that can actually break it.
+
+    `run` checks the criteria and THEN deletes proof.txt, so it passes. If
+    `execute` runs post_run too, the file is gone before `evaluate` ever looks
+    and the identical trajectory scores 0.00 — same agent output, opposite
+    verdict.
+    """
+    direct = tmp_path / "direct"
+    _invoke(["run", str(post_run_task), "--run-dir", str(direct)])
+    expected = _row(_task_dir(direct))
+    assert expected["final_status"] == FinalStatus.SUCCESS.value, "the fixture must pass under a single `run`"
+
+    split = tmp_path / "split"
+    _invoke(["execute", str(post_run_task), "--run-dir", str(split)])
+    _invoke(["evaluate", str(_task_dir(split)), "--allow-recorded-commands"])
+    actual = _row(_task_dir(split))
+
+    assert actual["final_status"] == expected["final_status"]
+    assert actual["weighted_score"] == expected["weighted_score"]
+
+
+def test_execute_defers_post_run_instead_of_running_it(tmp_path: Path, post_run_task: Path) -> None:
+    """Asserted on the side effect, not on a log line: the deletion must not have
+    happened, so the workspace `evaluate` inherits is the one the agent left."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(post_run_task), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+
+    assert _proof(task_dir).is_file(), "execute ran post_run and deleted the criteria's input"
+    assert _post_run_commands(task_dir) == [], "a deferred command must not record a result"
+
+
+def test_the_grading_pass_runs_post_run_and_records_it(tmp_path: Path, post_run_task: Path) -> None:
+    """Deferred, not cancelled — the commands still run, one phase later."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(post_run_task), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+
+    _invoke(["evaluate", str(task_dir), "--allow-recorded-commands"])
+
+    assert not _proof(task_dir).exists(), "the grading pass never ran post_run"
+    assert _post_run_commands(task_dir).count("rm -f proof.txt") == 1
+    recorded = _row(task_dir)["post_run_results"]
+    assert all(r["exit_code"] == 0 for r in recorded), recorded
+
+
+def test_a_second_grade_does_not_run_post_run_again(tmp_path: Path, post_run_task: Path) -> None:
+    """Nothing declares post_run idempotent, and the first grade already ran it.
+
+    Re-running would repeat the side effects and double-count the records, since
+    `_seed_from_prior_result` has already carried the first pass's results onto
+    this row.
+    """
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(post_run_task), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+    _invoke(["evaluate", str(task_dir), "--allow-recorded-commands"])
+    after_first = _post_run_commands(task_dir)
+
+    # The re-grade now FAILS the criterion — post_run deleted its input on the
+    # first pass. That is expected and is not what this test is about; what
+    # matters is that the record does not grow.
+    _invoke(["evaluate", str(task_dir), "--allow-recorded-commands"], expect_exit=1)
+    assert _post_run_commands(task_dir) == after_first, "post_run ran twice"
+
+
+def test_run_resume_grades_the_deferred_post_run_too(tmp_path: Path, post_run_task: Path) -> None:
+    """`run --resume` is the other command that grades an executed row, so it
+    owes the same deferred commands `evaluate` does."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(post_run_task), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+
+    _invoke(["run", str(post_run_task), "--run-dir", str(run_dir), "--resume"])
+
+    assert _row(task_dir)["final_status"] == FinalStatus.SUCCESS.value
+    assert _post_run_commands(task_dir).count("rm -f proof.txt") == 1
+    assert not _proof(task_dir).exists()
+
+
+def test_an_in_place_grade_refuses_a_recorded_post_run_without_consent(tmp_path: Path, post_run_task: Path) -> None:
+    """post_run now runs on the DEFAULT (in-place) path, so the trust gate has to
+    cover it there. It was scanned only under `include_setup_phase`, which is
+    False in place — which would have let a shared run directory run recorded
+    shell on the grader's host with no prompt at all."""
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(post_run_task), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+
+    result = _invoke(["evaluate", str(task_dir)], expect_exit=2)
+    assert "rm -f proof.txt" in result.output, "the refusal must name the command it refused"
+    assert _proof(task_dir).is_file(), "refused, yet the command ran anyway"
+
+
+def test_the_baseline_post_run_alone_does_not_prompt(tmp_path: Path) -> None:
+    """The whole point of the exemption, on the shape that is 100% of real runs.
+
+    `experiments/default.yaml` appends `rm -rf node_modules .npm-prefix` to every
+    task, so once post_run began running on the in-place path, scanning it
+    naively made EVERY `evaluate <run_dir>` demand --allow-recorded-commands.
+    A refusal that always fires is read as a formality and waved through, which
+    is how the gate would have stopped protecting the authored commands that DO
+    represent a choice by whoever wrote the run directory.
+
+    The agentless task authors no post_run of its own, so the recorded list holds
+    only the grader's own baseline — nothing the record chose.
+    """
+    run_dir = tmp_path / "r"
+    _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    task_dir = _task_dir(run_dir)
+
+    # No --allow-recorded-commands, and no refusal.
+    _invoke(["evaluate", str(task_dir)])
+
+    assert _row(task_dir)["final_status"] == FinalStatus.SUCCESS.value
+    assert "rm -rf node_modules .npm-prefix" in _post_run_commands(task_dir), (
+        "exempt from the PROMPT is not exempt from RUNNING — the command still has to execute"
+    )

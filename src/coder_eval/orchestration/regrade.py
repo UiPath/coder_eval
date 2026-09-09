@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import cache
 from pathlib import Path
 
 from coder_eval.models import (
@@ -93,15 +94,63 @@ def task_from_prior(
     return task, record.source_yaml
 
 
+@cache
+def _operator_baseline_post_run() -> frozenset[str]:
+    """``post_run`` commands the GRADER's own default experiment gives every task.
+
+    Read from the grading host's ``DEFAULT_EXPERIMENT_PATH``, never from the run
+    record — the whole point is to compare what arrived against what this
+    operator's own config does. A record cannot widen this set by claiming
+    membership in it; an exact string match is the only way in, and a match means
+    the command is one this host already runs on every task of its own.
+
+    Fails CLOSED. Any problem loading or parsing the baseline yields an empty set,
+    so every recorded command is scanned and the operator is asked. Cached because
+    it is a YAML parse on a path that cannot change within a process.
+    """
+    from coder_eval.orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment
+
+    try:
+        defaults = load_experiment(DEFAULT_EXPERIMENT_PATH).defaults
+    # Broad by intent: a missing or invalid baseline must narrow the exemption, never block a grade.
+    except Exception as e:
+        logger.debug(
+            "No baseline post_run exemption (%s: %s); every recorded command will be scanned.", type(e).__name__, e
+        )
+        return frozenset()
+    if defaults is None or not defaults.post_run:
+        return frozenset()
+    return frozenset(c.command for c in defaults.post_run)
+
+
 def embedded_commands(task: TaskDefinition, *, include_setup_phase: bool = True) -> list[str]:
     """Every shell command a rebuilt task definition would run on this host.
 
     ``include_setup_phase`` covers the two capability families that exist only on
-    the ``--copy`` path: ``pre_run`` / ``post_run``, and the sandbox's own
-    provisioning. Both are SKIPPED when grading in place (``Sandbox.adopt`` runs
-    no installer, and re-running the hooks would overwrite the agent's
-    deliverables before the criteria read them), so on that path they are not a
-    capability the run dir has.
+    the ``--copy`` path: ``pre_run``, and the sandbox's own provisioning. Both are
+    SKIPPED when grading in place (``Sandbox.adopt`` runs no installer, and
+    re-running ``pre_run`` would overwrite the agent's deliverables before the
+    criteria read them), so on that path they are not a capability the run dir
+    has.
+
+    ``post_run`` is deliberately NOT behind that flag, and this is the one place
+    the distinction bites. It used to be, back when the hooks were skipped as a
+    pair — but ``post_run`` belongs to the GRADING phase (``execute`` defers it),
+    so it now runs on EVERY grading path, in place included. Leaving it inside
+    ``include_setup_phase`` would have made the in-place path — the DEFAULT for a
+    run directory — execute recorded shell with no consent prompt at all.
+
+    It is filtered against ``_operator_baseline_post_run()`` for a reason worth
+    stating precisely: this gate asks the operator to approve shell **the record
+    chose**, and a single ``coder-eval run`` — the behaviour the split must
+    reproduce — runs ``post_run`` with no prompt at all, because the config came
+    from the operator. The grader's own default experiment appends the same
+    ``post_run`` to every task it ever runs, so finding one of those commands in
+    a record reveals no choice the record made and grants no capability the
+    operator's own config does not already exercise on every run. Prompting on it
+    would fire on 100% of run directories, and a refusal that always fires is
+    read as a formality and waved through — which is how the gate would stop
+    protecting the authored commands that DO represent a choice.
 
     Sandbox provisioning is the half this gate originally missed, and it was the
     worst one. ``grading_sandbox_config`` carries the recorded ``sandbox`` block
@@ -147,8 +196,12 @@ def embedded_commands(task: TaskDefinition, *, include_setup_phase: bool = True)
             # shlex-quoted, so this is disclosure rather than injection — but it
             # is still a subprocess the recorded config chose to start.
             commands.append(f"uv run uipath eval {c.agent_name} {c.eval_set}")
+    # Unconditional: post_run runs on every path that grades (see the docstring).
+    # Minus the operator's own universal baseline, which the record did not choose.
+    baseline = _operator_baseline_post_run()
+    commands += [c.command for c in task.post_run if c.command not in baseline]
     if include_setup_phase:
-        commands += [c.command for c in task.pre_run] + [c.command for c in task.post_run]
+        commands += [c.command for c in task.pre_run]
         sandbox = task.sandbox
         if sandbox.python is not None and sandbox.python.env_packages:
             commands.append(f"uv pip install {' '.join(sandbox.python.env_packages)}")

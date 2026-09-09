@@ -1544,6 +1544,10 @@ post_run:
 
 Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are captured on the `post_run_results` field of the evaluation result (truncated to 100KB each).
 
+**`post_run` runs in the grading phase.** "After evaluation completes" is a phase, not a clock reading, and it matters because these commands may mutate the workspace the criteria read — `rm -rf node_modules` is the usual case. So `coder-eval execute`, which checks no criteria, **defers** them; they run when `coder-eval evaluate <run_dir>` or `coder-eval run --resume` grades the row, and exactly once. Under a plain `coder-eval run` nothing changes: criteria first, then `post_run`, as always.
+
+The consequence worth knowing: a run you `execute` and never grade never runs its `post_run`, so its preserved sandbox keeps whatever the cleanup would have removed.
+
 **Experiment-level defaults:**
 
 Set `defaults.post_run` in an experiment YAML to run cleanup or extraction after every task.

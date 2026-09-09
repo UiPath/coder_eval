@@ -233,6 +233,13 @@ def run_task_internal_command(
     # The path below is never re-read; it only seeds Orchestrator's TASK_DIR.
     runtime_task_file = task_dir / "task.yaml" if task_dir.is_dir() else task_yaml
 
+    # Captured BEFORE the rewrite below: this is what `task.json` records.
+    # Recording the rewritten copy made a docker run's own record claim
+    # `driver: tempdir`, so `evaluate <run_dir>` skipped the host-grading
+    # refusal and the `graded_on_host` stamp entirely. See Orchestrator's
+    # `recorded_task`.
+    authored_task = task
+
     # Force driver back to tempdir for the actual in-container run.
     # We're already inside the container; another nested docker would be
     # both wrong and impossible (no docker CLI in image).
@@ -267,6 +274,7 @@ def run_task_internal_command(
         replicate_index=replicate_index,
         workspace_dir=workspace_dir,
         grade=grade,
+        recorded_task=authored_task,
     )
 
     # Install the stdout-NDJSON stream callback so per-tool-call events

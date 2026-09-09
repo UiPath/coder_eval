@@ -379,6 +379,7 @@ class Orchestrator:
         workspace_dir: Path | None = None,
         grade: bool = True,
         prior_result: EvaluationResult | None = None,
+        recorded_task: TaskDefinition | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -432,6 +433,17 @@ class Orchestrator:
         self.config_lineage = config_lineage or {}
         self.replicate_index = replicate_index
         self.grade = grade
+        # What `task_config.resolved` records, which is NOT always what we RUN.
+        # `run_task_internal_command` rewrites `driver: docker` -> `tempdir`
+        # before building the in-container Orchestrator (we are already inside
+        # the container the driver asked for), and recording that rewrite made
+        # the run's own record deny it ever used docker. A later
+        # `evaluate <run_dir>` reads the driver back out of the record, so the
+        # host-grading refusal never fired and the `graded_on_host` stamp was
+        # never applied: a container task's criteria ran against the host
+        # filesystem silently, which is the exact outcome that gate exists to
+        # prevent. The record must describe the task as AUTHORED.
+        self.recorded_task = recorded_task if recorded_task is not None else task
         self.prior_result = prior_result
 
         # Derived paths
@@ -832,9 +844,14 @@ class Orchestrator:
         self.result.expected_commands = prior.expected_commands
         self.result.simulation = prior.simulation
 
-        # The hooks belong to the execute phase and are NOT re-run against an
-        # adopted workspace (see _skip_hooks_for_adopted), so their recorded
+        # pre_run belongs to the execute phase and is NOT re-run against an
+        # adopted workspace (see _skip_pre_run_for_adopted), so its recorded
         # outcomes would otherwise vanish from the graded row.
+        #
+        # post_run is the opposite: it belongs to the GRADING phase, so on a row
+        # that came from `execute` this list is EMPTY and this grade is about to
+        # fill it (see _skip_post_run). Copied into a fresh list either way, so
+        # appending here can never mutate the prior result.
         self.result.pre_run_results = list(prior.pre_run_results)
         self.result.post_run_results = list(prior.post_run_results)
 
@@ -1176,7 +1193,7 @@ class Orchestrator:
 
         # Task config record (warnings=False: discriminated unions produce benign warnings)
         self.result.task_config = TaskConfigRecord(
-            resolved=self.task.model_dump(warnings=False),
+            resolved=self.recorded_task.model_dump(warnings=False),
             source_yaml=self.source_yaml,
             source_file=str(self.task_file) if self.task_file else None,
             lineage=self.config_lineage,
@@ -3152,42 +3169,45 @@ class Orchestrator:
         ``FinalStatus.ERROR``. Post-run commands and cleanup still execute via
         the ``finally`` block.
 
-        Skipped entirely on an adopted sandbox — see ``_skip_hooks_for_adopted``.
+        Skipped entirely on an adopted sandbox — see ``_skip_pre_run_for_adopted``.
         """
-        if self.result is None or self._skip_hooks_for_adopted(self.task.pre_run, "pre_run"):
+        if self.result is None or self._skip_pre_run_for_adopted(self.task.pre_run):
             return
         await self._run_command_list(self.task.pre_run, self.result.pre_run_results, "pre_run")
 
     async def _run_post_run_commands(self) -> None:
-        """Execute post-run commands inside the sandbox after evaluation.
+        """Execute post-run commands inside the sandbox after the criteria are checked.
 
         See ``_run_command_list``. Post-run commands are informational only —
         ``fail_on_error`` is not part of ``PostRunCommand``, so failures are
         warning-logged and never affect the evaluation verdict.
 
-        Skipped entirely on an adopted sandbox — see ``_skip_hooks_for_adopted``.
+        ``post_run`` belongs to the GRADING phase, not the execute phase — see
+        ``_skip_post_run``.
         """
-        if self.result is None or self._skip_hooks_for_adopted(self.task.post_run, "post_run"):
+        if self.result is None or self._skip_post_run():
             return
         await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
 
-    def _skip_hooks_for_adopted(self, commands: Sequence[PreRunCommand | PostRunCommand], phase: str) -> bool:
-        """True when ``phase``'s commands must not run against an adopted sandbox.
+    def _skip_pre_run_for_adopted(self, commands: Sequence[PreRunCommand]) -> bool:
+        """True when ``pre_run`` must not run against an adopted sandbox.
 
         ``adopt()`` guarantees it materializes nothing into the workspace, but
         that guarantee is only as strong as its weakest caller: ``run()`` invokes
-        the pre/post-run hooks unconditionally, and those commands run with
+        the hooks unconditionally, and those commands run with
         ``cwd = sandbox_dir``. Several in-tree tasks stage fixtures there
         (``cp -a /app/[!.]* "$PWD/"``), so re-running them during a detached
         grade would overwrite the agent's deliverables *before* the criteria read
         them — silently changing the verdict and destroying preserved artifacts.
 
-        The hooks belong to the EXECUTE phase; the prior run already ran them,
-        and their recorded results are carried over by ``_seed_from_prior_result``.
+        ``pre_run`` prepares the environment the AGENT needs, so it belongs to
+        the execute phase; the prior run already ran it, and its recorded results
+        are carried over by ``_seed_from_prior_result``. Its ``post_run`` sibling
+        is the opposite case — see ``_skip_post_run``.
 
-        ``commands`` is passed in rather than looked up from ``phase``. The
+        ``commands`` is passed in rather than looked up from a phase name. The
         lookup was a stringly-typed branch whose only consumer was a log line, so
-        a typo (``"prerun"``) would silently report the post_run count with
+        a typo (``"prerun"``) would silently report the wrong count with
         nothing — not pyright, not ruff — able to see it, in the same module
         CE050 was written to protect from exactly that.
         """
@@ -3195,12 +3215,57 @@ class Orchestrator:
             return False
         if commands:
             logger.info(
-                "Skipping %d %s command(s): the sandbox was adopted for grading, and re-running them "
+                "Skipping %d pre_run command(s): the sandbox was adopted for grading, and re-running them "
                 + "would mutate the workspace under evaluation.",
                 len(commands),
-                phase,
             )
         return True
+
+    def _skip_post_run(self) -> bool:
+        """True when ``post_run`` must not run in THIS phase.
+
+        ``post_run`` runs after the verdict is finalized and is free to mutate
+        the workspace (``rm -rf node_modules`` is the archetype), so it belongs
+        to whichever phase GRADES — never to the phase that merely executes.
+        Running it under ``execute`` inverted its own contract and broke
+        round-trip equivalence: the criteria had not read the tree yet, so
+        ``execute`` + ``evaluate`` graded a workspace ``post_run`` had already
+        modified and could return a different verdict than a single ``run`` for
+        the identical trajectory.
+
+        Two skips, and they are NOT the same condition:
+
+        * ``grade=False`` (``execute``) — deferred, not cancelled. The commands
+          run later, when ``evaluate`` / ``run --resume`` grades the row. A run
+          that is never graded therefore never tidies its sandbox; that is the
+          accepted cost of keeping the verdict honest.
+        * an adopted sandbox whose prior row ALREADY recorded ``post_run``
+          results — that phase graded, so the commands have run once. Nothing
+          declares them idempotent, and ``_seed_from_prior_result`` has already
+          copied those results onto this row, so a second pass would both re-run
+          the side effects and double-count the records.
+
+        The two combined mean each command runs exactly once, in the grading
+        phase, whichever command that turns out to be.
+        """
+        assert self.result is not None
+        commands = self.task.post_run
+        if not self.grade:
+            if commands:
+                logger.info(
+                    "Deferring %d post_run command(s) to the grading phase: they run after the criteria are "
+                    + "checked, and `execute` checks none. `coder-eval evaluate <run_dir>` will run them.",
+                    len(commands),
+                )
+            return True
+        if self.prior_result is not None and self.prior_result.post_run_results:
+            if commands:
+                logger.info(
+                    "Skipping %d post_run command(s): the run being graded already ran them.",
+                    len(commands),
+                )
+            return True
+        return False
 
     def _unpreserved_sandbox_path(self) -> str | None:
         """What ``sandbox_path`` should say under ``PreservationMode.NONE``.
