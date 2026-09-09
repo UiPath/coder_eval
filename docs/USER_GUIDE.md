@@ -197,7 +197,7 @@ commands, so an errored row could never be graded again.
 **A run directory is untrusted input.** It is a shareable artifact — the whole
 point of the detached flow is that one machine executes and another grades — and
 rebuilding the task from it means the run dir decides what runs on your host,
-with your environment. So two things are refused rather than assumed:
+with your environment. So the recorded config is refused rather than assumed:
 
 - A recorded config that carries shell (`run_command` criteria, `agent_judge`,
   `uipath_eval`, an authored `post_run`, and on the `--copy` path `pre_run`) needs
@@ -209,10 +209,29 @@ with your environment. So two things are refused rather than assumed:
   exempt. The record did not choose it, running it is exactly what your own
   config does on every run, and prompting on it would fire for 100% of run
   directories — a refusal that always fires stops being read.
-A run made with `driver: docker` is a third case, and it is not a refusal:
-grading is **dispatched into a container of the task's own image**, so its
-criteria address the same paths and toolchain they did during the run. Nothing
-extra to pass — `coder-eval evaluate <run_dir>` and `run --resume` both do it.
+- A run made with `driver: docker` is graded **in a container of the task's own
+  image**, so its criteria address the same paths and toolchain they did during
+  the run. Starting that container is itself a capability the record chose — it
+  names the image, and the default credential allowlist is forwarded into it —
+  so it is listed by the same gate and needs the same `--allow-recorded-commands`
+  (or an explicit task file). Grading this way needs a working docker daemon, and
+  may pull or build an image.
+
+  `--allow-host-grading` is the escape hatch: no docker here, or criteria you
+  know are host-portable. It grades on this machine instead, and stamps the row
+  `graded_on_host` so it is never silently compared with a container-graded one.
+
+  Two limits are worth knowing before you rely on it. The grading container is a
+  **second, fresh** container: only the workspace crosses from the one that ran
+  the agent, and `pre_run` is **not** re-run — so a criterion that depends on
+  state `pre_run` put outside the workspace (a symlink in `/root`, an installed
+  package, a started service) will not see it. And for a `dockerfile_path` task
+  the grading phase re-runs `docker build`, so a Dockerfile or base image that
+  changed between the two phases yields a different grading image. Both cases are
+  warned about at dispatch; for either, a single `coder-eval run` is exact.
+
+`run --resume` is not affected by the gate at all: it re-resolves the task from
+your own YAML rather than from the record.
 
 Why it is not merely nicer: `tasks/byod_smoke_test.yaml` asserts
 `test -f /opt/byod_marker`, a file baked into its image. The identical row scores

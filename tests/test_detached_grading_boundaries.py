@@ -202,15 +202,24 @@ class TestDockerGradeBoundary:
 class TestInContainerGradeCoercion:
     """The container side of the same boundary."""
 
+    # Valid enough to survive `load_task`, which the regrade branch reaches. The
+    # `grade` / `regrade` coercions refuse before it, so those tests do not
+    # depend on this; the prior.json ones do.
+    _VALID_TASK_YAML = (
+        "task_id: t\ndescription: d\nagent:\n  type: none\n"
+        "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: d\n"
+    )
+
     @staticmethod
-    def _run_with_context(tmp_path: Path, grade: object):
+    def _run_with_context(tmp_path: Path, grade: object = True, **extra: object):
         input_dir = tmp_path / "input"
-        input_dir.mkdir()
-        # Only the keys read BEFORE the grade coercion need real values; the
-        # command must refuse before it ever builds an Orchestrator.
-        context = {"variant_id": "default", "source_yaml": "task_id: t\n", "grade": grade}
+        input_dir.mkdir(exist_ok=True)
+        # Only the keys read BEFORE the coercions need real values; the command
+        # must refuse before it ever builds an Orchestrator.
+        context: dict[str, object] = {"variant_id": "default", "source_yaml": "task_id: t\n", "grade": grade}
+        context.update(extra)
         (input_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
-        (input_dir / "task.yaml").write_text("task_id: t\n", encoding="utf-8")
+        (input_dir / "task.yaml").write_text(TestInContainerGradeCoercion._VALID_TASK_YAML, encoding="utf-8")
         return runner.invoke(
             app,
             ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")],
@@ -243,6 +252,36 @@ class TestInContainerGradeCoercion:
         result = self._run_with_context(tmp_path, "false")
         assert result.exit_code == 2
         assert "must be a boolean" in result.output
+
+    def test_a_non_boolean_regrade_is_a_hard_error(self, tmp_path: Path) -> None:
+        """The destructive twin of the test above, and the worse direction: a
+        truthy `"regrade": "false"` would take the ORDINARY branch and re-RUN the
+        agent against the workspace the operator asked only to grade, destroying
+        the trajectory being graded."""
+        result = self._run_with_context(tmp_path, regrade="false")
+        assert result.exit_code == 2
+        assert "'regrade' must be a boolean" in result.output
+
+    def test_a_regrade_without_a_staged_prior_names_the_missing_file(self, tmp_path: Path) -> None:
+        """The host stages prior.json beside task.yaml. Without it there is no row
+        to seed from, and the message must name the file — a crash here reaches
+        the host only as the opaque "container exited without producing
+        task.json"."""
+        result = self._run_with_context(tmp_path, regrade=True)
+        assert result.exit_code == 2
+        assert "prior.json" in result.output
+        assert "missing" in result.output
+
+    def test_an_unreadable_prior_degrades_to_a_message_not_a_traceback(self, tmp_path: Path) -> None:
+        """Corrupt bytes must produce the named-file diagnostic the code's own
+        comment promises, not a ValidationError traceback."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "prior.json").write_text("{not json", encoding="utf-8")
+        result = self._run_with_context(tmp_path, regrade=True)
+        assert result.exit_code == 2
+        assert "not a readable EvaluationResult" in result.output
+        assert "Traceback" not in result.output
 
     # The in-container default is asserted BEHAVIOURALLY by
     # `TestGradePlumbedIntoTheContainerOrchestrator::test_an_absent_key_still_grades`.

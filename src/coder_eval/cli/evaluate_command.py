@@ -87,6 +87,7 @@ def _resolve_inputs(
     *,
     allow_recorded_commands: bool,
     in_place: bool | None,
+    allow_host_grading: bool = False,
 ) -> _ResolvedInputs:
     """Turn the CLI positionals into a task, a workspace, and (maybe) a prior run.
 
@@ -106,7 +107,11 @@ def _resolve_inputs(
 
     try:
         return _resolve_run_dir_or_work_dir(
-            target, workspace, allow_recorded_commands=allow_recorded_commands, in_place=in_place
+            target,
+            workspace,
+            allow_recorded_commands=allow_recorded_commands,
+            in_place=in_place,
+            allow_host_grading=allow_host_grading,
         )
     except RegradeError as e:
         # The shared core raises a plain exception (orchestration/ must not
@@ -120,6 +125,7 @@ def _resolve_run_dir_or_work_dir(
     *,
     allow_recorded_commands: bool,
     in_place: bool | None,
+    allow_host_grading: bool = False,
 ) -> _ResolvedInputs:
     """The mode-specific half of :func:`_resolve_inputs`."""
     prior: EvaluationResult | None = None
@@ -164,6 +170,13 @@ def _resolve_run_dir_or_work_dir(
                 target.target,
                 allow_recorded_commands=allow_recorded_commands,
                 include_setup_phase=setup_will_run,
+                # The in-place path may dispatch a CONTAINER built from the
+                # recorded sandbox block, which is a wider capability than any
+                # recorded shell string -- the gate has to name it. Both inputs
+                # are forwarded so the gate can ask `_should_grade_in_container`
+                # itself rather than have this caller re-derive the rule.
+                grade_in_place=not setup_will_run,
+                allow_host_grading=allow_host_grading,
             )
         work_dir = workspace or default_workspace(target.target, prior)
         recorded_source = prior.task_config.source_file if prior.task_config else None
@@ -276,18 +289,22 @@ def evaluate_command(
         False,
         "--allow-recorded-commands",
         help=(
-            "Accept shell commands (run_command criteria, pre_run/post_run) rebuilt from the run "
-            "directory's own task.json. A run directory is a shareable artifact, so its recorded "
-            "config is untrusted input; without this, grading refuses rather than running it here."
+            "Accept the capabilities rebuilt from the run directory's own task.json: shell "
+            "(run_command criteria, pre_run/post_run) and, for a `driver: docker` row, starting a "
+            "container of the image the record names with your credentials in its environment. A "
+            "run directory is a shareable artifact, so its recorded config is untrusted input; "
+            "without this, grading refuses rather than running it here."
         ),
     ),
     allow_host_grading: bool = typer.Option(
         False,
         "--allow-host-grading",
         help=(
-            "Grade a `driver: docker` run on this host. Grading cannot start a container, so the "
-            "criteria run against a filesystem that lacks the container's paths and toolchain — "
-            "scores may differ from the run. Such rows are stamped graded_on_host."
+            "Grade a `driver: docker` run on THIS HOST instead of in a container of the task's "
+            "own image (the default). For a machine with no docker, or criteria you know are "
+            "host-portable. The criteria then run against a filesystem lacking the container's "
+            "paths and toolchain, so scores may differ from the run; such rows are stamped "
+            "graded_on_host."
         ),
     ),
     run_dir: Path | None = typer.Option(  # noqa: B008
@@ -359,6 +376,7 @@ def run_evaluation(
         workspace,
         allow_recorded_commands=allow_recorded_commands,
         in_place=in_place,
+        allow_host_grading=allow_host_grading,
     )
     task = inputs.task
     source_yaml = inputs.source_yaml
@@ -439,8 +457,9 @@ def run_evaluation(
             prior_result=prior,
         )
         graded = await orchestrator.run()
-        # Same stamp the delegating branch gets from `regrade_in_place`. Line 357
-        # above accepted the docker→host downgrade for THIS branch too, and
+        # Same stamp the delegating branch gets from `regrade_in_place`. The
+        # `grading_sandbox_config` call above accepted the docker->host
+        # downgrade for THIS branch too, and
         # CLAUDE.md, the user guide and CE051's own noqa all state the stamp as
         # unconditional — so `evaluate <run_dir> --copy --allow-host-grading`
         # was writing an unstamped host verdict that nothing downstream could
@@ -448,7 +467,15 @@ def run_evaluation(
         stamp_host_grading(graded, task)
         return graded
 
-    result = asyncio.run(_setup_and_run())
+    try:
+        result = asyncio.run(_setup_and_run())
+    except RegradeError as e:
+        # The delegating branch raises this for the missing/unresolvable task
+        # file and for a failed grading container, and both messages carry the
+        # operator's next step. Rendered like the three sibling handlers above --
+        # unwrapped, they arrived as the tail of a stack trace.
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(1) from e
     _report_and_exit(result, task=task, prior=prior, target=target, prepared_run_dir=prepared_run_dir)
 
 

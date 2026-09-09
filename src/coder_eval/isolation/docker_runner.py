@@ -32,6 +32,7 @@ from coder_eval.models import (
     CONTAINER_REFERENCE_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
+    IN_CONTAINER_ENV,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
     DockerDriverConfig,
@@ -679,6 +680,18 @@ class DockerRunner:
             # consumes; writable only for the run dir it must produce into.
             await asyncio.to_thread(grant_container_access, input_dir, writable=False)
             await asyncio.to_thread(grant_container_access, output_dir, writable=True)
+            if self.grade_workspace is not None:
+                # The graded workspace is a framework-owned mount like any other,
+                # so it needs the same widening -- and it is the one mount whose
+                # files the harness did NOT create, so the owner bits cannot be
+                # assumed. It happens to work when container #1 (running as root)
+                # wrote the tree, which is exactly what makes the broken case
+                # expensive: an operator-supplied `--workspace`, or artifacts
+                # re-created host-side, are owned by the host uid, and container
+                # root without DAC_OVERRIDE reaches them only through `other`.
+                # Criteria then fail EACCES and book a gating 0.0 that reads as
+                # an agent failure -- the CE039 shape this feature exists to end.
+                await asyncio.to_thread(grant_container_access, self.grade_workspace, writable=True)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
             # Prime the heartbeat before the container starts so the
@@ -760,6 +773,14 @@ class DockerRunner:
                 # an agent. Absent/False on every ordinary run.
                 "regrade": self.prior_result is not None,
                 "source_yaml": self.rt.source_yaml,
+                # The HOST's task-file path, recorded verbatim into task.json's
+                # audit trail. The container resolves TASK_DIR against
+                # /work/task_dir/task.yaml, which is right in there and exists on
+                # no host -- recording THAT made a detached grade of this row
+                # rebuild the task around an unresolvable path and silently mount
+                # no task dir. Absent -> the container falls back to its own path,
+                # so an older host keeps today's behaviour.
+                "host_task_file": str(self.rt.task_file) if self.rt.task_file else None,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
@@ -911,7 +932,56 @@ class DockerRunner:
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
         self._warn_on_version_mismatch(result)
         self._assert_grade_honored(result, task_json)
+        self._assert_regrade_honored(result, task_json)
         return result
+
+    def _assert_regrade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
+        """Fail loudly when a detached GRADE came back as a fresh agent run.
+
+        Exactly the sibling of :meth:`_assert_grade_honored`, for exactly the
+        same reason one release later. ``regrade`` crosses the boundary only
+        through ``context.json``; an image that predates container-side grading
+        ignores the unknown key, ignores the staged ``prior.json``, ignores the
+        ``/work/workspace`` mount, and falls through to the ordinary
+        ``Orchestrator`` branch -- which **starts an agent** from
+        ``initial_prompt``.
+
+        Nothing else catches it. ``_warn_on_version_mismatch`` only warns (and is
+        skipped entirely for ``dockerfile_path`` tasks), and
+        ``_assert_grade_honored`` early-returns because a grading container is
+        dispatched with ``grade=True``. So the host would fold a fabricated
+        trajectory back over the recorded row as its "grade" -- publishing a
+        verdict for work it never looked at, and billing the model for it.
+
+        Keyed on EVIDENCE, like its sibling: a container that honored the request
+        seeds from ``prior`` and never runs the agent, so the trajectory it
+        returns is the one we sent in. A DIFFERENT ``started_at`` is the tell --
+        ``_seed_from_prior_result`` restores the agent run's ``started_at``
+        verbatim (deliberately, so a re-graded row does not report the grading
+        pass's 2 seconds into ``average_duration``), so a fresh run is the only
+        way that field can move.
+        """
+        if self.prior_result is None:
+            return
+        if result.started_at == self.prior_result.started_at:
+            return
+        if task_json is not None:
+            # Same sidecar pattern as `_assert_grade_honored`: refusing in memory
+            # while leaving contradictory bytes in the bind-mounted run dir is
+            # not a refusal -- a later `aggregate` would publish them.
+            sidecar = task_json.with_suffix(task_json.suffix + ".rerun")
+            try:
+                os.replace(task_json, sidecar)
+                logger.warning("Quarantined the refused re-run record to %s", sidecar)
+            except OSError as exc:
+                logger.warning("Could not quarantine %s: %s", task_json, exc)
+        raise DockerRunError(
+            "Grading asked the container to score an already-executed run, but it returned a "
+            + f"different trajectory (started_at {result.started_at} vs the recorded "
+            + f"{self.prior_result.started_at}). The runtime image predates container-side "
+            + "grading and re-ran the agent instead; rebuild or pull a matching agent image, "
+            + "or grade on the host with --allow-host-grading."
+        )
 
     def _assert_grade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
         """Fail loudly when `execute` came back with a graded verdict.
@@ -1516,7 +1586,7 @@ class DockerRunner:
         # isolation. The Codex agent reads this to fall back to its full-access
         # sandbox: Codex's Landlock-backed read-only / workspace-write sandboxes
         # can't initialize inside a container and otherwise fail writes silently.
-        argv += ["--env", "CODER_EVAL_IN_CONTAINER=1"]
+        argv += ["--env", f"{IN_CONTAINER_ENV}=1"]
 
         # Hard-disable telemetry INSIDE the container. The app ships a baked-in
         # default connection string, so without this the in-container orchestrator

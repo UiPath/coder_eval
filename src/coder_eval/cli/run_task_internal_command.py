@@ -227,6 +227,12 @@ def run_task_internal_command(
     # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
     # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
     # Absent -> None -> standard run_dir/artifacts workspace.
+    # What task.json RECORDS as the task's source path, as distinct from the
+    # path this process resolves TASK_DIR against (see Orchestrator's
+    # `recorded_task_file`). Absent on an older host -> None -> the container
+    # path is recorded, which is the pre-existing behaviour.
+    host_task_file_raw = context.get("host_task_file")
+    recorded_task_file = Path(host_task_file_raw) if host_task_file_raw else None
     workspace_dir_raw = context.get("workspace_dir")
     workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
     config_lineage = {k: ConfigLineageEntry.model_validate(v) for k, v in (context.get("config_lineage") or {}).items()}
@@ -294,6 +300,7 @@ def run_task_internal_command(
         run_dir=output_dir,
         preservation_mode=preservation_mode,
         task_file=runtime_task_file,
+        recorded_task_file=recorded_task_file,
         variant_id=variant_id,
         source_yaml=source_yaml,
         config_lineage=config_lineage,
@@ -359,7 +366,7 @@ def _grade_recorded_run(
         raise typer.Exit(2)
     try:
         prior = EvaluationResult.model_validate_json(prior_path.read_text(encoding="utf-8"))
-    except ValueError as e:
+    except (OSError, ValueError) as e:
         # Degrade to a clean message rather than a traceback: the host parses
         # this container's task.json, so a crash here surfaces as the opaque
         # "container exited without producing task.json" rather than naming the

@@ -828,11 +828,29 @@ class TestCE027DocEnvVarParity:
         assert unbacked == [], f"false positive on non-assignment shape: {unbacked}"
 
     def test_name_side_of_env_value_literal_counts_as_backed(self):
-        # `--env CODER_EVAL_IN_CONTAINER=1` in src makes the doc assignment backed.
+        # `CODER_EVAL_IN_CONTAINER` reaches src only through the named constant
+        # `models/container_paths.py::IN_CONTAINER_ENV` -- both the docker
+        # `--env f"{IN_CONTAINER_ENV}=1"` writer and the four `os.environ.get`
+        # gates spell it that way. A scanner seeing only literals would call the
+        # repo's own gate unbacked and push the author to paste the literal back.
         from tests.lint.doc_env_parity import src_env_literals
 
         names = src_env_literals(self.REPO_ROOT / "src")
         assert "CODER_EVAL_IN_CONTAINER" in names
+
+    def test_a_constant_is_backed_only_when_something_reads_it(self, tmp_path: Path):
+        # The constant indirection must not weaken the rule: resolution is
+        # two-step, so a defined-but-unread constant stays unbacked exactly as a
+        # bare literal does.
+        from tests.lint.doc_env_parity import src_env_literals
+
+        (tmp_path / "defs.py").write_text(
+            'READ_ENV = "CODER_EVAL_READ"\nUNREAD_ENV = "CODER_EVAL_UNREAD"\n', encoding="utf-8"
+        )
+        (tmp_path / "use.py").write_text("import os\nx = os.environ.get(READ_ENV)\n", encoding="utf-8")
+        names = src_env_literals(tmp_path)
+        assert "CODER_EVAL_READ" in names
+        assert "CODER_EVAL_UNREAD" not in names
 
     def test_src_scan_requires_a_real_consumer_not_any_literal(self, tmp_path: Path):
         # A bare uppercase constant that no code reads must NOT count as "backed",
@@ -3794,6 +3812,14 @@ class TestCE052ProcessLethalMustBeContainerGated:
         src = 'if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n    os._exit(137)'
         assert not self._run(src)
 
+    def test_allows_a_gate_written_with_the_constant(self):
+        """The spelling the tree actually uses. A rule that saw only the literal
+        would read the constant-based gate as NO gate and tell the author to
+        paste the literal back — the rule arguing against the SSOT (and against
+        CE056) it should be reinforcing."""
+        src = 'if os.environ.get(IN_CONTAINER_ENV) == "1":\n    os._exit(137)'
+        assert not self._run(src)
+
     def test_allows_it_nested_deeper_inside_the_gate(self):
         """The real site defines a function and a loop inside the guard."""
         src = (
@@ -3849,6 +3875,58 @@ class TestRuffExternalCoversEveryRule:
         """Cheap guard against a typo silently widening the allowlist."""
         bad = sorted(i for i in self._external() if not re.fullmatch(r"CE\d{3}", i))
         assert not bad, f"not a CE rule id: {bad}"
+
+
+class TestCE056NoContainerEnvLiteral:
+    """CE056 flags a bare `CODER_EVAL_IN_CONTAINER` outside container_paths.
+
+    The motivating miss: every READER of the gate was migrated to
+    `IN_CONTAINER_ENV` and the single WRITER (`docker_runner`'s
+    `--env CODER_EVAL_IN_CONTAINER=1`) was not, so a rename would have disarmed
+    four gates at once, all silently. CE052 cannot see it -- that rule inspects
+    `if` guards, and the writer is not one.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/isolation/docker_runner.py"):
+        import ast
+
+        from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLiteral
+
+        return NoContainerEnvLiteral(filepath).check(ast.parse(src))
+
+    def test_flags_the_child_process_assignment_form(self):
+        """The exact shape that shipped unmigrated."""
+        assert self._run('argv += ["--env", "CODER_EVAL_IN_CONTAINER=1"]')
+
+    def test_flags_a_bare_read(self):
+        assert self._run('if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1": pass')
+
+    def test_allows_the_constant(self):
+        assert not self._run('argv += ["--env", f"{IN_CONTAINER_ENV}=1"]')
+
+    def test_allows_prose_that_merely_names_the_variable(self):
+        """A docstring explaining the gate must name it; a rule that pushed
+        authors to obfuscate their own explanations would be a bad trade."""
+        assert not self._run('"""Gated on CODER_EVAL_IN_CONTAINER, never on the driver."""')
+
+    def test_ignores_the_defining_module(self):
+        assert not self._run(
+            'IN_CONTAINER_ENV = "CODER_EVAL_IN_CONTAINER"',
+            filepath="src/coder_eval/models/container_paths.py",
+        )
+
+    def test_the_real_tree_is_clean(self):
+        """The whole point: the writer is migrated and stays migrated."""
+        import ast
+
+        from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLiteral
+
+        src = Path(__file__).parent.parent / "src" / "coder_eval"
+        violations = []
+        for py in src.rglob("*.py"):
+            violations += NoContainerEnvLiteral(str(py)).check(ast.parse(py.read_text(encoding="utf-8")))
+        assert not violations, violations
 
 
 class TestCE053NoRunRecordFilenameLiteral:

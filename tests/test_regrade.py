@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -355,6 +356,16 @@ class TestShouldGradeInContainer:
     separately rather than as one compound expression.
     """
 
+    @pytest.fixture(autouse=True)
+    def _on_the_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Three of these rows assert the HOST answer, so the ambient value of the
+        gate variable must not decide the test. This repo's own container harness
+        sets it on every task container, so inheriting it would flip two of them
+        to a silent pass-for-the-wrong-reason."""
+        from coder_eval.models import IN_CONTAINER_ENV
+
+        monkeypatch.delenv(IN_CONTAINER_ENV, raising=False)
+
     def test_a_docker_row_on_the_host_goes_to_a_container(self) -> None:
         from coder_eval.orchestration.regrade import _should_grade_in_container
 
@@ -365,7 +376,6 @@ class TestShouldGradeInContainer:
         machine without docker, and the row it produces is stamped."""
         from coder_eval.orchestration.regrade import _should_grade_in_container
 
-        assert _should_grade_in_container(_docker_task(), allow_host_grading=False) is True
         assert _should_grade_in_container(_docker_task(), allow_host_grading=True) is False
 
     def test_a_tempdir_row_never_starts_a_container(self) -> None:
@@ -437,9 +447,65 @@ class TestGradeInContainerDispatch:
         # The workspace belongs to the ORIGINAL run; a grading pass must never
         # move or delete it.
         assert captured["preservation_mode"] is PreservationMode.NONE
-        # The grade writes into its OWN run dir, which the caller then folds back
-        # into the row (preserving task.execute.json) — not into the row directly.
-        assert captured["run_dir"] == tmp_path / "grade-run"
+        # The grade writes into a SCRATCH dir the container alone owns, never the
+        # caller's run_dir. `run --resume` passes the executed row's own
+        # directory, where a pre-existing task.json would be read back as a
+        # successful grade if the container died (`_parse_result_or_raise` keys
+        # on existence and discards returncode) and where `docker.log` would be
+        # truncated. The verdict is folded back afterwards.
+        container_run_dir = captured["run_dir"]
+        assert isinstance(container_run_dir, Path)
+        assert container_run_dir != tmp_path / "grade-run"
+        assert container_run_dir.name.startswith("coder-eval-grade-")
+
+    async def test_the_container_grade_is_folded_back_into_the_callers_run_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The scratch dir is an implementation detail: the caller must still find
+        the graded task.json where it asked for it. The container's own
+        `docker.log` lands beside it under a PHASE-specific name, because on the
+        resume path `docker.log` is already the executed run's."""
+        import coder_eval.isolation.docker_runner as dr
+
+        graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
+
+        class _FakeRunner:
+            def __init__(self, rt, **kw):
+                self._run_dir = rt.run_dir
+
+            async def run(self):
+                self._run_dir.mkdir(parents=True, exist_ok=True)
+                (self._run_dir / "task.json").write_text(graded.model_dump_json(), encoding="utf-8")
+                (self._run_dir / "docker.log").write_text("container output", encoding="utf-8")
+                return graded
+
+        monkeypatch.setattr(dr, "DockerRunner", _FakeRunner)
+
+        from coder_eval.orchestration.regrade import regrade_in_place
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        task_file = tmp_path / "t.yaml"
+        task_file.write_text("task_id: t\n", encoding="utf-8")
+        run_dir = tmp_path / "row"
+        run_dir.mkdir()
+        # The executed run's own container log, which the grade must not clobber.
+        (run_dir / "docker.log").write_text("the executed run's log", encoding="utf-8")
+
+        await regrade_in_place(
+            task=_docker_task(),
+            prior=_result(),
+            workspace=workspace,
+            run_dir=run_dir,
+            task_file=task_file,
+            source_yaml="",
+            variant_id="v",
+        )
+
+        folded = EvaluationResult.model_validate_json((run_dir / "task.json").read_text(encoding="utf-8"))
+        assert folded.final_status is FinalStatus.SUCCESS
+        assert (run_dir / "grade.docker.log").read_text(encoding="utf-8") == "container output"
+        assert (run_dir / "docker.log").read_text(encoding="utf-8") == "the executed run's log"
 
     async def test_without_a_task_file_it_refuses_and_names_the_escape_hatch(self, tmp_path: Path) -> None:
         """The image is resolved relative to the task file; with none there is
@@ -586,3 +652,266 @@ class TestDockerRunnerGradingWiring:
         runner = self._runner(tmp_path)
         argv = runner._build_argv(tmp_path / "input", tmp_path / "out", container_name="c", image="img")
         assert CONTAINER_GRADE_WORKSPACE not in " ".join(argv)
+
+    def test_a_grading_run_forwards_the_hosts_own_task_file_for_the_record(self, tmp_path: Path) -> None:
+        """`task.json` must record a path that exists on a HOST.
+
+        The container resolves TASK_DIR against `/work/task_dir/task.yaml`, which
+        is right in there and meaningless anywhere else. Recording THAT made a
+        detached grade rebuild the task around an unresolvable path: the dispatch
+        guard saw a non-None Path and let it through, and `_prepare_task_dir_mount`
+        then silently mounted nothing, so every `$TASK_DIR` criterion resolved
+        against the wrong tree.
+        """
+        import asyncio
+        import json
+
+        runner = self._runner(tmp_path)
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        asyncio.run(runner._stage_inputs(input_dir))
+
+        context = json.loads((input_dir / "context.json").read_text(encoding="utf-8"))
+        assert context["host_task_file"] == str(tmp_path / "t.yaml")
+
+
+class TestRegradeSkewGuard:
+    """A stale image must not turn a GRADE into a fresh agent run.
+
+    Exactly the sibling of the `grade` guard one release earlier: `regrade`
+    crosses the boundary only through context.json, so an image that predates
+    container-side grading ignores the key and runs the agent — and the host
+    would fold that fabricated trajectory back as the recorded row's verdict.
+    """
+
+    @staticmethod
+    def _runner(tmp_path: Path, prior):
+        from coder_eval.isolation.docker_runner import DockerRunner
+        from coder_eval.models import ResolvedTask
+
+        task_file = tmp_path / "t.yaml"
+        task_file.write_text("task_id: t\n", encoding="utf-8")
+        rt = ResolvedTask(
+            task=_docker_task(), task_file=task_file, run_dir=tmp_path / "run", variant_id="v", source_yaml=""
+        )
+        ws = tmp_path / "ws"
+        ws.mkdir(exist_ok=True)
+        return DockerRunner(rt, prior_result=prior, grade_workspace=ws)
+
+    def test_a_row_carrying_the_recorded_trajectory_is_accepted(self, tmp_path: Path) -> None:
+        prior = _result()
+        graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
+        graded.started_at = prior.started_at
+        self._runner(tmp_path, prior)._assert_regrade_honored(graded)
+
+    def test_a_freshly_run_trajectory_is_refused_and_quarantined(self, tmp_path: Path) -> None:
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        prior = _result()
+        rerun = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
+        rerun.started_at = prior.started_at + timedelta(hours=1)
+
+        task_json = tmp_path / "task.json"
+        task_json.write_text("{}", encoding="utf-8")
+        with pytest.raises(DockerRunError, match="re-ran the agent"):
+            self._runner(tmp_path, prior)._assert_regrade_honored(rerun, task_json)
+
+        # Refusing in memory while leaving contradictory bytes on disk is not a
+        # refusal: a later `aggregate` would publish exactly this record.
+        assert not task_json.exists()
+        assert task_json.with_suffix(".json.rerun").is_file()
+
+    def test_an_ordinary_run_is_never_checked(self, tmp_path: Path) -> None:
+        """`prior_result is None` means nobody asked for a grade, so a fresh
+        trajectory is the expected outcome, not a skew symptom."""
+        from coder_eval.isolation.docker_runner import DockerRunner
+        from coder_eval.models import ResolvedTask
+
+        task_file = tmp_path / "t.yaml"
+        task_file.write_text("task_id: t\n", encoding="utf-8")
+        rt = ResolvedTask(
+            task=_docker_task(), task_file=task_file, run_dir=tmp_path / "run", variant_id="v", source_yaml=""
+        )
+        DockerRunner(rt)._assert_regrade_honored(_result(final_status=FinalStatus.SUCCESS))
+
+
+class TestContainerDispatchIsInsideTheTrustGate:
+    """A run directory is a shareable artifact, so the image it names is untrusted.
+
+    Grading a `driver: docker` row DISPATCHES A CONTAINER built from the recorded
+    sandbox block — the record chooses an image that runs on this host with the
+    default credential allowlist forwarded into it and a copy of ~/.claude
+    mounted. That is a strictly wider capability than the `run_command` strings
+    this gate already refuses, and it reached the host unprompted because the
+    scan walked only success_criteria and post_run.
+    """
+
+    def test_the_dispatch_is_named_in_the_inventory(self) -> None:
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        commands = embedded_commands(_docker_task(), include_setup_phase=False, include_container_dispatch=True)
+        assert any("docker run" in c for c in commands), commands
+
+    def test_it_is_silent_when_no_container_will_be_dispatched(self) -> None:
+        """The gate must not fire for something that never runs — `--copy` is
+        refused before it could dispatch, and a refusal that always fires stops
+        being read."""
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        assert embedded_commands(_docker_task(), include_setup_phase=False) == []
+
+    def test_an_all_file_exists_docker_row_no_longer_sails_through(self, tmp_path: Path) -> None:
+        """The exact bypass: zero embedded shell, so the gate returned early and
+        the container was started with no consent at all."""
+        from coder_eval.orchestration.regrade import RegradeError, check_embedded_commands
+
+        with pytest.raises(RegradeError, match="docker run"):
+            check_embedded_commands(
+                _docker_task(),
+                tmp_path,
+                allow_recorded_commands=False,
+                include_setup_phase=False,
+                include_container_dispatch=True,
+            )
+
+    def test_the_operator_can_still_opt_in(self, tmp_path: Path) -> None:
+        from coder_eval.orchestration.regrade import check_embedded_commands
+
+        check_embedded_commands(
+            _docker_task(),
+            tmp_path,
+            allow_recorded_commands=True,
+            include_setup_phase=False,
+            include_container_dispatch=True,
+        )
+
+
+class TestOperatorBaselineFailsClosed:
+    """A missing or invalid baseline must NARROW the exemption, never widen it.
+
+    This is the direction that fails silently: a broken baseline returning the
+    wrong sentinel would make the trust gate stop prompting for authored
+    `post_run` commands, and nothing would notice.
+    """
+
+    @staticmethod
+    def _clear():
+        from coder_eval.orchestration.regrade import _operator_baseline_post_run
+
+        _operator_baseline_post_run.cache_clear()
+
+    def test_a_broken_baseline_exempts_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import coder_eval.orchestration.experiment as exp
+        from coder_eval.orchestration.regrade import _operator_baseline_post_run
+
+        def _boom(_path):
+            raise OSError("no such file")
+
+        monkeypatch.setattr(exp, "load_experiment", _boom)
+        self._clear()
+        try:
+            assert _operator_baseline_post_run() == frozenset()
+        finally:
+            self._clear()
+
+    def test_a_baseline_without_defaults_exempts_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import coder_eval.orchestration.experiment as exp
+        from coder_eval.orchestration.regrade import _operator_baseline_post_run
+
+        monkeypatch.setattr(exp, "load_experiment", lambda _p: type("E", (), {"defaults": None})())
+        self._clear()
+        try:
+            assert _operator_baseline_post_run() == frozenset()
+        finally:
+            self._clear()
+
+    def test_with_no_exemption_the_baseline_command_is_scanned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The consequence, asserted rather than assumed: an empty baseline means
+        every recorded post_run reaches the gate."""
+        import coder_eval.orchestration.experiment as exp
+        from coder_eval.models import PostRunCommand
+        from coder_eval.orchestration.regrade import embedded_commands
+
+        monkeypatch.setattr(exp, "load_experiment", lambda _p: type("E", (), {"defaults": None})())
+        self._clear()
+        try:
+            task = _task()
+            task.post_run = [PostRunCommand(command="rm -rf node_modules .npm-prefix", timeout=30)]
+            assert "rm -rf node_modules .npm-prefix" in embedded_commands(task, include_setup_phase=False)
+        finally:
+            self._clear()
+
+
+class TestEvaluateDispatchesADockerRow:
+    """The reordering in `evaluate_command` is the fix; nothing pinned it.
+
+    `delegates_to_regrade` exists solely because `grading_sandbox_config` --
+    whose job is to REFUSE `driver: docker` -- was being called BEFORE the branch
+    that no longer needs it, so no docker row could ever reach the container
+    dispatch. Revert the hoist and every docker detached grade becomes a hard
+    refusal again, with the suite still green.
+    """
+
+    @staticmethod
+    def _docker_run_dir(tmp_path: Path) -> Path:
+        """A run directory whose recorded config says `driver: docker`."""
+        from coder_eval.models import TaskConfigRecord
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        task = _docker_task()
+        prior = _result(
+            weighted_score=None,
+            final_status=FinalStatus.NOT_GRADED,
+            task_config=TaskConfigRecord(
+                resolved=task.model_dump(warnings=False),
+                source_yaml="raw",
+                source_file=None,
+            ),
+        )
+        (run_dir / "task.json").write_text(prior.model_dump_json(), encoding="utf-8")
+        (run_dir / "artifacts").mkdir()
+        return run_dir
+
+    def test_the_default_path_reaches_the_container_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not the host-grading refusal: the dispatch. Asserted by the message
+        the refusal would have produced being absent from the failure."""
+        from coder_eval.models import IN_CONTAINER_ENV
+        from coder_eval.orchestration import regrade as rg
+
+        monkeypatch.delenv(IN_CONTAINER_ENV, raising=False)
+        run_dir = self._docker_run_dir(tmp_path)
+        prior = rg.load_prior_result(run_dir)
+        task, _ = rg.task_from_prior(
+            prior,
+            run_dir,
+            allow_recorded_commands=True,
+            include_setup_phase=False,
+            grade_in_place=True,
+            allow_host_grading=False,
+        )
+        # The routing predicate the CLI's reordering exists to let run.
+        assert rg._should_grade_in_container(task, allow_host_grading=False) is True
+
+    def test_allow_host_grading_still_takes_the_host_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from coder_eval.models import IN_CONTAINER_ENV
+        from coder_eval.orchestration import regrade as rg
+
+        monkeypatch.delenv(IN_CONTAINER_ENV, raising=False)
+        run_dir = self._docker_run_dir(tmp_path)
+        prior = rg.load_prior_result(run_dir)
+        task, _ = rg.task_from_prior(
+            prior,
+            run_dir,
+            allow_recorded_commands=True,
+            include_setup_phase=False,
+            grade_in_place=True,
+            allow_host_grading=True,
+        )
+        assert rg._should_grade_in_container(task, allow_host_grading=True) is False
+        # And the host config it then builds is the downgraded one, stamped.
+        assert rg.grading_sandbox_config(task, allow_host_grading=True).driver == "tempdir"

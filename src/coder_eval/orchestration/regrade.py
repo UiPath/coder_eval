@@ -17,8 +17,11 @@ not depend on the CLI layer (CE004).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import shutil
+import tempfile
 from functools import cache
 from pathlib import Path
 
@@ -63,6 +66,8 @@ def task_from_prior(
     *,
     allow_recorded_commands: bool = False,
     include_setup_phase: bool = True,
+    grade_in_place: bool = False,
+    allow_host_grading: bool = False,
 ) -> tuple[TaskDefinition, str]:
     """Rebuild the executed task from the run's own recorded config.
 
@@ -89,10 +94,24 @@ def task_from_prior(
         task = TaskDefinition.model_validate(record.resolved)
     except ValueError as e:
         return _fall_back_to_source(
-            record, run_dir, e, allow_recorded_commands=allow_recorded_commands, include_setup_phase=include_setup_phase
+            record,
+            run_dir,
+            e,
+            allow_recorded_commands=allow_recorded_commands,
+            include_setup_phase=include_setup_phase,
+            grade_in_place=grade_in_place,
+            allow_host_grading=allow_host_grading,
         )
     check_embedded_commands(
-        task, run_dir, allow_recorded_commands=allow_recorded_commands, include_setup_phase=include_setup_phase
+        task,
+        run_dir,
+        allow_recorded_commands=allow_recorded_commands,
+        include_setup_phase=include_setup_phase,
+        # Only the in-place path dispatches a container; --copy is refused by
+        # `grading_sandbox_config` before it could, so naming the image there
+        # would be a refusal for something that never runs.
+        include_container_dispatch=grade_in_place
+        and _should_grade_in_container(task, allow_host_grading=allow_host_grading),
     )
     return task, record.source_yaml
 
@@ -126,7 +145,9 @@ def _operator_baseline_post_run() -> frozenset[str]:
     return frozenset(c.command for c in defaults.post_run)
 
 
-def embedded_commands(task: TaskDefinition, *, include_setup_phase: bool = True) -> list[str]:
+def embedded_commands(
+    task: TaskDefinition, *, include_setup_phase: bool = True, include_container_dispatch: bool = False
+) -> list[str]:
     """Every shell command a rebuilt task definition would run on this host.
 
     ``include_setup_phase`` covers the two capability families that exist only on
@@ -163,6 +184,23 @@ def embedded_commands(task: TaskDefinition, *, include_setup_phase: bool = True)
     code at install time. Because the scan walked only ``success_criteria``, a
     shared run directory whose criteria were all ``file_exists`` sailed through
     the gate and still ran installers of the attacker's choosing.
+
+    ``include_container_dispatch`` is the same omission again, one layer up, and
+    it was reintroduced by the very change that made a docker row gradable. When
+    a ``driver: docker`` row is graded, the grade is DISPATCHED INTO A CONTAINER
+    built from the recorded ``sandbox.docker`` block -- so the record chooses the
+    image that runs on this host, with the default credential allowlist
+    (``ANTHROPIC_API_KEY``, ``UIPATH_ACCESS_TOKEN``, ``AWS_BEARER_TOKEN_BEDROCK``
+    ...) forwarded into it, a writable copy of ``~/.claude``, and a pinned
+    ``--entrypoint`` the image itself supplies. That is arbitrary code execution
+    from a shareable artifact, and it is a strictly WIDER capability than the
+    ``run_command`` strings this gate already refuses. It reached the host
+    unprompted because the scan walked only ``success_criteria`` and ``post_run``
+    -- the identical blind spot described in the paragraph above, which is the
+    argument for naming it here rather than trusting the next reader to notice.
+
+    Like ``post_run``, it is a capability of the IN-PLACE path (the default for a
+    run directory), so it cannot hide behind ``include_setup_phase``.
 
     ``isinstance`` narrowing, never ``getattr(c, "command", None)``: an untyped
     string probe over a discriminated union is invisible to pyright, so renaming
@@ -213,11 +251,36 @@ def embedded_commands(task: TaskDefinition, *, include_setup_phase: bool = True)
         for source in sandbox.template_sources or []:
             if isinstance(source, RepoSource):
                 commands.append(f"git clone -- {source.url}")
+    if include_container_dispatch:
+        docker = task.sandbox.docker
+        if docker.dockerfile_path:
+            # `docker build` runs every RUN step in the recorded Dockerfile on
+            # this host, and expands recorded build args against the GRADER's
+            # environment, so a `${ANTHROPIC_API_KEY}` arg is exfiltratable by a
+            # RUN step. `extra_args` is spliced into the argv unfiltered.
+            commands.append(f"docker build -f {docker.dockerfile_path}")
+            for key, value in docker.build.args.items():
+                commands.append(f"  --build-arg {key}={value}")
+            for spec in docker.build.secrets:
+                commands.append(f"  --secret {spec}")
+            for extra in docker.build.extra_args:
+                commands.append(f"  {extra}")
+        else:
+            commands.append(f"docker run {docker.image} (with your credentials in its environment)")
+        for mount in docker.extra_mounts or []:
+            commands.append(f"  -v {mount}")
+        if docker.env_passthrough_extra:
+            commands.append(f"  --env {' --env '.join(docker.env_passthrough_extra)}")
     return commands
 
 
 def check_embedded_commands(
-    task: TaskDefinition, run_dir: Path, *, allow_recorded_commands: bool, include_setup_phase: bool = True
+    task: TaskDefinition,
+    run_dir: Path,
+    *,
+    allow_recorded_commands: bool,
+    include_setup_phase: bool = True,
+    include_container_dispatch: bool = False,
 ) -> None:
     """Refuse — or at minimum name — the shell a rebuilt config will run here.
 
@@ -236,7 +299,9 @@ def check_embedded_commands(
     Passing the task file explicitly (``evaluate <task.yaml> <run_dir>``) also
     bypasses this: that config came from the operator, not from the artifact.
     """
-    commands = embedded_commands(task, include_setup_phase=include_setup_phase)
+    commands = embedded_commands(
+        task, include_setup_phase=include_setup_phase, include_container_dispatch=include_container_dispatch
+    )
     if not commands:
         return
     rendered = "; ".join(commands)
@@ -263,6 +328,8 @@ def _fall_back_to_source(
     *,
     allow_recorded_commands: bool,
     include_setup_phase: bool = True,
+    grade_in_place: bool = False,
+    allow_host_grading: bool = False,
 ) -> tuple[TaskDefinition, str]:
     """The loud source-YAML fallback for a resolved config that no longer validates."""
     from .task_loader import load_task
@@ -281,7 +348,12 @@ def _fall_back_to_source(
     )
     task, source_yaml = load_task(Path(record.source_file))
     check_embedded_commands(
-        task, run_dir, allow_recorded_commands=allow_recorded_commands, include_setup_phase=include_setup_phase
+        task,
+        run_dir,
+        allow_recorded_commands=allow_recorded_commands,
+        include_setup_phase=include_setup_phase,
+        include_container_dispatch=grade_in_place
+        and _should_grade_in_container(task, allow_host_grading=allow_host_grading),
     )
     return task, source_yaml
 
@@ -495,12 +567,19 @@ def restore_pre_grade_record(run_dir: Path) -> bool:
 def grading_sandbox_config(task: TaskDefinition, *, allow_host_grading: bool = False) -> SandboxConfig:
     """The sandbox config a grading pass runs under.
 
-    Grading never runs a container: the docker driver dispatches through
-    DockerRunner, which needs an agent. So a ``driver: docker`` task can only be
-    graded on the host — and that is a DIFFERENT machine from the one its
-    criteria were written against.
+    This is the HOST-grading config, and reaching it with ``driver: docker`` means
+    the container route was declined. A docker row is normally graded IN a
+    container of its own image (:func:`_should_grade_in_container`), which is
+    dispatched before this function is called; what is left here is the ``--copy``
+    path, which cannot adopt a container workspace, and the two-argument
+    ``evaluate <task.yaml> <dir>`` form.
 
-    It is therefore refused rather than downgraded. A container task's criteria
+    (This docstring once opened "grading never runs a container: the docker
+    driver dispatches through DockerRunner, which needs an agent". That premise
+    was simply wrong — a grading pass needs no agent — and it is the reason the
+    refusal below survived for a release after it stopped being the only answer.)
+
+    Grading a container task on the host is refused rather than downgraded. A container task's criteria
     address container paths (``/verifier``, ``/logs/verifier``) and container
     toolchains; run on the host they score 0.0 for a trajectory ``run`` scored
     1.0, and the row is written back FAILURE. The same commands (``rm -rf
@@ -522,12 +601,13 @@ def grading_sandbox_config(task: TaskDefinition, *, allow_host_grading: bool = F
         return task.sandbox.model_copy(deep=True)
     if not allow_host_grading:
         raise RegradeError(
-            f"Task {task.task_id!r} ran under `driver: docker`, and grading cannot start a container "
-            + "(there is no agent to run in it). Grading on the host would execute this task's "
-            + "criteria against a filesystem that lacks the container's paths and toolchain, "
-            + "scoring a FAILURE for a run that passed — and would run its shell commands "
-            + "unsandboxed here. Re-run with --allow-host-grading to accept that, or grade on a "
-            + "machine that reproduces the container."
+            f"Task {task.task_id!r} ran under `driver: docker`, so it must be graded in a container "
+            + "of its own image — but this grading path cannot dispatch one. Grading on the host "
+            + "would execute this task's criteria against a filesystem that lacks the container's "
+            + "paths and toolchain, scoring a FAILURE for a run that passed, and would run its "
+            + "shell commands unsandboxed here.\n"
+            + "Re-run WITHOUT --copy to grade it in a container (the default for a run directory), "
+            + "or with --allow-host-grading to accept host grading anyway."
         )
     logger.warning(
         "Grading %r on the host: its `driver: docker` sandbox cannot be reproduced here, so "
@@ -571,6 +651,36 @@ def _should_grade_in_container(task: TaskDefinition, *, allow_host_grading: bool
     return task.sandbox.driver == "docker" and not allow_host_grading and os.environ.get(IN_CONTAINER_ENV) != "1"
 
 
+def _fold_back_container_grade(container_run_dir: Path, run_dir: Path) -> None:
+    """Copy the grading container's record into the row the caller asked about.
+
+    The container writes into a scratch directory it alone owns (see
+    :func:`_grade_in_container`), so the graded ``task.json`` has to be moved to
+    where the caller expects it. Everything else the container produced --
+    ``docker.log`` above all -- stays in the scratch dir and is discarded with
+    it, which is the point: on the ``run --resume`` path ``run_dir`` is the
+    executed row's own directory, and those files are the run's, not the grade's.
+
+    Best-effort on the log, mandatory on the record: a grade that cannot write
+    its verdict is a failure, but a missing side-car log is not.
+    """
+    graded = container_run_dir / TASK_JSON_FILENAME
+    if not graded.is_file():
+        # `_parse_result_or_raise` already raised in this case; if we are here
+        # the runner returned a result, so the file exists. Guard anyway rather
+        # than raise a confusing FileNotFoundError from the copy.
+        return
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(run_dir / TASK_JSON_FILENAME, graded.read_text(encoding="utf-8"))
+    container_log = container_run_dir / "docker.log"
+    if container_log.is_file():
+        # Named for the PHASE, never `docker.log`: on the resume path that name
+        # is already taken by the executed container's log, and overwriting it
+        # would repeat the task.log/grade.log truncation bug one layer down.
+        with contextlib.suppress(OSError):
+            shutil.copy2(container_log, run_dir / "grade.docker.log")
+
+
 async def _grade_in_container(
     *,
     task: TaskDefinition,
@@ -592,19 +702,38 @@ async def _grade_in_container(
     ``task.execute.json`` exactly as on the host path — while the latter is
     adopted and never written over.
 
-    ``task_file`` is required. The image is built or named by the task's own
-    sandbox config, and DockerRunner resolves the Dockerfile and reference
-    directory relative to the task file; without one there is nothing to build
-    from. That is a real limitation of grading a container task detached, so it
-    says so rather than silently falling back to the host.
+    ``task_file`` is required, and must EXIST here. The image is built or named
+    by the task's own sandbox config, and DockerRunner resolves the Dockerfile
+    and reference directory relative to the task file; without one there is
+    nothing to build from.
+
+    Testing only for ``None`` was not enough, and failed on exactly the rows this
+    guard was written for. A ``driver: docker`` run records its ``source_file``
+    from the IN-CONTAINER orchestrator, so the value is
+    ``/work/task_dir/task.yaml`` — a real, non-``None`` ``Path`` that does not
+    exist on the grading host. The guard was skipped, and the failure then went
+    QUIET where it matters: ``_prepare_task_dir_mount`` does ``if not
+    source.is_dir(): return``, so the grading container got no ``TASK_DIR`` mount
+    at all and any ``$TASK_DIR`` criterion silently resolved against a different
+    tree than during the run — a wrong verdict with no error anywhere.
+
+    Requiring the file to exist also closes a second hole: on the detached path
+    ``task_file`` comes straight from the untrusted record, and its PARENT is
+    what ``_prepare_task_dir_mount`` copies into the container. A recorded
+    ``source_file`` of ``~/.ssh/config`` would copy the whole of ``~/.ssh``.
+    Existence alone does not make the path trusted — that is what the
+    ``--allow-recorded-commands`` gate is for, and it now names the container
+    dispatch — but it removes the silent-wrong-verdict half.
     """
     from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner
 
-    if task_file is None:
+    if task_file is None or not task_file.is_file():
+        recorded = "no task file" if task_file is None else f"a task file that is not on this host ({task_file})"
         raise RegradeError(
             f"Task {task.task_id!r} ran under `driver: docker`, so grading it needs a container built "
-            + "from its own image — but the run records no task file to resolve that image from. "
-            + "Pass the task file explicitly (`coder-eval evaluate <task.yaml> <run_dir>`), or "
+            + f"from its own image — but the run records {recorded} to resolve that image from. "
+            + "A container run records the path it saw INSIDE the container, which does not exist "
+            + "here. Pass the task file explicitly (`coder-eval evaluate <task.yaml> <run_dir>`), or "
             + "--allow-host-grading to grade here instead."
         )
 
@@ -613,32 +742,90 @@ async def _grade_in_container(
         + "toolchains, so the host cannot reproduce them.",
         task.task_id,
     )
-    rt = ResolvedTask(
-        task=task,
-        task_file=task_file,
-        run_dir=run_dir,
-        variant_id=variant_id,
-        source_yaml=source_yaml,
-        replicate_index=replicate_index,
-    )
-    try:
-        return await DockerRunner(
-            rt,
-            # The grading pass owns run_dir and nothing else. The workspace is a
-            # bind mount of the ORIGINAL run's output and must survive untouched.
-            preservation_mode=PreservationMode.NONE,
-            prior_result=prior,
-            grade_workspace=workspace,
-        ).run()
-    except DockerRunError as e:
-        # Wrapped, because `orchestration/` must not leak an isolation-layer
-        # exception to the CLI, and because the actionable next step is the
-        # host-grading escape hatch rather than a docker stack trace.
-        raise RegradeError(
-            f"Grading {task.task_id!r} in a container failed: {e}. Re-run with --allow-host-grading "
-            + "to grade on this machine instead (path- and toolchain-dependent criteria may then "
-            + "score differently, and the row is stamped graded_on_host)."
-        ) from e
+    if task.pre_run:
+        # KNOWN EQUIVALENCE GAP, made loud because it cannot be closed here.
+        #
+        # This is a SECOND, fresh container. Only `workspace` crosses from the
+        # one that ran the agent; everything that container's `pre_run` did
+        # OUTSIDE the workspace is gone -- and `pre_run` is not re-run, because
+        # `Sandbox.adopt` sets `was_adopted` and the orchestrator skips it (it
+        # would otherwise overwrite the agent's deliverables before the criteria
+        # read them, which is the defect that skip exists for).
+        #
+        # It is not hypothetical: `tasks/samples/skillsbench/3d-scan-calc`'s
+        # pre_run does `ln -sfn "$PWD/mass_report.json" /root/mass_report.json`
+        # and its verifier's first assertion is that /root/mass_report.json
+        # exists. In a fresh container /root is pristine, so the row scores 0.000
+        # for a trajectory `run` scores 1.000.
+        #
+        # Re-running pre_run here would trade this bug for the deliverable-
+        # clobbering one, so the honest move is to name it at dispatch and let
+        # the operator use --allow-host-grading or a single `run`.
+        logger.warning(
+            "Task %r declares %d pre_run command(s). They ran in the container that executed the "
+            + "agent and are NOT re-run here: this is a second container, and only the workspace "
+            + "crosses. A criterion that depends on state pre_run put OUTSIDE the workspace "
+            + "(a symlink in /root, an installed package, a started service) will score as a "
+            + "failure. If that is this task, grade it with a single `coder-eval run` instead.",
+            task.task_id,
+            len(task.pre_run),
+        )
+    # A SCRATCH output dir, never the caller's. The two callers disagree about
+    # what `run_dir` is -- `evaluate` passes a freshly prepared directory, while
+    # `run --resume` passes the executed row's OWN directory -- and every part of
+    # DockerRunner's result handling assumes an output dir it alone populates:
+    #
+    #  * `_parse_result_or_raise` decides "did the container produce a result?"
+    #    on `task_json.exists()` and discards `returncode`. Over the row's own
+    #    directory the pre-grade `task.json` is already there, so a grading
+    #    container that DIED (OOM, exit 137, or any of `_grade_recorded_run`'s
+    #    own FATAL guards) was read back as a successful grade -- returning the
+    #    stale ungraded row as the verdict, with the container's error discarded.
+    #  * `run()` opens `run_dir/docker.log` with mode "w", truncating the
+    #    executed container's log -- the same loss the task.log/grade.log split
+    #    was introduced to prevent.
+    #  * `grant_container_access(output_dir, writable=True)` would recursively
+    #    widen the whole preserved artifacts tree.
+    #
+    # Giving the container a private directory makes both callers identical and
+    # makes the docstring above true, rather than true of one caller.
+    with tempfile.TemporaryDirectory(prefix="coder-eval-grade-") as scratch:
+        container_run_dir = Path(scratch)
+        rt = ResolvedTask(
+            task=task,
+            task_file=task_file,
+            run_dir=container_run_dir,
+            variant_id=variant_id,
+            source_yaml=source_yaml,
+            replicate_index=replicate_index,
+        )
+        try:
+            result = await DockerRunner(
+                rt,
+                # The grading pass owns its scratch dir and nothing else. The
+                # workspace is a bind mount of the ORIGINAL run's output and must
+                # survive untouched.
+                preservation_mode=PreservationMode.NONE,
+                prior_result=prior,
+                grade_workspace=workspace,
+            ).run()
+        except (DockerRunError, OSError) as e:
+            # Wrapped, because `orchestration/` must not leak an isolation-layer
+            # exception to the CLI, and because the actionable next step is the
+            # host-grading escape hatch rather than a docker stack trace. OSError
+            # joins it because the staging copies (`_prepare_task_dir_mount`,
+            # `_prepare_reference_mount`) and the log open raise it unwrapped,
+            # and a raw traceback would drop the guidance below.
+            raise RegradeError(
+                f"Grading {task.task_id!r} in a container failed: {e}. Re-run with --allow-host-grading "
+                + "to grade on this machine instead (path- and toolchain-dependent criteria may then "
+                + "score differently, and the row is stamped graded_on_host)."
+            ) from e
+        # Fold the grade back into the row the caller asked about, mirroring what
+        # the host path does in place. `back_up_pre_grade_record` has already
+        # preserved task.execute.json, so this write is the graded record.
+        _fold_back_container_grade(container_run_dir, run_dir)
+        return result
 
 
 async def regrade_in_place(
@@ -673,6 +860,18 @@ async def regrade_in_place(
     # container performs every step against container paths rather than having
     # half of it done against the host's.
     if _should_grade_in_container(task, allow_host_grading=allow_host_grading):
+        # `recorded_task` is NOT forwarded, and that is deliberate rather than an
+        # omission: the container re-derives it from the staged task.yaml (see
+        # `run_task_internal_command`'s `authored_task`), which IS this `task`.
+        # Accepting a DIFFERENT one and dropping it would leave no evidence, so
+        # say so instead -- the whole point of the seam is that the record must
+        # not quietly disagree with what was authored.
+        if recorded_task is not None and recorded_task != task:
+            raise RegradeError(
+                "recorded_task cannot be honored when grading in a container: the container rebuilds "
+                + "the recorded task from the staged task.yaml. Pass the same task, or grade with "
+                + "--allow-host-grading."
+            )
         return await _grade_in_container(
             task=task,
             prior=prior,
