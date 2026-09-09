@@ -2,11 +2,12 @@
 
 import asyncio
 import logging
+import os
 import re
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,7 +67,14 @@ from .models import (
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
 from .orchestration.run_limits import validate_run_limits
-from .path_utils import digest_tree, format_task_log_id, rmtree_restrictive, task_log_path
+from .path_utils import (
+    TASK_JSON_FILENAME,
+    digest_tree,
+    format_task_log_id,
+    rmtree_restrictive,
+    task_log_path,
+    write_text_atomic,
+)
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -296,7 +304,6 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "Status": result.final_status.value,
         "Category": result.final_status.category,
         "DurationMs": int((result.duration_seconds or 0.0) * 1000),
-        "Score": float(result.weighted_score or 0.0),
         "Iterations": result.iteration_count,
         "AgentType": result.agent_type or "",
         "Model": result.model_used or "",
@@ -304,6 +311,13 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "EarlyStopped": result.early_stop is not None,
         "EarlyStopReason": (result.early_stop.reason.value if result.early_stop is not None else ""),
     }
+    # `Score` is OMITTED, never coalesced to 0.0, when the row was not graded.
+    # Dashboards compute `avg(todouble(customDimensions.Score))` with no status
+    # filter, so a laundered zero for a `coder-eval execute` night drags every
+    # score tile toward zero and is indistinguishable from a genuinely bad night.
+    # An absent dimension drops out of the average instead.
+    if result.weighted_score is not None:
+        props["Score"] = float(result.weighted_score)
     return "CoderEval.Task.End", props
 
 
@@ -363,6 +377,9 @@ class Orchestrator:
         config_lineage: dict[str, ConfigLineageEntry] | None = None,
         replicate_index: int = 0,
         workspace_dir: Path | None = None,
+        grade: bool = True,
+        prior_result: EvaluationResult | None = None,
+        recorded_task: TaskDefinition | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -385,6 +402,18 @@ class Orchestrator:
                 run_dir/artifacts/<task>, and the workspace is copied out to run_dir/artifacts/<task>
                 at cleanup. Resolved host-side by DockerRunner; None keeps standard behavior.
                 Takes precedence over preservation_mode when set.
+            grade: Whether to evaluate success criteria after execution. False is
+                `coder-eval execute`: the agent runs and the full trajectory is
+                captured, but no criterion is checked, ``weighted_score`` stays
+                None, and the row finalizes as ``FinalStatus.NOT_GRADED``. It is
+                deliberately NOT a task-config field — a task YAML must never be
+                able to declare itself ungraded — so it arrives only from
+                ``BatchRunConfig.grade``, never from the 5-layer merge or -D.
+            prior_result: A completed run's ``EvaluationResult`` to re-grade
+                (evaluate-only mode). Its trajectory and execution facts are
+                carried onto the fresh result so the grade describes the run that
+                actually happened instead of an empty one — see
+                ``_seed_from_prior_result`` for the field-by-field rationale.
         """
         self.task = task
         self.run_dir = run_dir
@@ -403,9 +432,22 @@ class Orchestrator:
         self.source_yaml = source_yaml
         self.config_lineage = config_lineage or {}
         self.replicate_index = replicate_index
+        self.grade = grade
+        # What `task_config.resolved` records, which is NOT always what we RUN.
+        # `run_task_internal_command` rewrites `driver: docker` -> `tempdir`
+        # before building the in-container Orchestrator (we are already inside
+        # the container the driver asked for), and recording that rewrite made
+        # the run's own record deny it ever used docker. A later
+        # `evaluate <run_dir>` reads the driver back out of the record, so the
+        # host-grading refusal never fired and the `graded_on_host` stamp was
+        # never applied: a container task's criteria ran against the host
+        # filesystem silently, which is the exact outcome that gate exists to
+        # prevent. The record must describe the task as AUTHORED.
+        self.recorded_task = recorded_task if recorded_task is not None else task
+        self.prior_result = prior_result
 
         # Derived paths
-        self.report_path = self.run_dir / "task.json"
+        self.report_path = self.run_dir / TASK_JSON_FILENAME
         self.html_report_path = self.run_dir / "task.html"
         # Clean user<->agent transcript for simulation runs. Written alongside
         # task.log so a human can follow the conversation without the
@@ -493,6 +535,58 @@ class Orchestrator:
             return str(self.task.agent.type)
         return AgentKind.NONE.value
 
+    def _terminal_status(self, success: bool) -> FinalStatus:
+        """The status a normally-completed evaluation loop lands on.
+
+        Extracted from ``run()`` because the chain answers one question and
+        ``run()`` answers several; inlining it grew ``run()`` past the
+        complexity bound the moment the grading switch was threaded in.
+
+        Order matters at every step:
+
+        * A detached grade may NOT overturn an execution fact. The prior run's
+          terminal status (TIMEOUT, ERROR, a budget stop) describes an agent
+          phase this pass neither repeated nor observed. Without the first arm a
+          crashed run re-graded against its half-finished workspace reports
+          SUCCESS — with the original ``error_message`` still attached.
+        * The NOT_GRADED arm sits ABOVE ``max_turns_exhausted``, and that order
+          is what makes ``execute`` + ``evaluate`` equal a single ``run``.
+          MAX_TURNS_EXHAUSTED reads like an execution fact but is not one: on the
+          graded path it is subordinate to the verdict — ``run`` returns SUCCESS
+          for a max-turns trajectory whose criteria pass, and only falls through
+          to MAX_TURNS_EXHAUSTED when they do not. So it is not knowable under
+          ``grade=False``. Consuming it here first made it terminal *and*
+          permanent (``is_execution_fact`` pins it in the first arm), so the same
+          agent output scored SUCCESS/1.0 under ``run`` and MAX_TURNS_EXHAUSTED
+          under ``execute`` → ``evaluate`` — and, being category ``failed``,
+          `run --resume` called the row complete and left it forever unscored.
+          Nothing is lost by deferring: the fact lives on
+          ``result.max_turns_exhausted``, which ``_seed_from_prior_result``
+          carries, so the detached grade walks this identical chain and reaches
+          the arm below.
+
+          The statuses that ARE execution facts (TIMEOUT, ERROR, the budget
+          stops) differ in kind: they abort the run before a verdict is
+          reachable, so preserving them overturns nothing.
+
+        With ``grade=True`` and no prior result the chain is the original one.
+        """
+        assert self.result is not None, "Result not initialized"
+        inherited = self.prior_result.final_status if self.prior_result is not None else None
+        if inherited is not None and inherited.is_execution_fact:
+            logger.info(
+                "Preserving the run's terminal status %s: grading cannot overturn an execution fact.",
+                inherited.value,
+            )
+            return inherited
+        if success:
+            return FinalStatus.SUCCESS
+        if not self.grade:
+            return FinalStatus.NOT_GRADED
+        if self.result.max_turns_exhausted:
+            return FinalStatus.MAX_TURNS_EXHAUSTED
+        return FinalStatus.FAILURE
+
     async def run(self) -> EvaluationResult:
         """Run the complete evaluation.
 
@@ -531,8 +625,12 @@ class Orchestrator:
             environment_info=get_version_info(),
         )
 
-        # Calculate task log path
-        task_log_file = task_log_path(self.run_dir)
+        self._seed_from_prior_result()
+
+        # Calculate task log path. A re-grade gets its own file: `prior_result`
+        # means the agent phase already ran and its trajectory log is sitting in
+        # this very directory, and `task_log_handler` opens `mode="w"`.
+        task_log_file = task_log_path(self.run_dir, regrade=self.prior_result is not None)
         task_log_file.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
         # Use context manager for automatic log handler management
@@ -583,13 +681,7 @@ class Orchestrator:
                         elapsed_seconds=time.time() - start_time,
                     )
 
-                # Update final status
-                if success:
-                    self.result.final_status = FinalStatus.SUCCESS
-                elif self.result.max_turns_exhausted:
-                    self.result.final_status = FinalStatus.MAX_TURNS_EXHAUSTED
-                else:
-                    self.result.final_status = FinalStatus.FAILURE
+                self.result.final_status = self._terminal_status(success)
 
             except asyncio.CancelledError:
                 # Re-raise cancellation to allow proper task cancellation
@@ -683,6 +775,9 @@ class Orchestrator:
                 # but BEFORE _finalize_result so task.json includes the field.
                 # Allowlist non-success terminal statuses; SUCCESS and
                 # MAX_TURNS_EXHAUSTED skip the tail to keep task.json compact.
+                # NOT_GRADED is deliberately absent: like SUCCESS and
+                # MAX_TURNS_EXHAUSTED it is not a diagnosis of something going
+                # wrong, so it keeps task.json compact.
                 if self.result.final_status in {
                     FinalStatus.ERROR,
                     FinalStatus.TIMEOUT,
@@ -696,6 +791,97 @@ class Orchestrator:
                     raise teardown_interrupt
 
         return self.result
+
+    def _seed_from_prior_result(self) -> None:
+        """Carry a completed run's execution facts onto this re-grade's result.
+
+        ``execute`` then ``evaluate`` must equal a single ``run``. Everything
+        below is a fact the AGENT phase established that the grading phase cannot
+        re-derive; leaving any of them at their defaults would publish a row that
+        silently disagrees with the run it grades.
+
+        Deliberately NOT carried: ``final_status``, ``weighted_score`` and
+        ``success_criteria_results`` — those are exactly what this pass recomputes.
+        """
+        prior = self.prior_result
+        if prior is None or self.result is None:
+            return
+
+        # A task row describes the TASK, so its clock is the agent run's, not the
+        # grading pass's. Left alone, a 10-minute run re-graded in 2 seconds would
+        # report 2 seconds — and that figure feeds average_duration, the report
+        # tables and the evalboard, so harness-vs-harness comparisons would be
+        # quietly wrong. _finalize_result restores the duration after its own
+        # timing write; the grading pass's cost is recorded separately there.
+        self.result.started_at = prior.started_at
+        # completed_at too, so the row's three time fields stay consistent with
+        # each other: leaving it at grading wall-clock produces a triple where
+        # completed_at - started_at != duration_seconds, which misleads anyone
+        # deriving a duration from the timestamps.
+        self.result.completed_at = prior.completed_at
+
+        # The trajectory itself. Every derived figure in _finalize_result —
+        # token totals, cost, command_stats, model_used, assistant turns —
+        # recomputes from `iterations`, so seeding it reproduces them exactly.
+        self.result.iterations = list(prior.iterations)
+        # Evaluate-only hardcodes 1; a multi-turn run must not be reported as
+        # single-turn just because the re-grade ran once.
+        self.result.iteration_count = prior.iteration_count or len(prior.iterations)
+
+        # LOAD-BEARING for the verdict: gate selection is FIRED-ONLY. When
+        # early_stop is not None the checker gates on the weighted ARMED subset
+        # instead of strict-AND over every criterion. Dropping it would re-grade a
+        # truncated trajectory under the full-run gate and flip the verdict.
+        self.result.early_stop = prior.early_stop
+
+        # Execution facts that outlive the agent process.
+        self.result.max_turns_exhausted = prior.max_turns_exhausted
+        self.result.error_message = prior.error_message
+        self.result.error_details = prior.error_details
+        self.result.error_log_tail = prior.error_log_tail
+        self.result.sdk_options = prior.sdk_options
+        self.result.agent_config = prior.agent_config
+        self.result.expected_commands = prior.expected_commands
+        self.result.simulation = prior.simulation
+
+        # pre_run belongs to the execute phase and is NOT re-run against an
+        # adopted workspace (see _skip_pre_run_for_adopted), so its recorded
+        # outcomes would otherwise vanish from the graded row.
+        #
+        # post_run is the opposite: it belongs to the GRADING phase, so on a row
+        # that came from `execute` this list is EMPTY and this grade is about to
+        # fill it (see _skip_post_run). Copied into a fresh list either way, so
+        # appending here can never mutate the prior result.
+        self.result.pre_run_results = list(prior.pre_run_results)
+        self.result.post_run_results = list(prior.post_run_results)
+
+        # The artifacts pointer. An adopted sandbox is not deleted by cleanup(),
+        # so the path stays valid — and a SECOND grade needs it, since without it
+        # the caller falls back to guessing the workspace.
+        self.result.sandbox_path = prior.sandbox_path
+
+        # environment_info: the prior run's capture describes the machine that
+        # RAN the task (installed_tools, api route, coder_eval version). Ours
+        # describes the machine grading it. Prior wins on conflict, and ours is
+        # preserved as flat `graded_by_*` scalars rather than being interleaved —
+        # a report that shows the grader's tool versions as the run's is worse
+        # than one that shows neither.
+        # Flattened to scalars rather than nested wholesale: environment_info is
+        # a flat map everywhere it is consumed (the HTML report `_esc`apes each
+        # value into a table cell; the evalboard types it as
+        # Record<string, string | number | null | Record<string, string>>), so a
+        # whole nested env capture renders as a Python dict repr. Only the three
+        # facts that identify the grading HOST are kept, and only when they
+        # differ from the run's.
+        grader = self.result.environment_info
+        provenance = {
+            f"graded_by_{key}": grader[key]
+            for key in ("coder_eval", "git_commit", "cli_version")
+            if key in grader and grader.get(key) != prior.environment_info.get(key)
+        }
+        # A second grade must not lose the first grader's stamp — merging prior
+        # over ours would otherwise clobber it and collapse the chain silently.
+        self.result.environment_info = {**grader, **prior.environment_info, **provenance}
 
     async def _run_evaluation_with_failure_evidence(
         self,
@@ -785,6 +971,11 @@ class Orchestrator:
         """
         if self.result is None:
             return
+        if not self.grade:
+            # Grading site 4 of 4. Under `execute` no criterion is checked on any
+            # path, diagnostics included — recording a not_evaluated vector here
+            # would imply criteria we were supposed to run and couldn't.
+            return
         if self.success_checker is None or self.sandbox is None:
             self._record_post_failure_not_evaluated("the sandbox or success checker was unavailable")
             return
@@ -858,6 +1049,77 @@ class Orchestrator:
         except Exception:
             logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
 
+    def _finalize_weighted_score(self) -> None:
+        """Write ``weighted_score``, or ``None`` when this run was not graded.
+
+        Wrapped because `_finalize_result` runs inside `run()`'s finally — an
+        unguarded raise here would skip persistence and lose task.json. The
+        other `calculate_weighted_score` calls (the simulation path) run inside
+        `run()`'s try, whose broad `except Exception` already converts a raise
+        into a populated ERROR result, so they intentionally stay unwrapped.
+        """
+        assert self.result is not None
+        assert self.task.agent is not None
+        try:
+            if self.grade:
+                self.result.calculate_weighted_score(self.task.success_criteria)
+            else:
+                # Explicit None, NOT the 0.0 calculate_weighted_score writes for
+                # an empty results list — that value is indistinguishable from a
+                # task that was graded and scored zero, and every downstream
+                # `score or 0.0` would launder it into a real-looking failure
+                # (CE049).
+                self.result.weighted_score = None
+        except ValueError as e:
+            logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
+            self.result.weighted_score = None
+            self.result.final_status = FinalStatus.ERROR
+            self.result.error_message = str(e)
+            self.result.error_details = create_error_context(
+                error=e,
+                task_id=self.task.task_id,
+                attempt=max(self.result.iteration_count, 1),
+                component="orchestrator.finalize.weighted_score",
+                agent_name=self._agent_name,
+            )
+
+    def _finalize_regrade_timing(self) -> None:
+        """On a re-grade, keep the AGENT run's timing and artifacts pointer.
+
+        No-op on an ordinary run. A 10-minute run re-graded in 2s would
+        otherwise report 2s into `average_duration`, the report tables and the
+        evalboard; the grading pass's own cost is preserved alongside rather
+        than discarded, so a slow judge stays visible.
+        """
+        assert self.result is not None
+        if self.prior_result is None:
+            return
+        self.result.environment_info["grading_duration_seconds"] = round(self.result.duration_seconds, 3)
+        self.result.duration_seconds = self.prior_result.duration_seconds
+        self._restore_prior_artifacts_pointer()
+
+    def _restore_prior_artifacts_pointer(self) -> None:
+        """Put the RUN's ``sandbox_path`` back after a re-grade overwrote it.
+
+        ``_seed_from_prior_result`` carries the pointer on purpose, then the
+        grading pass overwrites it twice on the ``--copy`` path — ``_setup``
+        writes the grading tempdir, and ``_cleanup`` writes either the preserved
+        copy or ``None``. Since ``evaluate <run_dir>`` writes the result back
+        into the ORIGINAL ``task.json``, one ``--copy`` grade left the run
+        pointing at another run's artifacts (or at nothing), and the NEXT
+        ``evaluate <run_dir>`` then failed ``default_workspace``'s containment
+        guard — a re-grade that permanently broke re-grading.
+
+        Same shape as the ``duration_seconds`` restore above: the grading pass
+        may not overwrite a fact about the run it grades. A prior ``None`` is
+        left alone, so an adopted in-place grade that discovered a real
+        workspace still records it.
+        """
+        assert self.result is not None
+        assert self.prior_result is not None
+        if self.prior_result.sandbox_path is not None:
+            self.result.sandbox_path = self.prior_result.sandbox_path
+
     def _finalize_result(self, start_time: float) -> None:
         """Finalize the evaluation result: scores, telemetry, and persistence."""
         if not self.result:
@@ -873,25 +1135,17 @@ class Orchestrator:
         self.result.completed_at = datetime.now()
         self.result.duration_seconds = time.time() - start_time
 
+        # Re-grade: the row keeps the agent run's duration (see
+        # _seed_from_prior_result). The grading pass's own cost is preserved
+        # alongside rather than discarded, so a slow judge is still visible.
+        self._finalize_regrade_timing()
+
         # Weighted score. This call site is wrapped because _finalize_result runs
         # inside run()'s finally — an unguarded raise here would skip persistence and
         # lose task.json. The other calculate_weighted_score calls (the simulation
         # path) run inside run()'s try, whose broad `except Exception` already converts
         # a raise into a populated ERROR result, so they intentionally stay unwrapped.
-        try:
-            self.result.calculate_weighted_score(self.task.success_criteria)
-        except ValueError as e:
-            logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
-            self.result.weighted_score = None
-            self.result.final_status = FinalStatus.ERROR
-            self.result.error_message = str(e)
-            self.result.error_details = create_error_context(
-                error=e,
-                task_id=self.task.task_id,
-                attempt=max(self.result.iteration_count, 1),
-                component="orchestrator.finalize.weighted_score",
-                agent_name=self._agent_name,
-            )
+        self._finalize_weighted_score()
 
         # Command statistics
         if self.result.iterations:
@@ -939,7 +1193,7 @@ class Orchestrator:
 
         # Task config record (warnings=False: discriminated unions produce benign warnings)
         self.result.task_config = TaskConfigRecord(
-            resolved=self.task.model_dump(warnings=False),
+            resolved=self.recorded_task.model_dump(warnings=False),
             source_yaml=self.source_yaml,
             source_file=str(self.task_file) if self.task_file else None,
             lineage=self.config_lineage,
@@ -948,10 +1202,13 @@ class Orchestrator:
         # Terminal per-task summary line. Emitted before report writes so a
         # write failure cannot swallow the one-line outcome.
         logger.info(
-            "Task finished: status=%s duration=%.1fs score=%.3f iterations=%d",
+            "Task finished: status=%s duration=%.1fs score=%s iterations=%d",
             self.result.final_status.value,
             self.result.duration_seconds or 0.0,
-            self.result.weighted_score or 0.0,
+            # "n/a", not 0.000: this line is read when diagnosing a run, and a
+            # zero here would say the criteria scored nothing rather than that
+            # nothing was scored.
+            "n/a" if self.result.weighted_score is None else f"{self.result.weighted_score:.3f}",
             self.result.iteration_count,
         )
 
@@ -981,10 +1238,8 @@ class Orchestrator:
         # docker-driver host-heartbeat watchdog firing) would otherwise leave
         # a truncated task.json that the host parses as malformed-JSON rather
         # than as "no result", conflating two distinct failure modes.
-        import os as _os
-
-        report_tmp = self.report_path.with_suffix(self.report_path.suffix + ".tmp")
-        report_tmp.write_text(  # noqa: CE002 — small JSON write at end of run
+        write_text_atomic(  # noqa: CE002 — small JSON write at end of run
+            self.report_path,
             self.result.model_dump_json(
                 indent=2,
                 # Strip inline transcripts: they live in sibling YAML files
@@ -993,9 +1248,7 @@ class Orchestrator:
                 # in the row record without losing any data.
                 exclude=TASK_JSON_TRANSCRIPT_EXCLUDE,
             ),
-            encoding="utf-8",
         )
-        _os.replace(report_tmp, self.report_path)
 
         # Also emit an HTML trace/report alongside task.json. HTML failure must
         # never mask the underlying run outcome — write_task_html logs and
@@ -1134,6 +1387,14 @@ class Orchestrator:
         """
         if not (isinstance(self.route, LiteLLMRoute) and settings.litellm_cost_log and self.result is not None):
             return
+        if self.prior_result is not None:
+            # Re-grading someone else's trajectory. The join keys on THIS
+            # Orchestrator's per-attempt nonce, which the original turns were
+            # never tagged with, so it would match nothing and overwrite the
+            # already-corrected per-turn costs with a warning about a missing
+            # bill. The prior run's cost is the real one; leave it alone.
+            logger.debug("Re-grade of a prior trajectory: keeping its recorded cost, skipping the LiteLLM join.")
+            return
         try:
             applied = apply_actual_cost(
                 self.result,
@@ -1217,6 +1478,12 @@ class Orchestrator:
             destination = staging / "reference"
             self._reference_dir = await asyncio.to_thread(stage_reference_dir, source, destination)
         self._reference_digest = await asyncio.to_thread(digest_tree, self._reference_dir)
+        # Persist it: a DETACHED grade happens in a different process with no
+        # access to this instance, and refuses to score old work against a new
+        # answer key by comparing the tree it stages against this recorded hash
+        # (orchestration/regrade.py::verify_reference_unchanged).
+        if self.result is not None:
+            self.result.environment_info["reference_digest"] = self._reference_digest
         self._validate_reference_consumers()
 
     def _validate_reference_consumers(self) -> None:
@@ -1266,6 +1533,43 @@ class Orchestrator:
                 + f"({current[:12]}...). Refusing to grade against a reference the agent may have written."
             )
 
+    def _arm_early_stop(self) -> None:
+        """Build the early-stop watcher, once, when the task arms one.
+
+        Sits BEFORE `_setup`'s evaluate-only early return, so an armed
+        evaluate-only re-grade builds an inert (never-fed) watcher — harmless,
+        and keeps a single creation point.
+        """
+        if not early_stop_active(self.task):
+            return
+        if self.grade:
+            self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
+            return
+        # Early stop cuts the run once coder-eval's own criteria decide the
+        # outcome. Under `execute` there is no outcome to decide and the
+        # trajectory is the deliverable (an external harness grades it), so an
+        # armed criterion must not truncate it. Same effect as the
+        # run_limits.stop_early kill switch, decided one layer up.
+        logger.info(
+            "Grading disabled (execute mode): early-stop is armed but stays disabled; "
+            + "the full trajectory is the deliverable."
+        )
+
+    def _restore_recorded_command_path(self) -> None:
+        """Re-apply the graded run's own PATH before its criteria run.
+
+        PATH parity with the run being graded. `_sync_sandbox_command_path_with_
+        agent` recorded the agent's effective PATH; no agent runs on the
+        evaluate-only path, so restore it explicitly or `run_command` criteria
+        resolve binaries against ambient PATH and can disagree with the original
+        verdict.
+        """
+        assert self.result is not None
+        assert self.sandbox is not None
+        restored_path = self.result.environment_info.get("command_base_path")
+        if isinstance(restored_path, str) and restored_path:
+            self.sandbox.set_command_base_path(self._sanitize_restored_path(restored_path))
+
     async def _setup(self) -> None:
         """Set up all components for evaluation.
 
@@ -1283,8 +1587,7 @@ class Orchestrator:
         # thrown). This sits BEFORE the evaluate-only early return below, so an
         # armed evaluate-only re-grade builds an inert (never-fed) watcher —
         # harmless, and keeps a single creation point.
-        if early_stop_active(self.task):
-            self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
+        self._arm_early_stop()
 
         # Stage the reference BEFORE either branch returns: judge criteria with
         # include_reference=true (and any $REFERENCE_DIR/... file entry) expect it
@@ -1296,6 +1599,8 @@ class Orchestrator:
             assert self.result is not None
             self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
+
+            self._restore_recorded_command_path()
 
             self._resolve_routes()
             self._record_route_environment_info()
@@ -1392,9 +1697,22 @@ class Orchestrator:
         # Save agent config on result (copy to prevent mutation of shared reference)
         self.result.agent_config = self.task.agent.model_copy(deep=True)
 
-        # Re-capture environment_info with sandbox path (for CLAUDE.md hash)
-        self.result.environment_info = get_version_info(
-            sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
+        # Re-capture environment_info with sandbox path (for CLAUDE.md hash).
+        #
+        # UPDATE, never rebind. `get_version_info` returns a FRESH dict, so
+        # assigning it here discarded every key written earlier in `_setup` —
+        # and `_stage_reference` runs earlier and writes `reference_digest`
+        # there. The digest therefore never reached task.json, which left
+        # `regrade.verify_reference_unchanged` taking its "recorded no digest"
+        # early return on every real run: the answer-key anti-cheat was a
+        # permanent no-op that CE054 could not see, because a write DID exist
+        # in `src/` — it was just dead. Merging keeps the sandbox-derived
+        # capture authoritative for the keys it owns without deleting anyone
+        # else's.
+        self.result.environment_info.update(
+            get_version_info(
+                sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
+            )
         )
 
         # Record API routing mode (shared between normal + evaluate-only paths)
@@ -1468,6 +1786,13 @@ class Orchestrator:
         path = sdk_env.get("PATH")
         if isinstance(path, str) and path:
             self.sandbox.set_command_base_path(path)
+            # Persist it so a LATER detached grade (`coder-eval evaluate` over a
+            # finished run dir) can restore the same PATH. Without this the
+            # "evaluate-only mode" gap named above is permanent: the re-grade
+            # would resolve `run_command` criteria against ambient PATH and could
+            # reach a different verdict than the run it claims to be grading.
+            if self.result is not None:
+                self.result.environment_info["command_base_path"] = path
 
     def _eval_route_overrides(self) -> EvalRouteOverrides:
         """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
@@ -1550,6 +1875,25 @@ class Orchestrator:
             )
             raise ValueError(msg)
 
+    def _record_grader_route_provenance(self) -> None:
+        """Record the GRADING host's route without touching the run's.
+
+        Two keys only — the agent route and the judge route — because those are
+        the two that decide what a re-grade's LLM criteria actually talked to.
+        Omitted entirely when they match the run, so an ordinary same-machine
+        re-grade adds nothing to the record.
+        """
+        assert self.result is not None
+        assert self.route is not None
+        env = self.result.environment_info
+        grader_routes = {"graded_by_api_routing": ROUTE_NAMES[type(self.route)]}
+        if self.eval_route is not None:
+            grader_routes["graded_by_eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
+        for key, value in grader_routes.items():
+            run_key = key.removeprefix("graded_by_")
+            if env.get(run_key) != value:
+                env[key] = value
+
     def _record_route_environment_info(self) -> None:
         """Persist resolved route + judge transport into ``result.environment_info``.
 
@@ -1559,6 +1903,17 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.route is not None
+        if self.prior_result is not None:
+            # A detached grade resolves routes for ITS OWN host, which may be a
+            # different backend from the one that ran the task. Writing them into
+            # the run's keys contradicts the "prior wins" contract in
+            # _seed_from_prior_result and leaves a self-contradictory record —
+            # `api_routing: anthropic_direct` beside the run's stale `aws_region`
+            # and `bedrock_model`. Keep the run's routing; record the grader's
+            # alongside it, under the same `graded_by_` provenance prefix the
+            # seeding uses, and only when it actually differs.
+            self._record_grader_route_provenance()
+            return
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
         # The judge side (llm_judge / agent_judge) may run on a different,
         # constant backend — pinned to Claude when the agent is on LiteLLM — so
@@ -1875,6 +2230,124 @@ class Orchestrator:
                 # forward so it isn't dropped from the latest results list.
                 r.token_usage = prior
 
+    def _sanitize_restored_path(self, recorded: str) -> str:
+        """Filter a PATH restored from a run's own ``task.json`` before prepending it.
+
+        The restored value is PREPENDED ahead of the host PATH, and it arrives
+        from a file inside the directory being graded — a run dir is a shareable
+        artifact (that is the whole point of the detached-grading flow), and under
+        ``driver: docker`` it is bind-mounted writable into the container the agent
+        runs in. Prepending it verbatim lets a run dir decide which binary
+        ``pytest`` resolves to on the grader's host.
+
+        Four filters, all cheap and all about what PATH parity actually needs:
+
+        * **Absolute only.** A relative entry resolves against the grader's
+          *current working directory*, which has nothing to do with the run — so
+          ``evilbin`` in a recorded PATH becomes ``$PWD/evilbin`` at the front of
+          every criterion subprocess's PATH. It also cannot be the toolchain
+          location it claims to be, since the run resolved it somewhere else.
+        * Drop anything that is not an existing directory (a dead entry buys no
+          parity).
+        * Drop any entry inside the **workspace** being graded — that tree is
+          agent-writable, so a shim dropped there would shadow a real tool.
+        * Drop any entry inside the **run directory** as a whole. The workspace
+          is only part of it; ``artifacts/``, a sibling replicate's tree and the
+          run root itself all travel in the same shared artifact and are all
+          equally attacker-chosen.
+
+        What remains is the run's genuine toolchain locations.
+        """
+        workspace = self.sandbox.sandbox_dir.resolve() if self.sandbox and self.sandbox.sandbox_dir else None
+        run_root = self.run_dir.resolve()
+        blocked = [p for p in (workspace, run_root) if p is not None]
+        kept: list[str] = []
+        for entry in recorded.split(os.pathsep):
+            if not entry:
+                continue
+            candidate = Path(entry)
+            if not candidate.is_absolute():
+                logger.warning(
+                    "Dropping recorded PATH entry %r: it is relative, so it would resolve against "
+                    + "the grader's working directory rather than the run's toolchain.",
+                    entry,
+                )
+                continue
+            if not candidate.is_dir():
+                logger.debug("Dropping recorded PATH entry %s: not a directory here.", entry)
+                continue
+            resolved = candidate.resolve()
+            if any(resolved == root or root in resolved.parents for root in blocked):
+                logger.warning(
+                    "Dropping recorded PATH entry %s: it lies inside the run being graded, "
+                    + "so a binary there could shadow a real tool on the grader's host.",
+                    entry,
+                )
+                continue
+            kept.append(str(resolved))
+        return os.pathsep.join(kept)
+
+    def _select_gate(self) -> bool:
+        """Apply the verdict gate to the criteria results already on ``self.result``.
+
+        Gate selection is FIRED-ONLY: the weighted armed gate applies iff the
+        watcher actually cut the run (``early_stop is not None``) — on a truncated
+        trajectory the unarmed criteria never had the chance to be satisfied, so
+        they stay advisory. A run that completed naturally (armed or not, watcher
+        never fired or disarmed fail-open) has a full trajectory and gates
+        strict-AND over every gating criterion, exactly like an unarmed run —
+        arming a criterion (e.g. adding a ``decide_within`` fail-fast timeout)
+        must never change the verdict of a run it didn't cut.
+
+        BOTH SINGLE-SHOT grading paths must call this — the live one and the
+        evaluate-only one, which are its two call sites. A detached grade
+        (``evaluate <run_dir>`` / ``run --resume``) reaches the verdict through
+        the evaluate-only branch, where ``early_stop`` arrives via
+        ``_seed_from_prior_result`` rather than from a live watcher; selecting
+        the gate there in a second, hand-written place is exactly how the
+        seeded field came to be carried but never read — re-grading an
+        early-stopped run under the full-run strict-AND gate flips its verdict.
+
+        The simulation dialog path does NOT route through here, and saying "both
+        grading paths" without that qualifier read as though it did. It is
+        benign only because ``result.early_stop`` is never assigned on the
+        dialog path, so an armed simulation task silently gates strict-AND on a
+        possibly-truncated trajectory. Wiring the dialog path through this seam
+        means also setting ``early_stop`` there; until then the limit is stated
+        rather than implied.
+        """
+        assert self.result is not None
+        if self.result.early_stop is not None:
+            # One gate for every early-stopped run, no per-reason branches: a
+            # decision-budget stop is just a fail-stop whose deciding criterion
+            # timed out (the watcher only fires once the weighted ceiling
+            # proves the armed gate cannot pass). The ceiling is an upper bound
+            # on the authoritative armed score only because the watcher reduces
+            # the SAME trajectory the checker scores — it records UNRESOLVED
+            # tool ends exactly like the agent's EventCollector does (see
+            # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
+            # correct whether the watcher fired on a pass, a fail, or a timeout.
+            gate_threshold = (
+                self.task.run_limits.stop_early_gate_threshold
+                if self.task.run_limits is not None
+                else DEFAULT_STOP_EARLY_GATE_THRESHOLD
+            )
+            armed_count = sum(1 for c in self.task.success_criteria if c.is_stop_armed)
+            logger.info(
+                "Early-stopped run (%s): gating on %d armed criteria (%d advisory, not gated).",
+                self.result.early_stop.reason.value,
+                armed_count,
+                len(self.task.success_criteria) - armed_count,
+            )
+            return self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
+
+        if self._early_stop_watcher is not None:
+            if self._early_stop_watcher.disarmed:
+                logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
+            else:
+                logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
+        return self.result.all_criteria_passed(self.task.success_criteria)
+
     async def _evaluation_loop(self) -> bool:
         """Run the main evaluation loop.
 
@@ -1888,6 +2361,14 @@ class Orchestrator:
         assert self.task.agent is not None
 
         if self.agent is None:
+            # Grading site 1 of 4. Evaluate-only with grading off would neither
+            # run an agent nor check anything — a no-op that still writes a
+            # task.json. Refuse instead of producing an empty row.
+            if not self.grade:
+                raise ValueError(
+                    "grade=False is meaningless on the evaluate-only path (no agent attached): "
+                    + "the run would neither execute nor grade."
+                )
             # No agent attached: evaluate-only re-grade of a completed sandbox.
             # (No-op tasks have a NoOpAgent here, so they take the normal path
             # below.) Check the criteria directly against the sandbox.
@@ -1901,7 +2382,12 @@ class Orchestrator:
                     "Criteria %s require agent execution; results may be incomplete with no agent",
                     unsupported,
                 )
-            self.result.iteration_count = 1
+            # A bare `evaluate <task> <dir>` has no trajectory, so one nominal
+            # iteration stands for the single grading pass. A re-grade seeded
+            # from a prior result already carries the real count (and the turns
+            # the trajectory-reading criteria need) — do not flatten it to 1.
+            if self.prior_result is None:
+                self.result.iteration_count = 1
             # Load reference in evaluate-only mode too: judge criteria with
             # include_reference=true expect this populated even when no agent
             # runs. The agent-driven branch below has the same call.
@@ -1911,7 +2397,7 @@ class Orchestrator:
                 turn_records=self.result.iterations,
             )
             self.result.success_criteria_results = criteria_results
-            return self.result.all_criteria_passed(self.task.success_criteria)
+            return self._select_gate()
 
         # Working directory context prepended to every prompt (including feedback).
         # The agent resumes its session between iterations via session_id.
@@ -1955,6 +2441,38 @@ class Orchestrator:
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
+        # Facts about the RUN, recorded before the grading switch. `execute`
+        # withholds the verdict, never the facts: `_seed_from_prior_result`
+        # cannot restore a fact the execute phase never captured, so a later
+        # `evaluate` would inherit the wrong terminal status.
+        #
+        # Recording the fact is NOT the same as finalizing on it. `max_turns`
+        # exhaustion decides the status only when the criteria fail (see
+        # `_terminal_status`), so under `grade=False` this flag is carried into
+        # task.json and consumed by the detached grade, not turned into a
+        # terminal status here.
+        if turn_record.max_turns_exhausted:
+            self.result.max_turns_exhausted = True
+            logger.warning(
+                "Agent exhausted max_turns (%s).",
+                self.task.run_limits.max_turns if self.task.run_limits else None,
+            )
+        # Soft cumulative-turn check (logs once; never aborts).
+        self._check_expected_turns(iteration=iteration)
+
+        # Grading site 2 of 4. `execute` stops here: the trajectory is captured
+        # and persisted exactly as on a graded run, but nothing is scored.
+        # Returning False keeps FinalStatus off SUCCESS; run()'s status chain
+        # turns it into NOT_GRADED. The reference-integrity check is skipped too
+        # — it exists to protect a grade that is not happening.
+        if not self.grade:
+            logger.info("Grading disabled (execute mode): skipping success criteria.")
+            # The budget gate is a run limit, not a verdict. Its only reason to
+            # sit after the criteria on the graded path is partial-credit
+            # visibility, and there is no partial credit here.
+            self._check_run_limits(iteration=iteration)
+            return False
+
         # Check success criteria (reference_dir feeds reference_comparison + judges)
         logger.debug("Checking success criteria")
         await self._verify_reference_integrity()
@@ -1971,64 +2489,22 @@ class Orchestrator:
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
-        # Gate selection is FIRED-ONLY: the weighted armed gate applies iff the
-        # watcher actually cut the run (early_stop is not None) — on a truncated
-        # trajectory the unarmed criteria never had the chance to be satisfied,
-        # so they stay advisory. A run that completed naturally (armed or not,
-        # watcher never fired or disarmed fail-open) has a full trajectory and
-        # gates strict-AND over every gating criterion, exactly like an unarmed
-        # run — arming a criterion (e.g. adding a decide_within fail-fast
-        # timeout) must never change the verdict of a run it didn't cut.
-        if self.result.early_stop is not None:
-            # One gate for every early-stopped run, no per-reason branches: a
-            # decision-budget stop is just a fail-stop whose deciding criterion
-            # timed out (the watcher only fires once the weighted ceiling
-            # proves the armed gate cannot pass). The ceiling is an upper bound
-            # on the authoritative armed score only because the watcher reduces
-            # the SAME trajectory the checker scores — it records UNRESOLVED
-            # tool ends exactly like the agent's EventCollector does (see
-            # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
-            # correct whether the watcher fired on a pass, a fail, or a timeout.
-            gate_threshold = (
-                self.task.run_limits.stop_early_gate_threshold
-                if self.task.run_limits is not None
-                else DEFAULT_STOP_EARLY_GATE_THRESHOLD
-            )
-            all_passed = self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
-            armed_count = sum(1 for c in self.task.success_criteria if c.is_stop_armed)
-            logger.info(
-                "Early-stopped run (%s): gating on %d armed criteria (%d advisory, not gated).",
-                self.result.early_stop.reason.value,
-                armed_count,
-                total_count - armed_count,
-            )
-        else:
-            if self._early_stop_watcher is not None:
-                if self._early_stop_watcher.disarmed:
-                    logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
-                else:
-                    logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
-            all_passed = self.result.all_criteria_passed(self.task.success_criteria)
+        all_passed = self._select_gate()
 
         # Reuse the model method for weighted score (single source of truth)
         self.result.calculate_weighted_score(self.task.success_criteria)
-        current_score = self.result.weighted_score or 0.0
+        # calculate_weighted_score just ran, so a score exists; the fallback is
+        # for the type, not for an unmeasured row (this branch only runs when
+        # grading did).
+        current_score = self.result.weighted_score or 0.0  # noqa: CE049 — graded here by construction
 
         logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
 
         self._emit_criteria_event(criteria_results)
 
-        if turn_record.max_turns_exhausted:
-            self.result.max_turns_exhausted = True
-            logger.warning(
-                "Agent exhausted max_turns (%s) without passing criteria.",
-                self.task.run_limits.max_turns if self.task.run_limits else None,
-            )
-
-        # Soft cumulative-turn check (logs once; never aborts).
-        self._check_expected_turns(iteration=iteration)
-
         # Budget gate runs AFTER criteria so partial-credit visibility is preserved.
+        # (max_turns capture and the soft turn check are recorded above, before
+        # the grading switch — they are facts about the run, not verdicts.)
         self._check_run_limits(iteration=iteration)
 
         return all_passed
@@ -2073,6 +2549,27 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
+        # Grading site 3 of 4. Unreachable today — `execute` rejects simulation
+        # tasks at the CLI, because the dialog's turn-continuation logic reads
+        # criteria results to decide whether to keep talking, so an ungraded
+        # dialog would silently change its own stopping behavior.
+        #
+        # RAISES rather than returning an empty list, matching the evaluate-only
+        # path's refusal. The empty-list version described itself as a
+        # "defensive no-op so the gate holds", and it was neither: both callers
+        # go straight on to `all_criteria_passed`, whose first act is a
+        # length pre-check that raises on a mismatch — and an empty criteria
+        # list is forbidden by `TaskDefinition.validate_success_criteria`, so
+        # the mismatch was guaranteed. If the simulation restriction ever lifts,
+        # that "no-op" turns every ungraded dialog into FinalStatus.ERROR. A
+        # loud refusal here is honest about the fact that this path has no
+        # ungraded semantics yet.
+        if not self.grade:
+            raise ValueError(
+                "Grading is disabled but the simulation dialog path requires criteria results to "
+                + "decide turn continuation. `execute` refuses simulation tasks at the CLI; reaching "
+                + "here means that refusal was bypassed."
+            )
         await self._verify_reference_integrity()
         criteria_results = await self.success_checker.check_all_async(
             self.task.success_criteria,
@@ -2507,7 +3004,8 @@ class Orchestrator:
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
-        current_score = self.result.weighted_score or 0.0
+        # Reached only from the grading path, where a score has been computed.
+        current_score = self.result.weighted_score or 0.0  # noqa: CE049 — graded here by construction
         criteria_details = [
             f"{criterion.type}: {'PASS' if result.score >= criterion.pass_threshold else 'FAIL'}"
             + f" ({result.score:.2f})"
@@ -2670,21 +3168,116 @@ class Orchestrator:
         outer ``except Exception`` handler and lands the run as
         ``FinalStatus.ERROR``. Post-run commands and cleanup still execute via
         the ``finally`` block.
+
+        Skipped entirely on an adopted sandbox — see ``_skip_pre_run_for_adopted``.
         """
-        if self.result is None:
+        if self.result is None or self._skip_pre_run_for_adopted(self.task.pre_run):
             return
         await self._run_command_list(self.task.pre_run, self.result.pre_run_results, "pre_run")
 
     async def _run_post_run_commands(self) -> None:
-        """Execute post-run commands inside the sandbox after evaluation.
+        """Execute post-run commands inside the sandbox after the criteria are checked.
 
         See ``_run_command_list``. Post-run commands are informational only —
         ``fail_on_error`` is not part of ``PostRunCommand``, so failures are
         warning-logged and never affect the evaluation verdict.
+
+        ``post_run`` belongs to the GRADING phase, not the execute phase — see
+        ``_skip_post_run``.
         """
-        if self.result is None:
+        if self.result is None or self._skip_post_run():
             return
         await self._run_command_list(self.task.post_run, self.result.post_run_results, "post_run")
+
+    def _skip_pre_run_for_adopted(self, commands: Sequence[PreRunCommand]) -> bool:
+        """True when ``pre_run`` must not run against an adopted sandbox.
+
+        ``adopt()`` guarantees it materializes nothing into the workspace, but
+        that guarantee is only as strong as its weakest caller: ``run()`` invokes
+        the hooks unconditionally, and those commands run with
+        ``cwd = sandbox_dir``. Several in-tree tasks stage fixtures there
+        (``cp -a /app/[!.]* "$PWD/"``), so re-running them during a detached
+        grade would overwrite the agent's deliverables *before* the criteria read
+        them — silently changing the verdict and destroying preserved artifacts.
+
+        ``pre_run`` prepares the environment the AGENT needs, so it belongs to
+        the execute phase; the prior run already ran it, and its recorded results
+        are carried over by ``_seed_from_prior_result``. Its ``post_run`` sibling
+        is the opposite case — see ``_skip_post_run``.
+
+        ``commands`` is passed in rather than looked up from a phase name. The
+        lookup was a stringly-typed branch whose only consumer was a log line, so
+        a typo (``"prerun"``) would silently report the wrong count with
+        nothing — not pyright, not ruff — able to see it, in the same module
+        CE050 was written to protect from exactly that.
+        """
+        if self.sandbox is None or not self.sandbox.was_adopted:
+            return False
+        if commands:
+            logger.info(
+                "Skipping %d pre_run command(s): the sandbox was adopted for grading, and re-running them "
+                + "would mutate the workspace under evaluation.",
+                len(commands),
+            )
+        return True
+
+    def _skip_post_run(self) -> bool:
+        """True when ``post_run`` must not run in THIS phase.
+
+        ``post_run`` runs after the verdict is finalized and is free to mutate
+        the workspace (``rm -rf node_modules`` is the archetype), so it belongs
+        to whichever phase GRADES — never to the phase that merely executes.
+        Running it under ``execute`` inverted its own contract and broke
+        round-trip equivalence: the criteria had not read the tree yet, so
+        ``execute`` + ``evaluate`` graded a workspace ``post_run`` had already
+        modified and could return a different verdict than a single ``run`` for
+        the identical trajectory.
+
+        Two skips, and they are NOT the same condition:
+
+        * ``grade=False`` (``execute``) — deferred, not cancelled. The commands
+          run later, when ``evaluate`` / ``run --resume`` grades the row. A run
+          that is never graded therefore never tidies its sandbox; that is the
+          accepted cost of keeping the verdict honest.
+        * an adopted sandbox whose prior row ALREADY recorded ``post_run``
+          results — that phase graded, so the commands have run once. Nothing
+          declares them idempotent, and ``_seed_from_prior_result`` has already
+          copied those results onto this row, so a second pass would both re-run
+          the side effects and double-count the records.
+
+        The two combined mean each command runs exactly once, in the grading
+        phase, whichever command that turns out to be.
+        """
+        assert self.result is not None
+        commands = self.task.post_run
+        if not self.grade:
+            if commands:
+                logger.info(
+                    "Deferring %d post_run command(s) to the grading phase: they run after the criteria are "
+                    + "checked, and `execute` checks none. `coder-eval evaluate <run_dir>` will run them.",
+                    len(commands),
+                )
+            return True
+        if self.prior_result is not None and self.prior_result.post_run_results:
+            if commands:
+                logger.info(
+                    "Skipping %d post_run command(s): the run being graded already ran them.",
+                    len(commands),
+                )
+            return True
+        return False
+
+    def _unpreserved_sandbox_path(self) -> str | None:
+        """What ``sandbox_path`` should say under ``PreservationMode.NONE``.
+
+        ``None`` for a sandbox `cleanup()` is about to delete — pointing at a
+        tempdir that no longer exists is worse than pointing nowhere. But an
+        ADOPTED sandbox belongs to the caller and survives cleanup, so its path
+        is not stale, and clearing it would strip the graded row of the
+        artifacts pointer a second grade needs to find the workspace.
+        """
+        assert self.sandbox is not None
+        return str(self.sandbox.sandbox_dir) if self.sandbox.was_adopted else None
 
     async def _cleanup(self) -> None:
         """Clean up all resources."""
@@ -2749,8 +3342,7 @@ class Orchestrator:
                     await asyncio.to_thread(self.sandbox.grant_read_access)
                     logger.info(f"Sandbox preserved (in-place): {self.sandbox.sandbox_dir}")
                 elif self.preservation_mode == PreservationMode.NONE and self.result:
-                    # Sandbox will be deleted by cleanup() below; clear stale path.
-                    self.result.sandbox_path = None
+                    self.result.sandbox_path = self._unpreserved_sandbox_path()
                 elif self.result:
                     # Defensive: a future PreservationMode member with no arm here
                     # would otherwise silently fall through. Treat as no-preserve.

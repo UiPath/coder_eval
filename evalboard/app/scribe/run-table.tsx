@@ -11,8 +11,10 @@ import { TableScroll } from "../_components/scroll-table";
 type ScribeRow = RunListingRow & { title?: string | null };
 
 function passPct(row: ScribeRow): number | null {
-    if (row.tasksRun === 0) return null;
-    return (row.tasksSucceeded / row.tasksRun) * 100;
+    // tasksGraded, not tasksRun: an ungraded row (`coder-eval execute`) was
+    // never scored, so it leaves both sides of the rate.
+    if (row.tasksGraded === 0) return null;
+    return (row.tasksSucceeded / row.tasksGraded) * 100;
 }
 
 export function ScribeRunTable({
@@ -120,7 +122,7 @@ export function ScribeRunTable({
                                             : "—"}
                                     </td>
                                     <td className="px-3 py-2 text-right tabular-nums text-gray-700">
-                                        {row.tasksSucceeded}/{row.tasksRun}
+                                        {row.tasksSucceeded}/{row.tasksGraded}
                                     </td>
                                     <td className="px-3 py-2 text-right tabular-nums text-gray-700">
                                         {fmtDuration(row.taskDurationSeconds)}

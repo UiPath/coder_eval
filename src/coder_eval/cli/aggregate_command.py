@@ -78,11 +78,15 @@ def aggregate_command(
         skipped_tasks=skipped,
     )
     write_run_summary(summary, out_dir)
-    console.print(
-        f"[green][OK][/green] Aggregated {summary.tasks_run} task(s) "
-        + f"({summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err) "
-        + f"→ {out_dir / 'run.json'}"
-    )
+    # The fourth bucket is named here too. `coder-eval aggregate <run>` is the
+    # step right after `coder-eval execute`, so an ungraded run is the FIRST
+    # thing this line renders — and without the term it reads
+    # "Aggregated 12 task(s) (0 ok / 0 fail / 0 err)", four numbers that no
+    # longer sum to tasks_run with nothing on screen to say where the rest went.
+    counts = f"{summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err"
+    if summary.tasks_not_graded:
+        counts += f" / {summary.tasks_not_graded} not graded"
+    console.print(f"[green][OK][/green] Aggregated {summary.tasks_run} task(s) ({counts}) → {out_dir / 'run.json'}")
     console.print(
         "[dim]Note: run-level summary only — per-suite (suite.json/suite.md) and "
         + "experiment (experiment.json/experiment.md) rollups are not rebuilt.[/dim]"

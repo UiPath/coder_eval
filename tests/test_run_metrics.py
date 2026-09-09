@@ -5,7 +5,9 @@ Two bugs are pinned here.
 **The denominator.** ``pass_rate`` used to be ``succeeded / (run - error)``, which
 paid a bonus for erroring: the more a run fell over, the smaller its denominator
 got, up to the degenerate case of a run rendering as a perfect score while passing
-a handful of rows. Every surface now divides by ``tasks_run``.
+a handful of rows. Every surface now divides by ``tasks_graded`` — every
+dispatched task except the ones that were never measured at all (``coder-eval
+execute`` leaves rows ``NOT_GRADED``, and those leave BOTH sides of the rate).
 
 **The bill.** Cost was summed over whatever rows happened to carry one, so a run
 whose model was missing from the rate card, or whose turns were killed before the

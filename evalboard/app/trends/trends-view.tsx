@@ -32,6 +32,7 @@ import { VersionChip } from "@/app/_components/version-list";
 import { HarnessSelector } from "@/app/_components/harness-selector";
 import { harnessShortLabel } from "@/app/_components/harness-badge";
 import { fetchTaskHistoryAction } from "./actions";
+import { isGraded, isPassStatus } from "@/lib/status";
 
 function fmtUsd(c: number | null): string {
     if (c == null) return "—";
@@ -39,7 +40,10 @@ function fmtUsd(c: number | null): string {
     return `$${c.toFixed(2)}`;
 }
 
-function fmtPct(p: number): string {
+function fmtPct(p: number | null): string {
+    // "—", never "0%": a task whose every run in the window was ungraded has no
+    // pass rate, and "0%" is indistinguishable from a task that never passed.
+    if (p == null) return "—";
     return `${Math.round(p * 100)}%`;
 }
 
@@ -109,10 +113,10 @@ function sortTasks(
                         : b.totalRuns - a.totalRuns;
                 break;
             case "passRate":
-                v =
-                    dir === "asc"
-                        ? a.passRate - b.passRate
-                        : b.passRate - a.passRate;
+                // Nullable like the avg columns: an unmeasured task has no rate
+                // to compare, and subtracting a coalesced 0 sorted it to the top
+                // of the default ascending view as the worst offender.
+                v = cmpNullable(a.passRate, b.passRate, dir);
                 break;
             case "avgDuration":
                 v = cmpNullable(
@@ -146,9 +150,13 @@ function sortTasks(
 
 function statusFill(status: string | null): string {
     if (status == null) return "bg-gray-300";
-    if (status === "SUCCESS") return "bg-green-500";
-    // All non-success outcomes share one red — the trends view treats every
-    // failure mode as equally bad rather than ranking FAILED vs ERROR.
+    if (isPassStatus(status)) return "bg-green-500";
+    // An ungraded row was never measured, so it is not a failure. Painting it
+    // red contradicted lib/trends.ts, which had just excluded those very rows
+    // from the pass rate feeding this same timeline.
+    if (!isGraded(status)) return "bg-gray-300";
+    // All non-success graded outcomes share one red — the trends view treats
+    // every failure mode as equally bad rather than ranking FAILED vs ERROR.
     return "bg-red-500";
 }
 
@@ -417,7 +425,7 @@ function TaskRow({
     // (lib/pass-rate.ts). This used to be green only at a perfect 100%, which
     // painted a task that passed 9 of its last 10 runs the same red as one that
     // never passed.
-    const rateClass = passClassRatio(t.totalRuns > 0 ? t.passRate : null);
+    const rateClass = passClassRatio(t.passRate);
     return (
         <>
             <tr

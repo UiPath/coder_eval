@@ -144,6 +144,7 @@ from coder_eval.models.results import (
     eval_overhead_cost,
     eval_result_total_cost,
     judge_cost_usd,
+    nothing_was_measured,
     row_cost_incomplete,
     simulator_cost_usd,
     sum_costs,
@@ -340,6 +341,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SkippedTask",
     # Cost helpers, shared by RunSummary's computed fields and the reports so
     # every surface agrees on what a total costs and which rows lost money.
+    "nothing_was_measured",
     "row_cost_incomplete",
     "eval_overhead_cost",
     "sum_costs",

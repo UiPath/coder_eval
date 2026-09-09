@@ -14,7 +14,7 @@ import {
     MaturePill,
     StatusPill,
 } from "@/lib/pills";
-import { isPassStatus, perTaskPassCounts, statusSortRank } from "@/lib/status";
+import { isPassStatus, perTaskGradedCounts, perTaskPassCounts, statusSortRank } from "@/lib/status";
 import { DEFAULT_VARIANT_ID, taskVariantKey, variantsOf } from "@/lib/variants";
 import {
     displayedTurns,
@@ -182,6 +182,7 @@ function TaskIdCell({
     className,
     matureSourceRuns,
     replicateCount = 1,
+    replicateGradedCount = 0,
     replicatePassCount = 0,
     sourceId,
 }: {
@@ -194,6 +195,8 @@ function TaskIdCell({
     // >1 the row collapses to a single entry with a k/N ✓ badge; the per-run
     // detail is reachable from the task page's run selector (?r=NN).
     replicateCount?: number;
+    // How many of those replicates were graded — the badge's denominator.
+    replicateGradedCount?: number;
     // How many of those replicates passed — shown as k/N and color-coded.
     replicatePassCount?: number;
 }) {
@@ -238,12 +241,12 @@ function TaskIdCell({
     return (
         <Link href={href} className={className}>
             {humanizeTaskId(t.taskId)}
-            {replicateCount > 1 && (
+            {replicateCount > 1 && replicateGradedCount > 0 && (
                 <span
-                    className={`ml-1.5 rounded border px-1 py-0.5 text-[10px] font-medium tabular-nums ${replicateBadgeClass(replicatePassCount, replicateCount)}`}
-                    title={`${replicatePassCount} of ${replicateCount} replicates passed — open to switch between them`}
+                    className={`ml-1.5 rounded border px-1 py-0.5 text-[10px] font-medium tabular-nums ${replicateBadgeClass(replicatePassCount, replicateGradedCount)}`}
+                    title={`${replicatePassCount} of ${replicateGradedCount} graded replicates passed — open to switch between them`}
                 >
-                    {replicatePassCount}/{replicateCount} ✓
+                    {replicatePassCount}/{replicateGradedCount} ✓
                 </span>
             )}
         </Link>
@@ -565,6 +568,13 @@ export function TaskGrid({
     // page's pass-rate tile all apply the same "any replicate passed" rule.
     const replicatePassCounts = useMemo(() => perTaskPassCounts(tasks), [tasks]);
 
+    // The badge's DENOMINATOR. Not `replicateCounts`, which counts every
+    // replicate: an ungraded replicate (`coder-eval execute`) was never scored,
+    // so counting it there rendered a red "0/2 ✓" with the tooltip "0 of 2
+    // replicates passed" for a run nothing was wrong with. Zero (every
+    // replicate ungraded) suppresses the badge entirely.
+    const replicateGradedCounts = useMemo(() => perTaskGradedCounts(tasks), [tasks]);
+
     // Collapse replicates to one row per (variant, task): repeated runs share a
     // taskId, so the grid shows a single entry with a k/N ✓ badge; the per-run
     // detail is selectable on the task page. The representative is chosen so its
@@ -752,6 +762,9 @@ export function TaskGrid({
                                         replicateCount={
                                             replicateCounts.get(taskVariantKey(t)) ?? 1
                                         }
+                                        replicateGradedCount={
+                                            replicateGradedCounts.get(taskVariantKey(t)) ?? 0
+                                        }
                                         replicatePassCount={
                                             replicatePassCounts.get(taskVariantKey(t)) ?? 0
                                         }
@@ -913,6 +926,9 @@ export function TaskGrid({
                                     replicateCount={
                                         replicateCounts.get(taskVariantKey(t)) ?? 1
                                     }
+                                        replicateGradedCount={
+                                            replicateGradedCounts.get(taskVariantKey(t)) ?? 0
+                                        }
                                         replicatePassCount={
                                             replicatePassCounts.get(taskVariantKey(t)) ?? 0
                                         }

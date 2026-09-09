@@ -541,6 +541,18 @@ jobs:
                     "uploaded run dir before re-running; this is an unattended paid job.")
               sys.exit(1)
 
+          # NOT_GRADED means a task ran but was never scored. This job invokes the
+          # published action, which runs `coder-eval run` (graded), so reaching it is
+          # impossible unless the action started dispatching `coder-eval execute` --
+          # in which case every score gate below silently measures nothing and the job
+          # goes green having verified no verdict at all. Hard-fail, don't tolerate.
+          ungraded = [s for s in statuses if s == "NOT_GRADED"]
+          if ungraded:
+              print("::error::task(s) reported NOT_GRADED -- the published action ran without "
+                    "grading. `coder-eval run` always grades, so the action is dispatching the "
+                    "wrong command and every score gate in this job is measuring nothing.")
+              sys.exit(1)
+
           # Exit-contract check, conditional on the model having actually performed.
           # Ignoring the step's exit code entirely (see the continue-on-error rationale
           # above) would also hide a REGRESSION in the action's own exit logic -- e.g. a

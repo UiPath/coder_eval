@@ -56,9 +56,19 @@ def _resolved(run_root, task_id: str) -> ResolvedTask:
     )
 
 
-def _write_task_json(rt: ResolvedTask, status: FinalStatus) -> None:
-    """Write a finalized task.json into rt.run_dir, like the orchestrator does."""
+def _write_task_json(rt: ResolvedTask, status: FinalStatus, *, graded: bool | None = None) -> None:
+    """Write a finalized task.json into rt.run_dir, like the orchestrator does.
+
+    ``graded`` decides whether the row carries a verdict, and it is not the same
+    question as ``status``. That is the whole point of the resume partition: a
+    row is owed a grade when it was executed but never scored, and an ``execute``
+    row that also tripped a run limit lands with an execution-fact status AND no
+    score. Defaulting it from the status alone would make the fixture unable to
+    express the case the partition exists to route.
+    """
     rt.run_dir.mkdir(parents=True, exist_ok=True)
+    if graded is None:
+        graded = status.category != "ungraded"
     result = EvaluationResult(
         task_id=rt.task.task_id,
         task_description=rt.task.description,
@@ -66,7 +76,9 @@ def _write_task_json(rt: ResolvedTask, status: FinalStatus) -> None:
         agent_type=AgentKind.CLAUDE_CODE,
         started_at=datetime.now(),
         final_status=status,
-        weighted_score=1.0 if status == FinalStatus.SUCCESS else 0.0,
+        # None, never 0.0, when nothing was measured: a laundered zero here would
+        # make the fixture indistinguishable from a genuinely-scored miss.
+        weighted_score=(1.0 if status == FinalStatus.SUCCESS else 0.0) if graded else None,
         duration_seconds=12.5,
         iteration_count=1,
         environment_info={},
@@ -84,7 +96,7 @@ def test_partition_splits_finalized_from_pending(tmp_path):
     partial.run_dir.mkdir(parents=True, exist_ok=True)
     (partial.run_dir / "task.json").write_text(json.dumps({"task_id": "partial_task"}), encoding="utf-8")
 
-    to_run, prior_results, prior_resolved = partition_for_resume([done, pending, partial])
+    to_run, _to_grade, prior_results, prior_resolved = partition_for_resume([done, pending, partial])
 
     assert {rt.task.task_id for rt in to_run} == {"pending_task", "partial_task"}
     assert [tr.task_id for tr in prior_results] == ["done_task"]
@@ -94,10 +106,102 @@ def test_partition_splits_finalized_from_pending(tmp_path):
     assert prior_results[0].duration == 12.5
 
 
+def test_partition_sends_ungraded_rows_to_grading_not_to_rerun(tmp_path):
+    """`run --resume` owes a NOT_GRADED row a GRADE, not another agent run.
+
+    A NOT_GRADED row (written by `coder-eval execute`) carries a final status, so
+    the naive "has any final status" test calls it complete — which made
+    `run --resume` report "already complete", grade nothing, and exit 0.
+    """
+    ungraded = _resolved(tmp_path, "ungraded_task")
+    graded = _resolved(tmp_path, "graded_task")
+    _write_task_json(ungraded, FinalStatus.NOT_GRADED)
+    _write_task_json(graded, FinalStatus.SUCCESS)
+
+    part = partition_for_resume([ungraded, graded], grade=True)
+
+    assert [rt.task.task_id for rt in part.to_grade] == ["ungraded_task"]
+    assert part.to_run == [], "an executed row must not be re-executed — that discards the agent spend"
+    assert [tr.task_id for tr in part.prior_results] == ["graded_task"]
+
+
+def test_partition_treats_ungraded_as_done_for_execute(tmp_path):
+    """`execute --resume` owes a NOT_GRADED row nothing: it finished executing."""
+    ungraded = _resolved(tmp_path, "ungraded_task")
+    _write_task_json(ungraded, FinalStatus.NOT_GRADED)
+
+    part = partition_for_resume([ungraded], grade=False)
+
+    assert part.to_grade == []
+    assert part.to_run == []
+    assert [tr.task_id for tr in part.prior_results] == ["ungraded_task"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [FinalStatus.TIMEOUT, FinalStatus.TOKEN_BUDGET_EXCEEDED, FinalStatus.COST_BUDGET_EXCEEDED],
+)
+def test_an_execute_row_that_also_tripped_a_run_limit_still_owes_a_grade(tmp_path, status):
+    """The case routing-by-category missed entirely.
+
+    A run limit aborts the run BEFORE grading, so under `coder-eval execute` such
+    a row lands with an execution-fact status — category `error`/`failed`, not
+    `ungraded` — and no verdict at all. Keying the partition on the category
+    filed it under "already complete", so it stayed permanently `weighted_score:
+    null` with an empty criteria vector in run.json, the rollup and the
+    evalboard — while `evaluate <run_dir>` graded the identical bytes happily.
+    Two entry points into one feature disagreeing about the same record.
+    """
+    row = _resolved(tmp_path, "limited_task")
+    _write_task_json(row, status, graded=False)
+
+    part = partition_for_resume([row], grade=True)
+
+    assert [rt.task.task_id for rt in part.to_grade] == ["limited_task"]
+    assert part.to_run == [], "the agent already ran; re-running it discards that spend"
+
+
+@pytest.mark.parametrize("status", [FinalStatus.FAILURE, FinalStatus.ERROR, FinalStatus.TIMEOUT])
+def test_partition_still_never_retries_failures(tmp_path, status):
+    """The carve-out must not become a general 'retry bad rows' rule.
+
+    Resume has never retried failures (delete a task's task.json to force that),
+    and both commands must keep treating a row that CARRIES a verdict as
+    complete — which is why these rows are written graded.
+    """
+    failed = _resolved(tmp_path, "failed_task")
+    _write_task_json(failed, status, graded=True)
+
+    for grade in (True, False):
+        part = partition_for_resume([failed], grade=grade)
+        assert part.to_run == [], f"grade={grade} re-ran a {status.value} row"
+        assert part.to_grade == [], f"grade={grade} tried to re-grade a {status.value} row"
+        assert len(part.prior_results) == 1
+
+
+def test_grade_flag_is_exempt_from_the_resume_drift_warning(tmp_path):
+    """`execute` then `run --resume` is a supported flow, not a config mistake.
+
+    The warning's text ("already-finalized tasks keep their original-config
+    results") is actively wrong for it: those rows are re-graded with the current
+    config, which is the whole point.
+    """
+    executed = BatchRunConfig(run_dir=tmp_path, grade=False)
+    write_run_fingerprint(tmp_path, compute_run_fingerprint(executed, "exp1", "direct", None))
+    prior = read_run_fingerprint(tmp_path)
+
+    grading = BatchRunConfig(run_dir=tmp_path, grade=True)
+    assert fingerprint_diff(prior, compute_run_fingerprint(grading, "exp1", "direct", None)) == {}
+
+    # ...but a real difference alongside it is still reported.
+    both = BatchRunConfig(run_dir=tmp_path, grade=True, overrides={"agent.model": "opus"})
+    assert "overrides" in fingerprint_diff(prior, compute_run_fingerprint(both, "exp1", "direct", None))
+
+
 def test_partition_no_run_dir_yields_all_pending(tmp_path):
     """--resume on a fresh dir degrades to a normal run (everything to_run)."""
     tasks = [_resolved(tmp_path, f"t{i}") for i in range(3)]
-    to_run, prior_results, prior_resolved = partition_for_resume(tasks)
+    to_run, _to_grade, prior_results, prior_resolved = partition_for_resume(tasks)
     assert len(to_run) == 3
     assert prior_results == []
     assert prior_resolved == []
@@ -114,7 +218,7 @@ async def test_run_batch_folds_prior_into_run_json(tmp_path):
     _write_task_json(p_success, FinalStatus.SUCCESS)
     _write_task_json(p_fail, FinalStatus.FAILURE)
 
-    _, prior_results, prior_resolved = partition_for_resume([p_success, p_fail])
+    _, _to_grade, prior_results, prior_resolved = partition_for_resume([p_success, p_fail])
     assert len(prior_results) == 2
 
     # Nothing left to run — exercises the merge + run.json write in isolation.

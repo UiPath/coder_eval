@@ -750,3 +750,84 @@ class TestReplicateAggregation:
         vr = result.task_summaries[0].variant_results[0]
         assert abs(vr.duration_seconds - 0.0) < 1e-9
         assert vr.final_status == FinalStatus.ERROR
+
+
+class TestAggregationCountsErroredRowsAsMisses:
+    """An ERRORED row must count as 0.0, not vanish from both sides.
+
+    ``weighted_score is None`` and ``final_status.category == "ungraded"`` look
+    interchangeable and are not: an ERROR / BUILD_FAILED row also has no score.
+    Filtering on the score dropped it from the numerator AND the denominator, so
+    a nightly where one image build failed reported a HIGHER headline score than
+    a clean one, and A/B comparisons were biased toward whichever variant errored
+    more. Only an ungraded row leaves both sides — nothing measured it.
+    """
+
+    @staticmethod
+    def _result(task_id: str, variant_id: str, status: str, score: float | None) -> EvaluationResult:
+        return EvaluationResult(
+            task_id=task_id,
+            task_description="d",
+            variant_id=variant_id,
+            agent_type="claude-code",
+            started_at=datetime.now(),
+            final_status=status,  # type: ignore[arg-type]
+            weighted_score=score,
+            duration_seconds=1.0,
+            iteration_count=1,
+            environment_info={},
+        )
+
+    def _aggregate(self, rows: list[tuple[str, str, str, float | None]]) -> ExperimentResult:
+        return aggregate_results(
+            experiment_id="e",
+            description="d",
+            variant_ids=sorted({vid for _, vid, _, _ in rows}),
+            task_results=[
+                TaskResult(
+                    task_id=task_id,
+                    variant_id=variant_id,
+                    result=self._result(task_id, variant_id, status, score),
+                    duration=1.0,
+                )
+                for task_id, variant_id, status, score in rows
+            ],
+            total_duration=1.0,
+        )
+
+    def test_an_errored_row_drags_the_average_down_like_a_miss(self):
+        clean = self._aggregate([("a", "v", "SUCCESS", 1.0), ("b", "v", "FAILURE", 0.0)])
+        errored = self._aggregate([("a", "v", "SUCCESS", 1.0), ("b", "v", "ERROR", None)])
+
+        assert clean.variant_aggregates["v"].average_score == 0.5
+        assert errored.variant_aggregates["v"].average_score == 0.5, (
+            "an infrastructure-failure night must not score HIGHER than a clean one"
+        )
+
+    def test_a_build_failure_is_a_miss_too(self):
+        result = self._aggregate([("a", "v", "SUCCESS", 1.0), ("b", "v", "BUILD_FAILED", None)])
+        assert result.variant_aggregates["v"].average_score == 0.5
+
+    def test_an_ungraded_row_leaves_both_sides(self):
+        result = self._aggregate([("a", "v", "SUCCESS", 1.0), ("b", "v", "NOT_GRADED", None)])
+        assert result.variant_aggregates["v"].average_score == 1.0
+
+    def test_a_fully_ungraded_variant_has_no_average(self):
+        result = self._aggregate([("a", "v", "NOT_GRADED", None)])
+        assert result.variant_aggregates["v"].average_score is None
+
+    def test_score_spread_still_sees_a_fully_errored_arm(self):
+        """A task where variant B fully errored reported spread 0.0 instead of
+        the real gap, because B had no score to compare."""
+        result = self._aggregate([("a", "x", "SUCCESS", 0.8), ("a", "y", "ERROR", None)])
+        assert result.task_summaries[0].score_spread == pytest.approx(0.8)
+
+    def test_no_arbitrary_winner_when_nothing_was_scored(self):
+        """`variants[0]` named whichever arm the input happened to list first,
+        with `is_tie=False` asserting it was a real result — so swapping the
+        inputs flipped the reported winner."""
+        one = self._aggregate([("a", "x", "NOT_GRADED", None), ("a", "y", "NOT_GRADED", None)])
+        other = self._aggregate([("a", "y", "NOT_GRADED", None), ("a", "x", "NOT_GRADED", None)])
+
+        assert one.task_summaries[0].best_variant == other.task_summaries[0].best_variant
+        assert one.task_summaries[0].is_tie is True

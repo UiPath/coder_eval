@@ -33,6 +33,13 @@ initial_prompt: |
   Do nothing. The task will verify that the custom Docker image was used.
 
 success_criteria:
-  - type: file_exists
-    path: /opt/byod_marker
+  # `run_command`, not `file_exists`, and the distinction is load-bearing:
+  # criterion paths are SANDBOX-RELATIVE, and joining an absolute path onto the
+  # sandbox root discards the prefix. `/opt/byod_marker` therefore escapes
+  # containment, and this task is asserting about the container IMAGE rather
+  # than about anything the agent produced in its workspace. A shell test says
+  # that directly.
+  - type: run_command
+    command: test -f /opt/byod_marker
+    timeout: 10
     description: Marker file added by custom BYOD image (verifies custom image was used)

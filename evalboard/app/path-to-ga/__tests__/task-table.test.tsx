@@ -12,6 +12,7 @@ function row(overrides: Partial<TagTaskRow> = {}): TagTaskRow {
         skill: "uipath-maestro-flow",
         appearances: 20,
         matureSkips: 0,
+        ungraded: 0,
         executed: 20,
         passRate: 90,
         latestStatus: "SUCCESS",

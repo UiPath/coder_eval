@@ -38,7 +38,7 @@ from coder_eval.agents.antigravity_agent import AntigravityAgent
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.agents.codex_agent import CodexAgent, _CodexTurnState
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.cli.plan_command import plan_command
+from coder_eval.cli.plan_command import run_plan
 from coder_eval.config import settings
 from coder_eval.criteria import CriterionRegistry, init_criteria
 from coder_eval.criteria.command_executed import CommandExecutedChecker
@@ -1041,7 +1041,7 @@ class TestGuardrailResolutionSurfaces:
         assert early_stop_active(by_variant["smoke"]) is True
 
     def _run_plan(self, task_file: Path, exp_dir: Path) -> tuple[str, int]:
-        """Invoke the real plan_command against a minimal single-variant experiment.
+        """Invoke the real plan body against a minimal single-variant experiment.
 
         Returns the concatenated console output and the exit code (0 when plan
         returned normally).
@@ -1058,7 +1058,7 @@ class TestGuardrailResolutionSurfaces:
             patch("coder_eval.cli.plan_command.console") as mock_console,
         ):
             try:
-                plan_command(task_files=[task_file], experiment=exp_file)
+                run_plan(task_files=[task_file], experiment=exp_file)
             except typer.Exit as exc:
                 exit_code = exc.exit_code
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)

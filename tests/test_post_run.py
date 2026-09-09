@@ -119,7 +119,7 @@ def _make_orchestrator(task: TaskDefinition, tmp_path: Path) -> Orchestrator:
 async def test_post_run_skipped_when_empty(tmp_path):
     task = _make_task(post_run=[])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_post_run_commands()
@@ -142,7 +142,7 @@ async def test_post_run_skipped_when_no_sandbox(tmp_path):
 async def test_post_run_command_success(tmp_path):
     task = _make_task(post_run=[PostRunCommand(command="echo '{\"ok\": true}'")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_post_run_commands()
@@ -161,7 +161,7 @@ async def test_post_run_command_failure_does_not_affect_result(tmp_path):
     )
     orch = _make_orchestrator(task, tmp_path)
     orch.result.final_status = FinalStatus.SUCCESS
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_post_run_commands()
@@ -178,7 +178,7 @@ async def test_post_run_command_with_pipes(tmp_path):
     """Shell commands support pipes and redirects."""
     task = _make_task(post_run=[PostRunCommand(command="echo hello world | tr a-z A-Z")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_post_run_commands()
@@ -192,7 +192,7 @@ async def test_post_run_command_with_pipes(tmp_path):
 async def test_post_run_command_timeout(tmp_path):
     task = _make_task(post_run=[PostRunCommand(command="sleep 10", timeout=1)])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_post_run_commands()
@@ -211,7 +211,7 @@ async def test_post_run_multiple_commands(tmp_path):
         ]
     )
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_post_run_commands()
@@ -229,7 +229,7 @@ async def test_post_run_cwd_is_sandbox(tmp_path):
 
     task = _make_task(post_run=[PostRunCommand(command='python3 -c "import os; print(os.getcwd())"')])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = sandbox_dir
 
     await orch._run_post_run_commands()
@@ -243,7 +243,7 @@ async def test_post_run_streams_stdout_to_logger(tmp_path, caplog):
     """Each line of stdout is forwarded to the orchestrator logger as it is read."""
     task = _make_task(post_run=[PostRunCommand(command="python3 -c \"print('line-one'); print('line-two')\"")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with caplog.at_level(logging.INFO, logger="coder_eval.orchestrator"):
@@ -263,7 +263,7 @@ async def test_post_run_streams_stderr_as_warning(tmp_path, caplog):
     """Stderr lines are forwarded at WARNING level (separate from stdout)."""
     task = _make_task(post_run=[PostRunCommand(command="python3 -c \"import sys; print('boom', file=sys.stderr)\"")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
@@ -279,7 +279,7 @@ async def test_post_run_output_truncated(tmp_path):
     # Generate output larger than the limit
     task = _make_task(post_run=[PostRunCommand(command="python3 -c \"print('x' * 200_000)\"")])
     orch = _make_orchestrator(task, tmp_path)
-    orch.sandbox = AsyncMock()
+    orch.sandbox = AsyncMock(was_adopted=False)
     orch.sandbox.sandbox_dir = tmp_path
 
     await orch._run_post_run_commands()
