@@ -1091,7 +1091,7 @@ class TestTurnAlwaysReapsTheCli:
         await asyncio.sleep(0.05)  # let it spawn and read the first event
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task  # the await re-raises the cancellation; no value ever exists
         assert proc.killed is True
 
     async def test_a_clean_turn_kills_nothing(self, patch_exec, tmp_path):
@@ -1117,7 +1117,7 @@ class TestExternalCancel:
         await asyncio.sleep(0.05)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task  # the await re-raises the cancellation; no value ever exists
         partial = agent.pending_turn
         assert partial is not None
         assert partial.crashed is True
