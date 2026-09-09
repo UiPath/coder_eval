@@ -309,8 +309,8 @@ class TestInContainerRegradeBranch:
     )
 
     def _invoke(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mount_workspace: bool = True, **extra):
-        import coder_eval.models as models
-        import coder_eval.orchestration.regrade as rg
+        from coder_eval import models
+        from coder_eval.orchestration import regrade as rg
 
         input_dir = tmp_path / "input"
         input_dir.mkdir(exist_ok=True)

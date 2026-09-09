@@ -445,7 +445,7 @@ class TestGradeInContainerDispatch:
         """Both must reach DockerRunner, and they are what make the grade real:
         the prior row supplies the trajectory a judge or `command_executed`
         criterion reads, and the workspace is the tree under evaluation."""
-        import coder_eval.isolation.docker_runner as dr
+        from coder_eval.isolation import docker_runner as dr
 
         graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
 
@@ -499,7 +499,7 @@ class TestGradeInContainerDispatch:
         the graded task.json where it asked for it. The container's own
         `docker.log` lands beside it under a PHASE-specific name, because on the
         resume path `docker.log` is already the executed run's."""
-        import coder_eval.isolation.docker_runner as dr
+        from coder_eval.isolation import docker_runner as dr
 
         graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
 
@@ -570,7 +570,7 @@ class TestGradeInContainerDispatch:
         """`orchestration/` must not leak an isolation-layer exception to the
         CLI, and the actionable next step is the escape hatch, not a docker
         stack trace."""
-        import coder_eval.isolation.docker_runner as dr
+        from coder_eval.isolation import docker_runner as dr
 
         class _Boom(_RunnerDouble):
             async def run(self) -> EvaluationResult:
@@ -961,7 +961,7 @@ class TestContainerFailureKeepsItsEvidence:
     async def test_the_container_log_survives_a_failed_grade(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import coder_eval.isolation.docker_runner as dr
+        from coder_eval.isolation import docker_runner as dr
 
         class _BoomAfterLogging(_RunnerDouble):
             async def run(self) -> EvaluationResult:
@@ -1002,7 +1002,7 @@ class TestContainerFailureKeepsItsEvidence:
         symlink there — an arbitrary-file-overwrite primitive in a run directory
         the grader did not create. The sibling verdict write goes through
         `write_text_atomic` for exactly this reason."""
-        import coder_eval.isolation.docker_runner as dr
+        from coder_eval.isolation import docker_runner as dr
 
         graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
 
@@ -1047,8 +1047,8 @@ class TestContainerFailureKeepsItsEvidence:
         guards only RegradeError and let it escape into Typer as a stack trace
         AFTER a successful grade, while `run --resume` caught it and reported a
         computed, correct verdict as a grading failure."""
-        import coder_eval.isolation.docker_runner as dr
-        import coder_eval.orchestration.regrade as rg
+        from coder_eval.isolation import docker_runner as dr
+        from coder_eval.orchestration import regrade as rg
 
         graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
 
@@ -1094,7 +1094,7 @@ class TestContainerGradeIsStampedAndCounted:
 
     @staticmethod
     def _dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task: TaskDefinition) -> EvaluationResult:
-        import coder_eval.isolation.docker_runner as dr
+        from coder_eval.isolation import docker_runner as dr
 
         graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
 
@@ -1238,8 +1238,8 @@ class TestContainerGradeEmitsTelemetryHostSide:
     """
 
     async def test_a_container_grade_emits_task_end(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import coder_eval.isolation.docker_runner as dr
         import coder_eval.telemetry as telemetry
+        from coder_eval.isolation import docker_runner as dr
 
         graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
 
