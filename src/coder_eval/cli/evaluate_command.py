@@ -375,21 +375,32 @@ def run_evaluation(
         console.print(f"[red]✗ Failed to prepare run directory:[/red] {e}")
         raise typer.Exit(1) from e
 
-    try:
-        sandbox_config = grading_sandbox_config(task, allow_host_grading=allow_host_grading)
-    except RegradeError as e:
-        console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(1) from e
-    if not grade_in_place:
-        # Copy path: preload the sandbox with the work dir as a template source.
-        template_source = TemplateDirSource(path=str(graded_dir.resolve()))
-        sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
+    # `regrade_in_place` owns the sandbox on the delegating path — and for a
+    # `driver: docker` row it owns rather more than that, dispatching a grading
+    # CONTAINER of the task's own image. Building a host sandbox_config here
+    # first would call `grading_sandbox_config`, whose whole job is to REFUSE
+    # that driver, so the refusal fired before the branch that no longer needs
+    # it and no docker row could ever be graded properly.
+    delegates_to_regrade = grade_in_place and prior is not None
 
-    task_dir = task_file.parent.resolve() if task_file is not None else None
-    sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
+    sandbox: Sandbox | None = None
+    if not delegates_to_regrade:
+        try:
+            sandbox_config = grading_sandbox_config(task, allow_host_grading=allow_host_grading)
+        except RegradeError as e:
+            console.print(f"[red]✗ {e}[/red]")
+            raise typer.Exit(1) from e
+        if not grade_in_place:
+            # Copy path: preload the sandbox with the work dir as a template source.
+            template_source = TemplateDirSource(path=str(graded_dir.resolve()))
+            sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
+
+        task_dir = task_file.parent.resolve() if task_file is not None else None
+        sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
 
     async def _setup_and_run() -> EvaluationResult:
-        if grade_in_place and prior is not None:
+        if delegates_to_regrade:
+            assert prior is not None
             # Delegate to the shared re-grade core. Restating its body here is
             # how this path and `run --resume` came to differ (replicate_index,
             # error semantics) while CLAUDE.md called regrade.py the single
@@ -406,6 +417,7 @@ def run_evaluation(
                 replicate_index=_replicate_index_of(target.target),
                 allow_host_grading=allow_host_grading,
             )
+        assert sandbox is not None  # built above whenever we reach this branch
         if grade_in_place:
             await asyncio.to_thread(sandbox.adopt, graded_dir)
         else:

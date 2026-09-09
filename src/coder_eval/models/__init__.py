@@ -23,11 +23,13 @@ from coder_eval.models.agent_config import (
 
 # Container paths (leaf constants; re-exported so consumers obey CE001)
 from coder_eval.models.container_paths import (
+    CONTAINER_GRADE_WORKSPACE,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
     CONTAINER_REFERENCE_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
+    IN_CONTAINER_ENV,
     REFERENCE_DIR_TOKEN,
     RESERVED_CONTAINER_DIRS,
     TASK_DIR_TOKEN,
@@ -286,7 +288,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "DockerBuildConfig",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
+    "CONTAINER_GRADE_WORKSPACE",
     "CONTAINER_REFERENCE_DIR",
+    "IN_CONTAINER_ENV",
     "CONTAINER_TASK_DIR",
     "REFERENCE_DIR_TOKEN",
     "TASK_DIR_TOKEN",

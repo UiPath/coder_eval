@@ -30,6 +30,10 @@ GRADE_LOG_FILENAME = "grade.log"
 # packages is how a rename becomes a silent no-op on the sites it missed.
 TASK_JSON_FILENAME = "task.json"
 PRE_GRADE_JSON_FILENAME = "task.execute.json"
+# The already-executed row a DETACHED GRADE seeds from, staged into the grading
+# container's read-only input mount. Never written by a run; only ever an input
+# to `coder-eval evaluate` / `run --resume` over a `driver: docker` row.
+PRIOR_RESULT_FILENAME = "prior.json"
 
 # The virtualenv directory `setup` creates and `adopt` discovers. Named because
 # whether it is on PATH decides which binaries a criterion resolves.

@@ -26,6 +26,7 @@ import yaml
 
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
+    CONTAINER_GRADE_WORKSPACE,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
     CONTAINER_REFERENCE_DIR,
@@ -41,6 +42,7 @@ from coder_eval.models import (
 )
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
 from coder_eval.path_utils import (
+    PRIOR_RESULT_FILENAME,
     REFERENCE_COPY_IGNORE,
     TASK_JSON_FILENAME,
     ignore_patterns_and_symlinks,
@@ -547,11 +549,29 @@ class DockerRunner:
         stream_callback: StreamCallback | None = None,
         verbose: bool = False,
         grade: bool = True,
+        prior_result: EvaluationResult | None = None,
+        grade_workspace: Path | None = None,
     ) -> None:
         self.rt = rt
         self.preservation_mode = preservation_mode
         self.stream_callback = stream_callback
         self.verbose = verbose
+        # DETACHED GRADE. Both set together or neither: `prior_result` is the
+        # already-executed row (trajectory + execution facts) the in-container
+        # Orchestrator seeds from, and `grade_workspace` is the host directory
+        # that run left behind, mounted at CONTAINER_GRADE_WORKSPACE and ADOPTED
+        # rather than recreated.
+        #
+        # This is what makes `evaluate` over a `driver: docker` row honest. The
+        # criteria of such a task address container paths and the image's
+        # toolchain, so grading them on the host scores a FAILURE for a run that
+        # passed. Running them back inside the same image is not a workaround for
+        # that — it is the only place the verdict means what it meant during the
+        # run.
+        self.prior_result = prior_result
+        self.grade_workspace = grade_workspace
+        if (prior_result is None) != (grade_workspace is None):
+            raise ValueError("prior_result and grade_workspace must be passed together")
         # Forwarded to the in-container orchestrator via context.json. It is a
         # run-level decision made by the CLI, so it cannot be recovered from the
         # staged task.yaml on the other side.
@@ -735,6 +755,10 @@ class DockerRunner:
                 # `coder-eval run` vs `coder-eval execute`. Not derivable from
                 # task.yaml on the container side (deliberately not a task field).
                 "grade": self.grade,
+                # A detached grade: seed from prior.json (staged beside this
+                # file) and adopt CONTAINER_GRADE_WORKSPACE instead of running
+                # an agent. Absent/False on every ordinary run.
+                "regrade": self.prior_result is not None,
                 "source_yaml": self.rt.source_yaml,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
@@ -742,6 +766,15 @@ class DockerRunner:
             }
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+        if self.prior_result is not None:
+            # The row being graded, carried in whole. The container seeds from
+            # it exactly as the host path does, so the trajectory an `llm_judge`
+            # or `command_executed` criterion reads is the ORIGINAL run's.
+            await asyncio.to_thread(
+                (input_dir / PRIOR_RESULT_FILENAME).write_text,
+                self.prior_result.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
 
     async def _stream_container_output(self, proc: asyncio.subprocess.Process, log_fh: TextIO) -> int:
         """Stream the container's stdout, returning its exit code.
@@ -1506,6 +1539,16 @@ class DockerRunner:
         # would chmod the operator's own `tasks/`.
         if self._task_dir_mount_src is not None:
             argv += ["-v", f"{self._task_dir_mount_src}:{CONTAINER_TASK_DIR}"]
+
+        # DETACHED GRADE: the already-executed workspace, read-WRITE and NOT a
+        # copy. Read-write because criteria legitimately mutate what they grade
+        # (a `run_command` that compiles, a post_run that cleans up), and the
+        # real tree because copying is what the host path proved wrong —
+        # `_setup_template` filters out node_modules / dist / build / .venv, so a
+        # criterion reading those would fail as a copying artifact rather than as
+        # a verdict.
+        if self.grade_workspace is not None:
+            argv += ["-v", f"{self.grade_workspace.resolve()}:{CONTAINER_GRADE_WORKSPACE}"]
 
         # ANTI-CHEAT: the reference solution normally lives INSIDE the task dir,
         # so the symmetric mount above would hand the agent the answer via

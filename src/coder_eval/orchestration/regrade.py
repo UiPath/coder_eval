@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from functools import cache
 from pathlib import Path
 
 from coder_eval.models import (
+    IN_CONTAINER_ENV,
     EvaluationResult,
     PreservationMode,
+    ResolvedTask,
     SandboxConfig,
     TaskConfigRecord,
     TaskDefinition,
@@ -547,6 +550,97 @@ def stamp_host_grading(result: EvaluationResult, task: TaskDefinition) -> None:
         result.environment_info["graded_on_host"] = True
 
 
+def _should_grade_in_container(task: TaskDefinition, *, allow_host_grading: bool) -> bool:
+    """Whether this grade belongs in a container of the task's own image.
+
+    Three conditions, and each rules out a different wrong answer:
+
+    * ``driver: docker`` — a tempdir task has no container to grade in.
+    * NOT already inside one. Gated on ``CODER_EVAL_IN_CONTAINER``, never on the
+      driver, for the same reason the reference-permission window is: the
+      in-container entry point rewrites `docker` -> `tempdir` before building its
+      Orchestrator, so a driver-based test would be reading a value that has
+      already been changed. Without this, a grading container would try to
+      dispatch a grading container.
+    * ``--allow-host-grading`` not passed. That flag is the operator saying
+      "grade it here anyway" — the escape hatch for a machine with no docker, or
+      for criteria known to be host-portable — and it must keep winning, since
+      the row it produces is stamped ``graded_on_host`` and is therefore honest
+      about what it is.
+    """
+    return task.sandbox.driver == "docker" and not allow_host_grading and os.environ.get(IN_CONTAINER_ENV) != "1"
+
+
+async def _grade_in_container(
+    *,
+    task: TaskDefinition,
+    prior: EvaluationResult,
+    workspace: Path,
+    run_dir: Path,
+    task_file: Path | None,
+    source_yaml: str,
+    variant_id: str,
+    replicate_index: int,
+) -> EvaluationResult:
+    """Grade ``workspace`` inside a container built from ``task``'s own image.
+
+    The container gets two separate mounts, and keeping them separate is the
+    point: ``run_dir`` (this GRADING pass's fresh directory) at the standard
+    output location, and ``workspace`` (the ORIGINAL run's output) at
+    ``CONTAINER_GRADE_WORKSPACE``. The grade writes its ``task.json`` into the
+    former, which the caller then folds back into the row — preserving
+    ``task.execute.json`` exactly as on the host path — while the latter is
+    adopted and never written over.
+
+    ``task_file`` is required. The image is built or named by the task's own
+    sandbox config, and DockerRunner resolves the Dockerfile and reference
+    directory relative to the task file; without one there is nothing to build
+    from. That is a real limitation of grading a container task detached, so it
+    says so rather than silently falling back to the host.
+    """
+    from coder_eval.isolation.docker_runner import DockerRunError, DockerRunner
+
+    if task_file is None:
+        raise RegradeError(
+            f"Task {task.task_id!r} ran under `driver: docker`, so grading it needs a container built "
+            + "from its own image — but the run records no task file to resolve that image from. "
+            + "Pass the task file explicitly (`coder-eval evaluate <task.yaml> <run_dir>`), or "
+            + "--allow-host-grading to grade here instead."
+        )
+
+    logger.info(
+        "Grading %r in a container of its own image: its criteria address container paths and "
+        + "toolchains, so the host cannot reproduce them.",
+        task.task_id,
+    )
+    rt = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir,
+        variant_id=variant_id,
+        source_yaml=source_yaml,
+        replicate_index=replicate_index,
+    )
+    try:
+        return await DockerRunner(
+            rt,
+            # The grading pass owns run_dir and nothing else. The workspace is a
+            # bind mount of the ORIGINAL run's output and must survive untouched.
+            preservation_mode=PreservationMode.NONE,
+            prior_result=prior,
+            grade_workspace=workspace,
+        ).run()
+    except DockerRunError as e:
+        # Wrapped, because `orchestration/` must not leak an isolation-layer
+        # exception to the CLI, and because the actionable next step is the
+        # host-grading escape hatch rather than a docker stack trace.
+        raise RegradeError(
+            f"Grading {task.task_id!r} in a container failed: {e}. Re-run with --allow-host-grading "
+            + "to grade on this machine instead (path- and toolchain-dependent criteria may then "
+            + "score differently, and the row is stamped graded_on_host)."
+        ) from e
+
+
 async def regrade_in_place(
     *,
     task: TaskDefinition,
@@ -558,6 +652,7 @@ async def regrade_in_place(
     variant_id: str,
     replicate_index: int = 0,
     allow_host_grading: bool = False,
+    recorded_task: TaskDefinition | None = None,
 ) -> EvaluationResult:
     """Run ``task``'s criteria against an already-executed ``workspace``.
 
@@ -571,6 +666,23 @@ async def regrade_in_place(
     tool calls score exactly as they would have during the run.
     """
     from coder_eval.orchestrator import Orchestrator
+
+    # A `driver: docker` row is graded INSIDE a container of the same image,
+    # which is the only place its criteria mean what they meant during the run.
+    # Dispatched before anything else here, including the reference check, so the
+    # container performs every step against container paths rather than having
+    # half of it done against the host's.
+    if _should_grade_in_container(task, allow_host_grading=allow_host_grading):
+        return await _grade_in_container(
+            task=task,
+            prior=prior,
+            workspace=workspace,
+            run_dir=run_dir,
+            task_file=task_file,
+            source_yaml=source_yaml,
+            variant_id=variant_id,
+            replicate_index=replicate_index,
+        )
 
     # Inside the shared entry point, not at each caller: a guard a caller has to
     # remember is one a third caller will forget, and this one is the difference
@@ -595,6 +707,7 @@ async def regrade_in_place(
         source_yaml=source_yaml,
         replicate_index=replicate_index,
         prior_result=prior,
+        recorded_task=recorded_task,
     )
     result = await orchestrator.run()
     stamp_host_grading(result, task)

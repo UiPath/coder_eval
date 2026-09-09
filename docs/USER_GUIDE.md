@@ -209,11 +209,26 @@ with your environment. So two things are refused rather than assumed:
   exempt. The record did not choose it, running it is exactly what your own
   config does on every run, and prompting on it would fire for 100% of run
   directories — a refusal that always fires stops being read.
-- A run made with `driver: docker` needs `--allow-host-grading`. Grading cannot
-  start a container, and such a task's criteria address container paths and
-  toolchains; on your host they score `0.0` for a run that passed. An opted-in
-  row is stamped `graded_on_host` in `environment_info` so it is never silently
-  compared with a container-graded one.
+A run made with `driver: docker` is a third case, and it is not a refusal:
+grading is **dispatched into a container of the task's own image**, so its
+criteria address the same paths and toolchain they did during the run. Nothing
+extra to pass — `coder-eval evaluate <run_dir>` and `run --resume` both do it.
+
+Why it is not merely nicer: `tasks/byod_smoke_test.yaml` asserts
+`test -f /opt/byod_marker`, a file baked into its image. The identical row scores
+`SUCCESS 1.000` graded in a container and `FAILURE 0.000` graded on your host —
+because the host is answering "is that marker on THIS machine", which nobody
+asked. A container-graded row carries no `graded_on_host` stamp, exactly like a
+row `coder-eval run` produced.
+
+`--allow-host-grading` keeps its meaning as the escape hatch: grade here anyway,
+for a machine with no docker or for criteria you know are host-portable. It
+still stamps `graded_on_host` in `environment_info`, so such a row is never
+silently compared with a container-graded one.
+
+Grading in a container needs a task file to resolve the image from. When the run
+records none, `evaluate` says so and points at the two ways forward — pass the
+task file explicitly, or `--allow-host-grading`.
 
 Passing a task file **over** a run directory re-grades it with different
 criteria, reusing the trajectory and workspace of a run you already paid for:
