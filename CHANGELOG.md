@@ -2,6 +2,178 @@
 
 <!-- version list -->
 
+## v0.12.0 (2026-09-09)
+
+### Bug Fixes
+
+- Code review fixes for pi-harness ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **container**: Arm the heartbeat watchdog only inside the container
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **criteria**: Refuse an out-of-sandbox criterion path instead of scoring it 0.0
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **eval**: Address the medium and low findings from the branch review
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **eval**: Close the verdict-correctness gaps in detached grading
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **evalboard**: Show per-row cost for open-weight harnesses (Pi)
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **execute**: Close the verdict-changing and trust-boundary defects in detached grading
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **execute**: Close the verdict-divergence, trust-gate and fabricated-rate defects
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **execute**: Move post_run to the grading phase and stop the record lying about its driver
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **pi**: Address bai-uipath review — apportionment caveat + token/telemetry minors
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Do not forward allowed_tools/disallowed_tools to Pi
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Multi-model review — gate error-crash on intentional cuts + dead dup + doc/guard nits
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Review blockers — session-id sanitize, error crash, telemetry warn, tool map, CE047
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **security**: Close the three CodeQL findings on the detached-grading diff
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **tasks**: Make the two remaining absolute criterion paths reachable, and add CE055
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **tests**: Kill the CodeQL taint source and the Windows mode assertion
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+### Documentation
+
+- **agents**: 4/4 — add Pi harness docs + enumeration-surface parity
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **docker**: Fix env_passthrough model name + list Pi in baked-toolchain docs
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: 3/4 — document docker support for Pi
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Correct plugins->--skill support + OPENROUTER passthrough claims
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Fix tool-enforcement claims + cost docstring after review
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+### Features
+
+- **agents**: 2/4 — add PiAgent harness (pi --mode json) + registration
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **cli**: `coder-eval execute` + detached grading via `evaluate <run_dir>`
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **cli**: Add `coder-eval execute` — run tasks without grading them
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **cli**: Grade an executed run afterwards — `evaluate <run_dir>` + `Sandbox.adopt`
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **cli**: Make --resume distinguish "executed" from "graded"
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **docker**: 1/4 — bake the pinned Pi CLI into docker/Dockerfile
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **evalboard**: Show the Pi logo + "Pi" in the harness view
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **models**: 1/4 — add AgentKind.PI + PiAgentConfig model
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Add Pi harness (`--type pi`) with docker + skill injection
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Load agent.plugins skills via --skill + harden turn/token handling
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **sandbox**: 2/4 — forward OPENROUTER_API_KEY into docker containers
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **tasks**: 3/4 — add local pi_smoke_test task
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+### Refactoring
+
+- **agents**: Hoist shared plugins->skills resolver into agents/_skills.py
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+### Testing
+
+- Fix two CI-only failures in the detached-grading tests
+  ([#154](https://github.com/UiPath/coder_eval/pull/154),
+  [`0fe8cb0`](https://github.com/UiPath/coder_eval/commit/0fe8cb01e6e49dbe1c5e3905ac62fd7fce2851da))
+
+- **docker**: 4/4 — guard that the Dockerfile bakes a pinned Pi CLI
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Assign the awaited cancel result to silence CodeQL 'no effect'
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Install shutil.which patch so the env-info test doesn't need the real CLI
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Port OpenCode teardown + cost-fallback matrices (blockers 3, 4)
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+- **pi**: Scrub personal scratchpad path from happy-stream fixture
+  ([#159](https://github.com/UiPath/coder_eval/pull/159),
+  [`57c9e33`](https://github.com/UiPath/coder_eval/commit/57c9e33620e222d9e238983cd9057d2e852015be))
+
+
 ## v0.11.7 (2026-09-08)
 
 ### Bug Fixes
