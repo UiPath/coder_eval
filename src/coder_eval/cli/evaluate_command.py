@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import typer
+from rich.markup import escape
 
 from ..evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
 from ..logging_config import setup_logging
@@ -152,30 +153,28 @@ def _resolve_run_dir_or_work_dir(
             task, source_yaml = load_task(target.task_file)
             console.print(f"[dim]Grading with {target.task_file} (overrides the run's recorded config).[/dim]")
         else:
-            # pre_run and the sandbox's installers both run only on the --copy
-            # path (an adopted workspace must not have pre_run re-run over the
-            # agent's deliverables, and `adopt` installs nothing), so in place
-            # they are not capabilities the run dir can reach. post_run is NOT
-            # one of them — it belongs to the grading phase and runs on both
-            # paths, so `embedded_commands` scans it unconditionally.
+            # ONE lever, passed once, and derived through the SAME function
+            # `run_evaluation` uses rather than restated. It decides which
+            # capability families the recorded-shell gate discloses, so a second
+            # copy of the rule would keep answering the old question the moment
+            # the default moved — and silently stop covering commands that then
+            # do run.
             #
-            # Derived through the SAME function `run_evaluation` uses, not
-            # restated. This value decides whether recorded shell is refused, so
-            # a second copy of the rule would keep answering the old question if
-            # the default ever moved — and silently stop covering commands that
-            # then do run.
-            setup_will_run = not resolve_grade_in_place(target, in_place)
+            # In place: the grade may dispatch a CONTAINER built from the
+            # recorded sandbox block, a wider capability than any recorded shell
+            # string. On --copy instead: pre_run and the sandbox's own
+            # installers, neither of which an adopted workspace reaches. post_run
+            # is in NEITHER set — it belongs to the grading phase and runs on
+            # both paths, so `embedded_commands` scans it unconditionally.
+            #
+            # Both answers follow from this single boolean, so the gate derives
+            # them itself (`_gate_scope_for_grade`) rather than taking two
+            # arguments a caller could set incoherently.
             task, source_yaml = task_from_prior(
                 prior,
                 target.target,
                 allow_recorded_commands=allow_recorded_commands,
-                include_setup_phase=setup_will_run,
-                # The in-place path may dispatch a CONTAINER built from the
-                # recorded sandbox block, which is a wider capability than any
-                # recorded shell string -- the gate has to name it. Both inputs
-                # are forwarded so the gate can ask `_should_grade_in_container`
-                # itself rather than have this caller re-derive the rule.
-                grade_in_place=not setup_will_run,
+                grade_in_place=resolve_grade_in_place(target, in_place),
                 allow_host_grading=allow_host_grading,
             )
         work_dir = workspace or default_workspace(target.target, prior)
@@ -187,12 +186,12 @@ def _resolve_run_dir_or_work_dir(
         try:
             task, source_yaml = load_task(task_file)
         except Exception as e:
-            console.print(f"[red]✗ Failed to load task:[/red] {e}")
+            console.print(f"[red]✗ Failed to load task:[/red] {escape(str(e))}")
             raise typer.Exit(1) from e
         work_dir = target.target
 
     if not work_dir.is_dir():
-        console.print(f"[red]✗ Work directory is not a directory:[/red] {work_dir}")
+        console.print(f"[red]✗ Work directory is not a directory:[/red] {escape(str(work_dir))}")
         raise typer.Exit(1)
 
     # Evaluate-only mode bypasses experiment resolution + CLI overrides, so
@@ -390,7 +389,7 @@ def run_evaluation(
     try:
         prepared_run_dir = prepare_run_directory(run_dir)
     except Exception as e:
-        console.print(f"[red]✗ Failed to prepare run directory:[/red] {e}")
+        console.print(f"[red]✗ Failed to prepare run directory:[/red] {escape(str(e))}")
         raise typer.Exit(1) from e
 
     # `regrade_in_place` owns the sandbox on the delegating path — and for a
@@ -399,26 +398,14 @@ def run_evaluation(
     # first would call `grading_sandbox_config`, whose whole job is to REFUSE
     # that driver, so the refusal fired before the branch that no longer needs
     # it and no docker row could ever be graded properly.
-    delegates_to_regrade = grade_in_place and prior is not None
-
-    sandbox: Sandbox | None = None
-    if not delegates_to_regrade:
-        try:
-            sandbox_config = grading_sandbox_config(task, allow_host_grading=allow_host_grading)
-        except RegradeError as e:
-            console.print(f"[red]✗ {e}[/red]")
-            raise typer.Exit(1) from e
-        if not grade_in_place:
-            # Copy path: preload the sandbox with the work dir as a template source.
-            template_source = TemplateDirSource(path=str(graded_dir.resolve()))
-            sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
-
-        task_dir = task_file.parent.resolve() if task_file is not None else None
-        sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
-
+    #
+    # Branching on ``prior is not None`` directly, and building the sandbox
+    # inside the branch that uses it, so NEITHER value is Optional at its use
+    # site. Both were, briefly, re-narrowed by a bare `assert` plus a comment
+    # asserting an invariant the type checker could hold structurally — and
+    # `assert` is the weakest narrowing available, stripped entirely under -O.
     async def _setup_and_run() -> EvaluationResult:
-        if delegates_to_regrade:
-            assert prior is not None
+        if grade_in_place and prior is not None:
             # Delegate to the shared re-grade core. Restating its body here is
             # how this path and `run --resume` came to differ (replicate_index,
             # error semantics) while CLAUDE.md called regrade.py the single
@@ -435,7 +422,13 @@ def run_evaluation(
                 replicate_index=_replicate_index_of(target.target),
                 allow_host_grading=allow_host_grading,
             )
-        assert sandbox is not None  # built above whenever we reach this branch
+        sandbox_config = grading_sandbox_config(task, allow_host_grading=allow_host_grading)
+        if not grade_in_place:
+            # Copy path: preload the sandbox with the work dir as a template source.
+            template_source = TemplateDirSource(path=str(graded_dir.resolve()))
+            sandbox_config.template_sources = [template_source, *(sandbox_config.template_sources or [])]
+        task_dir = task_file.parent.resolve() if task_file is not None else None
+        sandbox = Sandbox(sandbox_config, task_id=task.task_id, task_dir=task_dir)
         if grade_in_place:
             await asyncio.to_thread(sandbox.adopt, graded_dir)
         else:
@@ -474,7 +467,7 @@ def run_evaluation(
         # file and for a failed grading container, and both messages carry the
         # operator's next step. Rendered like the three sibling handlers above --
         # unwrapped, they arrived as the tail of a stack trace.
-        console.print(f"[red]✗ {e}[/red]")
+        console.print(f"[red]✗ {escape(str(e))}[/red]")
         raise typer.Exit(1) from e
     _report_and_exit(result, task=task, prior=prior, target=target, prepared_run_dir=prepared_run_dir)
 

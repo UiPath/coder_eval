@@ -224,15 +224,16 @@ def run_task_internal_command(
     if not isinstance(regrade_raw, bool):
         typer.echo(f"FATAL: context.json 'regrade' must be a boolean, got {regrade_raw!r}", err=True)
         raise typer.Exit(2)
-    # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
-    # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
-    # Absent -> None -> standard run_dir/artifacts workspace.
+    regrade: bool = regrade_raw
     # What task.json RECORDS as the task's source path, as distinct from the
     # path this process resolves TASK_DIR against (see Orchestrator's
     # `recorded_task_file`). Absent on an older host -> None -> the container
     # path is recorded, which is the pre-existing behaviour.
     host_task_file_raw = context.get("host_task_file")
     recorded_task_file = Path(host_task_file_raw) if host_task_file_raw else None
+    # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
+    # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
+    # Absent -> None -> standard run_dir/artifacts workspace.
     workspace_dir_raw = context.get("workspace_dir")
     workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
     config_lineage = {k: ConfigLineageEntry.model_validate(v) for k, v in (context.get("config_lineage") or {}).items()}
@@ -278,10 +279,11 @@ def run_task_internal_command(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if regrade_raw:
+    if regrade:
         _grade_recorded_run(
             task=task,
             authored_task=authored_task,
+            recorded_task_file=recorded_task_file,
             input_dir=input_dir,
             output_dir=output_dir,
             runtime_task_file=runtime_task_file,
@@ -327,6 +329,7 @@ def _grade_recorded_run(
     authored_task: TaskDefinition,
     input_dir: Path,
     output_dir: Path,
+    recorded_task_file: Path | None,
     runtime_task_file: Path,
     source_yaml: str,
     variant_id: str,
@@ -350,7 +353,12 @@ def _grade_recorded_run(
     we are already inside the container the driver asked for), which is also what
     keeps ``regrade_in_place`` from trying to dispatch a container from within
     one. ``authored_task`` is what gets RECORDED, so the row keeps saying
-    `driver: docker`.
+    `driver: docker`. ``recorded_task_file`` is the path half of that same
+    distinction and travels with it: without it the row re-records
+    ``/work/task_dir/task.yaml`` as its ``source_file``, a path on no host, and a
+    later ``evaluate <run_dir>`` over the row refuses or mounts the wrong tree.
+    The ordinary run branch above has always forwarded it; this one is the
+    second consumer and must not be the one that forgets.
 
     Delegates to the same ``regrade_in_place`` the host uses rather than
     restating it. The two implementations that already drifted apart once —
@@ -391,6 +399,7 @@ def _grade_recorded_run(
                 variant_id=variant_id,
                 replicate_index=replicate_index,
                 recorded_task=authored_task,
+                recorded_task_file=recorded_task_file,
             )
         )
     except RegradeError as e:

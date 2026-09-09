@@ -217,11 +217,11 @@ def run_command(
         False,
         "--allow-host-grading",
         help=(
-            "When --resume grades a `driver: docker` row, grade it on this host anyway. "
-            "Grading cannot start a container, so such criteria run against a filesystem "
-            "lacking the container's paths and toolchain and may score differently than "
-            "the run did; those rows are stamped graded_on_host. Without this they are "
-            "refused and stay ungraded."
+            "When --resume grades a `driver: docker` row, grade it on this host instead of "
+            "in a container of the task's own image (the default). Such criteria then run "
+            "against a filesystem lacking the container's paths and toolchain and may score "
+            "differently than the run did, so those rows are stamped graded_on_host. Use it "
+            "for a machine with no docker, or for criteria you know are host-portable."
         ),
     ),
     max_parallel: int = typer.Option(

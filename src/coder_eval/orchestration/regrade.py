@@ -24,6 +24,7 @@ import shutil
 import tempfile
 from functools import cache
 from pathlib import Path
+from typing import TypedDict
 
 from coder_eval.models import (
     IN_CONTAINER_ENV,
@@ -34,7 +35,14 @@ from coder_eval.models import (
     TaskConfigRecord,
     TaskDefinition,
 )
-from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME, write_text_atomic
+from coder_eval.path_utils import (
+    DOCKER_LOG_FILENAME,
+    GRADE_DOCKER_LOG_FILENAME,
+    GRADE_LOG_FILENAME,
+    PRE_GRADE_JSON_FILENAME,
+    TASK_JSON_FILENAME,
+    write_text_atomic,
+)
 from coder_eval.sandbox import Sandbox
 
 
@@ -65,7 +73,6 @@ def task_from_prior(
     run_dir: Path,
     *,
     allow_recorded_commands: bool = False,
-    include_setup_phase: bool = True,
     grade_in_place: bool = False,
     allow_host_grading: bool = False,
 ) -> tuple[TaskDefinition, str]:
@@ -83,6 +90,20 @@ def task_from_prior(
 
     ``allow_recorded_commands`` gates the shell half. See
     :func:`check_embedded_commands`.
+
+    ``grade_in_place`` is the ONE lever that selects which capability families
+    the gate discloses, and it is deliberately one parameter rather than two.
+    It shipped beside an ``include_setup_phase`` that every caller passed as its
+    exact complement -- two names for one fact, with nothing rejecting the
+    incoherent pairings. That is not cosmetic here: the flag gates a SECURITY
+    disclosure, so a future caller that set one and forgot the other would drop
+    the container-dispatch half of the untrusted-config gate with nothing
+    failing. Both derived values are computed once, in
+    :func:`_gate_scope_for_grade`.
+
+    ``allow_host_grading`` participates only through that derivation: with the
+    flag set, no container is dispatched, so naming one in the consent prompt
+    would ask the operator to approve something that never runs.
     """
     record = prior.task_config
     if record is None:
@@ -98,7 +119,6 @@ def task_from_prior(
             run_dir,
             e,
             allow_recorded_commands=allow_recorded_commands,
-            include_setup_phase=include_setup_phase,
             grade_in_place=grade_in_place,
             allow_host_grading=allow_host_grading,
         )
@@ -106,14 +126,42 @@ def task_from_prior(
         task,
         run_dir,
         allow_recorded_commands=allow_recorded_commands,
-        include_setup_phase=include_setup_phase,
-        # Only the in-place path dispatches a container; --copy is refused by
-        # `grading_sandbox_config` before it could, so naming the image there
-        # would be a refusal for something that never runs.
-        include_container_dispatch=grade_in_place
-        and _should_grade_in_container(task, allow_host_grading=allow_host_grading),
+        # The recorded source path, so the prompt can name the task DIRECTORY
+        # the dispatch copies in. It is the same untrusted value
+        # `_grade_in_container` resolves the image from.
+        task_file=Path(record.source_file) if record.source_file else None,
+        **_gate_scope_for_grade(task, grade_in_place=grade_in_place, allow_host_grading=allow_host_grading),
     )
     return task, record.source_yaml
+
+
+class _GateScope(TypedDict):
+    include_setup_phase: bool
+    include_container_dispatch: bool
+
+
+def _gate_scope_for_grade(task: TaskDefinition, *, grade_in_place: bool, allow_host_grading: bool) -> _GateScope:
+    """Which capability families the untrusted-config gate must disclose.
+
+    Both answers follow from ``grade_in_place``, which is why this is one
+    function rather than two arguments threaded past each other:
+
+    * ``include_setup_phase`` is ``not grade_in_place``. ``pre_run`` and the
+      sandbox's own provisioning exist only on the ``--copy`` path; ``adopt``
+      runs no installer and the orchestrator skips ``pre_run``, so in place they
+      are not a capability the run dir has.
+    * ``include_container_dispatch`` needs ``grade_in_place`` too, since ``--copy``
+      is refused by ``grading_sandbox_config`` before it could dispatch anything
+      -- naming the image there would be a refusal for something that never runs.
+
+    The pair is computed at ONE site so the two consumers (``task_from_prior``
+    and its source-YAML fallback) cannot drift.
+    """
+    return {
+        "include_setup_phase": not grade_in_place,
+        "include_container_dispatch": grade_in_place
+        and _should_grade_in_container(task, allow_host_grading=allow_host_grading),
+    }
 
 
 @cache
@@ -146,7 +194,11 @@ def _operator_baseline_post_run() -> frozenset[str]:
 
 
 def embedded_commands(
-    task: TaskDefinition, *, include_setup_phase: bool = True, include_container_dispatch: bool = False
+    task: TaskDefinition,
+    *,
+    include_setup_phase: bool = True,
+    include_container_dispatch: bool = False,
+    task_file: Path | None = None,
 ) -> list[str]:
     """Every shell command a rebuilt task definition would run on this host.
 
@@ -252,26 +304,86 @@ def embedded_commands(
             if isinstance(source, RepoSource):
                 commands.append(f"git clone -- {source.url}")
     if include_container_dispatch:
-        docker = task.sandbox.docker
-        if docker.dockerfile_path:
-            # `docker build` runs every RUN step in the recorded Dockerfile on
-            # this host, and expands recorded build args against the GRADER's
-            # environment, so a `${ANTHROPIC_API_KEY}` arg is exfiltratable by a
-            # RUN step. `extra_args` is spliced into the argv unfiltered.
-            commands.append(f"docker build -f {docker.dockerfile_path}")
-            for key, value in docker.build.args.items():
-                commands.append(f"  --build-arg {key}={value}")
-            for spec in docker.build.secrets:
-                commands.append(f"  --secret {spec}")
-            for extra in docker.build.extra_args:
-                commands.append(f"  {extra}")
-        else:
-            commands.append(f"docker run {docker.image} (with your credentials in its environment)")
-        for mount in docker.extra_mounts or []:
-            commands.append(f"  -v {mount}")
-        if docker.env_passthrough_extra:
-            commands.append(f"  --env {' --env '.join(docker.env_passthrough_extra)}")
+        commands += _container_dispatch_commands(task, task_file)
     return commands
+
+
+def _container_dispatch_commands(task: TaskDefinition, task_file: Path | None) -> list[str]:
+    """The container dispatch, rendered as the ONE shell command it is.
+
+    Every string this returns is a command, because that is what the caller
+    promises: :func:`check_embedded_commands` joins the list with ``"; "`` and
+    interpolates ``len(commands)`` into the consent prompt. The first version
+    appended argv FRAGMENTS as separate entries, so a `dockerfile_path` task with
+    two build args and one mount asked the operator to approve "4 shell
+    command(s)" reading ``docker build -f Dockerfile;   --build-arg FOO=bar;
+    --build-arg BAZ=qux;   -v /a:/b`` -- one docker invocation described as four
+    commands, three of which are not commands. The consent prompt is the one
+    place this text has to be exact.
+
+    It also names every HOST PATH the dispatch exposes, not just the ones under
+    ``sandbox.docker``. Three families reach the record-named image without the
+    record ever mentioning them in a ``docker`` block:
+
+    * the TASK DIRECTORY, copied wholesale from the recorded ``source_file``'s
+      parent (``DockerRunner._prepare_task_dir_mount``) -- a record whose
+      ``source_file`` is ``~/.ssh/config`` copies all of ``~/.ssh`` in;
+    * every ``agent.plugins[].path``, every ``TemplateDirSource.path`` and
+      ``agent.system_prompt_file``, auto-mounted read-only at their host paths by
+      ``_build_argv``. ``_sensitive_source_paths`` only *warns* about a fixed
+      list of these, and this module's own gate docstring states the governing
+      principle: a warning is not a control, because it prints as the command is
+      already being prepared;
+    * a WRITABLE copy of ``~/.claude``, ``.credentials.json`` included.
+
+    Networking defaults to ``--network bridge``, so anything the container can
+    read it can also send. Disclosing only ``sandbox.docker.*`` would ask the
+    operator to consent to a strict subset of what actually happens.
+    """
+    docker = task.sandbox.docker
+    parts: list[str] = []
+    if docker.dockerfile_path:
+        # `docker build` runs every RUN step in the recorded Dockerfile on this
+        # host, and expands recorded build args against the GRADER's environment,
+        # so a `${ANTHROPIC_API_KEY}` arg is exfiltratable by a RUN step.
+        # `extra_args` is spliced into the argv unfiltered.
+        parts.append(f"docker build -f {docker.dockerfile_path}")
+        parts += [f"--build-arg {key}={value}" for key, value in docker.build.args.items()]
+        parts += [f"--secret {spec}" for spec in docker.build.secrets]
+        parts += list(docker.build.extra_args)
+        parts.append("&& docker run <the image just built>")
+    else:
+        parts.append(f"docker run {docker.image}")
+    parts += [f"-v {mount}" for mount in docker.extra_mounts or []]
+    parts += [f"-v {path}" for path in _dispatch_host_exposure(task, task_file)]
+    parts += [f"--env {name}" for name in docker.env_passthrough_extra or []]
+    parts.append("(with your credentials in its environment and a writable copy of ~/.claude)")
+    return [" ".join(parts)]
+
+
+def _dispatch_host_exposure(task: TaskDefinition, task_file: Path | None) -> list[str]:
+    """Host paths the grading container receives that no ``docker`` field names.
+
+    Mirrors ``DockerRunner._prepare_task_dir_mount`` and the ``_auto_mount``
+    block of ``_build_argv``. Rendered as strings rather than resolved Paths:
+    this is disclosure text, and an unresolvable entry is still worth naming.
+    """
+    from coder_eval.models import TemplateDirSource
+
+    exposed: list[str] = []
+    if task_file is not None:
+        exposed.append(f"{task_file.parent} (the recorded task directory, copied in)")
+    agent = task.agent
+    for plugin in (agent.plugins if agent else None) or []:
+        path = plugin.get("path") if isinstance(plugin, dict) else None
+        if path:
+            exposed.append(str(path))
+    for source in task.sandbox.template_sources or []:
+        if isinstance(source, TemplateDirSource):
+            exposed.append(source.path)
+    if agent is not None and agent.system_prompt_file:
+        exposed.append(str(agent.system_prompt_file))
+    return exposed
 
 
 def check_embedded_commands(
@@ -281,6 +393,7 @@ def check_embedded_commands(
     allow_recorded_commands: bool,
     include_setup_phase: bool = True,
     include_container_dispatch: bool = False,
+    task_file: Path | None = None,
 ) -> None:
     """Refuse — or at minimum name — the shell a rebuilt config will run here.
 
@@ -300,7 +413,10 @@ def check_embedded_commands(
     bypasses this: that config came from the operator, not from the artifact.
     """
     commands = embedded_commands(
-        task, include_setup_phase=include_setup_phase, include_container_dispatch=include_container_dispatch
+        task,
+        include_setup_phase=include_setup_phase,
+        include_container_dispatch=include_container_dispatch,
+        task_file=task_file,
     )
     if not commands:
         return
@@ -327,7 +443,6 @@ def _fall_back_to_source(
     e: ValueError,
     *,
     allow_recorded_commands: bool,
-    include_setup_phase: bool = True,
     grade_in_place: bool = False,
     allow_host_grading: bool = False,
 ) -> tuple[TaskDefinition, str]:
@@ -351,9 +466,8 @@ def _fall_back_to_source(
         task,
         run_dir,
         allow_recorded_commands=allow_recorded_commands,
-        include_setup_phase=include_setup_phase,
-        include_container_dispatch=grade_in_place
-        and _should_grade_in_container(task, allow_host_grading=allow_host_grading),
+        task_file=Path(record.source_file),
+        **_gate_scope_for_grade(task, grade_in_place=grade_in_place, allow_host_grading=allow_host_grading),
     )
     return task, source_yaml
 
@@ -606,8 +720,10 @@ def grading_sandbox_config(task: TaskDefinition, *, allow_host_grading: bool = F
             + "would execute this task's criteria against a filesystem that lacks the container's "
             + "paths and toolchain, scoring a FAILURE for a run that passed, and would run its "
             + "shell commands unsandboxed here.\n"
-            + "Re-run WITHOUT --copy to grade it in a container (the default for a run directory), "
-            + "or with --allow-host-grading to accept host grading anyway."
+            + "Grade a run directory in place (the default) to get a container, or pass "
+            + "--allow-host-grading to accept host grading anyway.\n"
+            + "(The two-argument `evaluate <task.yaml> <dir>` form has no container route at all, "
+            + "so --allow-host-grading is the only way forward there.)"
         )
     logger.warning(
         "Grading %r on the host: its `driver: docker` sandbox cannot be reproduced here, so "
@@ -651,18 +767,75 @@ def _should_grade_in_container(task: TaskDefinition, *, allow_host_grading: bool
     return task.sandbox.driver == "docker" and not allow_host_grading and os.environ.get(IN_CONTAINER_ENV) != "1"
 
 
-def _fold_back_container_grade(container_run_dir: Path, run_dir: Path) -> None:
+def _fold_back_container_logs(container_run_dir: Path, run_dir: Path) -> None:
+    """Rescue the grading container's logs from the scratch dir before it dies.
+
+    Called on BOTH the success and the failure path, and the failure path is the
+    one that makes it necessary. ``_grade_in_container`` runs the whole dispatch
+    inside a ``TemporaryDirectory``, and every ``DockerRunner`` diagnostic is
+    written into it: ``docker.log`` (the container's merged stdout+stderr, where
+    the in-container FATAL guards land, since ``_grade_in_container`` passes no
+    ``stream_callback`` and nothing is echoed), the captured build log a failed
+    ``docker build`` persists there, and the synthetic ``BUILD_FAILED`` /
+    ``ERROR`` records. Folding out only on success deleted precisely the evidence
+    -- and DockerRunError's own text says ``See {log_path} for container
+    output``, naming a path that no longer existed by the time it was printed.
+
+    ``grade.log`` is the grading pass's OWN log, written by the in-container
+    orchestrator (``task_log_path(run_dir, regrade=True)``) and holding the
+    per-criterion detail -- ``run_command`` stdout/stderr, judge prompts and
+    verdicts -- which is the only durable record of WHY a criterion scored what
+    it did. It is a documented part of the run-directory contract, so a
+    ``driver: docker`` row must not be the one shape that silently lacks it.
+
+    Best-effort throughout: a side-car log is not the verdict, and this runs
+    where an exception is already in flight.
+    """
+    for name, dest_name in ((DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME), (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME)):
+        # `docker.log` is renamed for the PHASE: on the resume path that name is
+        # already taken by the executed container's log, and overwriting it would
+        # repeat the task.log/grade.log truncation bug one layer down.
+        # `grade.log` does not collide -- a detached grade is the only thing that
+        # ever writes it into that directory -- so it keeps its name.
+        source = container_run_dir / name
+        if not source.is_file():
+            continue
+        # The destination may not exist yet on the FAILURE path -- the verdict
+        # fold-back, which creates it, never ran.
+        with contextlib.suppress(OSError):
+            run_dir.mkdir(parents=True, exist_ok=True)
+        dest = run_dir / dest_name
+        if dest.is_symlink():
+            # `shutil.copy2` opens the destination for writing, which FOLLOWS a
+            # symlink there -- an arbitrary-file-overwrite primitive in a run
+            # directory the grader did not create (`run --resume` passes the
+            # executed row's own directory; `--run-dir` can point anywhere). The
+            # sibling verdict write goes through `write_text_atomic` precisely
+            # for this, and the `suppress(OSError)` below would have made the
+            # redirect leave no trace at all.
+            logger.warning("Refusing to write %s: it is a symlink.", dest)
+            continue
+        with contextlib.suppress(OSError):
+            shutil.copy2(source, dest)
+
+
+def _fold_back_container_grade(container_run_dir: Path, run_dir: Path, task_id: str) -> None:
     """Copy the grading container's record into the row the caller asked about.
 
     The container writes into a scratch directory it alone owns (see
     :func:`_grade_in_container`), so the graded ``task.json`` has to be moved to
-    where the caller expects it. Everything else the container produced --
-    ``docker.log`` above all -- stays in the scratch dir and is discarded with
-    it, which is the point: on the ``run --resume`` path ``run_dir`` is the
-    executed row's own directory, and those files are the run's, not the grade's.
+    where the caller expects it; its logs come along via
+    :func:`_fold_back_container_logs`.
 
-    Best-effort on the log, mandatory on the record: a grade that cannot write
-    its verdict is a failure, but a missing side-car log is not.
+    Mandatory on the record: a grade that cannot write its verdict is a failure.
+    But it must fail as a ``RegradeError``, not as a raw ``OSError``. This call
+    sits outside the dispatch ``try``, so an unwrapped ``OSError`` reached the two
+    callers differently and both outcomes were wrong: ``evaluate`` guards only
+    ``RegradeError``, so it escaped into Typer as a stack trace *after* a grade
+    that had already succeeded; ``run --resume`` catches ``OSError`` too, so it
+    folded the row back with its ORIGINAL ungraded result and an error reading
+    "Grading failed during --resume" -- reporting a computed, correct verdict as
+    a grading failure and discarding it.
     """
     graded = container_run_dir / TASK_JSON_FILENAME
     if not graded.is_file():
@@ -670,15 +843,69 @@ def _fold_back_container_grade(container_run_dir: Path, run_dir: Path) -> None:
         # the runner returned a result, so the file exists. Guard anyway rather
         # than raise a confusing FileNotFoundError from the copy.
         return
-    run_dir.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(run_dir / TASK_JSON_FILENAME, graded.read_text(encoding="utf-8"))
-    container_log = container_run_dir / "docker.log"
-    if container_log.is_file():
-        # Named for the PHASE, never `docker.log`: on the resume path that name
-        # is already taken by the executed container's log, and overwriting it
-        # would repeat the task.log/grade.log truncation bug one layer down.
-        with contextlib.suppress(OSError):
-            shutil.copy2(container_log, run_dir / "grade.docker.log")
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(run_dir / TASK_JSON_FILENAME, graded.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise RegradeError(
+            f"Graded {task_id!r} in a container, but could not write the verdict to "
+            + f"{run_dir / TASK_JSON_FILENAME}: {e}. The grade itself succeeded; re-run once the "
+            + "destination is writable."
+        ) from e
+    _fold_back_container_logs(container_run_dir, run_dir)
+
+
+def _stamp_container_grading(result: EvaluationResult, task: TaskDefinition) -> None:
+    """Record the container grade's known equivalence gaps ON the row.
+
+    The sibling of :func:`stamp_host_grading`, and written for the reason that
+    function's own docstring gives: a console warning does not travel with
+    ``task.json`` into ``run.json``, the reports or the evalboard, so a row it
+    describes cannot be filtered out of a comparison by anything downstream.
+
+    ``graded_without_pre_run`` is the count of ``pre_run`` commands that ran in
+    the container which executed the agent and were NOT re-run here. It is not a
+    hypothetical: three of the ten in-tree ``driver: docker`` tasks seed state
+    outside the workspace in ``pre_run`` (``3d-scan-calc`` symlinks
+    ``/root/mass_report.json``, and its verifier's first assertion is that the
+    path exists), so such a row scores 0.000 for a trajectory ``coder-eval run``
+    scores 1.000. Refusing outright was considered and declined: it would make
+    ``run --resume`` fail on rows it grades correctly today whenever ``pre_run``
+    happens to touch only the workspace, which is the common case. A durable,
+    machine-readable marker lets a consumer decide, which a refusal does not.
+
+    ``graded_with_rebuilt_image`` marks the other gap: the grading pass re-ran
+    ``docker build`` under the run's deterministic tag, so the image is only as
+    stable as the Dockerfile and its base were between the two phases.
+    """
+    if task.pre_run:
+        result.environment_info["graded_without_pre_run"] = len(task.pre_run)
+    if task.sandbox.docker.dockerfile_path:
+        result.environment_info["graded_with_rebuilt_image"] = str(task.sandbox.docker.dockerfile_path)
+
+
+def _emit_task_telemetry(result: EvaluationResult, *, variant_id: str) -> None:
+    """Emit the ``Task.End`` event the grading container could not.
+
+    Every container this repo starts is launched with ``TELEMETRY_ENABLED=false``
+    (``DockerRunner._build_argv``), whose comment states the invariant verbatim:
+    "container silent, host emits once". The RUN path supplies the host half in
+    ``orchestration/batch.py`` right after parsing the container's result; the
+    grading path inherited the silent half and had no counterpart, so a verdict
+    published by ``evaluate <run_dir>`` or ``run --resume`` over a
+    ``driver: docker`` row reached no usage telemetry at all -- while the
+    byte-identical operation on a ``tempdir`` row, or the same row with
+    ``--allow-host-grading``, did. A driver-dependent hole in the metric the
+    split exists to keep at parity with ``run``.
+
+    Non-fatal like every other emission site (CE019): telemetry must never be
+    the reason a computed verdict is lost.
+    """
+    from coder_eval.orchestrator import build_task_event
+    from coder_eval.telemetry import track_event
+
+    name, props = build_task_event(result, driver="docker", variant_id=variant_id)
+    track_event(name, props)
 
 
 async def _grade_in_container(
@@ -770,6 +997,32 @@ async def _grade_in_container(
             task.task_id,
             len(task.pre_run),
         )
+    if task.sandbox.docker.dockerfile_path:
+        # The SECOND known equivalence gap, and the one the user guide already
+        # promised was warned about while nothing emitted it.
+        #
+        # `_build_image` re-runs `docker build` on every dispatch under the
+        # deterministic tag `coder-eval-task-<id>:built`, so the grading image
+        # REPLACES the run's under the same name. A Dockerfile, build context or
+        # base image that moved between the two phases means the criteria read a
+        # different filesystem than the agent did, and the score changes for
+        # identical agent output.
+        #
+        # Nothing pins or records image identity on either side yet, so this
+        # cannot be detected after the fact -- which is exactly why it is said
+        # at dispatch. (A `reference_digest`-style pin on the resolved image is
+        # the real fix and is deliberately NOT attempted here; it needs the
+        # identity recorded on the RUN side too, which is a change to the run
+        # path rather than to grading.)
+        logger.warning(
+            "Task %r builds its image from %s, so this grading pass re-runs `docker build`. If the "
+            + "Dockerfile, its build context or its base image changed since the run, the criteria "
+            + "read a different filesystem than the agent did and the score may differ for identical "
+            + "agent output. Nothing records the image identity, so this cannot be detected "
+            + "afterwards -- grade with a single `coder-eval run` if the image may have moved.",
+            task.task_id,
+            task.sandbox.docker.dockerfile_path,
+        )
     # A SCRATCH output dir, never the caller's. The two callers disagree about
     # what `run_dir` is -- `evaluate` passes a freshly prepared directory, while
     # `run --resume` passes the executed row's OWN directory -- and every part of
@@ -817,15 +1070,25 @@ async def _grade_in_container(
             # `_prepare_reference_mount`) and the log open raise it unwrapped,
             # and a raw traceback would drop the guidance below.
             raise RegradeError(
-                f"Grading {task.task_id!r} in a container failed: {e}. Re-run with --allow-host-grading "
+                f"Grading {task.task_id!r} in a container failed: {e}. The container's own output was "
+                + f"kept at {run_dir / GRADE_DOCKER_LOG_FILENAME}. Re-run with --allow-host-grading "
                 + "to grade on this machine instead (path- and toolchain-dependent criteria may then "
                 + "score differently, and the row is stamped graded_on_host)."
             ) from e
+        finally:
+            # ALWAYS, not only on success: the scratch dir is deleted the moment
+            # this `with` exits, and everything that explains a failure lives in
+            # it. See `_fold_back_container_logs`.
+            _fold_back_container_logs(container_run_dir, run_dir)
         # Fold the grade back into the row the caller asked about, mirroring what
         # the host path does in place. `back_up_pre_grade_record` has already
         # preserved task.execute.json, so this write is the graded record.
-        _fold_back_container_grade(container_run_dir, run_dir)
-        return result
+        _fold_back_container_grade(container_run_dir, run_dir, task.task_id)
+    # Outside the `with`: the scratch dir has served its purpose, and both of
+    # these act on the returned result, which the caller writes back last.
+    _stamp_container_grading(result, task)
+    _emit_task_telemetry(result, variant_id=variant_id)
+    return result
 
 
 async def regrade_in_place(
@@ -840,6 +1103,7 @@ async def regrade_in_place(
     replicate_index: int = 0,
     allow_host_grading: bool = False,
     recorded_task: TaskDefinition | None = None,
+    recorded_task_file: Path | None = None,
 ) -> EvaluationResult:
     """Run ``task``'s criteria against an already-executed ``workspace``.
 
@@ -851,6 +1115,16 @@ async def regrade_in_place(
     ``prior`` supplies the trajectory and the run's execution facts (see
     ``Orchestrator._seed_from_prior_result``), so criteria that read the agent's
     tool calls score exactly as they would have during the run.
+
+    ``recorded_task`` / ``recorded_task_file`` are the two halves of one seam:
+    what the row RECORDS, as distinct from what this process runs and resolves
+    paths against. Both matter only in the container, where the task is rewritten
+    to ``driver: tempdir`` and every path is a container path. Omitting the file
+    half made every container-graded row re-record ``/work/task_dir/task.yaml``
+    as its ``source_file`` -- a path that exists on no host, which is the exact
+    defect ``Orchestrator.recorded_task_file`` was added to fix, reintroduced one
+    caller down. A later ``evaluate <run_dir>`` on such a row then hits
+    ``_grade_in_container``'s own "a task file that is not on this host" refusal.
     """
     from coder_eval.orchestrator import Orchestrator
 
@@ -871,6 +1145,16 @@ async def regrade_in_place(
                 "recorded_task cannot be honored when grading in a container: the container rebuilds "
                 + "the recorded task from the staged task.yaml. Pass the same task, or grade with "
                 + "--allow-host-grading."
+            )
+        if recorded_task_file is not None and recorded_task_file != task_file:
+            # Same rule as `recorded_task` above. The container receives this
+            # value over `context.json`'s `host_task_file`, which DockerRunner
+            # fills from `rt.task_file` -- i.e. from `task_file` here. A
+            # different one could not be honored, so say so rather than drop it.
+            raise RegradeError(
+                "recorded_task_file cannot be honored when grading in a container: the container "
+                + "records the host task file the dispatch forwards to it, which is `task_file`. "
+                + "Pass the same path, or grade with --allow-host-grading."
             )
         return await _grade_in_container(
             task=task,
@@ -907,6 +1191,7 @@ async def regrade_in_place(
         replicate_index=replicate_index,
         prior_result=prior,
         recorded_task=recorded_task,
+        recorded_task_file=recorded_task_file,
     )
     result = await orchestrator.run()
     stamp_host_grading(result, task)

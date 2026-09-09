@@ -1,4 +1,4 @@
-"""CE053: no bare run-record filename literal outside ``path_utils``.
+"""CE053: no bare run-record or run-log filename literal outside ``path_utils``.
 
 ``path_utils`` defines ``TASK_JSON_FILENAME`` / ``PRE_GRADE_JSON_FILENAME`` and
 its comment states why: "~12 sites name them — including three that ``rglob`` for
@@ -17,6 +17,10 @@ A rationale that only a human remembers is not a rule. Fires on any string
 constant in ``src/coder_eval/`` (outside ``path_utils.py``) that equals one of
 those filenames, or embeds it as a trailing path segment (``"*/task.json"``).
 Import the constant instead; ``# noqa: CE053`` for a genuinely unrelated string.
+
+Covers the per-run LOG names too (``task.log`` / ``grade.log`` / ``docker.log`` /
+``grade.docker.log``) — same shape, one release later, and the ``docker.log``
+case was worse because its consumer skips silently when the file is absent.
 """
 
 import ast
@@ -26,10 +30,32 @@ from tests.lint.rules.base import BaseRule
 
 
 def _run_record_filenames() -> set[str]:
-    """The filenames from ``path_utils``, read from the module rather than retyped."""
-    from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME
+    """The filenames from ``path_utils``, read from the module rather than retyped.
 
-    return {TASK_JSON_FILENAME, PRE_GRADE_JSON_FILENAME}
+    The log names joined the record names for the same reason and after the same
+    defect one release later: ``docker.log`` was produced in ``isolation/`` and
+    consumed in ``orchestration/`` as three unrelated literals, and because the
+    consumer guards its copy with ``is_file()``, a rename on the producing side
+    would have degraded the fold-back to a silent no-op — discarding the only
+    record of why a grading container failed, with nothing failing.
+    """
+    from coder_eval.path_utils import (
+        DOCKER_LOG_FILENAME,
+        GRADE_DOCKER_LOG_FILENAME,
+        GRADE_LOG_FILENAME,
+        PRE_GRADE_JSON_FILENAME,
+        TASK_JSON_FILENAME,
+        TASK_LOG_FILENAME,
+    )
+
+    return {
+        TASK_JSON_FILENAME,
+        PRE_GRADE_JSON_FILENAME,
+        TASK_LOG_FILENAME,
+        GRADE_LOG_FILENAME,
+        DOCKER_LOG_FILENAME,
+        GRADE_DOCKER_LOG_FILENAME,
+    }
 
 
 class NoRunRecordFilenameLiteral(BaseRule):
