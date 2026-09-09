@@ -17,6 +17,7 @@ const HARNESS_LOGO: Record<string, { src: string; label: string; short: string }
         short: "Claude Code",
     },
     codex: { src: "/harness/codex.png", label: "Codex · OpenAI", short: "Codex" },
+    pi: { src: "/harness/pi.png", label: "Pi · pi.dev", short: "Pi" },
     antigravity: {
         src: "/harness/antigravity.png",
         label: "Antigravity · Google Gemini",

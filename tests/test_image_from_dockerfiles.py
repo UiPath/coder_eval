@@ -507,3 +507,34 @@ def test_claude_code_version_pin_matches_framework() -> None:
         f"CLAUDE_CODE_VERSION drift: docker/Dockerfile pins {fw!r} but docker/Dockerfile.runtime pins {kit!r} — "
         "inject and rebase tasks would run different Claude Code versions."
     )
+
+
+def test_pi_cli_baked_and_pinned() -> None:
+    """docker/Dockerfile must ship a PINNED Pi CLI, and its install line must
+    reference the ARG (not a hardcoded literal) so a bump is one edit and the
+    pin can't drift from the install. Mirrors the claude-code pinned-CLI guard
+    above — Pi's presence is a positive, mechanically-checkable invariant
+    (`--driver docker --type pi` depends on it). Fails on @latest or removal.
+    Scope: main docker/Dockerfile only — Dockerfile.runtime deliberately does
+    NOT bake Pi (inject-mode is out of scope), so it is not asserted here."""
+    df_text = (Path(__file__).resolve().parents[1] / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    pin: str | None = None
+    for ln in df_text.splitlines():
+        m = re.match(r"\s*ARG PI_VERSION=(\S+)", ln)
+        if m:
+            pin = m.group(1)
+            break
+    assert pin, "ARG PI_VERSION=<version> missing from docker/Dockerfile — the Pi CLI is not pinned."
+    assert pin.lower() != "latest", (
+        f"PI_VERSION is pinned to {pin!r} — the Pi CLI must be an exact version, not `latest`, so layer "
+        "caching cannot freeze it nondeterministically across rebuilds."
+    )
+
+    assert re.search(
+        r"npm install -g @earendil-works/pi-coding-agent@\$\{PI_VERSION\}",
+        df_text,
+    ), (
+        "docker/Dockerfile must `npm install -g @earendil-works/pi-coding-agent@${PI_VERSION}` — the install "
+        "must reference the PI_VERSION ARG so the pin and the install cannot drift."
+    )

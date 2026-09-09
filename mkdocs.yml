@@ -2,7 +2,7 @@ site_name: Coder Eval
 site_description: >-
   Evaluate and benchmark AI coding agents and their skills — a sandboxed,
   agent-agnostic framework with declarative YAML eval suites for Claude Code,
-  Codex, Antigravity (Gemini) and OpenCode, A/B experiments, weighted scoring,
+  Codex, Antigravity (Gemini), OpenCode and Pi, A/B experiments, weighted scoring,
   and CI gates.
 site_url: https://coder-eval.com/docs/
 repo_url: https://github.com/UiPath/coder_eval
@@ -85,6 +85,7 @@ extra:
     agents/CODEX.md: "Running the OpenAI Codex agent"
     agents/ANTIGRAVITY.md: "Running the Google Antigravity / Gemini agent"
     agents/OPENCODE.md: "Running the OpenCode agent on open-weight models"
+    agents/PI.md: "Running the Pi agent on open-weight models"
     agents/HARNESS_PARITY.md: "What each run_limits field means on every harness"
     AB_EXPERIMENTS.md: "Compare models / tools / prompts across the same tasks"
     DATASETS.md: "Fan a single task out over a dataset"
@@ -115,6 +116,7 @@ nav:
       - Codex: agents/CODEX.md
       - Antigravity (Gemini): agents/ANTIGRAVITY.md
       - OpenCode: agents/OPENCODE.md
+      - Pi: agents/PI.md
       - Run-Limit Parity: agents/HARNESS_PARITY.md
   - Advanced:
       - A/B Experiments: AB_EXPERIMENTS.md

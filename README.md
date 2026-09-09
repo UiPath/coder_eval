@@ -17,14 +17,14 @@
 open-source, **agent-agnostic** framework for **evaluating and benchmarking AI coding
 agents and their skills** — built for benchmark authors, CLI builders, and skill
 builders — with sandboxing, reproducibility, and data-driven analysis. It runs a real
-agent — **Claude Code**, **OpenAI Codex**, **Google Antigravity (Gemini)**, or
-**OpenCode** — in a sandbox against declarative YAML tasks, then scores the files and
+agent — **Claude Code**, **OpenAI Codex**, **Google Antigravity (Gemini)**,
+**OpenCode**, or **Pi** — in a sandbox against declarative YAML tasks, then scores the files and
 commands it actually produced. Changing harness is one field (`agent.type`); the
 tasks, criteria, scoring, telemetry, and reports stay the same.
 
 Reach for it when you want to **benchmark agents on your own domain tasks**,
 **test whether a skill triggers** in the agent you ship for, **A/B-test Claude Code
-vs. Codex vs. Gemini vs. OpenCode** (or model vs. model, prompt vs. prompt), or
+vs. Codex vs. Gemini vs. OpenCode vs. Pi** (or model vs. model, prompt vs. prompt), or
 **gate CI on coding-agent quality**. It is **not a fixed leaderboard**: unlike
 SWE-bench or SkillsBench, which rank models on a shared task set, you bring the tasks
 and you bring the scoring — weighted 0.0–1.0 criteria, a `skill_triggered` activation
@@ -40,7 +40,7 @@ care about. See [How it compares](https://coder-eval.com/docs/comparison).
 - **Sandboxed execution** in isolated environments with resource limits
 - **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
 - **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent-agnostic by design** — Claude Code, OpenAI Codex, Antigravity (Gemini), and OpenCode today; add your own harness through the plugin SPI
+- **Agent-agnostic by design** — Claude Code, OpenAI Codex, Antigravity (Gemini), OpenCode, and Pi today; add your own harness through the plugin SPI
 - **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
 
@@ -62,7 +62,7 @@ care about. See [How it compares](https://coder-eval.com/docs/comparison).
 ## What you can do with it
 
 - **Benchmark coding agents** — score an agent across a suite of tasks with weighted scoring and pass/fail thresholds
-- **Compare models & configs** — A/B-test Claude vs. Codex vs. Gemini vs. OpenCode, model vs. model, tool-on vs. tool-off, prompt vs. prompt
+- **Compare models & configs** — A/B-test Claude vs. Codex vs. Gemini vs. OpenCode vs. Pi, model vs. model, tool-on vs. tool-off, prompt vs. prompt
 - **Evaluate skills** — verify an agent actually engages a target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style), on whichever harness your users run
 - **Keep skills up to date in CI** — re-validate your skills on every change or on a schedule; catch silent regressions when models, prompts, or the skills themselves drift
 - **Gate CI on agent quality** — run the suite in GitHub Actions and fail the build on regressions
@@ -252,6 +252,7 @@ The step's exit code is coder-eval's own: non-zero on any failed task.
 | [Codex](docs/agents/CODEX.md) | Running the OpenAI Codex agent |
 | [Antigravity (Gemini)](docs/agents/ANTIGRAVITY.md) | Running the Google Antigravity / Gemini agent |
 | [OpenCode](docs/agents/OPENCODE.md) | Running the OpenCode agent on open-weight models |
+| [Pi](docs/agents/PI.md) | Running the Pi agent on open-weight models |
 | [Run-Limit Parity](docs/agents/HARNESS_PARITY.md) | What each run_limits field means on every harness |
 | [A/B Experiments](docs/AB_EXPERIMENTS.md) | Compare models / tools / prompts across the same tasks |
 | [Bring Your Own Dataset](docs/DATASETS.md) | Fan a single task out over a dataset |

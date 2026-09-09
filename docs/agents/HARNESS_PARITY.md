@@ -10,12 +10,12 @@ This page is the contract for what each run limit means per harness, plus the sh
 
 ## The table
 
-| Limit | claude-code | codex | antigravity | opencode |
-|---|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
-| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) |
+| Limit | claude-code | codex | antigravity | opencode | pi |
+|---|---|---|---|---|---|
+| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native turn cap (the CLI's own `turn_start` agent-loop steps) |
+| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
+| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
+| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 
@@ -49,6 +49,14 @@ exists and is honored: `max_turns: N` allows N complete steps and cuts the run
 when step N+1 begins, with the completed steps' tokens intact. A step is one
 assistant generation and may carry several tool calls — so, as with claude-code,
 the same number is a looser tool-call budget than on the visible-turn backends.
+
+**Pi keeps a native unit too — its `turn_start` agent-loop steps.** Like OpenCode,
+`pi -p --mode json` runs a real multi-step agent loop per invocation and streams it
+(`turn_start` / `turn_end`), so `max_turns: N` allows N complete turns and cuts the
+run when turn N+1 begins, with the completed turns' tokens intact. Pi streams
+incrementally, so the cut genuinely stops spend mid-run. A Pi turn is one assistant
+generation and may carry several tool calls — the same looser budget as claude-code
+and OpenCode.
 
 **So holding `max_turns` constant across harnesses does not hold the budget
 constant.** If you are A/B-ing across backends and the cap is close to binding, that
@@ -116,16 +124,25 @@ whose cap fires should not look like a task whose harness hung.
 Not a run limit, but the same promise: one task file, three harnesses, same meaning.
 This field breaks it silently.
 
-| | claude-code | codex | antigravity |
-|---|---|---|---|
-| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted |
-| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted |
+| | claude-code | codex | antigravity | pi |
+|---|---|---|---|---|
+| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted | accepted |
+| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted | **loads, but undetected** † |
 
 claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
 live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
 parents the skill directories and no skill loads. Codex
 (`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
 both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
+
+† Pi uses the shared `_plugin_skill_dirs` resolver, whose bare-dir fallback resolves a
+bare skills directory to itself and passes it as `--skill <dir>`, so the skill *does*
+load and the agent can use it. But `skill_triggered` detects engagement by matching a
+`skills/<name>/` segment in the read path (`_SKILL_PATH_RE`), which a bare dir lacks — so
+an **activation suite** on a bare dir still scores recall 0 even though the skill ran.
+Net effect for activation suites is therefore the same silent-0 as claude-code, via a
+different mechanism; use the plugin-root shape (lint rule CE045 holds `SKILL_SOURCE_PATH`
+to it for exactly this reason).
 
 So `.claude/skills` works on two backends out of three and fails on the third — and
 fails without an error. The agent simply is not offered the skill, every positive row
@@ -165,15 +182,45 @@ plugin-root shape by lint rule CE045. The rule keys on that variable name only; 
 one, feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code,
 so the same requirement applies there and is unlinted.
 
+**OpenCode and Pi both honor the *skills* half of a plugin.** OpenCode maps each
+local plugin root to its `skills.paths`; Pi maps each to a `--skill <dir>` argument —
+both via the same `_plugin_skill_dirs` resolver — so both **can** run activation
+suites. A plugin's non-skill assets (agents/hooks/commands/MCP servers) are dropped on
+both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
+
+## Pi enforces `system_prompt` but not the tool allowlists
+
+- **`system_prompt` is ENFORCED** (`--append-system-prompt`, semantics `append`) — a
+  small win over OpenCode, which drops it.
+- **`allowed_tools` / `disallowed_tools` are NOT enforced.** Pi's built-in tools are
+  lowercase (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`), but the shared config
+  default (`experiments/default.yaml`) sets Claude-namespaced names
+  (`Bash`/`Read`/`Write`/…). Forwarding those to `--tools` would allowlist tools that
+  do not exist in Pi and strip the agent of ALL tools — so, like OpenCode (drops them),
+  Codex (forwards `disallowed_tools` without SDK enforcement), and Antigravity (does not
+  read them), Pi ignores them and runs with its full native toolset. A task that needs a
+  restricted Pi toolset would have to name Pi's lowercase tools — a documented follow-up.
+- **`permission_mode` is NOT enforced** — Pi headless print mode auto-runs tools and
+  exposes only project-file trust (`--approve` / `--no-approve`), no tool-approval
+  mode; the sandbox driver is the isolation boundary (same as Codex/Antigravity).
+- **`system_prompt_file` is NOT read** (use inline `system_prompt`), matching
+  Codex/Antigravity.
+- **Built-in auto-retry.** Pi retries a transient/provider error *internally* (another
+  `agent_start` cycle in the same invocation, flagged `willRetry: true`), which the
+  harness folds into one turn. The internal retry is bounded by
+  `turn_timeout` / `task_timeout`.
+
+Full detail: [Pi](PI.md).
+
 ## Reproducing
 
 `tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more
 sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
 outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
-`--type antigravity` / `--type opencode` to check a backend against the contract
-above.
+`--type antigravity` / `--type opencode` / `--type pi` to check a backend against the
+contract above.
 
 ## Related
 
-- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md)
+- [Claude Code](CLAUDE_CODE.md) · [Codex](CODEX.md) · [Antigravity](ANTIGRAVITY.md) · [OpenCode](OPENCODE.md) · [Pi](PI.md)
 - [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) — the full `run_limits` schema
