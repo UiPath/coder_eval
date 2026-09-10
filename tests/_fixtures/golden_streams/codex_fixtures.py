@@ -30,8 +30,33 @@ CODEX_MODEL = "gpt-5-codex"
 # --- Notification factories (mirror test_codex_agent) -----------------------
 
 
-def _item(method: str, root: SimpleNamespace) -> SimpleNamespace:
-    return SimpleNamespace(method=method, payload=SimpleNamespace(item=SimpleNamespace(root=root)))
+# Fixed epoch milliseconds, so every derived duration is deterministic and the
+# golden snapshots pin a real value rather than a scrubbed clock read.
+_T0_MS = 1_800_000_000_000
+
+
+def _item(
+    method: str,
+    root: SimpleNamespace,
+    *,
+    started_at_ms: int | None = None,
+    completed_at_ms: int | None = None,
+) -> SimpleNamespace:
+    """One item notification.
+
+    ``started_at_ms`` / ``completed_at_ms`` sit on the PAYLOAD, beside ``item``,
+    which is where the agent reads them from
+    (``getattr(notification.payload, ...)``). They default to None so a
+    scenario that says nothing about timing behaves exactly as before.
+    """
+    return SimpleNamespace(
+        method=method,
+        payload=SimpleNamespace(
+            item=SimpleNamespace(root=root),
+            started_at_ms=started_at_ms,
+            completed_at_ms=completed_at_ms,
+        ),
+    )
 
 
 def _delta(text: str) -> SimpleNamespace:
@@ -160,8 +185,8 @@ def _build_catalogue() -> list[CodexScenario]:
         CodexScenario(
             name="b_command_execution",
             notifications=[
-                _item("item/started", cmd),
-                _item("item/completed", cmd),
+                _item("item/started", cmd, started_at_ms=_T0_MS),
+                _item("item/completed", cmd, completed_at_ms=_T0_MS + 250),
                 _token_usage(inp=120, out=30, cached=0),
                 _turn_completed(),
             ],
@@ -189,9 +214,9 @@ def _build_catalogue() -> list[CodexScenario]:
         CodexScenario(
             name="d_cross_flush_is_error",
             notifications=[
-                _item("item/started", cmd_d),
+                _item("item/started", cmd_d, started_at_ms=_T0_MS),
                 _token_usage(inp=90, out=15, cached=0),
-                _item("item/completed", cmd_d),
+                _item("item/completed", cmd_d, completed_at_ms=_T0_MS + 400),
                 _turn_completed(),
             ],
         )
@@ -202,7 +227,9 @@ def _build_catalogue() -> list[CodexScenario]:
         CodexScenario(
             name="e_orphan_tool",
             notifications=[
-                _item("item/started", _command("cmd_orphan")),
+                # A real ItemStartedNotification always carries this (the SDK
+                # marks it required), so the orphan's start IS knowable.
+                _item("item/started", _command("cmd_orphan"), started_at_ms=_T0_MS),
                 _delta("done"),
                 _turn_completed(),
             ],
@@ -217,10 +244,10 @@ def _build_catalogue() -> list[CodexScenario]:
         CodexScenario(
             name="f_collab_fallback",
             notifications=[
-                _item("item/started", spawn),
-                _item("item/completed", spawn),
-                _item("item/started", wait),
-                _item("item/completed", wait),
+                _item("item/started", spawn, started_at_ms=_T0_MS),
+                _item("item/completed", spawn, completed_at_ms=_T0_MS + 120),
+                _item("item/started", wait, started_at_ms=_T0_MS + 130),
+                _item("item/completed", wait, completed_at_ms=_T0_MS + 900),
                 _delta("done"),
                 _turn_completed(),
             ],

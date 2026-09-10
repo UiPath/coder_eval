@@ -5,6 +5,8 @@ The Codex SDK is an optional extra; this entire test module is skipped when
 it isn't installed, so `make test` / CI stay green without the extra.
 """
 
+from datetime import datetime
+
 import pytest
 
 
@@ -504,8 +506,23 @@ from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noq
 from coder_eval.errors import AgentCrashError, TurnTimeoutError  # noqa: E402
 
 
-def _item_notification(method: str, root: SimpleNamespace) -> SimpleNamespace:
-    return SimpleNamespace(method=method, payload=SimpleNamespace(item=SimpleNamespace(root=root)))
+def _item_notification(
+    method: str,
+    root: SimpleNamespace,
+    *,
+    started_at_ms: int | None = None,
+    completed_at_ms: int | None = None,
+) -> SimpleNamespace:
+    """One item notification. The stamps sit on the PAYLOAD, beside ``item``,
+    which is where the real SDK puts them and where the agent reads them."""
+    return SimpleNamespace(
+        method=method,
+        payload=SimpleNamespace(
+            item=SimpleNamespace(root=root),
+            started_at_ms=started_at_ms,
+            completed_at_ms=completed_at_ms,
+        ),
+    )
 
 
 def _delta(text: str) -> SimpleNamespace:
@@ -2162,3 +2179,120 @@ class TestMaxTurnsVisibleTurnCap:
         record = await agent.communicate("delegate it", should_stop=lambda: True)
 
         assert not [c for c in record.commands if c.tool_name == "Bash"]
+
+
+_BOUNDS_EPOCH_MS = 1_800_000_000_000
+
+
+def _bounds_command_item(item_id: str = "cmd_1") -> SimpleNamespace:
+    return SimpleNamespace(
+        type="commandExecution",
+        id=item_id,
+        command="echo hi",
+        exit_code=0,
+        aggregated_output="hi",
+        duration_ms=None,
+    )
+
+
+class TestExecutionBoundsWiring:
+    """The notification -> builder wiring, end to end through communicate().
+
+    The builder arithmetic is covered in test_codex_agent_unit.py by calling
+    `_telemetry_for_item` directly. That leaves the WIRING untested, and the
+    golden snapshots cannot cover it: `_scrub.py` masks every non-null
+    timestamp to "<scrubbed>", so they assert presence, not value. Swapping
+    `started_ms` and `completed_ms` at the single production call site would
+    make every command 0ms with a zero-width window and still match every
+    snapshot byte-for-byte. These two tests read the values.
+    """
+
+    async def test_stamps_reach_the_record_with_the_right_values(self):
+        notifications = [
+            _item_notification("item/started", _bounds_command_item(), started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/completed", _bounds_command_item(), completed_at_ms=_BOUNDS_EPOCH_MS + 250),
+            _token_usage(inp=10, out=5, cached=0),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("go")
+
+        cmd = next(c for c in record.commands if c.tool_id == "cmd_1")
+        assert cmd.execution_started_at == datetime.fromtimestamp(_BOUNDS_EPOCH_MS / 1000)
+        assert cmd.execution_completed_at == datetime.fromtimestamp((_BOUNDS_EPOCH_MS + 250) / 1000)
+        assert cmd.duration_ms == 250.0
+        assert cmd.execution_started_at < cmd.execution_completed_at
+
+    async def test_an_orphaned_tool_keeps_its_known_start_but_no_end(self):
+        # Force-closed without an item/completed. The start IS known (the SDK
+        # marks started_at_ms required), so it is recorded; nothing timed the
+        # rest, so completion and duration stay None.
+        notifications = [
+            _item_notification("item/started", _bounds_command_item("cmd_orphan"), started_at_ms=_BOUNDS_EPOCH_MS),
+            _delta("done"),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("go")
+
+        orphan = next(c for c in record.commands if c.tool_id == "cmd_orphan")
+        assert orphan.result_status == "unknown"
+        assert orphan.execution_started_at == datetime.fromtimestamp(_BOUNDS_EPOCH_MS / 1000)
+        assert orphan.execution_completed_at is None
+        assert orphan.duration_ms is None
+
+
+class TestGenerationWindowExcludesToolExecution:
+    """A tool closing inside a generation window is not model time.
+
+    `_flush_message`'s window is seeded from the first item's start and
+    extended to the LAST item's completion, so any generation containing a
+    tool call already CONTAINS that tool's execution. Publishing the raw span
+    double-counted it against the tool's own duration_ms — Generation + Tool
+    exec then exceeded the wall clock they are shown against.
+    """
+
+    async def test_a_tool_only_emission_reports_no_generation_time(self):
+        # The whole 250ms window was `echo hi` running. Reporting 250ms of
+        # "generation" beside a 250ms command is the same interval twice.
+        notifications = [
+            _item_notification("item/started", _bounds_command_item(), started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/completed", _bounds_command_item(), completed_at_ms=_BOUNDS_EPOCH_MS + 250),
+            _token_usage(inp=10, out=5, cached=0),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("go")
+
+        assistant = [m for m in record.messages if m.role == "assistant"]
+        cmd = next(c for c in record.commands if c.tool_id == "cmd_1")
+        assert cmd.duration_ms == 250.0
+        assert sum(m.generation_duration_ms or 0.0 for m in assistant) == 0.0
+
+    async def test_generation_plus_tool_exec_does_not_exceed_the_window(self):
+        # Two tools inside one window: the sum of what the page shows as
+        # Generation and Tool exec must fit inside the span they are shown
+        # against, or Phase 1's Unaccounted cell renders a negative share.
+        first = _bounds_command_item("cmd_a")
+        second = _bounds_command_item("cmd_b")
+        notifications = [
+            _item_notification("item/started", first, started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/completed", first, completed_at_ms=_BOUNDS_EPOCH_MS + 120),
+            _item_notification("item/started", second, started_at_ms=_BOUNDS_EPOCH_MS + 130),
+            _item_notification("item/completed", second, completed_at_ms=_BOUNDS_EPOCH_MS + 900),
+            _token_usage(inp=10, out=5, cached=0),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("go")
+
+        assistant = [m for m in record.messages if m.role == "assistant"]
+        gen_ms = sum(m.generation_duration_ms or 0.0 for m in assistant)
+        tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
+        window_ms = 900.0  # the emission's own span, first start -> last completion
+
+        assert tool_ms == 120.0 + 770.0
+        # The 10ms gap between the two tools is the only generation time the
+        # stream lets us attribute.
+        assert gen_ms == pytest.approx(10.0)
+        assert gen_ms + tool_ms == pytest.approx(window_ms)

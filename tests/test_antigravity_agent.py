@@ -1624,7 +1624,7 @@ def _assistant(record):
 
 
 class TestBusyMs:
-    """`_busy_ms` is the UNION of tool intervals, clipped to the window.
+    """`busy_ms` is the UNION of tool intervals, clipped to the window.
 
     A scalar sum was wrong twice over: overlapping tools (this harness
     resolves several calls from one Step and backgrounds anything over ten
@@ -1639,9 +1639,9 @@ class TestBusyMs:
         return _CLOCK_BASE + timedelta(milliseconds=ms)
 
     def _busy(self, spans, lo=0, hi=10_000) -> float:
-        from coder_eval.agents.antigravity_agent import _busy_ms
+        from coder_eval.agents._timing import busy_ms
 
-        return _busy_ms([(self._at(s), self._at(e)) for s, e in spans], self._at(lo), self._at(hi))
+        return busy_ms([(self._at(s), self._at(e)) for s, e in spans], self._at(lo), self._at(hi))
 
     def test_no_spans_is_zero(self):
         assert self._busy([]) == 0.0

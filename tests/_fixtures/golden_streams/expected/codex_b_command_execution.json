@@ -6,8 +6,8 @@
       "assistant_turn_index": null,
       "duration_ms": "<scrubbed>",
       "error_message": null,
-      "execution_completed_at": null,
-      "execution_started_at": null,
+      "execution_completed_at": "<scrubbed>",
+      "execution_started_at": "<scrubbed>",
       "generation_completed_at": null,
       "parameters": {
         "command": "echo hi"

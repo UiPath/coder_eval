@@ -31,6 +31,7 @@ from typing import Any, ClassVar
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
+from coder_eval.agents._timing import busy_ms
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
@@ -198,35 +199,6 @@ _TARGET_USER = "TARGET_USER"
 def _enum_value(x: Any) -> Any:
     """Return a (possibly str-enum) value as its plain ``.value``, else itself."""
     return getattr(x, "value", x)
-
-
-def _busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) -> float:
-    """Wall milliseconds inside ``[lo, hi]`` where at least ONE span was running.
-
-    The union, not the sum. Antigravity resolves several tool calls from one
-    ``Step`` and backgrounds anything over ten seconds, so tool intervals
-    routinely overlap; adding their durations over-counts the busy time by
-    exactly the overlap. Subtracting such a sum from a generation window
-    understates generation and, with enough concurrency, drives it negative —
-    reintroducing the ``0.0`` this whole change exists to remove (four
-    concurrent 400 ms calls inside a 1000 ms window sum to 1600 ms).
-
-    Clipping to ``[lo, hi]`` is the other half: a tool that opened before this
-    window only spent part of its life inside it, and only that part is not
-    generation time here.
-    """
-    clipped = sorted((max(s, lo), min(e, hi)) for s, e in spans if min(e, hi) > max(s, lo))
-    if not clipped:
-        return 0.0
-    total = 0.0
-    open_start, open_end = clipped[0]
-    for start, end in clipped[1:]:
-        if start > open_end:  # disjoint — bank the run and start a new one
-            total += (open_end - open_start).total_seconds() * 1000.0
-            open_start, open_end = start, end
-        else:  # overlapping or adjacent — extend the run
-            open_end = max(open_end, end)
-    return total + (open_end - open_start).total_seconds() * 1000.0
 
 
 def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
@@ -888,7 +860,7 @@ class _AntigravityTurnState:
         # arrives and only a later usage_metadata Step cuts the message — so a
         # window legitimately contains tool time that is not model time. Kept
         # as intervals, not a running total, because they overlap (see
-        # _busy_ms).
+        # busy_ms).
         self._tool_spans_since_mark: list[tuple[datetime, datetime]] = []
 
     @property
@@ -1009,7 +981,7 @@ class _AntigravityTurnState:
             # This tool closed inside the open generation window, so its time is
             # not model time. The INTERVAL is recorded, not the duration: tool
             # calls overlap here, and only their union may be subtracted (see
-            # _busy_ms). Only the DONE path records one — a tool force-closed at
+            # busy_ms). Only the DONE path records one — a tool force-closed at
             # finalize has duration_ms None and was never timed.
             self._tool_spans_since_mark.append((started, completed))
             self.commands.append(end_tel)
@@ -1075,10 +1047,10 @@ class _AntigravityTurnState:
         # still open. Accounting for that wait is separate work (audit P2-1);
         # do not read such a number as model time.
         span_ms = (now_monotonic - self._gen_mark_monotonic) * 1000.0
-        tool_ms = _busy_ms(self._tool_spans_since_mark, self._gen_mark_wall, now_wall)
+        tool_ms = busy_ms(self._tool_spans_since_mark, self._gen_mark_wall, now_wall)
         generation_ms = span_ms - tool_ms
         if generation_ms < 0:
-            # _busy_ms clips to this window and unions overlaps, so it cannot
+            # busy_ms clips to this window and unions overlaps, so it cannot
             # exceed the window's own wall span. Reaching here means the two
             # clocks disagree (the span is monotonic, the tool intervals are
             # wall), i.e. jitter — worth a line in the task log, because the

@@ -28,6 +28,43 @@ class TestAvgCommandTimeDivisor:
             f"Should divide by timed commands (2), not all commands (4)"
         )
 
+    def test_nothing_timed_reports_no_average_rather_than_zero(self):
+        """`avg_command_time_ms` is `float | None` so it can say "unmeasured".
+
+        Reachable since the Claude orphan coalesce was deleted: a turn whose
+        only tool call is force-closed without a tool result has no timed
+        command at all. A 0 here rendered "0ms average command time" in the
+        HTML report for a run where nothing was ever timed.
+        """
+        now = datetime.now()
+        commands = [
+            CommandTelemetry(tool_name="Bash", tool_id="1", timestamp=now, duration_ms=None),
+            CommandTelemetry(tool_name="Bash", tool_id="2", timestamp=now, duration_ms=None),
+        ]
+        turn = TurnRecord(iteration=1, user_input="test", agent_output="test", commands=commands)
+        stats = calculate_command_statistics([turn])
+
+        assert stats.avg_command_time_ms is None
+        assert stats.total_command_time_ms == 0.0
+
+    def test_an_untimed_command_is_not_ranked_among_the_slowest(self):
+        """The slowest list is built from timed commands only.
+
+        It used to coalesce a missing duration to 0.0, which put an untimed
+        command in a "slowest" ranking at the bottom — a measurement it never
+        had. The pre-filter and the reported value are now the same fact.
+        """
+        now = datetime.now()
+        commands = [
+            CommandTelemetry(tool_name="Read", tool_id="1", timestamp=now, duration_ms=50.0),
+            CommandTelemetry(tool_name="Bash", tool_id="2", timestamp=now, duration_ms=None),
+        ]
+        turn = TurnRecord(iteration=1, user_input="test", agent_output="test", commands=commands)
+        stats = calculate_command_statistics([turn])
+
+        assert [c.tool_id for c in stats.slowest_commands] == ["1"]
+        assert stats.slowest_commands[0].duration_ms == 50.0
+
     def test_zero_duration_counted_as_timed(self):
         """A command with duration_ms=0.0 should be counted as timed (not excluded)."""
         now = datetime.now()

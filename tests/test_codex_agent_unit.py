@@ -15,7 +15,10 @@ module's ``importorskip("openai_codex")``.
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from types import SimpleNamespace
+
+import pytest
 
 from coder_eval.agents.codex_agent import _CLAUDE_TO_CODEX_TOOL_MAP, CodexAgent
 from coder_eval.models import AgentKind, parse_agent_config
@@ -129,3 +132,149 @@ class TestCodexTurnState:
         # result_tokens (ceil(len/4)) must scale with the real output, not ~31.
         assert cmd.result_tokens >= len(big_output) // 4
         assert cmd.result_tokens > 100
+
+
+# ---------------------------------------------------------------------------
+# Execution bounds
+#
+# The SDK delivers `started_at_ms` / `completed_at_ms` on the item notification
+# and the agent discarded both, publishing the item's own `duration_ms`
+# instead — 0.0 for 70 of 211 commands in one nightly, absent for 25 more, and
+# no execution bounds at all, so no Codex tool call could be placed on a
+# timeline. All three telemetry builders now derive their timing identically.
+#
+# Pure logic: the builders take plain SimpleNamespace roots, so these live
+# here rather than behind test_codex_agent.py's importorskip — otherwise a
+# clean `make test` (which syncs no codex extra) skips them entirely.
+# ---------------------------------------------------------------------------
+
+_EPOCH_MS = 1_800_000_000_000
+
+
+def _command_item(item_id: str = "cmd_1", *, duration_ms: object = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="commandExecution",
+        id=item_id,
+        command="echo hi",
+        exit_code=0,
+        aggregated_output="hi",
+        duration_ms=duration_ms,
+    )
+
+
+def _generic_item(item_id: str = "mcp_1", *, duration_ms: object = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="mcpToolCall",
+        id=item_id,
+        server="srv",
+        tool="lookup",
+        arguments={"q": "x"},
+        status="completed",
+        error=None,
+        success=True,
+        duration_ms=duration_ms,
+    )
+
+
+def _file_change_item(item_id: str = "fc_1", *, duration_ms: object = None) -> SimpleNamespace:
+    """A fileChange root. The SDK reports no duration for one, so
+    ``duration_ms`` is accepted (for signature parity with the other two
+    factories) and deliberately ignored."""
+    del duration_ms
+    return SimpleNamespace(
+        type="fileChange",
+        id=item_id,
+        changes=[SimpleNamespace(path="out.txt")],
+        status="completed",
+    )
+
+
+# (root factory, root_type) for each of the three builders, so a fix in one
+# cannot pass for the others.
+_BUILDERS = [
+    pytest.param(_command_item, "commandExecution", id="commandExecution"),
+    pytest.param(_file_change_item, "fileChange", id="fileChange"),
+    pytest.param(_generic_item, "mcpToolCall", id="generic"),
+]
+
+# The two whose SDK item carries a duration at all. NAMED, not sliced
+# positionally: reordering _BUILDERS must not silently point the fallback
+# tests at fileChange, where the value is discarded and they would pass
+# while asserting nothing.
+_BUILDERS_WITH_SDK_DURATION = [_BUILDERS[0], _BUILDERS[2]]
+
+
+class TestExecutionBoundsFromSdkStamps:
+    """All three builders derive bounds and duration from the SDK stamps."""
+
+    @staticmethod
+    def _build(root, root_type, *, started_ms=None, completed_ms=None):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        telemetry, _ = agent._telemetry_for_item(
+            root, root_type, getattr(root, "id", "x"), 0, started_ms=started_ms, completed_ms=completed_ms
+        )
+        assert telemetry is not None
+        return telemetry
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
+    def test_both_stamps_give_bounds_and_an_exact_duration(self, factory, root_type):
+        tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=_EPOCH_MS + 250)
+        assert tel.execution_started_at == datetime.fromtimestamp(_EPOCH_MS / 1000)
+        assert tel.execution_completed_at == datetime.fromtimestamp((_EPOCH_MS + 250) / 1000)
+        assert tel.duration_ms == 250.0
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
+    def test_timestamp_is_the_tools_own_start(self, factory, root_type):
+        # It used to be datetime.now() at COMPLETION, which places the call
+        # after its own execution.
+        tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=_EPOCH_MS + 250)
+        assert tel.timestamp == datetime.fromtimestamp(_EPOCH_MS / 1000)
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
+    def test_only_one_stamp_never_fabricates_an_interval(self, factory, root_type):
+        # _ms_to_dt(None) is datetime.now(), so pairing a real stamp with a
+        # missing one would invent an interval running to the present moment.
+        tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=None)
+        assert tel.execution_started_at is None
+        assert tel.execution_completed_at is None
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
+    def test_a_backwards_pair_clamps_but_keeps_both_bounds(self, factory, root_type):
+        # Clock skew. The duration cannot be negative, but the anomaly stays
+        # visible in the record.
+        tel = self._build(factory(), root_type, started_ms=_EPOCH_MS + 500, completed_ms=_EPOCH_MS)
+        assert tel.duration_ms == 0.0
+        assert tel.execution_started_at is not None
+        assert tel.execution_completed_at is not None
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS_WITH_SDK_DURATION)
+    def test_derived_duration_wins_over_a_conflicting_sdk_value(self, factory, root_type):
+        tel = self._build(factory(duration_ms=0), root_type, started_ms=_EPOCH_MS, completed_ms=_EPOCH_MS + 250)
+        assert tel.duration_ms == 250.0
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS_WITH_SDK_DURATION)
+    def test_no_stamps_falls_back_to_a_reported_sdk_duration(self, factory, root_type):
+        tel = self._build(factory(duration_ms=12), root_type)
+        assert tel.execution_started_at is None
+        assert tel.duration_ms == 12.0
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS_WITH_SDK_DURATION)
+    def test_an_sdk_zero_is_unreported_not_instant(self, factory, root_type):
+        # The case that motivated the change: 70 of 211 commands in one
+        # nightly reported 0 for calls the message gaps show took seconds.
+        assert self._build(factory(duration_ms=0), root_type).duration_ms is None
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS_WITH_SDK_DURATION)
+    def test_a_negative_sdk_duration_is_unreported_too(self, factory, root_type):
+        assert self._build(factory(duration_ms=-5), root_type).duration_ms is None
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS_WITH_SDK_DURATION)
+    def test_an_absent_sdk_duration_stays_unknown(self, factory, root_type):
+        assert self._build(factory(), root_type).duration_ms is None
+
+    @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
+    def test_generation_completed_at_is_left_unset(self, factory, root_type):
+        # Codex's stream does not say when the model finished emitting the
+        # tool_use block; deriving it from the flush time would be a guess.
+        tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=_EPOCH_MS + 1)
+        assert tel.generation_completed_at is None
