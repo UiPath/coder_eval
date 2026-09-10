@@ -4,7 +4,7 @@
   "commands": [
     {
       "assistant_turn_index": 0,
-      "duration_ms": "<scrubbed>",
+      "duration_ms": null,
       "error_message": null,
       "execution_completed_at": null,
       "execution_started_at": null,

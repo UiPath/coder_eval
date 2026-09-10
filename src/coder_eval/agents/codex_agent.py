@@ -1599,8 +1599,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Rebuild the assistant transcript from a Turn's ``items`` list (fallback).
 
         Same item→block mapping as the streaming path, but Turn items carry no
-        per-item timestamps, so timing falls back to now()/0.0. Used only when the
-        stream produced no messages.
+        per-item timestamps, so there is no window to measure: the bounds fall back
+        to now() and ``generation_duration_ms`` is None (unknown), never 0.0 (an
+        instant generation). Used only when the stream produced no messages.
         """
         if not items:
             return []
@@ -1619,7 +1620,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 AssistantMessage(
                     started_at=now,
                     completed_at=now,
-                    generation_duration_ms=0.0,
+                    generation_duration_ms=None,
                     content_blocks=open_blocks,
                     tool_use_ids=[b.tool_use_id for b in open_blocks if b.block_type == "tool_use" and b.tool_use_id],
                     model=self._effective_model(),
@@ -2123,7 +2124,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return AssistantMessage(
             started_at=now,
             completed_at=now,
-            generation_duration_ms=0.0,
+            generation_duration_ms=None,
             content_blocks=blocks,
             tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
             input_tokens=fresh,
@@ -2149,7 +2150,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return AssistantMessage(
             started_at=now,
             completed_at=now,
-            generation_duration_ms=0.0,
+            generation_duration_ms=None,
             content_blocks=[ContentBlock(block_type="text", sequence=0, text=text)],
             tool_use_ids=[],
             input_tokens=0,

@@ -72,7 +72,7 @@
           "tool_use_id": null
         }
       ],
-      "generation_duration_ms": "<scrubbed>",
+      "generation_duration_ms": null,
       "input_tokens": 300,
       "message_id": "subagent-toolu_agent_d",
       "model": "mock-model",

@@ -23,7 +23,7 @@
           "tool_use_id": null
         }
       ],
-      "generation_duration_ms": "<scrubbed>",
+      "generation_duration_ms": null,
       "input_tokens": 0,
       "message_id": "codex-1-msg-0",
       "model": "gpt-5-codex",

@@ -80,7 +80,9 @@ async def test_orphaned_result_message_marks_unknown(tmp_path):
         cmd = turn_record.commands[0]
         assert cmd.tool_name == "Bash"
         assert cmd.result_status == "unknown"
-        assert cmd.duration_ms == 0.0  # Conservative estimate for unknown status
+        # Unknown status and unknown duration are the same fact: nothing
+        # resolved this command, so nothing timed it either.
+        assert cmd.duration_ms is None
 
     finally:
         agent_module.query = original_query

@@ -1373,14 +1373,17 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         for tool_id, cmd_data in pending_commands.items():
             cmd = cmd_data["telemetry"]
             if cmd.result_status is None:
+                # Unknown status and unknown duration are the same fact: nothing
+                # resolved this command, so nothing timed it either. duration_ms
+                # is deliberately LEFT as None here — it used to be coerced to
+                # 0.0, which put an invented measurement on both sides of
+                # avg_command_time_ms and dragged the average toward zero.
                 cmd.result_status = "unknown"
                 unknown_status_count += 1
                 self._log.warning(
                     f"Command {cmd.tool_name}:{tool_id} completed without tool result. "
                     + "Status set to 'unknown'. This may indicate agent interruption or SDK issue."
                 )
-            if cmd.duration_ms is None:
-                cmd.duration_ms = 0.0
             commands.append(cmd)
 
         if unknown_status_count > 0:
@@ -1753,11 +1756,13 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             except (TypeError, ValueError):
                 return 0
 
+        # This generation arrives as a tool result and is never streamed, so no
+        # window exists to measure — None (unknown), not 0.0 (instant).
         now = datetime.now()
         return AssistantMessageTelemetry(
             started_at=now,
             completed_at=now,
-            generation_duration_ms=0.0,
+            generation_duration_ms=None,
             content_blocks=([ContentBlock(block_type="text", sequence=0, text=result_text)] if result_text else []),
             tool_use_ids=[],
             input_tokens=_int(usage.get("input_tokens")),

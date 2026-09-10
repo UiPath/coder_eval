@@ -103,7 +103,7 @@
           "tool_use_id": null
         }
       ],
-      "generation_duration_ms": "<scrubbed>",
+      "generation_duration_ms": null,
       "input_tokens": 0,
       "message_id": "codex-1-subagent-1",
       "model": "gpt-5.5",

@@ -4258,3 +4258,169 @@ class TestCE055NoAbsoluteCriterionPath:
             success_criteria=[FileExistsCriterion(description="c", path="build/out.txt")],
         )
         assert self._absolute_paths(task) == []
+
+
+class TestCE058NoTimingLiteral:
+    """CE058 flags an unknown timing value written as a numeric literal."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/codex_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce058_no_timing_literal import NoTimingLiteral
+
+        return NoTimingLiteral(filepath).check(ast.parse(src))
+
+    # Form 1 — a zero constructor keyword.
+    def test_flags_a_zero_generation_window_keyword(self):
+        assert self._run("m = AssistantMessage(started_at=a, completed_at=b, generation_duration_ms=0.0)")
+
+    def test_flags_a_zero_duration_on_command_telemetry(self):
+        assert self._run("t = CommandTelemetry(tool_name='Bash', duration_ms=0)")
+
+    def test_flags_the_import_alias_spelling_too(self):
+        assert self._run("m = AssistantMessageTelemetry(generation_duration_ms=0.0)")
+
+    def test_allows_none(self):
+        assert not self._run("m = AssistantMessage(generation_duration_ms=None)")
+
+    def test_allows_a_measured_value(self):
+        assert not self._run("m = AssistantMessage(generation_duration_ms=gen_ms)")
+
+    def test_ignores_a_zero_duration_on_an_unrelated_constructor(self):
+        assert not self._run("cfg = RetryPolicy(duration_ms=0.0)")
+
+    def test_ignores_a_non_timing_zero_keyword(self):
+        assert not self._run("m = AssistantMessage(output_tokens=0)")
+
+    def test_form_one_flags_only_a_zero(self):
+        # A constructor keyword is also how a legitimately MEASURED value is
+        # passed, so form 1 flags the placeholder zero every real producer
+        # wrote — not any number. Forms 2-4 stay broad: there, any invented
+        # number standing in for an unmeasured value is the defect.
+        assert not self._run("m = AssistantMessage(generation_duration_ms=1234.0)")
+        assert self._run("x = cmd.duration_ms or 5")
+
+    # Form 2 — the coalesce.
+    def test_flags_duration_or_zero(self):
+        assert self._run("x = sorted(c, key=lambda x: x.duration_ms or 0)")
+
+    def test_ignores_an_unrelated_name_coalesce(self):
+        assert not self._run("x = sample_rate_limit or 0")
+
+    def test_allows_a_non_numeric_fallback(self):
+        assert not self._run('x = cmd.duration_ms or "—"')
+
+    # Form 3 — the conditional expression, both polarities.
+    def test_flags_the_is_not_none_conditional(self):
+        assert self._run("x = cmd.duration_ms if cmd.duration_ms is not None else 0.0")
+
+    def test_flags_the_is_none_conditional(self):
+        assert self._run("x = 0.0 if cmd.duration_ms is None else cmd.duration_ms")
+
+    def test_allows_a_conditional_whose_unknown_branch_is_none(self):
+        assert not self._run("x = cmd.duration_ms if cmd.duration_ms is not None else None")
+
+    # Form 4 — the guard-and-assign. The live Claude instance's shape.
+    def test_flags_the_guard_and_assign(self):
+        src = "if cmd.duration_ms is None:\n    cmd.duration_ms = 0.0\n"
+        assert self._run(src)
+
+    def test_allows_a_guard_that_assigns_a_different_field(self):
+        # A guard on one field that sets another is not this bug.
+        src = "if cmd.duration_ms is None:\n    cmd.result_status = 'unknown'\n"
+        assert not self._run(src)
+
+    def test_allows_a_guard_on_a_different_receiver(self):
+        src = "if a.duration_ms is None:\n    b.duration_ms = 0.0\n"
+        assert not self._run(src)
+
+    def test_allows_a_guard_that_assigns_a_measured_value(self):
+        src = "if cmd.duration_ms is None:\n    cmd.duration_ms = measured\n"
+        assert not self._run(src)
+
+    # Form 5 — the model_copy(update={...}) dict, which a keyword rule cannot
+    # see and which is how CommandTelemetry.duration_ms is actually written on
+    # the Antigravity DONE path.
+    def test_flags_a_zero_timing_key_in_an_update_dict(self):
+        assert self._run('tel = start.model_copy(update={"duration_ms": 0.0})')
+
+    def test_allows_a_measured_value_in_an_update_dict(self):
+        assert not self._run('tel = start.model_copy(update={"duration_ms": tool_ms})')
+
+    def test_ignores_a_non_timing_key_in_an_update_dict(self):
+        assert not self._run('tel = start.model_copy(update={"output_tokens": 0})')
+
+    def test_ignores_a_dict_literal_that_is_not_an_update_kwarg(self):
+        # Scoped to `update=` so an unrelated fixture dict cannot fire.
+        assert not self._run('row = {"duration_ms": 0.0}')
+
+    # Scope + suppression.
+    def test_is_out_of_scope_outside_src(self):
+        assert not self._run(
+            "m = AssistantMessage(generation_duration_ms=0.0)",
+            filepath="tests/test_codex_agent.py",
+        )
+
+    def test_noqa_suppresses(self):
+        from tests.lint.runner import check_file
+
+        path = SRC / "coder_eval/agents/antigravity_agent.py"
+        assert path.is_file(), "the noqa fixture file must exist or this test passes vacuously"
+        assert not [v for v in check_file(path) if v.rule_id == "CE058"]
+
+
+class TestCE059GenerationWindowIsTwoReads:
+    """CE059 flags a generation window built from one clock read."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/antigravity_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce059_generation_window_is_two_reads import GenerationWindowIsTwoReads
+
+        return GenerationWindowIsTwoReads(filepath).check(ast.parse(src))
+
+    def test_flags_the_same_name_for_both_bounds(self):
+        assert self._run("m = AssistantMessage(started_at=now, completed_at=now, generation_duration_ms=0.0)")
+
+    def test_flags_an_omitted_duration_too(self):
+        # An omitted duration is not a disclaimer; the field defaults to None
+        # but the call has not said so, and the bounds still read as a window.
+        assert self._run("m = AssistantMessage(started_at=now, completed_at=now)")
+
+    def test_flags_the_alias_spelling_too(self):
+        assert self._run("m = AssistantMessageTelemetry(started_at=now, completed_at=now, generation_duration_ms=g)")
+
+    def test_allows_collapsed_bounds_when_the_call_says_no_window_exists(self):
+        # Passing None in the field built to say "unmeasurable" is the honest
+        # record, not a claim the two stamps have to support.
+        assert not self._run("m = AssistantMessage(started_at=now, completed_at=now, generation_duration_ms=None)")
+
+    def test_allows_two_different_names(self):
+        assert not self._run("m = AssistantMessage(started_at=started, completed_at=completed)")
+
+    def test_ignores_attribute_expressions(self):
+        # `self.a` vs `self.b` cannot be compared without guessing.
+        assert not self._run("m = AssistantMessage(started_at=self.mark, completed_at=self.mark)")
+
+    def test_ignores_a_call_expression(self):
+        assert not self._run("m = AssistantMessage(started_at=datetime.now(), completed_at=datetime.now())")
+
+    def test_ignores_an_unrelated_constructor(self):
+        assert not self._run("s = Span(started_at=now, completed_at=now)")
+
+    def test_is_out_of_scope_outside_agents(self):
+        assert not self._run(
+            "m = AssistantMessage(started_at=now, completed_at=now)",
+            filepath="src/coder_eval/orchestrator.py",
+        )
+
+    def test_noqa_suppresses(self):
+        from tests.lint.runner import check_file
+
+        # The Antigravity flush carries the only live instance, noqa'd until
+        # Phase 3 replaces it with a real measured window.
+        path = SRC / "coder_eval/agents/antigravity_agent.py"
+        assert path.is_file(), "the noqa fixture file must exist or this test passes vacuously"
+        assert not [v for v in check_file(path) if v.rule_id == "CE059"]

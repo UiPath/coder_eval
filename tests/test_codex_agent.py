@@ -906,7 +906,7 @@ class TestTokenUsageFromMessages:
         return AssistantMessage(
             started_at=now,
             completed_at=now,
-            generation_duration_ms=0.0,
+            generation_duration_ms=12.0,
             input_tokens=0,
             output_tokens=output,
             cache_creation_tokens=cache_creation,
@@ -942,6 +942,24 @@ class TestTokenUsageFromMessages:
 def _reasoning_item(text: str = "", item_id: str = "r1") -> SimpleNamespace:
     """A reasoning item root. Text-less items become hidden-CoT placeholders."""
     return SimpleNamespace(type="reasoning", id=item_id, content=[text] if text else [], summary=[])
+
+
+class TestMessagesFromItemsHasNoWindow:
+    """The rollout-rebuild fallback must not invent a generation window.
+
+    Turn items carry no per-item timestamps, so nothing about the rebuilt
+    messages was ever timed. 0.0 would publish an instant generation; None
+    says the truth, and the evalboard already narrows on it.
+    """
+
+    def test_rebuilt_messages_report_an_unknown_window(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        items = [SimpleNamespace(type="agentMessage", id="m1", text="rebuilt from items")]
+
+        rebuilt = agent._messages_from_items(items, "turn_1")
+
+        assert rebuilt, "expected the fallback to rebuild a message"
+        assert all(m.generation_duration_ms is None for m in rebuilt)
 
 
 class TestFlushMessageReasoningSplit:

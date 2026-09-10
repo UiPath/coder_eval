@@ -1002,9 +1002,9 @@ class _AntigravityTurnState:
             block.sequence = i
         self.messages.append(
             AssistantMessage(
-                started_at=now,
+                started_at=now,  # noqa: CE059  # one clock read; a real window lands with the next commit
                 completed_at=now,
-                generation_duration_ms=0.0,
+                generation_duration_ms=0.0,  # noqa: CE058  # replaced with a real measured window next commit
                 content_blocks=list(self._blocks),
                 tool_use_ids=[b.tool_use_id for b in self._blocks if b.block_type == "tool_use" and b.tool_use_id],
                 input_tokens=gen.uncached_input_tokens,

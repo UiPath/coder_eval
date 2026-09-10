@@ -222,8 +222,19 @@ class AssistantMessage(BaseModel):
 
     started_at: datetime = Field(description="Wall-clock start of generation (end of the previous SDK event).")
     completed_at: datetime = Field(description="Wall-clock arrival of the AssistantMessage from the SDK.")
-    generation_duration_ms: float = Field(
-        description="completed_at - started_at in milliseconds (wall-clock between SDK events).",
+    generation_duration_ms: float | None = Field(
+        default=None,
+        description=(
+            "Model-generation time for this emission, in milliseconds. None when the harness "
+            "surfaced the message with no measurable window (a rollout rebuild, or a sub-agent "
+            "generation delivered as a tool result). Equals completed_at - started_at only when "
+            "no tool execution closed inside the window; a harness whose stream interleaves tool "
+            "calls into one generation (Antigravity) subtracts those. The property this field exists "
+            "to make true — once every harness records a real window — is: "
+            "sum(generation_duration_ms) + sum(command duration_ms) ~= turn duration_seconds. "
+            "Per-harness status is in docs/agents/HARNESS_PARITY.md; do not assume it holds "
+            "for a harness that table does not yet claim it for."
+        ),
     )
 
     content_blocks: list[ContentBlock] = Field(

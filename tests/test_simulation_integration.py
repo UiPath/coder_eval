@@ -323,3 +323,76 @@ async def test_simulation_pending_user_turn_prepended_to_each_turn(tmp_path, mon
     assert result.simulation.simulator_output_tokens == 14
     # End-of-dialog criteria check ran (success_criteria_results populated).
     assert result.success_criteria_results
+
+
+@pytest.mark.asyncio
+async def test_standalone_turn_records_the_simulator_call_duration(tmp_path, monkeypatch):
+    """The trailing simulator turn must report the time it actually took.
+
+    ``TurnRecord.duration_seconds`` defaults to 0.0 and no caller passed it, so
+    this turn reported 0s for a simulator call that really took seconds — and
+    ``reports_html`` divides by the turn count, halving ``avg_turn`` for every
+    simulation task.
+    """
+    _install_fake_agent(monkeypatch, scenario="success")
+    _install_fake_simulator(monkeypatch, responses=["Looks good. <<<DONE>>>"])
+
+    task = _build_task()
+    orch = Orchestrator(task=task, run_dir=tmp_path / "run" / "sim", variant_id="default")
+    result = await orch.run()
+
+    # The standalone turn is the one holding only the unconsumed simulator
+    # message — the ordinary stop-token exit.
+    standalone = result.iterations[-1]
+    assert [type(m).__name__ for m in standalone.messages] == ["UserMessage"]
+    sim_ms = standalone.messages[0].generation_duration_ms
+    assert sim_ms is not None and sim_ms > 0
+    assert standalone.duration_seconds == pytest.approx(sim_ms / 1000.0)
+    assert standalone.duration_seconds > 0
+
+    # The turn is RECORDED, not COUNTED. Every per-turn tally must describe
+    # only the turns the agent actually took, so derive the expectation from
+    # the trajectory rather than hardcoding it: the standalone turn is the one
+    # entry holding no assistant message.
+    agent_turns = [t for t in result.iterations if t is not standalone]
+    assert len(agent_turns) == len(result.iterations) - 1
+    assert result.iteration_count == len(agent_turns)
+    assert result.simulation is not None
+    assert result.simulation.total_turns == len(agent_turns)
+    # Summed over ALL iterations (orchestrator.py:1192); the standalone turn
+    # holds no assistant message, so it must contribute nothing.
+    assert result.total_assistant_turns == sum(t.assistant_turn_count for t in agent_turns)
+    assert standalone.assistant_turn_count == 0
+
+
+@pytest.mark.asyncio
+async def test_standalone_turn_holding_a_pinned_opener_records_zero(tmp_path, monkeypatch):
+    """A pinned opener has no simulator call behind it, so 0.0 is its real duration.
+
+    ``UserMessage.generation_duration_ms`` is None by design for a pinned
+    ``initial_prompt``; the branch must record 0.0 rather than raising on the
+    division.
+
+    This is a NO-RAISE guard, not a regression test: 0.0 is also what the old
+    code produced, so reverting the fix leaves it green. Its sibling above
+    (`test_standalone_turn_records_the_simulator_call_duration`) is the one
+    that fails on a revert.
+    """
+
+    async def _create(self):
+        return _ExplodingAgent("agent exploded on turn 1")
+
+    monkeypatch.setattr(Orchestrator, "_create_agent", _create)
+    _install_fake_simulator(monkeypatch, responses=["never reached"])
+
+    task = _build_task()
+    orch = Orchestrator(task=task, run_dir=tmp_path / "run" / "sim", variant_id="default")
+    result = await orch.run()
+
+    openers = [
+        t
+        for t in result.iterations
+        if [type(m).__name__ for m in t.messages] == ["UserMessage"] and t.messages[0].generation_duration_ms is None
+    ]
+    assert openers, "expected a standalone turn holding the pinned opener"
+    assert all(t.duration_seconds == 0.0 for t in openers)
