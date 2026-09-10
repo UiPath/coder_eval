@@ -129,7 +129,30 @@ def export_task(
             portability audit.
     """
     task, _raw_yaml = load_task(task_file)
+    return export_resolved_task(task, task_file, out_dir, allow_credentials=allow_credentials)
 
+
+def export_resolved_task(
+    task: TaskDefinition,
+    task_file: Path,
+    out_dir: Path,
+    *,
+    allow_credentials: bool = False,
+) -> ExportResult:
+    """Emit a Harbor task directory from an already-loaded/resolved ``TaskDefinition``.
+
+    Shared by ``export_task`` (single task.yaml) and
+    ``harbor.experiment_packager.export_experiment`` (task.yaml + experiment.yaml,
+    one resolved task per variant/replicate/dataset row) — one writer, so the
+    two paths cannot silently drift. ``task_file`` is the ORIGINAL task YAML
+    path (not a synthetic one) — it is only used to resolve ``task.reference``,
+    which ``load_task`` deliberately leaves relative (see ``_write_reference``);
+    every other path-shaped field is already absolute by the time a
+    ``TaskDefinition`` reaches this function (``load_task`` resolves
+    ``dockerfile_path``/``initial_prompt_file``/``system_prompt_file`` inline).
+
+    Raises the same two errors as ``export_task``, for the same reasons.
+    """
     issues = audit_criteria(task.success_criteria, allow_credentials=allow_credentials)
     if issues:
         raise CriteriaNotExportableError(issues)
@@ -378,5 +401,6 @@ __all__ = [
     "CriteriaNotExportableError",
     "ExportResult",
     "TaskNotExportableError",
+    "export_resolved_task",
     "export_task",
 ]
