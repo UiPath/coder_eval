@@ -200,6 +200,35 @@ def _enum_value(x: Any) -> Any:
     return getattr(x, "value", x)
 
 
+def _busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) -> float:
+    """Wall milliseconds inside ``[lo, hi]`` where at least ONE span was running.
+
+    The union, not the sum. Antigravity resolves several tool calls from one
+    ``Step`` and backgrounds anything over ten seconds, so tool intervals
+    routinely overlap; adding their durations over-counts the busy time by
+    exactly the overlap. Subtracting such a sum from a generation window
+    understates generation and, with enough concurrency, drives it negative —
+    reintroducing the ``0.0`` this whole change exists to remove (four
+    concurrent 400 ms calls inside a 1000 ms window sum to 1600 ms).
+
+    Clipping to ``[lo, hi]`` is the other half: a tool that opened before this
+    window only spent part of its life inside it, and only that part is not
+    generation time here.
+    """
+    clipped = sorted((max(s, lo), min(e, hi)) for s, e in spans if min(e, hi) > max(s, lo))
+    if not clipped:
+        return 0.0
+    total = 0.0
+    open_start, open_end = clipped[0]
+    for start, end in clipped[1:]:
+        if start > open_end:  # disjoint — bank the run and start a new one
+            total += (open_end - open_start).total_seconds() * 1000.0
+            open_start, open_end = start, end
+        else:  # overlapping or adjacent — extend the run
+            open_end = max(open_end, end)
+    return total + (open_end - open_start).total_seconds() * 1000.0
+
+
 def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
     """Map a ``google.antigravity.types.UsageMetadata`` to coder_eval ``TokenUsage``.
 
@@ -554,6 +583,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
         self._begin_turn()
         turn_start_time = time.monotonic()
+        turn_start_wall = datetime.now()
         task_id = str(self.config.type)
         model = self._effective_model()
         collector = EventCollector()
@@ -570,6 +600,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             iteration=self._iteration,
             model=model,
             turn_start_time=turn_start_time,
+            turn_start_wall=turn_start_wall,
             max_turns=max_turns,
         )
 
@@ -803,6 +834,7 @@ class _AntigravityTurnState:
         iteration: int,
         model: str,
         turn_start_time: float,
+        turn_start_wall: datetime,
         max_turns: int | None = None,
     ) -> None:
         self._agent = agent
@@ -842,6 +874,22 @@ class _AntigravityTurnState:
         self._tool_last_status: dict[str, Any] = {}
         # Content blocks accumulated since the last per-generation flush.
         self._blocks: list[ContentBlock] = []
+        # Generation-window mark: where the CURRENT generation started. Set to
+        # the turn's own start so the first window includes prompt submission
+        # and connection setup — real time the model call cost, and the same
+        # choice Claude makes (its mark is also the turn start). Both stamps
+        # come from the SAME instant, captured by communicate(), so the
+        # recorded bounds and the measured duration describe one span.
+        # Advanced only by a flush that actually emitted a message.
+        self._gen_mark_monotonic: float = turn_start_time
+        self._gen_mark_wall: datetime = turn_start_wall
+        # Execution intervals of tools that CLOSED since the mark. This harness
+        # interleaves tool calls into one generation — the Step for the tool
+        # arrives and only a later usage_metadata Step cuts the message — so a
+        # window legitimately contains tool time that is not model time. Kept
+        # as intervals, not a running total, because they overlap (see
+        # _busy_ms).
+        self._tool_spans_since_mark: list[tuple[datetime, datetime]] = []
 
     @property
     def ended_cleanly(self) -> bool:
@@ -947,6 +995,7 @@ class _AntigravityTurnState:
             )
             completed = datetime.now()
             started = start_tel.execution_started_at or completed
+            tool_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
             end_tel = start_tel.model_copy(
                 update={
                     "parameters": self._params(start_tel.tool_name, call.args, self._tool_input_keys.get(cid)),
@@ -954,9 +1003,15 @@ class _AntigravityTurnState:
                     "result_summary": str(result_text) if result_text is not None else None,
                     "error_message": (step.error or "tool failed") if errored else None,
                     "execution_completed_at": completed,
-                    "duration_ms": max((completed - started).total_seconds() * 1000.0, 0.0),
+                    "duration_ms": tool_ms,
                 }
             )
+            # This tool closed inside the open generation window, so its time is
+            # not model time. The INTERVAL is recorded, not the duration: tool
+            # calls overlap here, and only their union may be subtracted (see
+            # _busy_ms). Only the DONE path records one — a tool force-closed at
+            # finalize has duration_ms None and was never timed.
+            self._tool_spans_since_mark.append((started, completed))
             self.commands.append(end_tel)
             self.emit.on_event(
                 ToolEndEvent(
@@ -997,14 +1052,50 @@ class _AntigravityTurnState:
         """
         if not self._blocks and gen.is_empty():
             return
-        now = datetime.now()
+        now_monotonic = time.monotonic()
+        now_wall = datetime.now()
+        # Model-generation time = the whole window MINUS the tool executions
+        # that closed inside it.
+        #
+        # Do NOT "simplify" this to resetting the mark when a tool ends. That
+        # loses real model time: measured on run 2026-09-09_04-18-50, task
+        # skill-rpa-uia-google-search, a harness-local Read closed 8 ms after
+        # it opened while 6.4 s of model time separated the two flushes around
+        # it — a reset would have reported 8 ms and dropped the 6.4 s.
+        # Subtracting closed tool time handles that case AND its opposite (a
+        # 43 s Bash, where the model time really is the flush-to-DONE
+        # remainder).
+        #
+        # What this deliberately over-reports: time spent WAITING on a tool
+        # that is still open. Only CLOSED intervals are subtracted, so an
+        # orphaned/backgrounded call contributes nothing while the poll loop
+        # sleeps on it. That reaches two windows — the one finalize cuts when
+        # no usage_metadata ever arrived (tens of minutes on an orphan-poll
+        # task), and any ordinary window whose flush lands while the call is
+        # still open. Accounting for that wait is separate work (audit P2-1);
+        # do not read such a number as model time.
+        span_ms = (now_monotonic - self._gen_mark_monotonic) * 1000.0
+        tool_ms = _busy_ms(self._tool_spans_since_mark, self._gen_mark_wall, now_wall)
+        generation_ms = span_ms - tool_ms
+        if generation_ms < 0:
+            # _busy_ms clips to this window and unions overlaps, so it cannot
+            # exceed the window's own wall span. Reaching here means the two
+            # clocks disagree (the span is monotonic, the tool intervals are
+            # wall), i.e. jitter — worth a line in the task log, because the
+            # clamped 0.0 below is otherwise indistinguishable from a real
+            # instant generation. Numbers only: no agent output is logged.
+            self._agent._log.debug(
+                "Generation window went negative (span=%.1fms tool=%.1fms); clamping to 0.",
+                span_ms,
+                tool_ms,
+            )
         for i, block in enumerate(self._blocks):
             block.sequence = i
         self.messages.append(
             AssistantMessage(
-                started_at=now,  # noqa: CE059  # one clock read; a real window lands with the next commit
-                completed_at=now,
-                generation_duration_ms=0.0,  # noqa: CE058  # replaced with a real measured window next commit
+                started_at=self._gen_mark_wall,
+                completed_at=now_wall,
+                generation_duration_ms=max(0.0, generation_ms),
                 content_blocks=list(self._blocks),
                 tool_use_ids=[b.tool_use_id for b in self._blocks if b.block_type == "tool_use" and b.tool_use_id],
                 input_tokens=gen.uncached_input_tokens,
@@ -1017,6 +1108,12 @@ class _AntigravityTurnState:
         )
         self._assistant_turns += 1
         self._blocks = []
+        # Advance the mark ONLY after a message was actually appended. The
+        # early return above means a no-op flush leaves the window open, so a
+        # later real generation still measures from where it began.
+        self._gen_mark_monotonic = now_monotonic
+        self._gen_mark_wall = now_wall
+        self._tool_spans_since_mark = []
 
     def _agent_output(self) -> str:
         if self._output_parts:

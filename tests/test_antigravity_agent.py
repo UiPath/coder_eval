@@ -8,6 +8,8 @@ import asyncio
 import os
 import sys
 from collections.abc import Callable
+from datetime import datetime, timedelta
+from itertools import pairwise
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -24,6 +26,7 @@ from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import AgentKind, AntigravityAgentConfig, parse_agent_config
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.pricing import calculate_cost
+from tests._fixtures.golden_streams._scrub import assert_reconciliation
 
 
 def test_antigravity_registered_to_agent_and_config():
@@ -1565,3 +1568,384 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     assert [c.tool_id for c in record.commands if c.result_status == "unknown"] == ["bg2"]
     assert conv.receive_steps_call_count == 2  # initial drain + one poll re-drain, then stop
     assert conv.cancel_call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Generation window
+#
+# Antigravity used to read datetime.now() ONCE per flush and pass it as both
+# bounds with generation_duration_ms=0.0, so every task page reported 0ms of
+# generation. The reducer now measures a real window and subtracts the tool
+# executions that closed inside it — this harness interleaves tool calls into
+# one generation, so a window legitimately contains time that is not model time.
+# ---------------------------------------------------------------------------
+
+_CLOCK_BASE = datetime(2026, 1, 1, 12, 0, 0)
+
+
+class _Clock:
+    """Controlled stand-in for the two clocks the reducer reads.
+
+    ONE monotonically advancing counter, read by both clocks: every read —
+    `time.monotonic()` or `datetime.now()` — costs TICK_MS. So the fixture's
+    timeline is driven by read ORDER, not by elapsed time, and the two clocks
+    are deliberately coupled rather than independent. That is enough to pin
+    the arithmetic exactly; it is NOT a cross-check that the reducer keeps the
+    two clocks in their proper roles (a variant deriving the span from the
+    wall stamps would pass every test here). The module's only clock uses are
+    `time.monotonic` and `datetime.now`, so patching these two covers it.
+    """
+
+    TICK_MS = 100.0
+
+    def __init__(self) -> None:
+        self.ms = 0.0
+
+    def _advance(self) -> float:
+        self.ms += self.TICK_MS
+        return self.ms
+
+    def monotonic(self) -> float:
+        return self._advance() / 1000.0
+
+    def now(self) -> datetime:
+        return _CLOCK_BASE + timedelta(milliseconds=self._advance())
+
+
+def _install_clock(monkeypatch, clock: _Clock) -> None:
+    import coder_eval.agents.antigravity_agent as agent_module
+
+    monkeypatch.setattr(agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(agent_module, "datetime", SimpleNamespace(now=clock.now))
+
+
+def _assistant(record):
+    return [m for m in record.messages if m.role == "assistant"]
+
+
+class TestBusyMs:
+    """`_busy_ms` is the UNION of tool intervals, clipped to the window.
+
+    A scalar sum was wrong twice over: overlapping tools (this harness
+    resolves several calls from one Step and backgrounds anything over ten
+    seconds) get counted more than once, and a tool that opened before the
+    window gets charged in full to it. Subtracting such a sum from a
+    generation window understates generation and, with enough concurrency,
+    drives it negative — reintroducing the 0.0 this change removes.
+    """
+
+    @staticmethod
+    def _at(ms: float) -> datetime:
+        return _CLOCK_BASE + timedelta(milliseconds=ms)
+
+    def _busy(self, spans, lo=0, hi=10_000) -> float:
+        from coder_eval.agents.antigravity_agent import _busy_ms
+
+        return _busy_ms([(self._at(s), self._at(e)) for s, e in spans], self._at(lo), self._at(hi))
+
+    def test_no_spans_is_zero(self):
+        assert self._busy([]) == 0.0
+
+    def test_a_single_span_is_its_own_length(self):
+        assert self._busy([(100, 400)]) == 300.0
+
+    def test_disjoint_spans_add(self):
+        assert self._busy([(100, 200), (500, 700)]) == 300.0
+
+    def test_overlapping_spans_count_once(self):
+        # The defect: summing gives 400, but only 300ms of wall time was busy.
+        assert self._busy([(100, 300), (200, 400)]) == 300.0
+
+    def test_a_contained_span_adds_nothing(self):
+        assert self._busy([(100, 900), (300, 400)]) == 800.0
+
+    def test_adjacent_spans_merge_without_double_counting_the_seam(self):
+        assert self._busy([(100, 200), (200, 300)]) == 200.0
+
+    def test_input_order_does_not_matter(self):
+        assert self._busy([(500, 700), (100, 300), (200, 400)]) == 500.0
+
+    def test_a_span_is_clipped_to_the_window(self):
+        # Opened before the window and closed after it: only the overlap counts.
+        assert self._busy([(0, 5_000)], lo=1_000, hi=1_500) == 500.0
+
+    def test_a_span_entirely_outside_the_window_is_dropped(self):
+        assert self._busy([(0, 500)], lo=1_000, hi=2_000) == 0.0
+
+    def test_a_zero_length_span_is_dropped(self):
+        assert self._busy([(100, 100)]) == 0.0
+
+
+async def test_concurrent_tools_do_not_over_subtract(monkeypatch):
+    """Overlapping tool calls are subtracted once, not once each.
+
+    Four calls opened by one Step and closed by the next overlap almost
+    entirely. Summing their durations exceeded the window and clamped
+    `generation_duration_ms` to 0.0 — the pre-change symptom, with a 0%
+    breakdown on the task page and nothing failing.
+    """
+    _install_clock(monkeypatch, _Clock())
+    opens = _step(
+        "TOOL_CALL",
+        "ACTIVE",
+        target="TARGET_ENVIRONMENT",
+        tool_calls=[_tc("run_command", f"t{i}", {"command_line": f"job{i}"}) for i in range(4)],
+    )
+    closes = _step(
+        "TOOL_CALL",
+        "DONE",
+        target="TARGET_ENVIRONMENT",
+        tool_calls=[_tc("run_command", f"t{i}", {"command_line": f"job{i}", "exit_code": 0}) for i in range(4)],
+    )
+    steps = [
+        _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
+        opens,
+        closes,
+        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    second = _assistant(record)[1]
+    tools = [c for c in record.commands if c.tool_id.startswith("t")]
+    assert len(tools) == 4
+    span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
+    summed_ms = sum(c.duration_ms or 0.0 for c in tools)
+
+    assert summed_ms > span_ms, "fixture must make the naive sum exceed the window"
+    assert second.generation_duration_ms > 0, "the naive sum clamped this to 0.0"
+    # Union of the four overlapping intervals, not their sum.
+    busy_ms = (
+        max(c.execution_completed_at for c in tools) - min(c.execution_started_at for c in tools)
+    ).total_seconds() * 1000.0
+    assert second.generation_duration_ms == pytest.approx(span_ms - busy_ms)
+
+
+async def test_generation_window_is_measured_not_zero():
+    """Every streaming generation reports a real, positive window.
+
+    Asserts the PROPERTY, not a millisecond value — this runs on the real
+    clock, so only the shape is deterministic.
+    """
+    steps = [
+        _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
+        _step("THINKING", "DONE", thinking="second", usage=_usage(120, 0, 6, 4)),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    messages = _assistant(record)
+    assert len(messages) == 2
+    for m in messages:
+        assert m.generation_duration_ms is not None
+        assert m.generation_duration_ms > 0
+        assert m.started_at < m.completed_at
+
+
+async def test_consecutive_windows_chain_end_to_start():
+    """Message n+1 begins where message n ended — the mark IS the previous flush."""
+    steps = [
+        _step("THINKING", "DONE", thinking="a", usage=_usage(100, 0, 5, 5)),
+        _step("THINKING", "DONE", thinking="b", usage=_usage(100, 0, 5, 5)),
+        _step("TEXT_RESPONSE", "DONE", content="c", content_delta="c", complete=True, usage=_usage(100, 0, 5, 0)),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    messages = _assistant(record)
+    assert len(messages) == 3
+    for earlier, later in pairwise(messages):
+        assert later.started_at == earlier.completed_at
+
+
+async def test_tool_execution_is_subtracted_from_the_window(monkeypatch):
+    """A tool closing inside a generation is not counted as model time.
+
+    This is the test that pins the design decision. Without it, "simplifying"
+    the subtraction to a reset-on-tool-end passes everything else — and loses
+    real model time, because a harness-local tool can close 8 ms after it opens
+    while seconds of model time separate the two flushes around it.
+    """
+    clock = _Clock()
+    _install_clock(monkeypatch, clock)
+    steps = [
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
+        ),
+        _step(
+            "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(200, 0, 10, 0)
+        ),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    messages = _assistant(record)
+    assert len(messages) == 2
+    second = messages[1]
+    bash = next(c for c in record.commands if c.tool_name == "Bash")
+
+    # The window spans 400ms of wall clock and contains a 100ms tool call, so
+    # 300ms of it was the model generating. Cross-checked against the recorded
+    # bounds, which come from the OTHER clock the reducer reads.
+    span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
+    assert bash.duration_ms == pytest.approx(100.0)
+    assert span_ms == pytest.approx(400.0)
+    assert second.generation_duration_ms == pytest.approx(span_ms - bash.duration_ms)
+    assert second.generation_duration_ms == pytest.approx(300.0)
+
+
+async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypatch):
+    """A tool open across a flush is clipped to the window it is subtracted from.
+
+    `t1` opens before the first flush and closes after it. Only the part that
+    elapsed INSIDE the second window is not generation time there; charging
+    its full duration would understate generation and, with a long enough
+    overhang, drive the result to a clamped 0.0 — the very value this change
+    exists to stop publishing.
+    """
+    _install_clock(monkeypatch, _Clock())
+    steps = [
+        # t1 opens here and stays open across the first flush.
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "slow"})],
+        ),
+        # t2 opens and closes entirely inside the first window.
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t2", {"command_line": "quick"})],
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t2", {"command_line": "quick", "exit_code": 0})],
+        ),
+        _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
+        # t1 closes in the SECOND window, carrying the first window's overhang.
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "slow", "exit_code": 0})],
+        ),
+        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    second = _assistant(record)[1]
+    slow = next(c for c in record.commands if c.tool_id == "t1")
+    span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
+    in_window_ms = (slow.execution_completed_at - second.started_at).total_seconds() * 1000.0
+
+    assert slow.duration_ms > span_ms, "fixture must produce a straddling tool"
+    assert 0 < in_window_ms < slow.duration_ms, "part of the tool ran before this window"
+    assert second.generation_duration_ms == pytest.approx(span_ms - in_window_ms)
+    assert second.generation_duration_ms > 0
+
+
+async def test_a_no_op_flush_does_not_move_the_mark(monkeypatch):
+    """An empty generation must leave the open window alone.
+
+    The early return in `_flush_generation` sits before any mark handling, so
+    a usage_metadata step carrying nothing must not restart the measurement —
+    otherwise the real generation that follows reports only the time since the
+    empty one.
+    """
+    real = _step("THINKING", "DONE", thinking="real", usage=_usage(100, 0, 5, 5))
+    # Zero usage and no content: reaches the flush, appends nothing.
+    empty = _step("THINKING", "DONE", usage=_usage(0, 0, 0, 0))
+
+    # Two runs off identical fresh clocks. The empty flush returns before any
+    # clock read, so it must leave the window — and therefore the real
+    # generation's recorded bounds — byte-identical.
+    _install_clock(monkeypatch, _Clock())
+    without = _assistant(await _agent_with_steps([real]).communicate("go"))
+
+    _install_clock(monkeypatch, _Clock())
+    with_empty = _assistant(await _agent_with_steps([empty, real]).communicate("go"))
+
+    assert len(with_empty) == 1, "the empty generation must not produce a message"
+    assert with_empty[0].started_at == without[0].started_at
+    assert with_empty[0].generation_duration_ms == without[0].generation_duration_ms
+
+
+async def test_generation_and_tool_time_account_for_the_turn():
+    """Σ generation + Σ tool execution lands inside the turn's own duration.
+
+    Bounds, not equality: the fake conversation's own overhead sits in the
+    residual. Before this change the generation half was identically 0.
+    """
+    steps = [
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
+        ),
+        _step(
+            "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(200, 0, 10, 0)
+        ),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    gen_ms = sum(m.generation_duration_ms or 0.0 for m in _assistant(record))
+    tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
+    turn_ms = record.duration_seconds * 1000.0
+
+    assert gen_ms > 0
+    assert gen_ms + tool_ms <= turn_ms
+    assert gen_ms + tool_ms >= 0.5 * turn_ms
+
+
+async def test_timing_change_moves_no_token_bucket():
+    """The window is three timing fields; the token buckets must not shift.
+
+    Runs on a stream that also exercises the new timing, so a regression in
+    `_flush_generation` shows up here as a token failure too.
+    """
+    steps = [
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(1000, 0, 10, 20)),
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
+            usage=_usage(1200, 0, 15, 5),
+        ),
+        _step(
+            "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(1300, 0, 30, 0)
+        ),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    assert record.token_usage is not None
+    assert record.token_usage.output_tokens == (10 + 20) + (15 + 5) + (30 + 0)
+    assert record.token_usage.uncached_input_tokens == 1000 + 1200 + 1300
+    # The reconciliation invariant, via the shared SSOT helper rather than a
+    # local re-implementation of two of its four buckets.
+    assert_reconciliation(record.model_dump(mode="json"))
+    assert all(m.generation_duration_ms is not None for m in _assistant(record))
