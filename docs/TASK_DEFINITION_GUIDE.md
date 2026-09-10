@@ -518,6 +518,8 @@ compares a truncated run against a full one):
 
 The `sandbox` block is optional. When omitted, it defaults to `driver: "tempdir"` with standard Python environment.
 
+The sandbox venv is created with **system site packages**, so `run_command` criteria (and `pre_run`/`post_run`) can import packages the task image installed globally while anything `env_packages` adds still lands in the venv. An isolated venv would shadow the image's interpreter without providing a replacement.
+
 ```yaml
 sandbox:
   driver: "tempdir"                   # Sandbox type ("tempdir" or "docker"); default: "tempdir"

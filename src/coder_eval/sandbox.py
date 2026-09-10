@@ -406,7 +406,9 @@ class Sandbox:
             # Mark mock binaries executable so the agent's PATH can shadow real CLIs
             self._prepare_mock_path_dirs()
 
-            # Set up Python virtual environment (only if python config is provided)
+            # Set up Python virtual environment (only if python config is provided).
+            # The venv is created with system site packages -- see _setup_virtualenv
+            # for why an isolated one was actively harmful.
             if self.config.python:
                 self._setup_virtualenv()
 
@@ -835,7 +837,29 @@ class Sandbox:
         return False
 
     def _setup_virtualenv(self) -> None:
-        """Create a Python virtual environment in the sandbox."""
+        """Create a Python virtual environment in the sandbox, with system site packages.
+
+        ``--system-site-packages`` is load-bearing, not a convenience. An ISOLATED
+        venv here shadows the interpreter while providing nothing: the sandbox venv
+        goes on the criterion PATH (``_build_run_command_env``, which governs every
+        ``run_command`` criterion plus ``pre_run``/``post_run``), so inside a task
+        image that provisions packages globally, ``python`` resolved to the empty
+        venv and could not import them while ``pip`` -- which ``uv venv`` does not
+        place in the venv at all -- fell through to the image's global pip and
+        reported them present. Measured in a task image: ``import langchain`` raised
+        ``ModuleNotFoundError`` while ``pip list`` showed ``langchain 1.3.14``. An
+        agent that tried to verify its own work chased that contradiction for ten
+        turns and ran out of budget before finishing.
+
+        Note the venv is NOT on the agent's own PATH -- the orchestrator prepends
+        only ``resolved_mock_path_dirs`` there -- so the contradiction above is a
+        property of criterion and pre/post-run subprocesses.
+
+        System site packages fixes it in the direction that keeps both halves: the
+        image's globals stay importable, ``python`` and ``pip`` agree, and installs
+        still land in the venv (``sys.prefix`` remains the sandbox), so a task's
+        ``env_packages`` cannot leak into the image.
+        """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox directory not initialized")
 
@@ -846,13 +870,16 @@ class Sandbox:
             # Check if uv is available
             subprocess.run(["uv", "--version"], check=True, capture_output=True, timeout=5)
             # Use uv to create venv
-            cmd = ["uv", "venv", str(self.venv_dir)]
+            cmd = ["uv", "venv", "--system-site-packages", str(self.venv_dir)]
             subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=60)
         except (subprocess.CalledProcessError, FileNotFoundError):
-            # Fallback to standard venv if uv is not available
+            # Fallback to standard venv if uv is not available. The two paths do not
+            # produce the same artifact -- this one seeds pip, `uv venv` does not --
+            # so say which shape this host got rather than leaving it to be inferred.
             import venv
 
-            venv.create(self.venv_dir, with_pip=True)
+            logger.warning("uv unavailable; created %s with stdlib venv (pip seeded)", self.venv_dir)
+            venv.create(self.venv_dir, with_pip=True, system_site_packages=True)
 
     def _install_packages(self) -> None:
         """Install required Python packages in the virtual environment."""
