@@ -30,6 +30,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
+    "tomli-w>=1.0.0",
     "typer>=0.24.1",
     "click>=8.3.3",
     "rich>=14.3.3",

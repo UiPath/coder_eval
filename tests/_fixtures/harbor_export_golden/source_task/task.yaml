@@ -1,0 +1,33 @@
+task_id: golden_export_example
+description: A canonical task exercising every C2 mapping row at once (golden fixture — do not edit casually).
+tags: [golden, harbor-export]
+
+agent:
+  type: claude-code
+
+sandbox:
+  driver: docker
+  docker:
+    dockerfile_path: environment/Dockerfile
+    network: none
+  limits:
+    max_memory_mb: 1024
+    max_cpus: 1.5
+
+initial_prompt: Write 'hello world' to greeting.txt, matching reference/greeting.txt.
+
+reference:
+  directory: reference
+
+run_limits:
+  task_timeout: 300
+
+success_criteria:
+  - type: file_exists
+    path: greeting.txt
+    description: greeting.txt exists
+
+  - type: reference_comparison
+    agent_file: greeting.txt
+    reference_file: greeting.txt
+    description: matches the reference greeting
