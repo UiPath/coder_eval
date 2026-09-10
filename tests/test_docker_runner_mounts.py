@@ -888,6 +888,43 @@ class TestContainerAccessWidening:
     def _other_bits(path: Path) -> int:
         return path.stat().st_mode & 0o007
 
+    def test_it_reports_what_it_widened_so_a_caller_can_put_it_back(self, tmp_path: Path):
+        """The graded workspace is the one mount the harness did NOT create.
+
+        `input_dir` / `output_dir` are staging directories deleted with the
+        dispatch, so widening them is scoped to their lifetime. The graded
+        workspace is not: with `--workspace` it is an arbitrary operator
+        directory, and otherwise it is the run's preserved `artifacts/` tree that
+        outlives the grade. Left world-writable it lets any other local uid on a
+        shared or CI host rewrite the artifacts a criterion reads -- i.e. change
+        the verdict -- so the widening must be reversible.
+        """
+        from coder_eval.isolation.docker_runner import restore_modes
+
+        ws = tmp_path / "ws"
+        ws.mkdir(mode=0o700)
+        f = ws / "deliverable.txt"
+        f.write_text("x", encoding="utf-8")
+        f.chmod(0o600)
+
+        widened = grant_container_access(ws, writable=True)
+
+        assert self._other_bits(ws) == 0o007
+        assert self._other_bits(f) == 0o006
+        assert {p for p, _ in widened} == {ws, f}
+
+        restore_modes(widened)
+
+        assert ws.stat().st_mode & 0o777 == 0o700
+        assert f.stat().st_mode & 0o777 == 0o600
+
+    def test_restoring_is_best_effort_over_a_vanished_path(self, tmp_path: Path):
+        """It runs in a `finally` beside the staging cleanup, where an exception
+        is often already in flight. A failed restore must never mask it."""
+        from coder_eval.isolation.docker_runner import restore_modes
+
+        restore_modes([(tmp_path / "gone", 0o600)])
+
     def test_output_dir_becomes_other_writable(self, tmp_path: Path):
         run_dir = tmp_path / "run"
         run_dir.mkdir(mode=0o755)

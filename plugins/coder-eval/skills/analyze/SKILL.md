@@ -93,6 +93,17 @@ record is truncated or synthetic (the docker degrade path writes a `final_status
 for it. Note that `iterations` present but empty is a legitimate zero-turn record and not
 the same thing — test `has("iterations")`, never truthiness.
 
+**A `final_status` of `NOT_GRADED` is not a failure — it is a row nothing measured.**
+`coder-eval execute` runs the agent and deliberately skips every criterion, so such a
+record has `weighted_score: null` and an EMPTY `success_criteria_results`. The recipe
+above then reports `all_criteria_perfect: false` (the `length > 0` guard) with no
+`failed_criteria`, which reads as "uniformly imperfect" for a run that was never scored.
+Partition the rows first: exclude `NOT_GRADED` from BOTH sides of any pass rate or mean
+score, count them separately, and say so in the report. If EVERY row is `NOT_GRADED`,
+the answer is "this run was executed but not graded — grade it with `coder-eval run
+<tasks> --run-dir <run> --resume` or `coder-eval evaluate <run>/<variant>/<task>/00`",
+not a table of zeros.
+
 `error_excerpt` = the first ~200 characters of each failing criterion's `error`, falling
 back to `details`. Those are the only two free-text fields a criterion result carries,
 and which one is populated depends on the failure: `error` holds an exception, `details`

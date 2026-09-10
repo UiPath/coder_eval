@@ -26,11 +26,13 @@ import yaml
 
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
+    CONTAINER_GRADE_WORKSPACE,
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
     CONTAINER_REFERENCE_DIR,
     CONTAINER_TASK_DIR,
     CONTAINER_WORK_DIR,
+    IN_CONTAINER_ENV,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
     DockerDriverConfig,
@@ -40,7 +42,15 @@ from coder_eval.models import (
     ResourceLimits,
 )
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
-from coder_eval.path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks, rmtree_restrictive
+from coder_eval.path_utils import (
+    DOCKER_LOG_FILENAME,
+    PRIOR_RESULT_FILENAME,
+    REFERENCE_COPY_IGNORE,
+    TASK_JSON_FILENAME,
+    ignore_patterns_and_symlinks,
+    rmtree_restrictive,
+    write_text_atomic,
+)
 from coder_eval.streaming.callbacks import safe_emit
 from coder_eval.streaming.wire import deserialize_event, has_prefix
 from coder_eval.utils import get_default_docker_image_tag
@@ -476,7 +486,7 @@ def _copy_claude_home(host_claude_dir: Path, claude_copy: Path) -> None:
     ) from last_exc
 
 
-def grant_container_access(root: Path, *, writable: bool) -> None:
+def grant_container_access(root: Path, *, writable: bool) -> list[tuple[Path, int]]:
     """Widen ``root`` (recursively) so the container can reach it without DAC caps.
 
     Paired with the ``--cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH`` in
@@ -505,10 +515,16 @@ def grant_container_access(root: Path, *, writable: bool) -> None:
     withholding it keeps ``_verify_reference_integrity`` from being the sole
     guard against tampering.
 
+    Returns ``(path, original_mode)`` for every entry it actually changed, so a
+    caller that widened a tree it does not own can put it back (see
+    :func:`restore_modes`). The framework-created staging dirs are disposable and
+    ignore it; the graded workspace is not.
+
     No-op on Windows, where POSIX mode bits are not the access-control mechanism.
     """
+    widened_paths: list[tuple[Path, int]] = []
     if os.name == "nt":  # pragma: no cover - POSIX mode bits are meaningless here
-        return
+        return widened_paths
     extra = 0o006 if writable else 0o004
     for path in (root, *root.rglob("*")):
         # lstat + skip: chmod follows symlinks, so widening one would silently
@@ -525,6 +541,54 @@ def grant_container_access(root: Path, *, writable: bool) -> None:
             widened |= 0o001
         if widened != mode:
             os.chmod(path, widened)
+            widened_paths.append((path, mode))
+    return widened_paths
+
+
+def restore_modes(widened: list[tuple[Path, int]]) -> None:
+    """Put back the modes :func:`grant_container_access` widened.
+
+    Needed for exactly one mount, and the asymmetry is the point. ``input_dir``
+    and ``output_dir`` are staging directories the harness created for this one
+    dispatch and deletes afterwards, so widening them is scoped to their whole
+    lifetime. The GRADED WORKSPACE is neither: with ``--workspace`` it is an
+    arbitrary operator directory, and otherwise it is the run's preserved
+    ``artifacts/`` tree that outlives the grade. Leaving those world-writable
+    means any other local uid on a shared or CI host can afterwards rewrite the
+    artifacts a criterion reads -- i.e. change the verdict -- or plant an
+    executable in the tree.
+
+    Best-effort and never raises: this runs in a ``finally`` beside the staging
+    cleanup, and a failed restore must not mask the container's own outcome.
+    """
+    for path, mode in reversed(widened):
+        try:
+            if not path.is_symlink():
+                os.chmod(path, mode)
+        except OSError as exc:  # pragma: no cover - raced away or removed by the container
+            logger.warning("Could not restore mode on %s: %s", path, exc)
+
+
+def _quarantine_record(task_json: Path | None, suffix: str, label: str) -> None:
+    """Move a refused container record aside, best-effort.
+
+    Shared by both version-skew refusals (`_assert_grade_honored`,
+    `_assert_regrade_honored`), which had the same seven lines twice and differed
+    only in the suffix and the wording. Refusing in memory while leaving
+    contradictory bytes in the bind-mounted run dir is not a refusal -- a later
+    `aggregate` would publish exactly the row the guard declined -- so this must
+    behave identically on both paths, which one copy per caller cannot promise.
+
+    Never masks the caller's raise: a failed move is logged and swallowed.
+    """
+    if task_json is None:
+        return
+    sidecar = task_json.with_suffix(task_json.suffix + suffix)
+    try:
+        os.replace(task_json, sidecar)  # atomic; overwrites any stale prior sidecar
+        logger.warning("Quarantined the refused %s record to %s", label, sidecar)
+    except OSError as exc:
+        logger.warning("Could not quarantine %s: %s", task_json, exc)
 
 
 class DockerRunner:
@@ -540,11 +604,34 @@ class DockerRunner:
         preservation_mode: PreservationMode = PreservationMode.DIRECT_WRITE,
         stream_callback: StreamCallback | None = None,
         verbose: bool = False,
+        grade: bool = True,
+        prior_result: EvaluationResult | None = None,
+        grade_workspace: Path | None = None,
     ) -> None:
         self.rt = rt
         self.preservation_mode = preservation_mode
         self.stream_callback = stream_callback
         self.verbose = verbose
+        # DETACHED GRADE. Both set together or neither: `prior_result` is the
+        # already-executed row (trajectory + execution facts) the in-container
+        # Orchestrator seeds from, and `grade_workspace` is the host directory
+        # that run left behind, mounted at CONTAINER_GRADE_WORKSPACE and ADOPTED
+        # rather than recreated.
+        #
+        # This is what makes `evaluate` over a `driver: docker` row honest. The
+        # criteria of such a task address container paths and the image's
+        # toolchain, so grading them on the host scores a FAILURE for a run that
+        # passed. Running them back inside the same image is not a workaround for
+        # that — it is the only place the verdict means what it meant during the
+        # run.
+        self.prior_result = prior_result
+        self.grade_workspace = grade_workspace
+        if (prior_result is None) != (grade_workspace is None):
+            raise ValueError("prior_result and grade_workspace must be passed together")
+        # Forwarded to the in-container orchestrator via context.json. It is a
+        # run-level decision made by the CLI, so it cannot be recovered from the
+        # staged task.yaml on the other side.
+        self.grade = grade
         # Set by _prepare_host_mounts: the tmp lean copy of ~/.claude that
         # _build_argv mounts read-write. None when there is no ~/.claude to
         # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
@@ -618,6 +705,9 @@ class DockerRunner:
         input_dir = staging / "input"
         await asyncio.to_thread(input_dir.mkdir)
         output_dir = self.rt.run_dir.resolve()
+        # Bound BEFORE the try: the `finally` restores it, and `_stage_inputs`
+        # can raise before the widening happens.
+        widened_workspace: list[tuple[Path, int]] = []
 
         try:
             await self._stage_inputs(input_dir)
@@ -648,6 +738,24 @@ class DockerRunner:
             # consumes; writable only for the run dir it must produce into.
             await asyncio.to_thread(grant_container_access, input_dir, writable=False)
             await asyncio.to_thread(grant_container_access, output_dir, writable=True)
+            if self.grade_workspace is not None:
+                # The graded workspace is a framework-owned mount like any other,
+                # so it needs the same widening -- and it is the one mount whose
+                # files the harness did NOT create, so the owner bits cannot be
+                # assumed. It happens to work when container #1 (running as root)
+                # wrote the tree, which is exactly what makes the broken case
+                # expensive: an operator-supplied `--workspace`, or artifacts
+                # re-created host-side, are owned by the host uid, and container
+                # root without DAC_OVERRIDE reaches them only through `other`.
+                # Criteria then fail EACCES and book a gating 0.0 that reads as
+                # an agent failure -- the CE039 shape this feature exists to end.
+                #
+                # Recorded and restored in the `finally` below, unlike the two
+                # staging dirs above: those are disposable and deleted with the
+                # dispatch, while this tree survives it. An operator-supplied
+                # `--workspace` left world-writable forever is a real, permanent
+                # exposure on a shared host.
+                widened_workspace = await asyncio.to_thread(grant_container_access, self.grade_workspace, writable=True)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
             # Prime the heartbeat before the container starts so the
@@ -661,7 +769,7 @@ class DockerRunner:
                 stderr=asyncio.subprocess.STDOUT,
                 limit=STDOUT_LINE_LIMIT_BYTES,
             )
-            log_path = self.rt.run_dir / "docker.log"
+            log_path = self.rt.run_dir / DOCKER_LOG_FILENAME
             log_fh = await asyncio.to_thread(log_path.open, "w", encoding="utf-8")
             # Cancellation guard: `docker run --rm` does NOT propagate kill
             # to the container daemon-side. Without this `finally`, Ctrl-C
@@ -693,6 +801,9 @@ class DockerRunner:
             # directory raises PermissionError -- which ignore_errors swallows,
             # orphaning a tempdir that holds the reference solution.
             await asyncio.to_thread(rmtree_restrictive, staging)
+            # The graded workspace is the caller's tree, not ours; give it back
+            # the modes it had. See `restore_modes`.
+            await asyncio.to_thread(restore_modes, widened_workspace)
 
     async def _stage_inputs(self, input_dir: Path) -> None:
         """Serialise the post-override TaskDefinition + lineage/variant context into the
@@ -721,13 +832,37 @@ class DockerRunner:
                 "replicate_index": self.rt.replicate_index,
                 "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
                 "preservation_mode": self.preservation_mode.value,
+                # `coder-eval run` vs `coder-eval execute`. Not derivable from
+                # task.yaml on the container side (deliberately not a task field).
+                "grade": self.grade,
+                # A detached grade: seed from prior.json (staged beside this
+                # file) and adopt CONTAINER_GRADE_WORKSPACE instead of running
+                # an agent. Absent/False on every ordinary run.
+                "regrade": self.prior_result is not None,
                 "source_yaml": self.rt.source_yaml,
+                # The HOST's task-file path, recorded verbatim into task.json's
+                # audit trail. The container resolves TASK_DIR against
+                # /work/task_dir/task.yaml, which is right in there and exists on
+                # no host -- recording THAT made a detached grade of this row
+                # rebuild the task around an unresolvable path and silently mount
+                # no task dir. Absent -> the container falls back to its own path,
+                # so an older host keeps today's behaviour.
+                "host_task_file": str(self.rt.task_file) if self.rt.task_file else None,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
                 "workspace_dir": self._workspace_dir,
             }
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+        if self.prior_result is not None:
+            # The row being graded, carried in whole. The container seeds from
+            # it exactly as the host path does, so the trajectory an `llm_judge`
+            # or `command_executed` criterion reads is the ORIGINAL run's.
+            await asyncio.to_thread(
+                (input_dir / PRIOR_RESULT_FILENAME).write_text,
+                self.prior_result.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
 
     async def _stream_container_output(self, proc: asyncio.subprocess.Process, log_fh: TextIO) -> int:
         """Stream the container's stdout, returning its exit code.
@@ -837,7 +972,7 @@ class DockerRunner:
         task.json and raise ``DockerRunError`` so the batch dispatcher records the
         failure as an ERROR-status result.
         """
-        task_json = output_dir / "task.json"
+        task_json = output_dir / TASK_JSON_FILENAME
         if not await asyncio.to_thread(task_json.exists):
             # The container died before its orchestrator's `finally` could
             # write task.json (e.g. it was torn down by the cleanup above
@@ -863,7 +998,88 @@ class DockerRunner:
             # rather than crashing with an uncaught ValidationError/JSONDecodeError.
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
         self._warn_on_version_mismatch(result)
+        self._assert_grade_honored(result, task_json)
+        self._assert_regrade_honored(result, task_json)
         return result
+
+    def _assert_regrade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
+        """Fail loudly when a detached GRADE came back as a fresh agent run.
+
+        Exactly the sibling of :meth:`_assert_grade_honored`, for exactly the
+        same reason one release later. ``regrade`` crosses the boundary only
+        through ``context.json``; an image that predates container-side grading
+        ignores the unknown key, ignores the staged ``prior.json``, ignores the
+        ``/work/workspace`` mount, and falls through to the ordinary
+        ``Orchestrator`` branch -- which **starts an agent** from
+        ``initial_prompt``.
+
+        Nothing else catches it. ``_warn_on_version_mismatch`` only warns (and is
+        skipped entirely for ``dockerfile_path`` tasks), and
+        ``_assert_grade_honored`` early-returns because a grading container is
+        dispatched with ``grade=True``. So the host would fold a fabricated
+        trajectory back over the recorded row as its "grade" -- publishing a
+        verdict for work it never looked at, and billing the model for it.
+
+        Keyed on EVIDENCE, like its sibling: a container that honored the request
+        seeds from ``prior`` and never runs the agent, so the trajectory it
+        returns is the one we sent in. A DIFFERENT ``started_at`` is the tell --
+        ``_seed_from_prior_result`` restores the agent run's ``started_at``
+        verbatim (deliberately, so a re-graded row does not report the grading
+        pass's 2 seconds into ``average_duration``), so a fresh run is the only
+        way that field can move.
+        """
+        if self.prior_result is None:
+            return
+        if result.started_at == self.prior_result.started_at:
+            return
+        _quarantine_record(task_json, ".rerun", "re-run")
+        raise DockerRunError(
+            "Grading asked the container to score an already-executed run, but it returned a "
+            + f"different trajectory (started_at {result.started_at} vs the recorded "
+            + f"{self.prior_result.started_at}). The runtime image predates container-side "
+            + "grading and re-ran the agent instead; rebuild or pull a matching agent image, "
+            + "or grade on the host with --allow-host-grading."
+        )
+
+    def _assert_grade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
+        """Fail loudly when `execute` came back with a graded verdict.
+
+        ``grade`` crosses the boundary only through ``context.json``. An image
+        that predates ``execute`` ignores the unknown key and grades anyway, and
+        the image-version preflight only warns — so ``execute --driver docker``
+        against a stale image would silently produce SUCCESS/FAILURE rows that
+        look like a normal graded run. Version skew must not change what a
+        command MEANS, so refuse the row rather than publish it.
+
+        ``task_json`` is the on-disk record, quarantined before the raise. The
+        refusal used to be in-memory only, which left the graded ``task.json``
+        sitting in the bind-mounted host run dir: a later
+        ``execute --resume`` read it back as a completed row (its category is
+        ``succeeded``, so the resume partition files it under prior results) and
+        plain ``aggregate`` folded it straight into ``run.json`` — publishing
+        exactly the row this guard declined to publish. Refusing in memory while
+        leaving contradictory bytes on disk is not a refusal.
+        """
+        if self.grade:
+            return
+        # Keyed on EVIDENCE, not on the label. Exempting every execution-fact
+        # status let a stale image return a fully graded MAX_TURNS_EXHAUSTED row
+        # — criteria vector, weighted score and all — unchallenged, because the
+        # exemption exists for statuses a *fresh* image also produces, and a
+        # fresh one produces them with neither. The question is not "what status
+        # is this" but "did it grade".
+        graded_anyway = bool(result.success_criteria_results) or result.weighted_score is not None
+        if not graded_anyway and (
+            result.final_status.is_execution_fact or result.final_status is FinalStatus.NOT_GRADED
+        ):
+            return
+        _quarantine_record(task_json, ".graded", "graded")
+        raise DockerRunError(
+            "`coder-eval execute` asked the container not to grade, but it returned "
+            + f"{result.final_status.value} with {len(result.success_criteria_results)} criterion "
+            + "result(s). The runtime image predates `execute` and ignored the request; "
+            + "rebuild or pull a matching agent image."
+        )
 
     async def _handle_malformed_task_json(self, task_json: Path, log_path: Path, exc: ValueError) -> DockerRunError:
         """Degrade a present-but-malformed task.json; return the DockerRunError to raise.
@@ -908,9 +1124,11 @@ class DockerRunner:
         """
         try:
             await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
-            log_path = self.rt.run_dir / "docker.log"
+            log_path = self.rt.run_dir / DOCKER_LOG_FILENAME
             await asyncio.to_thread(log_path.write_text, exc.build_log or str(exc), encoding="utf-8")
-            await self._write_synthetic_task_json(self.rt.run_dir / "task.json", exc, status=FinalStatus.BUILD_FAILED)
+            await self._write_synthetic_task_json(
+                self.rt.run_dir / TASK_JSON_FILENAME, exc, status=FinalStatus.BUILD_FAILED
+            )
         except OSError as io_exc:  # pragma: no cover - defensive
             logger.warning("Failed to record build failure for %s: %s", self.rt.task.task_id, io_exc)
 
@@ -939,9 +1157,15 @@ class DockerRunner:
         def _write() -> None:
             if target.exists():
                 return
-            tmp = target.with_suffix(target.suffix + ".synthetic.tmp")
-            tmp.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-            os.replace(tmp, target)
+            # Through `write_text_atomic` like every other writer of this file.
+            # The hand-rolled tmp+replace here used `Path.write_text`, which
+            # FOLLOWS symlinks — so a pre-planted `task.json.synthetic.tmp` in a
+            # run directory (a shareable artifact, bind-mounted writable into the
+            # agent's own container) redirected this harness-privileged write to
+            # any path the grading user could reach. It also falsified the
+            # helper's "one writer, so the crash semantics cannot differ" claim,
+            # which is the property future readers rely on.
+            write_text_atomic(target, result.model_dump_json(indent=2))
 
         try:
             await asyncio.to_thread(_write)
@@ -1412,7 +1636,7 @@ class DockerRunner:
         # isolation. The Codex agent reads this to fall back to its full-access
         # sandbox: Codex's Landlock-backed read-only / workspace-write sandboxes
         # can't initialize inside a container and otherwise fail writes silently.
-        argv += ["--env", "CODER_EVAL_IN_CONTAINER=1"]
+        argv += ["--env", f"{IN_CONTAINER_ENV}=1"]
 
         # Hard-disable telemetry INSIDE the container. The app ships a baked-in
         # default connection string, so without this the in-container orchestrator
@@ -1435,6 +1659,16 @@ class DockerRunner:
         # would chmod the operator's own `tasks/`.
         if self._task_dir_mount_src is not None:
             argv += ["-v", f"{self._task_dir_mount_src}:{CONTAINER_TASK_DIR}"]
+
+        # DETACHED GRADE: the already-executed workspace, read-WRITE and NOT a
+        # copy. Read-write because criteria legitimately mutate what they grade
+        # (a `run_command` that compiles, a post_run that cleans up), and the
+        # real tree because copying is what the host path proved wrong —
+        # `_setup_template` filters out node_modules / dist / build / .venv, so a
+        # criterion reading those would fail as a copying artifact rather than as
+        # a verdict.
+        if self.grade_workspace is not None:
+            argv += ["-v", f"{self.grade_workspace.resolve()}:{CONTAINER_GRADE_WORKSPACE}"]
 
         # ANTI-CHEAT: the reference solution normally lives INSIDE the task dir,
         # so the symmetric mount above would hand the agent the answer via

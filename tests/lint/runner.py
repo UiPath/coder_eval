@@ -26,7 +26,15 @@ from tests.lint.rules.ce038_acquire_inside_try import AcquireInsideTry
 from tests.lint.rules.ce039_config_error_escalates import ConfigErrorEscalates
 from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
 from tests.lint.rules.ce046_env_info_spreads_super import EnvInfoSpreadsSuper
-from tests.lint.rules.ce048_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
+from tests.lint.rules.ce048_no_in_process_typer_command_call import NoInProcessTyperCommandCall
+from tests.lint.rules.ce049_no_score_or_zero import NoScoreOrZero
+from tests.lint.rules.ce050_no_union_getattr_probe import NoUnionGetattrProbe
+from tests.lint.rules.ce051_no_driver_override import NoDriverOverride
+from tests.lint.rules.ce052_process_lethal_must_be_container_gated import ProcessLethalMustBeContainerGated
+from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
+from tests.lint.rules.ce054_env_info_key_round_trip import EnvInfoKeyRoundTrip
+from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLiteral
+from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -76,6 +84,14 @@ ALL_RULES: list[RuleClass] = [
     ConfigErrorEscalates,
     NoCommandOutputTruncation,
     EnvInfoSpreadsSuper,
+    EnvInfoKeyRoundTrip,
+    NoInProcessTyperCommandCall,
+    NoScoreOrZero,
+    NoUnionGetattrProbe,
+    NoDriverOverride,
+    ProcessLethalMustBeContainerGated,
+    NoContainerEnvLiteral,
+    NoRunRecordFilenameLiteral,
     SidecarShimStdlibOnly,
 ]
 

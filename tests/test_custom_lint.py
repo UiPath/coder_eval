@@ -13,7 +13,7 @@ Run just these tests:
 import json
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -23,13 +23,21 @@ from tests.lint.runner import ALL_RULES, check_paths
 SRC = Path(__file__).parent.parent / "src"
 
 
+# Rules whose defect class lives in the TEST tree, not in src/. CE048's whole
+# subject is an in-process call to a Typer command, and the only place that
+# happens is a test — scanning src/ alone would leave the rule permanently green
+# while the bug it exists for sat five lines away.
+_ALSO_SCAN_TESTS = {"CE048"}
+
+
 @pytest.mark.lint
 @pytest.mark.parametrize("rule_class", ALL_RULES, ids=[r.id for r in ALL_RULES])
 def test_no_violations(rule_class: type) -> None:
     import sys
 
     mod_doc = (getattr(sys.modules.get(rule_class.__module__), "__doc__", "") or "").splitlines()[0].strip()
-    violations = check_paths([SRC], rules=[rule_class])
+    paths = [SRC, Path(__file__).parent] if rule_class.id in _ALSO_SCAN_TESTS else [SRC]
+    violations = check_paths(paths, rules=[rule_class])
     assert not violations, (
         f"\n{len(violations)} violation(s) for {rule_class.id} ({mod_doc}):\n\n"
         + "\n".join(f"  {v}" for v in violations)
@@ -147,14 +155,14 @@ class TestCE046EnvInfoSpreadsSuper:
 
 
 @pytest.mark.lint
-class TestCE048SidecarShimStdlibOnly:
-    """CE048 flags a non-stdlib import in a module copied beside a generated shim."""
+class TestCE057SidecarShimStdlibOnly:
+    """CE057 flags a non-stdlib import in a module copied beside a generated shim."""
 
     @staticmethod
     def _run(src: str, *, sidecar: bool = True):
         import ast
 
-        from tests.lint.rules.ce048_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
+        from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 
         path = "src/coder_eval/argv_match.py" if sidecar else "src/coder_eval/invocation_log.py"
         return SidecarShimStdlibOnly(path).check(ast.parse(src))
@@ -191,13 +199,13 @@ class TestCE048SidecarShimStdlibOnly:
         from pathlib import Path
 
         from coder_eval.models import SIDECAR_MODULES
-        from tests.lint.rules.ce048_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
+        from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 
         package = Path(__file__).resolve().parents[1] / "src" / "coder_eval"
         for module in SIDECAR_MODULES:
             target = package / module
             assert target.is_file(), f"SIDECAR_MODULES names {module}, which does not exist"
-            assert SidecarShimStdlibOnly(str(target))._sidecar, f"CE048 does not match {target}"
+            assert SidecarShimStdlibOnly(str(target))._sidecar, f"CE057 does not match {target}"
 
 
 @pytest.mark.lint
@@ -874,11 +882,29 @@ class TestCE027DocEnvVarParity:
         assert unbacked == [], f"false positive on non-assignment shape: {unbacked}"
 
     def test_name_side_of_env_value_literal_counts_as_backed(self):
-        # `--env CODER_EVAL_IN_CONTAINER=1` in src makes the doc assignment backed.
+        # `CODER_EVAL_IN_CONTAINER` reaches src only through the named constant
+        # `models/container_paths.py::IN_CONTAINER_ENV` -- both the docker
+        # `--env f"{IN_CONTAINER_ENV}=1"` writer and the four `os.environ.get`
+        # gates spell it that way. A scanner seeing only literals would call the
+        # repo's own gate unbacked and push the author to paste the literal back.
         from tests.lint.doc_env_parity import src_env_literals
 
         names = src_env_literals(self.REPO_ROOT / "src")
         assert "CODER_EVAL_IN_CONTAINER" in names
+
+    def test_a_constant_is_backed_only_when_something_reads_it(self, tmp_path: Path):
+        # The constant indirection must not weaken the rule: resolution is
+        # two-step, so a defined-but-unread constant stays unbacked exactly as a
+        # bare literal does.
+        from tests.lint.doc_env_parity import src_env_literals
+
+        (tmp_path / "defs.py").write_text(
+            'READ_ENV = "CODER_EVAL_READ"\nUNREAD_ENV = "CODER_EVAL_UNREAD"\n', encoding="utf-8"
+        )
+        (tmp_path / "use.py").write_text("import os\nx = os.environ.get(READ_ENV)\n", encoding="utf-8")
+        names = src_env_literals(tmp_path)
+        assert "CODER_EVAL_READ" in names
+        assert "CODER_EVAL_UNREAD" not in names
 
     def test_src_scan_requires_a_real_consumer_not_any_literal(self, tmp_path: Path):
         # A bare uppercase constant that no code reads must NOT count as "backed",
@@ -3691,6 +3717,357 @@ class TestCE045PluginPathIsAPluginRoot:
         assert not self._offending_paths_in(task)
 
 
+class TestCE054EnvInfoKeyRoundTrip:
+    """CE054 fires when an environment_info key is read with no writer anywhere.
+
+    The rule shipped with only the whole-tree "finds nothing" scan, which cannot
+    tell a rule that is CORRECT from one that can never fire — the exact failure
+    its own docstring is about. The path form matters too: the rule scopes itself
+    with a leading-separator regex, so a repo-relative path must still be in
+    scope or a house-style test would pass vacuously.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestrator.py"):
+        import ast
+
+        from tests.lint.rules.ce054_env_info_key_round_trip import EnvInfoKeyRoundTrip
+
+        return EnvInfoKeyRoundTrip(filepath).check(ast.parse(src))
+
+    def test_flags_a_get_with_no_writer(self):
+        assert self._run('x = self.result.environment_info.get("no_such_key_anywhere")')
+
+    def test_flags_a_subscript_read_with_no_writer(self):
+        assert self._run('x = self.result.environment_info["no_such_key_anywhere"]')
+
+    def test_allows_a_key_that_is_written_in_src(self):
+        # reference_digest gained a writer; that is the whole point of the rule.
+        assert not self._run('x = self.result.environment_info.get("reference_digest")')
+
+    def test_allows_the_graded_by_prefix(self):
+        assert not self._run('x = self.result.environment_info.get("graded_by_git_commit")')
+
+    def test_ignores_a_computed_key(self):
+        assert not self._run("x = self.result.environment_info.get(key)")
+
+    def test_is_out_of_scope_outside_src(self):
+        assert not self._run('x = r.environment_info.get("no_such_key_anywhere")', filepath="tests/test_thing.py")
+
+    def test_scope_is_the_same_for_relative_and_absolute_paths(self):
+        """A repo-relative path must be in scope, or every house-style test lies."""
+        src = 'x = self.result.environment_info.get("no_such_key_anywhere")'
+        relative = self._run(src, filepath="src/coder_eval/orchestrator.py")
+        absolute = self._run(src, filepath="/home/u/repo/src/coder_eval/orchestrator.py")
+        assert bool(relative) == bool(absolute) is True
+
+
+class TestCE048NoInProcessTyperCommandCall:
+    """CE048 fires on an in-process call to a Typer command function."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "tests/test_thing.py"):
+        import ast
+
+        from tests.lint.rules.ce048_no_in_process_typer_command_call import NoInProcessTyperCommandCall
+
+        return NoInProcessTyperCommandCall(filepath).check(ast.parse(src))
+
+    def test_flags_calling_a_command_function_directly(self):
+        assert self._run("from coder_eval.cli.evaluate_command import evaluate_command\nevaluate_command(x)")
+
+    def test_allows_the_plain_python_entry_point(self):
+        assert not self._run("from coder_eval.cli.evaluate_command import run_evaluation\nrun_evaluation(x=1)")
+
+
+class TestCE049NoScoreOrZero:
+    """CE049 flags coalescing an unmeasured score into a real-looking number."""
+
+    @staticmethod
+    def _run(src: str):
+        import ast
+
+        from tests.lint.rules.ce049_no_score_or_zero import NoScoreOrZero
+
+        return NoScoreOrZero("src/coder_eval/orchestrator.py").check(ast.parse(src))
+
+    def test_flags_weighted_score_or_zero(self):
+        assert self._run("x = float(result.weighted_score or 0.0)")
+
+    def test_flags_a_bare_score_name_and_an_int_literal(self):
+        assert self._run("x = score or 0")
+
+    def test_flags_a_rate(self):
+        assert self._run("x = summary.pass_rate or 0.0")
+
+    def test_allows_an_explicit_none_branch(self):
+        assert not self._run("x = 0.0 if result.weighted_score is None else result.weighted_score")
+
+    def test_allows_a_non_numeric_fallback(self):
+        assert not self._run('x = result.weighted_score or "n/a"')
+
+    def test_ignores_an_unrelated_name(self):
+        assert not self._run("x = retry_count or 0")
+
+
+class TestCE050NoUnionGetattrProbe:
+    """CE050 flags an untyped getattr probe for a discriminated-union field."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestration/regrade.py"):
+        import ast
+
+        from tests.lint.rules.ce050_no_union_getattr_probe import NoUnionGetattrProbe
+
+        return NoUnionGetattrProbe(filepath).check(ast.parse(src))
+
+    def test_flags_the_command_probe(self):
+        assert self._run('cmd = getattr(c, "command", None)')
+
+    def test_allows_isinstance_narrowing(self):
+        assert not self._run("cmd = c.command if isinstance(c, RunCommandCriterion) else None")
+
+    def test_ignores_a_name_no_union_member_declares(self):
+        assert not self._run('x = getattr(obj, "definitely_not_a_criterion_field", None)')
+
+    def test_ignores_a_computed_key(self):
+        assert not self._run("x = getattr(obj, name, None)")
+
+    def test_is_out_of_scope_outside_src(self):
+        assert not self._run('cmd = getattr(c, "command", None)', filepath="tests/test_thing.py")
+
+
+class TestCE051NoDriverOverride:
+    """CE051 flags a silent sandbox-driver rewrite."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/orchestration/regrade.py"):
+        import ast
+
+        from tests.lint.rules.ce051_no_driver_override import NoDriverOverride
+
+        return NoDriverOverride(filepath).check(ast.parse(src))
+
+    def test_flags_a_spread_model_validate(self):
+        assert self._run('SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})')
+
+    def test_flags_model_copy_update(self):
+        assert self._run('cfg.model_copy(update={"driver": "tempdir"})')
+
+    def test_flags_setattr(self):
+        assert self._run('setattr(cfg, "driver", "tempdir")')
+
+    def test_flags_attribute_assignment(self):
+        assert self._run('cfg.driver = "tempdir"')
+
+    def test_allows_a_config_built_from_scratch(self):
+        assert not self._run('SandboxConfig.model_validate({"driver": "tempdir"})')
+
+    def test_allows_carrying_a_config_forward_unchanged(self):
+        assert not self._run("task.sandbox.model_copy(deep=True)")
+
+    def test_is_out_of_scope_in_the_model_module(self):
+        assert not self._run(
+            'cfg.model_copy(update={"driver": "tempdir"})',
+            filepath="src/coder_eval/models/sandbox.py",
+        )
+
+
+class TestCE052ProcessLethalMustBeContainerGated:
+    """CE052 flags an `os._exit` that is not gated on being in the container."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/cli/run_task_internal_command.py"):
+        import ast
+
+        from tests.lint.rules.ce052_process_lethal_must_be_container_gated import (
+            ProcessLethalMustBeContainerGated,
+        )
+
+        return ProcessLethalMustBeContainerGated(filepath).check(ast.parse(src))
+
+    def test_flags_an_ungated_exit(self):
+        assert self._run("os._exit(137)")
+
+    def test_flags_it_under_an_unrelated_guard(self):
+        assert self._run("if stale:\n    os._exit(137)")
+
+    def test_flags_it_in_the_else_arm_of_the_container_guard(self):
+        """An inverted guard is the shape a well-meaning refactor produces."""
+        src = 'if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n    pass\nelse:\n    os._exit(137)'
+        assert self._run(src)
+
+    def test_allows_a_gated_exit(self):
+        src = 'if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n    os._exit(137)'
+        assert not self._run(src)
+
+    def test_allows_a_gate_written_with_the_constant(self):
+        """The spelling the tree actually uses. A rule that saw only the literal
+        would read the constant-based gate as NO gate and tell the author to
+        paste the literal back — the rule arguing against the SSOT (and against
+        CE056) it should be reinforcing."""
+        src = 'if os.environ.get(IN_CONTAINER_ENV) == "1":\n    os._exit(137)'
+        assert not self._run(src)
+
+    def test_allows_it_nested_deeper_inside_the_gate(self):
+        """The real site defines a function and a loop inside the guard."""
+        src = (
+            'if _os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":\n'
+            "\n"
+            "    def _watch() -> None:\n"
+            "        while True:\n"
+            "            if stale:\n"
+            "                _os._exit(137)\n"
+        )
+        assert not self._run(src)
+
+    def test_is_out_of_scope_outside_the_package(self):
+        assert not self._run("os._exit(137)", filepath="scripts/reap.py")
+
+    def test_the_real_module_is_clean(self):
+        """The rule must actually pass on the site it was written for — a rule
+        that only ever fires on synthetic input proves nothing about the tree."""
+        from pathlib import Path
+
+        path = Path("src/coder_eval/cli/run_task_internal_command.py")
+        source = path.read_text(encoding="utf-8")
+        assert not self._run(source, filepath=str(path))
+        assert "_os._exit(137)" in source, "the guarded call must still exist"
+
+
+class TestRuffExternalCoversEveryRule:
+    """Every CE rule's documented `# noqa` must be accepted by ruff.
+
+    `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid
+    rule code" for a suppression it does not own. It was hand-maintained and had
+    fallen ~14 ids behind — including CE054 and CE048, whose own docstrings
+    advertise `# noqa: CE054` / `# noqa: CE048` as the supported escape hatch. So
+    the first person to use the documented exemption got a red `make check`
+    instead, for doing exactly what the rule told them to.
+    """
+
+    @staticmethod
+    def _external() -> set[str]:
+        import tomllib
+        from pathlib import Path
+
+        data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        return set(data["tool"]["ruff"]["lint"]["external"])
+
+    def test_every_registered_rule_is_listed(self):
+        from tests.lint.runner import ALL_RULES
+
+        missing = sorted({r.id for r in ALL_RULES} - self._external())
+        assert not missing, f"add to [tool.ruff.lint] external in pyproject.toml: {missing}"
+
+    def test_every_listed_id_is_well_formed(self):
+        """Cheap guard against a typo silently widening the allowlist."""
+        bad = sorted(i for i in self._external() if not re.fullmatch(r"CE\d{3}", i))
+        assert not bad, f"not a CE rule id: {bad}"
+
+
+class TestCE056NoContainerEnvLiteral:
+    """CE056 flags a bare `CODER_EVAL_IN_CONTAINER` outside container_paths.
+
+    The motivating miss: every READER of the gate was migrated to
+    `IN_CONTAINER_ENV` and the single WRITER (`docker_runner`'s
+    `--env CODER_EVAL_IN_CONTAINER=1`) was not, so a rename would have disarmed
+    four gates at once, all silently. CE052 cannot see it -- that rule inspects
+    `if` guards, and the writer is not one.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/isolation/docker_runner.py"):
+        import ast
+
+        from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLiteral
+
+        return NoContainerEnvLiteral(filepath).check(ast.parse(src))
+
+    def test_flags_the_child_process_assignment_form(self):
+        """The exact shape that shipped unmigrated."""
+        assert self._run('argv += ["--env", "CODER_EVAL_IN_CONTAINER=1"]')
+
+    def test_flags_a_bare_read(self):
+        assert self._run('if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1": pass')
+
+    def test_allows_the_constant(self):
+        assert not self._run('argv += ["--env", f"{IN_CONTAINER_ENV}=1"]')
+
+    def test_allows_prose_that_merely_names_the_variable(self):
+        """A docstring explaining the gate must name it; a rule that pushed
+        authors to obfuscate their own explanations would be a bad trade."""
+        assert not self._run('"""Gated on CODER_EVAL_IN_CONTAINER, never on the driver."""')
+
+    def test_ignores_the_defining_module(self):
+        assert not self._run(
+            'IN_CONTAINER_ENV = "CODER_EVAL_IN_CONTAINER"',
+            filepath="src/coder_eval/models/container_paths.py",
+        )
+
+    def test_the_real_tree_is_clean(self):
+        """The whole point: the writer is migrated and stays migrated."""
+        import ast
+
+        from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLiteral
+
+        src = Path(__file__).parent.parent / "src" / "coder_eval"
+        violations = []
+        for py in src.rglob("*.py"):
+            violations += NoContainerEnvLiteral(str(py)).check(ast.parse(py.read_text(encoding="utf-8")))
+        assert not violations, violations
+
+
+class TestCE053NoRunRecordFilenameLiteral:
+    """CE053 flags a `task.json` literal outside path_utils."""
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/reports.py"):
+        import ast
+
+        from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
+
+        return NoRunRecordFilenameLiteral(filepath).check(ast.parse(src))
+
+    def test_flags_a_bare_literal(self):
+        assert self._run('path = run_dir / "task.json"')
+
+    def test_flags_an_rglob(self):
+        """The three rglob sites are the ones the constant's own comment cites."""
+        assert self._run('for p in run_dir.rglob("task.json"): pass')
+
+    def test_flags_a_trailing_path_segment(self):
+        assert self._run('matches = sorted(d.glob("*/task.json"))')
+
+    def test_flags_the_pre_grade_record_too(self):
+        assert self._run('backup = run_dir / "task.execute.json"')
+
+    def test_allows_the_constant(self):
+        assert not self._run("path = run_dir / TASK_JSON_FILENAME")
+
+    def test_allows_prose_that_merely_mentions_the_file(self):
+        """Naming the file in an error message is the point of the message."""
+        assert not self._run('raise ValueError("no task.json in that directory")')
+
+    def test_is_out_of_scope_in_path_utils(self):
+        assert not self._run('TASK_JSON_FILENAME = "task.json"', filepath="src/coder_eval/path_utils.py")
+
+    def test_the_tree_is_clean(self):
+        """The migration must actually have happened — a rule whose only
+        evidence is synthetic proves nothing about the repo."""
+        import ast
+        from pathlib import Path
+
+        from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
+
+        offenders = []
+        for path in Path("src/coder_eval").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            if NoRunRecordFilenameLiteral(str(path)).check(tree):
+                offenders.append(str(path))
+        assert not offenders, offenders
+
+
 @pytest.mark.lint
 class TestCE047AgentRosterParity:
     """CE047 — every onboarding/marketing surface must name every built-in agent.
@@ -3736,13 +4113,27 @@ class TestCE047AgentRosterParity:
         # The exact historical gap: a surface listing three of the four harnesses.
         from tests.lint.agent_roster_parity import missing_agents_in
 
-        three_of_four = "runs Claude Code, Codex, or Antigravity (Gemini) in a sandbox"
+        three_of_four = "runs Claude Code, Codex, Antigravity (Gemini), or Pi in a sandbox"
         assert missing_agents_in(three_of_four) == ["opencode"]
 
     def test_model_name_counts_as_naming_the_antigravity_row(self):
         from tests.lint.agent_roster_parity import missing_agents_in
 
-        assert missing_agents_in("Claude Code, Codex, Gemini, and OpenCode") == []
+        assert missing_agents_in("Claude Code, Codex, Gemini, OpenCode, and Pi") == []
+
+    def test_short_name_is_not_satisfied_by_a_substring(self):
+        # The matcher is word-boundary anchored, so the 2-char "Pi" row is NOT
+        # satisfied by an incidental bigram in unrelated prose — the exact
+        # false-negative that let a stale roster ship undetected for Pi.
+        from tests.lint.agent_roster_parity import missing_agents_in
+
+        for decoy in ("anthropic models", "see the ci-pipeline.md guide", "the harness copies files"):
+            assert missing_agents_in(decoy, kinds=["pi"]) == ["pi"]
+        # A standalone mention (any surrounding punctuation) DOES satisfy it.
+        assert missing_agents_in("runs Pi in a sandbox", kinds=["pi"]) == []
+        assert missing_agents_in("… OpenCode, or Pi —", kinds=["pi"]) == []
+        # The hyphenated packaging spelling satisfies the claude-code row.
+        assert missing_agents_in("coder-eval[claude-code]", kinds=["claude-code"]) == []
 
     def test_extractors_narrow_to_the_marketing_region(self, tmp_path: Path):
         from tests.lint.agent_roster_parity import _mkdocs_site_description, _pyproject_marketing_text
@@ -3756,3 +4147,114 @@ class TestCE047AgentRosterParity:
         region = _pyproject_marketing_text(pyproject)
         assert "Claude Code" in region and "opencode" in region
         assert "[tool.x]" not in region
+
+
+@pytest.mark.lint
+class TestCE055NoAbsoluteCriterionPath:
+    """CE055 — a criterion `path:` in `tasks/` must be sandbox-relative.
+
+    Criterion paths are joined onto the sandbox root, and joining an ABSOLUTE
+    path discards that root: `Path(sandbox) / "/opt/marker"` is `/opt/marker`.
+    Containment then refuses it, so the criterion can never match no matter what
+    the agent does.
+
+    Two in-tree tasks were broken this way, and the failure mode is why a static
+    rule earns its place on top of the runtime guard:
+
+    * `tasks/byod_smoke_test.yaml` checked `/opt/byod_marker`. It IS in a CI
+      bucket, and CI reported `Results: 7/8 succeeded` with a gating 0.0 reading
+      "file does not exist" for a file that plainly existed. The real cause sat
+      in a warning inside a task log.
+    * `tasks/dockerfile_build_example/dockerfile_build_example.yaml` checked
+      `/opt/greeting.txt` and `/opt/secret_check.txt`. It is in NO bucket, so
+      nothing ran it at all — the runtime guard, however loud, is never reached.
+
+    That second case is the argument: a runtime error only fires for tasks
+    somebody runs, and this repo ships example tasks that CI does not. This rule
+    reads the YAML.
+
+    The fix is never "make containment allow it". An absolute path here is a
+    claim about the container IMAGE rather than about anything the agent produced
+    in its workspace, and `run_command` (`test -f /opt/marker`) states that
+    directly — while staying inside the trust gate that governs recorded shell on
+    the detached grading path.
+    """
+
+    ROOT = Path(__file__).parent.parent
+
+    @staticmethod
+    def _absolute_paths(task) -> list[str]:
+        """Criterion paths that are absolute, hence unreachable inside a sandbox.
+
+        Read off each criterion's own `path` field via `isinstance` narrowing on
+        the union rather than a `getattr(c, "path", None)` probe: an untyped
+        string probe over a discriminated union is invisible to pyright, so a
+        field rename would silently degrade this rule to a permanent no-op —
+        which is exactly what CE050 exists to prevent.
+        """
+        from coder_eval.models import (
+            ClassificationMatchCriterion,
+            FileCheckCriterion,
+            FileContainsCriterion,
+            FileExistsCriterion,
+            FileMatchesRegexCriterion,
+            JsonCheckCriterion,
+        )
+
+        path_bearing = (
+            ClassificationMatchCriterion,
+            FileCheckCriterion,
+            FileContainsCriterion,
+            FileExistsCriterion,
+            FileMatchesRegexCriterion,
+            JsonCheckCriterion,
+        )
+        offenders = []
+        for c in task.success_criteria:
+            if not isinstance(c, path_bearing):
+                continue
+            # PurePosixPath, not Path: the rule must give the same answer on a
+            # Windows checkout, where `Path("/opt/x").is_absolute()` is False.
+            if PurePosixPath(c.path).is_absolute():
+                offenders.append(f"{type(c).__name__}(path={c.path!r})")
+        return offenders
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_tasks_use_sandbox_relative_criterion_paths(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        offenders = self._absolute_paths(task)
+        assert not offenders, (
+            f"{path}: criterion path(s) {offenders} are absolute. Joining an absolute path onto the "
+            "sandbox root discards the root, so containment refuses it and the criterion can never "
+            "match. To assert on a file baked into the container image, use a `run_command` "
+            "criterion (e.g. `test -f /opt/marker`)."
+        )
+
+    def test_detects_an_absolute_criterion_path(self):
+        """The rule's own sensor — without this, an empty `tasks/` would 'pass'."""
+        from coder_eval.models import FileExistsCriterion, TaskDefinition
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            success_criteria=[FileExistsCriterion(description="c", path="/opt/byod_marker")],
+        )
+        assert self._absolute_paths(task) == ["FileExistsCriterion(path='/opt/byod_marker')"]
+
+    def test_allows_a_relative_path(self):
+        from coder_eval.models import FileExistsCriterion, TaskDefinition
+
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            success_criteria=[FileExistsCriterion(description="c", path="build/out.txt")],
+        )
+        assert self._absolute_paths(task) == []

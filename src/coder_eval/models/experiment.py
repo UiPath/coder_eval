@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 from coder_eval.models.enums import FinalStatus
 from coder_eval.models.limits import RunLimits
 from coder_eval.models.mutations import PromptMutation
-from coder_eval.models.results import ConfigLineageEntry, EvaluationResult
+from coder_eval.models.results import ConfigLineageEntry, EvaluationResult, nothing_was_measured
 from coder_eval.models.sandbox import SandboxConfig
 from coder_eval.models.tasks import PostRunCommand, PreRunCommand, TaskDefinition
 from coder_eval.models.templates import TemplateSource
@@ -190,7 +190,11 @@ class VariantResult(BaseModel):  # noqa: CE009 -- persisted result model; round-
 
     variant_id: str
     task_id: str
-    weighted_score: float
+    # None when nothing was graded (`coder-eval execute`), mirroring
+    # EvaluationResult.weighted_score. A plain float here would launder the
+    # ungraded None into 0.000, which renders as — and is picked as a best
+    # variant against — a real score of zero.
+    weighted_score: float | None = None
     final_status: FinalStatus
     duration_seconds: float
     total_tokens: int | None = None
@@ -213,8 +217,9 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     """Aggregated statistics for a single variant across all tasks.
 
     ``pass_rate`` uses the same denominator as ``RunSummary.pass_rate``: every task
-    the variant ran, errors included as misses. Otherwise an A/B whose variants
-    error at different rates compares two different denominators.
+    the variant GRADED, errors included as misses, ungraded tasks leaving BOTH
+    sides. Otherwise an A/B whose variants error at different rates compares two
+    different denominators.
     """
 
     variant_id: str
@@ -222,7 +227,17 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
     tasks_succeeded: int
     tasks_failed: int
     tasks_error: int
-    average_score: float
+    # Fourth bucket of the task_count invariant (see RunSummary.tasks_not_graded).
+    # Defaulted so experiment.json written before `coder-eval execute` still loads.
+    tasks_not_graded: int = Field(
+        default=0,
+        ge=0,
+        description="Tasks executed without grading (`coder-eval execute`). Excluded from pass_rate entirely.",
+    )
+    # None when nothing in this variant was graded (`coder-eval execute`).
+    # A 0.0 here is indistinguishable from "measured and scored zero" — the same
+    # reason EvaluationResult.weighted_score is Optional.
+    average_score: float | None
     average_duration: float
     total_tokens: int | None = None
     replicate_count: int = Field(
@@ -241,19 +256,52 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
         ge=0,
         description="Subset of tasks_failed where run_limits cost cap tripped.",
     )
+    # Verdict evidence, NOT a bucket: how many rows actually carry a
+    # weighted_score. `pass_rate` needs it because the four category buckets
+    # cannot tell a graded FAILURE from a TIMEOUT that no criterion ever saw.
+    # Defaulted so an experiment.json written before this field still parses —
+    # and inert on those, since they predate the ungraded bucket entirely.
+    tasks_measured: int = Field(
+        default=0,
+        ge=0,
+        description="Rows carrying a criteria verdict (weighted_score is not None). Gates pass_rate.",
+    )
 
     @model_validator(mode="after")
     def _check_task_count_invariant(self) -> VariantAggregate:
-        if self.tasks_succeeded + self.tasks_failed + self.tasks_error != self.tasks_run:
-            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error}"
+        buckets = self.tasks_succeeded + self.tasks_failed + self.tasks_error + self.tasks_not_graded
+        if buckets != self.tasks_run:
+            total = f"{self.tasks_succeeded} + {self.tasks_failed} + {self.tasks_error} + {self.tasks_not_graded}"
             raise ValueError(f"Task count invariant violated: {total} != {self.tasks_run}")
         return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property
+    def tasks_graded(self) -> int:
+        """Tasks actually measured — ``pass_rate``'s denominator.
+
+        Serialized for the same reason as its RunSummary twin: a consumer that
+        cannot read the denominator re-derives the rate and drifts.
+        """
+        return self.tasks_run - self.tasks_not_graded
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def pass_rate(self) -> float | None:
-        """``tasks_succeeded / tasks_run`` as a 0-1 fraction. ``None`` on an empty variant."""
-        return self.tasks_succeeded / self.tasks_run if self.tasks_run else None
+        """``tasks_succeeded / tasks_graded`` as a 0-1 fraction. ``None`` when nothing was graded.
+
+        Mirrors ``RunSummary.pass_rate``: ungraded tasks leave both sides, AND a
+        variant where no row produced a verdict has no rate at all. The mirror
+        used to be a claim rather than a fact — this property said "Mirrors
+        RunSummary.pass_rate" while implementing only half of it, so the same
+        10-task execute run with one crash gave ``None`` in ``run.json`` and
+        ``0.0`` here, which ``reports_experiment`` rendered as
+        "Pass Rate: 0.0% (0/1)". Both now route through
+        ``nothing_was_measured``.
+        """
+        if nothing_was_measured(not_graded=self.tasks_not_graded, measured=self.tasks_measured):
+            return None
+        return self.tasks_succeeded / self.tasks_graded if self.tasks_graded else None
 
 
 class TaskExperimentSummary(BaseModel):  # noqa: CE009 -- persisted result model; round-trip leniency like models/results.py

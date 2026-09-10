@@ -4,7 +4,7 @@
 > for evaluating, benchmarking, and A/B-testing AI coding agents and their skills
 > (including Claude Code skills) in a sandbox. It uses declarative YAML tasks with
 > weighted, continuous scoring (0.0–1.0), runs real agents (Claude Code, OpenAI
-> Codex, Google Antigravity/Gemini, OpenCode) with full tool use — switching harness
+> Codex, Google Antigravity/Gemini, OpenCode, Pi) with full tool use — switching harness
 > is one field, `agent.type` — captures per-tool cost/token telemetry, and provides
 > CI-ready pass/fail gates. It is not a fixed benchmark or leaderboard: you bring the
 > tasks and the scoring, and it can verify whether a skill actually triggers.
@@ -31,6 +31,7 @@ and A/B plumbing.
 - [Codex](https://coder-eval.com/docs/agents/codex): Running the OpenAI Codex agent
 - [Antigravity (Gemini)](https://coder-eval.com/docs/agents/antigravity): Running the Google Antigravity / Gemini agent
 - [OpenCode](https://coder-eval.com/docs/agents/opencode): Running the OpenCode agent on open-weight models
+- [Pi](https://coder-eval.com/docs/agents/pi): Running the Pi agent on open-weight models
 - [Run-Limit Parity](https://coder-eval.com/docs/agents/harness-parity): What each run_limits field means on every harness
 - [A/B Experiments](https://coder-eval.com/docs/ab-experiments): Compare models / tools / prompts across the same tasks
 - [Bring Your Own Dataset](https://coder-eval.com/docs/datasets): Fan a single task out over a dataset

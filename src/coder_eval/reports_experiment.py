@@ -26,6 +26,8 @@ from coder_eval.reports_stats import (
     describe_prompt_config,
     fmt_mean_sd,
     fmt_p,
+    format_score,
+    is_env_table_key,
     load_variant_eval_results,
     paired_comparison,
     stddev,
@@ -248,7 +250,8 @@ class ExperimentReportGenerator:
             tokens_str = f"{v.total_tokens:,}" if v.total_tokens is not None else "N/A"
             avg_dur = v.duration_seconds / v.replicate_count
             lines.append(
-                f"| {v.variant_id} | {v.weighted_score:.3f} | {v.final_status}" + f" | {avg_dur:.1f}s | {tokens_str} |"
+                f"| {v.variant_id} | {format_score(v.weighted_score)} | {v.final_status}"
+                + f" | {avg_dur:.1f}s | {tokens_str} |"
             )
 
         return "\n".join(lines)
@@ -343,7 +346,19 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
-        # Every task the variant ran is in the denominator, errors included.
+        # Row: Not Graded — conditional, like the budget sub-rows above. Without
+        # it Tasks Run / Succeeded / Failed / Errors stop summing to tasks_run on
+        # an ungraded run, with nothing in the table to say where the rest went.
+        if any(result.variant_aggregates[vid].tasks_not_graded > 0 for vid in result.variant_ids):
+            row = "| Not Graded"
+            for vid in result.variant_ids:
+                row += f" | {result.variant_aggregates[vid].tasks_not_graded}"
+            if show_p_values:
+                row += " | —"
+            lines.append(row + " |")
+
+        # Every task the variant GRADED is in the denominator, errors included;
+        # ungraded rows leave both sides.
         row = "| Pass Rate"
         for vid in result.variant_ids:
             rate = result.variant_aggregates[vid].pass_rate
@@ -483,7 +498,7 @@ class ExperimentReportGenerator:
                 vr = scores_by_variant.get(vid)
                 if vr:
                     status_icon = vr.final_status.icon
-                    cells.append(f"{vr.weighted_score:.3f} ({status_icon})")
+                    cells.append(f"{format_score(vr.weighted_score)} ({status_icon})")
                 else:
                     cells.append("N/A")
             best_str = f"{'TIE' if ts.is_tie else ts.best_variant}"
@@ -626,8 +641,11 @@ class ExperimentReportGenerator:
             f"- **Succeeded**: {agg.tasks_succeeded}",
             failed_line,
             f"- **Errors**: {agg.tasks_error}",
-            f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_run})",
-            f"- **Average Score**: {agg.average_score:.3f}",
+            *([f"- **Not Graded**: {agg.tasks_not_graded}"] if agg.tasks_not_graded else []),
+            # Denominator is the GRADED count, matching VariantAggregate.pass_rate —
+            # an ungraded task was never measured and belongs on neither side.
+            f"- **Pass Rate**: {pass_rate_str} ({agg.tasks_succeeded}/{agg.tasks_graded})",
+            f"- **Average Score**: {format_score(agg.average_score)}",
             f"- **Average Duration**: {agg.average_duration:.1f}s",
             f"- **Total Tokens**: {tokens_str}",
         ]
@@ -636,7 +654,7 @@ class ExperimentReportGenerator:
         variant_results = [
             vr for ts in result.task_summaries for vr in ts.variant_results if vr.variant_id == variant_id
         ]
-        scores = [vr.weighted_score for vr in variant_results]
+        scores = [vr.weighted_score for vr in variant_results if vr.weighted_score is not None]
         durations = [vr.duration_seconds / vr.replicate_count for vr in variant_results]
 
         if scores and len(scores) >= 2:
@@ -670,7 +688,8 @@ class ExperimentReportGenerator:
             for vr in ts.variant_results:
                 if vr.variant_id == variant_id:
                     avg_duration = vr.duration_seconds / vr.replicate_count
-                    row = f"| {ts.task_id} | {vr.weighted_score:.3f} | {vr.final_status} | {avg_duration:.1f}s |"
+                    score_text = format_score(vr.weighted_score)
+                    row = f"| {ts.task_id} | {score_text} | {vr.final_status} | {avg_duration:.1f}s |"
                     if has_reps:
                         row += f" {vr.replicate_count} |"
                     if has_similarity:
@@ -717,7 +736,7 @@ class ExperimentReportGenerator:
                 # Environment (from first result with data)
                 for er in eval_results:
                     if er.environment_info:
-                        env = {k: v for k, v in er.environment_info.items() if k != "installed_tools"}
+                        env = {k: v for k, v in er.environment_info.items() if is_env_table_key(k)}
                         if env:
                             lines.extend(["", "## Environment", ""])
                             for key, value in env.items():

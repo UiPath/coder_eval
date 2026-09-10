@@ -387,6 +387,13 @@ class PostRunCommand(BaseModel):
     Post-run commands run inside the sandbox after the evaluation verdict is finalized.
     They do NOT affect pass/fail status — they are for artifact generation, data extraction,
     cleanup, or any side effects needed after the run.
+
+    "After the verdict" is a phase, not a clock reading, and it is load-bearing:
+    these commands may mutate the workspace (``rm -rf node_modules`` is the
+    archetype), and the criteria must have read that workspace first. So they run
+    in whichever command GRADES — ``run``, or a later ``evaluate`` / ``run
+    --resume`` over an executed run — and never under ``coder-eval execute``,
+    which checks no criteria. See ``Orchestrator._skip_post_run``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -546,7 +553,8 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         default_factory=list,
         description=(
             "Commands to execute after evaluation completes. Do not affect pass/fail. "
-            "The task's commands run first, then experiment-defaults post_run (cleanup-last)."
+            "The task's commands run first, then experiment-defaults post_run (cleanup-last). "
+            "They run in the grading phase, so `coder-eval execute` defers them to a later `evaluate`."
         ),
     )
     dataset: Dataset | None = Field(
@@ -733,7 +741,10 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         """
         if self.dataset is None and self.suite_id is None:
             for c in self.success_criteria:
-                if getattr(c, "suite_thresholds", None):
+                # Direct attribute access, not getattr: suite_thresholds is
+                # declared on BaseSuccessCriterion, so every union member has it
+                # and pyright can see a rename.
+                if c.suite_thresholds:
                     raise ValueError(
                         f"success_criteria[{c.type!r}].suite_thresholds requires a dataset: block "
                         + "(thresholds are evaluated on aggregated across-row metrics)"

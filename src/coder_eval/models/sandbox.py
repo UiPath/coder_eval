@@ -257,6 +257,11 @@ class DockerDriverConfig(BaseModel):
             # selects the Gemini model when agent.model is unset.
             "GEMINI_API_KEY",
             "ANTIGRAVITY_MODEL",
+            # Pi agent provider credential — Pi addresses models as `provider/id`
+            # and reads OpenRouter's key from the env. The baked pi CLI + this
+            # passthrough make `--driver docker --type pi` work; without it the
+            # in-container pi has no credential and every turn fails auth.
+            "OPENROUTER_API_KEY",
             # User HOME used to keep ~/.claude resolution symmetric with the host.
             # See docs/DOCKER_ISOLATION.md "HOME is forwarded by default" for the
             # contract. tl;dr: Path.home() inside the container returns the
@@ -318,7 +323,7 @@ RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/{RECORD_CLI_LOG_NAME}"
 
 # Modules copied into the recorder directory beside each shim that declares
 # response rules. The shim imports them as siblings, so they must be
-# stdlib-only (lint rule CE048) -- they run where coder_eval is not installed.
+# stdlib-only (lint rule CE057) -- they run where coder_eval is not installed.
 SIDECAR_MODULES: tuple[str, ...] = ("argv_match.py",)
 
 # Shadowing any of these breaks the harness rather than the tool under test: the

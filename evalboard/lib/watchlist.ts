@@ -11,6 +11,7 @@
 
 import type { PerRun } from "./overview";
 import type { RunOverviewTask } from "./runs";
+import { isGraded, isPassStatus } from "./status";
 import { timeRatio } from "./timing";
 import { turnRatio } from "./turns";
 
@@ -98,7 +99,10 @@ function runsNewestFirst(perRun: PerRun[]): LoadedRun[] {
         .map((r) => ({ id: r.id, tasks: r.overview!.tasks }));
 }
 
-const isPass = (status: string | null) => status === "SUCCESS";
+// Delegates rather than restating `=== "SUCCESS"`: this file already had to
+// learn about the ungraded bucket, and a second private spelling of "passed"
+// is how one surface ends up disagreeing with the rest.
+const isPass = (status: string | null) => isPassStatus(status);
 
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
 const mean = (xs: number[]) =>
@@ -116,7 +120,9 @@ function stdev(xs: number[]): number {
 function skillPassSeq(runs: LoadedRun[], skill: string): number[] {
     const seq: number[] = [];
     for (const run of runs) {
-        const ts = run.tasks.filter((t) => t.skill === skill);
+        const ts = run.tasks.filter(
+            (t) => t.skill === skill && isGraded(t.status),
+        );
         if (ts.length === 0) continue;
         seq.push(ts.filter((t) => isPass(t.status)).length / ts.length);
     }
@@ -137,6 +143,8 @@ export function leaderboard(runs: LoadedRun[]): LeaderboardRow[] {
     for (const run of runs) {
         for (const t of run.tasks) {
             if (!t.skill) continue;
+            // Ungraded rows leave both sides of the rate — see isGraded.
+            if (!isGraded(t.status)) continue;
             total.set(t.skill, (total.get(t.skill) ?? 0) + 1);
             if (isPass(t.status))
                 passed.set(t.skill, (passed.get(t.skill) ?? 0) + 1);
@@ -202,6 +210,8 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
             const ts = run.tasks.filter((t) => t.skill === skill);
             if (ts.length > 0) appeared++;
             for (const t of ts) {
+                // Ungraded rows leave both sides of the rate — see isGraded.
+                if (!isGraded(t.status)) continue;
                 outcomes++;
                 taskIds.add(t.taskId);
                 if (isPass(t.status)) passes++;
@@ -210,6 +220,14 @@ export function attention(runs: LoadedRun[]): AttentionRow[] {
             }
         }
         if (appeared < floor) continue;
+        // Nothing measured ⇒ nothing to say. Without this, a skill whose rows
+        // were all ungraded fell into `outcomes ? … : 0` below and scored
+        // passRate 0 / failRate 1 — the maximum FAIL_WEIGHT — so a
+        // `coder-eval execute` night would put its most-run skill at the TOP of
+        // an exec-triage hero, described as chronically failing. The same
+        // "never measured" vs "measured and scored zero" confusion CE049 exists
+        // to prevent on the Python side.
+        if (outcomes === 0) continue;
 
         const passRate = outcomes ? passes / outcomes : 0;
         const failRate = 1 - passRate;

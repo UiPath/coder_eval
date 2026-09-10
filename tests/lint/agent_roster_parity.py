@@ -45,15 +45,21 @@ NON_ROSTER_KINDS: frozenset[str] = frozenset({"none", "unknown"})
 # How each built-in agent is spelled in prose. Keyed by the `AgentKind` VALUE so a
 # new built-in fails `test_every_builtin_kind_has_display_names` until its prose
 # name is declared here — the enum stays the trigger, this table is only the
-# spelling. Matching is case-insensitive and substring-based, so "Codex" also
-# covers "OpenAI Codex" and `coder-eval[codex]`.
+# spelling. Matching is case-insensitive and WORD-BOUNDARY anchored (see
+# `missing_agents_in`), so a short name like "Pi" matches the standalone word but
+# NOT "anthropic" / "ci-pipeline" / "copies"; "Codex" still covers "OpenAI Codex"
+# and the bracketed `coder-eval[codex]`.
 AGENT_DISPLAY_NAMES: dict[str, tuple[str, ...]] = {
-    "claude-code": ("Claude Code",),
+    # The hyphenated `claude-code` spelling is listed alongside the prose form so
+    # the word-boundary matcher accepts the packaging-metadata keyword too
+    # (`\bClaude Code\b` would not match the hyphenated form).
+    "claude-code": ("Claude Code", "claude-code"),
     "codex": ("Codex",),
     # Google's harness is named on some surfaces by its model ("Gemini"), which is
     # an acceptable spelling of the same row.
     "antigravity": ("Antigravity", "Gemini"),
     "opencode": ("OpenCode",),
+    "pi": ("Pi",),
 }
 
 
@@ -94,11 +100,12 @@ def roster_kinds() -> list[str]:
 
 def missing_agents_in(text: str, kinds: list[str] | None = None) -> list[str]:
     """Roster kinds that ``text`` names by none of their accepted spellings."""
-    haystack = text.lower()
     return [
         kind
         for kind in (kinds if kinds is not None else roster_kinds())
-        if not any(name.lower() in haystack for name in AGENT_DISPLAY_NAMES.get(kind, (kind,)))
+        if not any(
+            re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE) for name in AGENT_DISPLAY_NAMES.get(kind, (kind,))
+        )
     ]
 
 

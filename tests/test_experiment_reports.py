@@ -1708,3 +1708,102 @@ class TestExperimentReportSnapshots:
         )
         md = ExperimentReportGenerator.generate_experiment_report(result)
         assert_matches_snapshot(md, "experiment_replicates.md")
+
+
+class TestUngradedRenderingInMarkdown:
+    """The Markdown twin of `TestUngradedRenderingInHtml`.
+
+    Five ungraded edits landed on `reports_html.py` with tests and the identical
+    five on `reports_experiment.py` with none, so the two renderers could drift
+    apart while the suite stayed green. These also cover the four new public
+    `reports_stats` helpers, which no test called at all — including
+    `is_env_table_key`, a behaviour change (three key families newly hidden from
+    BOTH Environment tables) that shipped unasserted in either direction.
+    """
+
+    @staticmethod
+    def _ungraded_result():
+        from coder_eval.models import ExperimentResult, VariantAggregate, VariantResult
+        from coder_eval.models.experiment import TaskExperimentSummary
+
+        return ExperimentResult(
+            experiment_id="exec-only",
+            description="an execute run, not yet graded",
+            variant_ids=["a"],
+            task_summaries=[
+                TaskExperimentSummary(
+                    task_id="t",
+                    variant_results=[
+                        VariantResult(
+                            variant_id="a",
+                            task_id="t",
+                            weighted_score=None,
+                            final_status="NOT_GRADED",
+                            duration_seconds=12.0,
+                            total_tokens=900,
+                        )
+                    ],
+                    best_variant="a",
+                    is_tie=True,
+                    score_spread=0.0,
+                )
+            ],
+            variant_aggregates={
+                "a": VariantAggregate(
+                    variant_id="a",
+                    tasks_run=1,
+                    tasks_succeeded=0,
+                    tasks_failed=0,
+                    tasks_error=0,
+                    tasks_not_graded=1,
+                    average_score=None,
+                    average_duration=12.0,
+                )
+            },
+            total_duration_seconds=12.0,
+        )
+
+    def test_the_report_names_the_fourth_bucket_and_publishes_no_zero(self):
+        from coder_eval.reports_experiment import ExperimentReportGenerator
+
+        md = ExperimentReportGenerator.generate_experiment_report(self._ungraded_result())
+
+        assert "Not Graded" in md, "the fourth bucket must be named, or an execute run reads as 0 of 1"
+        # The score CELL, not the whole document — the spread column legitimately
+        # renders 0.000 for a single-variant experiment.
+        score_row = next(line for line in md.splitlines() if line.startswith("| t |"))
+        assert "n/a" in score_row, score_row
+        assert "0.000" not in score_row.split("|")[2], "an unmeasured row rendered as a scored zero"
+
+    def test_duration_and_tokens_survive_an_ungraded_row(self):
+        """Only the SCORE is missing. Dropping the row whole made an all-ungraded
+        experiment render `Avg Duration | N/A` with Tokens absent entirely — the
+        bug `collect_variant_series`' own comment describes."""
+        from coder_eval.reports_stats import collect_variant_series
+
+        series = collect_variant_series(self._ungraded_result())["a"]
+
+        assert series.scores == []
+        assert series.durations == [12.0]
+        assert series.tokens == [900.0]
+
+    def test_format_score_distinguishes_unmeasured_from_zero(self):
+        from coder_eval.reports_stats import UNGRADED_SCORE_TEXT, format_score
+
+        assert format_score(None) == UNGRADED_SCORE_TEXT
+        assert format_score(0.0) == "0.000"
+        assert format_score(None) != format_score(0.0)
+
+    @pytest.mark.parametrize(
+        "key", ["installed_tools", "command_base_path", "reference_digest", "graded_by_api_routing"]
+    )
+    def test_env_table_hides_the_noise_keys(self, key):
+        from coder_eval.reports_stats import is_env_table_key
+
+        assert not is_env_table_key(key)
+
+    def test_env_table_keeps_ordinary_keys(self):
+        from coder_eval.reports_stats import is_env_table_key
+
+        assert is_env_table_key("coder_eval")
+        assert is_env_table_key("api_routing")

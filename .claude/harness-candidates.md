@@ -480,3 +480,12 @@ with the two `action.yml` items above — one considered change to the action's 
   probe failed. Now fixed for this case by running a real shim. Deferred as a general guard:
   "derives its expectation from the thing it checks" is not mechanically detectable; it belongs
   in the review rubric rather than a lint rule.
+
+- [ ] A `_*TurnState` (agent turn-state) attribute that is written but never read
+  outside its own assignment — CE037-class dead accumulator. Surfaced during the
+  Pi harness port: `_PiTurnState.turns_finished` was copied from OpenCode's
+  `steps_finished` (which drives that agent's `finished_without_tokens` guard) but
+  Pi deliberately dropped that guard, leaving the counter dead. Fixed by hand this
+  run. Guard would need cross-method dataflow over each `Agent`-subclass turn-state
+  class (write sites vs read sites), which the AST-only CExxx runner can't express
+  in ~30 min — deferred. Caught in: Pi harness Phase 2 quality review.

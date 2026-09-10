@@ -44,6 +44,7 @@ describe("summarizeListing", () => {
             id: "r",
             tasksSucceeded: 0,
             tasksRun: 0,
+            tasksGraded: 0,
             totalCostUsd: null,
             taskDurationSeconds: null,
             ...overrides,
@@ -57,6 +58,7 @@ describe("summarizeListing", () => {
             costPartial: false,
             tasksSucceeded: 0,
             tasksRun: 0,
+            tasksGraded: 0,
             durationSeconds: null,
             durationPartial: false,
         });
@@ -1254,5 +1256,84 @@ describe("adhocRunDate", () => {
             "adhoc-2026-08-27_19-35-31",
             "2026-05-28_skills-full-codex-gpt54",
         ]);
+    });
+});
+
+describe("ungraded rows leave both sides of every rate", () => {
+    // The three denominators this PR changed had no assertions at all. Each
+    // case below is the arithmetic invariant, not the code shape: a row that
+    // was never measured must leave the numerator AND the denominator, or a
+    // `coder-eval execute` night publishes a measured-looking 0%.
+    function ungradedPerRun(id: string, tasks: RunOverviewTask[]): PerRun {
+        return {
+            id,
+            overview: {
+                id,
+                tasks,
+                totalCostUsd: null,
+                taskDurationSeconds: null,
+                componentShas: [],
+            },
+            reviewTagCounts: {},
+            reviewTagsByTask: {},
+            adhoc: false,
+            title: null,
+        };
+    }
+
+    test("buildTagTaskRows: executed = appearances - matureSkips - ungraded", () => {
+        const TAG = "path-to-ga";
+        const rows = buildTagTaskRows(
+            [
+                ungradedPerRun("r1", [
+                    task({ taskId: "a", tags: [TAG], status: "SUCCESS" }),
+                ]),
+                ungradedPerRun("r2", [
+                    task({ taskId: "a", tags: [TAG], status: "NOT_GRADED" }),
+                ]),
+            ],
+            TAG,
+        );
+
+        expect(rows[0].appearances).toBe(2);
+        expect(rows[0].ungraded).toBe(1);
+        expect(rows[0].executed).toBe(1);
+        expect(rows[0].passRate).toBe(100);
+    });
+
+    test("buildTagTaskRows: an all-ungraded task has no pass rate at all", () => {
+        const TAG = "path-to-ga";
+        const rows = buildTagTaskRows(
+            [
+                ungradedPerRun("r1", [
+                    task({ taskId: "a", tags: [TAG], status: "NOT_GRADED" }),
+                ]),
+            ],
+            TAG,
+        );
+
+        expect(rows[0].executed).toBe(0);
+        expect(rows[0].passRate).toBeNull();
+    });
+
+    test("turnBudgetRateForTasks: an ungraded budgeted row is not a budget miss", () => {
+        // The confirmed miss. `status` is a free string, so neither tsc nor
+        // assertNever could see that a raw `!== "SUCCESS"` books the fourth
+        // category as a failure — it entered `eligible` and never
+        // `withinBudget`, publishing 0%.
+        const withUngraded = turnBudgetRateForTasks([
+            task({ status: "SUCCESS", expectedTurns: 10, visibleTurns: 5 }),
+            task({ status: "NOT_GRADED", expectedTurns: 10, visibleTurns: 99 }),
+        ]);
+
+        expect(withUngraded).toBe(100);
+    });
+
+    test("turnBudgetRateForTasks: an all-ungraded scope reports null, not 0%", () => {
+        expect(
+            turnBudgetRateForTasks([
+                task({ status: "NOT_GRADED", expectedTurns: 10, visibleTurns: 4 }),
+            ]),
+        ).toBeNull();
     });
 });

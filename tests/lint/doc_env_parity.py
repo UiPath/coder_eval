@@ -69,6 +69,21 @@ _ENV_ASSIGNMENT = re.compile(r"(?<![\w./:\\-])((?:" + _PREFIX_ALT + r")[A-Z0-9_]
 _SRC_ENV_READ = re.compile(r"""(?:getenv\(\s*|environ(?:\.get\(\s*|\[\s*))['"]([A-Z][A-Z0-9_]{2,})['"]""")
 _SRC_ENV_VALUE = re.compile(r"""['"]([A-Z][A-Z0-9_]{2,})=[^'"]*['"]""")
 
+# The same two shapes again, but reached through a NAMED CONSTANT rather than an
+# inline literal. `CODER_EVAL_IN_CONTAINER` has a single definition
+# (`models/container_paths.py::IN_CONTAINER_ENV`) and every consumer now spells it
+# `os.environ.get(IN_CONTAINER_ENV)`, so a scanner that recognised only literals
+# would report the repo's own gate as unbacked and push the author to paste the
+# literal back -- the scanner arguing against the SSOT it should reinforce.
+#
+# Resolution is deliberately TWO-STEP, so this stays as strict as it was: a
+# constant counts only when some module actually reads it by name. A bare
+# `CONST = "CODER_EVAL_BOGUS"` that nothing consumes is still unbacked, which is
+# the property `test_src_scan_requires_a_real_consumer_not_any_literal` pins.
+_SRC_ENV_CONST_DEF = re.compile(r"""^([A-Z][A-Z0-9_]{2,})\s*(?::[^=\n]+)?=\s*['"]([A-Z][A-Z0-9_]{2,})['"]\s*$""", re.M)
+_SRC_ENV_CONST_READ = re.compile(r"""(?:getenv\(\s*|environ(?:\.get\(\s*|\[\s*))([A-Z][A-Z0-9_]{2,})\b""")
+_SRC_ENV_CONST_VALUE = re.compile(r"""f['"]\{([A-Z][A-Z0-9_]{2,})\}=[^'"]*['"]""")
+
 
 def settings_env_names() -> set[str]:
     """Uppercased env names Settings actually reads: field names + AliasChoices."""
@@ -89,10 +104,18 @@ def src_env_literals(src_root: Path) -> set[str]:
     """Env-var names ``src/`` actually consumes: direct ``os.getenv``/``os.environ``
     reads plus the NAME side of inline ``"NAME=VALUE"`` child-process literals."""
     names: set[str] = set()
+    const_values: dict[str, str] = {}
+    const_reads: set[str] = set()
     for py in src_root.rglob("*.py"):
         text = py.read_text(encoding="utf-8")
         names.update(_SRC_ENV_READ.findall(text))
         names.update(_SRC_ENV_VALUE.findall(text))
+        const_values.update(dict(_SRC_ENV_CONST_DEF.findall(text)))
+        const_reads.update(_SRC_ENV_CONST_READ.findall(text))
+        const_reads.update(_SRC_ENV_CONST_VALUE.findall(text))
+    # Step two: a constant is backed only if it is BOTH defined as an env name and
+    # read somewhere. Defined-but-unread stays unbacked, exactly as before.
+    names.update(const_values[ident] for ident in const_reads & const_values.keys())
     return names
 
 

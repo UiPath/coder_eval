@@ -225,3 +225,49 @@ describe("historyForTaskInner", () => {
         expect(byRun.r2).toBe(false);
     });
 });
+
+describe("aggregate — ungraded rows", () => {
+    // The parallel of the "mature skip" block above, for the fourth status
+    // category. The denominator changed here with nothing asserting it: an
+    // ungraded row must leave BOTH sides, or a `coder-eval execute` run drags
+    // every task's trend down as though it had failed.
+    test("leave both sides of the pass rate", () => {
+        const { trends } = aggregate([
+            perRun("r1", [task({ status: "SUCCESS" })]),
+            perRun("r2", [task({ status: "NOT_GRADED" })]),
+        ]);
+
+        expect(trends[0].totalRuns).toBe(1);
+        expect(trends[0].successRuns).toBe(1);
+        expect(trends[0].passRate).toBe(1);
+    });
+
+    test("a fully ungraded task reports no runs rather than a 0% pass rate", () => {
+        const { trends } = aggregate([
+            perRun("r1", [task({ status: "NOT_GRADED" })]),
+            perRun("r2", [task({ status: "NOT_GRADED" })]),
+        ]);
+
+        expect(trends[0].totalRuns).toBe(0);
+        expect(trends[0].successRuns).toBe(0);
+        // The assertion this test was missing. It asserted the denominator and
+        // pointedly not the rate, so it passed while `passRate` coalesced to a
+        // literal 0 — which the view rendered as "0%" and the default ascending
+        // sort put at the very top of the page as the worst offender.
+        expect(trends[0].passRate).toBeNull();
+    });
+
+    test("an unmeasured task sorts last, not first, in the default worst-first order", () => {
+        const { trends } = aggregate([
+            perRun("r1", [
+                task({ taskId: "graded", status: "FAILURE" }),
+                task({ taskId: "ungraded", status: "NOT_GRADED" }),
+            ]),
+        ]);
+
+        // A real 0% belongs at the top; "never measured" is not an offender.
+        expect(trends.map((t) => t.taskId)).toEqual(["graded", "ungraded"]);
+        expect(trends[0].passRate).toBe(0);
+        expect(trends[1].passRate).toBeNull();
+    });
+});

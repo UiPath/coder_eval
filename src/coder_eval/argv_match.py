@@ -11,7 +11,7 @@ Everything here takes PLAIN DICTS rather than pydantic models, and imports
 nothing beyond the standard library: ``Sandbox._generate_cli_recorders`` copies
 this file into the recorder directory as a SIDECAR beside every shim that
 declares response rules, and that shim imports it as a sibling while running
-inside the sandbox, where ``coder_eval`` is not installed. Lint rule CE048 keeps
+inside the sandbox, where ``coder_eval`` is not installed. Lint rule CE057 keeps
 the imports stdlib-only.
 
 :class:`MatchSpec` is what ``CliMatch.match_spec`` emits. It is a ``TypedDict``

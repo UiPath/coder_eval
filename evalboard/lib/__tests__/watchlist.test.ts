@@ -299,3 +299,35 @@ describe("empty window", () => {
         expect(data.windowSize).toBe(0);
     });
 });
+
+describe("ungraded rows", () => {
+    // The denominators in leaderboard() and attention() gained an `isGraded`
+    // filter with nothing asserting it. An ungraded row must leave BOTH sides:
+    // counted only in the denominator it reads as a failure, which is exactly
+    // what would put a `coder-eval execute` night at the top of the watchlist.
+    test("leave both sides of a skill's pass rate", () => {
+        const data = buildWatchlist([
+            perRun("2026-01-02", [
+                task({ taskId: "a", skill: "alpha", status: "SUCCESS" }),
+                task({ taskId: "b", skill: "alpha", status: "NOT_GRADED" }),
+            ]),
+        ]);
+
+        expect(data.leaderboard).toEqual([
+            { skill: "alpha", passRate: 1, outcomes: 1 },
+        ]);
+    });
+
+    test("an all-ungraded skill raises no attention at all", () => {
+        const runs = Array.from({ length: 4 }, (_, i) =>
+            perRun(`2026-01-0${4 - i}`, [
+                task({ taskId: "a", skill: "unmeasured", status: "NOT_GRADED" }),
+            ]),
+        );
+
+        const { topAttention, leaderboard } = buildWatchlist(runs);
+
+        expect(topAttention).toHaveLength(0);
+        expect(leaderboard).toEqual([]);
+    });
+});

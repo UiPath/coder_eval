@@ -35,6 +35,7 @@ _FINAL_STATUS_NAMES = frozenset(
         "MAX_TURNS_EXHAUSTED",
         "TOKEN_BUDGET_EXCEEDED",
         "COST_BUDGET_EXCEEDED",
+        "NOT_GRADED",
     }
 )
 

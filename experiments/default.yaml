@@ -39,7 +39,8 @@ defaults:
     # count_cached_input: false
 
   agent:
-    # Agent type (currently only "claude-code" is supported)
+    # Agent type. Built-in kinds: claude-code, codex, antigravity, opencode, pi,
+    # none (plus any plugin-registered kind). claude-code is the run-wide default.
     type: claude-code
 
     # Permission mode for agent actions:

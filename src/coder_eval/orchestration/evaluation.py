@@ -20,7 +20,7 @@ import os
 import shutil
 from pathlib import Path
 
-from ..models import CONTAINER_REFERENCE_DIR, TaskDefinition
+from ..models import CONTAINER_REFERENCE_DIR, IN_CONTAINER_ENV, TaskDefinition
 from ..path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks
 
 
@@ -78,7 +78,7 @@ def resolve_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path 
     # invisible — wrong reference content, wrong reference_comparison scores,
     # wrong judge prompts, no error.
     container_mount = Path(CONTAINER_REFERENCE_DIR)
-    if os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":
+    if os.environ.get(IN_CONTAINER_ENV) == "1":
         if container_mount.is_dir():
             logger.debug("Reference resolved from the container mount at %s", container_mount)
             return container_mount

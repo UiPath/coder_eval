@@ -92,8 +92,16 @@ def test_record_route_environment_info_handles_every_route():
     pyright can't check the isinstance chain. Also covers the simulator_route ->
     simulator_routing seam directly (not just via a shared alias with route)."""
     for r in _INSTANCES:
+        # prior_result=None: a detached grade takes a different branch that
+        # records the GRADING host's route under graded_by_* instead of
+        # overwriting the run's. This test covers the ordinary run.
         fake = SimpleNamespace(
-            route=r, eval_route=r, simulator_route=r, result=SimpleNamespace(environment_info={}), agent=None
+            route=r,
+            eval_route=r,
+            simulator_route=r,
+            result=SimpleNamespace(environment_info={}),
+            agent=None,
+            prior_result=None,
         )
         Orchestrator._record_route_environment_info(fake)  # type: ignore[arg-type]
         env = fake.result.environment_info

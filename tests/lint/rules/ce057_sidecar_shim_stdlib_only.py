@@ -1,4 +1,4 @@
-"""CE048: a sidecar module copied beside a generated sandbox shim stays stdlib-only.
+"""CE057: a sidecar module copied beside a generated sandbox shim stays stdlib-only.
 
 ``Sandbox._generate_cli_recorders`` writes every module in
 ``models.sandbox.SIDECAR_MODULES`` into the recorder directory beside each
@@ -32,7 +32,7 @@ from tests.lint.rules.base import BaseRule
 
 
 class SidecarShimStdlibOnly(BaseRule):
-    id = "CE048"
+    id = "CE057"
 
     # Derived from the writer's own list, so moving the module moves the rule
     # with it. A hardcoded second copy would match nothing after such a move and
@@ -68,7 +68,7 @@ class SidecarShimStdlibOnly(BaseRule):
             node,
             f"'{module}' is imported by a module copied beside generated sandbox shims, which run "
             "where coder_eval and its dependencies are not installed. Use the standard library, or "
-            f"add '{root}' to CE048's STDLIB_ALLOWED if it really is stdlib.",
+            f"add '{root}' to CE057's STDLIB_ALLOWED if it really is stdlib.",
         )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:

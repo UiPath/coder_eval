@@ -52,7 +52,7 @@ def _run_shim(sandbox_dir, tool: str, args: list[str]) -> subprocess.CompletedPr
 # first does not. Both are ASCII-only fixtures on purpose (see
 # test_rendered_shim_is_pure_ascii). Note neither shape carries argv_match.py's
 # body any more -- the sidecar's own "stubs, does not proxy" property is NOT
-# covered by the invariants asserted over these two shapes; CE048 covers its
+# covered by the invariants asserted over these two shapes; CE057 covers its
 # imports, and nothing covers its exec surface.
 SHIM_SHAPES = (
     RecordedCli(tool="uip"),
@@ -504,7 +504,7 @@ class TestRenderedSource:
 
         While `argv_match.py` was SPLICED into the shim,
         `test_rendered_shim_does_not_execute_anything` scanned its body too. As a
-        separate file it is no longer in that scan, and CE048 cannot stand in:
+        separate file it is no longer in that scan, and CE057 cannot stand in:
         `os` is on its STDLIB_ALLOWED (the matcher genuinely needs it), so
         `os.system(...)` in the sidecar would pass lint, typecheck, and ship into
         every sandbox. "It stubs a tool; it does not proxy one" is a documented
