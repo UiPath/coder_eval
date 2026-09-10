@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from coder_eval.harbor import packager
 from coder_eval.harbor.packager import (
     DEFAULT_WORKDIR,
     CriteriaNotExportableError,
@@ -21,6 +22,23 @@ from coder_eval.harbor.packager import (
     export_task,
 )
 from coder_eval.models import TaskDefinition
+
+
+_REAL_INSPECT_IMAGE_WORKDIR = packager._inspect_image_workdir
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker_inspection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep this module hermetic: never let ``export_task`` shell out to a real
+    ``docker image inspect``, whose answer depends on what happens to be
+    cached on the machine running the tests (an image literally named
+    ``byod-custom-image:0.1.0`` -- this file's own placeholder BYOD image
+    name -- built by an unrelated docker-integration test elsewhere in the
+    suite answered ``/work`` here once, silently flipping this file's
+    DEFAULT_WORKDIR assertions). Tests that care about the inspection path
+    itself override this via monkeypatch locally.
+    """
+    monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: None)
 
 
 _BASE_TASK: dict[str, object] = {
@@ -278,7 +296,14 @@ class TestCoderEvalAgentBaseImageWarning:
         result = export_task(task_file, tmp_path / "out")
         assert any("coder-eval-agent" in w for w in result.warnings)
 
-    def test_no_warning_when_prebuilt_image_names_coder_eval_agent(self, tmp_path: Path) -> None:
+    def test_no_warning_when_prebuilt_image_names_coder_eval_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Give inspection a real-looking answer -- a None here would ALSO warn
+        # ("Could not determine ...'s own WORKDIR"), whose text incidentally
+        # contains "coder-eval-agent" (the image name), which is not the
+        # warning this test is checking for.
+        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: "/work")
         task_file = _write_task(
             tmp_path, {"sandbox": {"driver": "docker", "docker": {"image": "coder-eval-agent:0.12.0"}}}
         )
@@ -306,3 +331,75 @@ class TestPrePostRunWarnings:
         task_file = _write_task(tmp_path)
         result = export_task(task_file, tmp_path / "out")
         assert not any("pre_run" in w or "post_run" in w for w in result.warnings)
+
+
+class TestPrebuiltImageWorkdirInspection:
+    """A pre-built (no ``dockerfile_path``) image has no Dockerfile ``WORKDIR`` line
+    to read, so the packager shells out to ``docker image inspect`` for it -- a
+    real bug this closes: defaulting to ``/app`` unconditionally exported a task
+    that failed at Harbor verify time with exit 127, because Harbor's
+    ``docker exec -w`` (unlike ``docker run -w``) refuses to chdir into a path
+    that doesn't already exist in the image (confirmed live against
+    ``coder-eval-agent:latest``, whose real WORKDIR is ``/work``).
+    """
+
+    def test_uses_the_inspected_workdir_when_docker_reports_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: "/work")
+        task_file = _write_task(tmp_path)  # _BASE_TASK's image is byod-custom-image:0.1.0
+
+        result = export_task(task_file, tmp_path / "out")
+
+        assert result.workdir == "/work"
+        assert not any("Could not determine" in w for w in result.warnings)
+
+    def test_falls_back_to_default_and_warns_when_inspection_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: None)
+        task_file = _write_task(tmp_path)
+
+        result = export_task(task_file, tmp_path / "out")
+
+        assert result.workdir == DEFAULT_WORKDIR
+        assert any("Could not determine" in w and "byod-custom-image:0.1.0" in w for w in result.warnings)
+
+    def test_explicit_working_dir_wins_over_inspection(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: "/from-inspection")
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"working_dir": "/explicit"}}})
+
+        result = export_task(task_file, tmp_path / "out")
+
+        assert result.workdir == "/explicit"
+
+    def test_inspect_image_workdir_parses_real_subprocess_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Exercise the real (un-mocked) helper against a stubbed ``subprocess.run``.
+
+        The module-wide autouse fixture stubs out ``_inspect_image_workdir``
+        itself for hermeticity, so this restores the real function first --
+        it is the one thing here under test.
+        """
+        monkeypatch.setattr(packager, "_inspect_image_workdir", _REAL_INSPECT_IMAGE_WORKDIR)
+
+        class _FakeResult:
+            returncode = 0
+            stdout = "/work\n"
+
+        def _fake_run(cmd, **kwargs):
+            assert cmd[:3] == ["docker", "image", "inspect"]
+            return _FakeResult()
+
+        monkeypatch.setattr(packager.subprocess, "run", _fake_run)
+        assert packager._inspect_image_workdir("some-image:tag") == "/work"
+
+    def test_inspect_image_workdir_returns_none_when_docker_binary_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(packager, "_inspect_image_workdir", _REAL_INSPECT_IMAGE_WORKDIR)
+
+        def _raise(cmd, **kwargs):
+            raise FileNotFoundError("docker not found")
+
+        monkeypatch.setattr(packager.subprocess, "run", _raise)
+        assert packager._inspect_image_workdir("some-image:tag") is None
