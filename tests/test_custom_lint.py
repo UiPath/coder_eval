@@ -155,6 +155,60 @@ class TestCE046EnvInfoSpreadsSuper:
 
 
 @pytest.mark.lint
+class TestCE057SidecarShimStdlibOnly:
+    """CE057 flags a non-stdlib import in a module copied beside a generated shim."""
+
+    @staticmethod
+    def _run(src: str, *, sidecar: bool = True):
+        import ast
+
+        from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
+
+        path = "src/coder_eval/argv_match.py" if sidecar else "src/coder_eval/invocation_log.py"
+        return SidecarShimStdlibOnly(path).check(ast.parse(src))
+
+    def test_flags_package_import(self):
+        assert self._run("from coder_eval.models import FlagMatch")
+        assert self._run("import coder_eval.models")
+
+    def test_flags_third_party_import(self):
+        assert self._run("import pydantic")
+        assert self._run("from pydantic import BaseModel")
+
+    def test_flags_relative_import(self):
+        assert self._run("from .models import FlagMatch")
+
+    def test_flags_a_future_import(self):
+        """The likeliest accidental addition -- and the one whose generic message
+        would have been actively misleading, since widening STDLIB_ALLOWED to admit
+        `__future__` retires the guard instead of fixing the import."""
+        violations = self._run("from __future__ import annotations")
+        assert violations
+        assert "drop the line" in violations[0].message
+
+    def test_allows_stdlib(self):
+        assert not self._run("import re\nimport json")
+
+    def test_ignores_files_that_are_not_a_sidecar(self):
+        # invocation_log.py renders the shim; it is not itself copied beside one.
+        assert not self._run("from coder_eval.models import RecordedCli", sidecar=False)
+
+    def test_the_rule_guards_a_file_that_actually_exists(self):
+        """A rule matching nothing passes vacuously while reading as a guarantee --
+        which is what a move of the sidecar module would otherwise cause."""
+        from pathlib import Path
+
+        from coder_eval.models import SIDECAR_MODULES
+        from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
+
+        package = Path(__file__).resolve().parents[1] / "src" / "coder_eval"
+        for module in SIDECAR_MODULES:
+            target = package / module
+            assert target.is_file(), f"SIDECAR_MODULES names {module}, which does not exist"
+            assert SidecarShimStdlibOnly(str(target))._sidecar, f"CE057 does not match {target}"
+
+
+@pytest.mark.lint
 class TestCE017ModelsLazyAgentImports:
     """CE017 flags only module-level agents/plugins imports inside models/."""
 
@@ -1041,6 +1095,41 @@ class TestCE030DocSchemaParity:
             real = set(by_name[model_name].model_fields)
             for field_name in fields:
                 assert field_name in real, f"EXEMPT[{model_name}] names non-field {field_name!r}"
+
+    def test_claude_md_names_every_registered_model(self):
+        """CLAUDE.md carries a prose copy of the CE030 registry, and it had already
+        gone stale (four names after a sixth was registered).
+
+        Nothing sensed it, because CE030 checks model FIELDS against a doc page, not
+        its own registry against CLAUDE.md. A prose copy of a registry with no sensor
+        decays silently, which is the whole failure class CE030 exists for.
+        """
+        from tests.lint.doc_schema_parity import DOCUMENTED_MODELS
+
+        text = (self.REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        sentence = next(
+            (line for line in text.splitlines() if "models CE030 tracks" in line),
+            None,
+        )
+        assert sentence, "CLAUDE.md no longer describes CE030's tracked models; update this test"
+        for model, _ in DOCUMENTED_MODELS:
+            assert f"`{model.__name__}`" in sentence, (
+                f"CLAUDE.md's CE030 list omits {model.__name__}, which is registered in tests/lint/doc_schema_parity.py"
+            )
+
+    def test_record_cli_models_are_registered_for_doc_parity(self):
+        """A future trim of the registry must fail rather than silently drop coverage.
+
+        `RecordedCli` / `CliResponse` are the `record_cli` authoring surface -- the
+        fields a task author writes by hand -- so an undocumented field on either is
+        exactly the P0/P1 shape CE030 exists to catch.
+        """
+        from coder_eval.models import CliResponse, RecordedCli
+        from tests.lint.doc_schema_parity import DOCUMENTED_MODELS
+
+        registered = {model for model, _ in DOCUMENTED_MODELS}
+        for model in (RecordedCli, CliResponse):
+            assert model in registered, f"{model.__name__} is no longer registered with CE030"
 
     def test_detects_an_undocumented_field(self):
         from pydantic import BaseModel, Field

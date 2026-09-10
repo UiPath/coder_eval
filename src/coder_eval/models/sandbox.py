@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from coder_eval.models.cli_match import CliMatch
 from coder_eval.models.container_paths import CONTAINER_WORK_DIR, RESERVED_CONTAINER_DIRS
 from coder_eval.models.merge_strategy import MergeField
 from coder_eval.models.templates import TemplateSource
@@ -320,6 +321,11 @@ RECORD_CLI_DIR = "cli_mocks"
 RECORD_CLI_LOG_NAME = "calls.jsonl"
 RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/{RECORD_CLI_LOG_NAME}"
 
+# Modules copied into the recorder directory beside each shim that declares
+# response rules. The shim imports them as siblings, so they must be
+# stdlib-only (lint rule CE057) -- they run where coder_eval is not installed.
+SIDECAR_MODULES: tuple[str, ...] = ("argv_match.py",)
+
 # Shadowing any of these breaks the harness rather than the tool under test: the
 # shim is a script run by an interpreter, and its directory goes FIRST on a PATH
 # the orchestrator also reuses for run_command criteria. `tool: python3` made the
@@ -328,6 +334,40 @@ RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/{RECORD_CLI_LOG_NAME}"
 RECORD_CLI_RESERVED_TOOLS = frozenset(
     {"python", "python3", "py", "env", "sh", "bash", "zsh", "cmd", "node", "uv", "git"}
 )
+
+
+class CliResponse(BaseModel):
+    """One canned response, served when an invocation matches ``when``.
+
+    The reason a shadowed tool can answer `uip ixp dummy1` and `uip ixp dummy2`
+    differently instead of returning one fixed pair of streams for everything an
+    agent types. Rules are tried in declaration order and the FIRST match wins,
+    so the specific rule goes above the general one; an invocation matching no
+    rule falls back to the entry's own ``exit_code`` / ``stdout`` / ``stderr``.
+
+    ``exit_code`` defaults to 0 here, the opposite of :class:`RecordedCli`: a rule
+    exists because the author described this exact invocation, so the natural
+    reading is "and this is what it answers", whereas an undescribed one should
+    look like a tool that failed rather than a silent success.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    when: CliMatch = Field(
+        description=(
+            'Pattern the invocation must match, e.g. {verb: "ixp dummy1"}. Always a mapping -- same '
+            "facets and same matching semantics as the cli_called criterion, so the pattern that "
+            "serves a response is the pattern that grades it"
+        )
+    )
+    exit_code: int = Field(
+        default=0,
+        ge=0,
+        le=255,
+        description="Exit status the shim returns for a matching invocation. Defaults to 0 (success)",
+    )
+    stdout: str = Field(default="", description="Text the shim writes to stdout for a matching invocation")
+    stderr: str = Field(default="", description="Text the shim writes to stderr for a matching invocation")
 
 
 class RecordedCli(BaseModel):
@@ -339,6 +379,11 @@ class RecordedCli(BaseModel):
     ``cli_called`` criterion reads by default, so a task asserts on what actually
     ran without hand-rolling a mock and without the record shape being a contract
     between two repositories.
+
+    The fields below are what every invocation gets; ``responses`` overrides them
+    per invocation, so one shadowed ``uip`` can answer ``ixp dummy1`` and
+    ``ixp dummy2`` differently — what an agent needs when its next step depends on
+    what the tool just told it.
 
     It stubs a tool; it does not proxy one. A test that needs a REAL executable's
     behavior recorded on the way through still supplies its own wrapper under
@@ -374,6 +419,115 @@ class RecordedCli(BaseModel):
             "would, so an agent reads a plausible error rather than silence"
         ),
     )
+    # Plain Field, not MergeField: `RecordedCli` is never a merge root. The
+    # enclosing `SandboxConfig.record_cli` is a `replace` list, so a later layer
+    # substitutes the whole list of entries and no per-entry strategy is ever
+    # consulted. A strategy annotation here would read as a knob and be inert.
+    responses: list[CliResponse] = Field(
+        default_factory=list,
+        description=(
+            "Per-invocation responses, tried in order until one matches; the fields above are the "
+            "fallback for an invocation none of them claim. Use it when the agent's next step "
+            "depends on what the tool answered -- `ixp projects list` returning a project the agent "
+            "then acts on, say -- instead of one fixed reply to everything. A config layer that sets "
+            "record_cli replaces the whole list of entries, this one included"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_responses_are_reachable(self) -> RecordedCli:
+        """Reject a rule an earlier rule already claims.
+
+        First-match-wins means a rule below a more general one can never answer.
+        Silence there would be out of step with the rest of this authoring
+        surface, which hard-errors on every declaration that cannot take effect:
+        a `verb_any_of` entry prefixed by another, a predicate on an ignored
+        flag, an empty `positional`, two entries writing the same shim filename.
+
+        Deliberately narrow, because "A matches everything B matches" is not
+        decidable in general. Two sound cases only: an exact duplicate, and a
+        verb-only A whose verb prefixes B's under the same flag parsing.
+        """
+        specs = [response.when.match_spec for response in self.responses]
+        for later, spec in enumerate(specs):
+            for earlier, prior in enumerate(specs[:later]):
+                if prior == spec:
+                    reason = "is an exact duplicate of"
+                elif (
+                    prior["positional"] is None
+                    and prior["flags"] is None
+                    # BOTH sides free of flag predicates, not just the earlier
+                    # one: a predicate makes its flag known and value-bearing in
+                    # that rule's parse only. `--profile prod ixp projects get`
+                    # leaves `prod` positional for a verb-only `ixp projects`,
+                    # which therefore does NOT match, while a later
+                    # `ixp projects get` + `flags: {profile: prod}` does -- so the
+                    # later rule is reachable and rejecting it was wrong.
+                    and spec["flags"] is None
+                    and prior["value_flags"] == spec["value_flags"]
+                    and prior["ignore_flags"] == spec["ignore_flags"]
+                    and spec["verb_spellings"]
+                    and all(
+                        any(tokens[: len(prefix)] == prefix for prefix in prior["verb_spellings"])
+                        for tokens in spec["verb_spellings"]
+                    )
+                ):
+                    reason = "is already claimed by the more general"
+                else:
+                    continue
+                msg = (
+                    f"record_cli tool {self.tool!r}: responses[{later}] {reason} responses[{earlier}], "
+                    "so it can never answer -- the first matching rule wins. Put the specific rule "
+                    "above the general one, or drop the duplicate."
+                )
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_responses_are_evaluable(self) -> RecordedCli:
+        """Prove every rule can actually be MATCHED, not merely parsed.
+
+        The shim catches a matcher fault so a broken rule cannot turn the stub into
+        a crashing executable, and books ``rule_error`` on the record. But
+        ``cli_called`` can only score that 0.0 -- the log lives in the sandbox the
+        agent writes to, so a fault there cannot be attributed to the task author
+        and must not escalate (see the comment in ``criteria/cli_called.py``).
+
+        So the attribution has to happen HERE, before a sandbox exists and where
+        nothing the agent does can participate: run the real matcher over each rule
+        and let an unevaluable spec be a load-time ValidationError. Exercises both
+        branches -- an argv rebuilt from the rule's own pattern (so the rule
+        matches) and an empty argv (so it does not) -- because a predicate can raise
+        on one path and not the other.
+        """
+        from coder_eval.argv_match import select_rule
+
+        if not self.responses:
+            return self
+        # Building the probe argvs reads the same spec the matcher will, so it sits
+        # INSIDE the guard: a spec malformed enough to break this loop is exactly
+        # the kind that must surface as a clean authoring error, not a TypeError
+        # escaping a validator.
+        try:
+            rules = [
+                {"when": response.when.match_spec, "exit": response.exit_code, "stdout": "", "stderr": ""}
+                for response in self.responses
+            ]
+            probes: list[list[str]] = [[]]
+            for spec in (rule["when"] for rule in rules):
+                for spelling in spec["verb_spellings"] or [[]]:
+                    probes.append([*spelling, *(spec["positional"] or [])])
+            for argv in probes:
+                select_rule(rules, argv)  # type: ignore[arg-type]
+        except Exception as exc:
+            msg = (
+                f"record_cli tool {self.tool!r}: a response rule cannot be evaluated "
+                f"({type(exc).__name__}: {exc}). The generated shim would swallow this and serve "
+                "the entry fallback for every invocation, so the agent would never see the "
+                "responses this task describes. Fix the `when:` pattern."
+            )
+            raise ValueError(msg) from exc
+        return self
 
     @field_validator("tool")
     @classmethod
@@ -396,8 +550,23 @@ class RecordedCli(BaseModel):
                 + f"Reserved: {reserved}"
             )
             raise ValueError(msg)
-        if v == RECORD_CLI_LOG_NAME:
+        # Folded for the same reason as the reserved set: on a case-insensitive
+        # filesystem `CALLS.JSONL` is the seeded log, and the shim write would hit
+        # it -- reported as a confusing duplicate-filename error at setup instead.
+        if v.lower() == RECORD_CLI_LOG_NAME:
             raise ValueError(f"record_cli tool {v!r} would overwrite the invocation log criteria read")
+        # Case-folded like the reserved check above: APFS and NTFS are
+        # case-insensitive, so `ARGV_MATCH.PY` names the same inode as the
+        # sidecar. The sidecar write would then clobber the agent's shim without
+        # `_generate_cli_recorders`' per-tool exists() guard ever firing.
+        if v.lower() in {module.lower() for module in SIDECAR_MODULES}:
+            names = ", ".join(sorted(SIDECAR_MODULES))
+            msg = (
+                f"record_cli tool {v!r} collides with a module the recorder writes beside the shim "
+                f"({names}); the shim imports it as a sibling, so shadowing it breaks response "
+                "dispatch for every entry. Declare a different name."
+            )
+            raise ValueError(msg)
         if v.lower().endswith((".cmd", ".bat")):
             raise ValueError(f"record_cli tool {v!r} collides with the generated Windows twin; declare the bare name")
         return v
@@ -463,10 +632,11 @@ class SandboxConfig(BaseModel):
             "Executables to shadow with a generated recording shim. The sandbox writes each shim "
             f"into '{RECORD_CLI_DIR}/' and PATH-prepends that directory, so the agent's calls are "
             f"recorded as JSON Lines in '{RECORD_CLI_LOG}' — the log a 'cli_called' criterion reads "
-            "by default. Use instead of hand-writing a mock under mock_path_dirs when all the test "
-            "needs is a faithful record of what ran plus a canned exit status and message. It does "
-            "NOT serve per-invocation responses and does NOT proxy the real executable; supply your "
-            "own mock for either. Replaced (not merged) across config layers, like mock_path_dirs."
+            "by default. Use instead of hand-writing a mock under mock_path_dirs when the test needs "
+            "a faithful record of what ran plus canned output -- one reply per entry, or a different "
+            "one per invocation via that entry's 'responses'. It does NOT proxy the real executable "
+            "(nothing is run, so no network, auth, or side effect); supply your own mock for that. "
+            "Replaced (not merged) across config layers, like mock_path_dirs."
         ),
     )
 

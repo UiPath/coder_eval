@@ -6,7 +6,12 @@ shim template `SandboxConfig.record_cli` renders, and `parse_log`, which the
 
 The rendered script runs INSIDE the sandbox, where ``coder_eval`` is not
 installed, so it imports nothing from this package: its configuration arrives as
-embedded literals and everything else comes from the standard library.
+literals, and everything else comes from the standard library. The one exception
+is the argv matcher that dispatches its per-invocation responses -- copied into
+the recorder directory as a SIDECAR module beside the shim
+(:mod:`coder_eval.argv_match`, stdlib-only for exactly that reason) and imported
+as a sibling, so the shim dispatches on the very module the ``cli_called``
+criterion grades with.
 
 Keeping the template here rather than inline in :mod:`coder_eval.sandbox` lets
 :func:`render_recorder` be exercised directly (render, execute, read the log)
@@ -15,13 +20,17 @@ without standing up a sandbox.
 
 import json
 import sys
+from importlib import resources
 
-from coder_eval.models import RecordedCli
+from coder_eval.models import RECORD_CLI_LOG_NAME, SIDECAR_MODULES, RecordedCli
 
 
-# Written beside the shims, inside the generated recorder directory, so the log
-# travels with them if the sandbox root moves.
-LOG_FILENAME = "calls.jsonl"
+# The shim imports exactly one of them -- the argv matcher. A second sidecar
+# would need its own import line, so this unpacks rather than indexing: adding
+# one is then a loud failure here instead of a silently un-imported file.
+(_SIDECAR_MODULE,) = SIDECAR_MODULES
+_SIDECAR_MODULE_STEM = _SIDECAR_MODULE.removesuffix(".py")
+
 
 _TEMPLATE = '''\
 #!{interpreter}
@@ -32,6 +41,7 @@ the format the `cli_called` success criterion reads. Do not edit: regenerated on
 every sandbox setup.
 """
 
+import importlib.util
 import json
 import os
 import sys
@@ -41,13 +51,19 @@ TOOL = {tool!r}
 EXIT_CODE = {exit_code!r}
 STDOUT_TEXT = {stdout!r}
 STDERR_TEXT = {stderr!r}
+# Per-invocation responses in declaration order, empty when the entry declared
+# none -- in which case every invocation gets the three defaults above.
+RULES = {rules!r}
 
 SHIM_DIR = os.path.dirname(os.path.abspath(__file__))
+# Set by the sidecar import block below when the matcher could not be imported.
+SIDECAR_ERROR = None
+{sidecar_import}
 LOG_PATH = os.path.join(SHIM_DIR, {log_filename!r})
 LOG_ERROR_PATH = LOG_PATH + ".error"
 
 
-def record(argv, exit_code):
+def record(argv, exit_code, rule, rule_error):
     """Append this invocation to the log.
 
     Best-effort: a logging failure must never break the command the agent ran,
@@ -58,6 +74,25 @@ def record(argv, exit_code):
     exists instead of a flattened command line. stdin is deliberately never
     read: it would block whenever the sandbox leaves it on an open pipe, and in
     passthrough mode it would consume the payload the real tool needs.
+
+    `rule` is the index of the response rule that answered, recorded only when
+    one did. Without it, "no rule matched, so this is the default" and "rule 2
+    answered, and happens to look like the default" are indistinguishable in the
+    log -- the first question asked when an expected canned response does not
+    arrive.
+
+    `rule_error` is booked when rule evaluation RAISED, and it is what stops an
+    eval-config fault from reading as a clean no-match: the agent got fallback
+    output the task never described, so `cli_called` fails the whole log on it
+    rather than scoring a run whose responses were wrong.
+
+    `sidecar_error` is the same idea one step earlier: the matcher module beside
+    this script could not be IMPORTED, so no rule could be tried at all. It is
+    booked on every record rather than returned per invocation, because the
+    import happens once at startup and fails for the whole process. Recording
+    the call anyway is the point -- a shim that answers and logs NOTHING is
+    indistinguishable from a tool the agent never ran, which is how a
+    `max_count: 0` guard over a forbidden call once scored a silent pass.
     """
     entry = {{
         "ts": round(time.time(), 3),
@@ -65,6 +100,12 @@ def record(argv, exit_code):
         "argv": list(argv),
         "exit": exit_code,
     }}
+    if rule is not None:
+        entry["rule"] = rule
+    if rule_error is not None:
+        entry["rule_error"] = rule_error
+    if SIDECAR_ERROR is not None:
+        entry["sidecar_error"] = SIDECAR_ERROR
     try:
         # ensure_ascii escapes non-ASCII and any stray surrogate from
         # undecodable argv bytes, so an exotic argument cannot make this write
@@ -82,25 +123,123 @@ def record(argv, exit_code):
             pass
 
 
-def main(argv):
-    """Record the invocation, then fail like the tool would with nothing behind it.
+def respond(argv):
+    """Pick this invocation's (exit code, stdout, stderr, rule index, rule error).
 
-    Nothing is executed: no network, no auth, no side effects. A test that needs
+    First matching rule wins; whatever no rule claims gets the defaults. The
+    sidecar import above is emitted only when RULES is non-empty, so the RULES
+    half of this guard is what keeps `select_rule` from being NAMED when it was
+    never imported -- and the `select_rule is None` half covers the import being
+    emitted but having failed, which `record` reports via SIDECAR_ERROR.
+    """
+    if not RULES or select_rule is None:
+        return EXIT_CODE, STDOUT_TEXT, STDERR_TEXT, None, None
+    try:
+        selected = select_rule(RULES, list(argv))
+    except Exception as exc:
+        # Best-effort, like the log write: a matcher fault must not turn the stub
+        # into a crashing executable, which the agent would read as the tool
+        # itself breaking in a way the task never described. Unlike the log
+        # write it is also RETURNED, so the record says what happened -- an
+        # untraceable fallback here scores the task as if the agent had never
+        # made the call at all.
+        sys.stderr.write("coder_eval recorder: response matching failed: %r\\n" % (exc,))
+        return EXIT_CODE, STDOUT_TEXT, STDERR_TEXT, None, repr(exc)
+    if selected is None:
+        return EXIT_CODE, STDOUT_TEXT, STDERR_TEXT, None, None
+    index, rule = selected
+    return rule["exit"], rule["stdout"], rule["stderr"], index, None
+
+
+def main(argv):
+    """Answer the invocation from the canned responses, and record what happened.
+
+    Nothing is executed: no network, no auth, no side effects -- a response is
+    text the task author wrote, never the real tool's output. A test that needs
     the real tool's behavior recorded instead should supply its own wrapper under
-    mock_path_dirs -- proxying a live executable is a different job from stubbing
+    mock_path_dirs: proxying a live executable is a different job from stubbing
     one, and this shim deliberately does only the second.
     """
-    record(argv[1:], EXIT_CODE)
-    if STDOUT_TEXT:
-        sys.stdout.write(STDOUT_TEXT)
-    if STDERR_TEXT:
-        sys.stderr.write(STDERR_TEXT)
-    return EXIT_CODE
+    args = argv[1:]
+    exit_code, stdout_text, stderr_text, rule, rule_error = respond(args)
+    record(args, exit_code, rule, rule_error)
+    if stdout_text:
+        sys.stdout.write(stdout_text)
+    if stderr_text:
+        sys.stderr.write(stderr_text)
+    return exit_code
 
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
 '''
+
+
+# Rendered into the shim only when the entry declares rules. Every line of the
+# comment is addressed at whoever opens a generated shim inside a sandbox, which
+# is why the reasoning lives in the emitted text rather than only here.
+#
+# The module name is derived from SIDECAR_MODULES rather than written out, so
+# renaming the sidecar cannot leave this import pointing at a file that no
+# longer exists -- the one failure the write side would not catch.
+_SIDECAR_IMPORT = f"""\
+# {_SIDECAR_MODULE} is written beside this shim by coder_eval SandboxConfig.record_cli.
+# Loaded by ABSOLUTE PATH, not by name: a plain `import {_SIDECAR_MODULE_STEM}` resolves
+# through sys.path, so an unrelated {_SIDECAR_MODULE_STEM} earlier on it (PYTHONPATH, the
+# cwd, site-packages) would win over the file written beside this shim -- silently
+# on a module that happens to export select_rule.
+#
+# This directory is dropped from sys.path first, and deliberately NOT re-added:
+# it is agent-writable and holds one file per shadowed tool, so a tool named
+# `typing.py` here would shadow the matcher's OWN stdlib imports (which still
+# resolve through sys.path while it executes) and break every rules-bearing shim
+# in the sandbox. Comparison is by realpath because sys.path[0] is resolved
+# while SHIM_DIR, from abspath(__file__), is not.
+#
+# Bytecode is off first, so loading the sidecar cannot leave a __pycache__/
+# directory here for a file_check criterion or an artifact diff to trip over.
+sys.dont_write_bytecode = True
+_here = os.path.realpath(SHIM_DIR)
+sys.path[:] = [_p for _p in sys.path if os.path.realpath(_p or ".") != _here]
+try:
+    # A private module name, so this never collides in sys.modules with a real
+    # {_SIDECAR_MODULE_STEM} the sandbox may legitimately have installed.
+    _spec = importlib.util.spec_from_file_location(
+        "_coder_eval_{_SIDECAR_MODULE_STEM}", os.path.join(SHIM_DIR, {_SIDECAR_MODULE!r})
+    )
+    if _spec is None or _spec.loader is None:
+        raise ImportError("could not build a module spec for the argv matcher sidecar")
+    _sidecar = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_sidecar)
+    select_rule = _sidecar.select_rule
+except Exception as _exc:
+    # Never fatal: a shim that dies here is a tool that is ON PATH, answers
+    # nothing, and RECORDS NOTHING -- byte-identical in the log to a call the
+    # agent never made, which is how `max_count: 0` over a forbidden call scored
+    # a silent pass. Fall back to the entry defaults and let `record` book the
+    # fault on every line so the log is untrustworthy rather than empty.
+    select_rule = None
+    SIDECAR_ERROR = repr(_exc)
+"""
+
+
+def sidecar_source(module: str) -> str:
+    """The source of one sidecar module, to write beside a generated shim.
+
+    Read as a package resource rather than copied off the filesystem, so a
+    zipimported install still works -- and never reconstructed or
+    re-implemented: the shim must dispatch on the SAME matcher the
+    ``cli_called`` criterion grades with, and every transformation in between is
+    a place the two could diverge.
+
+    Raises:
+        ValueError: ``module`` is not a declared sidecar. The name is joined onto
+            the package directory, so an unvetted one reads an arbitrary module
+            (or escapes the package via ``..``).
+    """
+    if module not in SIDECAR_MODULES:
+        raise ValueError(f"{module!r} is not a declared sidecar module; expected one of {SIDECAR_MODULES}")
+    return resources.files("coder_eval").joinpath(module).read_text(encoding="utf-8")
 
 
 def render_recorder(spec: RecordedCli, interpreter: str | None = None) -> str:
@@ -110,14 +249,30 @@ def render_recorder(spec: RecordedCli, interpreter: str | None = None) -> str:
     the running interpreter). A ``#!/usr/bin/env python3`` shebang resolves
     through the same PATH the recorder dir is prepended to, so `tool: python3`
     made the shim re-exec itself forever.
+
+    The sidecar import is emitted only when the entry declares ``responses``: a
+    shim that answers every invocation the same way never consults the matcher,
+    and leaving the import out keeps the common shim runnable on its own, with
+    no sibling file to write.
     """
+    rules = [
+        {
+            "when": response.when.match_spec,
+            "exit": response.exit_code,
+            "stdout": response.stdout,
+            "stderr": response.stderr,
+        }
+        for response in spec.responses
+    ]
     return _TEMPLATE.format(
         interpreter=interpreter or sys.executable,
         tool=spec.tool,
         exit_code=spec.exit_code,
         stdout=spec.stdout,
         stderr=spec.stderr,
-        log_filename=LOG_FILENAME,
+        rules=rules,
+        sidecar_import=_SIDECAR_IMPORT if rules else "",
+        log_filename=RECORD_CLI_LOG_NAME,
     )
 
 

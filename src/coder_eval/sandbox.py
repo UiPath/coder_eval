@@ -15,11 +15,12 @@ from pathlib import Path
 
 from .errors.checker_misuse import CheckerMisuseError
 from .fs_permissions import RESTRICTED_MODE, set_permissions
-from .invocation_log import render_recorder
+from .invocation_log import render_recorder, sidecar_source
 from .models import (
     IN_CONTAINER_ENV,
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
+    SIDECAR_MODULES,
     RepoSource,
     SandboxConfig,
     StarterFilesSource,
@@ -668,11 +669,15 @@ class Sandbox:
     def _generate_cli_recorders(self) -> None:
         """Write a recording shim for every ``SandboxConfig.record_cli`` entry.
 
-        Each shim is a self-contained Python script — it must run inside the
-        sandbox, where ``coder_eval`` is not installed, so it imports nothing
-        from this package and carries its configuration as embedded literals.
-        A ``.cmd`` twin is written beside it so a bare ``uip`` also resolves
-        through Windows PATHEXT lookup on the tempdir driver.
+        Each shim runs inside the sandbox, where ``coder_eval`` is not
+        installed, so it carries its configuration as literals and imports
+        nothing installed. An entry that declares ``responses`` also gets every
+        :data:`SIDECAR_MODULES` file written into the recorder directory beside
+        it — the argv matcher it dispatches on, which it imports as a sibling
+        rather than the harness splicing that source into the shim. A rules-less
+        entry needs no matcher, so no sidecar is written for it.
+        A ``.cmd`` twin is written beside each shim so a bare ``uip`` also
+        resolves through Windows PATHEXT lookup on the tempdir driver.
 
         Raises:
             RuntimeError: a task's own ``mock_path_dirs`` already provides an
@@ -751,10 +756,22 @@ class Sandbox:
                 newline="",
             )
 
-        logger.info(
-            f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/: "
-            + ", ".join(f"{s.tool}(exit {s.exit_code})" for s in self.config.record_cli)
+        # Once for the whole directory, not once per entry: every rules-bearing shim
+        # imports the same sidecar, so writing it inside the loop above just rewrote
+        # identical bytes N times. Skipped entirely when no entry declares rules --
+        # such a shim never consults the matcher and needs no sibling file.
+        sidecars = sorted(SIDECAR_MODULES) if any(spec.responses for spec in self.config.record_cli) else []
+        for module in sidecars:
+            (recorder_dir / module).write_text(sidecar_source(module), encoding="utf-8", newline="\n")
+
+        summary = ", ".join(
+            f"{s.tool}(exit {s.exit_code}" + (f", {len(s.responses)} rule(s)" if s.responses else "") + ")"
+            for s in self.config.record_cli
         )
+        # Names the sidecar: an operator debugging a `sidecar_error` needs setup-time
+        # confirmation that the file was actually written.
+        beside = f" (+ {', '.join(sidecars)})" if sidecars else ""
+        logger.info(f"Generated {len(self.config.record_cli)} CLI recorder(s) in {RECORD_CLI_DIR}/{beside}: {summary}")
 
     def _apply_starter_files_source(self, source: StarterFilesSource) -> None:
         """Create inline starter files in sandbox with overwrite tracking.

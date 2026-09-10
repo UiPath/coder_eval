@@ -34,6 +34,7 @@ from tests.lint.rules.ce052_process_lethal_must_be_container_gated import Proces
 from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral
 from tests.lint.rules.ce054_env_info_key_round_trip import EnvInfoKeyRoundTrip
 from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLiteral
+from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -91,6 +92,7 @@ ALL_RULES: list[RuleClass] = [
     ProcessLethalMustBeContainerGated,
     NoContainerEnvLiteral,
     NoRunRecordFilenameLiteral,
+    SidecarShimStdlibOnly,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

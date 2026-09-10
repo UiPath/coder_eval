@@ -6,9 +6,9 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from coder_eval.criteria.cli_called import _split_flags
+from coder_eval.argv_match import split_flags
 from coder_eval.evaluation.checker import SuccessChecker
-from coder_eval.models import CliCalledCriterion, SandboxConfig
+from coder_eval.models import CliCalledCriterion, CriterionResult, SandboxConfig
 from coder_eval.sandbox import Sandbox
 
 
@@ -174,18 +174,16 @@ class TestFlagPredicates:
         assert checker.check(without_dotall).score == 0.0
         assert checker.check(with_dotall).score == 1.0
 
-    def test_invalid_regex_reports_the_offending_flag(self, sandbox_with_log):
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "--val", "x"])])
-        criterion = CliCalledCriterion(
-            description="bad pattern",
-            log=LOG,
-            verb="ixp projects get",
-            flags={"val": {"matches_regex": "([unclosed"}},
-        )
-        result = SuccessChecker(sandbox).check(criterion)
-        assert result.score == 0.0
-        assert "Invalid matches_regex for flag 'val'" in (result.error or "")
+    def test_invalid_regex_is_refused_at_load_naming_the_flag(self):
+        """Load-time, not check-time: the same FlagMatch feeds a record_cli response
+        rule, which evaluates the pattern inside the sandbox and cannot report."""
+        with pytest.raises(ValidationError, match="matches_regex is not a valid regex"):
+            CliCalledCriterion(
+                description="bad pattern",
+                log=LOG,
+                verb="ixp projects get",
+                flags={"val": {"matches_regex": "([unclosed"}},
+            )
 
     def test_absent_distinguishes_missing_from_different_value(self, sandbox_with_log):
         """`absent` is why flags is a predicate map, not dict[str, str]."""
@@ -273,6 +271,136 @@ class TestCounts:
 
 
 class TestLogHandling:
+    """The five ways this checker refuses to score a log, and why they are UNIFORM.
+
+    All five return a gating 0.0, and none raises. A missing log, a write sentinel,
+    a `sidecar_error`, an unusable record and a `rule_error` are every one of them
+    things an AGENT can cause -- the whole recorder directory lives inside the
+    sandbox it writes to (`rm` the log, fill the disk, delete the matcher beside the
+    shim, append garbage, append a crafted `rule_error` record). So none of them may
+    escalate: a `FinalStatus.ERROR` reads as "harness broken, discard this data
+    point", which is a strictly better outcome for a failing agent than FAILED.
+
+    An earlier revision raised `CheckerMisuseError` on `rule_error`, believing only a
+    task author could produce it. `test_a_crafted_rule_error_cannot_launder_a_failure`
+    is the regression test for that. The authoring concern it was addressing is
+    handled at LOAD time instead, by `RecordedCli._validate_responses_are_evaluable`.
+    """
+
+    def test_a_shim_rule_fault_scores_zero_without_escalating(self, sandbox_with_log):
+        """The log cannot be trusted, so the criterion fails -- but it must not raise.
+
+        Goes through SuccessChecker, not `_check_impl`, so an escalation would
+        actually propagate here via `handle_criterion_errors`.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        record = _call(["ixp", "dummy1"])
+        record["rule_error"] = "TypeError('argument of type int is not iterable')"
+        _write_log(sandbox_dir, [record])
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "could not evaluate its response rules" in (result.error or "")
+
+    def test_a_non_string_rule_error_still_scores_zero(self, sandbox_with_log):
+        """`parse_log` only validates `argv`, so `rule_error` may be any JSON value.
+        The message formats it with !r and must not call string methods on it."""
+        sandbox, sandbox_dir = sandbox_with_log
+        record = _call(["ixp", "dummy1"])
+        record["rule_error"] = 42
+        _write_log(sandbox_dir, [record])
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "42" in (result.error or "")
+
+    def test_a_crafted_rule_error_cannot_launder_a_failure(self, sandbox_with_log):
+        """Regression: `rule_error` used to RAISE, on the premise that only a task
+        author could cause it. The log is agent-writable, so one appended line turned
+        an honest FAILED into a FinalStatus.ERROR -- i.e. "discard this data point".
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        # The agent never ran the required command, so this must fail.
+        _write_log(sandbox_dir, [])
+        criterion = CliCalledCriterion(description="must have called dummy1", log=LOG, verb="ixp dummy1")
+        assert SuccessChecker(sandbox).check(criterion).score == 0.0
+
+        log_path = sandbox_dir / LOG
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"argv": [], "rule_error": "TypeError()"}) + "\n")
+
+        # Still a failure, and specifically NOT an exception.
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0, "tampering must not improve the verdict"
+        assert result.error is not None
+
+    def test_a_rule_error_on_an_unusable_record_takes_the_zero_path(self, sandbox_with_log):
+        """`faults` is built from `usable` only, so a fault on a record whose argv is
+        unreadable is counted as unusable instead -- scored 0.0, never raised."""
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            json.dumps({"tool": "uip", "argv": "not-a-list", "rule_error": "TypeError()"}) + "\n",
+            encoding="utf-8",
+        )
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "unusable record" in (result.error or "")
+
+    def test_an_explicit_null_rule_error_is_not_a_fault(self, sandbox_with_log):
+        """`is not None`, not truthiness: a record carrying `rule_error: null` is a
+        clean record and must score normally."""
+        sandbox, sandbox_dir = sandbox_with_log
+        record = _call(["ixp", "dummy1"])
+        record["rule_error"] = None
+        _write_log(sandbox_dir, [record])
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        assert SuccessChecker(sandbox).check(criterion).score == 1.0
+
+    def test_the_write_failure_sentinel_still_scores_zero(self, sandbox_with_log):
+        """The one refuse-to-score path with no test before now.
+
+        An agent can cause it (fill the disk, chmod the recorder dir), so it stays a
+        gating 0.0 rather than joining the escalating path above.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        _write_log(sandbox_dir, [_call(["ixp", "dummy1"])])
+        (sandbox_dir / f"{LOG}.error").write_text(
+            "OSError(28, 'No space left on device') ['ixp', 'dummy2']\n", encoding="utf-8"
+        )
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+        assert result.score == 0.0
+        assert "could not write" in (result.error or "")
+
+    def test_a_fault_on_one_tool_does_not_fail_another_tools_criterion(self, sandbox_with_log):
+        """One log serves every shadowed tool, so the fault checks are scoped.
+
+        A `uip` shim that could not import its matcher says nothing about whether
+        the agent ran `curl`, and failing that guard would report an error message
+        about response dispatch to an author who never declared a response rule.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        broken = _call(["ixp", "dummy1"], tool="uip")
+        broken["sidecar_error"] = "ModuleNotFoundError()"
+        _write_log(sandbox_dir, [broken, _call(["https://example.com"], tool="curl", exit_code=7)])
+
+        curl = CliCalledCriterion(
+            description="fetched the url", log=LOG, tool="curl", positional=["https://example.com"], min_count=1
+        )
+        assert SuccessChecker(sandbox).check(curl).score == 1.0
+
+        uip = CliCalledCriterion(description="called dummy1", log=LOG, tool="uip", verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(uip)
+        assert result.score == 0.0
+        assert "could not import its matcher" in (result.error or "")
+
     def test_missing_log_fails_even_a_negative_guard(self, sandbox_with_log):
         """A missing log is a harness fault, so `max_count: 0` must NOT pass on it.
 
@@ -322,10 +450,80 @@ class TestLogHandling:
         assert "1 unusable record" in (result.error or "")
 
 
+class TestNoEscalationOnAgentControlledContent:
+    """The log is agent-writable, so NOTHING in it may raise.
+
+    The sensor for the defect this guard was written after: `rule_error` was made to
+    raise `CheckerMisuseError` on the premise that only a task author could produce
+    it. `CheckerMisuseError` is in `criteria/base.py::_ESCALATING_EXCEPTIONS`, so it
+    propagates to `FinalStatus.ERROR`, whose category is "error" and not "failed" --
+    the run is discarded instead of counted against the agent. One appended line
+    bought that.
+
+    A checker over sandbox content has exactly two honest outcomes: a `CriterionResult`
+    with a score, or a crash that is a coder_eval bug. It may never convert what an
+    agent WROTE into a harness-fault verdict. Enumerated rather than fuzzed so each
+    case names the shape it stands for.
+    """
+
+    @pytest.mark.parametrize(
+        ("label", "content"),
+        [
+            ("crafted rule_error", json.dumps({"argv": [], "rule_error": "TypeError()"})),
+            ("crafted sidecar_error", json.dumps({"argv": [], "sidecar_error": "ImportError()"})),
+            ("non-string rule_error", json.dumps({"argv": [], "rule_error": {"nested": True}})),
+            ("rule_error on a real call", json.dumps({"argv": ["ixp", "dummy1"], "rule_error": 1})),
+            ("both fault keys at once", json.dumps({"argv": [], "rule_error": "a", "sidecar_error": "b"})),
+            ("not json", "}{ not json at all"),
+            ("json but not an object", json.dumps([1, 2, 3])),
+            ("argv not a list", json.dumps({"argv": "ixp dummy1"})),
+            ("argv not all strings", json.dumps({"argv": ["ixp", 7]})),
+            ("empty file", ""),
+            ("only whitespace", "   \n\n  "),
+            ("huge argv", json.dumps({"argv": ["x" * 20000]})),
+            ("surrogates in argv", json.dumps({"argv": ["\udcff"]})),
+        ],
+    )
+    def test_no_log_content_can_make_the_checker_raise(self, sandbox_with_log, label, content):
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(content + "\n", encoding="utf-8")
+
+        criterion = CliCalledCriterion(description="called dummy1", log=LOG, verb="ixp dummy1")
+        result = SuccessChecker(sandbox).check(criterion)
+
+        assert isinstance(result, CriterionResult), f"{label} produced no scored result"
+        assert result.score in (0.0, 1.0), f"{label} produced a non-binary score"
+
+    def test_a_negative_guard_still_fails_on_every_untrustworthy_log(self, sandbox_with_log):
+        """The other half: refusing to raise must not become refusing to fail.
+
+        A `max_count: 0` guard passing vacuously on a log the agent damaged is the
+        mirror-image defect, and the reason all five paths score 0.0 rather than
+        being skipped.
+        """
+        sandbox, sandbox_dir = sandbox_with_log
+        log_path = sandbox_dir / LOG
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        forbidden = CliCalledCriterion(
+            description="must not delete", log=LOG, verb="ixp fields delete", min_count=0, max_count=0
+        )
+        for content in (
+            json.dumps({"argv": [], "rule_error": "TypeError()"}),
+            json.dumps({"argv": [], "sidecar_error": "ImportError()"}),
+            "unparseable",
+        ):
+            log_path.write_text(content + "\n", encoding="utf-8")
+            result = SuccessChecker(sandbox).check(forbidden)
+            assert result.score == 0.0, f"a negative guard passed on: {content}"
+            assert result.error, "an untrustworthy log must say why"
+
+
 class TestArgvNormalization:
     def test_equals_form_and_space_form_are_equivalent(self):
-        space = _split_flags(["get", "--model", "pro"], frozenset(), frozenset({"model"}))
-        equals = _split_flags(["get", "--model=pro"], frozenset(), frozenset({"model"}))
+        space = split_flags(["get", "--model", "pro"], frozenset(), frozenset({"model"}))
+        equals = split_flags(["get", "--model=pro"], frozenset(), frozenset({"model"}))
         assert space == equals == (["get"], {"model": ["pro"]})
 
     def test_output_is_ignored_by_default(self, sandbox_with_log):
@@ -344,13 +542,13 @@ class TestArgvNormalization:
         assert SuccessChecker(sandbox).check(with_json).score == 1.0
 
     def test_boolean_switch_does_not_consume_the_next_flag(self):
-        positional, flags = _split_flags(["delete", "proj-1", "--yes", "--force"], frozenset(), frozenset())
+        positional, flags = split_flags(["delete", "proj-1", "--yes", "--force"], frozenset(), frozenset())
         assert positional == ["delete", "proj-1"]
         assert flags == {"yes": [""], "force": [""]}
 
     def test_flag_like_value_stays_a_value(self):
         """A value that merely looks like a flag is still a value when quoted as one."""
-        positional, flags = _split_flags(
+        positional, flags = split_flags(
             ["confirm", "--corrections", '[{"v":"--x"}]'], frozenset(), frozenset({"corrections"})
         )
         assert positional == ["confirm"]
@@ -358,13 +556,13 @@ class TestArgvNormalization:
 
     def test_double_dash_terminates_flag_parsing(self):
         """`--` is consumed as a separator; what follows is positional, not a flag."""
-        positional, flags = _split_flags(["run", "--", "--not-a-flag"], frozenset(), frozenset())
+        positional, flags = split_flags(["run", "--", "--not-a-flag"], frozenset(), frozenset())
         assert positional == ["run", "--not-a-flag"]
         assert flags == {}
 
     def test_lone_dash_is_positional(self):
         """A bare `-` is the stdin convention, not a flag."""
-        positional, flags = _split_flags(["import", "-"], frozenset(), frozenset())
+        positional, flags = split_flags(["import", "-"], frozenset(), frozenset())
         assert positional == ["import", "-"]
         assert flags == {}
 
@@ -461,13 +659,13 @@ class TestRegressionsFromReview:
 
     def test_declared_multi_char_short_flag_is_taken_whole(self):
         """Declaring the name wins over splitting, for CLIs with real -ab flags."""
-        assert _split_flags(["rm", "-rf", "p"], frozenset(), frozenset(), frozenset({"rf"})) == (
+        assert split_flags(["rm", "-rf", "p"], frozenset(), frozenset(), frozenset({"rf"})) == (
             ["rm", "p"],
             {"rf": [""]},
         )
 
     def test_attached_value_on_a_short_flag(self):
-        assert _split_flags(["g", "-ff-002"], frozenset(), frozenset({"f"}), frozenset({"f"})) == (
+        assert split_flags(["g", "-ff-002"], frozenset(), frozenset({"f"}), frozenset({"f"})) == (
             ["g"],
             {"f": ["f-002"]},
         )
@@ -475,35 +673,35 @@ class TestRegressionsFromReview:
     def test_bare_negative_number_stays_positional(self):
         """`-1` as a flag named `1` dropped it from the positionals -- the same
         silent disappearance as the --yes bug."""
-        assert _split_flags(["seek", "-1"], frozenset(), frozenset(), frozenset()) == (
+        assert split_flags(["seek", "-1"], frozenset(), frozenset(), frozenset()) == (
             ["seek", "-1"],
             {},
         )
-        assert _split_flags(["seek", "-1.5"], frozenset(), frozenset(), frozenset())[0] == ["seek", "-1.5"]
+        assert split_flags(["seek", "-1.5"], frozenset(), frozenset(), frozenset())[0] == ["seek", "-1.5"]
 
     def test_declared_numeric_flag_still_parses_as_a_flag(self):
         """`head -1 file` -- declaring it wins over the numeric rule."""
-        assert _split_flags(["head", "-1", "f.txt"], frozenset(), frozenset(), frozenset({"1"})) == (
+        assert split_flags(["head", "-1", "f.txt"], frozenset(), frozenset(), frozenset({"1"})) == (
             ["head", "f.txt"],
             {"1": [""]},
         )
 
     def test_declared_value_flag_consumes_a_dash_leading_value(self):
         """`--limit -1 proj-1`: declared value flags bind even a dash-leading value."""
-        positional, flags = _split_flags(
+        positional, flags = split_flags(
             ["ixp", "proj", "get", "--limit", "-1", "proj-1"], frozenset(), frozenset({"limit"})
         )
         assert positional == ["ixp", "proj", "get", "proj-1"]
         assert flags == {"limit": ["-1"]}
 
     def test_undeclared_flag_leaves_its_neighbour_positional(self):
-        positional, flags = _split_flags(["ixp", "fields", "delete", "--yes", "proj-1"], frozenset(), frozenset())
+        positional, flags = split_flags(["ixp", "fields", "delete", "--yes", "proj-1"], frozenset(), frozenset())
         assert positional == ["ixp", "fields", "delete", "proj-1"]
         assert flags == {"yes": [""]}
 
     def test_equals_form_keeps_a_dash_leading_value_and_invents_no_flag(self):
         """`--offset=-1` used to drop the value AND invent a flag named `1`."""
-        positional, flags = _split_flags(["get", "--offset=-1"], frozenset(), frozenset())
+        positional, flags = split_flags(["get", "--offset=-1"], frozenset(), frozenset())
         assert positional == ["get"]
         assert flags == {"offset": ["-1"]}
 
@@ -634,19 +832,15 @@ class TestRegressionsFromReview:
         )
         assert SuccessChecker(sandbox).check(criterion).score == 0.0
 
-    def test_bad_regex_flags_value_names_the_flag(self, sandbox_with_log):
-        """re.error is not a ValueError, so the pre-flight guard missed this."""
-        sandbox, sandbox_dir = sandbox_with_log
-        _write_log(sandbox_dir, [_call(["ixp", "projects", "get", "--val", "x"])])
-        criterion = CliCalledCriterion(
-            description="bad flags int",
-            log=LOG,
-            verb="ixp projects get",
-            flags={"val": {"matches_regex": "a", "flags": 99999999}},
-        )
-        result = SuccessChecker(sandbox).check(criterion)
-        assert result.score == 0.0
-        assert "flag 'val'" in (result.error or "")
+    def test_bad_regex_flags_value_is_refused_at_load(self):
+        """re.error is not a ValueError, so the old pre-flight guard missed this."""
+        with pytest.raises(ValidationError, match="not a valid regex with flags=99999999"):
+            CliCalledCriterion(
+                description="bad flags int",
+                log=LOG,
+                verb="ixp projects get",
+                flags={"val": {"matches_regex": "a", "flags": 99999999}},
+            )
 
 
 class TestModelValidation:

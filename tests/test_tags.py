@@ -1,13 +1,16 @@
 """Tests for task tagging and tag-based filtering."""
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
-from coder_eval.models import TaskDefinition
+from coder_eval.models import RECORD_CLI_DIR, RECORD_CLI_LOG, SandboxConfig, TaskDefinition
 from coder_eval.orchestration.batch import filter_tasks_by_tags
+from coder_eval.sandbox import Sandbox
 
 
 def _make_task(task_id: str, tags: list[str]) -> TaskDefinition:
@@ -208,6 +211,188 @@ class TestCiSmokePassContract:
             f"Makefile SMOKE_GLOBS {sorted(make_globs)} != CI smoke globs {sorted(ci_globs)}; "
             "`make test-smoke` no longer mirrors the CI job."
         )
+
+
+class TestTasksReadmeSmokeMembers:
+    """tasks/README.md calls itself "the map", and its smoke Members list had no sensor.
+
+    It had already decayed (`opencode_smoke_test` was tagged `smoke` and missing) --
+    the same silent-decay class `TestCiSmokePassContract` guards for the CI counts.
+    """
+
+    README = Path("tasks/README.md")
+
+    def test_every_root_smoke_task_is_listed(self):
+        if not self.README.exists():
+            pytest.skip("tasks/README.md not present")
+        tagged = set()
+        for task_file in sorted(Path("tasks").glob("*.yaml")):
+            try:
+                task = TaskDefinition(**yaml.safe_load(task_file.read_text(encoding="utf-8")))
+            except Exception:  # malformed tasks are other tests' business
+                continue
+            if any(tag.startswith("smoke") for tag in task.tags):
+                tagged.add(task_file.stem)
+
+        text = self.README.read_text(encoding="utf-8")
+        assert "Members:" in text, "the smoke Members list is gone; update this test"
+        block = text.split("Members:", 1)[1].split("\n\n", 1)[0]
+        listed = set(re.findall(r"`([^`]+)`", block))
+
+        assert not tagged - listed, (
+            f"tasks/README.md's smoke Members list omits {sorted(tagged - listed)}. "
+            "The README is the map for this directory; add the task or drop the tag."
+        )
+
+
+class TestRecordCliProbeIntegrity:
+    """The probe's detectors must stay wired to the stub they detect.
+
+    Mirrors TestAntiCheatProbeIntegrity: a probe whose detector drifts from the
+    thing it detects reports a pass forever, including after a real regression.
+    These turn the task's own prose invariants into tests.
+
+    Reads the task through `TaskDefinition` rather than raw YAML, so every default
+    (a rule's `exit_code`, an omitted `stdout`) comes from the models instead of
+    being hand-copied here -- a copied default stops matching the shim silently.
+    """
+
+    TASK = Path("tasks/record_cli_responses.yaml")
+    LOG = "cli_mocks/calls.jsonl"
+
+    def _task(self) -> TaskDefinition:
+        if not self.TASK.exists():
+            pytest.skip("probe task not present")
+        return TaskDefinition(**yaml.safe_load(self.TASK.read_text(encoding="utf-8")))
+
+    def _entry(self, task: TaskDefinition):
+        entries = task.sandbox.record_cli
+        assert len(entries) == 1, (
+            f"this probe's tests assume exactly one record_cli entry, found {len(entries)}. "
+            "Adding a second stubbed tool means teaching them which entry to read."
+        )
+        return entries[0]
+
+    def test_dispatch_is_proved_against_a_real_shim_log(self):
+        """The authoritative detector, checked against a log the SHIM actually wrote.
+
+        `cli_called` matches argv only, so it passes whether a rule answered or the
+        entry fallback did. `captured.txt` is transcribable: this YAML is serialised
+        to /work/input and mounted at /work/task_dir, both readable. And a codegen
+        regression that renders `RULES = []` raises nothing, so neither `rule_error`
+        nor `sidecar_error` is booked. Only the `"rule": N` key catches that.
+
+        So this test does not compare the YAML against itself. It generates the
+        task's own record_cli entry, RUNS each stubbed command, and requires the
+        criteria's regexes to match the resulting real log lines -- because the
+        needle's exact spelling (`"rule": 0`, with the space) belongs to
+        `json.dumps`'s default separators in `invocation_log.record`, not to this
+        test. Switching the shim to compact separators would otherwise leave this
+        green while the blocking CI probe failed.
+        """
+        task = self._task()
+        entry = self._entry(task)
+        patterns = [
+            c.pattern
+            for c in task.success_criteria
+            if c.type == "file_matches_regex" and c.path == self.LOG and c.must_match
+        ]
+        assert patterns, (
+            f"no must-match file_matches_regex criterion reads {self.LOG!r}. Without it this probe "
+            "reports SUCCESS when per-invocation dispatch is dead but the agent still ran the commands."
+        )
+
+        config = SandboxConfig(driver="tempdir", python=None, record_cli=[entry])
+        sandbox = Sandbox(config, task_id="probe_integrity_log")
+        try:
+            sandbox_dir = sandbox.setup()
+            for rule in entry.responses:
+                (tokens,) = rule.when.match_spec["verb_spellings"]
+                subprocess.run(
+                    [sys.executable, str(sandbox_dir / RECORD_CLI_DIR / entry.tool), *tokens],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    check=False,
+                )
+            log_lines = (sandbox_dir / RECORD_CLI_LOG).read_text(encoding="utf-8").splitlines()
+        finally:
+            sandbox.cleanup(preserve=False)
+
+        assert len(log_lines) == len(entry.responses), "the stub did not record every invocation"
+        # Every rule must be pinned to the line IT produced. Requiring the indices
+        # to appear merely somewhere would accept a regression that swapped them.
+        for index, line in enumerate(log_lines):
+            assert any(re.search(pattern, line) for pattern in patterns), (
+                f"no log criterion matches the real record for responses[{index}]:\n  {line}\n"
+                "The probe's regexes have drifted from what the shim writes, so the blocking CI "
+                "task would fail while this test stayed green."
+            )
+            assert f'"rule": {index}' in line, (
+                f"responses[{index}] did not answer its own invocation; the shim recorded: {line}"
+            )
+
+    def test_the_expected_strings_come_from_the_stub_not_the_prompt(self):
+        """Keeps the response strings out of the prompt.
+
+        This does NOT make them unobtainable -- the task YAML is readable in the
+        sandbox, which is why the log criterion above is the authoritative detector.
+        It removes the cheapest transcription path: a prompt that named the strings
+        would let an agent satisfy `captured.txt` without running anything at all.
+        """
+        task = self._task()
+        served = {rule.stdout.strip() for rule in self._entry(task).responses}
+        wanted = [
+            needle
+            for c in task.success_criteria
+            if c.type == "file_contains" and c.path == "captured.txt"
+            for needle in c.includes
+        ]
+
+        assert wanted, "the probe no longer checks what the agent captured"
+        for needle in wanted:
+            assert any(needle in text for text in served), (
+                f"captured.txt wants {needle!r} but no record_cli response serves it"
+            )
+            assert needle not in task.initial_prompt, (
+                f"{needle!r} appears in initial_prompt, so the criterion is satisfiable by "
+                "transcription without the agent running the tool at all"
+            )
+
+    def test_every_asserted_verb_has_a_matching_response_rule(self):
+        """Pins each cli_called detector to a rule, the way the anti-cheat probe pins
+        its regex to its canary."""
+        task = self._task()
+        rule_verbs = {
+            tuple(tokens) for rule in self._entry(task).responses for tokens in rule.when.match_spec["verb_spellings"]
+        }
+        asserted = [c for c in task.success_criteria if c.type == "cli_called"]
+
+        assert asserted, "the probe no longer asserts any invocation"
+        for criterion in asserted:
+            for tokens in criterion.verb_spellings:
+                assert tuple(tokens) in rule_verbs, (
+                    f"cli_called asserts verb {' '.join(tokens)!r}, which no response rule serves — "
+                    "the probe would pass on the entry fallback and prove nothing about dispatch"
+                )
+
+    def test_the_fallback_differs_from_every_rule(self):
+        """ "Every rule served the entry default" must be distinguishable from a pass.
+
+        Defaults come from the models, not from literals here: `CliResponse.exit_code`
+        defaults to 0 while `RecordedCli.exit_code` defaults to 1, and neither rule in
+        the task sets one, so a hand-copied default that drifted would leave this
+        comparing a tuple the shim never serves.
+        """
+        entry = self._entry(self._task())
+        fallback = (entry.exit_code, entry.stdout, entry.stderr)
+
+        for index, rule in enumerate(entry.responses):
+            served = (rule.exit_code, rule.stdout, rule.stderr)
+            assert served != fallback, (
+                f"responses[{index}] is byte-identical to the entry fallback, so this probe cannot "
+                "tell per-rule dispatch from no dispatch at all"
+            )
 
 
 class TestAntiCheatProbeIntegrity:

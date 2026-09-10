@@ -455,6 +455,31 @@ with the two `action.yml` items above — one considered change to the action's 
   `final_status`, which does not exist in `run.json` and would have made a new
   assertion dead on arrival. Guard: assert the key set that non-Python consumers
   depend on, mirroring how CE030 pins doc/schema parity.
+- [ ] **A probe task's detector must not be satisfiable from the sandbox-readable task
+  YAML.** `docker_runner._stage_inputs` serialises the post-override `TaskDefinition` to
+  `/work/input/task.yaml` and mounts `tasks/` again at `/work/task_dir`, both agent-readable.
+  Two probes now depend on NOT being satisfiable from that text — `anti_cheat_reference` via a
+  regex that cannot match its own source, `record_cli_responses` via a log-derived detector —
+  and nothing enforces it. `record_cli_responses` originally shipped (in review) with
+  `file_contains` needles that were verbatim in its own YAML, which would have let a
+  transcribing agent pass while dispatch was dead. Guard: for every `smoke-pass` task, assert no
+  `file_contains` needle / `file_matches_regex` pattern on a must-match criterion appears in the
+  serialised task YAML. Deferred: needs per-criterion-type handling and a real false-positive
+  pass (paths and generic words will collide), so well over 30 min.
+- [ ] **A new shim failure mode must still RECORD the invocation.** A generated shim that dies
+  before `record()` leaves a log byte-identical to "the agent never ran it", which passes a
+  `max_count: 0` guard. The sidecar import was exactly that, caught only in review. Guard:
+  render each shim shape, break each external dependency in turn, assert the log is non-empty.
+  Deferred: "each external dependency" has no enumeration today, so the rule needs a seam
+  (a declared list of what a shim depends on) before it can be mechanical rather than a
+  hand-maintained list that decays.
+- [ ] **A generated-artifact invariant must be asserted against a real run of that artifact,
+  not against the config that produced it.** `TestRecordCliProbeIntegrity` first shipped
+  comparing the task YAML with itself and hardcoding `"rule": 0` — a spelling `json.dumps`'s
+  default separators own — so a separator change would have left it green while the blocking CI
+  probe failed. Now fixed for this case by running a real shim. Deferred as a general guard:
+  "derives its expectation from the thing it checks" is not mechanically detectable; it belongs
+  in the review rubric rather than a lint rule.
 
 - [ ] A `_*TurnState` (agent turn-state) attribute that is written but never read
   outside its own assignment — CE037-class dead accumulator. Surfaced during the

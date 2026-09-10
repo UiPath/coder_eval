@@ -27,6 +27,7 @@ docs.
 | `inline_starter_example` | inline starter files |
 | `sentiment_classification` | `classification_match` + a JSONL dataset (`datasets/`) |
 | `mock_path_dirs_smoke` | mocking CLIs on `PATH` (uses `mock_path_dirs_template_dir/`) |
+| `record_cli_responses` | `record_cli` per-invocation `responses` + `cli_called` grading (`driver: docker`) |
 | `test_sandbox` | the smallest possible sandbox task |
 
 ## `agents/` — agent feature-tests
@@ -52,9 +53,10 @@ would drop them from those runs.
 | `smoke` | Umbrella over the pass + fail buckets | ad hoc |
 
 Members: `hello_date`, `agentless_smoke_test`, `byod_smoke_test`,
-`dataset_example`, `smoke_agent_judge`, `smoke_llm_judge`, `smoke_negative_path`,
-`smoke_budget_exceeded`, `smoke_cost_budget_exceeded`, `smoke_task_timeout`,
-`smoke_variants`, `token_check`.
+`dataset_example`, `opencode_smoke_test`, `pi_smoke_test`,
+`record_cli_responses`, `smoke_agent_judge`, `smoke_llm_judge`,
+`smoke_negative_path`, `smoke_budget_exceeded`, `smoke_cost_budget_exceeded`,
+`smoke_task_timeout`, `smoke_variants`, `token_check`.
 
 ## Support subdirectories
 
