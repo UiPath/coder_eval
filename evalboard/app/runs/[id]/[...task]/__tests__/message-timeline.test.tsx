@@ -13,6 +13,7 @@ function makeMessage(overrides: Partial<MessageEvent> = {}): MessageEvent {
         thinkingMs: null,
         textMs: 1000,
         toolGenMs: null,
+        mixedGenMs: null,
         blockTypes: ["text"],
         thinkingText: null,
         text: "hello",
@@ -576,5 +577,123 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
         expect(
             screen.getByText("Unaccounted").parentElement,
         ).toHaveAttribute("title", expect.stringContaining("sandbox setup"));
+    });
+});
+
+// A mixed-kind emission's per-kind split is apportioned by content size, so
+// the page must say so and must not let the unattributable part distort the
+// thinking share.
+describe("MessageTimelineSection — mixed generation sub-cell", () => {
+    function cellValue(label: string): string {
+        const parent = screen.getByText(label).parentElement as HTMLElement;
+        return (parent.children[1] as HTMLElement).textContent ?? "";
+    }
+
+    test("a mixed message renders the mixed sub-cell with its value", () => {
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: null,
+                        mixedGenMs: 900,
+                    }),
+                ]}
+            />,
+        );
+        expect(screen.getByText("unsplit")).toBeInTheDocument();
+        expect(cellValue("unsplit")).toContain("900ms");
+    });
+
+    test("a fully attributed message renders no mixed sub-cell at all", () => {
+        // claude-code's shape: the layout must look exactly as it does today.
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: null,
+                        textMs: 1000,
+                        toolGenMs: null,
+                        mixedGenMs: null,
+                    }),
+                ]}
+            />,
+        );
+        expect(screen.queryByText("unsplit")).toBeNull();
+    });
+
+    test("the thinking tint is computed against the ATTRIBUTABLE part", () => {
+        // 100ms of thinking out of 100ms attributable is 100% — red — even
+        // though it is only 10% of the raw generation total.
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: null,
+                        mixedGenMs: 900,
+                    }),
+                ]}
+            />,
+        );
+        const thinking = screen.getByText("thinking").parentElement as HTMLElement;
+        expect((thinking.children[1] as HTMLElement).className).toContain("text-red-700");
+    });
+
+    test("a low thinking share against a fully attributed total is not tinted", () => {
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: 900,
+                        mixedGenMs: null,
+                    }),
+                ]}
+            />,
+        );
+        const thinking = screen.getByText("thinking").parentElement as HTMLElement;
+        expect((thinking.children[1] as HTMLElement).className).not.toContain("text-red-700");
+    });
+
+    test("the four sub-cell percentages sum to 100%, not 190%", () => {
+        // The tint uses the ATTRIBUTABLE denominator; the displayed shares
+        // must not, or thinking reads as 100% of a generation it was 10% of
+        // — on exactly the emission class this phase stops over-crediting.
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: null,
+                        mixedGenMs: 900,
+                    }),
+                ]}
+            />,
+        );
+        const pct = (label: string) => {
+            const cell = screen.getByText(label).parentElement as HTMLElement;
+            const m = /\((-?\d+)%\)/.exec(cell.textContent ?? "");
+            return m ? Number(m[1]) : 0;
+        };
+        expect(pct("thinking")).toBe(10);
+        expect(pct("tool") + pct("text") + pct("unsplit") + pct("thinking")).toBe(100);
+    });
+
+    test("the Generation cell says the mixed split is an estimate", () => {
+        render(<MessageTimelineSection messages={[makeMessage()]} />);
+        expect(screen.getByText("Generation").parentElement).toHaveAttribute(
+            "title",
+            expect.stringContaining("apportioned by content size"),
+        );
     });
 });

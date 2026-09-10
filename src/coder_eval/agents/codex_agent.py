@@ -482,13 +482,39 @@ class _CodexTurnState:
         think_out = reasoning_tok if action_blocks else total_output
         action_out = max(total_output - reasoning_tok, 0) if thinking_blocks else total_output
 
-        # Sub-message specs in generation order (thinking first). The FIRST carries
-        # the gen's input/cache + gen-time; the rest carry 0 (no double-count).
+        # Sub-message specs in generation order (thinking first). The FIRST
+        # carries the gen's input/cache — those are per-CALL billing figures
+        # and must not be split. Generation TIME is different: it is a
+        # property of the content, so it is apportioned below.
         specs: list[tuple[list[ContentBlock], int, int]] = []
         if thinking_blocks:
             specs.append((thinking_blocks, think_out, reasoning_tok))
         if action_blocks:
             specs.append((action_blocks, action_out, 0))
+
+        # Split gen_ms across the sub-messages by their own OUTPUT-TOKEN
+        # share, giving the last the remainder so the parts reconstruct
+        # gen_ms (to float precision — the shares are rounded to 1e-6 ms, so
+        # do not assert exact equality on an arbitrary measured window).
+        # Concentrating it all on the first reported the thinking row as the
+        # entire generation and the action row as instant. With no output
+        # recorded anywhere, split evenly — there is nothing to weigh by, and
+        # one row taking all of it would be a guess dressed as a measurement.
+        #
+        # NOTE this weighs by output tokens while the evalboard's own
+        # mixed-emission split weighs by CONTENT SIZE. Deliberate, not an
+        # oversight to unify: here the SDK hands us a real per-spec token
+        # count, so there is no need to approximate one from content length.
+        out_total = sum(out_tok for _, out_tok, _ in specs)
+        gen_parts: list[float] = []
+        assigned = 0.0
+        for idx, (_, out_tok, _) in enumerate(specs):
+            if idx == len(specs) - 1:
+                gen_parts.append(gen_ms - assigned)
+            else:
+                share = round(gen_ms * (out_tok / out_total if out_total > 0 else 1 / len(specs)), 6)
+                gen_parts.append(share)
+                assigned += share
 
         for idx, (blocks, out_tok, reas_tok) in enumerate(specs):
             for i, blk in enumerate(blocks):
@@ -498,7 +524,7 @@ class _CodexTurnState:
                 AssistantMessage(
                     started_at=started,
                     completed_at=completed,
-                    generation_duration_ms=gen_ms if first else 0.0,
+                    generation_duration_ms=gen_parts[idx],
                     content_blocks=blocks,
                     tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
                     input_tokens=gen_input if first else 0,

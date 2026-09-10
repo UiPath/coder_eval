@@ -2296,3 +2296,126 @@ class TestGenerationWindowExcludesToolExecution:
         # stream lets us attribute.
         assert gen_ms == pytest.approx(10.0)
         assert gen_ms + tool_ms == pytest.approx(window_ms)
+
+
+class TestFlushMessageGenTimeSplit:
+    """`gen_ms` is apportioned across sub-messages by their output share.
+
+    It used to land entirely on the FIRST spec, so a thinking+action
+    generation reported the thinking row as the whole generation and the
+    action row as instant — 98.5% of Codex generation time booked to
+    thinking. Billing tokens still travel with the first spec only; time is a
+    property of the content, not of the call.
+    """
+
+    @staticmethod
+    def _flush(*, gen_ms: float, think_out: int, action_out: int, thinking: bool = True):
+        """Drive `_flush_message` with a controlled window and output split."""
+        # Build the reducer directly; only the flush path is under test.
+        from coder_eval.agents.codex_agent import _CodexTurnState
+        from coder_eval.models import ContentBlock
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.collector import EventCollector
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        collector = EventCollector()
+        st = _CodexTurnState(
+            agent,
+            emit=CompositeStreamCallback([collector]),
+            task_id="codex",
+            turn_id="codex-1",
+            collector=collector,
+            commands=[],
+            messages=[],
+            user_input="go",
+            iteration=1,
+            turn_start_time=0.0,
+        )
+        st.open_blocks = [
+            *([ContentBlock(block_type="thinking", sequence=0, thinking="plan")] if thinking else []),
+            ContentBlock(block_type="text", sequence=0, text="answer"),
+        ]
+        st.open_start_ms = _BOUNDS_EPOCH_MS
+        st.open_end_ms = _BOUNDS_EPOCH_MS + int(gen_ms)
+        # Non-zero input/cache, so "billing stays on the first spec" is an
+        # assertion that can actually fail rather than 0 == 0.
+        last = SimpleNamespace(
+            input_tokens=500,
+            cached_input_tokens=200,
+            output_tokens=think_out + action_out,
+            reasoning_output_tokens=think_out,
+        )
+        st._flush_message(last)
+        return st.messages
+
+    def test_time_splits_by_output_share_and_sums_exactly(self):
+        msgs = self._flush(gen_ms=1000, think_out=800, action_out=200)
+        assert [m.generation_duration_ms for m in msgs] == [800.0, 200.0]
+        assert sum(m.generation_duration_ms or 0.0 for m in msgs) == 1000.0
+
+    def test_rounding_leaves_no_drift(self):
+        msgs = self._flush(gen_ms=1000, think_out=333, action_out=667)
+        assert sum(m.generation_duration_ms or 0.0 for m in msgs) == 1000.0
+
+    def test_no_output_anywhere_splits_evenly(self):
+        # Nothing to weigh by; one row taking all of it would be a guess.
+        msgs = self._flush(gen_ms=1000, think_out=0, action_out=0)
+        assert [m.generation_duration_ms for m in msgs] == [500.0, 500.0]
+
+    def test_billing_tokens_stay_on_the_first_sub_message_only(self):
+        # Time is split; input/cache are per-CALL figures and must not be.
+        # The comment this phase edited previously claimed the two travelled
+        # together, so assert them apart explicitly.
+        msgs = self._flush(gen_ms=1000, think_out=800, action_out=200)
+        assert len(msgs) == 2
+        assert msgs[0].input_tokens == 500 - 200  # fresh slice
+        assert msgs[0].cache_read_tokens == 200
+        assert msgs[1].input_tokens == 0
+        assert msgs[1].cache_creation_tokens == 0
+        assert msgs[1].cache_read_tokens == 0
+        # ...while the TIME did split.
+        assert msgs[1].generation_duration_ms == 200.0
+
+    def test_a_single_spec_flush_carries_all_of_gen_ms(self):
+        msgs = self._flush(gen_ms=1000, think_out=0, action_out=400, thinking=False)
+        assert len(msgs) == 1
+        assert msgs[0].generation_duration_ms == 1000.0
+
+    async def test_the_split_survives_end_to_end_through_communicate(self):
+        """Pinned here, not in the golden master.
+
+        `_scrub.py` masks `generation_duration_ms` to "<scrubbed>" whenever
+        it is non-null, so a snapshot cannot tell 1000/0 (the old behaviour)
+        from 800/200 (the new one). The only way to assert the split reaches
+        a real TurnRecord is to read the values back.
+        """
+        last = SimpleNamespace(input_tokens=100, output_tokens=50, cached_input_tokens=8, reasoning_output_tokens=20)
+        total = SimpleNamespace(input_tokens=100, output_tokens=50, cached_input_tokens=8)
+        reasoning = _reasoning_item(text="plan")
+        notifications = [
+            # item/started is what banks the stamp (on_item_completed does not
+            # read one), and it is recorded for every item kind, not just tools.
+            _item_notification("item/started", reasoning, started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/completed", reasoning),
+            _delta("final answer"),
+            _item_notification(
+                "item/completed",
+                SimpleNamespace(type="agentMessage", id="m1", text="final answer"),
+                completed_at_ms=_BOUNDS_EPOCH_MS + 1000,
+            ),
+            SimpleNamespace(
+                method="thread/tokenUsage/updated",
+                payload=SimpleNamespace(token_usage=SimpleNamespace(last=last, total=total)),
+            ),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("think then answer")
+
+        assistant = [m for m in record.messages if m.role == "assistant"]
+        assert len(assistant) == 2, "expected a thinking and an action sub-message"
+        # Output was 20 reasoning / 30 action, so the 1000ms window splits
+        # 400/600 — NOT 1000/0, which is what concentrating it on the first
+        # sub-message produced.
+        assert [m.generation_duration_ms for m in assistant] == [400.0, 600.0]
+        assert sum(m.generation_duration_ms or 0.0 for m in assistant) == 1000.0

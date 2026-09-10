@@ -63,6 +63,7 @@ function call(opts: {
         thinkingMs: opts.thinkingMs,
         textMs: null,
         toolGenMs: null,
+        mixedGenMs: null,
         blockTypes: [],
         thinkingText: null,
         text: null,

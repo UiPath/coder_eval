@@ -366,6 +366,7 @@ export function MessageTimelineSection({
     const thinkingMs = messages.reduce((s, m) => s + (m.thinkingMs ?? 0), 0);
     const textMs = messages.reduce((s, m) => s + (m.textMs ?? 0), 0);
     const toolGenMs = messages.reduce((s, m) => s + (m.toolGenMs ?? 0), 0);
+    const mixedMs = messages.reduce((s, m) => s + (m.mixedGenMs ?? 0), 0);
     const toolExecMs = messages.reduce(
         (s, m) => s + m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0),
         0,
@@ -378,7 +379,13 @@ export function MessageTimelineSection({
             s + m.toolUses.filter((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS).length,
         0,
     );
-    const thinkingShare = totalGenMs > 0 ? thinkingMs / totalGenMs : 0;
+    // TINT ONLY. Against the ATTRIBUTABLE part, because an emission no kind
+    // could claim would otherwise drag the thinking share down for a reason
+    // unrelated to thinking. The DISPLAYED percentages all divide by
+    // totalGenMs instead, so the four of them sum to 100% — mixing the two
+    // denominators made them sum to 190%.
+    const attributableGenMs = totalGenMs - mixedMs;
+    const thinkingShare = attributableGenMs > 0 ? thinkingMs / attributableGenMs : 0;
 
     // Wall clock the agent stream does not explain. Negative means generation
     // and tool execution overlapped, which is a real signal — never clamped.
@@ -408,14 +415,21 @@ export function MessageTimelineSection({
                     </div>
                     <div className="text-gray-900 font-medium">{messageCount}</div>
                 </div>
-                <div>
+                <div
+                    title="model-generation time. Within an emission that mixed block kinds, the per-kind split is apportioned by content size — an estimate for those emissions, not a measurement. 'unsplit' is time in an emission with no apportionable content at all, so it belongs to no kind."
+                >
                     <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                         Generation
                     </div>
                     <div className="text-gray-900 font-medium">
                         {fmtMs(totalGenMs)}
                     </div>
-                    <div className="mt-1 grid grid-cols-3 gap-2 text-[10px]">
+                    <div
+                        className={
+                            "mt-1 grid gap-2 text-[10px] " +
+                            (mixedMs > 0 ? "grid-cols-4" : "grid-cols-3")
+                        }
+                    >
                         <div>
                             <div className="text-gray-500">thinking</div>
                             <div
@@ -429,7 +443,7 @@ export function MessageTimelineSection({
                                 {totalGenMs > 0 && (
                                     <span className="text-gray-400">
                                         {" "}
-                                        ({Math.round(thinkingShare * 100)}%)
+                                        ({Math.round((thinkingMs / totalGenMs) * 100)}%)
                                     </span>
                                 )}
                             </div>
@@ -458,6 +472,26 @@ export function MessageTimelineSection({
                                 )}
                             </div>
                         </div>
+                        {mixedMs > 0 && (
+                            <div>
+                                {/* NOT "mixed": the legend above already uses
+                                    MIXED for a message carrying multiple block
+                                    types, which is ~93% of Delegate's rows and
+                                    the very case this cell is usually EMPTY
+                                    for. This is the leftover no kind claimed.
+                                    Backed by MessageEvent.mixedGenMs. */}
+                                <div className="text-gray-500">unsplit</div>
+                                <div className="text-gray-800 font-medium tabular-nums">
+                                    {fmtMs(mixedMs)}
+                                    {totalGenMs > 0 && (
+                                        <span className="text-gray-400">
+                                            {" "}
+                                            ({Math.round((mixedMs / totalGenMs) * 100)}%)
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
                 <div>

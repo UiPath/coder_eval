@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { approxTokens, parseMessages, type TurnEntry } from "../runs";
+import { approxTokens, kindWeights, parseMessages, type TurnEntry } from "../runs";
 
 // Helper: a single assistant MessageEntry with one content block. coder_eval
 // emits one message-entry per content-block kind, which is the shape these
@@ -946,5 +946,348 @@ describe("parseMessages — open-weight cost apportionment", () => {
         const r = parseMessages(turns)[0];
         // Rate card: 1M input @ $2 + 1M output @ $12 = $14, not the bogus 999.
         expect(r.costUsd).toBeCloseTo(14, 6);
+    });
+});
+
+// A raw with MULTIPLE block kinds in one message entry — the Delegate shape.
+// 93% of its emissions are mixed (142/174 are thinking+tool_use), which the
+// old priority chain booked entirely to whichever kind it tested first.
+function mixedMsg(opts: {
+    startedAt: string;
+    completedAt: string;
+    genMs: number | null;
+    outputTokens?: number | null;
+    thinking?: string;
+    text?: string;
+    toolParams?: Record<string, unknown> | null;
+}) {
+    const blocks: Record<string, unknown>[] = [];
+    if (opts.thinking !== undefined) {
+        blocks.push({ block_type: "thinking", thinking: opts.thinking });
+    }
+    if (opts.text !== undefined) {
+        blocks.push({ block_type: "text", text: opts.text });
+    }
+    if (opts.toolParams !== undefined && opts.toolParams !== null) {
+        blocks.push({ block_type: "tool_use", tool_use_id: "tu_1" });
+    }
+    return {
+        role: "assistant",
+        started_at: opts.startedAt,
+        completed_at: opts.completedAt,
+        generation_duration_ms: opts.genMs,
+        output_tokens: opts.outputTokens ?? null,
+        content_blocks: blocks,
+    };
+}
+
+function toolCmd(params: Record<string, unknown>, toolId = "tu_1") {
+    // `tool_id`, not `tool_use_id`: that is the key parseMessages resolves a
+    // block against. With the wrong field the command never resolves, params
+    // fall back to {}, and EVERY tool weighs exactly 1 — which silently makes
+    // a content-size split test assert nothing.
+    return {
+        tool_id: toolId,
+        tool_name: "Bash",
+        parameters: params,
+        result_status: "success",
+    };
+}
+
+describe("kindWeights", () => {
+    test("units are consistent: chars are converted, tool proxies are not", () => {
+        // 400 chars / 4 = 100 tokens, weighed against a 100-token tool proxy.
+        const w = kindWeights(400, 0, [100]);
+        expect(w.thinking).toBe(100);
+        expect(w.tool).toBe(100);
+        expect(w.text).toBe(0);
+    });
+
+    test("total is the sum of its parts", () => {
+        const w = kindWeights(400, 80, [10, 5]);
+        expect(w.total).toBe(w.thinking + w.tool + w.text);
+        expect(w.total).toBe(100 + 20 + 15);
+    });
+
+    test("no content at all weighs nothing", () => {
+        expect(kindWeights(0, 0, []).total).toBe(0);
+    });
+});
+
+describe("parseMessages — mixed-kind emissions", () => {
+    // Every case here asserts BOTH invariants, so a change that fixes one
+    // side and breaks the other cannot pass.
+    //
+    // TIME is always exact: mixedGenMs is the bucket for whatever no kind
+    // could claim, so the four parts reconstruct generationMs.
+    //
+    // OUTPUT has no mixed bucket, by design — an emission with nothing
+    // sizeable attributes its output to no kind rather than inventing a
+    // fourth output figure. So the parts may only UNDER-sum, never over,
+    // and `exactOutput` asks for equality wherever content existed. It is
+    // the over-sum that was the bug: the same tokens counted twice.
+    function assertSums(
+        e: ReturnType<typeof parseMessages>[number],
+        { exactOutput = true }: { exactOutput?: boolean } = {},
+    ) {
+        if (e.generationMs != null) {
+            expect(
+                (e.thinkingMs ?? 0) +
+                    (e.textMs ?? 0) +
+                    (e.toolGenMs ?? 0) +
+                    (e.mixedGenMs ?? 0),
+            ).toBeCloseTo(e.generationMs, 6);
+        }
+        if (e.outputTokens != null) {
+            const attributed =
+                (e.thinkingOutputTokens ?? 0) +
+                (e.textOutputTokens ?? 0) +
+                e.toolUses.reduce((a, t) => a + (t.outputTokens ?? 0), 0);
+            expect(attributed).toBeLessThanOrEqual(e.outputTokens);
+            if (exactOutput) expect(attributed).toBe(e.outputTokens);
+        }
+    }
+
+    test("thinking + tool_use splits BOTH time and output by content size", () => {
+        // The 142-of-174 Delegate case. Thinking text is 400 chars (100
+        // proxy-tokens); the tool's params are sized to match, so the split
+        // is roughly even — and crucially neither bucket gets 0 or all.
+        const params = { command: "x".repeat(396) };
+        const events = parseMessages([
+            {
+                messages: [
+                    mixedMsg({
+                        startedAt: "2026-01-01T00:00:00.000Z",
+                        completedAt: "2026-01-01T00:00:10.000Z",
+                        genMs: 10_000,
+                        outputTokens: 1000,
+                        thinking: "t".repeat(400),
+                        toolParams: params,
+                    }),
+                ],
+                commands: [toolCmd(params)],
+            },
+        ]);
+        expect(events).toHaveLength(1);
+        const e = events[0];
+
+        // The command resolved, so the tool really is weighed by its args.
+        expect(e.toolUses[0].toolName).toBe("Bash");
+        // 400 thinking chars -> 100 proxy-tokens; the params serialize to
+        // ~102. Neither ~0% nor ~100%: today's bug reported 99.8% thinking,
+        // and the `outputTokens - toolWeight` trap would report 100% tool.
+        expect(e.thinkingMs).toBeGreaterThan(4_000);
+        expect(e.thinkingMs).toBeLessThan(6_000);
+        expect(e.toolGenMs).toBeGreaterThan(4_000);
+        expect(e.toolGenMs).toBeLessThan(6_000);
+        expect(e.mixedGenMs).toBeNull();
+        // The double-count: 1000 output tokens used to be attributed to
+        // thinking AND to the tool, so this summed to 2000.
+        expect(
+            (e.thinkingOutputTokens ?? 0) + (e.toolUses[0].outputTokens ?? 0),
+        ).toBe(1000);
+        // Per-tool generation time is the tool SHARE, not the whole emission
+        // — a tool row must not out-report the tool total above it. Within a
+        // millisecond: the group total is rounded to integer ms, the per-tool
+        // figure is not.
+        expect(Math.abs((e.toolUses[0].genMs ?? 0) - (e.toolGenMs ?? 0))).toBeLessThan(1);
+        // The bug this replaces: the tool row carried the WHOLE emission.
+        expect(e.toolUses[0].genMs).toBeLessThan(6_000);
+        assertSums(e);
+    });
+
+    test("neither invariant over-sums across a rounding sweep", () => {
+        // The tie case: two Math.round calls on shares that add to the total
+        // can each round up. Booking the tool share in the first pass and the
+        // rest via splitByWeight made that reachable, so sweep it.
+        for (const thinkChars of [100, 397, 400, 401, 800, 1201, 2000]) {
+            for (const proxyChars of [96, 200, 396, 404, 800]) {
+                for (const out of [613, 999, 1000, 1001]) {
+                    const params = { command: "z".repeat(proxyChars) };
+                    const [e] = parseMessages([
+                        {
+                            messages: [
+                                mixedMsg({
+                                    startedAt: "2026-01-01T00:00:00.000Z",
+                                    completedAt: "2026-01-01T00:00:10.000Z",
+                                    genMs: 10_000,
+                                    outputTokens: out,
+                                    thinking: "t".repeat(thinkChars),
+                                    toolParams: params,
+                                }),
+                            ],
+                            commands: [toolCmd(params)],
+                        },
+                    ]);
+                    const attributed =
+                        (e.thinkingOutputTokens ?? 0) +
+                        (e.textOutputTokens ?? 0) +
+                        e.toolUses.reduce((a, t) => a + (t.outputTokens ?? 0), 0);
+                    expect(attributed).toBe(out);
+                    expect(
+                        (e.thinkingMs ?? 0) +
+                            (e.textMs ?? 0) +
+                            (e.toolGenMs ?? 0) +
+                            (e.mixedGenMs ?? 0),
+                    ).toBeCloseTo(10_000, 6);
+                }
+            }
+        }
+    });
+
+    test("text + thinking + tool_use splits three ways and sums exactly", () => {
+        const params = { command: "y".repeat(200) };
+        const events = parseMessages([
+            {
+                messages: [
+                    mixedMsg({
+                        startedAt: "2026-01-01T00:00:00.000Z",
+                        completedAt: "2026-01-01T00:00:09.000Z",
+                        genMs: 9000,
+                        outputTokens: 999,
+                        thinking: "t".repeat(400),
+                        text: "x".repeat(120),
+                        toolParams: params,
+                    }),
+                ],
+                commands: [toolCmd(params)],
+            },
+        ]);
+        const e = events[0];
+        expect(e.thinkingMs).toBeGreaterThan(0);
+        expect(e.textMs).toBeGreaterThan(0);
+        expect(e.toolGenMs).toBeGreaterThan(0);
+        assertSums(e);
+    });
+
+    test("empty thinking text reads as all-tool, not as unattributable", () => {
+        // Some harnesses hide CoT. "We have no thinking content to size" is
+        // an honest all-tool reading; mixedGenMs is for having NOTHING.
+        const params = { command: "z".repeat(200) };
+        const events = parseMessages([
+            {
+                messages: [
+                    mixedMsg({
+                        startedAt: "2026-01-01T00:00:00.000Z",
+                        completedAt: "2026-01-01T00:00:04.000Z",
+                        genMs: 4000,
+                        outputTokens: 400,
+                        thinking: "",
+                        toolParams: params,
+                    }),
+                ],
+                commands: [toolCmd(params)],
+            },
+        ]);
+        const e = events[0];
+        expect(e.toolGenMs).toBe(4000);
+        expect(e.thinkingMs).toBeNull();
+        expect(e.mixedGenMs).toBeNull();
+        assertSums(e);
+    });
+
+    test("a mixed emission with no sizeable content lands in mixed", () => {
+        // Previously this fell through all three chain branches and was
+        // silently dropped from the breakdown while still counting in genSum.
+        const events = parseMessages([
+            {
+                messages: [
+                    mixedMsg({
+                        startedAt: "2026-01-01T00:00:00.000Z",
+                        completedAt: "2026-01-01T00:00:00.500Z",
+                        genMs: 500,
+                        outputTokens: 10,
+                        thinking: "",
+                        text: "",
+                    }),
+                ],
+            },
+        ]);
+        const e = events[0];
+        expect(e.mixedGenMs).toBe(500);
+        expect(e.thinkingMs).toBeNull();
+        expect(e.textMs).toBeNull();
+        // Nothing was sizeable, so the output belongs to no kind either.
+        expect(e.thinkingOutputTokens ?? 0).toBe(0);
+        expect(e.textOutputTokens ?? 0).toBe(0);
+        assertSums(e, { exactOutput: false });
+    });
+
+    test("a measured zero does not invent a mixed bucket", () => {
+        const events = parseMessages([
+            {
+                messages: [
+                    mixedMsg({
+                        startedAt: "2026-01-01T00:00:00.000Z",
+                        completedAt: "2026-01-01T00:00:00.000Z",
+                        genMs: 0,
+                        outputTokens: 10,
+                        thinking: "",
+                        text: "",
+                    }),
+                ],
+            },
+        ]);
+        expect(events[0].mixedGenMs).toBeNull();
+    });
+
+    test("a repeated single kind is still single-kind", () => {
+        // ['tool_use','tool_use'] is ONE kind — compare distinct kinds, not
+        // array length, or two parallel calls read as a mixed emission.
+        const params = { command: "ls" };
+        const entry = mixedMsg({
+            startedAt: "2026-01-01T00:00:00.000Z",
+            completedAt: "2026-01-01T00:00:03.000Z",
+            genMs: 3000,
+            outputTokens: 60,
+            toolParams: params,
+        });
+        entry.content_blocks.push({ block_type: "tool_use", tool_use_id: "tu_2" });
+        const events = parseMessages([
+            {
+                messages: [entry],
+                commands: [toolCmd(params), toolCmd(params, "tu_2")],
+            },
+        ]);
+        const e = events[0];
+        expect(e.toolGenMs).toBe(3000);
+        expect(e.mixedGenMs).toBeNull();
+        assertSums(e);
+    });
+
+    test("Codex shape: two single-kind raws sharing a message_id", () => {
+        const events = parseMessages([
+            {
+                messages: [
+                    {
+                        role: "assistant",
+                        message_id: "m1",
+                        started_at: "2026-01-01T00:00:00.000Z",
+                        completed_at: "2026-01-01T00:00:00.800Z",
+                        generation_duration_ms: 800,
+                        content_blocks: [{ block_type: "thinking", thinking: "plan" }],
+                    },
+                    {
+                        role: "assistant",
+                        message_id: "m1",
+                        started_at: "2026-01-01T00:00:00.800Z",
+                        completed_at: "2026-01-01T00:00:01.000Z",
+                        generation_duration_ms: 200,
+                        content_blocks: [
+                            { block_type: "tool_use", tool_use_id: "tu_1" },
+                        ],
+                    },
+                ],
+                commands: [toolCmd({ command: "ls" })],
+            },
+        ]);
+        // They regroup into ONE MessageEvent, but each raw is single-kind, so
+        // the breakdown is real rather than apportioned.
+        expect(events).toHaveLength(1);
+        const e = events[0];
+        expect(e.thinkingMs).toBe(800);
+        expect(e.toolGenMs).toBe(200);
+        expect(e.mixedGenMs).toBeNull();
+        assertSums(e);
     });
 });
