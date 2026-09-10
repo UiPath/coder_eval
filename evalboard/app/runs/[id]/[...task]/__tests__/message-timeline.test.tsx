@@ -476,3 +476,105 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
         expect(screen.getByText("Message timeline (1)")).toBeInTheDocument();
     });
 });
+
+// The strip must reconcile: generation + tool exec are shown against the wall
+// clock they should add up to, so a harness that stops reporting one of them
+// is visible on the page instead of silently reading as fast.
+describe("MessageTimelineSection — Unaccounted cell", () => {
+    // Each summary cell is <label><value>[<sub-grid>]. Read the value element
+    // itself so a matching string elsewhere in the strip (the Generation
+    // sub-cells also render times and percentages) cannot satisfy an
+    // assertion about this cell.
+    function cell(label: string): HTMLElement {
+        const parent = screen.getByText(label).parentElement as HTMLElement;
+        return parent.children[1] as HTMLElement;
+    }
+
+    function renderStrip(
+        taskDurationSeconds: number | null | undefined,
+        overrides: Partial<MessageEvent> = {},
+    ) {
+        const m = makeMessage({
+            generationMs: 4000,
+            textMs: 4000,
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "tu_1",
+                    summary: "ls",
+                    argText: "ls",
+                    description: null,
+                    genMs: null,
+                    durationMs: 1000,
+                    isError: false,
+                    resultPreview: null,
+                    outputTokens: null,
+                    resultTokens: null,
+                },
+            ],
+            ...overrides,
+        });
+        return render(
+            <MessageTimelineSection
+                messages={[m]}
+                taskDurationSeconds={taskDurationSeconds}
+            />,
+        );
+    }
+
+    test("renders the residual and its share of the wall clock", () => {
+        // 10s wall clock − 4s generation − 1s tool exec = 5s (50%).
+        renderStrip(10);
+        expect(cell("Unaccounted").textContent).toBe("5.0s (50%)");
+    });
+
+    test("the four pre-existing cells still render their values", () => {
+        renderStrip(10);
+        expect(cell("Messages").textContent).toBe("1");
+        expect(cell("Generation").textContent).toBe("4.0s");
+        expect(cell("Tool exec").textContent).toBe("1.0s");
+        expect(cell("Slow events").textContent).toBe("0 gen · 0 tool");
+    });
+
+    test("a residual at or above 25% is tinted red", () => {
+        // 5s of 10s = 50%.
+        renderStrip(10);
+        expect(cell("Unaccounted").className).toContain("text-red-700");
+    });
+
+    test("a residual below 25% is not tinted", () => {
+        // 5s gen+tool of 5.5s wall clock ≈ 9%.
+        renderStrip(5.5);
+        expect(cell("Unaccounted").textContent).toBe("500ms (9%)");
+        expect(cell("Unaccounted").className).not.toContain("text-red-700");
+    });
+
+    test("no recorded duration renders an em-dash, no NaN and no percentage", () => {
+        const { container } = renderStrip(undefined);
+        expect(cell("Unaccounted").textContent).toBe("—");
+        expect(container.textContent).not.toContain("NaN");
+    });
+
+    test("a zero-second task shows the raw residual with no percentage", () => {
+        const { container } = renderStrip(0);
+        expect(cell("Unaccounted").textContent).toBe("-5.0s");
+        expect(container.textContent).not.toContain("NaN");
+    });
+
+    test("a negative residual renders signed and is NOT tinted red", () => {
+        // Overlap (parallel tools, or a tool closing inside a generation
+        // window) is a signal, not unreported time — so it is neither clamped
+        // nor flagged. The share stays signed too: 5s accounted against a 1s
+        // task is a 4x overlap, and saying so beats hiding it.
+        renderStrip(1);
+        expect(cell("Unaccounted").textContent).toBe("-4.0s (-400%)");
+        expect(cell("Unaccounted").className).not.toContain("text-red-700");
+    });
+
+    test("the cell explains that the residual is not only agent time", () => {
+        renderStrip(10);
+        expect(
+            screen.getByText("Unaccounted").parentElement,
+        ).toHaveAttribute("title", expect.stringContaining("sandbox setup"));
+    });
+});

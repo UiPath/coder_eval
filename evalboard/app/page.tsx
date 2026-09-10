@@ -73,6 +73,40 @@ function fmtCost(c: number | null): string {
     return `$${c.toFixed(2)}`;
 }
 
+// The Duration cell for a run row. `taskDurationSeconds` is compute time over
+// the rows that actually ran, so when the nightly carried some forward as
+// mature passes the cell says how many that was — otherwise "1300 tasks ·
+// 15h 29m" reads as a per-task rate over 1300 tasks when it describes 397.
+function RunDurationCell({
+    seconds,
+    tasksRun,
+    tasksExecuted,
+}: {
+    seconds: number | null;
+    tasksRun: number;
+    tasksExecuted: number;
+}) {
+    const skipped = tasksRun - tasksExecuted;
+    if (skipped <= 0) {
+        return (
+            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
+                {fmtDuration(seconds)}
+            </td>
+        );
+    }
+    return (
+        <td
+            className="py-3 px-4 text-right tabular-nums text-gray-700"
+            title={`compute time over the ${tasksExecuted} task(s) that executed; ${skipped} were carried forward as mature passes`}
+        >
+            {fmtDuration(seconds)}
+            <div className="text-[11px] text-gray-400">
+                {tasksExecuted} run
+            </div>
+        </td>
+    );
+}
+
 // Rail-level q filter: substring match on tag name only. This is narrower
 // than getRunListing's q (which also matches taskId / humanized id) by
 // design — rails are a tag namespace, the table is a task namespace.
@@ -428,9 +462,11 @@ export default async function Page({
                                     <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                         {fmtCost(r.totalCostUsd)}
                                     </td>
-                                    <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                        {fmtDuration(r.taskDurationSeconds)}
-                                    </td>
+                                    <RunDurationCell
+                                        seconds={r.taskDurationSeconds}
+                                        tasksRun={total}
+                                        tasksExecuted={r.tasksExecuted}
+                                    />
                                 </tr>
                             );
                         })}
@@ -572,11 +608,11 @@ export default async function Page({
                                             <td className="py-3 px-4 text-right tabular-nums text-gray-700">
                                                 {fmtCost(r.totalCostUsd)}
                                             </td>
-                                            <td className="py-3 px-4 text-right tabular-nums text-gray-700">
-                                                {fmtDuration(
-                                                    r.taskDurationSeconds,
-                                                )}
-                                            </td>
+                                            <RunDurationCell
+                                                seconds={r.taskDurationSeconds}
+                                                tasksRun={total}
+                                                tasksExecuted={r.tasksExecuted}
+                                            />
                                         </tr>
                                     );
                                 })}

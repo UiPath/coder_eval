@@ -253,11 +253,17 @@ export function ToolTimelineSection({
     );
 }
 
+// Sign-aware: the Unaccounted residual goes negative when generation and tool
+// execution overlap (parallel tool calls, or Antigravity closing a tool inside
+// a generation window), and "-1.2s" reads as an overlap where "-1200ms" reads
+// as a formatting bug.
 function fmtMs(ms: number | null): string {
     if (ms == null) return "—";
-    if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`;
-    if (ms >= 1_000) return `${(ms / 1_000).toFixed(1)}s`;
-    return `${Math.round(ms)}ms`;
+    const sign = ms < 0 ? "-" : "";
+    const abs = Math.abs(ms);
+    if (abs >= 60_000) return `${sign}${(abs / 60_000).toFixed(1)}m`;
+    if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}s`;
+    return `${sign}${Math.round(abs)}ms`;
 }
 
 function fmtTokens(n: number | null): string {
@@ -310,6 +316,7 @@ export function MessageTimelineSection({
     messages,
     subAgentUsageByToolId = {},
     impactByIndex,
+    taskDurationSeconds,
 }: {
     messages: MessageEvent[];
     // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
@@ -320,6 +327,10 @@ export function MessageTimelineSection({
     // by message index. Renders an inline Δ badge on each affected row. Empty
     // (no badges) when levers sit at as-run, or undefined when no simulator.
     impactByIndex?: Map<number, PerMessageImpact>;
+    // The task's recorded wall clock, so the strip can show what generation +
+    // tool execution do NOT account for. Null/absent on a run predating
+    // duration capture — the cell then renders "—" rather than a fake residual.
+    taskDurationSeconds?: number | null;
 }) {
     // Token columns can be shown as counts or as their estimated USD value.
     const [unit, setUnit] = useState<Unit>("tokens");
@@ -369,6 +380,16 @@ export function MessageTimelineSection({
     );
     const thinkingShare = totalGenMs > 0 ? thinkingMs / totalGenMs : 0;
 
+    // Wall clock the agent stream does not explain. Negative means generation
+    // and tool execution overlapped, which is a real signal — never clamped.
+    const taskMs =
+        taskDurationSeconds != null ? taskDurationSeconds * 1000 : null;
+    const unaccountedMs = taskMs != null ? taskMs - totalGenMs - toolExecMs : null;
+    const unaccountedShare =
+        taskMs != null && taskMs > 0 && unaccountedMs != null
+            ? unaccountedMs / taskMs
+            : null;
+
     return (
         <section className="space-y-2">
             <div className="flex items-center justify-between gap-2">
@@ -380,7 +401,7 @@ export function MessageTimelineSection({
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums">
                 <div>
                     <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                         Messages
@@ -445,6 +466,28 @@ export function MessageTimelineSection({
                     </div>
                     <div className="text-gray-900 font-medium">
                         {fmtMs(toolExecMs)}
+                    </div>
+                </div>
+                <div
+                    title="task wall clock minus generation and tool execution — includes sandbox setup, grading, simulator calls, and any time the harness did not report"
+                >
+                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                        Unaccounted
+                    </div>
+                    <div
+                        className={
+                            unaccountedShare != null && unaccountedShare >= 0.25
+                                ? "text-red-700 font-medium"
+                                : "text-gray-900 font-medium"
+                        }
+                    >
+                        {fmtMs(unaccountedMs)}
+                        {unaccountedShare != null && (
+                            <span className="text-gray-400">
+                                {" "}
+                                ({Math.round(unaccountedShare * 100)}%)
+                            </span>
+                        )}
                     </div>
                 </div>
                 <div>
@@ -660,11 +703,14 @@ export function CostExplorerSection({
     subAgentUsageByToolId = {},
     tokens,
     recordedCostUsd,
+    taskDurationSeconds,
 }: {
     messages: MessageEvent[];
     subAgentUsageByToolId?: Record<string, SubAgentTotals>;
     tokens: TokenTotals;
     recordedCostUsd: number | null;
+    // Forwarded verbatim to the timeline's Unaccounted cell.
+    taskDurationSeconds?: number | null;
 }) {
     const [scale, setScale] = useState(1);
     const [toolScale, setToolScale] = useState(1);
@@ -702,6 +748,7 @@ export function CostExplorerSection({
                 messages={messages}
                 subAgentUsageByToolId={subAgentUsageByToolId}
                 impactByIndex={impactByIndex}
+                taskDurationSeconds={taskDurationSeconds}
             />
             {model && tokens.total > 0 && (
                 <section className="space-y-2">

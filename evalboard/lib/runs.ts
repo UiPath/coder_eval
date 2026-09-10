@@ -57,6 +57,10 @@ export interface RunSummary {
     // (run end - run start) when per-task durations are unavailable.
     taskDurationSeconds: number | null;
     tasksRun: number;
+    // Rows that actually executed: tasksRun minus the ones the nightly carried
+    // forward as mature passes. taskDurationSeconds is the compute time of
+    // exactly these, so a UI showing one must be able to name the other.
+    tasksExecuted: number;
     tasksSucceeded: number;
     tasksFailed: number;
     tasksError: number;
@@ -400,7 +404,9 @@ export function aggregateSubAgentUsage(
 
 // ---------- run.json schema ----------
 
-interface RawTaskResult {
+// Exported so a test can type its fixtures against deriveRunDuration's
+// published signature rather than restating the row shape.
+export interface RawTaskResult {
     task_id?: string;
     // Experiment arm that produced this row (the <variant> sub-dir). Written by
     // reports_experiment.py on every run; absent on runs that predate it, which
@@ -818,6 +824,40 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
     };
 }
 
+export interface RunDurationTotals {
+    // Σ duration over EXECUTED rows, or the wall-clock fallback.
+    seconds: number | null;
+    // Rows that actually ran (mature-skipped excluded).
+    executedTasks: number;
+}
+
+// Compute time for a run, and how many of its rows actually produced it.
+//
+// Mature-skipped rows leave BOTH sides: they are carried-forward passes that
+// never executed, so counting their (absent or zero) duration alongside the
+// rows that did work reports one number and describes another — a codex
+// nightly rendered "1300 tasks · 15h 29m" for 397 tasks that ran. Mirrors
+// overview.ts::timePerPassedTaskForTasks, which already excludes them.
+//
+// The sum is only trusted when EVERY executed row recorded a duration;
+// otherwise the partial sum would understate the run drastically (1/50 rows
+// with a duration would render as that single task's time), so it falls back
+// to the run's wall clock.
+export function deriveRunDuration(
+    taskResults: RawTaskResult[],
+    totalDurationSeconds: number | null | undefined,
+): RunDurationTotals {
+    const executed = taskResults.filter((t) => !t.mature_skipped);
+    const allHaveDuration =
+        executed.length > 0 && executed.every((t) => t.duration != null);
+    return {
+        seconds: allHaveDuration
+            ? executed.reduce((a, t) => a + (t.duration ?? 0), 0)
+            : (totalDurationSeconds ?? null),
+        executedTasks: executed.length,
+    };
+}
+
 export async function readRunSummary(
     id: string,
     source: Source = DEFAULT_SOURCE,
@@ -829,27 +869,18 @@ export async function readRunSummary(
         (a, t) => a + (t.total_cost_usd ?? 0),
         0,
     );
-    // Sum of per-task durations (compute time). Only use the sum when every
-    // task has a duration recorded; otherwise the partial sum would understate
-    // the run drastically (e.g. 1/50 tasks with a duration would render as that
-    // single task's time). Fall back to wall-clock in that case.
-    const taskDurationSum = taskResults.reduce(
-        (a, t) => a + (t.duration ?? 0),
-        0,
+    const duration = deriveRunDuration(
+        taskResults,
+        data.total_duration_seconds,
     );
-    const allHaveDuration =
-        taskResults.length > 0 &&
-        taskResults.every((t) => t.duration != null);
-    const taskDurationSeconds = allHaveDuration
-        ? taskDurationSum
-        : (data.total_duration_seconds ?? null);
     const models = tallyModels(taskResults);
     return {
         id,
         startTime: data.start_time ?? null,
         endTime: data.end_time ?? null,
-        taskDurationSeconds,
+        taskDurationSeconds: duration.seconds,
         tasksRun: data.tasks_run ?? taskResults.length,
+        tasksExecuted: duration.executedTasks,
         tasksSucceeded: data.tasks_succeeded ?? 0,
         tasksFailed: data.tasks_failed ?? 0,
         tasksError: data.tasks_error ?? 0,
@@ -1049,6 +1080,12 @@ export interface RunOverview {
     // front-page table and the chart can be built from a single read.
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
+    // Rows that actually executed (mature-skipped excluded) — the set
+    // taskDurationSeconds is summed over, so the two always describe the same
+    // rows. Optional only so test factories predating it stay valid; a reader
+    // with no value falls back to the full task count, which is what every
+    // pre-mature_skipped run means anyway.
+    tasksExecuted?: number;
     componentShas: ComponentSha[];
     // Run-level harness (coder-eval AgentKind) from the RunConfig stamp
     // (environment_info.run_config), falling back to the most common per-task
@@ -1168,20 +1205,16 @@ export async function readRunOverview(
         (a, t) => a + (t.total_cost_usd ?? 0),
         0,
     );
-    const taskDurationSum = taskResults.reduce(
-        (a, t) => a + (t.duration ?? 0),
-        0,
+    const duration = deriveRunDuration(
+        taskResults,
+        data.total_duration_seconds,
     );
-    const allHaveDuration =
-        taskResults.length > 0 &&
-        taskResults.every((t) => t.duration != null);
     return {
         id,
         tasks,
         totalCostUsd: taskResults.length ? totalCost : null,
-        taskDurationSeconds: allHaveDuration
-            ? taskDurationSum
-            : (data.total_duration_seconds ?? null),
+        taskDurationSeconds: duration.seconds,
+        tasksExecuted: duration.executedTasks,
         componentShas: extractComponentShas(data.environment_info),
         ...extractRunConfig(data),
         startedAt: data.start_time ?? null,

@@ -364,6 +364,7 @@ export default async function TaskPage({
                     subAgentUsageByToolId={task.subAgentUsageByToolId}
                     tokens={task.tokens}
                     recordedCostUsd={task.totalCostUsd}
+                    taskDurationSeconds={task.durationSeconds}
                 />
             )}
             <ProviderCallTableSection providerCalls={task.providerCalls} />

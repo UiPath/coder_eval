@@ -14,6 +14,7 @@ import {
     aggregateSubAgentUsage,
     type ArtifactRef,
     clearRunCacheDir,
+    deriveRunDuration,
     extractComponentShas,
     tallyModels,
     extractRunConfig,
@@ -21,6 +22,7 @@ import {
     isExcludedArtifact,
     type MessageEvent,
     parseCriterionResults,
+    type RawTaskResult,
     sortArtifacts,
     toTaskRow,
     visibleTurnsFromRaw,
@@ -92,6 +94,97 @@ describe("toTaskRow", () => {
         expect(
             toTaskRow({ task_id: "x", expected_seconds: null }).expectedSeconds,
         ).toBeNull();
+    });
+});
+
+describe("deriveRunDuration", () => {
+    // Compute time must describe the rows that produced it. A mature-skipped
+    // row is a carried-forward pass that never ran, so it leaves BOTH the sum
+    // and the count.
+    function row(overrides: Partial<RawTaskResult> = {}): RawTaskResult {
+        return { task_id: "t", duration: 0, ...overrides };
+    }
+
+    test("no skips: the plain sum over every row, byte-identical to before", () => {
+        const d = deriveRunDuration(
+            [row({ duration: 10 }), row({ duration: 20 }), row({ duration: 30 })],
+            999,
+        );
+        expect(d.seconds).toBe(60);
+        expect(d.executedTasks).toBe(3);
+    });
+
+    test("mature-skipped rows leave both the sum and the count", () => {
+        const d = deriveRunDuration(
+            [
+                row({ duration: 10 }),
+                row({ duration: 20 }),
+                row({ duration: 30 }),
+                row({ duration: 0, mature_skipped: true }),
+                row({ duration: 0, mature_skipped: true }),
+            ],
+            999,
+        );
+        expect(d.seconds).toBe(60);
+        expect(d.executedTasks).toBe(3);
+    });
+
+    test("an executed row with no duration falls back to the wall clock", () => {
+        const d = deriveRunDuration(
+            [row({ duration: 10 }), row({ duration: undefined })],
+            750,
+        );
+        expect(d.seconds).toBe(750);
+        expect(d.executedTasks).toBe(2);
+    });
+
+    test("a mature-skipped row with no duration does NOT trigger the fallback", () => {
+        // The old whole-run every() guard fell back here, discarding a sum that
+        // was complete over everything that actually ran.
+        const d = deriveRunDuration(
+            [
+                row({ duration: 10 }),
+                row({ duration: 20 }),
+                row({ duration: undefined, mature_skipped: true }),
+            ],
+            750,
+        );
+        expect(d.seconds).toBe(30);
+        expect(d.executedTasks).toBe(2);
+    });
+
+    test("all rows mature-skipped: wall clock, not 0s for a run that did work", () => {
+        const d = deriveRunDuration(
+            [
+                row({ duration: 0, mature_skipped: true }),
+                row({ duration: 0, mature_skipped: true }),
+            ],
+            420,
+        );
+        expect(d.seconds).toBe(420);
+        expect(d.executedTasks).toBe(0);
+    });
+
+    test("no mature_skipped key anywhere reproduces the no-skips case exactly", () => {
+        const rows: RawTaskResult[] = [
+            { task_id: "a", duration: 10 },
+            { task_id: "b", duration: 20 },
+        ];
+        expect(deriveRunDuration(rows, 999)).toEqual({
+            seconds: 30,
+            executedTasks: 2,
+        });
+    });
+
+    test("empty task_results falls back, and to null with no wall clock", () => {
+        expect(deriveRunDuration([], 88)).toEqual({
+            seconds: 88,
+            executedTasks: 0,
+        });
+        expect(deriveRunDuration([], undefined)).toEqual({
+            seconds: null,
+            executedTasks: 0,
+        });
     });
 });
 
