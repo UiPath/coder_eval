@@ -32,11 +32,15 @@ from coder_eval.models import (
     CONTAINER_INPUT_DIR,
     CONTAINER_OUTPUT_DIR,
     CONTAINER_TASK_DIR,
+    IN_CONTAINER_ENV,
     ConfigLineageEntry,
+    EvaluationResult,
     PreservationMode,
     SandboxConfig,
+    TaskDefinition,
 )
 from coder_eval.orchestration.task_loader import load_task
+from coder_eval.path_utils import PRIOR_RESULT_FILENAME
 
 
 logger = logging.getLogger(__name__)
@@ -87,7 +91,7 @@ def _arm_host_heartbeat_watchdog(output_dir: Path) -> None:
     # building the in-container Orchestrator, so a driver-based gate would
     # disarm itself on exactly the path that needs it. See
     # `Sandbox.enforces_permission_windows`.
-    if _os.environ.get("CODER_EVAL_IN_CONTAINER") == "1":
+    if _os.environ.get(IN_CONTAINER_ENV) == "1":
 
         def _watch_host_heartbeat() -> None:
             heartbeat = output_dir / HEARTBEAT_FILENAME
@@ -211,6 +215,22 @@ def run_task_internal_command(
         typer.echo(f"FATAL: context.json 'grade' must be a boolean, got {grade_raw!r}", err=True)
         raise typer.Exit(2)
     grade: bool = grade_raw
+    # A DETACHED GRADE, not a run: seed from the staged prior.json and adopt the
+    # already-executed workspace instead of starting an agent. Coerced for the
+    # same reason `grade` is — a hand-edited `"regrade": "false"` is a truthy
+    # str, and getting this one wrong would re-RUN the agent against a workspace
+    # the operator asked only to grade, destroying the trajectory being graded.
+    regrade_raw = context.get("regrade", False)
+    if not isinstance(regrade_raw, bool):
+        typer.echo(f"FATAL: context.json 'regrade' must be a boolean, got {regrade_raw!r}", err=True)
+        raise typer.Exit(2)
+    regrade: bool = regrade_raw
+    # What task.json RECORDS as the task's source path, as distinct from the
+    # path this process resolves TASK_DIR against (see Orchestrator's
+    # `recorded_task_file`). Absent on an older host -> None -> the container
+    # path is recorded, which is the pre-existing behaviour.
+    host_task_file_raw = context.get("host_task_file")
+    recorded_task_file = Path(host_task_file_raw) if host_task_file_raw else None
     # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
     # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
     # Absent -> None -> standard run_dir/artifacts workspace.
@@ -259,6 +279,20 @@ def run_task_internal_command(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if regrade:
+        _grade_recorded_run(
+            task=task,
+            authored_task=authored_task,
+            recorded_task_file=recorded_task_file,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            runtime_task_file=runtime_task_file,
+            source_yaml=source_yaml,
+            variant_id=variant_id,
+            replicate_index=replicate_index,
+        )
+        return
+
     # Late import: orchestrator pulls in heavy deps (anthropic SDK etc.)
     # that we don't want to load just to print --help.
     from coder_eval.orchestrator import Orchestrator
@@ -268,6 +302,7 @@ def run_task_internal_command(
         run_dir=output_dir,
         preservation_mode=preservation_mode,
         task_file=runtime_task_file,
+        recorded_task_file=recorded_task_file,
         variant_id=variant_id,
         source_yaml=source_yaml,
         config_lineage=config_lineage,
@@ -286,3 +321,90 @@ def run_task_internal_command(
 
     asyncio.run(orchestrator.run())
     # Orchestrator.run() writes task.json to run_dir (== output_dir). Done.
+
+
+def _grade_recorded_run(
+    *,
+    task: TaskDefinition,
+    authored_task: TaskDefinition,
+    input_dir: Path,
+    output_dir: Path,
+    recorded_task_file: Path | None,
+    runtime_task_file: Path,
+    source_yaml: str,
+    variant_id: str,
+    replicate_index: int,
+) -> None:
+    """Grade an already-executed row INSIDE the container that produced it.
+
+    This is the container half of `evaluate <run_dir>` / `run --resume` over a
+    `driver: docker` task. The host stages `prior.json` next to `task.yaml` and
+    bind-mounts the executed workspace at ``CONTAINER_GRADE_WORKSPACE``; here we
+    seed from that row and run its criteria against that workspace.
+
+    Why it must happen here at all: a container task's criteria address the
+    image's paths and toolchain, so grading them on the host scores a FAILURE for
+    a run that passed. The host path therefore REFUSES by default and demands
+    `--allow-host-grading`. Running them back inside the same image is the only
+    place the verdict means what it meant during the run — so a container-graded
+    detached row carries no `graded_on_host` stamp, exactly like a `run` row.
+
+    ``task`` is the driver-rewritten copy (docker -> tempdir, done above because
+    we are already inside the container the driver asked for), which is also what
+    keeps ``regrade_in_place`` from trying to dispatch a container from within
+    one. ``authored_task`` is what gets RECORDED, so the row keeps saying
+    `driver: docker`. ``recorded_task_file`` is the path half of that same
+    distinction and travels with it: without it the row re-records
+    ``/work/task_dir/task.yaml`` as its ``source_file``, a path on no host, and a
+    later ``evaluate <run_dir>`` over the row refuses or mounts the wrong tree.
+    The ordinary run branch above has always forwarded it; this one is the
+    second consumer and must not be the one that forgets.
+
+    Delegates to the same ``regrade_in_place`` the host uses rather than
+    restating it. The two implementations that already drifted apart once —
+    `evaluate`'s run-dir mode hardcoding `replicate_index=0` and relabelling
+    every replicate but the first — are the reason that function exists.
+    """
+    from coder_eval.models import CONTAINER_GRADE_WORKSPACE
+    from coder_eval.orchestration.regrade import RegradeError, regrade_in_place
+
+    prior_path = input_dir / PRIOR_RESULT_FILENAME
+    if not prior_path.is_file():
+        typer.echo(f"FATAL: context.json requested a regrade but {prior_path} is missing", err=True)
+        raise typer.Exit(2)
+    try:
+        prior = EvaluationResult.model_validate_json(prior_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        # Degrade to a clean message rather than a traceback: the host parses
+        # this container's task.json, so a crash here surfaces as the opaque
+        # "container exited without producing task.json" rather than naming the
+        # staged file that could not be read.
+        typer.echo(f"FATAL: {prior_path} is not a readable EvaluationResult: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    workspace = Path(CONTAINER_GRADE_WORKSPACE)
+    if not workspace.is_dir():
+        typer.echo(f"FATAL: the graded workspace was not mounted at {workspace}", err=True)
+        raise typer.Exit(2)
+
+    try:
+        asyncio.run(
+            regrade_in_place(
+                task=task,
+                prior=prior,
+                workspace=workspace,
+                run_dir=output_dir,
+                task_file=runtime_task_file,
+                source_yaml=source_yaml,
+                variant_id=variant_id,
+                replicate_index=replicate_index,
+                recorded_task=authored_task,
+                recorded_task_file=recorded_task_file,
+            )
+        )
+    except RegradeError as e:
+        # Surfaced as a clean message, not a traceback: the host parses this
+        # container's task.json, and a RegradeError means none was written. Exit
+        # 2 keeps it distinguishable from an agent failure.
+        typer.echo(f"FATAL: {e}", err=True)
+        raise typer.Exit(2) from e

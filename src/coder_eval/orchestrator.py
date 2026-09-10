@@ -380,6 +380,7 @@ class Orchestrator:
         grade: bool = True,
         prior_result: EvaluationResult | None = None,
         recorded_task: TaskDefinition | None = None,
+        recorded_task_file: Path | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -444,6 +445,17 @@ class Orchestrator:
         # filesystem silently, which is the exact outcome that gate exists to
         # prevent. The record must describe the task as AUTHORED.
         self.recorded_task = recorded_task if recorded_task is not None else task
+        # Same seam, same reason, for the PATH. `task_file` is what this process
+        # resolves TASK_DIR and the reference against -- in a container that is
+        # `/work/task_dir/task.yaml`, which is correct here and meaningless
+        # anywhere else. Recording it made a container row's `source_file` name a
+        # path that exists on no host, so a later `evaluate <run_dir>` rebuilt the
+        # task around it: the docker dispatch guard saw a non-None Path and let it
+        # through, and `_prepare_task_dir_mount` then silently mounted nothing
+        # (`if not source.is_dir(): return`), so every `$TASK_DIR` criterion
+        # resolved against the wrong tree and scored a verdict nobody could
+        # explain. The host forwards its own path for the record.
+        self.recorded_task_file = recorded_task_file if recorded_task_file is not None else task_file
         self.prior_result = prior_result
 
         # Derived paths
@@ -1195,7 +1207,7 @@ class Orchestrator:
         self.result.task_config = TaskConfigRecord(
             resolved=self.recorded_task.model_dump(warnings=False),
             source_yaml=self.source_yaml,
-            source_file=str(self.task_file) if self.task_file else None,
+            source_file=str(self.recorded_task_file) if self.recorded_task_file else None,
             lineage=self.config_lineage,
         )
 

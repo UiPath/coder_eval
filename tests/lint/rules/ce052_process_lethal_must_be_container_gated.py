@@ -45,7 +45,13 @@ import re
 from tests.lint.rules.base import BaseRule
 
 
-_GATE = "CODER_EVAL_IN_CONTAINER"
+# Both spellings of the same gate. The env var NAME is the canonical one, but it
+# is now reached through `models.container_paths.IN_CONTAINER_ENV` so the string
+# has a single definition — and a rule that recognised only the literal would
+# read the constant-based gate as NO gate at all, then instruct the author to
+# paste the literal back. That is the rule arguing against the SSOT it should be
+# reinforcing, so it accepts the constant's name too.
+_GATES = ("CODER_EVAL_IN_CONTAINER", "IN_CONTAINER_ENV")
 
 _MESSAGE = (
     "`os._exit` here is not gated on CODER_EVAL_IN_CONTAINER. It kills the process outright — "
@@ -53,7 +59,8 @@ _MESSAGE = (
     "own main process. Anywhere else it destroys a host process that merely called this code: an "
     "unconditionally-armed watchdog once exited a pytest worker 40s after the test that armed it, "
     "reporting as a random crash in an unrelated file and as a bogus coverage failure. Gate it on "
-    '`os.environ.get("CODER_EVAL_IN_CONTAINER") == "1"`, or add `# noqa: CE052` with a reason.'
+    '`os.environ.get(IN_CONTAINER_ENV) == "1"` (from coder_eval.models), or add `# noqa: CE052` '
+    "with a reason."
 )
 
 
@@ -88,4 +95,4 @@ class ProcessLethalMustBeContainerGated(BaseRule):
         self.generic_visit(node)
 
     def _container_gated(self) -> bool:
-        return any(_GATE in ast.dump(test) for test in self._guards)
+        return any(gate in ast.dump(test) for test in self._guards for gate in _GATES)

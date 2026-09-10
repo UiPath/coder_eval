@@ -202,15 +202,24 @@ class TestDockerGradeBoundary:
 class TestInContainerGradeCoercion:
     """The container side of the same boundary."""
 
+    # Valid enough to survive `load_task`, which the regrade branch reaches. The
+    # `grade` / `regrade` coercions refuse before it, so those tests do not
+    # depend on this; the prior.json ones do.
+    _VALID_TASK_YAML = (
+        "task_id: t\ndescription: d\nagent:\n  type: none\n"
+        "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: d\n"
+    )
+
     @staticmethod
-    def _run_with_context(tmp_path: Path, grade: object):
+    def _run_with_context(tmp_path: Path, grade: object = True, **extra: object):
         input_dir = tmp_path / "input"
-        input_dir.mkdir()
-        # Only the keys read BEFORE the grade coercion need real values; the
-        # command must refuse before it ever builds an Orchestrator.
-        context = {"variant_id": "default", "source_yaml": "task_id: t\n", "grade": grade}
+        input_dir.mkdir(exist_ok=True)
+        # Only the keys read BEFORE the coercions need real values; the command
+        # must refuse before it ever builds an Orchestrator.
+        context: dict[str, object] = {"variant_id": "default", "source_yaml": "task_id: t\n", "grade": grade}
+        context.update(extra)
         (input_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
-        (input_dir / "task.yaml").write_text("task_id: t\n", encoding="utf-8")
+        (input_dir / "task.yaml").write_text(TestInContainerGradeCoercion._VALID_TASK_YAML, encoding="utf-8")
         return runner.invoke(
             app,
             ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")],
@@ -244,11 +253,133 @@ class TestInContainerGradeCoercion:
         assert result.exit_code == 2
         assert "must be a boolean" in result.output
 
+    def test_a_non_boolean_regrade_is_a_hard_error(self, tmp_path: Path) -> None:
+        """The destructive twin of the test above, and the worse direction: a
+        truthy `"regrade": "false"` would take the ORDINARY branch and re-RUN the
+        agent against the workspace the operator asked only to grade, destroying
+        the trajectory being graded."""
+        result = self._run_with_context(tmp_path, regrade="false")
+        assert result.exit_code == 2
+        assert "'regrade' must be a boolean" in result.output
+
+    def test_a_regrade_without_a_staged_prior_names_the_missing_file(self, tmp_path: Path) -> None:
+        """The host stages prior.json beside task.yaml. Without it there is no row
+        to seed from, and the message must name the file — a crash here reaches
+        the host only as the opaque "container exited without producing
+        task.json"."""
+        result = self._run_with_context(tmp_path, regrade=True)
+        assert result.exit_code == 2
+        assert "prior.json" in result.output
+        assert "missing" in result.output
+
+    def test_an_unreadable_prior_degrades_to_a_message_not_a_traceback(self, tmp_path: Path) -> None:
+        """Corrupt bytes must produce the named-file diagnostic the code's own
+        comment promises, not a ValidationError traceback."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "prior.json").write_text("{not json", encoding="utf-8")
+        result = self._run_with_context(tmp_path, regrade=True)
+        assert result.exit_code == 2
+        assert "not a readable EvaluationResult" in result.output
+        assert "Traceback" not in result.output
+
     # The in-container default is asserted BEHAVIOURALLY by
     # `TestGradePlumbedIntoTheContainerOrchestrator::test_an_absent_key_still_grades`.
     # It used to be a `assert 'context.get("grade", True)' in source` grep, which
     # is the same static check that already failed here once: it passes happily
     # while the line it describes is never executed.
+
+
+class TestInContainerRegradeBranch:
+    """The container half of `evaluate <run_dir>` / `run --resume`, driven end to end.
+
+    Every seam here was reachable only through a real container, so the branch
+    shipped at 0% coverage — and it holds two values whose loss is silent.
+    Verified by mutation on the merged commit: deleting `recorded_task=` and
+    nulling `recorded_task_file` both left the whole suite green, while the first
+    makes the row record `driver: tempdir` (which then lets a later
+    `evaluate <run_dir>` skip BOTH the host-grading refusal and the
+    `graded_on_host` stamp) and the second makes it record
+    `/work/task_dir/task.yaml`, a path that exists on no host.
+    """
+
+    _DOCKER_TASK_YAML = (
+        "task_id: t\ndescription: d\nagent:\n  type: none\nsandbox:\n  driver: docker\n"
+        "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: d\n"
+    )
+
+    def _invoke(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mount_workspace: bool = True, **extra):
+        from coder_eval import models
+        from coder_eval.orchestration import regrade as rg
+
+        input_dir = tmp_path / "input"
+        input_dir.mkdir(exist_ok=True)
+        (input_dir / "task.yaml").write_text(self._DOCKER_TASK_YAML, encoding="utf-8")
+        (input_dir / "prior.json").write_text(_result().model_dump_json(), encoding="utf-8")
+        context: dict[str, object] = {
+            "variant_id": "default",
+            "source_yaml": self._DOCKER_TASK_YAML,
+            "regrade": True,
+            "host_task_file": str(tmp_path / "host" / "task.yaml"),
+        }
+        context.update(extra)
+        (input_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+
+        workspace = tmp_path / "graded-workspace"
+        if mount_workspace:
+            workspace.mkdir()
+        monkeypatch.setattr(models, "CONTAINER_GRADE_WORKSPACE", str(workspace))
+
+        captured: dict[str, object] = {}
+
+        async def _fake_regrade(**kw: object) -> EvaluationResult:
+            captured.update(kw)
+            return _result()
+
+        monkeypatch.setattr(rg, "regrade_in_place", _fake_regrade)
+        result = runner.invoke(
+            app,
+            ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")],
+        )
+        return result, captured
+
+    def test_it_grades_the_mounted_workspace_with_the_authored_task(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Three values, and each is what keeps the row honest: the workspace the
+        host bind-mounted, the AUTHORED `driver: docker` task (so the record does
+        not claim the `tempdir` rewrite this process performs on itself), and the
+        HOST's task file (so `source_file` names a path that exists off the
+        container)."""
+        result, captured = self._invoke(tmp_path, monkeypatch)
+
+        assert result.exit_code == 0, result.output
+        assert captured["workspace"] == Path(tmp_path / "graded-workspace")
+        # What runs: rewritten to tempdir, because we are already inside the
+        # container the docker driver asked for.
+        assert captured["task"].sandbox.driver == "tempdir"  # type: ignore[union-attr]
+        # What is RECORDED: unchanged.
+        assert captured["recorded_task"].sandbox.driver == "docker"  # type: ignore[union-attr]
+        assert captured["recorded_task_file"] == tmp_path / "host" / "task.yaml"
+
+    def test_an_older_host_forwards_no_task_file_and_that_is_not_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`host_task_file` is absent on a host predating the key. The row then
+        records the container path, which is the pre-existing behaviour — a
+        degraded record, not a refusal."""
+        result, captured = self._invoke(tmp_path, monkeypatch, host_task_file=None)
+
+        assert result.exit_code == 0, result.output
+        assert captured["recorded_task_file"] is None
+
+    def test_an_unmounted_workspace_is_a_hard_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Grading a directory that is not there would score every criterion 0.0
+        and report it as an agent failure. Exit 2 keeps it distinguishable."""
+        result, _ = self._invoke(tmp_path, monkeypatch, mount_workspace=False)
+
+        assert result.exit_code == 2
+        assert "was not mounted" in result.output
 
 
 # --------------------------------------------------------------------------

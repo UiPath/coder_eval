@@ -17,6 +17,7 @@ from .errors.checker_misuse import CheckerMisuseError
 from .fs_permissions import RESTRICTED_MODE, set_permissions
 from .invocation_log import render_recorder
 from .models import (
+    IN_CONTAINER_ENV,
     RECORD_CLI_DIR,
     RECORD_CLI_LOG,
     RepoSource,
@@ -199,7 +200,7 @@ class Sandbox:
         would read "tempdir" inside the container and silently disable the
         anti-cheat window on exactly the path that needs it.
         """
-        return os.environ.get("CODER_EVAL_IN_CONTAINER") == "1"
+        return os.environ.get(IN_CONTAINER_ENV) == "1"
 
     def set_permissions(
         self,

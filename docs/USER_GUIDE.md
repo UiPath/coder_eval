@@ -42,7 +42,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, `pi`, or a plugin kind). |
 | `--repeats` | Run each `(task, variant)` N times (≥1); overrides experiment/variant `repeats:`. See [Replicates](#replicates). |
 | `--resume` | Resume an interrupted run: skip tasks already finalized in `--run-dir` and run the rest, folding prior results into `run.json`. Requires `--run-dir`. See [Resuming a run](#resuming-a-run). |
-| `--allow-host-grading` | `--resume` only. Grade an executed-but-ungraded `driver: docker` row on this host instead of refusing; the row is stamped `graded_on_host`. Rejected without `--resume`, since a fresh `run` grades inside the driver the task asks for. |
+| `--allow-host-grading` | `--resume` only. Grade an executed-but-ungraded `driver: docker` row on this host instead of in a container of the task's own image (the default); the row is stamped `graded_on_host`. Rejected without `--resume`, since a fresh `run` grades inside the driver the task asks for. |
 | `--sample N` | For dataset-backed tasks, run a fixed-seed random N-row sample (reproducible; cheap smoke test). See [Bring Your Own Dataset](DATASETS.md). |
 | `--sample-per-stratum N` | For dataset-backed tasks, keep up to N rows per stratum (`stratify_field`). Overridden by `--sample`. Nondeterministic unless `dataset.sample_seed` is set — see [Bring Your Own Dataset](DATASETS.md). |
 | `--include-skipped` | Also run tasks marked `skip: true` in their YAML (off by default so CI keeps excluding them). |
@@ -197,7 +197,7 @@ commands, so an errored row could never be graded again.
 **A run directory is untrusted input.** It is a shareable artifact — the whole
 point of the detached flow is that one machine executes and another grades — and
 rebuilding the task from it means the run dir decides what runs on your host,
-with your environment. So two things are refused rather than assumed:
+with your environment. So the recorded config is refused rather than assumed:
 
 - A recorded config that carries shell (`run_command` criteria, `agent_judge`,
   `uipath_eval`, an authored `post_run`, and on the `--copy` path `pre_run`) needs
@@ -209,11 +209,48 @@ with your environment. So two things are refused rather than assumed:
   exempt. The record did not choose it, running it is exactly what your own
   config does on every run, and prompting on it would fire for 100% of run
   directories — a refusal that always fires stops being read.
-- A run made with `driver: docker` needs `--allow-host-grading`. Grading cannot
-  start a container, and such a task's criteria address container paths and
-  toolchains; on your host they score `0.0` for a run that passed. An opted-in
-  row is stamped `graded_on_host` in `environment_info` so it is never silently
-  compared with a container-graded one.
+- A run made with `driver: docker` is graded **in a container of the task's own
+  image**, so its criteria address the same paths and toolchain they did during
+  the run. Starting that container is itself a capability the record chose — it
+  names the image, and the default credential allowlist is forwarded into it —
+  so it is listed by the same gate and needs the same `--allow-recorded-commands`
+  (or an explicit task file). Grading this way needs a working docker daemon, and
+  may pull or build an image.
+
+  `--allow-host-grading` is the escape hatch: no docker here, or criteria you
+  know are host-portable. It grades on this machine instead, and stamps the row
+  `graded_on_host` so it is never silently compared with a container-graded one.
+
+  Two limits are worth knowing before you rely on **container grading**. The
+  grading container is a **second, fresh** container: only the workspace crosses
+  from the one that ran the agent, and `pre_run` is **not** re-run — so a
+  criterion that depends on state `pre_run` put outside the workspace (a symlink
+  in `/root`, an installed package, a started service) will not see it. And for a
+  `dockerfile_path` task the grading phase re-runs `docker build`, so a
+  Dockerfile or base image that changed between the two phases yields a different
+  grading image; nothing records the image identity, so that one cannot be
+  detected after the fact.
+
+  Both are warned about at dispatch **and** stamped onto the row, so a consumer
+  can filter them out rather than take the console's word for it:
+  `environment_info.graded_without_pre_run` carries the number of `pre_run`
+  commands that did not re-run, and `environment_info.graded_with_rebuilt_image`
+  names the Dockerfile that was rebuilt. For either, a single `coder-eval run` is
+  exact.
+
+`run --resume` is not affected by the gate at all: it re-resolves the task from
+your own YAML rather than from the record.
+
+Why it is not merely nicer: `tasks/byod_smoke_test.yaml` asserts
+`test -f /opt/byod_marker`, a file baked into its image. The identical row scores
+`SUCCESS 1.000` graded in a container and `FAILURE 0.000` graded on your host —
+because the host is answering "is that marker on THIS machine", which nobody
+asked. A container-graded row carries no `graded_on_host` stamp, exactly like a
+row `coder-eval run` produced.
+
+Grading in a container needs a task file to resolve the image from. When the run
+records none, `evaluate` says so and points at the two ways forward — pass the
+task file explicitly, or `--allow-host-grading`.
 
 Passing a task file **over** a run directory re-grades it with different
 criteria, reusing the trajectory and workspace of a run you already paid for:
@@ -236,7 +273,7 @@ rather than as a verdict. Override either default with `--in-place` / `--copy`.
 | `--preserve / --no-preserve` | Preserve sandbox after evaluation (default: preserve). Ignored when grading in place — an adopted directory is never moved or deleted. |
 | `--run-dir` | Where the graded `task.json` lands (default: auto-generated timestamped dir in `runs/`). |
 | `--allow-recorded-commands` | Accept a rebuilt config that would run shell (`run_command` criteria, judges, `pre_run`/`post_run`) or install packages on this host. Refused by default — a run directory is a shareable artifact, so its recorded config is untrusted input. |
-| `--allow-host-grading` | Grade a `driver: docker` task on this host instead of refusing. The row is stamped `graded_on_host` so it is never silently compared with a container-graded one. |
+| `--allow-host-grading` | Grade a `driver: docker` task on this host instead of in a container of the task's own image (the default). The row is stamped `graded_on_host` so it is never silently compared with a container-graded one. |
 | `--verbose, -v` | DEBUG-level logging |
 
 A re-grade refuses to run if the task's `reference:` directory changed since the

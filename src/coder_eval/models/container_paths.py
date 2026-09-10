@@ -70,6 +70,17 @@ def command_uses_token(command: str, token: str) -> bool:
     return False
 
 
+# The one reliable "am I inside a task container?" signal, set by DockerRunner
+# on every container it starts.
+#
+# Every gate that means "in a container" MUST key on this and never on
+# `sandbox.driver`: the in-container entry point rewrites `docker` -> `tempdir`
+# before building its Orchestrator, so a driver-based test reads a value that has
+# already been changed — which would silently disable the reference-permission
+# window on exactly the path that needs it (regression-guarded by
+# TestSandboxDriverGate).
+IN_CONTAINER_ENV = "CODER_EVAL_IN_CONTAINER"
+
 CONTAINER_WORK_DIR = "/work"
 CONTAINER_INPUT_DIR = "/work/input"
 CONTAINER_OUTPUT_DIR = "/work/output"
@@ -82,6 +93,17 @@ CONTAINER_TASK_DIR = "/work/task_dir"
 # cannot read the solution (see ``fs_permissions.py``).
 CONTAINER_REFERENCE_DIR = "/work/references"
 
+# Where a DETACHED GRADE mounts the already-executed workspace it is grading.
+# Only ever present on a grading container (`evaluate` / `run --resume` over a
+# `driver: docker` row); a normal run never mounts it.
+#
+# It is a separate mount from CONTAINER_OUTPUT_DIR because the two belong to
+# different runs: the grading pass writes its own `task.json` into its own fresh
+# run directory (which the host then folds back into the row, preserving
+# `task.execute.json`), while the workspace under evaluation belongs to the
+# ORIGINAL run and must be adopted, never written over.
+CONTAINER_GRADE_WORKSPACE = "/work/workspace"
+
 # Paths a task's WORKDIR must never collide with: the container root and every
 # framework-owned mount under /work. Consumed by SandboxConfig's working_dir
 # validator (models/sandbox.py) and re-asserted host-side in docker_runner.
@@ -93,5 +115,6 @@ RESERVED_CONTAINER_DIRS = frozenset(
         CONTAINER_OUTPUT_DIR,
         CONTAINER_TASK_DIR,
         CONTAINER_REFERENCE_DIR,
+        CONTAINER_GRADE_WORKSPACE,
     }
 )
