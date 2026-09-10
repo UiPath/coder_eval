@@ -2,8 +2,13 @@
 
 The "core" layer comprises every package that should be usable without the
 CLI: criteria/, evaluation/, models/, simulation/, scoring/, streaming/,
-errors/, orchestration/, agents/. Importing from coder_eval.cli
+errors/, orchestration/, agents/, harbor/. Importing from coder_eval.cli
 creates an upward dependency that breaks testability in isolation.
+
+``harbor/`` joined this list for the same reason ``orchestration/`` is on it:
+its reward writer wants to raise a plain exception (``RewardWriteSkippedError``,
+or the re-exported ``RegradeError``) and let the CLI wrap it into an exit
+code — exactly the ``orchestration/regrade.py`` -> ``evaluate`` shape.
 
 Note: this is a single, narrow rule (no upward imports into cli). For a
 fully layered import graph (no upward imports between any layers), evaluate
@@ -18,7 +23,7 @@ from tests.lint.rules.base import BaseRule
 
 
 _CORE_DIRS = re.compile(
-    r"[/\\](criteria|evaluation|models|simulation|scoring|streaming|errors|orchestration|agents)[/\\]"
+    r"[/\\](criteria|evaluation|models|simulation|scoring|streaming|errors|orchestration|agents|harbor)[/\\]"
 )
 _BANNED = re.compile(r"^coder_eval\.cli")
 
