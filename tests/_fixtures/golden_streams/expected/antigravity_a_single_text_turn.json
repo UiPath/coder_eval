@@ -1,0 +1,52 @@
+{
+  "agent_output": "All done.",
+  "assistant_turn_count": 1,
+  "commands": [],
+  "crash_reason": null,
+  "crashed": false,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "text",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": "All done.",
+          "thinking": null,
+          "tool_use_id": null
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 100,
+      "message_id": null,
+      "model": "gemini-3.5-flash",
+      "output_tokens": 20,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": null,
+      "tool_use_ids": []
+    }
+  ],
+  "model_used": "gemini-3.5-flash",
+  "num_turns": 1,
+  "result_summary": null,
+  "timestamp": "<scrubbed>",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 100,
+    "output_tokens": 20,
+    "total_cost_usd": "<scrubbed>",
+    "uncached_input_tokens": 100
+  },
+  "user_input": "do it"
+}

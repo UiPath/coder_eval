@@ -489,3 +489,52 @@ with the two `action.yml` items above — one considered change to the action's 
   run. Guard would need cross-method dataflow over each `Agent`-subclass turn-state
   class (write sites vs read sites), which the AST-only CExxx runner can't express
   in ~30 min — deferred. Caught in: Pi harness Phase 2 quality review.
+
+- [ ] A duration/count aggregate over run-task rows that fails to exclude
+  `mature_skipped`. Nothing guards it: the CExxx runner is Python-AST only and
+  this defect class lives in the evalboard's TypeScript. A codex nightly
+  rendered "1300 tasks · 15h 29m" for the 397 tasks that actually ran. Fixed
+  for the two whole-run sites by extracting `deriveRunDuration`; a general
+  guard needs a TS lint surface the harness does not have.
+  Caught in: timing-capture Phase 1 review.
+
+- [ ] Subtracting a SUM of intervals from a wall span where the intervals can
+  overlap. Semantic, not syntactic — an AST rule cannot tell a sum of
+  durations from a union. Antigravity shipped it: four concurrent 400ms tool
+  calls inside a 1000ms window summed to 1600ms and clamped generation to the
+  0.0 the change existed to remove. The real guard is the replay-based
+  `assert_timing_captured` golden sensor, which now exists; a static rule
+  would not have caught it. Caught in: timing-capture Phase 3 review.
+
+- [ ] A test fixture whose field name does not exist on the type it models.
+  `parseMessages`'s `CommandEntry` keys on `tool_id`; a fixture using
+  `tool_use_id` never resolves, params fall back to `{}`, and every tool
+  weighs exactly 1 — which silently turned a "split by content size" test
+  into a 99%-thinking assertion that passed. TypeScript accepts it because
+  the fixtures are untyped object literals. Typing the fixture factories
+  against the real interfaces would guard the whole class; that is a
+  sweep across the evalboard test suite, not ~30 min.
+  Caught in: timing-capture Phase 5 review.
+
+### Deferred timing divergences (not guardrails — accounting gaps)
+
+Recorded here as well as in `docs/agents/HARNESS_PARITY.md` § Known
+divergences, so the deferred-work record is one place. Measurements in
+`c/time-bugs-audit.md`.
+
+- [ ] **Antigravity books orphan-poll waiting as agent duration** (audit P2-1).
+  A task can spend `0.8 × turn_timeout` waiting on a tool call that never
+  reaches DONE — 14 tasks, 9.6h of one 83h run. Only CLOSED tool intervals are
+  subtracted from a generation window, so that wait stays inside whichever
+  window contains it; the force-close records `execution_completed_at` while
+  leaving `duration_ms` as `None`. Deliberately out of scope of the timing
+  work: closing it means deciding whether a backgrounded tool's elapsed time
+  is model time (the model IS generating while it runs), which is a semantic
+  question, not a bug fix.
+
+- [ ] **Delegate (`delegate-sdk`) records no execution bounds** (audit P3-1).
+  It reports `duration_ms` but neither `execution_started_at` nor
+  `execution_completed_at`, so its tool calls cannot be placed on a timeline.
+  Coverage is ~88%, so it is not urgent. The agent lives in the separate
+  `coder_eval_uipath` repo; mirror the Codex change there
+  (`_item_timing` + threading the SDK stamps through the telemetry builders).

@@ -37,124 +37,20 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-
-
-_FIXTURE = Path(__file__).parent / "fixtures" / "pi_happy_stream.jsonl"
-HAPPY_STREAM = _FIXTURE.read_text(encoding="utf-8").splitlines()
-
-# Derived from the fixture's three `turn_end` usages (per-generation, summed):
-#   input   406 + 512 + 79   = 997
-#   output  (69+8)+(49+3)+(28+3) = 160   (reasoning folds into the output rate)
-#   cacheRead 1024 + 1024 + 1536 = 3584
-#   cost.total 0.002177194 + 0.002192494 + 0.000951666 = 0.005321354
-EXPECTED_INPUT = 997
-EXPECTED_OUTPUT = 160
-EXPECTED_CACHE_READ = 3584
-EXPECTED_COST = 0.005321354
-
-
-def _turn_start() -> str:
-    return json.dumps({"type": "turn_start"})
-
-
-def _turn_end(*, inp: int, out: int, cache_read: int = 0, cache_write: int = 0, reasoning: int = 0, cost: float = 0.0):
-    """A `turn_end` event carrying that step's own (per-generation) usage."""
-    usage: dict[str, Any] = {
-        "input": inp,
-        "output": out,
-        "cacheRead": cache_read,
-        "cacheWrite": cache_write,
-        "reasoning": reasoning,
-        "totalTokens": inp + out + cache_read + cache_write,
-        "cost": {"total": cost},
-    }
-    return json.dumps(
-        {"type": "turn_end", "message": {"role": "assistant", "usage": usage, "stopReason": "stop"}, "toolResults": []}
-    )
-
-
-def _tool_start(call_id: str, name: str, args: dict[str, Any]) -> str:
-    return json.dumps({"type": "tool_execution_start", "toolCallId": call_id, "toolName": name, "args": args})
-
-
-def _tool_end(call_id: str, name: str, text: str, *, is_error: bool = False) -> str:
-    return json.dumps(
-        {
-            "type": "tool_execution_end",
-            "toolCallId": call_id,
-            "toolName": name,
-            "result": {"content": [{"type": "text", "text": text}]},
-            "isError": is_error,
-        }
-    )
-
-
-class _FakeProcess:
-    def __init__(self, lines: list[str], returncode: int = 0, stderr: bytes = b"") -> None:
-        self._lines = [f"{line}\n".encode() for line in lines]
-        self.returncode: int | None = None
-        self._final_returncode = returncode
-        self._stderr = stderr
-        self.pid = 4242
-        self.terminated = False
-        self.killed = False
-        self.stdout = self
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        self.returncode = self._final_returncode
-        return b""
-
-    async def read(self) -> bytes:
-        return self._stderr
-
-    async def wait(self) -> int:
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = self._final_returncode
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = self._final_returncode
-
-
-class _RunningProcess(_FakeProcess):
-    """A process that stays alive until it is explicitly terminated or killed."""
-
-    def __init__(self, lines: list[str], **kwargs: Any) -> None:
-        super().__init__(lines, **kwargs)
-        self._exited = asyncio.Event()
-
-    async def wait(self) -> int:
-        await self._exited.wait()
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self._exited.set()
-
-    def kill(self) -> None:
-        self.killed = True
-        self._exited.set()
-
-
-class _ExplodingRunningProcess(_RunningProcess):
-    """Raises from ``readline`` mid-stream AND stays alive, like the real CLI.
-
-    ``_ExplodingProcess`` inherits the plain fake's ``wait()``, which reports an
-    exit code the instant it is awaited — so it can never model the case that
-    matters for teardown: the read loop dying while the CLI is still streaming.
-    """
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        raise ValueError("Separator is not found, and chunk exceed the limit")
+from tests._fixtures.golden_streams.pi_fixtures import (
+    EXPECTED_CACHE_READ,
+    EXPECTED_COST,
+    EXPECTED_INPUT,
+    EXPECTED_OUTPUT,
+    HAPPY_STREAM,
+    _ExplodingRunningProcess,
+    _FakeProcess,
+    _RunningProcess,
+    _tool_end,
+    _tool_start,
+    _turn_end,
+    _turn_start,
+)
 
 
 @pytest.fixture

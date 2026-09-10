@@ -27,6 +27,13 @@ from coder_eval.models import AgentKind, AntigravityAgentConfig, parse_agent_con
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.pricing import calculate_cost
 from tests._fixtures.golden_streams._scrub import assert_reconciliation
+from tests._fixtures.golden_streams.antigravity_fixtures import (
+    _agent_with_steps,
+    _no_sleep,
+    _step,
+    _tc,
+    _usage,
+)
 
 
 def test_antigravity_registered_to_agent_and_config():
@@ -233,105 +240,6 @@ def test_gemini_models_are_priced(model: str):
 
 
 # --- communicate() step-stream mapping (SDK mocked via fake Step stream) ---------
-
-
-def _usage(prompt: int, cached: int, candidates: int, thoughts: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        prompt_token_count=prompt,
-        cached_content_token_count=cached,
-        candidates_token_count=candidates,
-        thoughts_token_count=thoughts,
-        total_token_count=prompt + candidates + thoughts,
-    )
-
-
-def _tc(name: str, tid: str, args: dict) -> SimpleNamespace:
-    return SimpleNamespace(name=name, id=tid, args=args)
-
-
-def _step(
-    stype,
-    status,
-    *,
-    source="MODEL",
-    target="TARGET_USER",
-    tool_calls=None,
-    content="",
-    content_delta="",
-    thinking="",
-    thinking_delta="",
-    usage=None,
-    complete=None,
-    error="",
-    step_index=0,
-    trajectory_id="",
-):
-    # Plain strings stand in for the SDK's str-enums (_enum_value passes them through).
-    return SimpleNamespace(
-        type=stype,
-        status=status,
-        source=source,
-        target=target,
-        tool_calls=tool_calls or [],
-        content=content,
-        content_delta=content_delta,
-        thinking=thinking,
-        thinking_delta=thinking_delta,
-        usage_metadata=usage,
-        is_complete_response=complete,
-        error=error,
-        step_index=step_index,
-        trajectory_id=trajectory_id,
-    )
-
-
-class _FakeConversation:
-    """Scriptable fake SDK conversation.
-
-    ``steps`` is either a flat list (one batch, yielded on the first
-    ``receive_steps()`` call) or a list of batches (one per successive
-    ``receive_steps()`` call — the shape a poll loop drains repeatedly). Once
-    the authored batches are exhausted, further calls yield an EMPTY batch —
-    this mirrors the real SDK's local connection, which drains a queue and
-    returns immediately with nothing once idle; it never replays already-
-    yielded steps. A test standing in for a background job that never
-    resolves should author one batch that opens the orphan and let
-    exhaustion naturally fall through to empty polls, not repeat itself.
-    """
-
-    def __init__(self, steps):
-        self._batches = list(steps) if steps and isinstance(steps[0], list) else [steps]
-        self._batch_index = 0
-        self.last_response = ""
-        self.receive_steps_call_count = 0
-        self.cancel_call_count = 0
-
-    async def send(self, prompt, **kwargs):
-        return None
-
-    async def receive_steps(self):
-        self.receive_steps_call_count += 1
-        batch = self._batches[self._batch_index] if self._batch_index < len(self._batches) else []
-        self._batch_index += 1
-        for s in batch:
-            yield s
-
-    async def cancel(self):
-        self.cancel_call_count += 1
-
-
-def _agent_with_steps(steps):
-    from pathlib import Path
-
-    agent = AntigravityAgent(parse_agent_config(type="antigravity", model="gemini-3.5-flash"))
-    agent.working_directory = Path("/tmp")
-    agent._sdk_agent = SimpleNamespace(conversation=_FakeConversation(steps), is_started=True)
-    return agent
-
-
-async def _no_sleep(_seconds: float) -> None:
-    """Stand-in for asyncio.sleep in poll-loop tests — no real wait."""
-    return None
 
 
 class _FiringWatchdog:

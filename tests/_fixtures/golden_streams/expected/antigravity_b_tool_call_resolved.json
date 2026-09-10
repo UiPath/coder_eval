@@ -14,11 +14,11 @@
       },
       "result_data": null,
       "result_status": "success",
-      "result_summary": "Exit code: 0 | Output: hi\n",
-      "result_tokens": 7,
+      "result_summary": "hi",
+      "result_tokens": 1,
       "sequence_number": 0,
       "timestamp": "<scrubbed>",
-      "tool_id": "cmd_b",
+      "tool_id": "t1",
       "tool_name": "Bash"
     }
   ],
@@ -40,7 +40,7 @@
           "signature": null,
           "text": null,
           "thinking": null,
-          "tool_use_id": "cmd_b"
+          "tool_use_id": "t1"
         },
         {
           "block_type": "text",
@@ -54,20 +54,20 @@
       ],
       "generation_duration_ms": "<scrubbed>",
       "input_tokens": 120,
-      "message_id": "codex-1-msg-0",
-      "model": "gpt-5-codex",
-      "output_tokens": 30,
+      "message_id": null,
+      "model": "gemini-3.5-flash",
+      "output_tokens": 15,
       "parent_tool_use_id": null,
       "reasoning_tokens": 0,
       "role": "assistant",
       "started_at": "<scrubbed>",
       "stop_reason": null,
       "tool_use_ids": [
-        "cmd_b"
+        "t1"
       ]
     }
   ],
-  "model_used": "gpt-5-codex",
+  "model_used": "gemini-3.5-flash",
   "num_turns": 1,
   "result_summary": null,
   "timestamp": "<scrubbed>",
@@ -75,7 +75,7 @@
     "cache_creation_input_tokens": 0,
     "cache_read_input_tokens": 0,
     "input_tokens": 120,
-    "output_tokens": 30,
+    "output_tokens": 15,
     "total_cost_usd": "<scrubbed>",
     "uncached_input_tokens": 120
   },

@@ -179,7 +179,12 @@ def _build_catalogue() -> list[CodexScenario]:
         )
     )
 
-    # (b) commandExecution start+complete + tokenUsage + turn/completed.
+    # (b) commandExecution start+complete, then a reply, + tokenUsage +
+    # turn/completed. The reply is not decoration: without it the emission is
+    # tool-ONLY, its whole window is the command's execution, and the
+    # generation-window subtraction correctly reports 0ms of model time —
+    # which would make this scenario blind to a harness that stopped
+    # measuring generation at all.
     cmd = _command("cmd_b")
     scenarios.append(
         CodexScenario(
@@ -187,6 +192,12 @@ def _build_catalogue() -> list[CodexScenario]:
             notifications=[
                 _item("item/started", cmd, started_at_ms=_T0_MS),
                 _item("item/completed", cmd, completed_at_ms=_T0_MS + 250),
+                _delta("done"),
+                _item(
+                    "item/completed",
+                    _agent_message("done"),
+                    completed_at_ms=_T0_MS + 400,
+                ),
                 _token_usage(inp=120, out=30, cached=0),
                 _turn_completed(),
             ],

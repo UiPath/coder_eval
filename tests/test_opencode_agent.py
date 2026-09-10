@@ -43,130 +43,14 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-
-
-SESSION = "ses_test123"
-
-
-def _evt(event_type: str, part: dict[str, Any]) -> str:
-    """One CLI event line: payload under ``part``, sessionID on the envelope."""
-    return json.dumps(
-        {"type": event_type, "timestamp": 1786663016802, "sessionID": SESSION, "part": {"sessionID": SESSION, **part}}
-    )
-
-
-def _tokens(inp: int, out: int, *, write: int = 0, read: int = 0, reasoning: int = 0) -> dict[str, Any]:
-    """Token payload in the NESTED convention (total = input+output+reasoning, cache
-    counted inside `input`); see TestTokenShapeIsObservable for the flat one."""
-    return {
-        "total": inp + out + reasoning,
-        "input": inp,
-        "output": out,
-        "reasoning": reasoning,
-        "cache": {"write": write, "read": read},
-    }
-
-
-HAPPY_STREAM = [
-    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
-    _evt(
-        "tool_use",
-        {
-            "id": "prt_2",
-            "messageID": "msg_1",
-            "type": "tool",
-            "tool": "read",
-            "callID": "call_1",
-            "state": {
-                "status": "completed",
-                "input": {"filePath": "main.py"},
-                "output": "print('hi')",
-                "time": {"start": 1786663018214, "end": 1786663018231},
-            },
-        },
-    ),
-    _evt(
-        "step_finish",
-        {
-            "id": "prt_3",
-            "messageID": "msg_1",
-            "reason": "tool-calls",
-            "cost": 0.001,
-            "tokens": _tokens(100, 20, write=5, read=10),
-        },
-    ),
-    _evt("step_start", {"id": "prt_4", "messageID": "msg_2", "type": "step-start"}),
-    _evt("text", {"id": "prt_5", "messageID": "msg_2", "type": "text", "text": "Created the file."}),
-    _evt(
-        "step_finish",
-        {
-            "id": "prt_6",
-            "messageID": "msg_2",
-            "reason": "stop",
-            "cost": 0.002,
-            "tokens": _tokens(50, 30, read=40, reasoning=7),
-        },
-    ),
-]
-
-
-class _FakeProcess:
-    def __init__(self, lines: list[str], returncode: int = 0, stderr: bytes = b"") -> None:
-        self._lines = [f"{line}\n".encode() for line in lines]
-        self.returncode: int | None = None
-        self._final_returncode = returncode
-        self._stderr = stderr
-        self.pid = 4242
-        self.terminated = False
-        self.killed = False
-        self.stdout = self
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        self.returncode = self._final_returncode
-        return b""
-
-    async def read(self) -> bytes:
-        return self._stderr
-
-    async def wait(self) -> int:
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = self._final_returncode
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = self._final_returncode
-
-
-class _RunningProcess(_FakeProcess):
-    """A process that stays alive until it is explicitly terminated or killed.
-
-    Needed for teardown assertions: the plain fake reports an exit code as soon
-    as ``wait()`` is awaited, so ``kill()`` would (correctly) skip ``terminate()``
-    on an already-dead process and the test would prove nothing.
-    """
-
-    def __init__(self, lines: list[str], **kwargs: Any) -> None:
-        super().__init__(lines, **kwargs)
-        self._exited = asyncio.Event()
-
-    async def wait(self) -> int:
-        await self._exited.wait()
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self._exited.set()
-
-    def kill(self) -> None:
-        self.killed = True
-        self._exited.set()
+from tests._fixtures.golden_streams.opencode_fixtures import (
+    HAPPY_STREAM,
+    SESSION,
+    _evt,
+    _FakeProcess,
+    _RunningProcess,
+    _tokens,
+)
 
 
 @pytest.fixture

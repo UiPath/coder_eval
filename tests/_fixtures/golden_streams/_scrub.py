@@ -97,3 +97,54 @@ def assert_reconciliation(record: dict[str, Any]) -> None:
     assert out_sum == usage["output_tokens"], "output bucket does not reconcile"
     assert cw_sum == usage["cache_creation_input_tokens"], "cache_creation bucket does not reconcile"
     assert cr_sum == usage["cache_read_input_tokens"], "cache_read bucket does not reconcile"
+
+
+def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: bool) -> None:
+    """Assert a TurnRecord dump actually recorded the timing it could measure.
+
+    Run on the UNSCRUBBED dump. ``scrub()`` masks values but preserves ``None``
+    (see its docstring), and present-vs-absent IS the whole assertion here — a
+    scrubbed snapshot can tell you a field was set, never that it was set to
+    something meaningful.
+
+    An AST rule cannot see that an SDK returned ``0.0``; this replay-based
+    sensor can. Two checks:
+
+    **Unconditional.** Every command that RESOLVED (``result_status`` of
+    ``"success"`` or ``"error"``) carries ``execution_started_at``,
+    ``execution_completed_at`` and ``duration_ms``. A force-closed orphan
+    (``"unknown"``) is exempt: it was never timed, and saying so is the honest
+    record. Where a scenario resolves no command the check is vacuously true,
+    which is correct rather than weak — the scenario is asserting nothing
+    about commands because it has none.
+
+    **Flagged.** When ``expect_generation_window``, at least one assistant
+    entry reports a ``generation_duration_ms`` that is non-``None`` AND
+    greater than zero.
+
+    Why a scenario-level floor rather than a per-entry rule: no per-entry form
+    works against the real snapshots. ``claude_d_subagent_terminal`` holds two
+    content-bearing assistant messages of which exactly one is legitimately
+    ``None`` (the synthesized sub-agent generation, delivered as a tool result
+    and never streamed), so no scenario-level flag can express "this one but
+    not that one". And "never exactly 0.0" conflicts with the clamps that can
+    legitimately produce a measured zero. The detailed per-message contract
+    lives in each agent's own unit tests; this is the cross-harness floor.
+    """
+    for command in record.get("commands") or []:
+        if command.get("result_status") not in ("success", "error"):
+            continue
+        tool = command.get("tool_id")
+        for field in ("execution_started_at", "execution_completed_at", "duration_ms"):
+            assert command.get(field) is not None, (
+                f"resolved command {tool!r} has no {field}: a command that ran and "
+                "returned was timed, so the record must say when and for how long"
+            )
+
+    if not expect_generation_window:
+        return
+    windows = [m.get("generation_duration_ms") for m in record.get("messages") or [] if m.get("role") == "assistant"]
+    assert any(w is not None and w > 0 for w in windows), (
+        f"no assistant message reports a positive generation window (saw {windows!r}); "
+        "the harness measured no model time at all for a turn that streamed one"
+    )
