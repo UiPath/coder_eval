@@ -41,6 +41,7 @@ inferred) before writing this module.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -231,7 +232,47 @@ def _write_environment(
     # operator can see which image the exported task will pull.
     if "coder-eval-agent" not in docker_cfg.image:
         warnings.append(_MISSING_CODER_EVAL_WARNING)
-    return docker_cfg.working_dir or DEFAULT_WORKDIR
+    if docker_cfg.working_dir is not None:
+        return docker_cfg.working_dir
+    inspected = _inspect_image_workdir(docker_cfg.image)
+    if inspected is not None:
+        return inspected
+    warnings.append(
+        f"Could not determine {docker_cfg.image}'s own WORKDIR (image not present locally, or docker "
+        + f"unavailable at export time) -- defaulting to `{DEFAULT_WORKDIR}`. Harbor's `docker exec -w` "
+        + "hard-fails if that path does not already exist in the image (unlike `docker run -w`, it will "
+        + "not create it); set `sandbox.docker.working_dir` explicitly to the image's real WORKDIR to "
+        + "avoid a verify-time exit 127."
+    )
+    return DEFAULT_WORKDIR
+
+
+def _inspect_image_workdir(image: str) -> str | None:
+    """Best-effort ``docker image inspect`` for a pre-built image's own ``WORKDIR``.
+
+    A pre-built image has no Dockerfile for ``_find_workdir`` to read, so this
+    is the only way to avoid guessing a path that doesn't exist in it (Harbor's
+    ``docker exec -w`` -- unlike ``docker run -w`` -- fails outright if the
+    directory isn't already there; confirmed live). Returns ``None`` (never
+    raises) whenever docker isn't available, the image isn't present locally,
+    or it declares no WORKDIR -- callers fall back to ``DEFAULT_WORKDIR`` and
+    warn.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image, "--format", "{{.Config.WorkingDir}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    workdir = result.stdout.strip()
+    return workdir or None
 
 
 _MISSING_CODER_EVAL_WARNING = (
