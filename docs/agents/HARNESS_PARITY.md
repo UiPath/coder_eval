@@ -25,10 +25,13 @@ wall clock its numbers account for.
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
 | `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock per CLI step, minus tool execution inside the step | harness clock per CLI turn, minus tool execution inside the turn |
+| what the **first** window covers | turn start → msg0, so dispatch + TTFT are INSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | turn start → first flush, so dispatch + TTFT are INSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
+| `harness_startup_ms` (turn head) | 0.0 — the window above already covers it | ~3.2 s — CLI boot fused with TTFT | 0.0 — the window above already covers it | ~2.5 s — CLI boot fused with TTFT | ~0.24 s — CLI boot fused with TTFT |
+| `harness_teardown_ms` (turn tail) | ~1.4 s | ~12 ms | ~5 ms | ~28 ms | ~13 ms |
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
-| `Σ generation + Σ tool ≈ turn duration` | yes | yes | yes | yes | yes |
+| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes | yes | yes | yes | yes |
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
 Four of the five harnesses interleave tool execution into a single generation
@@ -39,7 +42,7 @@ opens its window at `step_start` and closes it at `step_finish`, and Pi at
 `turn_start` / `turn_end`, with every tool call running inside. In all four the
 span between the recorded bounds legitimately CONTAINS tool time that the model
 did not spend generating, so all four subtract it — the **union** of the closed tool intervals
-clipped to the window (`agents/_timing.py::busy_ms`), never the sum, because
+clipped to the window (`coder_eval/timing.py::busy_ms`), never the sum, because
 tool calls overlap: Antigravity resolves several from one `Step` and backgrounds
 anything over ten seconds, and Codex spawns collab agents concurrently. Summing
 them over-subtracts by exactly the overlap and, with enough concurrency, drives
@@ -52,6 +55,42 @@ is what "never measured" looks like. Only `claude-code` does not need the
 subtraction: it marks the end of the previous SDK event and reads again when
 the next message arrives, so a tool's execution falls between two windows
 rather than inside one.
+
+**The head and tail are measured, not normalized.** Generation and tool are
+only two of the four buckets. The turn's **head** (turn start → first
+generation window) and **tail** (last window → turn end) are booked as
+`TurnRecord.harness_startup_ms` / `harness_teardown_ms`, computed once at the
+`EventCollector` seam by `coder_eval/timing.py::decompose_turn`. The tool term
+is the **union** of the command intervals, for the same reason the subtraction
+above is — Pi resolved a `Write` and a `Bash` overlapping by 18.4 ms in one
+measured turn, and summing their durations books that overlap twice. With all
+four buckets and the union, three live turns per harness reconcile to within
+1.3 ms of `duration_seconds` (worst case 0.012% of wall clock; the residual is
+clock skew, since head and tail are measured between wall-clock event stamps
+while `duration_seconds` is the agent's own monotonic span, and its sign flips
+between harnesses). `scripts/timing/decompose_run.py` reproduces the table. The head and tail
+figures in the table above are means of three live `tasks/hello_date` turns
+per harness and move with CLI cache warmth, so read their ORDER OF
+MAGNITUDE, not the digits.
+
+What the head CONTAINS differs per harness and is deliberately **not**
+decomposed, because the divergence is real and unfixable in both directions:
+
+- On an **in-process SDK** (claude-code, antigravity) the first generation
+  window starts at turn entry, so dispatch and time-to-first-token are already
+  inside it and the head reads a measured ~0. Excluding them is not possible —
+  neither harness stamps a per-message arrival to fall back to, and
+  `started_at == completed_at` would be the CE059 defect.
+- On a **subprocess harness** (codex, opencode, pi) the first window cannot
+  start before the first event the CLI emits, so the head is one opaque
+  interval fusing CLI boot, provider resolution, dispatch and TTFT. Measured on
+  OpenCode: the process spawns in ~3 ms and its first `step_start` lands at
+  ~3.9 s, with no marker in between.
+
+So the fields are named for the **interval they measure**, never for what they
+contain. Do not rename them `cli_boot_ms` or `ttft_ms` — that would claim a
+split nobody performed. A measured `0.0` head is an answer; `None` is what
+"never measured" looks like (a turn that produced no assistant message).
 
 **Why Codex leaves `generation_completed_at` as `None`.** It means "when the
 model finished emitting the `tool_use` block". Codex's stream does not carry
@@ -82,7 +121,19 @@ tool call rather than shell commands alone.
   records `execution_completed_at` while leaving `duration_ms` as `None`
   (audit P2-1).
 
-Both are deliberately deferred; see `c/time-bugs-audit.md` for the measurements.
+- **`TurnStartEvent` is emitted at inconsistent points.** Antigravity and Codex
+  fire it at turn entry, before the pump; claude-code, OpenCode and Pi fire it
+  when a generation begins. Nothing in the timing accounting reads it — the
+  head and tail are measured from the first and last `AssistantMessage`
+  instead, which is uniform across all five — so this is recorded rather than
+  fixed. It is NOT a `max_turns` hazard: `EventCollector.visible_turn_count` is
+  `len(self._commands)`, derived from `ToolEndEvent`, and `_turn_starts` feeds
+  only `assistant_turn_count` on the no-`AgentEndEvent` fallback path. The real
+  cost of normalizing it is that the event drives the live renderers, so moving
+  it changes the turn boundaries users watch during a run.
+
+All three are deliberately deferred; see `c/time-bugs-audit.md` for the
+measurements.
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 

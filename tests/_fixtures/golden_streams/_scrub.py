@@ -135,6 +135,22 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
     bounds are the same ``ast.Name``; when they are two different names
     holding the same value it cannot, and this is the check that does.
 
+    **Unconditional, and keyed on the messages rather than on the flag.** A
+    turn's head and tail (``harness_startup_ms`` / ``harness_teardown_ms``) are
+    set exactly when the turn produced an assistant message, because that is
+    what the collector measures them against — so both are non-``None`` when
+    one exists and both are ``None`` when none does. The flag is the wrong key
+    for this one: ``codex_e_orphan_tool`` streams a generation whose window
+    subtracts to zero, so it clears the flag while still having a head and a
+    tail to report.
+
+    PRESENCE is all the fixtures can support, and it is the thing worth
+    asserting: the replays run in ~0.3 ms of synthetic wall clock, so their
+    head and tail are microseconds and any bound or ordering check would be
+    noise. A ``>= 0`` check would be worse than noise — ``decompose_turn``
+    clamps with ``max(..., 0.0)``, so it would restate the implementation and
+    could never fail.
+
     Why a scenario-level floor rather than a per-entry rule: no per-entry form
     works against the real snapshots. ``claude_d_subagent_terminal`` holds two
     content-bearing assistant messages of which exactly one is legitimately
@@ -154,9 +170,24 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
                 "returned was timed, so the record must say when and for how long"
             )
 
+    assistant = [m for m in record.get("messages") or [] if m.get("role") == "assistant"]
+    for field in ("harness_startup_ms", "harness_teardown_ms"):
+        value = record.get(field)
+        if assistant:
+            assert value is not None, (
+                f"{field} is None on a turn that produced {len(assistant)} assistant message(s): "
+                "the collector measures the head and tail against the first and last generation, "
+                "so a turn that generated has both — None here says the bucket was never measured"
+            )
+        else:
+            assert value is None, (
+                f"{field} is {value!r} on a turn that produced NO assistant message: there is no "
+                "generation window to measure against, and a number here claims a measurement "
+                "nobody could have taken"
+            )
+
     if not expect_generation_window:
         return
-    assistant = [m for m in record.get("messages") or [] if m.get("role") == "assistant"]
     windows = [(m.get("generation_duration_ms"), m.get("started_at"), m.get("completed_at")) for m in assistant]
     assert any(
         duration is not None and duration > 0 and started is not None and completed is not None and completed > started

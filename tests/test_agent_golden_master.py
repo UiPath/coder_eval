@@ -265,8 +265,15 @@ class TestAssertTimingCaptured:
         windows: list[float | None] = (),
         commands: list[dict[str, Any]] = (),
         bounds_collapse: bool = False,
+        overhead: tuple[float | None, float | None] = (0.0, 3.5),
     ) -> dict[str, Any]:
-        """A record whose bounds span each window, unless `bounds_collapse`."""
+        """A record whose bounds span each window, unless `bounds_collapse`.
+
+        `overhead` is the (head, tail) pair. It defaults to a MEASURED pair —
+        a 0.0 head is antigravity's real answer — because every record here
+        carries an assistant message unless a test says otherwise, and the
+        sensor requires both buckets on such a turn.
+        """
         return {
             "messages": [
                 {
@@ -278,6 +285,8 @@ class TestAssertTimingCaptured:
                 for w in windows
             ],
             "commands": list(commands),
+            "harness_startup_ms": overhead[0],
+            "harness_teardown_ms": overhead[1],
         }
 
     def test_a_positive_window_passes(self):
@@ -362,3 +371,27 @@ class TestAssertTimingCaptured:
 
     def test_a_scenario_with_no_commands_is_vacuously_fine(self):
         assert_timing_captured(self._record(windows=[5.0]), expect_generation_window=True)
+
+    # The turn's head and tail. Presence only — the replays run in ~0.3 ms of
+    # synthetic wall clock, so any bound check here would be noise.
+    def test_a_generating_turn_must_report_a_head(self):
+        with pytest.raises(AssertionError, match="harness_startup_ms is None"):
+            assert_timing_captured(self._record(windows=[5.0], overhead=(None, 3.5)), expect_generation_window=True)
+
+    def test_a_generating_turn_must_report_a_tail(self):
+        with pytest.raises(AssertionError, match="harness_teardown_ms is None"):
+            assert_timing_captured(self._record(windows=[5.0], overhead=(0.0, None)), expect_generation_window=True)
+
+    def test_a_turn_with_no_generation_must_report_neither(self):
+        # A number here claims a measurement nobody could have taken: the
+        # collector measures both against the first and last generation.
+        with pytest.raises(AssertionError, match=r"harness_startup_ms is 0\.0"):
+            assert_timing_captured(self._record(windows=[], overhead=(0.0, 3.5)), expect_generation_window=False)
+        assert_timing_captured(self._record(windows=[], overhead=(None, None)), expect_generation_window=False)
+
+    def test_the_buckets_are_checked_even_when_no_window_is_expected(self):
+        # codex_e_orphan_tool clears the flag (its window subtracts to zero)
+        # while still having a head and a tail — so the flag is the wrong key
+        # for this half of the sensor, and the early return must not skip it.
+        with pytest.raises(AssertionError, match="harness_teardown_ms is None"):
+            assert_timing_captured(self._record(windows=[None], overhead=(0.0, None)), expect_generation_window=False)

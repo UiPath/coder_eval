@@ -52,10 +52,18 @@ def decompose_turn(
 
     The turn's two unexplained ends. Between them the windows tile (each
     harness's generation mark runs to the next) and tool execution is already
-    subtracted inside them, so head + generation + tool + tail is the whole
-    turn. Defined once here rather than in five agents, and consumed by
-    ``EventCollector``, the golden-stream sensor, and
-    ``scripts/timing/decompose_run.py``.
+    subtracted inside them, so head + generation + UNION(tool) + tail is the
+    whole turn — the union and not the sum, because concurrent tool calls
+    otherwise book their overlap twice (``busy_ms`` above, and measured: one
+    live Pi turn overlapped a ``Write`` and a ``Bash`` by 18.4 ms).
+
+    ``EventCollector`` is the SOLE caller, and deliberately so: this is the one
+    place the two values are computed, after which they are persisted on
+    ``TurnRecord`` and every later consumer READS them rather than recomputing.
+    The golden-stream sensor asserts on the dumped record, and
+    ``scripts/timing/decompose_run.py`` reads the stored fields — neither can
+    call this, because ``task.json`` carries no ``AgentStartEvent`` stamp to
+    recompute a head from.
 
     What the head CONTAINS differs per harness and is deliberately NOT split.
     On an in-process SDK the first window already covers dispatch and
