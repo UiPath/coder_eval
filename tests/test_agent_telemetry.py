@@ -1278,3 +1278,76 @@ class TestPerMessageTokenCapture:
             assert second.cache_read_tokens == 50
         finally:
             agent_module.query = original_query
+
+
+class TestClaudeHeadIsStructurallyZero:
+    """Why claude-code's `harness_startup_ms` is 0.0, and why that is left alone.
+
+    `_ClaudeTurnState.__init__` stamps `last_event_wall`, which becomes the
+    FIRST generation window's `started_at`. `_build_claude_query` runs next,
+    and only then is `AgentStartEvent` emitted. So the head — agent start to
+    first window — is a small NEGATIVE that `decompose_turn` clamps to 0.0.
+
+    Two changes were considered and rejected, and this class pins the facts
+    each rejection rests on, because both are the kind of thing that rots
+    silently:
+
+    1. *Emit `AgentStartEvent` before `_build_claude_query`.* It would turn the
+       clamp into a genuine measurement, but the value stays ~0 either way —
+       `last_event_wall` is stamped before the build too, so the build sits
+       inside msg0's window regardless. The cost is real: the event carries
+       `model=effective_model`, which the build resolves, so moving it means
+       the live renderers show the configured model rather than the effective
+       one. Not worth it for a sub-millisecond gain.
+
+    2. *Re-seed the first window after the build.* That WOULD surface the build
+       cost, and it is the generation-window seeding change ruled out in
+       docs/agents/HARNESS_PARITY.md — for an in-process SDK the interval from
+       turn entry to the first message is msg0's generation.
+
+    Both rejections assume the build is cheap. This test is what keeps that
+    assumption honest.
+    """
+
+    # Measured at 0.03 ms bare and 0.10 ms with four plugin roots. The bound is
+    # ~300x that: generous enough that a loaded CI box cannot trip it, tight
+    # enough to catch a regression that would make the reasoning above wrong.
+    BUDGET_MS = 50.0
+
+    @staticmethod
+    def _build_ms(**config_kwargs) -> float:
+        from pathlib import Path
+
+        from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, model="claude-haiku-4-5-20251001", **config_kwargs)
+        agent = ClaudeCodeAgent(config)
+        agent.working_directory = Path(".")
+        # Best of N: the claim is about the work the call does, not about the
+        # worst scheduling slice a shared runner happens to hand it.
+        samples = []
+        for _ in range(5):
+            started = time.perf_counter()
+            agent._build_claude_query("hi", 60, 10, lambda _line: None)
+            samples.append((time.perf_counter() - started) * 1000.0)
+        return min(samples)
+
+    def test_the_query_build_is_cheap_enough_to_leave_inside_msg0(self):
+        elapsed = self._build_ms()
+        assert elapsed < self.BUDGET_MS, (
+            f"_build_claude_query took {elapsed:.2f} ms, over the {self.BUDGET_MS} ms budget. It runs "
+            "BETWEEN the first generation window's start stamp and the AgentStartEvent, so this time "
+            "is booked as model generation and the clamped 0.0 head hides it. At a few hundred "
+            "microseconds that is the right trade; at this size it is not — revisit the two options "
+            "in this class's docstring."
+        )
+
+    def test_plugin_resolution_does_not_change_that(self, tmp_path):
+        """The rejected proposal's motivating case was a plugin-heavy task."""
+        (tmp_path / "skills").mkdir()
+        roots = [{"type": "local", "path": str(tmp_path)} for _ in range(4)]
+        elapsed = self._build_ms(plugins=roots)
+        assert elapsed < self.BUDGET_MS, (
+            f"_build_claude_query with 4 plugin roots took {elapsed:.2f} ms, over the "
+            f"{self.BUDGET_MS} ms budget — see the sibling test for why that matters."
+        )
