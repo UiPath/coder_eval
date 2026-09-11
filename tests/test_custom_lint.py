@@ -4446,3 +4446,83 @@ class TestCE059GenerationWindowIsTwoReads:
         path = SRC / "coder_eval/agents/antigravity_agent.py"
         assert path.is_file(), "the noqa fixture file must exist or this test passes vacuously"
         assert not [v for v in check_file(path) if v.rule_id == "CE059"]
+
+
+class TestCE060MessageIdDeclared:
+    """CE060 flags an assistant message built without an identity.
+
+    Every source string carries its own import line: the rule derives its
+    constructor set from the module's own `coder_eval.models` imports, so a
+    bare `AssistantMessage(...)` with no import is correctly invisible to it.
+    """
+
+    _IMPORT = "from coder_eval.models import AssistantMessage\n"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/antigravity_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
+
+        return MessageIdDeclared(filepath).check(ast.parse(src))
+
+    def test_flags_an_omitted_message_id(self):
+        assert self._run(self._IMPORT + "m = AssistantMessage(model=model, output_tokens=3)")
+
+    def test_flags_an_explicit_none(self):
+        # Passing None is a claim that no id exists, which is never true for a
+        # harness that can synthesize one.
+        assert self._run(self._IMPORT + "m = AssistantMessage(model=model, message_id=None)")
+
+    def test_flags_the_in_tree_alias_spelling(self):
+        assert self._run(
+            "from coder_eval.models import AssistantMessage as AssistantMessageTelemetry\n"
+            "m = AssistantMessageTelemetry(model=model)"
+        )
+
+    def test_flags_an_arbitrary_alias(self):
+        # The case a hardcoded name list misses entirely — the whole reason
+        # CE060 resolves aliases instead.
+        assert self._run("from coder_eval.models import AssistantMessage as Msg\nm = Msg(model=model)")
+
+    def test_flags_the_attribute_spelling(self):
+        assert self._run(self._IMPORT + "m = models.AssistantMessage(model=model)")
+
+    def test_flags_a_star_expanded_call(self):
+        # `**fields` has not declared the field at the site.
+        assert self._run(self._IMPORT + "m = AssistantMessage(**fields)")
+
+    def test_allows_a_literal_id(self):
+        assert not self._run(self._IMPORT + 'm = AssistantMessage(message_id="x")')
+
+    def test_allows_an_fstring_id(self):
+        assert not self._run(self._IMPORT + 'm = AssistantMessage(message_id=f"{turn_id}-msg-{i}")')
+
+    def test_allows_a_fallback_expression(self):
+        # The runtime-None blind spot, exempted deliberately: passing a
+        # fallback expression IS deciding what the id is.
+        assert not self._run(self._IMPORT + "m = AssistantMessage(message_id=str(x) or None)")
+
+    def test_allows_a_star_expanded_call_that_also_passes_the_field(self):
+        assert not self._run(self._IMPORT + "m = AssistantMessage(**fields, message_id=mid)")
+
+    def test_ignores_an_unrelated_constructor(self):
+        assert not self._run(self._IMPORT + "s = Span(model=model)")
+
+    def test_ignores_a_module_with_no_matching_import(self):
+        # Nothing is bound, so the rule claims nothing here. A construction
+        # site has to import the class to reach it.
+        assert not self._run("m = AssistantMessage(model=model)")
+
+    def test_is_out_of_scope_outside_agents(self):
+        assert not self._run(
+            self._IMPORT + "m = AssistantMessage(model=model)",
+            filepath="src/coder_eval/orchestrator.py",
+        )
+
+    def test_the_real_antigravity_flush_declares_its_id(self):
+        from tests.lint.runner import check_file
+
+        path = SRC / "coder_eval/agents/antigravity_agent.py"
+        assert path.is_file(), "the fixture file must exist or this test passes vacuously"
+        assert not [v for v in check_file(path) if v.rule_id == "CE060"]
