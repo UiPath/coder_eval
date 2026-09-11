@@ -13,6 +13,7 @@ import type {
     TokenTotals,
     ToolCall,
 } from "@/lib/runs";
+import { toolExecutionMs } from "@/lib/timing";
 import {
     type PerMessageImpact,
     buildThinkingModel,
@@ -376,10 +377,11 @@ export function MessageTimelineSection({
     const textMs = mainThread.reduce((s, m) => s + (m.textMs ?? 0), 0);
     const toolGenMs = mainThread.reduce((s, m) => s + (m.toolGenMs ?? 0), 0);
     const mixedMs = mainThread.reduce((s, m) => s + (m.mixedGenMs ?? 0), 0);
-    const toolExecMs = mainThread.reduce(
-        (s, m) => s + m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0),
-        0,
-    );
+    // The UNION of the tool executions, not their sum — concurrent calls
+    // occupy the wall clock once. Summing them made Unaccounted negative on
+    // any task that ran tools in parallel, reporting overlap as if the
+    // harness had lost time.
+    const toolExecMs = toolExecutionMs(mainThread);
     const slowGen = mainThread.filter(
         (m) => (m.generationMs ?? 0) >= SLOW_GEN_MS,
     ).length;
@@ -417,25 +419,87 @@ export function MessageTimelineSection({
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums">
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Messages
+            {/* TWO LEVELS, two rows. The top row's Generation, Tool exec and
+                Unaccounted sum to the task's wall clock; the bottom row splits
+                Generation alone and sums to IT. Rendering the split as a
+                sub-cell of one top-row cell put both sums on one line, where
+                nothing said which total each part belonged to. */}
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums space-y-3">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+                    <div>
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Messages
+                        </div>
+                        <div className="text-gray-900 font-medium">{messageCount}</div>
                     </div>
-                    <div className="text-gray-900 font-medium">{messageCount}</div>
+                    <div title="model-generation time, split per block kind on the row below">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Generation
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(totalGenMs)}
+                        </div>
+                    </div>
+                    <div title="wall clock the tools occupied — overlapping calls counted once, not twice">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Tool exec
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(toolExecMs)}
+                        </div>
+                    </div>
+                    <div title="task wall clock minus generation and tool execution — includes sandbox setup, grading, simulator calls, and any time the harness did not report">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Unaccounted
+                        </div>
+                        <div
+                            className={
+                                unaccountedMs != null && unaccountedMs < 0
+                                    ? // Overlap or unreported overrun, not
+                                      // unexplained time — a different fact
+                                      // from a large positive residual, so a
+                                      // different colour rather than the same
+                                      // grey a healthy row gets.
+                                      "text-amber-700 font-medium"
+                                    : unaccountedShare != null && unaccountedShare >= 0.25
+                                      ? "text-red-700 font-medium"
+                                      : "text-gray-900 font-medium"
+                            }
+                        >
+                            {fmtMs(unaccountedMs)}
+                            {unaccountedShare != null && (
+                                <span className="text-gray-400">
+                                    {" "}
+                                    ({Math.round(unaccountedShare * 100)}%)
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                    <div>
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Slow events
+                        </div>
+                        <div
+                            className={
+                                slowGen + slowTool > 0
+                                    ? "text-red-700 font-medium"
+                                    : "text-gray-900 font-medium"
+                            }
+                        >
+                            {slowGen} gen · {slowTool} tool
+                        </div>
+                    </div>
                 </div>
                 <div
-                    title="model-generation time. Within an emission that mixed block kinds, the per-kind split is apportioned by content size — an estimate for those emissions, not a measurement. 'unsplit' is time in an emission with no apportionable content at all, so it belongs to no kind."
+                    className="border-t border-gray-200 pt-2 text-[10px]"
+                    title="how the Generation figure above divides across block kinds. Within an emission that mixed kinds the split is apportioned by content size — an estimate for those emissions, not a measurement. 'unsplit' is time in an emission with no apportionable content at all, so it belongs to no kind."
                 >
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Generation
-                    </div>
-                    <div className="text-gray-900 font-medium">
-                        {fmtMs(totalGenMs)}
+                    <div className="text-gray-500 uppercase tracking-wide">
+                        Generation split
                     </div>
                     <div
                         className={
-                            "mt-1 grid gap-2 text-[10px] " +
+                            "mt-1 grid gap-2 " +
                             (mixedMs > 0 ? "grid-cols-4" : "grid-cols-3")
                         }
                     >
@@ -458,7 +522,11 @@ export function MessageTimelineSection({
                             </div>
                         </div>
                         <div>
-                            <div className="text-gray-500">tool</div>
+                            {/* "tool args", never "tool": this is time the model
+                                spent WRITING a tool call, and the Tool exec cell
+                                one row up is time the tool spent RUNNING. The
+                                bare word named both. */}
+                            <div className="text-gray-500">tool args</div>
                             <div className="text-gray-800 font-medium tabular-nums">
                                 {fmtMs(toolGenMs)}
                                 {totalGenMs > 0 && (
@@ -501,56 +569,6 @@ export function MessageTimelineSection({
                                 </div>
                             </div>
                         )}
-                    </div>
-                </div>
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Tool exec
-                    </div>
-                    <div className="text-gray-900 font-medium">
-                        {fmtMs(toolExecMs)}
-                    </div>
-                </div>
-                <div
-                    title="task wall clock minus generation and tool execution — includes sandbox setup, grading, simulator calls, and any time the harness did not report"
-                >
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Unaccounted
-                    </div>
-                    <div
-                        className={
-                            unaccountedMs != null && unaccountedMs < 0
-                                ? // Overlap, not unreported time — a different
-                                  // fact from a large positive residual, so a
-                                  // different colour rather than the same grey
-                                  // a healthy row gets.
-                                  "text-amber-700 font-medium"
-                                : unaccountedShare != null && unaccountedShare >= 0.25
-                                  ? "text-red-700 font-medium"
-                                  : "text-gray-900 font-medium"
-                        }
-                    >
-                        {fmtMs(unaccountedMs)}
-                        {unaccountedShare != null && (
-                            <span className="text-gray-400">
-                                {" "}
-                                ({Math.round(unaccountedShare * 100)}%)
-                            </span>
-                        )}
-                    </div>
-                </div>
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Slow events
-                    </div>
-                    <div
-                        className={
-                            slowGen + slowTool > 0
-                                ? "text-red-700 font-medium"
-                                : "text-gray-900 font-medium"
-                        }
-                    >
-                        {slowGen} gen · {slowTool} tool
                     </div>
                 </div>
             </div>

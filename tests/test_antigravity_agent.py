@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from coder_eval.agents import antigravity_agent as agent_module
 from coder_eval.agents.antigravity_agent import (
     _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP,
     _DEFAULT_MODEL,
@@ -1521,8 +1522,6 @@ class _Clock:
 
 
 def _install_clock(monkeypatch, clock: _Clock) -> None:
-    import coder_eval.agents.antigravity_agent as agent_module
-
     monkeypatch.setattr(agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(agent_module, "datetime", SimpleNamespace(now=clock.now))
 

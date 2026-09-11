@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { epochMs } from "./timing";
 import path from "node:path";
 import { cache } from "react";
 import {
@@ -296,6 +297,14 @@ export interface MessageToolUse {
     description: string | null;
     genMs: number | null;         // LLM generation time for this tool_use block
     durationMs: number | null;    // tool execution time (separate from generationMs)
+    // The same execution as epoch milliseconds, so overlapping calls can be
+    // UNIONED rather than summed. `durationMs` alone cannot do that: two
+    // concurrent 5s calls sum to 10s of wall clock that only took 5, and a
+    // residual computed against the sum goes negative for a healthy run.
+    // Null on a call the harness never timed, or on a run predating the
+    // fields — such a call falls back to `durationMs` (see busyMs callers).
+    execStartMs: number | null;
+    execEndMs: number | null;
     isError: boolean;
     resultPreview: string | null; // short truncated preview of the result
     // Output tokens for this tool_use — the tool emission's recorded
@@ -1452,6 +1461,11 @@ interface CommandEntry {
     tool_id?: string;
     parameters?: Record<string, unknown>;
     duration_ms?: number;
+    // Wall-clock bounds of the tool's execution (CommandTelemetry). Present on
+    // every harness that times a resolved call; absent on a force-closed one,
+    // which was never timed at all.
+    execution_started_at?: string | null;
+    execution_completed_at?: string | null;
     result_status?: string;
     result_summary?: unknown;
     error_message?: string | null;
@@ -1857,6 +1871,8 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                             typeof cmd?.duration_ms === "number"
                                 ? cmd.duration_ms
                                 : null,
+                        execStartMs: epochMs(cmd?.execution_started_at),
+                        execEndMs: epochMs(cmd?.execution_completed_at),
                         isError:
                             b.is_error === true ||
                             (cmd?.result_status != null &&

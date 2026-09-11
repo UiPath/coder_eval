@@ -23,9 +23,10 @@ from typing import Any
 
 import pytest
 
+from coder_eval.agents import pi_agent as agent_module
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AgentKind, AssistantMessage, PiAgentConfig
+from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.events import (
     AgentEndEvent,
@@ -1109,9 +1110,7 @@ class TestGenerationWindowExcludesToolExecution:
     WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
     WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms turn
 
-    def _finish_turn(self, monkeypatch, spans):
-        import coder_eval.agents.pi_agent as agent_module
-
+    def _finish_turn(self, monkeypatch, spans, open_starts=()):
         class _Clock(datetime):
             @staticmethod
             def now(tz=None):
@@ -1120,6 +1119,13 @@ class TestGenerationWindowExcludesToolExecution:
         state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m")
         state.turn_started_at = self.WINDOW_START
         state.turn_tool_spans = list(spans)
+        for i, started in enumerate(open_starts):
+            state.open_tools[f"open-{i}"] = CommandTelemetry(
+                tool_name="bash",
+                tool_id=f"open-{i}",
+                timestamp=started,
+                execution_started_at=started,
+            )
         monkeypatch.setattr(agent_module, "datetime", _Clock)
         state.on_turn_end(
             {"message": {"role": "assistant", "usage": {"input": 100, "output": 20}, "stopReason": "stop"}}
@@ -1158,3 +1164,24 @@ class TestGenerationWindowExcludesToolExecution:
             [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
         )
         assert message.generation_duration_ms == 0.0
+
+    def test_a_tool_still_open_at_the_boundary_is_subtracted(self, monkeypatch):
+        # A call that opens inside this turn and closes inside the NEXT one
+        # straddles the boundary. Counting only closed intervals published the
+        # pre-boundary 400ms as generation while the call's own duration_ms
+        # counted it again.
+        message = self._finish_turn(
+            monkeypatch,
+            [],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=600)],
+        )
+        assert message.generation_duration_ms == pytest.approx(600.0)
+
+    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self, monkeypatch):
+        # Union, not sum, across the closed and still-open sets alike.
+        message = self._finish_turn(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
+        )
+        assert message.generation_duration_ms == pytest.approx(200.0)

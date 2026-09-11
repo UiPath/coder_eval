@@ -226,6 +226,8 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
                     resultPreview: null,
                     outputTokens: 80,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
             outputTokens: 80,
@@ -259,6 +261,8 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
                     resultPreview: null,
                     outputTokens: 5,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
         });
@@ -285,6 +289,8 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
             resultPreview: "[1, 2]",
             outputTokens: 10,
             resultTokens: null,
+            execStartMs: null,
+            execEndMs: null,
         };
     }
 
@@ -371,6 +377,8 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
                     resultPreview: "hi",
                     outputTokens: 121,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
         });
@@ -426,6 +434,8 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
                     resultPreview: "hi",
                     outputTokens: 3,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
         });
@@ -511,6 +521,8 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
                     resultPreview: null,
                     outputTokens: null,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
             ...overrides,
@@ -590,6 +602,8 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
             resultPreview: null,
             outputTokens: null,
             resultTokens: null,
+            execStartMs: null,
+            execEndMs: null,
         };
         const main = makeMessage({
             index: 1,
@@ -611,6 +625,49 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
         expect(cell("Unaccounted").textContent).toBe("3.0s (30%)");
         expect(cell("Generation").textContent).toBe("1.0s");
         expect(cell("Tool exec").textContent).toBe("6.0s");
+    });
+
+    test("concurrent tools are counted once, so the residual stays honest", () => {
+        // Two 5s sleeps started 1s apart occupy 6s of wall clock, not 10s.
+        // Summing their durations reported -615ms on a live task where the
+        // honest answer was positive: sandbox setup and grading.
+        const span = (start: number, end: number) => ({
+            toolName: "Bash",
+            toolUseId: `tu_${start}`,
+            summary: "sleep 5",
+            argText: "sleep 5",
+            description: null,
+            genMs: null,
+            durationMs: end - start,
+            isError: false,
+            resultPreview: null,
+            outputTokens: null,
+            resultTokens: null,
+            execStartMs: start,
+            execEndMs: end,
+        });
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        textMs: 1000,
+                        toolUses: [span(1_000, 6_000), span(2_000, 7_000)],
+                    }),
+                ]}
+                taskDurationSeconds={9.5}
+            />,
+        );
+        expect(cell("Tool exec").textContent).toBe("6.0s");
+        // 9.5s − 1s generation − 6s of tool wall clock = 2.5s.
+        expect(cell("Unaccounted").textContent).toBe("2.5s (26%)");
+    });
+
+    test("a tool with no recorded bounds still contributes its duration", () => {
+        // Runs predating the execution bounds, and harnesses that report only
+        // a duration, must not silently drop out of the tool total.
+        renderStrip(10);
+        expect(cell("Tool exec").textContent).toBe("1.0s");
     });
 
     test("the cell explains that the residual is not only agent time", () => {
@@ -727,12 +784,16 @@ describe("MessageTimelineSection — mixed generation sub-cell", () => {
             return m ? Number(m[1]) : 0;
         };
         expect(pct("thinking")).toBe(10);
-        expect(pct("tool") + pct("text") + pct("unsplit") + pct("thinking")).toBe(100);
+        expect(pct("tool args") + pct("text") + pct("unsplit") + pct("thinking")).toBe(100);
     });
 
-    test("the Generation cell says the mixed split is an estimate", () => {
+    test("the split row says the mixed split is an estimate", () => {
+        // The caveat travels with the SPLIT, which is what it qualifies — the
+        // Generation total above it is measured, not apportioned.
         render(<MessageTimelineSection messages={[makeMessage()]} />);
-        expect(screen.getByText("Generation").parentElement).toHaveAttribute(
+        expect(
+            screen.getByText("Generation split").parentElement,
+        ).toHaveAttribute(
             "title",
             expect.stringContaining("apportioned by content size"),
         );

@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from coder_eval.agents import opencode_agent as agent_module
 from coder_eval.agents.opencode_agent import (
     OpenCodeAgent,
     _OpenCodeTurnState,
@@ -31,7 +32,7 @@ from coder_eval.agents.opencode_agent import (
     _unwrap,
 )
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AssistantMessage, OpenCodeAgentConfig, PermissionMode
+from coder_eval.models import AssistantMessage, CommandTelemetry, OpenCodeAgentConfig, PermissionMode
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.events import (
     AgentEndEvent,
@@ -1800,9 +1801,7 @@ class TestGenerationWindowExcludesToolExecution:
     WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
     WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms step
 
-    def _finish_step(self, monkeypatch, spans):
-        import coder_eval.agents.opencode_agent as agent_module
-
+    def _finish_step(self, monkeypatch, spans, open_starts=()):
         class _Clock(datetime):
             @staticmethod
             def now(tz=None):
@@ -1811,6 +1810,13 @@ class TestGenerationWindowExcludesToolExecution:
         state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
         state.step_started_at = self.WINDOW_START
         state.step_tool_spans = list(spans)
+        for i, started in enumerate(open_starts):
+            state.open_tools[f"open-{i}"] = CommandTelemetry(
+                tool_name="bash",
+                tool_id=f"open-{i}",
+                timestamp=started,
+                execution_started_at=started,
+            )
         monkeypatch.setattr(agent_module, "datetime", _Clock)
         state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
         assistant = [m for m in state.messages if m.role == "assistant"]
@@ -1851,6 +1857,28 @@ class TestGenerationWindowExcludesToolExecution:
         )
         assert message.generation_duration_ms == 0.0
 
+    def test_a_tool_still_open_at_the_boundary_is_subtracted(self, monkeypatch):
+        # The windows tile from the previous step's finish, so a call that
+        # opens inside this step and closes inside the NEXT one straddles the
+        # boundary. Counting only closed intervals published the pre-boundary
+        # 400ms as generation while the call's own duration_ms counted it
+        # again — the exact double-count `busy_ms` exists to prevent.
+        message = self._finish_step(
+            monkeypatch,
+            [],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=600)],
+        )
+        assert message.generation_duration_ms == pytest.approx(600.0)
+
+    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self, monkeypatch):
+        # Union, not sum, across the closed and still-open sets alike.
+        message = self._finish_step(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
+        )
+        assert message.generation_duration_ms == pytest.approx(200.0)
+
 
 class TestGenerationWindowsTileTheTurn:
     """Each step's window runs from the PREVIOUS step's finish, not its own `step_start`.
@@ -1871,8 +1899,6 @@ class TestGenerationWindowsTileTheTurn:
 
     @staticmethod
     def _finish_at(monkeypatch, state, *, step_start, now):
-        import coder_eval.agents.opencode_agent as agent_module
-
         class _Clock(datetime):
             @staticmethod
             def now(tz=None):

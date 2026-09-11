@@ -1291,3 +1291,51 @@ describe("parseMessages — mixed-kind emissions", () => {
         assertSums(e);
     });
 });
+
+describe("parseMessages — tool execution bounds", () => {
+    const turns = (cmd: Record<string, unknown>): TurnEntry[] => [
+        {
+            messages: [
+                msg("tool_use", {
+                    startedAt: "2026-01-01T00:00:00.000Z",
+                    completedAt: "2026-01-01T00:00:00.500Z",
+                    genMs: 500,
+                    toolUseId: "tu_1",
+                }),
+            ],
+            commands: [
+                { tool_name: "Bash", tool_id: "tu_1", parameters: { command: "ls" }, ...cmd },
+            ],
+        },
+    ];
+
+    test("the recorded execution bounds reach the tool use as epoch ms", () => {
+        // Without them the Unaccounted residual can only SUM overlapping
+        // calls, which is what made it go negative on a concurrent-tool task.
+        const [e] = parseMessages(
+            turns({
+                duration_ms: 1000,
+                execution_started_at: "2026-01-01T00:00:01.000Z",
+                execution_completed_at: "2026-01-01T00:00:02.000Z",
+            }),
+        );
+        const t = e.toolUses[0];
+        expect(t.execEndMs! - t.execStartMs!).toBe(1000);
+        expect(t.execStartMs).toBe(Date.parse("2026-01-01T00:00:01.000Z"));
+    });
+
+    test("a command with no bounds keeps its duration and reports null bounds", () => {
+        const [e] = parseMessages(turns({ duration_ms: 1000 }));
+        expect(e.toolUses[0].durationMs).toBe(1000);
+        expect(e.toolUses[0].execStartMs).toBeNull();
+        expect(e.toolUses[0].execEndMs).toBeNull();
+    });
+
+    test("an unparseable stamp is null, not NaN", () => {
+        const [e] = parseMessages(
+            turns({ execution_started_at: "not a date", execution_completed_at: null }),
+        );
+        expect(e.toolUses[0].execStartMs).toBeNull();
+        expect(e.toolUses[0].execEndMs).toBeNull();
+    });
+});

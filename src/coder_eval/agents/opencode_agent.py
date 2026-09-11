@@ -711,13 +711,23 @@ class _OpenCodeTurnState:
         for i, tool_id in enumerate(self.step_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
+        # A call still OPEN at this boundary counts too, bounded at `completed`.
+        # Subtracting only CLOSED intervals publishes the part of a straddling
+        # call that ran inside this window as generation, while the call's own
+        # duration_ms counts it again — a live double-count now that the windows
+        # tile contiguously from `gen_mark`. No double subtraction: when the call
+        # later closes, `_finish_tool` appends its full interval to the NEXT
+        # window's list, where busy_ms clips it to the post-boundary remainder.
+        spans = self.step_tool_spans + [
+            (t.execution_started_at, completed) for t in self.open_tools.values() if t.execution_started_at is not None
+        ]
         self.messages.append(
             AssistantMessage(
                 started_at=started,
                 completed_at=completed,
                 generation_duration_ms=max(
                     0.0,
-                    (completed - started).total_seconds() * 1000 - busy_ms(self.step_tool_spans, started, completed),
+                    (completed - started).total_seconds() * 1000 - busy_ms(spans, started, completed),
                 ),
                 content_blocks=blocks,
                 tool_use_ids=list(self.step_tool_ids),

@@ -31,6 +31,8 @@ function toolUse(
         resultPreview,
         outputTokens,
         resultTokens,
+        execStartMs: null,
+        execEndMs: null,
     };
 }
 
