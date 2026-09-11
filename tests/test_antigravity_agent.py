@@ -24,7 +24,7 @@ from coder_eval.agents.antigravity_agent import (
     _to_token_usage,
 )
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, AntigravityAgentConfig, parse_agent_config
+from coder_eval.models import AgentKind, AntigravityAgentConfig, AssistantMessage, parse_agent_config
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.pricing import calculate_cost
 from tests._fixtures.golden_streams._scrub import assert_reconciliation
@@ -335,6 +335,13 @@ async def test_communicate_maps_steps_to_turn_record():
     assert sum(m.output_tokens for m in bucketed) == tr.token_usage.output_tokens
     assert sum(m.cache_creation_tokens for m in bucketed) == tr.token_usage.cache_creation_input_tokens
     assert sum(m.cache_read_tokens for m in bucketed) == tr.token_usage.cache_read_input_tokens
+    # Every generation carries its own identity. Filter explicitly: `tr.messages`
+    # is list[TranscriptMessage] and ReconciliationMessage has no `message_id`,
+    # so a bare comprehension would raise the moment a residual is booked.
+    # The literal strings pin the 0-based Codex-parity scheme, which mere
+    # distinctness (a uuid would pass) does not.
+    ids = [m.message_id for m in tr.messages if isinstance(m, AssistantMessage)]
+    assert ids == ["antigravity-1-msg-0", "antigravity-1-msg-1", "antigravity-1-msg-2"]
     assert agent.pending_turn is None  # success path leaves no partial
 
 

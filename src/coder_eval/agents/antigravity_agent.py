@@ -1087,6 +1087,10 @@ class _AntigravityTurnState:
                 cache_read_tokens=gen.cache_read_input_tokens,
                 reasoning_tokens=reasoning_tokens,
                 model=self.model,
+                # The Step stream carries no message id, and the evalboard's
+                # SAME_EMISSION_GAP_MS fallback cannot split this harness's
+                # contiguous windows — see docs/agents/HARNESS_PARITY.md.
+                message_id=f"{self.turn_id}-msg-{self._assistant_turns}",
             )
         )
         self._assistant_turns += 1
