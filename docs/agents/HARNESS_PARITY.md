@@ -31,17 +31,18 @@ wall clock its numbers account for.
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
-| `Σ generation + ∪ tool + head + tail ≈ turn duration` | within 0.1 ms when nothing overlaps; off by the generation/tool overlap when it does — see below | yes | yes | yes | yes |
+| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes | yes | yes | yes | yes |
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
-Four of the five harnesses interleave tool execution into a single generation
-window. Antigravity reports a `Step` for the tool and only a later
+All five harnesses can have tool execution inside a generation window, and all
+five subtract it. Four interleave it structurally: Antigravity reports a `Step`
+for the tool and only a later
 `usage_metadata` `Step` cuts the message; Codex's message window is seeded from
 the first item's start and extended to the last item's completion; OpenCode
 opens its window at `step_start` and closes it at `step_finish`, and Pi at
-`turn_start` / `turn_end`, with every tool call running inside. In all four the
+`turn_start` / `turn_end`, with every tool call running inside. In each the
 span between the recorded bounds legitimately CONTAINS tool time that the model
-did not spend generating, so all four subtract it — the **union** of the closed tool intervals
+did not spend generating, so each subtracts it — the **union** of the closed tool intervals
 clipped to the window (`coder_eval/timing.py::busy_ms`), never the sum, because
 tool calls overlap: Antigravity resolves several from one `Step` and backgrounds
 anything over ten seconds, and Codex spawns collab agents concurrently. Summing
@@ -53,21 +54,24 @@ the whole measured window was that tool running, so the recorded generation
 time is legitimately `0.0`. That is a measurement, not a placeholder — `None`
 is what "never measured" looks like.
 
-`claude-code` is the one harness that does **not** apply the subtraction: it
-marks the end of the previous SDK event and reads again when the next message
-arrives, on the premise that a tool's execution then falls between two windows
-rather than inside one. **Measured, that premise does not always hold.** A tool's
-timer starts at the emission carrying its `tool_use` block, and one assistant
-turn can span several emissions, so a later emission's window runs concurrently
-with a tool already timing. On a task issuing five parallel writes, five reads
-and two concurrent `Bash` calls, the overlap was 482 ms and 340 ms on two ~18-25 s
-turns — and the four-bucket residual came out at exactly `-481 ms` and `-339 ms`.
-On the same task the other four harnesses overlapped by ~2.0-2.3 s and still
-reconciled to within 1.2 ms, because they subtract it. Two claude-code turns in
-the same batch that happened to overlap by <1 ms reconciled to within 0.1 ms.
-Applying `busy_ms` here as the other four do is the obvious fix and is tracked
-in `.claude/harness-candidates.md`; it is a change to a published
-`generation_duration_ms`, so it needs its own verification pass.
+**`claude-code` subtracts at finalization, not as it flushes.** It was once
+exempt entirely, on the premise that because it marks the end of the previous
+SDK event and reads again when the next message arrives, a tool's execution
+falls *between* two windows rather than inside one. Measured, that premise does
+not hold: a tool's timer starts at the **emission** carrying its `tool_use`
+block, and one assistant turn spans several emissions, so a later emission's
+window runs concurrently with a tool already timing. On a task issuing five
+parallel writes, five reads and two concurrent `Bash` calls the overlap was
+482 ms and 340 ms on two ~18-25 s turns, and the four-bucket residual came out
+at exactly `-481 ms` and `-339 ms`; the other four overlapped by ~2.0-2.3 s on
+the same task and still reconciled to within 1.2 ms, because they subtract it.
+
+It cannot subtract while flushing, because a tool issued by an earlier emission
+is still running when the next window closes and its interval does not exist
+yet. `_ClaudeTurnState._subtract_tool_time_from_windows` therefore runs once at
+finalization, when every span is known. After it, the same task reconciles to
+**1.4 ms (0.006% of wall)** over four turns that all carried overlapping tool
+calls.
 
 **The head and tail are measured, not normalized.** Generation and tool are
 only two of the four buckets. The turn's **head** (turn start → first
