@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -433,7 +434,11 @@ def test_workspace_dir_with_docker_driver_is_a_clean_cli_error(tmp_path: Path) -
     )
 
     assert result.exit_code != 0
-    assert "--workspace-dir" in result.output
+    # click.unstyle strips ANSI color codes -- CI renders Click's error box
+    # with color (option names highlighted char-by-char), which would
+    # otherwise split "--workspace-dir" across escape sequences and silently
+    # break this check (see test_execute_format_harbor.py's equivalent).
+    assert "--workspace-dir" in click.unstyle(result.output)
     assert "Traceback" not in result.output
 
 
