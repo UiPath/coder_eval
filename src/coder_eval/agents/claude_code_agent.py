@@ -76,6 +76,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import busy_ms
 from coder_eval.utils import dump_dataclass, process_plugins
 
 
@@ -582,6 +583,49 @@ class _ClaudeTurnState:
             self._agent._reprice_for_litellm(usage, self.effective_model)
         return usage
 
+    def _subtract_tool_time_from_windows(self, commands: list[CommandTelemetry]) -> None:
+        """Take tool execution back out of the generation windows it overlapped.
+
+        The other four harnesses do this as they flush, because their stream
+        interleaves tool calls into one window. claude-code was exempted on the
+        premise that a tool's execution falls BETWEEN two windows — but a tool's
+        timer starts at the emission carrying its ``tool_use`` block, and one
+        assistant turn spans several emissions, so a later emission's window
+        runs concurrently with a tool already timing. Measured on a task with
+        two concurrent ``Bash`` calls: 482 ms and 340 ms of a ~18-25 s turn
+        counted as both generation and tool, which is exactly the amount by
+        which the four-bucket identity missed.
+
+        Deferred to finalization rather than done in ``on_assistant_message``
+        because that is the first point where every span is known: a tool
+        issued by an earlier emission is still running when the next window
+        closes, so its interval does not exist yet.
+
+        ``generation_duration_ms`` therefore means the same thing on all five
+        harnesses — wall time inside the window with no tool running. A window
+        entirely covered by tool execution legitimately reads ``0.0``; that is
+        a measurement, and ``None`` remains what "never measured" means.
+        """
+        spans = [
+            (c.execution_started_at, c.execution_completed_at)
+            for c in commands
+            if c.execution_started_at is not None and c.execution_completed_at is not None
+        ]
+        if not spans:
+            return
+        for emission in self.sdk_messages:
+            # A sub-agent's generation is not on this timeline: its own tools
+            # are not in `commands`, and the Agent call that spawned it already
+            # spans its whole run. A UserMessage / ReconciliationMessage has no
+            # window at all.
+            if not isinstance(emission, AssistantMessageTelemetry):
+                continue
+            if emission.generation_duration_ms is None or emission.parent_tool_use_id is not None:
+                continue
+            overlap = busy_ms(spans, emission.started_at, emission.completed_at)
+            if overlap > 0.0:
+                emission.generation_duration_ms = max(emission.generation_duration_ms - overlap, 0.0)
+
     def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
         """Close orphaned tools + the open turn, emit the terminal AgentEndEvent,
         and on a crash build the partial TurnRecord. Idempotent."""
@@ -590,6 +634,7 @@ class _ClaudeTurnState:
         self.finalized = True
 
         commands = self._agent._finalize_commands(self.pending_commands, self.messages)
+        self._subtract_tool_time_from_windows(commands)
         for cmd in commands:
             if cmd.tool_id in self.emitted_tool_ends:
                 continue

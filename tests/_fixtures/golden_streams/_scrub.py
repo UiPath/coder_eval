@@ -268,11 +268,9 @@ def assert_timing_captured(
             f"startup={record.get('harness_startup_ms')!r}, teardown={record.get('harness_teardown_ms')!r}. "
             "They are meant to be DISJOINT, so a sum this far over the turn means something is "
             "booked twice — most likely a tool that ran outside every generation window and was "
-            "left in the head or tail as well as in the tool union. The one KNOWN exception is "
-            "claude-code, which does not subtract tool time from its generation windows, so a "
-            "trajectory where a tool runs concurrently with a later emission of the same turn "
-            "overlaps legitimately; see docs/agents/HARNESS_PARITY.md before concluding this is "
-            "a new bug"
+            "left in the head or tail as well as in the tool union, or a generation window that "
+            "kept tool time it should have subtracted (see docs/agents/HARNESS_PARITY.md — all "
+            "five harnesses subtract, claude-code at finalization rather than as it flushes)"
         )
 
     if not expect_generation_window:

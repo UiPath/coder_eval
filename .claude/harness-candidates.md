@@ -582,8 +582,15 @@ divergences, so the deferred-work record is one place. Measurements in
   so the first agent to record an aware stamp discovers it at runtime.
   Caught in: turn head/tail timing final review.
 
-- [ ] **`claude-code` does not subtract tool execution from its generation
-  windows, and the premise for that is measurably wrong.** The other four
+- [x] ~~**`claude-code` does not subtract tool execution from its generation
+  windows.**~~ **FIXED** in `_ClaudeTurnState._subtract_tool_time_from_windows`,
+  which runs at finalization (it cannot run at flush time — a tool issued by an
+  earlier emission is still running when the next window closes). Re-measured
+  on the same task: 481 ms / 2.691% -> **1.4 ms / 0.006%** over four turns that
+  all carried overlapping tool calls. Original report kept below for the
+  reasoning.
+
+  ORIGINAL: The other four
   harnesses subtract the union (`timing.py::busy_ms`); claude-code is exempted
   on the reasoning that it "marks the end of the previous SDK event and reads
   again when the next message arrives, so a tool's execution falls between two
