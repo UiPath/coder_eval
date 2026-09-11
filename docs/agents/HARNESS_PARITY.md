@@ -89,9 +89,14 @@ decomposed, because the divergence is real and unfixable in both directions:
   as a measured interval**: the window actually opens marginally BEFORE the
   `AgentStartEvent` stamp (claude-code builds its turn state, then
   `_build_claude_query`, and only then emits the event), so the raw figure is
-  negative and clamps. The practical consequence is that harness setup on
-  these two is booked as generation, and a regression in it would not show up
-  in the Startup cell.
+  negative and clamps. The setup between those two points is therefore booked
+  as generation — **measured at 0.03 ms, and 0.10 ms with four plugin roots**,
+  so it is the sub-millisecond skew the clamp exists for rather than hidden
+  overhead. Emitting the event earlier would make the `0.0` a measurement
+  instead of a clamp but would not change it, since the window's start stamp
+  also precedes the build; only re-seeding the window after the build would
+  surface that time, and that is the seeding change ruled out above.
+  `TestClaudeHeadIsStructurallyZero` pins the build cost so this stays true.
 - On a **subprocess harness** (codex, opencode, pi) the first window cannot
   start before the first event the CLI emits, so the head is one opaque
   interval fusing CLI boot, provider resolution, dispatch and TTFT. Measured on
