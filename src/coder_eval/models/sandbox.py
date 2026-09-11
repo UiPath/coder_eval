@@ -597,7 +597,12 @@ class SandboxConfig(BaseModel):
     )
     python: PythonEnvConfig | None = Field(
         default_factory=PythonEnvConfig,
-        description="Python environment config; set to null in YAML (or None in Python) to skip venv creation",
+        description=(
+            "Python environment config. A venv is created whenever this block is present, with access to "
+            "system site packages so criteria can import what the task image installed globally (an isolated "
+            "venv shadows the interpreter while providing nothing). Set to null in YAML (or None in Python) "
+            "to skip venv creation, and to opt out of adopting a venv the agent created itself."
+        ),
     )
     node: NodeEnvConfig | None = Field(
         default=None,
