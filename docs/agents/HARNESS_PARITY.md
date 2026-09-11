@@ -31,6 +31,7 @@ wall clock its numbers account for.
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
+| `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID` | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes | yes | yes | yes | yes |
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
@@ -140,6 +141,24 @@ the SDK's own narrower command-execution figure, which it deliberately overrides
 generic tool items now carry a duration where they previously carried none, so
 `avg_command_time_ms` and `total_command_time_ms` for a Codex run describe every
 tool call rather than shell commands alone.
+
+**`message_id` is what splits the timeline.** The evalboard groups assistant
+emissions by `message_id`, and falls back to a wall-clock gap threshold
+(`SAME_EMISSION_GAP_MS`, 100 ms, in `evalboard/lib/runs.ts`) when either side
+lacks one. Antigravity's `Step` stream carries no message id, so the harness
+synthesizes one — and it must, because this harness's generation windows are
+*contiguous* by construction: each opens exactly where the previous one closed,
+so the gap between two of them is always 0 ms and the fallback would fold a
+whole turn's generations into a single row. Nothing about the numbers would
+look wrong, because the consumer SUMS a group's token buckets and durations;
+what is lost is per-generation thinking / text / tool attribution. CE060 makes
+the kwarg mandatory in `src/coder_eval/agents/` for that reason. Note the two
+synthetic schemes read differently on purpose: Codex deliberately REPEATS one
+id across the sub-messages of a single generation — that is exactly the "the
+CLI split one API response" signal the field exists to carry — while
+Antigravity's are all distinct, because it emits one message per generation
+with every block inside it. Runs recorded before a harness captured the field
+still carry `null` and still depend on the gap fallback, which is why it stays.
 
 ### Known divergences
 
