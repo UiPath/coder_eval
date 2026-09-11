@@ -77,6 +77,12 @@ class EventCollector:
             self._iteration = event.iteration
             self._user_input = event.prompt
             self._agent_start_at = event.timestamp
+            # A new turn has begun, so the previous turn's terminal event is no
+            # longer this turn's. Every agent builds a fresh collector per
+            # communicate(), but EarlyStopWatcher keeps ONE across retries: left
+            # stale, it would pair this attempt's start with the last attempt's
+            # end and publish the clamped inversion as a measured 0.0.
+            self._agent_end = None
             if event.model:
                 self._model = event.model
         elif isinstance(event, TurnStartEvent):
@@ -112,20 +118,43 @@ class EventCollector:
     def _overhead_ms(self, messages: list[TranscriptMessage]) -> tuple[float | None, float | None]:
         """The turn's head and tail — the wall clock the generations do not cover.
 
-        Measured against the FIRST and LAST ``AssistantMessage``, not
-        ``messages[0]`` / ``messages[-1]``: a simulation turn interleaves
-        ``UserMessage`` entries, and a reconciled turn ends with a
+        Measured against ``AssistantMessage`` entries only: a simulation turn
+        interleaves ``UserMessage`` entries, and a reconciled turn ends with a
         ``ReconciliationMessage`` that carries no timestamps at all, so indexing
         the raw list would measure the wrong thing or raise.
+
+        Two further restrictions, both of which are the difference between a
+        measurement and an invention:
+
+        A message whose ``generation_duration_ms`` is ``None`` is SKIPPED. That
+        field is the codebase's own marker for "no window was measurable here",
+        and every producer of one stamps ``started_at == completed_at ==
+        datetime.now()`` at *append* time as an admitted placeholder — Codex's
+        rollout rebuild (``_messages_from_items``), both Codex sub-agent
+        recovery builders, and Claude's ``_synthesize_subagent_terminal_message``.
+        Reading those stamps as window bounds turns a placeholder into a
+        measurement: a Codex turn rebuilt from its rollout stamps every message
+        at turn END, which would book the entire turn as harness startup. It is
+        the same exemption CE059 makes for exactly the same reason.
+
+        ``min`` / ``max`` rather than the first and last list entries, because
+        the list is not ordered by time — Codex appends recovered sub-agent
+        messages after the parent's last flush. Positional access made the
+        result depend on append order, which nothing enforces.
         """
-        generations = [m for m in messages if isinstance(m, AssistantMessage)]
+        generations = [m for m in messages if isinstance(m, AssistantMessage) and m.generation_duration_ms is not None]
         if not generations:
             return None, None
         return decompose_turn(
-            generations[0].started_at,
-            generations[-1].completed_at,
+            min(m.started_at for m in generations),
+            max(m.completed_at for m in generations),
             self._agent_start_at,
             self._agent_end.timestamp if self._agent_end is not None else None,
+            [
+                (c.execution_started_at, c.execution_completed_at)
+                for c in self._commands.values()
+                if c.execution_started_at is not None and c.execution_completed_at is not None
+            ],
         )
 
     @staticmethod

@@ -63,7 +63,12 @@ generation window) and **tail** (last window → turn end) are booked as
 `EventCollector` seam by `coder_eval/timing.py::decompose_turn`. The tool term
 is the **union** of the command intervals, for the same reason the subtraction
 above is — Pi resolved a `Write` and a `Bash` overlapping by 18.4 ms in one
-measured turn, and summing their durations books that overlap twice. With all
+measured turn, and summing their durations books that overlap twice. The head
+and tail exclude tool execution by that same rule and that same helper, which
+is what keeps the four buckets disjoint: a tool is not confined to a
+generation window (Antigravity force-closes an orphan at finalization, inside
+the tail, and backgrounds anything over ten seconds), so a span that escapes
+one would otherwise be counted both as tool and as head or tail. With all
 four buckets and the union, three live turns per harness reconcile to within
 1.3 ms of `duration_seconds` (worst case 0.012% of wall clock; the residual is
 clock skew, since head and tail are measured between wall-clock event stamps
@@ -78,9 +83,15 @@ decomposed, because the divergence is real and unfixable in both directions:
 
 - On an **in-process SDK** (claude-code, antigravity) the first generation
   window starts at turn entry, so dispatch and time-to-first-token are already
-  inside it and the head reads a measured ~0. Excluding them is not possible —
-  neither harness stamps a per-message arrival to fall back to, and
-  `started_at == completed_at` would be the CE059 defect.
+  inside it. Excluding them is not possible — neither harness stamps a
+  per-message arrival to fall back to, and `started_at == completed_at` would
+  be the CE059 defect. **Read their `0.0` head as "nothing is left over", not
+  as a measured interval**: the window actually opens marginally BEFORE the
+  `AgentStartEvent` stamp (claude-code builds its turn state, then
+  `_build_claude_query`, and only then emits the event), so the raw figure is
+  negative and clamps. The practical consequence is that harness setup on
+  these two is booked as generation, and a regression in it would not show up
+  in the Startup cell.
 - On a **subprocess harness** (codex, opencode, pi) the first window cannot
   start before the first event the CLI emits, so the head is one opaque
   interval fusing CLI boot, provider resolution, dispatch and TTFT. Measured on
