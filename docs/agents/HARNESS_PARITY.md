@@ -26,8 +26,8 @@ wall clock its numbers account for.
 |---|---|---|---|---|---|
 | `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock per CLI step, minus tool execution inside the step | harness clock per CLI turn, minus tool execution inside the turn |
 | what the **first** window covers | turn start → msg0, so dispatch + TTFT are INSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | turn start → first flush, so dispatch + TTFT are INSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
-| `harness_startup_ms` (turn head) | 0.0 — the window above already covers it | ~3.2 s — CLI boot fused with TTFT | 0.0 — the window above already covers it | ~2.5 s — CLI boot fused with TTFT | ~0.24 s — CLI boot fused with TTFT |
-| `harness_teardown_ms` (turn tail) | ~1.4 s | ~12 ms | ~5 ms | ~28 ms | ~13 ms |
+| `harness_startup_ms` (turn head) | 0.0 — the window above already covers it | ~3.1 s — CLI boot fused with TTFT | 0.0 — the window above already covers it | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
+| `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
@@ -69,14 +69,14 @@ is what keeps the four buckets disjoint: a tool is not confined to a
 generation window (Antigravity force-closes an orphan at finalization, inside
 the tail, and backgrounds anything over ten seconds), so a span that escapes
 one would otherwise be counted both as tool and as head or tail. With all
-four buckets and the union, three live turns per harness reconcile to within
-1.3 ms of `duration_seconds` (worst case 0.012% of wall clock; the residual is
+four buckets and the union, six live turns per harness reconcile to within
+1.7 ms of `duration_seconds` (worst case 0.014% of wall clock; the residual is
 clock skew, since head and tail are measured between wall-clock event stamps
 while `duration_seconds` is the agent's own monotonic span, and its sign flips
 between harnesses). `scripts/timing/decompose_run.py` reproduces the table. The head and tail
-figures in the table above are means of three live `tasks/hello_date` turns
-per harness and move with CLI cache warmth, so read their ORDER OF
-MAGNITUDE, not the digits.
+figures in the table above are means of six live `tasks/hello_date` turns per
+harness and move with CLI cache warmth, so read their ORDER OF MAGNITUDE, not
+the digits.
 
 What the head CONTAINS differs per harness and is deliberately **not**
 decomposed, because the divergence is real and unfixable in both directions:
