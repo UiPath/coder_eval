@@ -630,3 +630,47 @@ divergences, so the deferred-work record is one place. Measurements in
   kwarg rule ever lands, extract `tests/lint/rules/_message_calls.py` at that
   point rather than sooner.
   Caught in: the CE060 / antigravity `message_id` run.
+
+- [ ] **Nothing pins that `message_id` is only ever a WITHIN-TURN identity.** Ids
+  repeat across retry attempts of one turn on every synthetic-id harness —
+  `Agent.discard_pending_turn` rolls the iteration counter back, so a crashed
+  partial and its retry both emit `<harness>-1-msg-0` (antigravity, codex, and
+  the out-of-tree delegate agent alike). Harmless today, and verified so: the
+  evalboard declares its grouping list INSIDE the per-turn loop
+  (`runs.ts:1822`, flushed at `:2217`) and only ever compares adjacent raws, and
+  no Python consumer reads the field at all. It stops being harmless the moment
+  anything joins on the id run-wide (a React key across turns, a cost join, a
+  dedup) — which is a natural thing to reach for once every harness populates
+  it. No cheap guard exists: the property to assert is "no consumer treats this
+  as run-unique", which is a negative over two languages, and asserting
+  within-turn uniqueness instead would pass today and catch nothing. Cheapest
+  real option is a comment on the model field; the durable one is a run-level
+  id if a consumer ever needs one.
+  Caught in: the CE060 / antigravity `message_id` final review.
+
+- [ ] **No evalboard test is fed by a Python golden snapshot.** The two halves of
+  a capture fix are pinned by two hand-written fixtures that never meet: the
+  golden (`tests/_fixtures/golden_streams/expected/antigravity_e_multi_generation.json`)
+  pins what the reducer emits, and `evalboard/lib/__tests__/parseMessages.test.ts`
+  pins what the consumer does with a fixture an author typed from the same
+  understanding. Nothing feeds a real recorded shape through `parseMessages`, so
+  a reducer change that makes the TS fixture unrepresentative breaks no test on
+  either side. Deferred as architectural: it needs a loader, a scrub-aware
+  timestamp story (the goldens mask exactly the stamps the grouping reads), and
+  a convention for which snapshots the JS suite owns — well over 30 min, and
+  wider than any one capture fix.
+  Caught in: the CE060 / antigravity `message_id` final review.
+
+- [ ] **`AssistantMessage.message_id`'s field description names one harness of
+  five** (`models/telemetry.py:283`: "Anthropic API message_id … when the Claude
+  Code CLI splits one API response"). Five backends now write the field and four
+  synthesize it, so `docs/agents/HARNESS_PARITY.md`'s new row is the real SSOT
+  while the model — which this project's DRY principle designates as
+  authoritative — describes claude-code only. Not fixed here because the plan
+  scoped out every model change (the field already existed, so touching it would
+  have put a schema file in a golden-regeneration diff for prose). No mechanical
+  guard is obvious either: "a field description must not name a single harness
+  when the union has five writers" needs a writer census per field, which is
+  CE054-shaped but over a `str` description rather than a key. The cheap version
+  is to fix the sentence in the next change that touches the model.
+  Caught in: the CE060 / antigravity `message_id` final review.
