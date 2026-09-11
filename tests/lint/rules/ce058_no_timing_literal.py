@@ -15,6 +15,15 @@ Generation cell read ``0ms`` and its thinking/tool/text breakdown rendered
 milliseconds by a command count of which 70 of 211 in one nightly had never
 been timed at all.
 
+A third field family joined the first two: ``TurnRecord.harness_startup_ms``
+and ``harness_teardown_ms``, the turn's head and tail buckets. They are the
+same invariant one level up — a turn whose stream carried no assistant message
+was never timed at either end, and a ``0.0`` there would claim the harness
+started instantly, which is exactly the reading that sends a real gap into the
+evalboard's ``Unaccounted`` cell while a named bucket says it was measured at
+zero. ``0.0`` IS the right answer for an in-process SDK whose first generation
+window already covers dispatch, so the two values must stay distinguishable.
+
 Five syntactic forms, one invariant, one id — the shapes the codebase actually
 produced:
 
@@ -47,16 +56,20 @@ from tests.lint.rules.base import BaseRule
 
 
 # Trailing-segment match, so `cmd.duration_ms` and `generation_duration_ms`
-# fire while `duration_ms_limit` does not.
+# fire while `duration_ms_limit` does not. The `_startup_ms` / `_teardown_ms`
+# arms need a leading segment for the same reason the `_duration_ms` arm does:
+# the shipped fields are `harness_*`, and a bare `startup_ms` is more likely a
+# budget than a measurement.
 _TIMING_NAME = re.compile(
-    r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms|[a-z_]*_duration_ms)$"
+    r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms"
+    r"|[a-z_]*_duration_ms|[a-z_]*_(?:startup|teardown)_ms)$"
 )
 
 # The constructors that carry a timing field. Keying on the callee name is what
 # makes the alias hazard above real; it is also the only thing an AST rule can
 # see without type inference.
 _TIMING_CONSTRUCTORS = frozenset(
-    {"AssistantMessage", "AssistantMessageTelemetry", "CommandTelemetry", "SlowestCommandInfo"}
+    {"AssistantMessage", "AssistantMessageTelemetry", "CommandTelemetry", "SlowestCommandInfo", "TurnRecord"}
 )
 
 _SRC_ROOT = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")

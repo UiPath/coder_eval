@@ -4355,6 +4355,28 @@ class TestCE058NoTimingLiteral:
         # Scoped to `update=` so an unrelated fixture dict cannot fire.
         assert not self._run('row = {"duration_ms": 0.0}')
 
+    # The head/tail family — the turn-level buckets on TurnRecord.
+    def test_flags_a_zero_harness_startup(self):
+        assert self._run("rec = TurnRecord(iteration=0, harness_startup_ms=0.0)")
+
+    def test_flags_a_zero_harness_teardown(self):
+        assert self._run("rec = TurnRecord(iteration=0, harness_teardown_ms=0)")
+
+    def test_allows_an_unmeasured_harness_startup(self):
+        assert not self._run("rec = TurnRecord(iteration=0, harness_startup_ms=None)")
+
+    def test_allows_a_measured_harness_startup(self):
+        assert not self._run("rec = TurnRecord(iteration=0, harness_startup_ms=head_ms)")
+
+    def test_flags_the_head_coalesce(self):
+        assert self._run("x = rec.harness_startup_ms or 0")
+
+    def test_ignores_a_name_that_merely_starts_with_startup(self):
+        # Anchored at both ends, and the family needs a leading segment: a
+        # limit is not a measurement, and a bare `startup_ms` is not ours.
+        assert not self._run("cfg = TurnRecord(startup_ms_limit=0)")
+        assert not self._run("x = startup_ms_limit or 0")
+
     # Scope + suppression.
     def test_is_out_of_scope_outside_src(self):
         assert not self._run(
