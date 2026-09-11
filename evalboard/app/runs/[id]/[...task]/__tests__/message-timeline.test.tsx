@@ -678,6 +678,145 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
     });
 });
 
+describe("MessageTimelineSection — Startup and Teardown cells", () => {
+    function cell(label: string): HTMLElement {
+        const parent = screen.getByText(label).parentElement as HTMLElement;
+        return parent.children[1] as HTMLElement;
+    }
+
+    // Same 4s generation + 1s tool exec fixture the Unaccounted block uses, so
+    // the two blocks' numbers are directly comparable.
+    function renderStrip(props: {
+        taskDurationSeconds?: number | null;
+        harnessStartupMs?: number | null;
+        harnessTeardownMs?: number | null;
+    }) {
+        const m = makeMessage({
+            generationMs: 4000,
+            textMs: 4000,
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "tu_1",
+                    summary: "ls",
+                    argText: "ls",
+                    description: null,
+                    genMs: null,
+                    durationMs: 1000,
+                    isError: false,
+                    resultPreview: null,
+                    outputTokens: null,
+                    resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
+                },
+            ],
+        });
+        return render(<MessageTimelineSection messages={[m]} {...props} />);
+    }
+
+    test("both buckets render their measured value", () => {
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(cell("Startup").textContent).toBe("3.0s");
+        expect(cell("Teardown").textContent).toBe("1.5s");
+    });
+
+    test("a measured zero renders as 0ms, not as an em-dash", () => {
+        // claude-code and antigravity really do measure ~0 here — their first
+        // generation window already covers dispatch. "—" would report that
+        // honest measurement as a missing one.
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 0,
+            harnessTeardownMs: 834.7,
+        });
+        expect(cell("Startup").textContent).toBe("0ms");
+        expect(cell("Teardown").textContent).toBe("835ms");
+    });
+
+    test("Unaccounted shrinks by exactly startup + teardown", () => {
+        // 10s − 4s gen − 1s tool = 5s before; minus 3s + 1.5s = 500ms after.
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(cell("Unaccounted").textContent).toBe("500ms (5%)");
+    });
+
+    test("a corrected residual still above 25% stays red", () => {
+        // The other direction: naming the buckets must not disable the tint,
+        // only move the number it reads. 20s − 4s gen − 1s tool − 3s − 1s
+        // = 11s, still 55% unexplained.
+        renderStrip({
+            taskDurationSeconds: 20,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1000,
+        });
+        expect(cell("Unaccounted").textContent).toBe("11.0s (55%)");
+        expect(cell("Unaccounted").className).toContain("text-red-700");
+    });
+
+    test("a residual that was red goes grey once the buckets are named", () => {
+        // The 25% threshold applies to the CORRECTED residual: 50% before,
+        // 5% after, so the red tint must follow the correction.
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(cell("Unaccounted").className).not.toContain("text-red-700");
+    });
+
+    test("an older run with neither field renders — and today's residual", () => {
+        const { container } = renderStrip({ taskDurationSeconds: 10 });
+        expect(cell("Startup").textContent).toBe("—");
+        expect(cell("Teardown").textContent).toBe("—");
+        // Byte-identical to the pre-existing Unaccounted expectation.
+        expect(cell("Unaccounted").textContent).toBe("5.0s (50%)");
+        expect(cell("Unaccounted").className).toContain("text-red-700");
+        expect(container.textContent).not.toContain("NaN");
+    });
+
+    test("only the present bucket is subtracted", () => {
+        renderStrip({ taskDurationSeconds: 10, harnessStartupMs: 3000 });
+        expect(cell("Startup").textContent).toBe("3.0s");
+        expect(cell("Teardown").textContent).toBe("—");
+        expect(cell("Unaccounted").textContent).toBe("2.0s (20%)");
+    });
+
+    test("the residual still goes negative and stays amber", () => {
+        // Naming the buckets does not clamp the overlap signal.
+        renderStrip({
+            taskDurationSeconds: 5,
+            harnessStartupMs: 1000,
+            harnessTeardownMs: 500,
+        });
+        expect(cell("Unaccounted").textContent).toBe("-1.5s (-30%)");
+        expect(cell("Unaccounted").className).toContain("text-amber-700");
+    });
+
+    test("each bucket says what it measures and that it is not decomposed", () => {
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(screen.getByText("Startup").parentElement).toHaveAttribute(
+            "title",
+            expect.stringContaining("time-to-first-token"),
+        );
+        expect(screen.getByText("Teardown").parentElement).toHaveAttribute(
+            "title",
+            expect.stringContaining("teardown"),
+        );
+    });
+});
+
 // A mixed-kind emission's per-kind split is apportioned by content size, so
 // the page must say so and must not let the unattributable part distort the
 // thinking share.

@@ -318,6 +318,8 @@ export function MessageTimelineSection({
     subAgentUsageByToolId = {},
     impactByIndex,
     taskDurationSeconds,
+    harnessStartupMs,
+    harnessTeardownMs,
 }: {
     messages: MessageEvent[];
     // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
@@ -332,6 +334,13 @@ export function MessageTimelineSection({
     // tool execution do NOT account for. Null/absent on a run predating
     // duration capture — the cell then renders "—" rather than a fake residual.
     taskDurationSeconds?: number | null;
+    // The turn-level head and tail, summed over the task's turns: wall clock
+    // before the first generation window opened and after the last one closed.
+    // Turn-scoped, so they cannot be derived from the per-message stream the
+    // other stats come from. Null/absent on a run predating the capture, and
+    // the cells then read "—" while Unaccounted keeps exactly its old meaning.
+    harnessStartupMs?: number | null;
+    harnessTeardownMs?: number | null;
 }) {
     // Token columns can be shown as counts or as their estimated USD value.
     const [unit, setUnit] = useState<Unit>("tokens");
@@ -398,11 +407,23 @@ export function MessageTimelineSection({
     const attributableGenMs = totalGenMs - mixedMs;
     const thinkingShare = attributableGenMs > 0 ? thinkingMs / attributableGenMs : 0;
 
-    // Wall clock the agent stream does not explain. Negative means generation
-    // and tool execution overlapped, which is a real signal — never clamped.
+    // Wall clock the agent stream does not explain, AFTER every named bucket.
+    // Startup and teardown are subtracted because they are measured intervals,
+    // not residual — leaving them in reported a harness's CLI boot as
+    // unexplained time. `?? 0` subtracts only what was actually measured, so an
+    // older run with neither field keeps exactly its previous number.
+    // Negative means generation and tool execution overlapped, which is a real
+    // signal — never clamped.
     const taskMs =
         taskDurationSeconds != null ? taskDurationSeconds * 1000 : null;
-    const unaccountedMs = taskMs != null ? taskMs - totalGenMs - toolExecMs : null;
+    const unaccountedMs =
+        taskMs != null
+            ? taskMs -
+              totalGenMs -
+              toolExecMs -
+              (harnessStartupMs ?? 0) -
+              (harnessTeardownMs ?? 0)
+            : null;
     const unaccountedShare =
         taskMs != null && taskMs > 0 && unaccountedMs != null
             ? unaccountedMs / taskMs
@@ -419,18 +440,27 @@ export function MessageTimelineSection({
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
-            {/* TWO LEVELS, two rows. The top row's Generation, Tool exec and
-                Unaccounted sum to the task's wall clock; the bottom row splits
-                Generation alone and sums to IT. Rendering the split as a
-                sub-cell of one top-row cell put both sums on one line, where
-                nothing said which total each part belonged to. */}
+            {/* TWO LEVELS, two rows. The top row's five time cells — Startup,
+                Generation, Tool exec, Teardown, Unaccounted — sum to the task's
+                wall clock; the bottom row splits Generation alone and sums to
+                IT. Rendering the split as a sub-cell of one top-row cell put
+                both sums on one line, where nothing said which total each part
+                belonged to. The time cells are ordered as the turn runs. */}
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums space-y-3">
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
                     <div>
                         <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                             Messages
                         </div>
                         <div className="text-gray-900 font-medium">{messageCount}</div>
+                    </div>
+                    <div title="wall clock before the first generation window opened. Deliberately NOT decomposed: on an in-process SDK the first window already covers dispatch and time-to-first-token so this reads ~0, while on a subprocess harness it fuses CLI boot, provider resolution, dispatch and TTFT with no marker between them. See docs/agents/HARNESS_PARITY.md.">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Startup
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(harnessStartupMs ?? null)}
+                        </div>
                     </div>
                     <div title="model-generation time, split per block kind on the row below">
                         <div className="text-gray-500 uppercase tracking-wide text-[10px]">
@@ -448,7 +478,15 @@ export function MessageTimelineSection({
                             {fmtMs(toolExecMs)}
                         </div>
                     </div>
-                    <div title="task wall clock minus generation and tool execution — includes sandbox setup, grading, simulator calls, and any time the harness did not report">
+                    <div title="wall clock after the last generation window closed: SDK/CLI finalization, result assembly and process teardown">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Teardown
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(harnessTeardownMs ?? null)}
+                        </div>
+                    </div>
+                    <div title="task wall clock minus generation, tool execution, harness startup and harness teardown — includes sandbox setup, grading, simulator calls, and any time the harness did not report">
                         <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                             Unaccounted
                         </div>
@@ -771,6 +809,8 @@ export function CostExplorerSection({
     tokens,
     recordedCostUsd,
     taskDurationSeconds,
+    harnessStartupMs,
+    harnessTeardownMs,
 }: {
     messages: MessageEvent[];
     subAgentUsageByToolId?: Record<string, SubAgentTotals>;
@@ -778,6 +818,9 @@ export function CostExplorerSection({
     recordedCostUsd: number | null;
     // Forwarded verbatim to the timeline's Unaccounted cell.
     taskDurationSeconds?: number | null;
+    // Forwarded verbatim to the timeline's Startup/Teardown cells.
+    harnessStartupMs?: number | null;
+    harnessTeardownMs?: number | null;
 }) {
     const [scale, setScale] = useState(1);
     const [toolScale, setToolScale] = useState(1);
@@ -816,6 +859,8 @@ export function CostExplorerSection({
                 subAgentUsageByToolId={subAgentUsageByToolId}
                 impactByIndex={impactByIndex}
                 taskDurationSeconds={taskDurationSeconds}
+                harnessStartupMs={harnessStartupMs}
+                harnessTeardownMs={harnessTeardownMs}
             />
             {model && tokens.total > 0 && (
                 <section className="space-y-2">

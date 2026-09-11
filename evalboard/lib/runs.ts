@@ -364,6 +364,12 @@ export interface TaskDetail extends TaskResultSummary {
     // the Agent row). The cost simulator consumes the values via Object.values().
     // Empty for runs/turns with no spawned sub-agents.
     subAgentUsageByToolId: Record<string, SubAgentTotals>;
+    // The task's harness head and tail, summed over its turns. `null` when no
+    // turn measured that end — never 0, which would claim the harness started
+    // or finished instantly. Subtracted from the timeline's Unaccounted cell so
+    // that residual is what is left after every named bucket.
+    harnessStartupMs: number | null;
+    harnessTeardownMs: number | null;
     // Per-call ACTUAL cost + cache audit rows, grouped by turn iteration. Only
     // turns whose `provider_call_costs` list is non-empty appear (LiteLLM/
     // open-weight backend; empty on Claude/Bedrock). Rendered as a standalone
@@ -392,6 +398,35 @@ export interface SubAgentTotals {
     output: number;
     cacheCreation: number;
     cacheRead: number;
+}
+
+// Sum one optional per-turn measurement across a task's turns. `null` — never
+// 0 — when no turn carried the value, because 0 means "measured, and instant"
+// while null means nobody measured (the `TurnRecord` fields' own contract, and
+// what CE058 guards on the Python side). Non-finite values are dropped rather
+// than poisoning the total with NaN.
+function sumMeasured(values: (number | null | undefined)[]): number | null {
+    let total: number | null = null;
+    for (const v of values) {
+        if (typeof v !== "number" || !Number.isFinite(v)) continue;
+        total = (total ?? 0) + v;
+    }
+    return total;
+}
+
+// The task's harness head and tail, summed over its turns. The per-turn values
+// are measured by `coder_eval/timing.py::decompose_turn`; the summation is
+// evalboard-only, and the arithmetic that consumes it — the Unaccounted
+// residual in `_sections.tsx` — is the deliberate second implementation that
+// helper's docstring names (as `pricing.ts` mirrors `pricing.py`).
+export function sumHarnessOverhead(turns: TurnEntry[]): {
+    startupMs: number | null;
+    teardownMs: number | null;
+} {
+    return {
+        startupMs: sumMeasured(turns.map((t) => t.harness_startup_ms)),
+        teardownMs: sumMeasured(turns.map((t) => t.harness_teardown_ms)),
+    };
 }
 
 // Group the parsed assistant messages by `parentToolUseId` into a per-sub-agent
@@ -1531,6 +1566,12 @@ export interface TurnEntry {
     // reconciliation row, which carries no model of its own.
     model_used?: string | null;
     token_usage?: TokenUsageEntry | null;
+    // The turn's head and tail: wall ms before the first generation window
+    // opened and after the last one closed. Absent on runs predating the
+    // capture, and null on a turn that produced no assistant message — in both
+    // cases nobody measured, which is a different fact from a measured 0.
+    harness_startup_ms?: number | null;
+    harness_teardown_ms?: number | null;
     // Per-call actual cost + cache audit rows (LiteLLM/open-weight backend);
     // empty/absent on Claude/Bedrock. Surfaced as a standalone per-call table.
     provider_call_costs?: ProviderCallEntryRaw[];
@@ -2522,6 +2563,8 @@ export async function readTaskDetail(
     const tokens = selectTokenTotals(messages, task?.iterations ?? []);
 
     const subAgentUsageByToolId = aggregateSubAgentUsage(messages);
+    const { startupMs: harnessStartupMs, teardownMs: harnessTeardownMs } =
+        sumHarnessOverhead(task?.iterations ?? []);
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
@@ -2562,6 +2605,8 @@ export async function readTaskDetail(
         messages,
         tokens,
         subAgentUsageByToolId,
+        harnessStartupMs,
+        harnessTeardownMs,
         providerCalls,
     };
 }
