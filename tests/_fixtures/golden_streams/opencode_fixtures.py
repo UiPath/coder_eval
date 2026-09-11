@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -35,11 +36,47 @@ from coder_eval.models import OpenCodeAgentConfig
 SESSION = "ses_test123"
 
 
+# Base epoch milliseconds for the recorded stream. A BASE, not a wall-clock
+# claim: `_rebase_lines` shifts the whole timeline onto the replay's own clock
+# before the scenario runs, so these stamps and the agent's own `datetime.now()`
+# event stamps are commensurable. Left absolute they sit a month away from the
+# replay, which puts the recorded tool interval outside every measured window.
+_T0_MS = 1_786_663_016_802
+
+# How far after the replay's start the rebased timeline begins — small, but
+# non-zero so the first window opens after the AgentStartEvent.
+_REPLAY_LEAD_MS = 2
+
+
 def _evt(event_type: str, part: dict[str, Any]) -> str:
     """One CLI event line: payload under ``part``, sessionID on the envelope."""
     return json.dumps(
-        {"type": event_type, "timestamp": 1786663016802, "sessionID": SESSION, "part": {"sessionID": SESSION, **part}}
+        {"type": event_type, "timestamp": _T0_MS, "sessionID": SESSION, "part": {"sessionID": SESSION, **part}}
     )
+
+
+def _rebase_lines(lines: list[str]) -> list[str]:
+    """Shift every recorded stamp from ``_T0_MS`` onto the replay's own clock.
+
+    Keeps every DERIVED duration exact (a 17 ms tool stays 17 ms) and fixes
+    only the era, so the head and tail the collector records against the
+    agent's `datetime.now()` stamps are meaningful rather than a month wide.
+    """
+    offset = int(datetime.now().timestamp() * 1000) - _T0_MS + _REPLAY_LEAD_MS
+
+    def shift(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: (v + offset if k in _STAMP_KEYS and isinstance(v, int) else shift(v)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [shift(v) for v in node]
+        return node
+
+    return [json.dumps(shift(json.loads(line))) for line in lines]
+
+
+# Millisecond-epoch keys anywhere in an event payload: the envelope's own
+# stamp, and a tool's `state.time` bounds.
+_STAMP_KEYS = frozenset({"timestamp", "start", "end"})
 
 
 def _tokens(inp: int, out: int, *, write: int = 0, read: int = 0, reasoning: int = 0) -> dict[str, Any]:
@@ -175,7 +212,7 @@ class OpenCodeScenario:
 
 async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) -> dict[str, Any]:
     """Replay one scenario and return the resulting record as a plain dump."""
-    proc = _FakeProcess(scenario.lines)
+    proc = _FakeProcess(_rebase_lines(scenario.lines))
 
     async def fake_exec(*_argv: str, **_kwargs: Any) -> _FakeProcess:
         proc.stderr = proc  # type: ignore[assignment]
