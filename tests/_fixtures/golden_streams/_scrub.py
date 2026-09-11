@@ -137,12 +137,18 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
 
     **Unconditional, and keyed on the messages rather than on the flag.** A
     turn's head and tail (``harness_startup_ms`` / ``harness_teardown_ms``) are
-    set exactly when the turn produced an assistant message, because that is
-    what the collector measures them against — so both are non-``None`` when
-    one exists and both are ``None`` when none does. The flag is the wrong key
-    for this one: ``codex_e_orphan_tool`` streams a generation whose window
-    subtracts to zero, so it clears the flag while still having a head and a
-    tail to report.
+    set exactly when the turn produced an assistant message with a MEASURABLE
+    window, because that is what the collector measures them against — so both
+    are non-``None`` when one exists and both are ``None`` when none does.
+
+    Both halves of that key are load-bearing. The flag is the wrong one:
+    ``codex_e_orphan_tool`` streams a generation whose window subtracts to
+    zero, so it clears the flag while still having a head and a tail to report.
+    And "any assistant message" is too weak: ``codex_g_items_rebuild`` rebuilds
+    its transcript from the rollout after the turn ended, with
+    ``generation_duration_ms=None`` and placeholder ``now()`` bounds, so there
+    is nothing there to measure an end against and the honest answer is
+    ``None`` for both.
 
     PRESENCE is all the fixtures can support, and it is the thing worth
     asserting: the replays run in ~0.3 ms of synthetic wall clock, so their
@@ -171,18 +177,20 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
             )
 
     assistant = [m for m in record.get("messages") or [] if m.get("role") == "assistant"]
+    measurable = [m for m in assistant if m.get("generation_duration_ms") is not None]
     for field in ("harness_startup_ms", "harness_teardown_ms"):
         value = record.get(field)
-        if assistant:
+        if measurable:
             assert value is not None, (
-                f"{field} is None on a turn that produced {len(assistant)} assistant message(s): "
-                "the collector measures the head and tail against the first and last generation, "
-                "so a turn that generated has both — None here says the bucket was never measured"
+                f"{field} is None on a turn carrying {len(measurable)} measurable generation "
+                "window(s): the collector measures the head and tail against the earliest and "
+                "latest of those, so a turn that generated has both — None says never measured"
             )
         else:
             assert value is None, (
-                f"{field} is {value!r} on a turn that produced NO assistant message: there is no "
-                "generation window to measure against, and a number here claims a measurement "
+                f"{field} is {value!r} on a turn with no measurable generation window "
+                f"({len(assistant)} assistant message(s), none reporting a duration): there is "
+                "nothing to measure an end against, and a number here claims a measurement "
                 "nobody could have taken"
             )
 

@@ -485,15 +485,39 @@ class TestHarnessOverheadBuckets:
     """
 
     @staticmethod
-    def _msg(started: datetime, completed: datetime) -> AssistantMessage:
-        return AssistantMessage(started_at=started, completed_at=completed, generation_duration_ms=1.0)
+    def _msg(started: datetime, completed: datetime, *, measurable: bool = True) -> AssistantMessage:
+        """A generation window. ``measurable=False`` is the placeholder shape
+        every fabricated-bounds producer writes — a rollout rebuild or a
+        sub-agent recovery — which stamps one instant on both bounds and says
+        so with ``generation_duration_ms=None``."""
+        return AssistantMessage(
+            started_at=started,
+            completed_at=completed,
+            generation_duration_ms=1.0 if measurable else None,
+        )
 
-    def _record(self, messages, *, start: datetime, end: datetime) -> TurnRecord:
+    @staticmethod
+    def _tool(started: datetime, completed: datetime, tool_id: str = "t1") -> ToolEndEvent:
+        return ToolEndEvent(
+            task_id=TASK_ID,
+            tool=CommandTelemetry(
+                tool_id=tool_id,
+                tool_name="Bash",
+                timestamp=started,
+                sequence_number=0,
+                execution_started_at=started,
+                execution_completed_at=completed,
+                result_status="success",
+            ),
+        )
+
+    def _record(self, messages, *, start: datetime, end: datetime, tools=()) -> TurnRecord:
         collector = EventCollector()
         _feed(
             collector,
             [
                 AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1, timestamp=start),
+                *tools,
                 AgentEndEvent(
                     task_id=TASK_ID,
                     usage=TokenUsage(output_tokens=1),
@@ -556,6 +580,101 @@ class TestHarnessOverheadBuckets:
     def test_a_snapshot_before_the_terminal_event_measures_nothing(self):
         collector = EventCollector()
         _feed(collector, [AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1)])
+        rec = collector.build_turn_record()
+        assert rec.harness_startup_ms is None
+        assert rec.harness_teardown_ms is None
+
+    def test_a_placeholder_message_does_not_supply_the_bounds(self):
+        """A Codex turn rebuilt from its rollout stamps every message at turn
+        END and marks them generation_duration_ms=None. Reading those stamps as
+        window bounds books the WHOLE TURN as harness startup."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [
+                self._msg(t0.replace(second=2), t0.replace(second=5)),
+                self._msg(t0.replace(second=9), t0.replace(second=9), measurable=False),
+            ],
+            start=t0,
+            end=t0.replace(second=9),
+        )
+        assert rec.harness_startup_ms == pytest.approx(2000.0)
+        # 9s - 5s, measured off the real window, not off the placeholder's stamp.
+        assert rec.harness_teardown_ms == pytest.approx(4000.0)
+
+    def test_a_turn_of_only_placeholders_measures_nothing(self):
+        """codex_g_items_rebuild's shape: an assistant message exists, but
+        nothing in it was timed, so there is no end to measure against."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [self._msg(t0.replace(second=9), t0.replace(second=9), measurable=False)],
+            start=t0,
+            end=t0.replace(second=9),
+        )
+        assert rec.harness_startup_ms is None
+        assert rec.harness_teardown_ms is None
+
+    def test_the_bounds_do_not_depend_on_append_order(self):
+        """Codex appends recovered sub-agent messages after the parent's last
+        flush, so the list is not ordered by time."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [
+                self._msg(t0.replace(second=6), t0.replace(second=8)),
+                self._msg(t0.replace(second=2), t0.replace(second=4)),
+            ],
+            start=t0,
+            end=t0.replace(second=9),
+        )
+        assert rec.harness_startup_ms == pytest.approx(2000.0)
+        assert rec.harness_teardown_ms == pytest.approx(1000.0)
+
+    def test_a_tool_running_past_the_last_window_is_not_counted_twice(self):
+        """Antigravity force-closes an orphan at finalization, stamping its
+        completion inside the tail, and backgrounds anything over ten seconds.
+        Such a span is already in the tool bucket, so leaving it in the tail
+        books it twice and drives the residual sharply negative."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [self._msg(t0.replace(second=1), t0.replace(second=4))],
+            start=t0,
+            end=t0.replace(second=9),
+            tools=[self._tool(t0.replace(second=3), t0.replace(second=7))],
+        )
+        # Tail spans 4s->9s = 5s, of which 4s->7s = 3s was the tool still running.
+        assert rec.harness_teardown_ms == pytest.approx(2000.0)
+
+    def test_a_tool_running_before_the_first_window_is_not_counted_twice(self):
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [self._msg(t0.replace(second=5), t0.replace(second=8))],
+            start=t0,
+            end=t0.replace(second=8),
+            tools=[self._tool(t0.replace(second=1), t0.replace(second=3))],
+        )
+        # Head spans 0s->5s = 5s, of which 1s->3s = 2s was tool execution.
+        assert rec.harness_startup_ms == pytest.approx(3000.0)
+
+    def test_a_new_turn_clears_the_previous_turn_terminal_event(self):
+        """EarlyStopWatcher keeps ONE collector across retries. Left stale, the
+        next attempt's start pairs with the last attempt's end and the clamped
+        inversion publishes as a measured 0.0."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        collector = EventCollector()
+        _feed(
+            collector,
+            [
+                AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1, timestamp=t0),
+                AgentEndEvent(
+                    task_id=TASK_ID,
+                    usage=TokenUsage(output_tokens=1),
+                    messages=[self._msg(t0.replace(second=1), t0.replace(second=2))],
+                    timestamp=t0.replace(second=3),
+                    crashed=True,
+                ),
+                # Retry, a minute later, with no terminal event of its own yet.
+                AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1, timestamp=t0.replace(minute=1)),
+            ],
+        )
         rec = collector.build_turn_record()
         assert rec.harness_startup_ms is None
         assert rec.harness_teardown_ms is None

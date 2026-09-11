@@ -293,8 +293,10 @@ class TestAssertTimingCaptured:
         assert_timing_captured(self._record(windows=[12.5]), expect_generation_window=True)
 
     def test_a_none_window_raises_when_one_is_expected(self):
+        # overhead=(None, None) because a turn with no measurable window has no
+        # head or tail either; this isolates the generation-window assertion.
         with pytest.raises(AssertionError, match="positive generation window"):
-            assert_timing_captured(self._record(windows=[None]), expect_generation_window=True)
+            assert_timing_captured(self._record(windows=[None], overhead=(None, None)), expect_generation_window=True)
 
     def test_exactly_zero_raises_too(self):
         # The Antigravity defect's exact signature: a value that is present,
@@ -312,7 +314,7 @@ class TestAssertTimingCaptured:
             assert_timing_captured(self._record(windows=[500.0], bounds_collapse=True), expect_generation_window=True)
 
     def test_a_none_window_passes_when_none_is_expected(self):
-        assert_timing_captured(self._record(windows=[None]), expect_generation_window=False)
+        assert_timing_captured(self._record(windows=[None], overhead=(None, None)), expect_generation_window=False)
 
     def test_one_positive_among_several_passes(self):
         # The FLOOR, not a per-entry rule. claude_d_subagent_terminal holds two
@@ -384,14 +386,23 @@ class TestAssertTimingCaptured:
 
     def test_a_turn_with_no_generation_must_report_neither(self):
         # A number here claims a measurement nobody could have taken: the
-        # collector measures both against the first and last generation.
+        # collector measures both against the messages that report a window.
         with pytest.raises(AssertionError, match=r"harness_startup_ms is 0\.0"):
             assert_timing_captured(self._record(windows=[], overhead=(0.0, 3.5)), expect_generation_window=False)
         assert_timing_captured(self._record(windows=[], overhead=(None, None)), expect_generation_window=False)
+
+    def test_an_unmeasurable_window_is_not_something_to_measure_against(self):
+        # codex_g_items_rebuild's shape: an assistant message exists, but it was
+        # rebuilt after the turn ended with placeholder now() bounds and says so
+        # via generation_duration_ms=None. Those stamps are not window bounds, so
+        # the honest head and tail are None — keying on "any assistant message"
+        # would have demanded a number derived from a placeholder.
+        with pytest.raises(AssertionError, match=r"harness_startup_ms is 0\.0"):
+            assert_timing_captured(self._record(windows=[None], overhead=(0.0, 3.5)), expect_generation_window=False)
 
     def test_the_buckets_are_checked_even_when_no_window_is_expected(self):
         # codex_e_orphan_tool clears the flag (its window subtracts to zero)
         # while still having a head and a tail — so the flag is the wrong key
         # for this half of the sensor, and the early return must not skip it.
         with pytest.raises(AssertionError, match="harness_teardown_ms is None"):
-            assert_timing_captured(self._record(windows=[None], overhead=(0.0, None)), expect_generation_window=False)
+            assert_timing_captured(self._record(windows=[5.0], overhead=(0.0, None)), expect_generation_window=False)

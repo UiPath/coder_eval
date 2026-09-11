@@ -69,11 +69,19 @@ def _turn_buckets(turn: dict) -> tuple[float, float, float, float, float] | None
     duration_seconds = turn.get("duration_seconds")
     if not isinstance(duration_seconds, (int, float)):
         return None
+    # MAIN THREAD ONLY. A sub-agent's generations bubble into the same stream
+    # tagged with the spawning Agent call's tool_use_id, and that call's own
+    # interval already spans the sub-agent's entire run. Counting both books the
+    # sub-agent twice — the evalboard's timeline strip filters on exactly this
+    # field for exactly this reason (a 120 s Agent call containing 90 s of
+    # sub-agent generation drove its residual to -57%).
     messages = turn.get("messages") or []
     generation_ms = sum(
         m.get("generation_duration_ms") or 0.0
         for m in messages
-        if m.get("role") == "assistant" and isinstance(m.get("generation_duration_ms"), (int, float))
+        if m.get("role") == "assistant"
+        and m.get("parent_tool_use_id") is None
+        and isinstance(m.get("generation_duration_ms"), (int, float))
     )
     startup_ms = turn.get("harness_startup_ms")
     teardown_ms = turn.get("harness_teardown_ms")
@@ -98,7 +106,7 @@ def main(argv: list[str]) -> int:
         except (OSError, json.JSONDecodeError) as exc:
             print(f"skipping {path}: {exc}", file=sys.stderr)
             continue
-        harness = (record.get("environment_info") or {}).get("agent_type") or record.get("agent_type") or "unknown"
+        harness = record.get("agent_type") or "unknown"
         for turn in record.get("iterations") or []:
             buckets = _turn_buckets(turn)
             if buckets is not None:

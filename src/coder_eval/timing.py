@@ -1,4 +1,8 @@
-"""Shared timing helpers for agent implementations.
+"""Wall-clock arithmetic for a turn, defined once and shared.
+
+A cycle-free leaf (the ``models/cli_match.py`` rationale): it sits outside
+``agents/`` because ``EventCollector`` consumes it, and importing anything
+under ``agents/`` pulls in every agent, which imports ``streaming/``.
 
 Two harnesses interleave tool execution into a single generation window —
 Antigravity (the Step for the tool arrives and only a later ``usage_metadata``
@@ -47,6 +51,7 @@ def decompose_turn(
     last_completed_at: datetime | None,
     agent_started_at: datetime | None,
     agent_ended_at: datetime | None,
+    tool_spans: list[tuple[datetime, datetime]] | None = None,
 ) -> tuple[float | None, float | None]:
     """Wall ms before the first generation window opens, and after the last closes.
 
@@ -56,6 +61,17 @@ def decompose_turn(
     whole turn — the union and not the sum, because concurrent tool calls
     otherwise book their overlap twice (``busy_ms`` above, and measured: one
     live Pi turn overlapped a ``Write`` and a ``Bash`` by 18.4 ms).
+
+    ``tool_spans`` is what keeps those four buckets DISJOINT, and omitting it
+    is a double-count rather than a lost refinement. A tool is not confined to
+    a generation window: Antigravity force-closes an orphan at finalization
+    (``antigravity_agent.py``), which stamps its completion inside the tail,
+    and it backgrounds anything over ten seconds, which can straddle either
+    end. Such a span is subtracted out of the windows AND counted in the tool
+    bucket, so leaving it in the head or tail books it twice — measured on the
+    committed ``antigravity_d_orphaned_tool`` fixture as a residual of -86% of
+    wall clock. So the head and tail exclude tool time by the same rule and
+    the same helper the windows use.
 
     ``EventCollector`` is the SOLE caller, and deliberately so: this is the one
     place the two values are computed, after which they are persisted on
@@ -80,13 +96,19 @@ def decompose_turn(
     (the two clocks disagreeing) IS a real zero and clamps, because both ends
     were observed.
 
-    NOTE a second implementation of this arithmetic lives in the evalboard's
-    Unaccounted cell (``_sections.tsx``), as ``pricing.ts`` mirrors
-    ``pricing.py``. Change one, change the other.
+    NOTE the four-bucket identity has a second implementation in TypeScript —
+    the evalboard's Unaccounted cell (``_sections.tsx``) subtracts the same
+    buckets from the same wall clock, as ``pricing.ts`` mirrors ``pricing.py``.
+    It does not recompute a head or a tail (it reads the stored fields), so a
+    change HERE needs a TS change only when it alters what the buckets mean;
+    adding a fifth bucket means touching that cell and ``sumHarnessOverhead``.
     """
+    spans = tool_spans or []
     head = tail = None
     if first_started_at is not None and agent_started_at is not None:
-        head = max((first_started_at - agent_started_at).total_seconds() * 1000.0, 0.0)
+        elapsed = (first_started_at - agent_started_at).total_seconds() * 1000.0
+        head = max(elapsed - busy_ms(spans, agent_started_at, first_started_at), 0.0)
     if last_completed_at is not None and agent_ended_at is not None:
-        tail = max((agent_ended_at - last_completed_at).total_seconds() * 1000.0, 0.0)
+        elapsed = (agent_ended_at - last_completed_at).total_seconds() * 1000.0
+        tail = max(elapsed - busy_ms(spans, last_completed_at, agent_ended_at), 0.0)
     return head, tail
