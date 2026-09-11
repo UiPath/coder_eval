@@ -77,7 +77,6 @@ from uuid import uuid4
 
 from coder_eval.agent import Agent
 from coder_eval.agents._skills import _plugin_skill_dirs  # shared plugin->skills resolver
-from coder_eval.agents._timing import busy_ms
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -110,6 +109,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import busy_ms
 
 from .registry import AgentRegistry
 
@@ -294,7 +294,7 @@ class _PiTurnState:
         # milliseconds twice — once here and once as the tool's own
         # duration_ms. Intervals, not a running total: they overlap
         # whenever the harness runs tools concurrently, and only their
-        # union may be subtracted (agents/_timing.py::busy_ms).
+        # union may be subtracted (timing.py::busy_ms).
         self.turn_tool_spans: list[tuple[datetime, datetime]] = []
 
         # toolCallId -> telemetry for tools awaiting a result.

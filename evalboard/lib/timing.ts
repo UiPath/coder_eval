@@ -136,7 +136,7 @@ export function epochMs(value: string | null | undefined): number | null {
 // Milliseconds inside [lo, hi] where at least ONE span was running: the UNION,
 // not the sum.
 //
-// The TypeScript twin of `coder_eval.agents._timing.busy_ms`, deliberately the
+// The TypeScript twin of `coder_eval.timing.busy_ms`, deliberately the
 // same algorithm — the agents subtract tool time from a generation window with
 // it, and this file subtracts tool time from a task's wall clock, so the two
 // must agree about what "tool execution took N ms" means. Held in step by

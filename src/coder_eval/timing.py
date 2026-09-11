@@ -1,0 +1,84 @@
+"""Shared timing helpers for agent implementations.
+
+Two harnesses interleave tool execution into a single generation window —
+Antigravity (the Step for the tool arrives and only a later ``usage_metadata``
+Step cuts the message) and Codex (``_flush_message``'s window is extended to
+the last item's ``completed_at_ms``). Both must therefore subtract the tool
+time from the window before publishing ``generation_duration_ms``, and both
+must subtract the same thing: the UNION of the closed intervals, clipped to
+the window.
+"""
+
+from datetime import datetime
+
+
+def busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) -> float:
+    """Wall milliseconds inside ``[lo, hi]`` where at least ONE span was running.
+
+    The union, not the sum. Tool intervals overlap in practice — Antigravity
+    resolves several calls from one ``Step`` and backgrounds anything over ten
+    seconds; Codex spawns collab agents that run concurrently — so adding
+    their durations over-counts the busy time by exactly the overlap.
+    Subtracting such a sum from a generation window understates generation
+    and, with enough concurrency, drives it negative: four concurrent 400 ms
+    calls inside a 1000 ms window sum to 1600 ms, clamping the result to the
+    ``0.0`` that "unknown timing says unknown" exists to eliminate.
+
+    Clipping to ``[lo, hi]`` is the other half: a tool that opened before this
+    window only spent part of its life inside it, and only that part is not
+    generation time here.
+    """
+    clipped = sorted((max(s, lo), min(e, hi)) for s, e in spans if min(e, hi) > max(s, lo))
+    if not clipped:
+        return 0.0
+    total = 0.0
+    open_start, open_end = clipped[0]
+    for start, end in clipped[1:]:
+        if start > open_end:  # disjoint — bank the run and start a new one
+            total += (open_end - open_start).total_seconds() * 1000.0
+            open_start, open_end = start, end
+        else:  # overlapping or adjacent — extend the run
+            open_end = max(open_end, end)
+    return total + (open_end - open_start).total_seconds() * 1000.0
+
+
+def decompose_turn(
+    first_started_at: datetime | None,
+    last_completed_at: datetime | None,
+    agent_started_at: datetime | None,
+    agent_ended_at: datetime | None,
+) -> tuple[float | None, float | None]:
+    """Wall ms before the first generation window opens, and after the last closes.
+
+    The turn's two unexplained ends. Between them the windows tile (each
+    harness's generation mark runs to the next) and tool execution is already
+    subtracted inside them, so head + generation + tool + tail is the whole
+    turn. Defined once here rather than in five agents, and consumed by
+    ``EventCollector``, the golden-stream sensor, and
+    ``scripts/timing/decompose_run.py``.
+
+    What the head CONTAINS differs per harness and is deliberately NOT split.
+    On an in-process SDK the first window already covers dispatch and
+    time-to-first-token, so this reads ~0; on a subprocess harness it fuses CLI
+    boot, provider resolution, dispatch and TTFT, and the stream carries no
+    marker between them — measured on OpenCode, the process spawns in 3 ms and
+    the first event lands at 3921 ms. Naming these for the interval they
+    MEASURE rather than for what they contain is the whole point; see
+    docs/agents/HARNESS_PARITY.md for the per-harness composition.
+
+    ``None`` means never measured — a turn that produced no generation, or a
+    snapshot taken before the terminal event. Never 0.0, which would claim a
+    measurement was taken and came back instant (CE058). A measured inversion
+    (the two clocks disagreeing) IS a real zero and clamps, because both ends
+    were observed.
+
+    NOTE a second implementation of this arithmetic lives in the evalboard's
+    Unaccounted cell (``_sections.tsx``), as ``pricing.ts`` mirrors
+    ``pricing.py``. Change one, change the other.
+    """
+    head = tail = None
+    if first_started_at is not None and agent_started_at is not None:
+        head = max((first_started_at - agent_started_at).total_seconds() * 1000.0, 0.0)
+    if last_completed_at is not None and agent_ended_at is not None:
+        tail = max((agent_ended_at - last_completed_at).total_seconds() * 1000.0, 0.0)
+    return head, tail

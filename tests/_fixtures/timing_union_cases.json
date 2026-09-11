@@ -2,9 +2,9 @@
   "_comment": [
     "Shared replay corpus for the tool-execution UNION, in milliseconds relative",
     "to an arbitrary base instant. Two implementations must agree on it:",
-    "  * Python  — coder_eval.agents._timing.busy_ms, which subtracts tool time",
+    "  * Python  — coder_eval.timing.busy_ms, which subtracts tool time",
     "              from an agent's generation window.",
-    "  * TypeScript — evalboard/lib/runs.ts::busyMs, which subtracts tool time",
+    "  * TypeScript — evalboard/lib/timing.ts::busyMs, which subtracts tool time",
     "              from a task's wall clock to produce the Unaccounted residual.",
     "They answer the same question about the same task.json, so a divergence",
     "means the evalboard and the harness disagree about how long the tools ran.",

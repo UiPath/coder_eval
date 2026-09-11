@@ -8,6 +8,8 @@ rules in ``coder_eval/streaming/collector.py``.
 from datetime import datetime
 from typing import ClassVar
 
+import pytest
+
 from coder_eval.models import (
     AssistantMessage,
     CommandTelemetry,
@@ -202,7 +204,17 @@ class TestFullFieldParity:
     #   provider_call_costs -> joined in post-run by the orchestrator from the
     #                          LiteLLM proxy cost log (litellm_cost.apply_actual_cost),
     #                          not emitted by the agent/EventCollector.
-    _DERIVED: ClassVar[set[str]] = {"commands", "token_usage", "timestamp", "provider_call_costs"}
+    _DERIVED: ClassVar[set[str]] = {
+        "commands",
+        "token_usage",
+        "timestamp",
+        "provider_call_costs",
+        # Measured by the collector between the agent's own start/end event
+        # stamps and the first/last generation window — not carried on
+        # AgentEndEvent, because no agent computes them.
+        "harness_startup_ms",
+        "harness_teardown_ms",
+    }
 
     def _full_agent_end(self) -> AgentEndEvent:
         """An AgentEndEvent with every verbatim field set to a non-default sentinel."""
@@ -458,3 +470,92 @@ class TestNoTerminalEvent:
         assert record.model_used == "gpt-x"
         assert record.assistant_turn_count == 1
         assert [c.tool_id for c in record.commands] == ["a"]
+
+
+class TestHarnessOverheadBuckets:
+    """The turn's two unexplained ends: before the first generation, after the last.
+
+    Measured live across all five harnesses, these two plus generation plus tool
+    execution account for the turn to within 0.1 ms — so what the evalboard shows
+    as "Unaccounted" is fully explained rather than merely displayed. The head is
+    where the harnesses differ most (OpenCode ~3.0 s of CLI boot + TTFT fused,
+    claude-code a measured 0.0 because its first window already covers dispatch),
+    which is exactly why it is booked as its own bucket instead of being folded
+    into generation.
+    """
+
+    @staticmethod
+    def _msg(started: datetime, completed: datetime) -> AssistantMessage:
+        return AssistantMessage(started_at=started, completed_at=completed, generation_duration_ms=1.0)
+
+    def _record(self, messages, *, start: datetime, end: datetime) -> TurnRecord:
+        collector = EventCollector()
+        _feed(
+            collector,
+            [
+                AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1, timestamp=start),
+                AgentEndEvent(
+                    task_id=TASK_ID,
+                    usage=TokenUsage(output_tokens=1),
+                    messages=messages,
+                    timestamp=end,
+                ),
+            ],
+        )
+        return collector.build_turn_record()
+
+    def test_head_and_tail_are_measured_from_the_agent_event_stamps(self):
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [self._msg(t0.replace(second=2), t0.replace(second=5))],
+            start=t0,
+            end=t0.replace(second=9),
+        )
+        assert rec.harness_startup_ms == pytest.approx(2000.0)
+        assert rec.harness_teardown_ms == pytest.approx(4000.0)
+
+    def test_a_turn_with_no_generation_says_so_rather_than_claiming_zero(self):
+        """None means never measured; 0.0 would mean measured-and-instant (CE058)."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record([], start=t0, end=t0.replace(second=9))
+        assert rec.harness_startup_ms is None
+        assert rec.harness_teardown_ms is None
+
+    def test_a_measured_zero_head_is_zero_not_none(self):
+        """claude-code and Antigravity really do open their first window at turn
+        start, so their head is a genuine 0.0 — the distinction from None is the
+        whole point of the field."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record([self._msg(t0, t0.replace(second=5))], start=t0, end=t0.replace(second=5))
+        assert rec.harness_startup_ms == 0.0
+        assert rec.harness_teardown_ms == 0.0
+
+    def test_the_tail_ignores_a_trailing_reconciliation_entry(self):
+        """It is always last when present and carries no timestamps at all, so
+        indexing messages[-1] would raise rather than measure."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [
+                self._msg(t0.replace(second=1), t0.replace(second=4)),
+                ReconciliationMessage(input_tokens=5, note="residual"),
+            ],
+            start=t0,
+            end=t0.replace(second=6),
+        )
+        assert rec.harness_teardown_ms == pytest.approx(2000.0)
+
+    def test_a_clock_inversion_clamps_rather_than_going_negative(self):
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [self._msg(t0.replace(minute=59, hour=11), t0.replace(second=5))],
+            start=t0,
+            end=t0.replace(second=1),
+        )
+        assert rec.harness_startup_ms == 0.0
+
+    def test_a_snapshot_before_the_terminal_event_measures_nothing(self):
+        collector = EventCollector()
+        _feed(collector, [AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1)])
+        rec = collector.build_turn_record()
+        assert rec.harness_startup_ms is None
+        assert rec.harness_teardown_ms is None

@@ -24,6 +24,11 @@ SCRUB_KEYS = frozenset(
         "duration_ms",
         "duration_seconds",
         "generation_duration_ms",
+        # Measured wall intervals like the two above, so they vary run to run;
+        # masking keeps None-vs-set (the meaningful distinction) visible while
+        # the value itself stays out of the snapshot.
+        "harness_startup_ms",
+        "harness_teardown_ms",
         # Cost is a rate-card-dependent float (and is backfilled from the rate
         # card on timeout/kill), so it is masked too — keeping the snapshot
         # rate-card-independent. The integer TOKEN buckets stay EXACT; those are

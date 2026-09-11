@@ -1,7 +1,7 @@
 """The Python and TypeScript tool-execution unions must agree.
 
-``coder_eval.agents._timing.busy_ms`` subtracts tool time from an agent's
-generation window; ``evalboard/lib/runs.ts::busyMs`` subtracts tool time from a
+``coder_eval.timing.busy_ms`` subtracts tool time from an agent's
+generation window; ``evalboard/lib/timing.ts::busyMs`` subtracts tool time from a
 task's wall clock to produce the task page's ``Unaccounted`` residual. They
 answer the same question about the same ``task.json``, so a divergence is not a
 style difference — it is the harness and the evalboard reporting two different
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.agents._timing import busy_ms
+from coder_eval.timing import busy_ms
 
 
 _FIXTURE = Path(__file__).parent / "_fixtures" / "timing_union_cases.json"

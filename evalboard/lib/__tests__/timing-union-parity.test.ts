@@ -5,7 +5,7 @@ import { describe, expect, test } from "vitest";
 import { busyMs, toolExecutionMs } from "../timing";
 import type { MessageEvent, MessageToolUse } from "../runs";
 
-// Parity guard: `busyMs` here and `coder_eval.agents._timing.busy_ms` in the
+// Parity guard: `busyMs` here and `coder_eval.timing.busy_ms` in the
 // Python harness answer the same question about the same task.json — how much
 // wall clock the tools occupied — one to subtract it from a generation window,
 // the other to subtract it from the task's duration. A divergence makes the
