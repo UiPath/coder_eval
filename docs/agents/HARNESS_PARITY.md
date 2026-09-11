@@ -31,7 +31,7 @@ wall clock its numbers account for.
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
-| `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID` | CLI `responseId`; `None` when absent |
+| `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes | yes | yes | yes | yes |
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
@@ -149,16 +149,32 @@ lacks one. Antigravity's `Step` stream carries no message id, so the harness
 synthesizes one — and it must, because this harness's generation windows are
 *contiguous* by construction: each opens exactly where the previous one closed,
 so the gap between two of them is always 0 ms and the fallback would fold a
-whole turn's generations into a single row. Nothing about the numbers would
-look wrong, because the consumer SUMS a group's token buckets and durations;
-what is lost is per-generation thinking / text / tool attribution. CE060 makes
-the kwarg mandatory in `src/coder_eval/agents/` for that reason. Note the two
-synthetic schemes read differently on purpose: Codex deliberately REPEATS one
+whole turn's generations into a single row. CE060 makes the kwarg mandatory in
+`src/coder_eval/agents/` for that reason.
+
+The collapse is a *display* defect, not an accounting one — the consumer SUMS a
+group's token buckets and durations, so every total, percentage and cost is
+identical either way, as is the reconciliation residual. But it is not
+cosmetic, and three displayed figures do move when a turn stops collapsing:
+the thinking-cost simulator's per-call cache cascade (`calls` in
+`evalboard/lib/thinkingSim.ts` is the number of grouped emissions, and the
+cascade is quadratic in it — on a single-shot run it was pinned at one call,
+so every coefficient was zero), the `Messages` count and timeline heading, and
+the "slow generation" count, whose 10 s bar was being applied to a whole turn's
+summed generation time. All three move toward the figure they were always
+meant to report, so the fix corrects them rather than breaking them — but a
+trend compared across this change is not comparing like with like.
+
+The two synthetic schemes read differently on purpose: Codex deliberately REPEATS one
 id across the sub-messages of a single generation — that is exactly the "the
 CLI split one API response" signal the field exists to carry — while
 Antigravity's are all distinct, because it emits one message per generation
 with every block inside it. Runs recorded before a harness captured the field
-still carry `null` and still depend on the gap fallback, which is why it stays.
+still carry `null` and still depend on the gap fallback, which is why it stays
+— and so does a current OpenCode or Pi message whose payload omitted the id,
+which is the case CE060 cannot see (it requires the kwarg to be present, not
+non-`None` at runtime). OpenCode tiles its windows contiguously too, so it is
+the other harness where a missing id can still collapse a turn.
 
 ### Known divergences
 

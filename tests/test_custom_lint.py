@@ -4485,8 +4485,24 @@ class TestCE060MessageIdDeclared:
         # CE060 resolves aliases instead.
         assert self._run("from coder_eval.models import AssistantMessage as Msg\nm = Msg(model=model)")
 
-    def test_flags_the_attribute_spelling(self):
+    def test_flags_the_module_alias_spelling(self):
+        # The realistic way to write `models.AssistantMessage(...)`: the class
+        # itself is never bound, so only the attribute is left to match on.
+        assert self._run("import coder_eval.models as models\nm = models.AssistantMessage(model=model)")
+
+    def test_flags_the_attribute_spelling_beside_a_direct_import(self):
         assert self._run(self._IMPORT + "m = models.AssistantMessage(model=model)")
+
+    def test_flags_a_relative_import(self):
+        # `agents/` does use relative imports, and the absolute path test alone
+        # left the rule silently blind for a whole file.
+        assert self._run("from ..models import AssistantMessage\nm = AssistantMessage(model=model)")
+
+    def test_keys_on_the_model_name_rather_than_a_literal(self):
+        from coder_eval.models import AssistantMessage as _Model
+        from tests.lint.rules import ce060_message_id_declared as rule_mod
+
+        assert _Model.__name__ == rule_mod._CLASS
 
     def test_flags_a_star_expanded_call(self):
         # `**fields` has not declared the field at the site.
