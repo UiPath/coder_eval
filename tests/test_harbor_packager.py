@@ -608,7 +608,11 @@ class TestTemplateSourcesCopy:
         dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
         assert "templates" not in dockerfile_text
 
-    def test_nonexistent_template_dir_warns_instead_of_crashing(self, tmp_path: Path) -> None:
+    def test_nonexistent_template_dir_is_a_hard_export_failure(self, tmp_path: Path) -> None:
+        """A missing template dir is NOT downgraded to a warning: the agent-phase
+        task.yaml still references it, so a silently-skipped copy would ship an
+        export whose agent has no starter code -- every criterion then reads
+        "file does not exist" indistinguishable from a real agent failure."""
         missing = tmp_path / "does-not-exist"
         task_file = _write_task(
             tmp_path,
@@ -622,7 +626,34 @@ class TestTemplateSourcesCopy:
         )
         out_dir = tmp_path / "out"
 
+        with pytest.raises(packager.TaskNotExportableError, match="is not a directory"):
+            export_task(task_file, out_dir)
+
+        assert not (out_dir / "environment" / "templates").exists()
+
+    def test_non_template_dir_source_is_carried_over_unchanged_with_a_warning(self, tmp_path: Path) -> None:
+        """A `RepoSource`/`StarterFilesSource` template_sources entry resolves
+        entirely inside the container already (clone at runtime / inline file
+        content) -- it is legitimately not locally copyable, so it warns and is
+        carried over unchanged rather than failing the export."""
+        task_file = _write_task(
+            tmp_path,
+            {
+                "sandbox": {
+                    "driver": "docker",
+                    "docker": {"image": "byod-custom-image:0.1.0", "network": "none"},
+                    "template_sources": [
+                        {"type": "starter_files", "files": [{"path": "README.md", "content": "hello"}]},
+                    ],
+                }
+            },
+        )
+        out_dir = tmp_path / "out"
+
         result = export_task(task_file, out_dir)
 
-        assert any("is not a directory" in w for w in result.warnings)
-        assert not (out_dir / "environment" / "templates").exists()
+        assert any("StarterFilesSource" in w and "not a TemplateDirSource" in w for w in result.warnings)
+        emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
+        template_sources = emitted["sandbox"]["template_sources"]
+        assert len(template_sources) == 1
+        assert template_sources[0]["files"] == [{"path": "README.md", "content": "hello"}]

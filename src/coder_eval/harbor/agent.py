@@ -49,17 +49,17 @@ from coder_eval.harbor.agent_paths import AGENT_TASK_YAML_PATH
 
 
 if TYPE_CHECKING:
-    from harbor.environments.base import BaseEnvironment  # pyright: ignore[reportMissingImports]
-    from harbor.models.agent.context import AgentContext  # pyright: ignore[reportMissingImports]
+    from harbor.environments.base import BaseEnvironment
+    from harbor.models.agent.context import AgentContext
 
 try:
-    from harbor.agents.installed.base import BaseInstalledAgent  # pyright: ignore[reportMissingImports]
+    from harbor.agents.installed.base import BaseInstalledAgent
 except ImportError as e:  # pragma: no cover - exercised only where `harbor` is installed
     raise ImportError(
         "coder_eval.harbor.agent requires the `harbor` package (not installed here). This module is "
         + "meant to run INSIDE a Harbor trial container, where `harbor` is already present -- it is not "
-        + "a coder-eval runtime dependency. If you are trying to use this as a Harbor agent, install/pin "
-        + "`harbor` in the image the packager builds."
+        + "a coder-eval runtime dependency. Install it with `pip install 'coder-eval[harbor]'` into the "
+        + "same interpreter as coder_eval (the image the packager builds, or a `hb run` host)."
     ) from e
 
 try:

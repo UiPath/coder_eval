@@ -98,13 +98,39 @@ def _unhonorable_override_reason(resolved: ResolvedTask) -> str | None:
     return None
 
 
+class UnsafeExportPathError(ValueError):
+    """A resolved ``variant_id``/``task_id``/``row_id`` would export outside ``out_dir``."""
+
+
 def _out_subdir(out_dir: Path, resolved: ResolvedTask, *, needs_replicate_segment: bool) -> Path:
-    """``<out_dir>/<variant_id>/<task_id>/[<row_id>/]rep<NN>/`` — row/replicate segments only when they fan out."""
+    """``<out_dir>/<variant_id>/<task_id>/[<row_id>/]rep<NN>/`` — row/replicate segments only when they fan out.
+
+    ``variant_id``/``task_id``/``row_id`` are free-form, author-controlled
+    strings (``row_id`` in particular comes straight from a dataset row's
+    ``id_field``, which may be sourced from an external CSV/JSONL — less
+    trusted than the task YAML itself). None of them are validated as
+    filesystem-safe elsewhere, so a value like ``"../../../etc"`` would
+    otherwise let a crafted experiment/dataset write Harbor's exported
+    directory (including an executable ``tests/test.sh``) anywhere the
+    invoking user can write. Resolve the computed destination and refuse it
+    outright if it would land outside ``out_dir``, rather than trusting the
+    segments to be well-formed.
+    """
+    out_dir_resolved = out_dir.resolve()
     dest = out_dir / resolved.variant_id / resolved.task.task_id
     if resolved.task.row_id:
         dest = dest / resolved.task.row_id
     if needs_replicate_segment:
         dest = dest / f"rep{resolved.replicate_index:02d}"
+    # `resolve()` on a path that doesn't exist yet still normalizes `..`
+    # segments against its (existing) parents, so this catches traversal
+    # without requiring `dest` to already exist.
+    if not dest.resolve().is_relative_to(out_dir_resolved):
+        raise UnsafeExportPathError(
+            f"resolved export path for variant {resolved.variant_id!r}, task {resolved.task.task_id!r} "
+            + f"would land outside the output directory ({dest.resolve()} is not under {out_dir_resolved}) -- "
+            + "check variant_id/task_id/row_id for path-traversal sequences."
+        )
     return dest
 
 
@@ -196,5 +222,6 @@ def export_experiment(
 __all__ = [
     "ExperimentExportResult",
     "SkippedVariantExport",
+    "UnsafeExportPathError",
     "export_experiment",
 ]

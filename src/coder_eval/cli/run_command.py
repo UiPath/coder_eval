@@ -980,6 +980,40 @@ def _reject_simulation_under_execute(resolved: list[ResolvedTask], *, grade: boo
         )
 
 
+def _reject_empty_criteria_under_grade(resolved: list[ResolvedTask], *, grade: bool) -> None:
+    """Refuse a task with zero ``success_criteria`` under ``run``/``evaluate`` rather than scoring it.
+
+    ``TaskDefinition.success_criteria`` accepts an empty list at the model level
+    (needed so the Harbor agent-phase ``task.yaml`` -- criteria-free by design,
+    see ``harbor/packager.py::_write_agent_phase_task_yaml`` -- can round-trip
+    through ``coder-eval execute``, which never grades). But `EvaluationResult`'s
+    scoring is vacuous over an empty list: `all_criteria_passed` returns `True`
+    and `calculate_weighted_score` returns `0.0`, so a criteria-free task graded
+    under `run` would silently finalize as `FinalStatus.SUCCESS` with
+    `weighted_score: 0.0` -- an internally contradictory "successful" result for
+    what is actually a misconfigured task (a typo, a bad merge, a `-D` override
+    that cleared the list). `execute` (`grade=False`) is exactly the case this
+    is legal for, so the check is scoped to `grade` the same way
+    ``_reject_simulation_under_execute`` scopes its own check.
+
+    Callers must pass the POST-`--resume` set (``to_run``, not the full
+    ``resolved``): a resumed, already-finalized row is folded back from
+    ``prior_results`` and never re-executed or re-graded, so its own
+    (possibly empty) criteria are moot to this run and must not block one
+    that is not actually going to grade it.
+    """
+    if not grade:
+        return
+    empty = sorted(rt.task.task_id for rt in resolved if not rt.task.success_criteria)
+    if empty:
+        raise typer.BadParameter(
+            "task(s) with no `success_criteria` cannot be graded (they would silently score "
+            + "SUCCESS at weighted_score 0.0): "
+            + ", ".join(empty)
+            + ". Add at least one criterion, or use `coder-eval execute` to run without grading."
+        )
+
+
 async def _run_with_experiment(
     all_task_files: list[Path],
     config: BatchRunConfig,
@@ -1098,21 +1132,35 @@ async def _run_with_experiment(
             resolved, grade=grade, allow_host_grading=allow_host_grading
         )
 
+    # Checked against `to_run`, not `resolved`: a `--resume` peels off tasks
+    # already finalized (folded back from `prior_results`, never re-executed
+    # or re-graded), so an already-finalized row with empty success_criteria
+    # (e.g. it was originally run via `execute`) must not block a `run
+    # --resume` that isn't actually going to grade it.
+    _reject_empty_criteria_under_grade(to_run, grade=grade)
+
     # Print execution mode
     print_execution_mode(len(to_run), max_parallel)
 
-    summary, task_results = await _run_with_callbacks(
-        execute_fn=lambda **kwargs: run_batch(
-            resolved_tasks=to_run,
-            config=config,
-            skipped_tasks=skipped,
-            prior_results=prior_results,
-            prior_resolved=prior_resolved,
-            **kwargs,
-        ),
-        task_count=len(to_run),
-        stream_mode=stream_mode,
-    )
+    try:
+        summary, task_results = await _run_with_callbacks(
+            execute_fn=lambda **kwargs: run_batch(
+                resolved_tasks=to_run,
+                config=config,
+                skipped_tasks=skipped,
+                prior_results=prior_results,
+                prior_resolved=prior_resolved,
+                **kwargs,
+            ),
+            task_count=len(to_run),
+            stream_mode=stream_mode,
+        )
+    except ValueError as e:
+        # run_batch's own resolution-time guards (e.g. --workspace-dir requiring
+        # exactly one non-docker task) raise a plain ValueError -- convert it to
+        # the same clean CLI error every other resolution-time refusal in this
+        # function gets, instead of an unhandled traceback.
+        raise typer.BadParameter(str(e)) from e
 
     # Generate experiment reports
     experiment_result = aggregate_results(

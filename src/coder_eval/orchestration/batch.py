@@ -124,7 +124,7 @@ async def run_batch(
                 + "It names a single in-place directory every task would otherwise collide on."
             )
         (_workspace_dir_task,) = resolved_tasks
-        if _workspace_dir_task.task.sandbox is not None and _workspace_dir_task.task.sandbox.driver == "docker":
+        if _workspace_dir_task.task.sandbox.driver == "docker":
             raise ValueError(
                 "--workspace-dir is not for sandbox.driver: docker tasks -- the docker driver already "
                 + "aligns automatically via sandbox.docker.working_dir (see DockerRunner)."

@@ -232,3 +232,33 @@ class TestStructuralRefusalsPerVariant:
         assert result.exported == []
         assert len(result.skipped) == 1
         assert "sandbox.driver" in result.skipped[0].reason
+
+
+class TestExportPathContainment:
+    """A crafted `variant_id`/`task_id`/`row_id` must not escape `out_dir`.
+
+    None of these identifiers are validated as filesystem-safe anywhere in the
+    resolution chain (`variant_id` is a free string on `ExperimentVariant`),
+    and `row_id` in particular can come from an externally-sourced dataset
+    row. `_out_subdir` must refuse rather than silently write outside
+    `out_dir`.
+    """
+
+    def test_traversal_variant_id_is_refused(self, tmp_path: Path) -> None:
+        from coder_eval.harbor.experiment_packager import UnsafeExportPathError
+
+        task_file = _write_task(tmp_path)
+        exp_file = _write_experiment(
+            tmp_path,
+            {
+                "experiment_id": "evil",
+                "variants": [{"variant_id": "../../../../tmp/pwned"}],
+            },
+        )
+        out_dir = tmp_path / "out"
+
+        with pytest.raises(UnsafeExportPathError):
+            export_experiment([task_file], exp_file, out_dir)
+
+        # Nothing should have been written outside out_dir.
+        assert not (tmp_path.parent / "tmp" / "pwned").exists()

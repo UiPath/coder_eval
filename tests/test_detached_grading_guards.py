@@ -92,6 +92,45 @@ def test_run_still_accepts_the_same_simulation_task(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# `run` refuses a task with zero success_criteria; `execute` still accepts it
+# --------------------------------------------------------------------------
+
+_NO_CRITERIA = """task_id: t
+description: d
+agent:
+  type: none
+success_criteria: []
+"""
+
+
+def test_run_refuses_a_task_with_no_success_criteria(tmp_path: Path) -> None:
+    """An empty `success_criteria:` scores vacuously (all_criteria_passed([])
+    is True, calculate_weighted_score([]) is 0.0), so a graded run of such a
+    task would silently finalize as SUCCESS at weighted_score 0.0 -- a
+    misconfigured task, not a real result. `run` must refuse it by name."""
+    path = tmp_path / "t.yaml"
+    path.write_text(_NO_CRITERIA, encoding="utf-8")
+
+    result = runner.invoke(app, ["run", str(path), "--run-dir", str(tmp_path / "r")])
+
+    assert result.exit_code != 0
+    assert "success_criteria" in result.output
+    assert "t" in result.output
+
+
+def test_execute_still_accepts_a_task_with_no_success_criteria(tmp_path: Path) -> None:
+    """The control: `execute` never grades, so a criteria-free task.yaml (the
+    shape the Harbor agent-phase export deliberately produces) is legal there."""
+    path = tmp_path / "t.yaml"
+    path.write_text(_NO_CRITERIA, encoding="utf-8")
+
+    with patch("coder_eval.cli.run_command._run_with_experiment", new=AsyncMock(return_value=(MagicMock(), 0))):
+        result = runner.invoke(app, ["execute", str(path), "--run-dir", str(tmp_path / "r")])
+
+    assert "success_criteria" not in result.output
+
+
+# --------------------------------------------------------------------------
 # The evaluate-only path refuses grade=False
 # --------------------------------------------------------------------------
 
@@ -360,3 +399,76 @@ def test_the_recorded_task_defaults_to_the_task_being_run(tmp_path: Path) -> Non
     )
     orch = Orchestrator(task=task, run_dir=tmp_path, variant_id="v")
     assert orch.recorded_task is task
+
+
+# --------------------------------------------------------------------------
+# `--workspace-dir` misuse is a clean CLI error, not a traceback
+# --------------------------------------------------------------------------
+
+_DOCKER_TASK = """task_id: t
+description: d
+initial_prompt: p
+agent:
+  type: claude-code
+sandbox:
+  driver: docker
+  docker:
+    image: some-image:latest
+success_criteria:
+  - type: file_exists
+    path: proof.txt
+    description: x
+"""
+
+
+def test_workspace_dir_with_docker_driver_is_a_clean_cli_error(tmp_path: Path) -> None:
+    """run_batch's own guard raises a plain ValueError; the CLI must convert it
+    to typer.BadParameter (exit 2, clean message) instead of an unhandled
+    traceback -- --workspace-dir is not for sandbox.driver: docker tasks."""
+    path = tmp_path / "t.yaml"
+    path.write_text(_DOCKER_TASK, encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["run", str(path), "--run-dir", str(tmp_path / "r"), "--workspace-dir", str(tmp_path / "ws")]
+    )
+
+    assert result.exit_code != 0
+    assert "--workspace-dir" in result.output
+    assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------
+# The empty-criteria guard checks post-`--resume` `to_run`, not the full
+# `resolved` set -- an already-finalized row folded back from prior_results
+# is never re-graded, so its own (possibly empty) criteria are moot.
+# --------------------------------------------------------------------------
+
+
+def test_empty_criteria_guard_ignores_an_already_finalized_resumed_row(tmp_path: Path) -> None:
+    import typer
+
+    from coder_eval.cli.run_command import _reject_empty_criteria_under_grade
+    from coder_eval.models import ResolvedTask, TaskDefinition
+
+    finalized_but_empty = ResolvedTask(
+        task=TaskDefinition(
+            task_id="already-done",
+            description="d",
+            agent=parse_agent_config(type=AgentKind.NONE),
+            success_criteria=[],
+        ),
+        task_file=tmp_path / "t.yaml",
+        run_dir=tmp_path,
+        variant_id="v",
+    )
+
+    # The full `resolved` set (pre-resume) still refuses when actually graded
+    # -- this is the control, proving the guard is not simply disabled.
+    with pytest.raises(typer.BadParameter):
+        _reject_empty_criteria_under_grade([finalized_but_empty], grade=True)
+
+    # But `to_run` (post-resume) is what a real call site must pass: an
+    # already-finalized row is peeled off by `_apply_resume` and folded back
+    # from `prior_results` without being re-graded, so it is NOT in `to_run`
+    # -- the empty `to_run` a resumed run would actually see must not raise.
+    _reject_empty_criteria_under_grade([], grade=True)

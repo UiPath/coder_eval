@@ -433,11 +433,17 @@ def _copy_template_sources(task: TaskDefinition, env_dir: Path, warnings: list[s
             dest_name = f"{i:02d}-{source_path.name}"
             dest = templates_dir / dest_name
             if not source_path.is_dir():
-                warnings.append(
-                    f"template_sources[{i}].path {source_path} is not a directory -- not copied into the export."
+                # A hard failure, not a warning: the agent-phase task.yaml
+                # still references this template (starter files, or a pytest
+                # suite the prompt expects), so a silently-skipped copy ships
+                # an export whose agent has no starter code -- every criterion
+                # then reads "file does not exist" indistinguishable from a
+                # real agent failure (the exact CE039 anti-pattern, one layer
+                # up at the export boundary instead of the grading boundary).
+                raise TaskNotExportableError(
+                    f"template_sources[{i}].path {source_path} is not a directory -- cannot copy it into the "
+                    + "export. Fix the task's template_sources entry before exporting."
                 )
-                rewritten.append(dumped)
-                continue
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(source_path, dest)

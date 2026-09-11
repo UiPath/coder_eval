@@ -80,7 +80,9 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
+        # --extra harbor: pyright below type-checks src/coder_eval/harbor/agent.py
+        # against harbor's real types, not a scoped ignore.
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm --extra harbor
 
       # PHASE 1: Fast checks (fail early)
       - name: Check code formatting (ruff format)
@@ -385,7 +387,9 @@ jobs:
           pip install uv
 
       - name: Install project dependencies (hash-verified from uv.lock)
-        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm
+        # --extra harbor: pyright below type-checks src/coder_eval/harbor/agent.py
+        # against harbor's real types, not a scoped ignore.
+        run: uv sync --frozen --extra dev --extra uipath --extra codex --extra litellm --extra harbor
 
       - name: Check code formatting (ruff format)
         run: .venv/Scripts/ruff format --check src/ tests/
