@@ -49,11 +49,11 @@ from coder_eval.harbor.agent_paths import AGENT_TASK_YAML_PATH
 
 
 if TYPE_CHECKING:
-    from harbor.environments.base import BaseEnvironment
-    from harbor.models.agent.context import AgentContext
+    from harbor.environments.base import BaseEnvironment  # pyright: ignore[reportMissingImports]
+    from harbor.models.agent.context import AgentContext  # pyright: ignore[reportMissingImports]
 
 try:
-    from harbor.agents.installed.base import BaseInstalledAgent
+    from harbor.agents.installed.base import BaseInstalledAgent  # pyright: ignore[reportMissingImports]
 except ImportError as e:  # pragma: no cover - exercised only where `harbor` is installed
     raise ImportError(
         "coder_eval.harbor.agent requires the `harbor` package (not installed here). This module is "
