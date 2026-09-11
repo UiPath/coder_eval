@@ -10,6 +10,7 @@ feeds the checker.
 
 import json
 
+import click
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
@@ -120,4 +121,6 @@ def test_evaluate_format_harbor_requires_trajectory(tmp_path):
 
     result = runner.invoke(app, ["evaluate", str(task_file), str(work_dir), "--format", "harbor"])
     assert result.exit_code != 0
-    assert "--trajectory" in result.output
+    # click.unstyle strips ANSI color codes -- see test_execute_format_harbor.py's
+    # equivalent assertion for why a plain substring check is not portable here.
+    assert "--trajectory" in click.unstyle(result.output)

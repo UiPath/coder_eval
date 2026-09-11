@@ -2,6 +2,7 @@
 
 import json
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -80,4 +81,7 @@ def test_unknown_format_value_errors_cleanly(tmp_path, success_task):
         ["execute", str(success_task), "--run-dir", str(run_dir), "--format", "nonsense"],
     )
     assert result.exit_code != 0
-    assert "Unsupported --format" in result.output
+    # click.unstyle strips ANSI color codes -- CI renders Click's own error box
+    # with color (option names highlighted char-by-char), which would otherwise
+    # split "--format" across escape sequences and silently break this check.
+    assert "Unsupported --format" in click.unstyle(result.output)

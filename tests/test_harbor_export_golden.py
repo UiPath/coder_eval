@@ -26,6 +26,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from coder_eval.harbor.packager import export_task
 
 
@@ -70,6 +72,7 @@ def test_export_matches_the_committed_golden_tree(tmp_path: Path) -> None:
         assert actual[rel_path] == expected[rel_path], f"content drifted for {rel_path}"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only: NTFS has no chmod executable bit")
 def test_test_sh_is_executable_in_the_golden_tree() -> None:
     """The executable bit is part of C1.1's contract and isn't captured by file content."""
     test_sh = _EXPECTED_DIR / "tests" / "test.sh"

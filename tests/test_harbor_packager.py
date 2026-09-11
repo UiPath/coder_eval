@@ -8,6 +8,7 @@ path C2 actually runs through.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 
@@ -129,7 +130,8 @@ class TestEmittedDirectoryStructure:
         result = export_task(task_file, out_dir)
 
         test_sh = out_dir / "tests" / "test.sh"
-        assert test_sh.stat().st_mode & 0o111, "test.sh must be executable"
+        if os.name != "nt":  # NTFS has no chmod executable bit
+            assert test_sh.stat().st_mode & 0o111, "test.sh must be executable"
         content = test_sh.read_text(encoding="utf-8")
         assert f'coder-eval evaluate /tests/task.yaml "{result.workdir}"' in content
         assert "coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json" in content
