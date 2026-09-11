@@ -552,20 +552,18 @@ divergences, so the deferred-work record is one place. Measurements in
   whether legacy records can be distinguished from current ones at all.
   Caught in: timing-capture final review (gpt-5.6-sol).
 
-- [ ] **No golden-corpus assertion of the four-bucket identity**, which is what
-  would have caught the worst defect of the head/tail work (head and tail were
-  not tool-subtracted, so an orphaned or window-straddling tool was booked
-  twice — `antigravity_d_orphaned_tool` reconciled at **-86% of wall clock**
-  and every one of the 72 golden tests passed). The check itself is three
-  lines in `assert_timing_captured`: `Σ generation + ∪ tool + head + tail` must
-  not exceed `duration_seconds`. It is blocked because **5 of 27 fixtures stamp
-  their generations on a clock that is not commensurable with their agent
-  events** — the codex scenarios hardcode `2027-01-15` while the agent events
-  are stamped `now()`, giving a head of ~126 days, and `opencode_b` and
-  `claude_i` are similar. Adding the assertion today means a 5-entry
-  suppression list, i.e. a guard that is off for the harnesses most likely to
-  break it. The real fix is to make the fixtures use one clock; then the
-  invariant costs three lines. Caught in: turn head/tail timing final review.
+- [x] ~~No golden-corpus assertion of the four-bucket identity.~~ **DONE.** The
+  fixture clocks were unified (`_rebase_notifications` / `_rebase_lines` shift
+  codex's 2027 base and opencode's month-old base onto the replay's own clock,
+  keeping every derived duration exact) and `assert_timing_captured` now
+  asserts `Σ generation + ∪ tool + head + tail` against `duration_seconds`.
+  Mutation-verified: reintroducing the defect fails
+  `test_antigravity_golden[d_orphaned_tool]`, which previously passed.
+  22 of 27 scenarios are checked. The remaining 5 are exempt via
+  `FICTIONAL_DURATIONS` for a reason rebasing cannot fix: they inject SDK
+  stamps in integer MILLISECONDS (17-900 ms of declared item time) while the
+  replay runs in well under one, so closing that last gap needs the agent's
+  own clock faked, not the fixtures' rebased.
 
 - [ ] **No TypeScript counterpart to CE058.** `evalboard/lib/runs.ts` and
   `_sections.tsx` carry the same None-vs-0 contract as the Python side, and

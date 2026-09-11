@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,12 +27,23 @@ from coder_eval.models import AgentKind, parse_agent_config
 
 CODEX_MODEL = "gpt-5-codex"
 
+# How far after the replay's start the rebased timeline begins. Small, but
+# non-zero so the first generation window opens AFTER the AgentStartEvent and
+# the head is a measured interval instead of a clamped inversion.
+_REPLAY_LEAD_MS = 2
+
 
 # --- Notification factories (mirror test_codex_agent) -----------------------
 
 
 # Fixed epoch milliseconds, so every derived duration is deterministic and the
-# golden snapshots pin a real value rather than a scrubbed clock read.
+# golden snapshots pin a real value rather than a scrubbed clock read. It is a
+# BASE, not a wall-clock claim: ``_rebase_notifications`` shifts the whole
+# timeline onto the replay's own clock before the scenario runs, so the SDK
+# stamps and the agent's own event stamps are commensurable. Left absolute,
+# a codex replay recorded a ``harness_startup_ms`` of ~126 DAYS — the agent
+# events are stamped ``now()`` while these sat in 2027 — which is a number no
+# presence-only assertion can catch.
 _T0_MS = 1_800_000_000_000
 
 
@@ -314,6 +326,40 @@ class _FakeThread:
         return _FakeTurnHandle(self._notifications)
 
 
+def _rebase_notifications(notifications: list[Any]) -> list[Any]:
+    """Shift every SDK item stamp from ``_T0_MS`` onto the replay's own clock.
+
+    The scenario catalogue is built once at import with an absolute base, which
+    keeps every DERIVED duration deterministic (a 250 ms command stays 250 ms).
+    But the agent stamps its own lifecycle events with ``datetime.now()``, so
+    left absolute the two clocks are months apart and the recorded head and
+    tail are nonsense. Rebasing keeps the deltas and fixes the era.
+
+    The offset puts the first item a beat AFTER the replay starts, so the head
+    is a small positive interval rather than an inversion clamped to 0.0.
+    """
+    offset = int(datetime.now().timestamp() * 1000) - _T0_MS + _REPLAY_LEAD_MS
+    rebased: list[Any] = []
+    for note in notifications:
+        payload = getattr(note, "payload", None)
+        started = getattr(payload, "started_at_ms", None)
+        completed = getattr(payload, "completed_at_ms", None)
+        if payload is None or (started is None and completed is None):
+            rebased.append(note)
+            continue
+        rebased.append(
+            SimpleNamespace(
+                method=note.method,
+                payload=SimpleNamespace(
+                    item=payload.item,
+                    started_at_ms=None if started is None else started + offset,
+                    completed_at_ms=None if completed is None else completed + offset,
+                ),
+            )
+        )
+    return rebased
+
+
 async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> dict[str, Any]:
     """Run ``scenario`` with fakes and return the TurnRecord/pending_turn dump."""
     import pytest
@@ -322,7 +368,7 @@ async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> dict[
     agent = CodexAgent(config)
     agent.working_directory = Path(working_dir)
     agent.codex_client = SimpleNamespace(close=lambda: None)
-    agent.thread = _FakeThread(scenario.notifications)
+    agent.thread = _FakeThread(_rebase_notifications(scenario.notifications))
 
     # Point CODEX_HOME at a sessions-less dir so sub-agent rollout recovery
     # short-circuits instead of polling the real ~/.codex.

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+
+from coder_eval.timing import busy_ms
 
 
 SCRUB_PLACEHOLDER = "<scrubbed>"
@@ -104,7 +107,41 @@ def assert_reconciliation(record: dict[str, Any]) -> None:
     assert cr_sum == usage["cache_read_input_tokens"], "cache_read bucket does not reconcile"
 
 
-def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: bool) -> None:
+# The four buckets are disjoint by construction, so their sum cannot exceed the
+# turn's own wall clock. Flag only an overshoot past BOTH bounds: the relative
+# one is what catches the defect (an orphaned tool double-booked into the tail
+# read +55% of wall on ``antigravity_d_orphaned_tool``), and the absolute floor
+# keeps a replay whose whole turn is 40 microseconds from failing on scheduler
+# jitter. Healthy fixtures overshoot by at most 0.003 ms / 2%.
+_IDENTITY_FLOOR_MS = 0.1
+_IDENTITY_SHARE = 0.20
+
+
+def _tool_union_ms(record: dict[str, Any]) -> float:
+    """Wall ms this turn spent executing tools — the union, never the sum."""
+    spans: list[tuple[datetime, datetime]] = []
+    for command in record.get("commands") or []:
+        start = _parse_stamp(command.get("execution_started_at"))
+        end = _parse_stamp(command.get("execution_completed_at"))
+        if start is not None and end is not None and end >= start:
+            spans.append((start, end))
+    if not spans:
+        return 0.0
+    return busy_ms(spans, min(s for s, _ in spans), max(e for _, e in spans))
+
+
+def _parse_stamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def assert_timing_captured(
+    record: dict[str, Any], *, expect_generation_window: bool, check_identity: bool = True
+) -> None:
     """Assert a TurnRecord dump actually recorded the timing it could measure.
 
     Run on the UNSCRUBBED dump. ``scrub()`` masks values but preserves ``None``
@@ -157,6 +194,20 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
     clamps with ``max(..., 0.0)``, so it would restate the implementation and
     could never fail.
 
+    **The four-bucket identity**, when ``check_identity``. Generation plus the
+    UNION of the tool intervals plus the head plus the tail cannot exceed the
+    turn's ``duration_seconds``, because the four are disjoint: the windows are
+    tool-subtracted and so are the head and tail. This is the one assertion
+    that catches a DOUBLE-COUNT rather than an absence — it is how an orphaned
+    tool force-closed inside the tail, booked both as tool and as teardown, was
+    found reconciling at -86% of wall clock while all 72 golden tests passed.
+
+    ``check_identity`` is off for the scenarios that inject their own SDK
+    timestamps (see ``FICTIONAL_DURATIONS``): those declare integer-millisecond
+    item durations of 17-900 ms while the replay itself takes ~0.3 ms of real
+    wall clock, so no rebasing can make the two commensurable — the SDK's
+    stamps are milliseconds and the replay is faster than one.
+
     Why a scenario-level floor rather than a per-entry rule: no per-entry form
     works against the real snapshots. ``claude_d_subagent_terminal`` holds two
     content-bearing assistant messages of which exactly one is legitimately
@@ -193,6 +244,32 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
                 "nothing to measure an end against, and a number here claims a measurement "
                 "nobody could have taken"
             )
+
+    if check_identity:
+        wall_ms = (record.get("duration_seconds") or 0.0) * 1000.0
+        # Main thread only: a sub-agent's generations bubble into the same
+        # stream, and the spawning Agent call's own interval already spans them.
+        generation_ms = sum(
+            m.get("generation_duration_ms") or 0.0
+            for m in record.get("messages") or []
+            if m.get("role") == "assistant" and m.get("parent_tool_use_id") is None
+        )
+        tool_ms = _tool_union_ms(record)
+        bucket_sum = (
+            generation_ms
+            + tool_ms
+            + (record.get("harness_startup_ms") or 0.0)
+            + (record.get("harness_teardown_ms") or 0.0)
+        )
+        overshoot = bucket_sum - wall_ms
+        assert overshoot <= max(_IDENTITY_FLOOR_MS, _IDENTITY_SHARE * wall_ms), (
+            f"the four buckets sum to {bucket_sum:.4f} ms against a {wall_ms:.4f} ms turn "
+            f"(over by {overshoot:.4f} ms): generation={generation_ms:.4f}, tool_union={tool_ms:.4f}, "
+            f"startup={record.get('harness_startup_ms')!r}, teardown={record.get('harness_teardown_ms')!r}. "
+            "They are meant to be DISJOINT, so a sum this far over the turn means something is "
+            "booked twice — most likely a tool that ran outside every generation window and was "
+            "left in the head or tail as well as in the tool union"
+        )
 
     if not expect_generation_window:
         return

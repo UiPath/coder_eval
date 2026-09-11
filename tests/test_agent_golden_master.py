@@ -70,6 +70,29 @@ def _expect_window(harness: str, scenario_name: str) -> bool:
     return f"{harness}_{scenario_name}" not in NO_GENERATION_WINDOW
 
 
+# Scenarios that inject their own SDK timestamps, so their recorded durations
+# are FICTIONAL and cannot be reconciled against the replay's real wall clock.
+# `_rebase_notifications` / `_rebase_lines` put those stamps on the replay's
+# clock, which fixes the era — but the SDK's stamps are integer MILLISECONDS
+# and these scenarios declare 17-900 ms of item time, while the replay itself
+# runs in well under one. No rebasing closes that; the agent's own clock would
+# have to be faked too. Everything else — every claude, antigravity and pi
+# scenario, and the codex/opencode ones that inject nothing — is checked.
+FICTIONAL_DURATIONS: frozenset[str] = frozenset(
+    {
+        "codex_b_command_execution",  # 250 ms command + 150 ms generation
+        "codex_d_cross_flush_is_error",  # 400 ms command
+        "codex_e_orphan_tool",  # command started, never completed
+        "codex_f_collab_fallback",  # 900 ms collab wait
+        "opencode_b_tool_call_resolved",  # 17 ms tool interval
+    }
+)
+
+
+def _check_identity(harness: str, scenario_name: str) -> bool:
+    return f"{harness}_{scenario_name}" not in FICTIONAL_DURATIONS
+
+
 _EXPECTED_DIR = Path(__file__).parent / "_fixtures" / "golden_streams" / "expected"
 _REGEN = os.environ.get("GOLDEN_REGEN", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -101,7 +124,11 @@ async def test_claude_golden(scenario, tmp_path):
     # Reconciliation is asserted on the UNscrubbed dump (token buckets are never
     # scrubbed, but cost/timestamps are — assert before masking to be explicit).
     assert_reconciliation(raw)
-    assert_timing_captured(raw, expect_generation_window=_expect_window("claude", scenario.name))
+    assert_timing_captured(
+        raw,
+        expect_generation_window=_expect_window("claude", scenario.name),
+        check_identity=_check_identity("claude", scenario.name),
+    )
     _compare_or_regen(f"claude_{scenario.name}", scrub(raw))
 
 
@@ -111,7 +138,11 @@ async def test_claude_golden(scenario, tmp_path):
 async def test_codex_golden(scenario, tmp_path):
     raw = await run_codex_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
-    assert_timing_captured(raw, expect_generation_window=_expect_window("codex", scenario.name))
+    assert_timing_captured(
+        raw,
+        expect_generation_window=_expect_window("codex", scenario.name),
+        check_identity=_check_identity("codex", scenario.name),
+    )
     _compare_or_regen(f"codex_{scenario.name}", scrub(raw))
 
 
@@ -137,7 +168,11 @@ async def test_codex_reconciliation_invariant(scenario, tmp_path):
 async def test_antigravity_golden(scenario, tmp_path):
     raw = await run_antigravity_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
-    assert_timing_captured(raw, expect_generation_window=_expect_window("antigravity", scenario.name))
+    assert_timing_captured(
+        raw,
+        expect_generation_window=_expect_window("antigravity", scenario.name),
+        check_identity=_check_identity("antigravity", scenario.name),
+    )
     _compare_or_regen(f"antigravity_{scenario.name}", scrub(raw))
 
 
@@ -153,7 +188,11 @@ async def test_antigravity_reconciliation_invariant(scenario, tmp_path):
 async def test_opencode_golden(scenario, tmp_path):
     raw = await run_opencode_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
-    assert_timing_captured(raw, expect_generation_window=_expect_window("opencode", scenario.name))
+    assert_timing_captured(
+        raw,
+        expect_generation_window=_expect_window("opencode", scenario.name),
+        check_identity=_check_identity("opencode", scenario.name),
+    )
     _compare_or_regen(f"opencode_{scenario.name}", scrub(raw))
 
 
@@ -169,7 +208,11 @@ async def test_opencode_reconciliation_invariant(scenario, tmp_path):
 async def test_pi_golden(scenario, tmp_path):
     raw = await run_pi_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
-    assert_timing_captured(raw, expect_generation_window=_expect_window("pi", scenario.name))
+    assert_timing_captured(
+        raw,
+        expect_generation_window=_expect_window("pi", scenario.name),
+        check_identity=_check_identity("pi", scenario.name),
+    )
     _compare_or_regen(f"pi_{scenario.name}", scrub(raw))
 
 
@@ -266,6 +309,7 @@ class TestAssertTimingCaptured:
         commands: list[dict[str, Any]] = (),
         bounds_collapse: bool = False,
         overhead: tuple[float | None, float | None] = (0.0, 3.5),
+        duration_seconds: float = 10.0,
     ) -> dict[str, Any]:
         """A record whose bounds span each window, unless `bounds_collapse`.
 
@@ -273,8 +317,13 @@ class TestAssertTimingCaptured:
         a 0.0 head is antigravity's real answer — because every record here
         carries an assistant message unless a test says otherwise, and the
         sensor requires both buckets on such a turn.
+
+        `duration_seconds` defaults to a turn long enough that the four-bucket
+        identity is trivially satisfied, so these cases constrain only what
+        each is about; the identity has its own cases below.
         """
         return {
+            "duration_seconds": duration_seconds,
             "messages": [
                 {
                     "role": "assistant",
@@ -399,6 +448,45 @@ class TestAssertTimingCaptured:
         # would have demanded a number derived from a placeholder.
         with pytest.raises(AssertionError, match=r"harness_startup_ms is 0\.0"):
             assert_timing_captured(self._record(windows=[None], overhead=(0.0, 3.5)), expect_generation_window=False)
+
+    # The four-bucket identity: generation + tool union + head + tail cannot
+    # exceed the turn, because the four are disjoint.
+    def test_buckets_summing_past_the_turn_raise(self):
+        # 4s generation + a 3.5ms tail on a 1s turn.
+        with pytest.raises(AssertionError, match="booked twice"):
+            assert_timing_captured(self._record(windows=[4000.0], duration_seconds=1.0), expect_generation_window=True)
+
+    def test_a_tool_double_booked_into_the_tail_is_caught(self):
+        """The exact defect: an orphan force-closed inside the tail, counted
+        both in the tool union and in harness_teardown_ms."""
+        record = self._record(
+            windows=[40.0],
+            duration_seconds=0.1,  # 100 ms turn
+            overhead=(0.0, 50.0),
+            commands=[
+                {
+                    "tool_id": "orphan",
+                    "result_status": "success",
+                    "duration_ms": 50.0,
+                    "execution_started_at": "2026-01-01T00:00:00.020000",
+                    "execution_completed_at": "2026-01-01T00:00:00.070000",
+                }
+            ],
+        )
+        with pytest.raises(AssertionError, match="booked twice"):
+            assert_timing_captured(record, expect_generation_window=True)
+
+    def test_the_identity_can_be_waived_for_a_fictional_clock(self):
+        # codex/opencode scenarios declare integer-millisecond item durations
+        # that a sub-millisecond replay can never contain.
+        assert_timing_captured(
+            self._record(windows=[4000.0], duration_seconds=1.0),
+            expect_generation_window=True,
+            check_identity=False,
+        )
+
+    def test_buckets_well_inside_the_turn_pass(self):
+        assert_timing_captured(self._record(windows=[40.0], duration_seconds=1.0), expect_generation_window=True)
 
     def test_the_buckets_are_checked_even_when_no_window_is_expected(self):
         # codex_e_orphan_tool clears the flag (its window subtracts to zero)
