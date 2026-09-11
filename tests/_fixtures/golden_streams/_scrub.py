@@ -120,7 +120,15 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
 
     **Flagged.** When ``expect_generation_window``, at least one assistant
     entry reports a ``generation_duration_ms`` that is non-``None`` AND
-    greater than zero.
+    greater than zero AND whose recorded bounds actually span it
+    (``completed_at > started_at``).
+
+    The bounds half is not redundant. Two harnesses derive the duration from a
+    MONOTONIC clock and the bounds from the wall clock, so the two can
+    disagree: a reducer could report a healthy duration beside two stamps that
+    collapsed to one instant. CE059 catches that statically only when both
+    bounds are the same ``ast.Name``; when they are two different names
+    holding the same value it cannot, and this is the check that does.
 
     Why a scenario-level floor rather than a per-entry rule: no per-entry form
     works against the real snapshots. ``claude_d_subagent_terminal`` holds two
@@ -143,8 +151,13 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
 
     if not expect_generation_window:
         return
-    windows = [m.get("generation_duration_ms") for m in record.get("messages") or [] if m.get("role") == "assistant"]
-    assert any(w is not None and w > 0 for w in windows), (
-        f"no assistant message reports a positive generation window (saw {windows!r}); "
-        "the harness measured no model time at all for a turn that streamed one"
+    assistant = [m for m in record.get("messages") or [] if m.get("role") == "assistant"]
+    windows = [(m.get("generation_duration_ms"), m.get("started_at"), m.get("completed_at")) for m in assistant]
+    assert any(
+        duration is not None and duration > 0 and started is not None and completed is not None and completed > started
+        for duration, started, completed in windows
+    ), (
+        f"no assistant message reports a positive generation window with bounds that span it "
+        f"(saw (duration, started_at, completed_at) = {windows!r}); the harness measured no model "
+        "time at all for a turn that streamed one, or its two clocks disagree"
     )

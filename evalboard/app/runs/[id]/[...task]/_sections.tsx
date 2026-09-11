@@ -362,19 +362,28 @@ export function MessageTimelineSection({
     const messageCount = messages.filter((m) => m.role === "assistant").length;
 
     // Roll-up stats for the summary strip.
-    const totalGenMs = messages.reduce((s, m) => s + (m.generationMs ?? 0), 0);
-    const thinkingMs = messages.reduce((s, m) => s + (m.thinkingMs ?? 0), 0);
-    const textMs = messages.reduce((s, m) => s + (m.textMs ?? 0), 0);
-    const toolGenMs = messages.reduce((s, m) => s + (m.toolGenMs ?? 0), 0);
-    const mixedMs = messages.reduce((s, m) => s + (m.mixedGenMs ?? 0), 0);
-    const toolExecMs = messages.reduce(
+    //
+    // MAIN THREAD ONLY. A sub-agent's emissions carry a parentToolUseId and
+    // are nested under the Agent tool call that spawned them — and that call's
+    // own durationMs already spans the sub-agent's entire run, generation and
+    // nested tools alike. Summing over every message counts the sub-agent
+    // twice: once as generation, once inside its parent's execution. On a 140s
+    // task with a 120s Agent call containing 90s of sub-agent generation, the
+    // Unaccounted residual came out at -57%.
+    const mainThread = messages.filter((m) => m.parentToolUseId == null);
+    const totalGenMs = mainThread.reduce((s, m) => s + (m.generationMs ?? 0), 0);
+    const thinkingMs = mainThread.reduce((s, m) => s + (m.thinkingMs ?? 0), 0);
+    const textMs = mainThread.reduce((s, m) => s + (m.textMs ?? 0), 0);
+    const toolGenMs = mainThread.reduce((s, m) => s + (m.toolGenMs ?? 0), 0);
+    const mixedMs = mainThread.reduce((s, m) => s + (m.mixedGenMs ?? 0), 0);
+    const toolExecMs = mainThread.reduce(
         (s, m) => s + m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0),
         0,
     );
-    const slowGen = messages.filter(
+    const slowGen = mainThread.filter(
         (m) => (m.generationMs ?? 0) >= SLOW_GEN_MS,
     ).length;
-    const slowTool = messages.reduce(
+    const slowTool = mainThread.reduce(
         (s, m) =>
             s + m.toolUses.filter((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS).length,
         0,
@@ -510,9 +519,15 @@ export function MessageTimelineSection({
                     </div>
                     <div
                         className={
-                            unaccountedShare != null && unaccountedShare >= 0.25
-                                ? "text-red-700 font-medium"
-                                : "text-gray-900 font-medium"
+                            unaccountedMs != null && unaccountedMs < 0
+                                ? // Overlap, not unreported time — a different
+                                  // fact from a large positive residual, so a
+                                  // different colour rather than the same grey
+                                  // a healthy row gets.
+                                  "text-amber-700 font-medium"
+                                : unaccountedShare != null && unaccountedShare >= 0.25
+                                  ? "text-red-700 font-medium"
+                                  : "text-gray-900 font-medium"
                         }
                     >
                         {fmtMs(unaccountedMs)}

@@ -15,8 +15,8 @@ Generation cell read ``0ms`` and its thinking/tool/text breakdown rendered
 milliseconds by a command count of which 70 of 211 in one nightly had never
 been timed at all.
 
-Four syntactic forms, one invariant, one id — these are the four the codebase
-actually produced:
+Five syntactic forms, one invariant, one id — the shapes the codebase actually
+produced:
 
 1. a ``0`` / ``0.0`` constructor keyword on one of the telemetry constructors
    that carry these fields;

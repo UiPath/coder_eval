@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import signal
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1089,3 +1090,71 @@ class TestCostFallsBackToTheRateCard:
         record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == 0.0
+
+
+class TestGenerationWindowExcludesToolExecution:
+    """A tool running inside a turn is not model time.
+
+    Pi marks the window at `turn_start` and closes it at `turn_end`, and
+    every tool call executes INSIDE it while also publishing its own
+    measured `duration_ms`. Publishing the raw span as generation time
+    counted the same milliseconds twice, which the task page's Unaccounted
+    cell renders as a ~-100% residual.
+
+    Driven at the reducer: the window is two `datetime.now()` reads and the
+    tool interval comes from the event payload, so only setting both
+    explicitly makes the arithmetic deterministic.
+    """
+
+    WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
+    WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms turn
+
+    def _finish_turn(self, monkeypatch, spans):
+        import coder_eval.agents.pi_agent as agent_module
+
+        class _Clock(datetime):
+            @staticmethod
+            def now(tz=None):
+                return TestGenerationWindowExcludesToolExecution.WINDOW_END
+
+        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m")
+        state.turn_started_at = self.WINDOW_START
+        state.turn_tool_spans = list(spans)
+        monkeypatch.setattr(agent_module, "datetime", _Clock)
+        state.on_turn_end(
+            {"message": {"role": "assistant", "usage": {"input": 100, "output": 20}, "stopReason": "stop"}}
+        )
+        assistant = [m for m in state.messages if m.role == "assistant"]
+        assert len(assistant) == 1
+        return assistant[0]
+
+    def test_tool_time_inside_the_turn_is_subtracted(self, monkeypatch):
+        message = self._finish_turn(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+        )
+        span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
+        assert span_ms == pytest.approx(1000.0)
+        assert message.generation_duration_ms == pytest.approx(500.0)
+
+    def test_a_turn_with_no_tools_keeps_its_whole_window(self, monkeypatch):
+        assert self._finish_turn(monkeypatch, []).generation_duration_ms == pytest.approx(1000.0)
+
+    def test_concurrent_tools_are_subtracted_once(self, monkeypatch):
+        # Two overlapping 500ms tools occupy 600ms, not 1000ms. Summing them
+        # would leave 0 generation for a turn that generated 400.
+        message = self._finish_turn(
+            monkeypatch,
+            [
+                (self.WINDOW_START + timedelta(milliseconds=100), self.WINDOW_START + timedelta(milliseconds=600)),
+                (self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700)),
+            ],
+        )
+        assert message.generation_duration_ms == pytest.approx(400.0)
+
+    def test_the_window_never_goes_negative(self, monkeypatch):
+        message = self._finish_turn(
+            monkeypatch,
+            [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
+        )
+        assert message.generation_duration_ms == 0.0

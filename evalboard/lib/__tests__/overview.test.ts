@@ -1126,6 +1126,30 @@ describe("projectRunRow", () => {
         expect(row).toMatchObject({ tasksRun: 2, tasksExecuted: 2 });
     });
 
+    test("filtered, a mature-skipped match leaves BOTH sides of the duration", () => {
+        // The unfiltered path goes through deriveRunDuration, which excludes
+        // them. Before this, typing a filter switched to a different
+        // definition — and one skipped row with no duration flipped the
+        // all-present guard, rendering "—" for a run whose executed rows were
+        // all timed.
+        const row = projectRunRow(
+            run("r", [
+                task({ taskId: "a", tags: ["keep"], durationSeconds: 30 }),
+                task({ taskId: "b", tags: ["keep"], durationSeconds: 20 }),
+                task({
+                    taskId: "c",
+                    tags: ["keep"],
+                    durationSeconds: null,
+                    matureSkipped: true,
+                }),
+            ]),
+            "keep",
+            null,
+        );
+        expect(row?.taskDurationSeconds).toBe(50);
+        expect(row?.tasksExecuted).toBe(2);
+    });
+
     test("filtered, tasksExecuted excludes a mature-skipped match", () => {
         const row = projectRunRow(
             run("r", [

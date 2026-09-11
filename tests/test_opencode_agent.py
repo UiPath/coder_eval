@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import signal
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -1779,3 +1780,73 @@ class TestToolFailureCapture:
         assert event.tool.tool_name == "unknown"
         assert event.tool.result_status == "unknown"
         assert event.tool.error_message == "no result observed"
+
+
+class TestGenerationWindowExcludesToolExecution:
+    """A tool running inside a step is not model time.
+
+    OpenCode marks the window at `step_start` and closes it at
+    `step_finish`, and every tool call executes INSIDE it while also
+    publishing its own measured `duration_ms`. Publishing the raw span as
+    generation time counted the same milliseconds twice, which the task
+    page's Unaccounted cell renders as a ~-100% residual.
+
+    Driven at the reducer rather than through `communicate()`: the window is
+    two `datetime.now()` reads and the tool interval comes from the event
+    payload, so only setting both explicitly makes the arithmetic
+    deterministic.
+    """
+
+    WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
+    WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms step
+
+    def _finish_step(self, monkeypatch, spans):
+        import coder_eval.agents.opencode_agent as agent_module
+
+        class _Clock(datetime):
+            @staticmethod
+            def now(tz=None):
+                return TestGenerationWindowExcludesToolExecution.WINDOW_END
+
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
+        state.step_started_at = self.WINDOW_START
+        state.step_tool_spans = list(spans)
+        monkeypatch.setattr(agent_module, "datetime", _Clock)
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
+        assistant = [m for m in state.messages if m.role == "assistant"]
+        assert len(assistant) == 1
+        return assistant[0]
+
+    def test_tool_time_inside_the_step_is_subtracted(self, monkeypatch):
+        # A 500ms tool squarely inside the 1000ms step.
+        message = self._finish_step(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+        )
+        span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
+        assert span_ms == pytest.approx(1000.0)
+        assert message.generation_duration_ms == pytest.approx(500.0)
+
+    def test_a_step_with_no_tools_keeps_its_whole_window(self, monkeypatch):
+        message = self._finish_step(monkeypatch, [])
+        assert message.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_concurrent_tools_are_subtracted_once(self, monkeypatch):
+        # Two overlapping 500ms tools occupy 600ms of wall clock, not 1000ms.
+        # Summing them would leave 0 generation for a step that generated 400.
+        message = self._finish_step(
+            monkeypatch,
+            [
+                (self.WINDOW_START + timedelta(milliseconds=100), self.WINDOW_START + timedelta(milliseconds=600)),
+                (self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700)),
+            ],
+        )
+        assert message.generation_duration_ms == pytest.approx(400.0)
+
+    def test_the_window_never_goes_negative(self, monkeypatch):
+        # A tool whose recorded interval straddles the step is clipped to it.
+        message = self._finish_step(
+            monkeypatch,
+            [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
+        )
+        assert message.generation_duration_ms == 0.0

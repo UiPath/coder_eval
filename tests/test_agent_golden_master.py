@@ -260,9 +260,23 @@ class TestAssertTimingCaptured:
     """The sensor itself. An AST rule cannot see that an SDK returned 0.0."""
 
     @staticmethod
-    def _record(*, windows: list[float | None] = (), commands: list[dict[str, Any]] = ()) -> dict[str, Any]:
+    def _record(
+        *,
+        windows: list[float | None] = (),
+        commands: list[dict[str, Any]] = (),
+        bounds_collapse: bool = False,
+    ) -> dict[str, Any]:
+        """A record whose bounds span each window, unless `bounds_collapse`."""
         return {
-            "messages": [{"role": "assistant", "generation_duration_ms": w} for w in windows],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "generation_duration_ms": w,
+                    "started_at": "2026-01-01T00:00:00",
+                    "completed_at": "2026-01-01T00:00:00" if bounds_collapse else "2026-01-01T00:00:01",
+                }
+                for w in windows
+            ],
             "commands": list(commands),
         }
 
@@ -278,6 +292,15 @@ class TestAssertTimingCaptured:
         # numeric, and means nothing was measured.
         with pytest.raises(AssertionError, match="positive generation window"):
             assert_timing_captured(self._record(windows=[0.0]), expect_generation_window=True)
+
+    def test_collapsed_bounds_raise_even_with_a_healthy_duration(self):
+        # Two harnesses take the duration from a MONOTONIC clock and the
+        # bounds from the wall clock, so a reducer can report a real duration
+        # beside two stamps that collapsed to one instant. CE059 sees that
+        # statically only when both bounds are the same ast.Name; this is the
+        # check for when they are two different names holding one value.
+        with pytest.raises(AssertionError, match="bounds that span it"):
+            assert_timing_captured(self._record(windows=[500.0], bounds_collapse=True), expect_generation_window=True)
 
     def test_a_none_window_passes_when_none_is_expected(self):
         assert_timing_captured(self._record(windows=[None]), expect_generation_window=False)

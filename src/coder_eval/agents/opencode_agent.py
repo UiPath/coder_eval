@@ -43,6 +43,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Literal, NoReturn
 
 from coder_eval.agent import Agent
+from coder_eval.agents._timing import busy_ms
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -310,6 +311,14 @@ class _OpenCodeTurnState:
         self.step_started_at: datetime | None = None
         self.step_text_parts: list[str] = []
         self.step_tool_ids: list[str] = []
+        # Execution intervals of tools that CLOSED inside the open
+        # generation window. Every tool call runs INSIDE the window, so
+        # publishing the raw span as generation time counts the same
+        # milliseconds twice — once here and once as the tool's own
+        # duration_ms. Intervals, not a running total: they overlap
+        # whenever the harness runs tools concurrently, and only their
+        # union may be subtracted (agents/_timing.py::busy_ms).
+        self.step_tool_spans: list[tuple[datetime, datetime]] = []
 
         # callID -> (telemetry, started_at) for tools awaiting a result.
         self.open_tools: dict[str, CommandTelemetry] = {}
@@ -347,6 +356,7 @@ class _OpenCodeTurnState:
         self.step_started_at = datetime.now()
         self.step_text_parts = []
         self.step_tool_ids = []
+        self.step_tool_spans = []
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -464,6 +474,10 @@ class _OpenCodeTurnState:
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
+            # This tool ran inside the open generation window, so its time is
+            # not model time. Only a RESOLVED tool contributes: one force-closed
+            # without a result was never timed.
+            self.step_tool_spans.append((telemetry.execution_started_at, completed))
         telemetry.result_status = _RESULT_STATUS[status]
         # Stored untruncated by design (sub-agent returns must survive whole).
         telemetry.result_summary = summary
@@ -684,7 +698,10 @@ class _OpenCodeTurnState:
             AssistantMessage(
                 started_at=started,
                 completed_at=completed,
-                generation_duration_ms=(completed - started).total_seconds() * 1000,
+                generation_duration_ms=max(
+                    0.0,
+                    (completed - started).total_seconds() * 1000 - busy_ms(self.step_tool_spans, started, completed),
+                ),
                 content_blocks=blocks,
                 tool_use_ids=list(self.step_tool_ids),
                 input_tokens=step_in,

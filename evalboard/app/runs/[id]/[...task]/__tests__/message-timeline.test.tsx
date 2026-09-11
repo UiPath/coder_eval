@@ -570,6 +570,47 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
         renderStrip(1);
         expect(cell("Unaccounted").textContent).toBe("-4.0s (-400%)");
         expect(cell("Unaccounted").className).not.toContain("text-red-700");
+        // Its own colour: overlap is a different fact from a large positive
+        // residual, and identical grey to a healthy row would hide it.
+        expect(cell("Unaccounted").className).toContain("text-amber-700");
+    });
+
+    test("a sub-agent is not counted as both generation and parent tool time", () => {
+        // The Agent call's durationMs already spans the sub-agent's whole run,
+        // so adding the sub-agent's own generation on top double-counts it.
+        const agentCall = {
+            toolName: "Agent",
+            toolUseId: "tu_agent",
+            summary: "spawn",
+            argText: null,
+            description: null,
+            genMs: null,
+            durationMs: 6000,
+            isError: false,
+            resultPreview: null,
+            outputTokens: null,
+            resultTokens: null,
+        };
+        const main = makeMessage({
+            index: 1,
+            generationMs: 1000,
+            textMs: 1000,
+            toolUses: [agentCall],
+        });
+        const child = makeMessage({
+            index: 2,
+            generationMs: 5000,
+            textMs: 5000,
+            parentToolUseId: "tu_agent",
+        });
+        render(
+            <MessageTimelineSection messages={[main, child]} taskDurationSeconds={10} />,
+        );
+        // 10s − 1s main generation − 6s Agent call = 3s. Counting the child's
+        // 5s of generation too would report -2s.
+        expect(cell("Unaccounted").textContent).toBe("3.0s (30%)");
+        expect(cell("Generation").textContent).toBe("1.0s");
+        expect(cell("Tool exec").textContent).toBe("6.0s");
     });
 
     test("the cell explains that the residual is not only agent time", () => {

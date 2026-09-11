@@ -24,29 +24,34 @@ wall clock its numbers account for.
 
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
-| `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock, per CLI step | harness clock, per CLI turn |
+| `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock per CLI step, minus tool execution inside the step | harness clock per CLI turn, minus tool execution inside the turn |
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `Σ generation + Σ tool ≈ turn duration` | yes | yes | yes | yes | yes |
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
-Two harnesses interleave tool execution into a single generation window.
-Antigravity reports a `Step` for the tool and only a later `usage_metadata`
-`Step` cuts the message; Codex's message window is seeded from the first item's
-start and extended to the last item's completion. In both, the span between the
-recorded bounds legitimately CONTAINS tool time that the model did not spend
-generating, so both subtract it — the **union** of the closed tool intervals
+Four of the five harnesses interleave tool execution into a single generation
+window. Antigravity reports a `Step` for the tool and only a later
+`usage_metadata` `Step` cuts the message; Codex's message window is seeded from
+the first item's start and extended to the last item's completion; OpenCode
+opens its window at `step_start` and closes it at `step_finish`, and Pi at
+`turn_start` / `turn_end`, with every tool call running inside. In all four the
+span between the recorded bounds legitimately CONTAINS tool time that the model
+did not spend generating, so all four subtract it — the **union** of the closed tool intervals
 clipped to the window (`agents/_timing.py::busy_ms`), never the sum, because
 tool calls overlap: Antigravity resolves several from one `Step` and backgrounds
 anything over ten seconds, and Codex spawns collab agents concurrently. Summing
 them over-subtracts by exactly the overlap and, with enough concurrency, drives
 the result to a clamped zero.
 
-The consequence worth knowing: on a Codex emission that carries *only* a tool
-call, the whole measured window was that tool running, so the recorded
-generation time is legitimately `0.0`. That is a measurement, not a placeholder
-— `None` is what "never measured" looks like.
+The consequence worth knowing: on an emission that carries *only* a tool call,
+the whole measured window was that tool running, so the recorded generation
+time is legitimately `0.0`. That is a measurement, not a placeholder — `None`
+is what "never measured" looks like. Only `claude-code` does not need the
+subtraction: it marks the end of the previous SDK event and reads again when
+the next message arrives, so a tool's execution falls between two windows
+rather than inside one.
 
 **Why Codex leaves `generation_completed_at` as `None`.** It means "when the
 model finished emitting the `tool_use` block". Codex's stream does not carry

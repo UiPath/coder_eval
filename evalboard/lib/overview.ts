@@ -1110,6 +1110,13 @@ export function scopeRunTasks(
     // Cost sums any matching task that recorded one; duration is only meaningful
     // when every matching task has one (otherwise the partial sum would
     // understate the slice — mirrors readRunOverview's whole-run rule).
+    //
+    // Mature-skipped rows leave BOTH sides of the duration, exactly as they do
+    // in deriveRunDuration: they are carried-forward passes that never ran.
+    // Without this the filtered slice used a different definition than the
+    // unfiltered one — and worse, ONE skipped row with no duration flipped
+    // durAllPresent and rendered "—" for a run whose executed rows were all
+    // timed.
     let costSum = 0;
     let costHasAny = false;
     let durSum = 0;
@@ -1119,6 +1126,7 @@ export function scopeRunTasks(
             costSum += t.totalCostUsd;
             costHasAny = true;
         }
+        if (t.matureSkipped) continue;
         if (t.durationSeconds != null) {
             durSum += t.durationSeconds;
         } else {
