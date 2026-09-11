@@ -1,6 +1,6 @@
 """Vendored ATIF (Agent Trajectory Interchange Format) models, v1.7.
 
-Mirrors the schema in ``harbor.models.trajectories`` (harbor 0.20.0) so
+Mirrors the schema in ``harbor.models.trajectories`` (harbor 0.22.0) so
 coder_eval can emit and parse ATIF trajectories with ZERO runtime dependency
 on the ``harbor`` pip package. Fidelity is guarded by a frozen fixture in
 ``tests/fixtures/atif/`` that was validated once against the real harbor
@@ -10,7 +10,7 @@ Deliberate deviations from harbor's models:
 
 - ``schema_version`` is a pattern-validated ``str`` (``^ATIF-v1\\.\\d+$``)
   instead of a closed Literal, so trajectories written by a FUTURE harbor
-  minor version (e.g. ``ATIF-v1.9``) still parse — harbor 0.20.0 itself
+  minor version (e.g. ``ATIF-v1.9``) still parse — harbor 0.22.0 itself
   would reject them. Major-version bumps (``ATIF-v2.0``) are rejected.
 - harbor's ``Agent`` model is named :class:`AtifAgent` here to avoid clashing
   with ``coder_eval.agent.Agent``.
@@ -72,11 +72,23 @@ class ToolCall(BaseModel):
 
 
 class SubagentTrajectoryRef(BaseModel):
-    """Reference to a delegated subagent trajectory."""
+    """Reference to a delegated subagent trajectory.
+
+    All four fields optional, mirroring ``harbor==0.22.0``'s real shape
+    (verified by installing it and diffing ``model_fields``): a document may
+    carry ``session_id`` alone (no ``trajectory_id``) or ``trajectory_path``
+    alone (the spec's file-ref form), and ``extra`` is a documented carry-all.
+    The earlier version made ``trajectory_id`` required and omitted
+    ``session_id``/``extra`` entirely, which rejected both of those valid
+    shapes under ``extra="forbid"``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    trajectory_id: str = Field(description="trajectory_id of the referenced subagent trajectory.")
+    trajectory_id: str | None = Field(default=None, description="trajectory_id of the referenced subagent trajectory.")
+    session_id: str | None = Field(
+        default=None, description="session_id of the referenced subagent trajectory, when addressed that way."
+    )
     trajectory_path: str | None = Field(
         default=None,
         description=(
@@ -84,6 +96,7 @@ class SubagentTrajectoryRef(BaseModel):
             "entry in the root trajectory's subagent_trajectories array."
         ),
     )
+    extra: dict[str, Any] | None = Field(default=None, description="Custom reference-level metadata.")
 
 
 class ObservationResult(BaseModel):

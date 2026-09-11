@@ -45,12 +45,22 @@ def _tool_call_to_command(
     result = results_by_id.get(call.tool_call_id)
     content = result.content if result is not None else None
     result_summary = content if isinstance(content, str) else (None if content is None else str(content))
+    # The mirror of atif_emit's `_tool_calls_for`: `result_status` rides on the
+    # ToolCall's own `extra` (call_extra) and `duration_ms` on its matching
+    # ObservationResult's `extra` (result_extra) -- read both back, or
+    # `command_executed(require_success: true)` silently scores a successful
+    # command 0.0 on every hydrated trajectory (result_status defaults to None,
+    # not "success").
+    call_extra = call.extra or {}
+    result_extra = (result.extra or {}) if result is not None else {}
     return CommandTelemetry(
         tool_name=call.function_name,
         tool_id=call.tool_call_id,
         timestamp=datetime.now(UTC),
         parameters=call.arguments,
         result_summary=result_summary,
+        result_status=call_extra.get("result_status"),
+        duration_ms=result_extra.get("duration_ms"),
         assistant_turn_index=assistant_turn_index,
         sequence_number=assistant_turn_index,
     )

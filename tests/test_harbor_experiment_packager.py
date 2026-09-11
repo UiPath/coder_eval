@@ -106,10 +106,12 @@ class TestRunLimitOnlyVariants:
         assert emitted["initial_prompt"] == "Write 'howdy' to greeting.txt."
 
 
-class TestUnhonorableOverridesAreSkipped:
-    """Agent/simulation overrides an exported Harbor directory cannot express."""
+class TestAgentOverridesAreHonored:
+    """Agent overrides ARE honorable now: CoderEvalAgent (C1.2) carries `task.agent`
+    verbatim into `environment/task.yaml` and executes it, so each variant exports
+    its own distinct directory rather than being skipped as indistinguishable."""
 
-    def test_variant_agent_model_override_is_skipped_not_exported(self, tmp_path: Path) -> None:
+    def test_variant_agent_model_override_is_exported_not_skipped(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
         exp_file = _write_experiment(
             tmp_path,
@@ -125,11 +127,14 @@ class TestUnhonorableOverridesAreSkipped:
 
         result = export_experiment([task_file], exp_file, out_dir)
 
-        assert result.exported == []
-        assert {s.variant_id for s in result.skipped} == {"sonnet", "opus"}
-        assert all("agent override" in s.reason for s in result.skipped)
+        assert {r.out_dir for r in result.exported} == {out_dir / "sonnet" / "greet", out_dir / "opus" / "greet"}
+        assert result.skipped == []
+        sonnet_yaml = (out_dir / "sonnet" / "greet" / "environment" / "task.yaml").read_text(encoding="utf-8")
+        opus_yaml = (out_dir / "opus" / "greet" / "environment" / "task.yaml").read_text(encoding="utf-8")
+        assert "claude-sonnet-5" in sonnet_yaml
+        assert "claude-opus-5" in opus_yaml
 
-    def test_experiment_defaults_agent_override_is_skipped(self, tmp_path: Path) -> None:
+    def test_experiment_defaults_agent_override_is_exported(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
         exp_file = _write_experiment(
             tmp_path,
@@ -143,28 +148,8 @@ class TestUnhonorableOverridesAreSkipped:
 
         result = export_experiment([task_file], exp_file, out_dir)
 
-        assert result.exported == []
-        assert "experiment-defaults" in result.skipped[0].reason
-
-    def test_variant_with_no_agent_override_still_exports_alongside_a_skipped_one(self, tmp_path: Path) -> None:
-        task_file = _write_task(tmp_path)
-        exp_file = _write_experiment(
-            tmp_path,
-            {
-                "experiment_id": "mixed",
-                "variants": [
-                    {"variant_id": "unmodified"},
-                    {"variant_id": "sonnet", "agent": {"model": "claude-sonnet-5"}},
-                ],
-            },
-        )
-        out_dir = tmp_path / "out"
-
-        result = export_experiment([task_file], exp_file, out_dir)
-
         assert len(result.exported) == 1
-        assert result.exported[0].out_dir == out_dir / "unmodified" / "greet"
-        assert [s.variant_id for s in result.skipped] == ["sonnet"]
+        assert result.skipped == []
 
     def test_task_level_agent_config_alone_does_not_trip_the_skip(self, tmp_path: Path) -> None:
         """The task's OWN agent.type (source='task') must not be mistaken for an experiment override."""
@@ -182,6 +167,65 @@ class TestUnhonorableOverridesAreSkipped:
 
         assert len(result.exported) == 1
         assert result.skipped == []
+
+
+class TestUnhonorableOverridesAreSkipped:
+    """A simulation override is the one thing an exported Harbor directory still cannot express."""
+
+    def test_variant_simulation_override_is_skipped_not_exported(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path)
+        exp_file = _write_experiment(
+            tmp_path,
+            {
+                "experiment_id": "sim-ab",
+                "variants": [
+                    {
+                        "variant_id": "dialog",
+                        "simulation": {
+                            "enabled": True,
+                            "persona": "a confused new user",
+                            "goal": "get the greeting written",
+                            "max_turns": 3,
+                        },
+                    },
+                ],
+            },
+        )
+        out_dir = tmp_path / "out"
+
+        result = export_experiment([task_file], exp_file, out_dir)
+
+        assert result.exported == []
+        assert [s.variant_id for s in result.skipped] == ["dialog"]
+        assert "simulation" in result.skipped[0].reason
+
+    def test_variant_with_no_simulation_override_still_exports_alongside_a_skipped_one(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path)
+        exp_file = _write_experiment(
+            tmp_path,
+            {
+                "experiment_id": "mixed",
+                "variants": [
+                    {"variant_id": "unmodified"},
+                    {
+                        "variant_id": "dialog",
+                        "simulation": {
+                            "enabled": True,
+                            "persona": "a confused new user",
+                            "goal": "get the greeting written",
+                            "max_turns": 3,
+                        },
+                    },
+                ],
+            },
+        )
+        out_dir = tmp_path / "out"
+
+        result = export_experiment([task_file], exp_file, out_dir)
+
+        assert len(result.exported) == 1
+        assert result.exported[0].out_dir == out_dir / "unmodified" / "greet"
+        assert [s.variant_id for s in result.skipped] == ["dialog"]
 
 
 class TestReplicateFanOut:

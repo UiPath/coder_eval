@@ -44,6 +44,7 @@ inferred) before writing this module.
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ from coder_eval.harbor.agent_paths import AGENT_TASK_TEMPLATES_DIR, AGENT_TASK_Y
 from coder_eval.harbor.portability import PortabilityIssue, audit_criteria
 from coder_eval.models import TaskDefinition, TemplateDirSource
 from coder_eval.orchestration.task_loader import load_task
+from coder_eval.path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks
 
 
 DEFAULT_WORKDIR = "/app"
@@ -168,6 +170,27 @@ def export_resolved_task(
             f"Task {task.task_id!r} uses sandbox.driver={task.sandbox.driver!r}, but Harbor always builds a "
             + "container per task and v1 export has no host-execution equivalent to derive environment/ from. "
             + "Set sandbox.driver: docker (with dockerfile_path or a custom image) to export this task."
+        )
+
+    if task.dataset is not None:
+        # `export_task`/`export_resolved_task` calls `load_task`, which does
+        # NOT run `expand_dataset` -- fan-out happens later, in the experiment
+        # pipeline (`export_experiment` resolves it per row before reaching
+        # here). Exporting a raw dataset-backed task would silently emit ONE
+        # Harbor task whose prompt and criteria still contain literal
+        # `${row.<field>}` placeholders: never expressible, but scored anyway.
+        raise TaskNotExportableError(
+            f"Task {task.task_id!r} has a `dataset:` block, which this function does not expand -- its "
+            + "`${row.*}` placeholders would export unsubstituted. Export via `coder-eval export ... "
+            + "-e <experiment.yaml>` (harbor.experiment_packager.export_experiment), which resolves one "
+            + "Harbor task directory per dataset row."
+        )
+
+    if task.simulation is not None and task.simulation.enabled:
+        raise TaskNotExportableError(
+            f"Task {task.task_id!r} has an enabled `simulation:` block -- its turn-continuation logic reads "
+            + "coder-eval's own criteria results mid-dialog, which has no Harbor equivalent. Simulation tasks "
+            + "cannot be exported."
         )
 
     warnings: list[str] = []
@@ -343,7 +366,9 @@ def _inspect_image_workdir(image: str) -> str | None:
     """
     try:
         result = subprocess.run(
-            ["docker", "image", "inspect", image, "--format", "{{.Config.WorkingDir}}"],
+            # `--` before `image` (task-YAML-controlled) stops it from being
+            # parsed as an option if it happens to start with "-".
+            ["docker", "image", "inspect", "--format", "{{.Config.WorkingDir}}", "--", image],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -404,6 +429,21 @@ def _write_verifier_task_yaml(task: TaskDefinition, out_dir: Path) -> None:
     }
     if task.reference is not None:
         payload["reference"] = {"directory": "reference"}
+    if task.run_limits is not None:
+        # Carried through so `coder-eval evaluate` (run by tests/test.sh inside
+        # Harbor's verifier container) sees the same turn/token/USD caps the
+        # task author declared, rather than silently falling back to the
+        # packaged default experiment's -- grading itself has no agent loop to
+        # cap, but `run_limits.task_timeout` still bounds the verifier
+        # invocation, and a future criterion or judge call reading `run_limits`
+        # off the resolved task should see the real value, not the default.
+        payload["run_limits"] = task.run_limits.model_dump(mode="json", exclude_none=True)
+    if task.checker_context is not None:
+        # The judge-route override (`checker_context.api_route`) determines
+        # which backend an `llm_judge`/`agent_judge` criterion dispatches
+        # through at verify time -- dropping it silently replaces a pinned
+        # route with the verifier environment's own default.
+        payload["checker_context"] = task.checker_context.model_dump(mode="json", exclude_none=True)
     (out_dir / "tests" / "task.yaml").write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
@@ -446,7 +486,14 @@ def _copy_template_sources(task: TaskDefinition, env_dir: Path, warnings: list[s
                 )
             if dest.exists():
                 shutil.rmtree(dest)
-            shutil.copytree(source_path, dest)
+            # Symlinks dereferenced by default (`shutil.copytree`'s default
+            # `symlinks=False`) would write a symlink TARGET's content into the
+            # distributable export -- e.g. a `creds -> /root/.aws/credentials`
+            # plant. Drop symlinks outright rather than following them, same
+            # rule as the sibling reference copy below and every other
+            # task-authored-tree copy in `src/` (`orchestration/evaluation.py`,
+            # `isolation/docker_runner.py`, `evaluation/sub_agent.py`).
+            shutil.copytree(source_path, dest, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
             dumped["path"] = f"{AGENT_TASK_TEMPLATES_DIR}/{dest_name}"
         else:
             warnings.append(
@@ -511,13 +558,27 @@ def _write_agent_phase_task_yaml(
     }
     if not is_agentless:
         payload["initial_prompt"] = initial_prompt
+    if task.run_limits is not None:
+        # `CoderEvalAgent.run()` invokes `coder-eval execute` against this
+        # file, which enforces `max_turns`/`turn_timeout`/`task_timeout`/the
+        # token+USD budget caps during the agent phase itself -- dropping this
+        # silently replaced a declared cap with the packaged default
+        # experiment's (`max_turns: 100`, `turn_timeout: 300`, no `max_usd` /
+        # token ceiling at all).
+        payload["run_limits"] = task.run_limits.model_dump(mode="json", exclude_none=True)
     (env_dir / "task.yaml").write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return (env_dir / "templates").is_dir()
 
 
 def _write_test_sh(out_dir: Path, *, workdir: str) -> None:
     path = out_dir / "tests" / "test.sh"
-    path.write_text(_TEST_SH_TEMPLATE.format(workdir=workdir), encoding="utf-8")
+    # `workdir` comes from task-YAML-controlled `sandbox.docker.working_dir`
+    # (or a derived default), and the only validator on that field checks for a
+    # leading "/" -- it does not reject quotes, `$(...)`, backticks or
+    # newlines. shlex.quote it before interpolating into the generated /bin/sh
+    # script so a crafted working_dir can't break out of the argument it's
+    # meant to be.
+    path.write_text(_TEST_SH_TEMPLATE.format(workdir=shlex.quote(workdir)), encoding="utf-8")
     path.chmod(0o755)
 
 
@@ -528,7 +589,19 @@ def _write_reference(task: TaskDefinition, task_file: Path, out_dir: Path) -> No
     dest = out_dir / "tests" / "reference"
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(source, dest)
+    # Same rule as the template copy above: drop symlinks rather than
+    # dereferencing them into the distributable export. Wrapped in
+    # TaskNotExportableError rather than left to raise a bare OSError: the
+    # `export` CLI only catches `(TaskNotExportableError,
+    # CriteriaNotExportableError)`, so an unreadable/missing reference tree
+    # would otherwise surface as an uncaught traceback (single-task path) or
+    # abort a whole experiment export the docstring promises it won't abort.
+    try:
+        shutil.copytree(source, dest, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
+    except OSError as e:
+        raise TaskNotExportableError(
+            f"Task {task.task_id!r}'s reference directory {source} could not be copied into the export: {e}"
+        ) from e
 
 
 def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str) -> None:

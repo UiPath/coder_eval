@@ -21,3 +21,8 @@ success_criteria:
   similarity_threshold: 0.8
 reference:
   directory: reference
+run_limits:
+  task_timeout: 300
+  count_cached_input: false
+  count_cache_creation: false
+  stop_early_gate_threshold: 1.0

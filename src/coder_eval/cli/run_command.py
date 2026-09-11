@@ -942,6 +942,13 @@ async def _apply_resume(
     # to_grade is deliberately NOT cleared: its artifacts are the run's output
     # and the very thing being graded.
     cleared = clear_rerun_artifacts(part.to_run)
+    # `to_grade` rows are about to be graded by `_grade_resumed_tasks` below
+    # (which delegates to `regrade_in_place`), so the same refusal `to_run`
+    # gets via `_reject_empty_criteria_under_grade` applies here too -- checked
+    # explicitly rather than relying solely on `regrade_in_place`'s own guard
+    # so the whole batch is refused up front (exit 2) instead of one row at a
+    # time turning into a per-task "could not grade" warning mid-resume.
+    _reject_empty_criteria_under_grade(part.to_grade, grade=grade)
     console.print(
         f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, "
         + f"running {len(part.to_run)} remaining"

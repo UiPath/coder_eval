@@ -95,7 +95,6 @@ class CoderEvalAgent(BaseInstalledAgent):
         time -- re-installing it here would fight whatever version the image
         pins.
         """
-        del environment
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         """Run ``coder-eval execute --format harbor`` inside the environment.

@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, datetime
 
+from coder_eval.harbor import atif_emit
 from coder_eval.harbor.atif_emit import evaluation_result_to_trajectory, write_trajectory_json
 from coder_eval.harbor.atif_models import Trajectory
 from coder_eval.models import (
@@ -350,11 +351,9 @@ class TestWriteTrajectoryJson:
         assert not path.exists()
 
     def test_converter_exception_swallowed(self, tmp_path, monkeypatch):
-        import coder_eval.harbor.atif_emit as emit
-
-        monkeypatch.setattr(emit, "evaluation_result_to_trajectory", lambda _: 1 / 0)
+        monkeypatch.setattr(atif_emit, "evaluation_result_to_trajectory", lambda _: 1 / 0)
         path = tmp_path / "trajectory.json"
-        assert emit.write_trajectory_json(_result([_turn()]), path) is None
+        assert atif_emit.write_trajectory_json(_result([_turn()]), path) is None
         assert not path.exists()
 
 

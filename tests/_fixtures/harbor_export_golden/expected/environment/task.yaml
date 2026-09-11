@@ -18,3 +18,8 @@ sandbox:
   ignore_patterns: []
 success_criteria: []
 initial_prompt: Write 'hello world' to greeting.txt, matching reference/greeting.txt.
+run_limits:
+  task_timeout: 300
+  count_cached_input: false
+  count_cache_creation: false
+  stop_early_gate_threshold: 1.0

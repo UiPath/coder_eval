@@ -879,6 +879,79 @@ async def test_direct_write_warns_on_non_empty_target(tmp_path, monkeypatch, cap
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_container", "expect_warning"),
+    [(False, True), (True, False)],
+    ids=["host_reachable_warns", "in_container_silent"],
+)
+async def test_workspace_dir_staleness_warning_keys_on_in_container_not_field(
+    tmp_path, monkeypatch, caplog, in_container, expect_warning
+):
+    """`--workspace-dir` on the host must warn on a pre-populated dir exactly like
+    DIRECT_WRITE does; only the in-container writer (a fresh container filesystem
+    every run) legitimately suppresses it. Regression for the bug where the
+    suppression keyed on `workspace_dir is None` instead of `IN_CONTAINER_ENV`."""
+    import logging
+    from datetime import datetime
+
+    from coder_eval import orchestrator as orchestrator_module
+    from coder_eval.models import IN_CONTAINER_ENV, ApiBackend, DirectRoute, EvaluationResult
+
+    class DummyAgent:
+        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None):
+            self.working_directory = working_directory
+
+        def get_sdk_options(self):
+            return {"env": {"PATH": os.environ.get("PATH", "")}}
+
+        def get_environment_info(self):
+            return {}
+
+    async def create_dummy_agent(_self):
+        return DummyAgent()
+
+    task_file = Path("tasks/hello_date.yaml")
+    task, _ = load_task(task_file)
+    task.sandbox.python = None
+
+    run_dir = tmp_path / "test_run" / "hello_date"
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    (ws / "stale.txt").write_text("from a prior run")
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant", workspace_dir=ws)
+    orchestrator.task_file = task_file
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="test-variant",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+
+    if in_container:
+        monkeypatch.setenv(IN_CONTAINER_ENV, "1")
+    else:
+        monkeypatch.delenv(IN_CONTAINER_ENV, raising=False)
+
+    monkeypatch.setattr(orchestrator_module.settings, "api_backend", ApiBackend.DIRECT)
+    monkeypatch.setattr(type(orchestrator_module.settings), "validate_api_keys", lambda _self, _agent_type: None)
+    monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _settings: DirectRoute(judge_transport=None))
+    monkeypatch.setattr(Orchestrator, "_create_agent", create_dummy_agent)
+
+    with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
+        await orchestrator._setup()
+
+    warned = any("already exists and is non-empty" in r.message for r in caplog.records)
+    assert warned is expect_warning
+
+    await orchestrator._cleanup()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_cleanup_persistent_sandbox(tmp_path):
     """DIRECT_WRITE: sandbox already lives in artifacts; _cleanup keeps it in place (no move)."""
     from datetime import datetime

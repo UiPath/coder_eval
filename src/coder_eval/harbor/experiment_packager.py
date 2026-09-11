@@ -60,35 +60,19 @@ class ExperimentExportResult:
 def _unhonorable_override_reason(resolved: ResolvedTask) -> str | None:
     """Why this resolved task's Harbor export can't honor an experiment-introduced override.
 
-    Harbor's agent phase is Harbor's own (or the unbuilt C1.2
-    coder-eval-as-agent embed adapter, see ``tmp/harborframework.md`` Part A
-    step 8) — entirely independent of coder-eval's ``agent``/``simulation``
-    config. A variant that changes neither is fine to export (the exported
-    directory is then identical to the base task's own export, which is the
-    existing, already-documented single-task limitation — coder-eval's
-    ``agent`` field is never read for the exported verifier ``tests/task.yaml``
-    either). But a variant that *introduces* an agent or simulation override
-    is the entire point of an A/B experiment: silently dropping it would
-    export two indistinguishable Harbor directories claiming to compare two
-    different arms. Detected via ``ResolvedTask.config_lineage`` — a field
-    counts only when its most-specific source is the variant or the
-    experiment defaults, never the task's own YAML or the baseline defaults.
+    An agent override (model/plugins/system_prompt/tools/type) IS honorable
+    now: ``packager.py::_write_agent_phase_task_yaml`` carries ``task.agent``
+    verbatim into ``environment/task.yaml``, which ``CoderEvalAgent.run()``
+    (``harbor/agent.py``, C1.2) executes via ``coder-eval execute`` — so a
+    variant that only touches ``agent.*`` exports its own distinct directory
+    and is NOT skipped. ``simulation`` is the one override that remains
+    unhonorable: Harbor's ``Trial`` model has no multi-turn user-simulator
+    concept, and the dialog's turn-continuation logic reads coder-eval's own
+    criteria results mid-run, which a single-shot verifier export cannot
+    represent. Detected via ``ResolvedTask.config_lineage`` — a field counts
+    only when its most-specific source is the variant or the experiment
+    defaults, never the task's own YAML or the baseline defaults.
     """
-    agent_sources = sorted(
-        {
-            entry.source
-            for key, entry in resolved.config_lineage.items()
-            if key.startswith("agent.") and entry.source in _EXPERIMENT_INTRODUCED_SOURCES
-        }
-    )
-    if agent_sources:
-        return (
-            f"variant {resolved.variant_id!r} sets an agent override (source: {', '.join(agent_sources)}) that "
-            "Harbor's verifier-only export cannot honor -- Harbor's agent phase is independent of coder-eval's "
-            "agent config. Building the C1.2 coder-eval-as-agent embed adapter (tmp/harborframework.md, Part A "
-            "step 8) is the fix; until then this variant is skipped rather than exported as an indistinguishable "
-            "duplicate of another arm."
-        )
     sim_entry = resolved.config_lineage.get("simulation")
     if sim_entry is not None and sim_entry.source in _EXPERIMENT_INTRODUCED_SOURCES:
         return (

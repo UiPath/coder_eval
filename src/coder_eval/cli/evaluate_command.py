@@ -431,6 +431,19 @@ def run_evaluation(
             task_description=task.description,
         )
 
+    if not task.success_criteria:
+        # `evaluate` always grades -- unlike `execute`, there is no legal reason
+        # for a zero-criteria task to reach here. `regrade_in_place` guards its
+        # own delegating branch; this guard covers the sibling orchestrator-direct
+        # branch below (fresh work-dir grading, or `--copy`), which never calls
+        # `regrade_in_place` and would otherwise finalize a criteria-free task as
+        # SUCCESS at weighted_score 0.0.
+        console.print(
+            f"[red]✗ Task {task.task_id!r} has no `success_criteria` and cannot be graded "
+            + "(it would silently score SUCCESS at weighted_score 0.0). Add at least one criterion.[/red]"
+        )
+        raise typer.Exit(1)
+
     grade_in_place = resolve_grade_in_place(target, in_place)
 
     try:
@@ -612,7 +625,15 @@ def _report_and_exit(
     if result.sandbox_path:
         console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")
 
-    if prior is not None:
+    # `prior is not None` alone is not enough: `--format harbor` seeds a
+    # SYNTHETIC prior on the WORK_DIR shape (from the supplied
+    # `--trajectory`), which is not a run directory and carries no
+    # `task.execute.json` sibling to preserve. `_write_back` is documented as
+    # "replace the graded RUN's task.json" and writes into `target.target`,
+    # which in WORK_DIR mode is the directory being graded, not a run dir --
+    # writing there planted a spurious task.json into the Harbor-synced
+    # workdir and wedged a later `evaluate` on it into RUN_DIR mode.
+    if prior is not None and target.mode is EvaluateMode.RUN_DIR:
         console.print(
             f"[dim]Re-graded {prior.final_status.value} → {result.final_status.value} "
             + f"over {len(result.iterations)} recorded turn(s).[/dim]"

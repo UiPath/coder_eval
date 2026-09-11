@@ -1,16 +1,17 @@
 """Tests for the vendored ATIF models (coder_eval.harbor.atif_models).
 
 Fixture compatibility guarantee: ``tests/fixtures/atif/known_good_trajectory.json``
-was validated ONCE against the real harbor package (harbor==0.20.0) and then
-frozen — CI never installs harbor. Reproducible re-validation procedure:
+was originally validated against harbor==0.20.0. ``harbor`` is now a real,
+installed optional extra (``pyproject.toml``'s ``harbor`` extra, pinned to
+0.22.0 — see ``pyproject.toml`` and both pyright CI jobs), so this fixture and
+the vendored models above can be re-verified directly against the installed
+package:
 
-    python3 -m venv /tmp/harbor-check && /tmp/harbor-check/bin/pip install -q 'harbor==0.20.0'
-    /tmp/harbor-check/bin/python -c "from harbor.models.trajectories.trajectory import Trajectory; \\
+    uv run python -c "from harbor.models.trajectories.trajectory import Trajectory; \\
         import json; Trajectory.model_validate(json.load(open('tests/fixtures/atif/known_good_trajectory.json'))); \\
         print('OK')"
-    rm -rf /tmp/harbor-check
 
-Last validated: harbor 0.20.0 (2026-07-20). If the vendored models and this
+Last validated: harbor 0.22.0 (2026-09-11). If the vendored models and this
 fixture ever disagree with harbor, re-run the procedure and reconcile.
 """
 
@@ -103,7 +104,7 @@ class TestValidators:
             Trajectory(agent=_agent(), steps=[_step(1)], subagent_trajectories=[sub1, sub2])
 
     def test_agent_version_required(self):
-        # Verified against harbor 0.20.0: Agent.version is REQUIRED, not optional.
+        # Verified against harbor 0.22.0: Agent.version is REQUIRED, not optional.
         with pytest.raises(ValidationError, match="version"):
             AtifAgent(name="claude-code")  # type: ignore[call-arg]
 
@@ -157,6 +158,24 @@ class TestExtraForbid:
         with pytest.raises(ValidationError):
             Step(step_id=1, source="agent", message="x", bogus=True)  # type: ignore[call-arg]
 
-    def test_subagent_ref_requires_trajectory_id(self):
+    def test_subagent_ref_rejects_unknown_field(self):
+        # All four real fields (trajectory_id, session_id, trajectory_path,
+        # extra) are optional in harbor==0.22.0 -- a bare SubagentTrajectoryRef()
+        # is a valid document (e.g. a session_id-only or trajectory_path-only
+        # reference need not repeat the others), so only an actually-unknown
+        # field should be rejected under extra="forbid".
+        SubagentTrajectoryRef()
         with pytest.raises(ValidationError):
-            SubagentTrajectoryRef()  # type: ignore[call-arg]
+            SubagentTrajectoryRef(bogus=1)  # type: ignore[call-arg]
+
+    def test_subagent_ref_accepts_session_id_only_form(self):
+        """harbor==0.22.0's session_id-addressed shape, verified against a real install."""
+        ref = SubagentTrajectoryRef(session_id="sess-123")
+        assert ref.trajectory_id is None
+        assert ref.session_id == "sess-123"
+
+    def test_subagent_ref_accepts_trajectory_path_only_form(self):
+        """The spec's file-ref form: trajectory_path alone, no trajectory_id."""
+        ref = SubagentTrajectoryRef(trajectory_path="subagents/child.json")
+        assert ref.trajectory_id is None
+        assert ref.trajectory_path == "subagents/child.json"

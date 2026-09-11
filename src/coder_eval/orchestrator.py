@@ -35,6 +35,7 @@ from .litellm_cost import apply_actual_cost, load_cost_records
 from .models import (
     CONTAINER_REFERENCE_DIR,
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
+    IN_CONTAINER_ENV,
     ROUTE_NAMES,
     AgentJudgeCriterion,
     AgentKind,
@@ -1650,11 +1651,19 @@ class Orchestrator:
         # DIRECT_WRITE deliberately does NOT clear the target dir, so a reused
         # --run-dir (or --resume) can leave a prior run's files alongside this
         # run's outputs and silently perturb file-based criteria. Surface it.
-        # Skipped in workspace_dir mode: a WORKDIR (/root, /app) legitimately holds
-        # the image's baked inputs — not stale prior-run files — so the warning
-        # would fire on essentially every run and cry wolf.
+        # Suppressed in workspace_dir mode ONLY inside a container
+        # (IN_CONTAINER_ENV, per CE056 -- never on the field itself): the
+        # original writer was exclusively `run_task_internal_command`, where
+        # the WORKDIR is a fresh container filesystem every run, so a WORKDIR
+        # (/root, /app) legitimately holds the image's baked inputs there, not
+        # stale prior-run files. `--workspace-dir` is now also a host-reachable
+        # CLI flag on `run`/`execute`, where the named directory persists
+        # across invocations exactly like DIRECT_WRITE's own target -- keying
+        # the suppression on `workspace_dir is None` silently disabled the
+        # warning on precisely the new path where it is needed.
+        in_container = os.environ.get(IN_CONTAINER_ENV) == "1"
         if (
-            self.workspace_dir is None
+            not (self.workspace_dir is not None and in_container)
             and direct_target is not None
             and direct_target.exists()
             and any(direct_target.iterdir())
