@@ -88,6 +88,28 @@ def test_adopt_leaves_venv_unset_when_there_is_none(tmp_path: Path) -> None:
     assert sandbox.venv_dir is None
 
 
+def test_adopt_ignores_a_venv_when_python_is_null(tmp_path: Path) -> None:
+    """`python: null` opts out of BOTH halves: setup creates no venv, and adopt
+    declines to pick up one the agent wrote itself.
+
+    Without this, the false arm of adopt's gate was unexercised across the whole
+    suite while the field description documents it as user-facing behavior. The
+    assertion is on the criterion environment, not just `venv_dir`, because that
+    is the surface the opt-out exists to control.
+    """
+    ws = _workspace(tmp_path)
+    (ws / ".venv" / "bin").mkdir(parents=True)
+    sandbox = _sandbox(python=None)
+    sandbox.adopt(ws)
+    assert sandbox.venv_dir is None
+    # `_build_run_command_env` starts from `os.environ.copy()`, so an ambient
+    # VIRTUAL_ENV from the grader's own shell can be present; what must not
+    # happen is the harness pointing either variable at the WORKSPACE venv.
+    env = sandbox._build_run_command_env()
+    assert env.get("VIRTUAL_ENV") != str(ws.resolve() / ".venv")
+    assert str(ws.resolve() / ".venv") not in env["PATH"]
+
+
 def test_adopt_rejects_the_docker_driver(tmp_path: Path) -> None:
     """A container workspace is not reachable from the host, so adopting one
     would silently grade whatever happens to sit at that host path."""

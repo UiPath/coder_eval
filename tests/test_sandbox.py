@@ -486,7 +486,12 @@ def test_sandbox_with_packages():
     sandbox = Sandbox(config, task_id="test_packages")
 
     try:
-        sandbox.setup()
+        sandbox_dir = sandbox.setup()
+
+        # Asking for packages is what earns a venv (see
+        # test_default_python_config_creates_no_venv_when_nothing_to_install).
+        assert (sandbox_dir / ".venv").exists()
+        assert sandbox.venv_dir == sandbox_dir / ".venv"
 
         # Test that requests is installed
         exit_code, stdout, stderr = sandbox.run_command('python -c "import requests; print(requests.__version__)"')
@@ -1310,3 +1315,53 @@ class TestReferenceDirEnv:
             assert "REFERENCE_DIR" not in sb._build_run_command_env()
         finally:
             sb.cleanup(preserve=False)
+
+
+def test_default_venv_can_import_system_site_packages():
+    """The sandbox venv must not shadow the interpreter it is layered over.
+
+    `SandboxConfig.python` defaults to a `PythonEnvConfig()` instance, so every
+    task gets a venv. Built ISOLATED, that venv split the toolchain inside a task
+    image that provisions packages globally: `python` resolved to the venv and
+    could not import them, while `pip` -- which `uv venv` never places in the venv
+    -- fell through to the image's global pip and reported them present. Measured
+    in a task image: `import langchain` raised ModuleNotFoundError while
+    `pip list` showed `langchain 1.3.14`.
+
+    Asserted through `pyvenv.cfg` rather than a live import so the test is
+    hermetic: it holds on a host whose base interpreter has nothing installed.
+    """
+    config = SandboxConfig(driver="tempdir")
+    assert config.python is not None, "default is an instance, not None -- the case this guards"
+    assert config.python.env_packages == []
+
+    sandbox = Sandbox(config, task_id="test_system_site_packages")
+    try:
+        sandbox_dir = sandbox.setup()
+        cfg = (sandbox_dir / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8")
+        assert "include-system-site-packages = true" in cfg.lower()
+    finally:
+        sandbox.cleanup()
+
+
+def test_venv_reaches_the_criterion_environment():
+    """The venv is only worth creating because criteria run under it.
+
+    `_build_run_command_env` is the single surface that carries it (its sole
+    caller is `Sandbox.run_command`, i.e. every `run_command` criterion plus
+    `pre_run`/`post_run`). The agent's own PATH never carries the venv -- the
+    orchestrator prepends only `resolved_mock_path_dirs` there -- so asserting
+    the artifact exists says nothing about the effect this change exists for.
+    """
+    sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id="test_criterion_env")
+    try:
+        sandbox_dir = sandbox.setup()
+        venv_dir = sandbox_dir / ".venv"
+        assert sandbox.venv_dir == venv_dir
+
+        env = sandbox._build_run_command_env()
+        assert env["VIRTUAL_ENV"] == str(venv_dir)
+        scripts_dir = "Scripts" if os.name == "nt" else "bin"
+        assert env["PATH"].startswith(f"{venv_dir / scripts_dir}{os.pathsep}")
+    finally:
+        sandbox.cleanup()

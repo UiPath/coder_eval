@@ -164,6 +164,7 @@ class TestTemplateIgnorePatterns:
         (template_dir / ".venv").mkdir()
         (template_dir / ".venv" / "bin").mkdir()
         (template_dir / ".venv" / "bin" / "python").write_text("fake python")
+        (template_dir / ".venv" / "from_template.marker").write_text("copied")
 
         config = SandboxConfig(
             driver="tempdir",
@@ -179,12 +180,16 @@ class TestTemplateIgnorePatterns:
             # Verify main.py copied
             assert (sandbox_path / "main.py").exists()
 
-            # Verify .venv from template was NOT copied
-            # (sandbox creates its own .venv)
-            venv_bin = sandbox_path / ".venv" / "bin"
-            if venv_bin.exists():
-                # If .venv exists, it should be the sandbox's venv, not the template's
-                assert not (venv_bin / "python").exists() or (venv_bin / "python").is_symlink()
+            # The .venv present here is the sandbox's own (setup creates one);
+            # assert the TEMPLATE's copy did not land, via a marker file the real
+            # venv can never contain. Unconditional on purpose: guarding this
+            # behind `if venv_bin.exists()` made the whole check vacuous the
+            # moment provisioning changed, which is exactly how it went
+            # unnoticed. The marker is also layout-independent -- asserting on
+            # `.venv/bin/python` would only work on POSIX, since a real venv puts
+            # its interpreter in `Scripts/python.exe` on Windows.
+            assert (sandbox_path / ".venv").exists()
+            assert not (sandbox_path / ".venv" / "from_template.marker").exists()
         finally:
             sandbox.cleanup(preserve=False)
 
