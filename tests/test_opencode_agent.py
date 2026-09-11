@@ -1850,3 +1850,71 @@ class TestGenerationWindowExcludesToolExecution:
             [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
         )
         assert message.generation_duration_ms == 0.0
+
+
+class TestGenerationWindowsTileTheTurn:
+    """Each step's window runs from the PREVIOUS step's finish, not its own `step_start`.
+
+    The CLI announces a step only once it is already producing one, so the
+    model time that PRODUCED the step lands in the gap before it. Measured on
+    tasks/hello_date with a live claude-haiku-4.5: gaps of 857 ms and 851 ms
+    carrying no tool at all (the Write inside them took 7 ms), attributed to
+    nothing — 24% of the turn, on its own enough to hold OpenCode above the
+    evalboard's 25% "Unaccounted" red threshold.
+
+    Driven at the reducer for the same reason as the sibling class above: the
+    window is two `datetime.now()` reads, so only setting them explicitly
+    makes the arithmetic deterministic.
+    """
+
+    T0 = datetime(2026, 1, 1, 12, 0, 0)
+
+    @staticmethod
+    def _finish_at(monkeypatch, state, *, step_start, now):
+        import coder_eval.agents.opencode_agent as agent_module
+
+        class _Clock(datetime):
+            @staticmethod
+            def now(tz=None):
+                return now
+
+        state.step_started_at = step_start
+        state.step_tool_spans = []
+        monkeypatch.setattr(agent_module, "datetime", _Clock)
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
+
+    def _two_steps(self, monkeypatch):
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
+        # Step 1 runs T0 -> T0+1000.
+        self._finish_at(monkeypatch, state, step_start=self.T0, now=self.T0 + timedelta(milliseconds=1000))
+        # 800ms of model time, then a step the CLI only announces at T0+1800.
+        self._finish_at(
+            monkeypatch,
+            state,
+            step_start=self.T0 + timedelta(milliseconds=1800),
+            now=self.T0 + timedelta(milliseconds=2000),
+        )
+        return [m for m in state.messages if m.role == "assistant"]
+
+    def test_the_gap_before_a_step_is_its_generation_time(self, monkeypatch):
+        first, second = self._two_steps(monkeypatch)
+        # Bounded by its own step_start, this window was 200ms and the 800ms
+        # that produced it was attributed to nothing.
+        assert second.generation_duration_ms == pytest.approx(1000.0)
+        assert second.started_at == first.completed_at
+
+    def test_the_first_step_keeps_its_own_start(self, monkeypatch):
+        """Everything before the first `step_start` is CLI spawn, not model time.
+
+        Tiling the first window back to the turn's start would report Node's
+        boot — 3.1 s of OpenCode's measured head — as generation.
+        """
+        first, _ = self._two_steps(monkeypatch)
+        assert first.started_at == self.T0
+        assert first.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_the_steps_leave_no_gap_between_them(self, monkeypatch):
+        first, second = self._two_steps(monkeypatch)
+        covered = (second.completed_at - first.started_at).total_seconds() * 1000.0
+        gen = sum(m.generation_duration_ms or 0.0 for m in (first, second))
+        assert gen == pytest.approx(covered)

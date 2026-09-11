@@ -309,6 +309,20 @@ class _OpenCodeTurnState:
         # needs it to close a TurnStartEvent the stream never got to close.
         self.step_open = False
         self.step_started_at: datetime | None = None
+        # Where the NEXT generation window starts: the previous step's finish.
+        # The CLI announces a step only once it is already producing one, so a
+        # window bounded by `step_start` drops the model time that PRODUCED the
+        # step into the gap before it. Measured on tasks/hello_date with a live
+        # claude-haiku-4.5: two gaps of 857 ms and 851 ms, carrying no tool
+        # (the Write inside them took 7 ms), attributed to nothing — 24% of the
+        # turn's wall clock, enough on its own to hold OpenCode above the
+        # evalboard's 25% "Unaccounted" red threshold.
+        #
+        # None until the first step finishes, and deliberately so: the first
+        # window keeps its own `step_start`, because everything before it is
+        # CLI process spawn, not model time. Tiling that in would report Node's
+        # boot as generation. Same shape as Codex's `gen_mark_ms`.
+        self.gen_mark: datetime | None = None
         self.step_text_parts: list[str] = []
         self.step_tool_ids: list[str] = []
         # Execution intervals of tools that CLOSED inside the open
@@ -685,8 +699,11 @@ class _OpenCodeTurnState:
         if isinstance(finish, str) and finish:
             self.stop_reason = finish
 
-        started = self.step_started_at or datetime.now()
         completed = datetime.now()
+        step_start = self.step_started_at or completed
+        # Tile from the previous step's finish; min() keeps a clock that went
+        # backwards from inverting the span.
+        started = min(self.gen_mark, step_start) if self.gen_mark is not None else step_start
         blocks: list[ContentBlock] = []
         step_text = "".join(self.step_text_parts)
         if step_text:
@@ -714,6 +731,11 @@ class _OpenCodeTurnState:
                 message_id=str(part.get("messageID") or "") or None,
             )
         )
+        # A message was appended, so the next window starts where this one
+        # ended. Only `step_finish` advances the mark: a step that never
+        # finished published nothing, so tiling past it would attribute its
+        # time to whichever step finishes next.
+        self.gen_mark = completed
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,
