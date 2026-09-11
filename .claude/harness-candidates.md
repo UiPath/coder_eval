@@ -538,3 +538,16 @@ divergences, so the deferred-work record is one place. Measurements in
   Coverage is ~88%, so it is not urgent. The agent lives in the separate
   `coder_eval_uipath` repo; mirror the Codex change there
   (`_item_timing` + threading the SDK stamps through the telemetry builders).
+
+- [ ] **Pre-existing, surfaced by this work's final review: `TokenUsage._adopt_legacy_input_tokens`
+  double-counts the cache buckets.** The validator copies a legacy record's
+  full-prompt `input_tokens` straight into `uncached_input_tokens`, and the
+  computed `input_tokens` then adds `cache_creation` + `cache_read` again. A
+  legacy record with `input_tokens=1000`, `cache_creation=200`, `cache_read=150`
+  reloads as 1350 prompt tokens and bills 1000 at the uncached rate instead of
+  650. Affects every report, budget check and detached regrade over a
+  pre-split run that used prompt caching. NOT touched by the timing work
+  (token accounting was explicitly out of its scope) and not a guardrail
+  candidate — a real bug needing its own change, with a decision about
+  whether legacy records can be distinguished from current ones at all.
+  Caught in: timing-capture final review (gpt-5.6-sol).
