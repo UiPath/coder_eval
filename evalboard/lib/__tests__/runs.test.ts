@@ -24,6 +24,7 @@ import {
     parseCriterionResults,
     type RawTaskResult,
     sortArtifacts,
+    sumHarnessOverhead,
     toTaskRow,
     visibleTurnsFromRaw,
     walkArtifacts,
@@ -243,6 +244,60 @@ describe("aggregateSubAgentUsage", () => {
         expect(aggregateSubAgentUsage([])).toEqual({});
         expect(aggregateSubAgentUsage([msg({ parentToolUseId: null })])).toEqual({});
         expect(aggregateSubAgentUsage([msg({ parentToolUseId: undefined })])).toEqual({});
+    });
+});
+
+describe("sumHarnessOverhead", () => {
+    test("sums both buckets across iterations", () => {
+        expect(
+            sumHarnessOverhead([
+                { harness_startup_ms: 3000, harness_teardown_ms: 800 },
+                { harness_startup_ms: 120, harness_teardown_ms: 40 },
+            ]),
+        ).toEqual({ startupMs: 3120, teardownMs: 840 });
+    });
+
+    test("a measured zero is a measurement and still sums", () => {
+        // An in-process SDK whose first generation window already covers
+        // dispatch legitimately reports 0.0 — that is a number, not a gap.
+        expect(
+            sumHarnessOverhead([{ harness_startup_ms: 0, harness_teardown_ms: 3.5 }]),
+        ).toEqual({ startupMs: 0, teardownMs: 3.5 });
+    });
+
+    test("is null when EVERY iteration is null — never 0", () => {
+        // 0 would claim the harness started instantly; null says nobody looked.
+        expect(
+            sumHarnessOverhead([
+                { harness_startup_ms: null, harness_teardown_ms: null },
+                {},
+            ]),
+        ).toEqual({ startupMs: null, teardownMs: null });
+    });
+
+    test("sums the measured iterations and ignores the unmeasured ones", () => {
+        expect(
+            sumHarnessOverhead([
+                { harness_startup_ms: 500 },
+                { harness_teardown_ms: 90 },
+            ]),
+        ).toEqual({ startupMs: 500, teardownMs: 90 });
+    });
+
+    test("is null on an empty turn list", () => {
+        expect(sumHarnessOverhead([])).toEqual({
+            startupMs: null,
+            teardownMs: null,
+        });
+    });
+
+    test("a non-finite value is dropped rather than poisoning the sum", () => {
+        expect(
+            sumHarnessOverhead([
+                { harness_startup_ms: NaN, harness_teardown_ms: 10 },
+                { harness_startup_ms: 25 },
+            ]),
+        ).toEqual({ startupMs: 25, teardownMs: 10 });
     });
 });
 
