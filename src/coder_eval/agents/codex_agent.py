@@ -393,6 +393,15 @@ class _CodexTurnState:
         self.open_blocks: list[ContentBlock] = []
         self.open_start_ms: int | None = None
         self.open_end_ms: int | None = None
+        # Where the NEXT generation window starts: the previous flush's end.
+        # Windows tile the turn contiguously, as they do on Antigravity and
+        # claude-code. None until the first flush, which falls back to its own
+        # first item — the SDK gives no "turn began" stamp, and inventing one
+        # from time.time() would mix our clock with the SDK's inside a single
+        # subtraction. Advanced ONLY by a flush that actually appended a
+        # message, so a no-op flush leaves the window open and a later real
+        # generation still measures from where it began.
+        self.gen_mark_ms: int | None = None
         self.start_ms_by_id: dict[str, int] = {}
         self.blocks_by_id: dict[str, ContentBlock] = {}
         # Tools that emitted item/started but not item/completed; whatever remains
@@ -454,24 +463,54 @@ class _CodexTurnState:
 
         thinking_blocks = [b for b in self.open_blocks if b.block_type == "thinking"]
         action_blocks = [b for b in self.open_blocks if b.block_type != "thinking"]
-        started = _ms_to_dt(self.open_start_ms)
-        completed = _ms_to_dt(self.open_end_ms if self.open_end_ms is not None else self.open_start_ms)
-        # The window is seeded from the first item's start and extended to the
-        # LAST item's completion, so for any generation containing a tool call
-        # it already CONTAINS that tool's execution. Publishing the raw span as
-        # generation time double-counts it against the tool's own duration_ms:
-        # a tool-only emission reported 250ms of "generation" for a 250ms
-        # `echo hi`, and the task page's Generation + Tool exec then exceeded
-        # the wall clock they must reconcile to.
+        # The window runs from the PREVIOUS flush's end, not from this
+        # generation's first item. The SDK stamps an item with the moment it
+        # began EXECUTING, so seeding from it discarded the model time that
+        # produced the item — the gap between the last item's completion and
+        # this one's start. Measured on tasks/hello_date: a Write emission
+        # spanning 2 ms (start 20:50:39.063, end .065) reported 98 output
+        # tokens, and the 2694 ms of real generation sat in the preceding gap,
+        # attributed to nothing. Across that turn only 15.8% of the 17 s wall
+        # clock was accounted for. Tiling matches Antigravity and claude-code,
+        # and is what lets Sum(generation) + Sum(tool) reconcile to the turn.
+        #
+        # min() is defensive: a stamp that goes backwards must never push the
+        # window start PAST the first item and invert the span.
+        window_start_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
+        if window_start_ms is not None and self.open_start_ms is not None:
+            window_start_ms = min(window_start_ms, self.open_start_ms)
+        window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
+        started = _ms_to_dt(window_start_ms)
+        completed = _ms_to_dt(window_end_ms)
+        # The window is extended to the LAST item's completion, so any
+        # generation containing a tool call already CONTAINS that tool's
+        # execution. Publishing the raw span as generation time double-counts
+        # it against the tool's own duration_ms: a tool-only emission reported
+        # 250ms of "generation" for a 250ms `echo hi`, and the task page's
+        # Generation + Tool exec then exceeded the wall clock they must
+        # reconcile to.
         #
         # Same treatment, and the same shared helper, as Antigravity: subtract
-        # the UNION of the closed tool intervals clipped to this window. A sum
-        # would over-subtract wherever they overlap, which Codex produces
-        # natively via concurrent collab agents.
+        # the UNION of the tool intervals clipped to this window. A sum would
+        # over-subtract wherever they overlap, which Codex produces natively
+        # via concurrent collab agents.
+        #
+        # Closed intervals, plus any call still OPEN at this flush bounded at
+        # the window end. Excluding the open ones publishes the part of a
+        # straddling call that ran inside this window as generation while the
+        # call's own duration_ms counts it again — harmless while the windows
+        # were too narrow to overlap a tool, and a live double-count now that
+        # they tile. Antigravity hit exactly that and broke the invariant by
+        # 0.26 ms; the fix travels with the tiling that makes it reachable.
         tool_spans = [
             (c.execution_started_at, c.execution_completed_at)
             for c in self.commands
             if c.execution_started_at is not None and c.execution_completed_at is not None
+        ]
+        tool_spans += [
+            (t.execution_started_at, completed)
+            for t in self.open_tools.values()
+            if t.execution_started_at is not None and t.execution_started_at < completed
         ]
         span_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
         gen_ms = max(0.0, span_ms - busy_ms(tool_spans, started, completed))
@@ -537,6 +576,10 @@ class _CodexTurnState:
                 )
             )
         self.gen_index += 1
+        # A message was appended, so the next window starts where this one
+        # ended. Both early returns above leave the mark alone on purpose.
+        if window_end_ms is not None:
+            self.gen_mark_ms = window_end_ms
         self.open_blocks = []
         self.open_start_ms = None
         self.open_end_ms = None

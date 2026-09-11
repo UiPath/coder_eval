@@ -1762,6 +1762,52 @@ async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypa
     assert second.generation_duration_ms > 0
 
 
+async def test_a_tool_still_open_at_the_flush_is_not_generation_time(monkeypatch):
+    """The sibling of the straddle test above, for the window the tool opened IN.
+
+    Subtracting only CLOSED intervals published the part of a still-running
+    call that had already elapsed as model time, while the call's own
+    `duration_ms` counted it again. These windows tile the turn, so there is no
+    slack to absorb that: measured on tasks/hello_date with a live
+    gemini-3.1-pro-preview, a Bash opening 1.7 ms before the flush drove
+    Sum(generation) + Sum(command) 0.26 ms PAST the turn's own
+    `duration_seconds`, on a turn whose entire headroom was 1.4 ms. Four
+    sibling runs passed by 1.2-8.7 ms out of ~12 s, so it was a coin flip.
+    """
+    _install_clock(monkeypatch, _Clock())
+    steps = [
+        # t1 opens here and is STILL RUNNING when the first window is cut.
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "slow"})],
+        ),
+        _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "slow", "exit_code": 0})],
+        ),
+        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    first = _assistant(record)[0]
+    slow = next(c for c in record.commands if c.tool_id == "t1")
+    span_ms = (first.completed_at - first.started_at).total_seconds() * 1000.0
+    # The part of t1 that had already run when this window was cut.
+    in_window_ms = (first.completed_at - slow.execution_started_at).total_seconds() * 1000.0
+
+    assert slow.execution_started_at < first.completed_at, "fixture must open the tool in this window"
+    assert slow.execution_completed_at > first.completed_at, "...and leave it open across the flush"
+    assert first.generation_duration_ms == pytest.approx(span_ms - in_window_ms)
+    # The whole point: what the page shows as Generation plus what it shows as
+    # Tool exec must still fit in the window they are shown against.
+    assert first.generation_duration_ms + in_window_ms == pytest.approx(span_ms)
+
+
 async def test_a_no_op_flush_does_not_move_the_mark(monkeypatch):
     """An empty generation must leave the open window alone.
 

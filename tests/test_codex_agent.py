@@ -2245,11 +2245,15 @@ class TestExecutionBoundsWiring:
 class TestGenerationWindowExcludesToolExecution:
     """A tool closing inside a generation window is not model time.
 
-    `_flush_message`'s window is seeded from the first item's start and
-    extended to the LAST item's completion, so any generation containing a
-    tool call already CONTAINS that tool's execution. Publishing the raw span
-    double-counted it against the tool's own duration_ms — Generation + Tool
-    exec then exceeded the wall clock they are shown against.
+    `_flush_message`'s window is extended to the LAST item's completion, so
+    any generation containing a tool call already CONTAINS that tool's
+    execution. Publishing the raw span double-counted it against the tool's
+    own duration_ms — Generation + Tool exec then exceeded the wall clock they
+    are shown against.
+
+    See TestGenerationWindowsTileTheTurn for where each window BEGINS; these
+    cases all describe a turn's first generation, which has no predecessor to
+    tile from and so still starts at its own first item.
     """
 
     async def test_a_tool_only_emission_reports_no_generation_time(self):
@@ -2296,6 +2300,68 @@ class TestGenerationWindowExcludesToolExecution:
         # stream lets us attribute.
         assert gen_ms == pytest.approx(10.0)
         assert gen_ms + tool_ms == pytest.approx(window_ms)
+
+
+class TestGenerationWindowsTileTheTurn:
+    """Each generation window runs from the PREVIOUS one's end, not its own first item.
+
+    The SDK stamps an item with the moment it began EXECUTING, so a window
+    seeded from that stamp discards the model time that produced the item.
+    Observed on tasks/hello_date with a live gpt-5.5: a Write emission spanning
+    2 ms reported 98 output tokens while the 2694 ms that generated it sat in
+    the preceding gap, attributed to nothing, and the emission published
+    `generation_duration_ms=0.0` — a fabricated "instant generation" of exactly
+    the kind CE058 exists to stop. Only 15.8% of that 17 s turn was accounted
+    for; tiling took three live runs to 66-86%.
+    """
+
+    async def test_the_gap_before_an_emission_is_its_generation_time(self):
+        first = _bounds_command_item("cmd_a")
+        second = _bounds_command_item("cmd_b")
+        notifications = [
+            # gen 0: a tool that ran for 100ms, starting the turn.
+            _item_notification("item/started", first, started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/completed", first, completed_at_ms=_BOUNDS_EPOCH_MS + 100),
+            _token_usage(inp=10, out=5, cached=0),
+            # gen 1: 1900ms of model time, THEN a 50ms tool. The stream stamps
+            # only the tool, so the 1900ms is visible solely as the gap.
+            _item_notification("item/started", second, started_at_ms=_BOUNDS_EPOCH_MS + 2000),
+            _item_notification("item/completed", second, completed_at_ms=_BOUNDS_EPOCH_MS + 2050),
+            _token_usage(inp=10, out=5, cached=0),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("go")
+
+        assistant = [m for m in record.messages if m.role == "assistant"]
+        assert len(assistant) == 2
+        # Seeded from its own first item, this window was 50ms of pure tool
+        # execution and published 0.0.
+        assert assistant[1].generation_duration_ms == pytest.approx(1900.0)
+        # ...and it abuts its predecessor rather than starting at the tool.
+        assert assistant[1].started_at == assistant[0].completed_at
+
+    async def test_tool_time_is_still_excluded_from_a_tiled_window(self):
+        """Tiling must not re-admit the double-count 4/6 removed."""
+        first = _bounds_command_item("cmd_a")
+        second = _bounds_command_item("cmd_b")
+        notifications = [
+            _item_notification("item/started", first, started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/completed", first, completed_at_ms=_BOUNDS_EPOCH_MS + 100),
+            _token_usage(inp=10, out=5, cached=0),
+            _item_notification("item/started", second, started_at_ms=_BOUNDS_EPOCH_MS + 2000),
+            _item_notification("item/completed", second, completed_at_ms=_BOUNDS_EPOCH_MS + 2050),
+            _token_usage(inp=10, out=5, cached=0),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("go")
+
+        gen_ms = sum(m.generation_duration_ms or 0.0 for m in record.messages if m.role == "assistant")
+        tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
+        # The turn the stream describes runs from the first stamp to the last.
+        assert tool_ms == pytest.approx(150.0)
+        assert gen_ms + tool_ms == pytest.approx(2050.0)
 
 
 class TestFlushMessageGenTimeSplit:

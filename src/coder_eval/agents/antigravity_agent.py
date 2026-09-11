@@ -1026,8 +1026,8 @@ class _AntigravityTurnState:
             return
         now_monotonic = time.monotonic()
         now_wall = datetime.now()
-        # Model-generation time = the whole window MINUS the tool executions
-        # that closed inside it.
+        # Model-generation time = the whole window MINUS the tool execution
+        # that happened inside it.
         #
         # Do NOT "simplify" this to resetting the mark when a tool ends. That
         # loses real model time: measured on run 2026-09-09_04-18-50, task
@@ -1038,16 +1038,27 @@ class _AntigravityTurnState:
         # 43 s Bash, where the model time really is the flush-to-DONE
         # remainder).
         #
-        # What this deliberately over-reports: time spent WAITING on a tool
-        # that is still open. Only CLOSED intervals are subtracted, so an
-        # orphaned/backgrounded call contributes nothing while the poll loop
-        # sleeps on it. That reaches two windows — the one finalize cuts when
-        # no usage_metadata ever arrived (tens of minutes on an orphan-poll
-        # task), and any ordinary window whose flush lands while the call is
-        # still open. Accounting for that wait is separate work (audit P2-1);
-        # do not read such a number as model time.
+        # A tool that is still OPEN at flush time counts too, bounded at
+        # `now_wall`. Subtracting only CLOSED intervals published the portion
+        # of a straddling call that ran before the boundary as generation,
+        # while the call's own duration_ms counted it again — the one
+        # double-count that this harness's contiguous windows have no slack to
+        # absorb. Measured on tasks/hello_date: a Bash opening 1.7 ms before
+        # the flush drove Sum(generation) + Sum(command) 0.26 ms PAST the turn
+        # wall, on a turn whose whole headroom was 1.4 ms. The four sibling
+        # runs passed by 1.2-8.7 ms out of ~12 s, so this was a coin flip, not
+        # a rounding artifact.
+        #
+        # No double subtraction: when the call later closes, the DONE path
+        # appends its full interval to the NEXT window's list, where busy_ms
+        # clips it to the post-flush remainder.
         span_ms = (now_monotonic - self._gen_mark_monotonic) * 1000.0
-        tool_ms = busy_ms(self._tool_spans_since_mark, self._gen_mark_wall, now_wall)
+        still_open = [
+            (tel.execution_started_at, now_wall)
+            for cid, tel in self._open_tools.items()
+            if cid not in self._closed_tools and tel.execution_started_at is not None
+        ]
+        tool_ms = busy_ms(self._tool_spans_since_mark + still_open, self._gen_mark_wall, now_wall)
         generation_ms = span_ms - tool_ms
         if generation_ms < 0:
             # busy_ms clips to this window and unions overlaps, so it cannot
