@@ -203,6 +203,70 @@ class TestVerifierTaskYaml:
         assert (out_dir / "tests" / "reference" / "greeting.txt").read_text(encoding="utf-8") == "hello"
 
 
+class TestAgentPhaseTaskYaml:
+    """environment/agent_task.yaml — the CoderEvalAgent embed's criteria-free real-agent config."""
+
+    def test_baked_at_fixed_path_via_dockerfile_copy(self, tmp_path: Path) -> None:
+        env_dir = tmp_path / "environment"
+        env_dir.mkdir()
+        (env_dir / "Dockerfile").write_text("FROM ubuntu:24.04\nWORKDIR /app\n", encoding="utf-8")
+        task_file = _write_task(
+            tmp_path,
+            {"sandbox": {"driver": "docker", "docker": {"dockerfile_path": "environment/Dockerfile"}}},
+        )
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        assert (out_dir / "environment" / "agent_task.yaml").exists()
+        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
+        assert "COPY agent_task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
+
+    def test_carries_the_real_agent_config_but_no_real_criteria(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path, {"agent": {"type": "claude-code", "model": "claude-opus-5"}})
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "environment" / "agent_task.yaml").read_text(encoding="utf-8"))
+        assert emitted["agent"]["type"] == "claude-code"
+        assert emitted["agent"]["model"] == "claude-opus-5"
+        assert len(emitted["success_criteria"]) == 1  # the placeholder only -- never the real ones
+        assert emitted["success_criteria"][0]["type"] == "file_exists"
+        # The real task's success_criteria (2 entries in _BASE_TASK) must never leak in.
+        assert "reference_comparison" not in str(emitted["success_criteria"])
+
+    def test_sandbox_driver_forced_to_tempdir_no_nested_docker(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path)  # _BASE_TASK uses sandbox.driver: docker
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "environment" / "agent_task.yaml").read_text(encoding="utf-8"))
+        assert emitted["sandbox"]["driver"] == "tempdir"
+
+    def test_reloads_as_a_valid_task_definition(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path)
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "environment" / "agent_task.yaml").read_text(encoding="utf-8"))
+        reloaded = TaskDefinition.model_validate(emitted)  # must not raise
+        assert reloaded.task_id == "greet"
+
+    def test_prebuilt_image_with_no_dockerfile_warns_it_cannot_bake_the_agent_file_in(self, tmp_path: Path) -> None:
+        task_file = _write_task(
+            tmp_path, {"sandbox": {"driver": "docker", "docker": {"image": "byod-custom-image:0.1.0"}}}
+        )
+        out_dir = tmp_path / "out"
+
+        result = export_task(task_file, out_dir)
+
+        assert (out_dir / "environment" / "agent_task.yaml").exists()  # still written -- just not bakeable in
+        assert any("No Dockerfile to bake" in w for w in result.warnings)
+
+
 class TestDockerfileWorkdirResolution:
     def test_dockerfile_with_no_workdir_gets_one_appended_and_warned(self, tmp_path: Path) -> None:
         env_dir = tmp_path / "environment"
@@ -235,7 +299,11 @@ class TestDockerfileWorkdirResolution:
         result = export_task(task_file, out_dir)
 
         assert result.workdir == "/workspace"
-        assert (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8") == original
+        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
+        # The WORKDIR-bearing content is untouched; only the agent_task.yaml COPY
+        # line (baked in for a CoderEvalAgent embed, see agent_paths.py) is appended.
+        assert dockerfile_text.startswith(original)
+        assert "COPY agent_task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
         assert not any("declared no WORKDIR" in w for w in result.warnings)
         # test.sh and task.toml must agree with the same resolved workdir.
         assert '"/workspace"' in (out_dir / "tests" / "test.sh").read_text(encoding="utf-8")
@@ -308,7 +376,11 @@ class TestCoderEvalAgentBaseImageWarning:
             tmp_path, {"sandbox": {"driver": "docker", "docker": {"image": "coder-eval-agent:0.12.0"}}}
         )
         result = export_task(task_file, tmp_path / "out")
-        assert not any("coder-eval-agent" in w for w in result.warnings)
+        # A prebuilt image (no dockerfile_path) always warns that agent_task.yaml
+        # can't be baked in (no Dockerfile to COPY into) -- that warning legitimately
+        # NAMES the image, so it is excluded from this substring check rather than
+        # the check being widened to also swallow the real regression it guards.
+        assert not any("coder-eval-agent" in w for w in result.warnings if "No Dockerfile to bake" not in w)
 
 
 class TestPrePostRunWarnings:

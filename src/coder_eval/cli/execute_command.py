@@ -181,6 +181,17 @@ def execute_command(
             "-D sandbox.driver.)"
         ),
     ),
+    format: str | None = typer.Option(
+        None,
+        "--format",
+        help=(
+            "Emit an additional interchange trajectory alongside task.json. Only 'harbor' is "
+            "supported: writes a sibling trajectory.json (ATIF format) for every task, so an "
+            "external `coder-eval evaluate --format harbor` invocation can grade the trajectory "
+            "without access to this process's task.json. This is the flag a Harbor agent's "
+            "`coder-eval execute --format harbor --run-dir <its logs dir>` invocation passes."
+        ),
+    ),
 ) -> None:
     """Run evaluation tasks WITHOUT checking their success criteria.
 
@@ -233,4 +244,5 @@ def execute_command(
         repeats=repeats,
         driver=driver,
         set_overrides=set_overrides,
+        format=format,
     )

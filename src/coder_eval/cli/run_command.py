@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -354,6 +355,17 @@ def run_command(
             "-D sandbox.driver.)"
         ),
     ),
+    format: str | None = typer.Option(
+        None,
+        "--format",
+        help=(
+            "Emit an additional interchange trajectory alongside task.json. Only 'harbor' is "
+            "supported: writes a sibling trajectory.json (ATIF format) for every task, so an "
+            "external `coder-eval evaluate --format harbor` invocation can grade the trajectory "
+            "without access to this process's task.json. Meant for `coder-eval execute --format "
+            "harbor --run-dir <harbor agent's logs dir>`, invoked by a Harbor agent."
+        ),
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -404,6 +416,7 @@ def run_command(
         repeats=repeats,
         driver=driver,
         set_overrides=set_overrides,
+        format=format,
     )
 
 
@@ -432,6 +445,7 @@ def run_pipeline(
     repeats: int | None,
     driver: str | None,
     set_overrides: list[str],
+    format: str | None = None,
 ) -> None:
     """The shared body of ``coder-eval run`` and ``coder-eval execute``.
 
@@ -441,6 +455,8 @@ def run_pipeline(
     commands are pure flag-parsing wrappers over this function, so a behavior
     change can never apply to one and miss the other.
     """
+    if format is not None and format != "harbor":
+        raise typer.BadParameter(f"Unsupported --format {format!r}. Supported: harbor.")
     # --resume needs an explicit run dir to resume into (auto-generated dirs are always fresh).
     if resume and run_dir is None:
         raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
@@ -513,6 +529,7 @@ def run_pipeline(
                 include_skipped=include_skipped,
                 junit_xml=junit_xml,
                 grade=grade,
+                format=format,
             )
         )
     except KeyboardInterrupt:
@@ -540,6 +557,7 @@ async def _run_all_tasks(
     include_skipped: bool = False,
     junit_xml: Path | None = None,
     grade: bool = True,
+    format: str | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -561,6 +579,16 @@ async def _run_all_tasks(
         junit_xml: Optional path to write a JUnit XML report to, after the run
             summary is persisted and before the failure exit-code gate.
         grade: False for `coder-eval execute` — run and capture, score nothing.
+        format: 'harbor' writes a trajectory.json (ATIF) sibling for every
+            task.json once the run finishes — see `harbor.atif_emit.emit_trajectories_for_run`.
+            When the run wrote exactly ONE trajectory (the shape a `CoderEvalAgent`
+            Harbor agent invocation always produces — one fixed-path agent-phase
+            task.yaml, no dataset/experiment fan-out), it is additionally copied to
+            `<run_dir>/trajectory.json` so a caller that pointed `--run-dir` at a
+            fixed discovery path (e.g. Harbor's `self.logs_dir`) can find it there
+            without knowing coder-eval's internal `<variant>/<task_id>/<replicate>/`
+            nesting. Multi-task runs are left nested only — there is no single
+            trajectory to promote.
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -631,6 +659,17 @@ async def _run_all_tasks(
         from ..logging_config import aggregate_task_logs
 
         aggregate_task_logs(run_dir)
+
+        if format == "harbor":
+            from ..harbor.atif_emit import emit_trajectories_for_run
+
+            written = emit_trajectories_for_run(run_dir)
+            console.print(f"[dim]Wrote {len(written)} trajectory.json (ATIF) file(s) under {run_dir}[/dim]")
+
+            flat_trajectory_path = run_dir / "trajectory.json"
+            if len(written) == 1 and written[0] != flat_trajectory_path:
+                await asyncio.to_thread(shutil.copy2, written[0], flat_trajectory_path)
+                console.print(f"[dim]Copied the single trajectory to {flat_trajectory_path}[/dim]")
 
         # Print execution summary
         print_execution_summary(run_dir, summary)

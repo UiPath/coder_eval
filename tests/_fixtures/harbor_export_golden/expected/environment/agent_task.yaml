@@ -1,0 +1,17 @@
+task_id: golden_export_example
+description: A canonical task exercising every C2 mapping row at once (golden fixture
+  — do not edit casually).
+agent:
+  type: claude-code
+  permission_mode: acceptEdits
+  ignore_patterns: []
+  system_prompt_mode: append
+  sdk_options: {}
+sandbox:
+  driver: tempdir
+success_criteria:
+- type: file_exists
+  path: .
+  description: (unused placeholder — this file is run via `coder-eval execute`, which
+    never checks criteria)
+initial_prompt: Write 'hello world' to greeting.txt, matching reference/greeting.txt.

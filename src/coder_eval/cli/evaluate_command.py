@@ -11,6 +11,8 @@ import typer
 from rich.markup import escape
 
 from ..evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
+from ..harbor.atif_hydrate import seed_from_atif_trajectory
+from ..harbor.atif_models import Trajectory
 from ..logging_config import setup_logging
 from ..models import (
     AgentKind,
@@ -311,6 +313,23 @@ def evaluate_command(
         "--run-dir",
         help="Where the graded task.json lands (default: auto-generated timestamped directory in runs/)",
     ),
+    format: str | None = typer.Option(
+        None,
+        "--format",
+        help=(
+            "Only 'harbor' is supported: grade a directory whose agent phase ran OUTSIDE this "
+            "process (a Harbor agent's `coder-eval execute --format harbor`) by hydrating trajectory "
+            "context from an ATIF trajectory.json instead of a run directory's task.json. Requires "
+            "--trajectory and the two-argument `TASK_FILE WORK_DIR` form."
+        ),
+    ),
+    trajectory: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--trajectory",
+        help="Path to an ATIF trajectory.json to hydrate trajectory context from. Required with --format harbor.",
+        exists=True,
+        dir_okay=False,
+    ),
 ) -> None:
     """Evaluate criteria against a directory, or re-grade a finished run.
 
@@ -343,6 +362,8 @@ def evaluate_command(
         allow_recorded_commands=allow_recorded_commands,
         allow_host_grading=allow_host_grading,
         run_dir=run_dir,
+        format=format,
+        trajectory=trajectory,
     )
 
 
@@ -357,6 +378,8 @@ def run_evaluation(
     allow_recorded_commands: bool = False,
     allow_host_grading: bool = False,
     run_dir: Path | None = None,
+    format: str | None = None,
+    trajectory: Path | None = None,
 ) -> None:
     """The body of ``coder-eval evaluate``, with real Python defaults.
 
@@ -383,6 +406,30 @@ def run_evaluation(
     task_file = inputs.task_file
     prior = inputs.prior
     target = inputs.target
+
+    if format is not None and format != "harbor":
+        console.print(f"[red]✗ Unsupported --format {format!r}. Supported: harbor.[/red]")
+        raise typer.Exit(1)
+    if format == "harbor":
+        if target.mode is not EvaluateMode.WORK_DIR:
+            console.print(
+                "[red]✗ --format harbor only applies to the two-argument `TASK_FILE WORK_DIR` form — "
+                + "a run directory already carries its own trajectory in task.json.[/red]"
+            )
+            raise typer.Exit(1)
+        if trajectory is None:
+            console.print("[red]✗ --format harbor requires --trajectory <path to trajectory.json>.[/red]")
+            raise typer.Exit(1)
+        try:
+            atif_trajectory = Trajectory.model_validate_json(trajectory.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            console.print(f"[red]✗ Could not read {trajectory} as an ATIF trajectory:[/red] {escape(str(e))}")
+            raise typer.Exit(1) from e
+        prior = seed_from_atif_trajectory(
+            atif_trajectory,
+            task_id=task.task_id,
+            task_description=task.description,
+        )
 
     grade_in_place = resolve_grade_in_place(target, in_place)
 
