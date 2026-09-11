@@ -31,7 +31,7 @@ wall clock its numbers account for.
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
-| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes | yes | yes | yes | yes |
+| `Σ generation + ∪ tool + head + tail ≈ turn duration` | within 0.1 ms when nothing overlaps; off by the generation/tool overlap when it does — see below | yes | yes | yes | yes |
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
 Four of the five harnesses interleave tool execution into a single generation
@@ -51,10 +51,23 @@ the result to a clamped zero.
 The consequence worth knowing: on an emission that carries *only* a tool call,
 the whole measured window was that tool running, so the recorded generation
 time is legitimately `0.0`. That is a measurement, not a placeholder — `None`
-is what "never measured" looks like. Only `claude-code` does not need the
-subtraction: it marks the end of the previous SDK event and reads again when
-the next message arrives, so a tool's execution falls between two windows
-rather than inside one.
+is what "never measured" looks like.
+
+`claude-code` is the one harness that does **not** apply the subtraction: it
+marks the end of the previous SDK event and reads again when the next message
+arrives, on the premise that a tool's execution then falls between two windows
+rather than inside one. **Measured, that premise does not always hold.** A tool's
+timer starts at the emission carrying its `tool_use` block, and one assistant
+turn can span several emissions, so a later emission's window runs concurrently
+with a tool already timing. On a task issuing five parallel writes, five reads
+and two concurrent `Bash` calls, the overlap was 482 ms and 340 ms on two ~18-25 s
+turns — and the four-bucket residual came out at exactly `-481 ms` and `-339 ms`.
+On the same task the other four harnesses overlapped by ~2.0-2.3 s and still
+reconciled to within 1.2 ms, because they subtract it. Two claude-code turns in
+the same batch that happened to overlap by <1 ms reconciled to within 0.1 ms.
+Applying `busy_ms` here as the other four do is the obvious fix and is tracked
+in `.claude/harness-candidates.md`; it is a change to a published
+`generation_duration_ms`, so it needs its own verification pass.
 
 **The head and tail are measured, not normalized.** Generation and tool are
 only two of the four buckets. The turn's **head** (turn start → first

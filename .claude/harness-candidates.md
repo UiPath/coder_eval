@@ -581,3 +581,25 @@ divergences, so the deferred-work record is one place. Measurements in
   `timezone.utc` / `utcnow` / `astimezone`) — but nothing pins that invariant,
   so the first agent to record an aware stamp discovers it at runtime.
   Caught in: turn head/tail timing final review.
+
+- [ ] **`claude-code` does not subtract tool execution from its generation
+  windows, and the premise for that is measurably wrong.** The other four
+  harnesses subtract the union (`timing.py::busy_ms`); claude-code is exempted
+  on the reasoning that it "marks the end of the previous SDK event and reads
+  again when the next message arrives, so a tool's execution falls between two
+  windows rather than inside one". But a tool's timer starts at the **emission**
+  carrying its `tool_use` block, and one assistant turn spans several emissions,
+  so a later emission's window runs concurrently with a tool already timing.
+  Measured live on a task with five parallel writes, five reads and two
+  concurrent `Bash` calls: the generation/tool overlap was **482 ms and 340 ms**
+  on two ~18-25 s turns, and the four-bucket residual came out at exactly
+  `-481 ms` / `-339 ms` — the overlap accounts for it to within 1.4 ms. The
+  other four harnesses overlapped by ~2.0-2.3 s on the same task and reconciled
+  to within 1.2 ms. Two claude-code turns with <1 ms of overlap reconciled to
+  within 0.1 ms, so the fault is precisely the missing subtraction.
+  Fix is to apply `busy_ms` in `on_assistant_message` as the other four do, but
+  it changes a PUBLISHED `generation_duration_ms` on the most-used harness, so
+  it needs its own golden regeneration and live pass. NOT introduced by the
+  head/tail work — generation-vs-tool timing predates it — but that work's
+  four-bucket identity is what made it visible.
+  Caught in: post-merge live verification of the head/tail buckets.
