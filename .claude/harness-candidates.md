@@ -551,3 +551,35 @@ divergences, so the deferred-work record is one place. Measurements in
   candidate — a real bug needing its own change, with a decision about
   whether legacy records can be distinguished from current ones at all.
   Caught in: timing-capture final review (gpt-5.6-sol).
+
+- [ ] **No golden-corpus assertion of the four-bucket identity**, which is what
+  would have caught the worst defect of the head/tail work (head and tail were
+  not tool-subtracted, so an orphaned or window-straddling tool was booked
+  twice — `antigravity_d_orphaned_tool` reconciled at **-86% of wall clock**
+  and every one of the 72 golden tests passed). The check itself is three
+  lines in `assert_timing_captured`: `Σ generation + ∪ tool + head + tail` must
+  not exceed `duration_seconds`. It is blocked because **5 of 27 fixtures stamp
+  their generations on a clock that is not commensurable with their agent
+  events** — the codex scenarios hardcode `2027-01-15` while the agent events
+  are stamped `now()`, giving a head of ~126 days, and `opencode_b` and
+  `claude_i` are similar. Adding the assertion today means a 5-entry
+  suppression list, i.e. a guard that is off for the harnesses most likely to
+  break it. The real fix is to make the fixtures use one clock; then the
+  invariant costs three lines. Caught in: turn head/tail timing final review.
+
+- [ ] **No TypeScript counterpart to CE058.** `evalboard/lib/runs.ts` and
+  `_sections.tsx` carry the same None-vs-0 contract as the Python side, and
+  `sumMeasured` implements it correctly, but nothing stops the next author
+  writing `?? 0` where an unmeasured value must stay null. Not a simple lint
+  rule: the residual arithmetic in `_sections.tsx` uses `?? 0` *correctly*
+  (subtract only what was measured), so a blanket ban fires on right code and
+  the rule needs a way to tell "publishing a value" from "consuming one".
+  Caught in: turn head/tail timing final review.
+
+- [ ] **`timing.py::decompose_turn` raises an uncaught `TypeError` on a
+  naive/aware datetime mix**, straight out of `EventCollector.build_turn_record`,
+  killing the turn. Unreachable today — every stamp in `agents/` and
+  `streaming/` is a naive `datetime.now()` (verified by grep: zero hits for
+  `timezone.utc` / `utcnow` / `astimezone`) — but nothing pins that invariant,
+  so the first agent to record an aware stamp discovers it at runtime.
+  Caught in: turn head/tail timing final review.
