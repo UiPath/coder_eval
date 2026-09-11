@@ -141,8 +141,23 @@ class EventCollector:
         the list is not ordered by time — Codex appends recovered sub-agent
         messages after the parent's last flush. Positional access made the
         result depend on append order, which nothing enforces.
+
+        MAIN THREAD ONLY, the third restriction and the same rule its two
+        sibling call sites already apply (``codex_agent._token_usage_from_messages``
+        and ``scripts/timing/decompose_run.py``). A sub-agent's generations
+        carry the spawning Agent call's ``parent_tool_use_id``, and the identity
+        these two values complete sums generation over the main thread ONLY —
+        the parent tool call's own interval already spans the sub-agent's whole
+        run. Bracketing the span with a sub-agent message therefore shrinks the
+        head or the tail by time no other bucket claims, and Codex's recovered
+        child messages carry the CHILD's clock, so the bracket can move either
+        way. Excluding them keeps all four buckets measuring one thread.
         """
-        generations = [m for m in messages if isinstance(m, AssistantMessage) and m.generation_duration_ms is not None]
+        generations = [
+            m
+            for m in messages
+            if isinstance(m, AssistantMessage) and m.generation_duration_ms is not None and m.parent_tool_use_id is None
+        ]
         if not generations:
             return None, None
         return decompose_turn(
