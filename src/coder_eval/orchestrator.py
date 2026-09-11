@@ -2569,13 +2569,13 @@ class Orchestrator:
         # RAISES rather than returning an empty list, matching the evaluate-only
         # path's refusal. The empty-list version described itself as a
         # "defensive no-op so the gate holds", and it was neither: both callers
-        # go straight on to `all_criteria_passed`, whose first act is a
-        # length pre-check that raises on a mismatch — and an empty criteria
-        # list is forbidden by `TaskDefinition.validate_success_criteria`, so
-        # the mismatch was guaranteed. If the simulation restriction ever lifts,
-        # that "no-op" turns every ungraded dialog into FinalStatus.ERROR. A
-        # loud refusal here is honest about the fact that this path has no
-        # ungraded semantics yet.
+        # go straight on to `all_criteria_passed`/`calculate_weighted_score`,
+        # which treat an empty criteria list as a vacuous pass/0.0 rather than
+        # raising, so a silent no-op here would produce a criteria-free dialog
+        # that scores as though nothing had been asked of the agent. If the
+        # simulation restriction ever lifts, that "no-op" turns every ungraded
+        # dialog into a silently-passing one. A loud refusal here is honest
+        # about the fact that this path has no ungraded semantics yet.
         if not self.grade:
             raise ValueError(
                 "Grading is disabled but the simulation dialog path requires criteria results to "

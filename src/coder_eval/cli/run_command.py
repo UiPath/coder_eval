@@ -366,6 +366,18 @@ def run_command(
             "harbor --run-dir <harbor agent's logs dir>`, invoked by a Harbor agent."
         ),
     ),
+    workspace_dir: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--workspace-dir",
+        help=(
+            "Run the single resolved task's agent in-place at this absolute path instead of the "
+            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
+            "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
+            "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
+            "container's own WORKDIR, where Harbor's verifier phase looks for them."
+        ),
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -417,6 +429,7 @@ def run_command(
         driver=driver,
         set_overrides=set_overrides,
         format=format,
+        workspace_dir=workspace_dir,
     )
 
 
@@ -446,6 +459,7 @@ def run_pipeline(
     driver: str | None,
     set_overrides: list[str],
     format: str | None = None,
+    workspace_dir: Path | None = None,
 ) -> None:
     """The shared body of ``coder-eval run`` and ``coder-eval execute``.
 
@@ -530,6 +544,7 @@ def run_pipeline(
                 junit_xml=junit_xml,
                 grade=grade,
                 format=format,
+                workspace_dir=workspace_dir,
             )
         )
     except KeyboardInterrupt:
@@ -558,6 +573,7 @@ async def _run_all_tasks(
     junit_xml: Path | None = None,
     grade: bool = True,
     format: str | None = None,
+    workspace_dir: Path | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -589,6 +605,12 @@ async def _run_all_tasks(
             without knowing coder-eval's internal `<variant>/<task_id>/<replicate>/`
             nesting. Multi-task runs are left nested only — there is no single
             trajectory to promote.
+        workspace_dir: Run the single resolved task's agent in-place at this path
+            instead of run_dir/artifacts (see `BatchRunConfig.workspace_dir` and
+            `Orchestrator.workspace_dir`). Meant for a `CoderEvalAgent` invocation
+            inside a container someone else already built (Harbor's), so the
+            agent's writes land where that container's own verifier looks for
+            them, rather than in a throwaway tempdir the verifier never sees.
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -615,6 +637,7 @@ async def _run_all_tasks(
         verbose=verbose,
         include_skipped=include_skipped,
         grade=grade,
+        workspace_dir=workspace_dir,
     )
 
     from ..telemetry import flush_telemetry, track_event

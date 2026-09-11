@@ -21,8 +21,13 @@ Design, per ``tmp/harborframework.md``'s "Scoping note — Part A revisited":
   installed ``harbor`` package's ``populate_context_post_run``: it writes to
   ``self.logs_dir / "trajectory.json"`` on the HOST side, after the container
   syncs back). This class instead has coder-eval write it directly inside the
-  container at the mirrored path, so no separate "workspace_dir" plumbing is
-  needed for v1 (Gap 2's accepted workaround).
+  container at the mirrored path.
+- ``--workspace-dir "$(pwd)"`` (Gap 2's real fix, not a workaround): without
+  it, ``coder-eval execute``'s own ``tempdir`` sandbox writes the agent's
+  workspace to a throwaway ``mkdtemp()`` elsewhere in the container, never
+  where Harbor's verifier phase (``tests/test.sh``) looks (the container's
+  ``WORKDIR``) — confirmed live, agent output was real but every criterion
+  scored 0 as "file does not exist". See ``run()``'s docstring.
 
 Verified against a real ``harbor==0.22.0`` install (``tmp/harbor-venv``):
 ``BaseAgent.name()`` is a ``@staticmethod``; ``run()`` returns ``None`` and
@@ -101,11 +106,25 @@ class CoderEvalAgent(BaseInstalledAgent):
         both from the same source), so there is nothing to forward. Token/cost
         totals are filled in afterward by ``populate_context_post_run``, not
         here, matching every other installed agent's convention.
+
+        ``--workspace-dir "$(pwd)"``: without it, ``coder-eval execute``'s own
+        ``tempdir`` sandbox (the agent-phase task.yaml forces ``driver:
+        tempdir`` — see ``packager._write_agent_phase_task_yaml``) writes the
+        agent's workspace to a fresh ``mkdtemp()`` elsewhere in the container,
+        NOT at the image's ``WORKDIR`` -- which is exactly where Harbor's own
+        verifier phase (``tests/test.sh``) looks for the agent's output.
+        ``$(pwd)`` is resolved by the container's shell at exec time, not by
+        this Python process, and equals the WORKDIR because ``environment.exec``
+        is not given an explicit ``cwd`` (Docker execs default to the image's
+        configured WORKDIR). Confirmed live: without this flag the agent wrote
+        real output but the verifier scored every criterion 0 with "file does
+        not exist", because it never left the tempdir.
         """
         del instruction, context  # nothing to forward; context is populated post-run
         run_dir = self.environment_logs_dir.as_posix()
         command = (
-            f"coder-eval execute {shlex.quote(AGENT_TASK_YAML_PATH)} --format harbor --run-dir {shlex.quote(run_dir)}"
+            f"coder-eval execute {shlex.quote(AGENT_TASK_YAML_PATH)} --format harbor "
+            f'--run-dir {shlex.quote(run_dir)} --workspace-dir "$(pwd)"'
         )
         await self._exec(environment, command)
 

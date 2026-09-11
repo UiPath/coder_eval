@@ -192,6 +192,18 @@ def execute_command(
             "`coder-eval execute --format harbor --run-dir <its logs dir>` invocation passes."
         ),
     ),
+    workspace_dir: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--workspace-dir",
+        help=(
+            "Run the single resolved task's agent in-place at this absolute path instead of the "
+            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
+            "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
+            "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
+            "container's own WORKDIR, where Harbor's verifier phase looks for them."
+        ),
+    ),
 ) -> None:
     """Run evaluation tasks WITHOUT checking their success criteria.
 
@@ -245,4 +257,5 @@ def execute_command(
         driver=driver,
         set_overrides=set_overrides,
         format=format,
+        workspace_dir=workspace_dir,
     )

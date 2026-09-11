@@ -117,6 +117,19 @@ async def run_batch(
 
     start_time = datetime.now()
 
+    if config.workspace_dir is not None:
+        if len(resolved_tasks) != 1:
+            raise ValueError(
+                f"--workspace-dir requires exactly one resolved task; got {len(resolved_tasks)}. "
+                + "It names a single in-place directory every task would otherwise collide on."
+            )
+        (_workspace_dir_task,) = resolved_tasks
+        if _workspace_dir_task.task.sandbox is not None and _workspace_dir_task.task.sandbox.driver == "docker":
+            raise ValueError(
+                "--workspace-dir is not for sandbox.driver: docker tasks -- the docker driver already "
+                + "aligns automatically via sandbox.docker.working_dir (see DockerRunner)."
+            )
+
     check_pricing_coverage(resolved_tasks)
 
     if on_batch_start is not None:
@@ -187,6 +200,7 @@ async def run_batch(
                         config_lineage=rt.config_lineage,
                         replicate_index=rt.replicate_index,
                         grade=config.grade,
+                        workspace_dir=config.workspace_dir,
                     )
                     result = await orchestrator.run()
                 tr = TaskResult(

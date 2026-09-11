@@ -792,11 +792,3 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
                 normalized.append(item)
             return normalized
         return v
-
-    @field_validator("success_criteria")
-    @classmethod
-    def validate_success_criteria(cls, v: Any) -> Any:
-        """Ensure at least one success criterion is defined."""
-        if not v:
-            raise ValueError("At least one success criterion must be defined")
-        return v

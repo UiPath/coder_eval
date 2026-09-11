@@ -3,4 +3,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends coreutils && rm
 
 WORKDIR /app
 
-COPY agent_task.yaml /opt/coder-eval-task/task.yaml
+COPY task.yaml /opt/coder-eval-task/task.yaml

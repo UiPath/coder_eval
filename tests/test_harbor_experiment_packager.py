@@ -80,7 +80,7 @@ class TestRunLimitOnlyVariants:
         assert "timeout_sec = 60" in (fast_dir / "task.toml").read_text(encoding="utf-8")
         assert "timeout_sec = 900" in (slow_dir / "task.toml").read_text(encoding="utf-8")
 
-    def test_variant_prompt_override_lands_in_instruction_md(self, tmp_path: Path) -> None:
+    def test_variant_prompt_override_lands_in_environment_task_yaml(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
         exp_file = _write_experiment(
             tmp_path,
@@ -96,8 +96,14 @@ class TestRunLimitOnlyVariants:
         result = export_experiment([task_file], exp_file, out_dir)
 
         assert len(result.exported) == 1
+        # instruction.md is a fixed placeholder now -- the real (overridden) prompt
+        # lands in environment/task.yaml instead.
         instruction = (out_dir / "rewritten" / "greet" / "instruction.md").read_text(encoding="utf-8")
-        assert "howdy" in instruction
+        assert "howdy" not in instruction
+        emitted = yaml.safe_load(
+            (out_dir / "rewritten" / "greet" / "environment" / "task.yaml").read_text(encoding="utf-8")
+        )
+        assert emitted["initial_prompt"] == "Write 'howdy' to greeting.txt."
 
 
 class TestUnhonorableOverridesAreSkipped:
