@@ -610,3 +610,23 @@ divergences, so the deferred-work record is one place. Measurements in
   head/tail work — generation-vs-tool timing predates it — but that work's
   four-bucket identity is what made it visible.
   Caught in: post-merge live verification of the head/tail buckets.
+
+### Deferred lint-rule widenings
+
+- [ ] **CE058 and CE059 still match `AssistantMessage` by a hardcoded constructor
+  NAME LIST** (`_MESSAGE_CONSTRUCTORS`), where CE060 derives the set from each
+  module's own `coder_eval.models` imports. The weakness is live, not
+  theoretical: `claude_code_agent.py` binds *only*
+  `AssistantMessage as AssistantMessageTelemetry` and never the bare name, so
+  the two shipped rules guard that file's two construction sites purely because
+  somebody wrote the current alias into a different file's frozenset — rename
+  the alias and both go silently blind there — and an arbitrary
+  `AssistantMessage as Msg` is missed outright by both. Adopting CE060's
+  alias-resolving `check()` pre-pass is about ten lines per rule, but it widens
+  two SHIPPED rules whose firing sets are load-bearing (CE058's constructor set
+  is a different, wider one: `CommandTelemetry`, `SlowestCommandInfo`,
+  `TurnRecord`), so it needs its own mutation check per rule and a re-measured
+  firing set over all of `src/`, not a drive-by edit. If a fourth same-scope
+  kwarg rule ever lands, extract `tests/lint/rules/_message_calls.py` at that
+  point rather than sooner.
+  Caught in: the CE060 / antigravity `message_id` run.

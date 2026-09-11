@@ -37,6 +37,7 @@ from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLitera
 from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 from tests.lint.rules.ce058_no_timing_literal import NoTimingLiteral
 from tests.lint.rules.ce059_generation_window_is_two_reads import GenerationWindowIsTwoReads
+from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -97,6 +98,7 @@ ALL_RULES: list[RuleClass] = [
     SidecarShimStdlibOnly,
     NoTimingLiteral,
     GenerationWindowIsTwoReads,
+    MessageIdDeclared,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule
