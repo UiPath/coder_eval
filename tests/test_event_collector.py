@@ -497,6 +497,17 @@ class TestHarnessOverheadBuckets:
         )
 
     @staticmethod
+    def _subagent_msg(started: datetime, completed: datetime) -> AssistantMessage:
+        """A sub-agent generation: same shape, tagged with the spawning Agent
+        call's tool_use_id. Its time is already inside that call's interval."""
+        return AssistantMessage(
+            started_at=started,
+            completed_at=completed,
+            generation_duration_ms=1.0,
+            parent_tool_use_id="toolu_agent",
+        )
+
+    @staticmethod
     def _tool(started: datetime, completed: datetime, tool_id: str = "t1") -> ToolEndEvent:
         return ToolEndEvent(
             task_id=TASK_ID,
@@ -537,6 +548,40 @@ class TestHarnessOverheadBuckets:
         )
         assert rec.harness_startup_ms == pytest.approx(2000.0)
         assert rec.harness_teardown_ms == pytest.approx(4000.0)
+
+    def test_a_sub_agent_generation_does_not_move_the_bracket(self):
+        """MAIN THREAD ONLY, the rule the two sibling call sites already apply.
+
+        The identity these buckets complete sums generation over the main
+        thread only — a sub-agent's run is already inside its parent Agent
+        call's interval. Letting a sub-agent message bracket the span shrinks
+        the head or the tail by time no bucket then claims, and Codex's
+        recovered child messages carry the CHILD's clock, so the bracket can
+        move either way.
+        """
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [
+                self._msg(t0.replace(second=2), t0.replace(second=5)),
+                # Stamps outside the main thread's own span, in both directions.
+                self._subagent_msg(t0.replace(second=1), t0.replace(second=8)),
+            ],
+            start=t0,
+            end=t0.replace(second=9),
+        )
+        assert rec.harness_startup_ms == pytest.approx(2000.0)
+        assert rec.harness_teardown_ms == pytest.approx(4000.0)
+
+    def test_a_turn_whose_only_generations_are_sub_agent_reports_no_overhead(self):
+        """No main-thread window means nothing was measured — None, not 0.0."""
+        t0 = datetime(2026, 1, 1, 12, 0, 0)
+        rec = self._record(
+            [self._subagent_msg(t0.replace(second=2), t0.replace(second=5))],
+            start=t0,
+            end=t0.replace(second=9),
+        )
+        assert rec.harness_startup_ms is None
+        assert rec.harness_teardown_ms is None
 
     def test_a_turn_with_no_generation_says_so_rather_than_claiming_zero(self):
         """None means never measured; 0.0 would mean measured-and-instant (CE058)."""
