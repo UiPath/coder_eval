@@ -1546,7 +1546,7 @@ class TestBusyMs:
         return _CLOCK_BASE + timedelta(milliseconds=ms)
 
     def _busy(self, spans, lo=0, hi=10_000) -> float:
-        from coder_eval.agents._timing import busy_ms
+        from coder_eval.timing import busy_ms
 
         return busy_ms([(self._at(s), self._at(e)) for s, e in spans], self._at(lo), self._at(hi))
 

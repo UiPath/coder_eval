@@ -25,6 +25,8 @@
   "crash_reason": null,
   "crashed": false,
   "duration_seconds": "<scrubbed>",
+  "harness_startup_ms": "<scrubbed>",
+  "harness_teardown_ms": "<scrubbed>",
   "iteration": 1,
   "max_turns_exhausted": false,
   "messages": [

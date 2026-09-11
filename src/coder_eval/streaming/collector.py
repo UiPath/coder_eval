@@ -22,6 +22,8 @@ reading the return value (and ``pending_turn`` on crash), now event-derived.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from coder_eval.models import (
     AssistantMessage,
     CommandTelemetry,
@@ -37,6 +39,7 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     TurnStartEvent,
 )
+from coder_eval.timing import decompose_turn
 
 
 class EventCollector:
@@ -54,6 +57,8 @@ class EventCollector:
         self._user_input: str = ""
         self._model: str | None = None
         self._turn_starts: int = 0
+        # Stamped by AgentStartEvent; the head is measured from it.
+        self._agent_start_at: datetime | None = None
         # tool_id -> finalized telemetry (last ToolEnd wins, mirroring last-result-wins).
         self._commands: dict[str, CommandTelemetry] = {}
         self._agent_end: AgentEndEvent | None = None
@@ -71,6 +76,7 @@ class EventCollector:
         if isinstance(event, AgentStartEvent):
             self._iteration = event.iteration
             self._user_input = event.prompt
+            self._agent_start_at = event.timestamp
             if event.model:
                 self._model = event.model
         elif isinstance(event, TurnStartEvent):
@@ -102,6 +108,25 @@ class EventCollector:
 
     def _ordered_commands(self) -> list[CommandTelemetry]:
         return sorted(self._commands.values(), key=lambda c: c.sequence_number)
+
+    def _overhead_ms(self, messages: list[TranscriptMessage]) -> tuple[float | None, float | None]:
+        """The turn's head and tail — the wall clock the generations do not cover.
+
+        Measured against the FIRST and LAST ``AssistantMessage``, not
+        ``messages[0]`` / ``messages[-1]``: a simulation turn interleaves
+        ``UserMessage`` entries, and a reconciled turn ends with a
+        ``ReconciliationMessage`` that carries no timestamps at all, so indexing
+        the raw list would measure the wrong thing or raise.
+        """
+        generations = [m for m in messages if isinstance(m, AssistantMessage)]
+        if not generations:
+            return None, None
+        return decompose_turn(
+            generations[0].started_at,
+            generations[-1].completed_at,
+            self._agent_start_at,
+            self._agent_end.timestamp if self._agent_end is not None else None,
+        )
 
     @staticmethod
     def _reconciled_messages(messages: list[TranscriptMessage], usage: TokenUsage) -> list[TranscriptMessage]:
@@ -193,6 +218,8 @@ class EventCollector:
         if token_usage is not None:
             messages = self._reconciled_messages(messages, token_usage)
 
+        startup_ms, teardown_ms = self._overhead_ms(messages)
+
         return TurnRecord(
             iteration=end.iteration or self._iteration,
             user_input=end.user_input or self._user_input,
@@ -208,4 +235,6 @@ class EventCollector:
             result_summary=end.result_summary,
             crashed=end.crashed,
             crash_reason=end.crash_reason,
+            harness_startup_ms=startup_ms,
+            harness_teardown_ms=teardown_ms,
         )

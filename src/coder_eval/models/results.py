@@ -325,6 +325,29 @@ class TurnRecord(BaseModel):
     )
     timestamp: datetime = Field(default_factory=datetime.now, description="When this turn occurred")
     duration_seconds: float = Field(default=0.0, description="How long this turn took")
+    harness_startup_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds between the agent turn starting and the first generation window "
+            "opening, measured between AGENT EVENT stamps — not from timestamp/duration_seconds "
+            "above, which are orchestrator-level and a slightly different clock, so a consumer "
+            "recomputing this from those will get a near-but-not-equal number. Its COMPOSITION "
+            "differs per harness and is deliberately not decomposed: on an in-process SDK the "
+            "first window already covers dispatch and time-to-first-token so this reads ~0, while "
+            "on a subprocess harness it fuses CLI boot, provider resolution, dispatch and TTFT, "
+            "which the event stream gives no marker to separate. See docs/agents/HARNESS_PARITY.md. "
+            "None when the turn produced no assistant message — never 0.0, which would mean "
+            "'measured, and instant'."
+        ),
+    )
+    harness_teardown_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds between the last generation window closing and the agent turn "
+            "ending: SDK/CLI finalization, result assembly and process teardown. Same clock "
+            "caveat as harness_startup_ms. None when the turn produced no assistant message."
+        ),
+    )
     token_usage: TokenUsage | None = Field(
         default=None, description="Token usage for this turn (if available from agent SDK)"
     )

@@ -5,6 +5,8 @@
   "crash_reason": "CLI process failed (exit code 1): bad config",
   "crashed": true,
   "duration_seconds": "<scrubbed>",
+  "harness_startup_ms": null,
+  "harness_teardown_ms": null,
   "iteration": 1,
   "max_turns_exhausted": false,
   "messages": [],
