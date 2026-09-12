@@ -54,15 +54,19 @@ COPY src/ ./src/
 # experiments/default.yaml is force-included by hatchling per pyproject.toml.
 COPY experiments/default.yaml ./experiments/default.yaml
 
-# Codex, Antigravity, and litellm are always baked into the image -- codex/
-# antigravity are peers to the claude-code agent installed above; litellm backs
-# the `checker_context.api_route.route: litellm` judge dispatch (see
-# pyproject.toml's `litellm` extra), which every DockerRunner-isolated task
-# needs available IN-container since the checker runs there too, not just on the
-# host. `openai-codex` (+ its pinned cli-bin), `google-antigravity` (which
-# bundles its `localharness` binary as a manylinux wheel), and `litellm` all
+# Codex, Antigravity, litellm, and harbor are always baked into the image --
+# codex/antigravity are peers to the claude-code agent installed above;
+# litellm backs the `checker_context.api_route.route: litellm` judge dispatch
+# (see pyproject.toml's `litellm` extra), which every DockerRunner-isolated
+# task needs available IN-container since the checker runs there too, not
+# just on the host; harbor lets this same image double as a Harbor agent
+# image (`coder_eval.harbor.agent:CoderEvalAgent`, a
+# `harbor.agents.installed.base.BaseInstalledAgent` subclass -- see
+# src/coder_eval/harbor/agent.py) without a separate build. `openai-codex`
+# (+ its pinned cli-bin), `google-antigravity` (which bundles its
+# `localharness` binary as a manylinux wheel), `litellm`, and `harbor` all
 # come from public PyPI, so this needs no private-index credentials. The RUN
-# below always passes `--extra codex --extra antigravity --extra litellm`.
+# below always passes `--extra codex --extra antigravity --extra litellm --extra harbor`.
 #
 # `pi` IS baked above (pinned PI_VERSION) and its OPENROUTER_API_KEY provider
 # credential is in DockerDriverConfig.env_passthrough, so `--driver docker --type pi`
@@ -90,7 +94,7 @@ ARG SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="openai-codex-cli-bin,openai-codex
 # All extras (codex, antigravity, litellm, and the opt-in uipath) resolve from
 # public PyPI per uv.lock, so the build needs no private-index credentials.
 RUN export SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS="${SAFE_CHAIN_MINIMUM_PACKAGE_AGE_EXCLUSIONS}" && \
-    uv export --frozen --extra codex --extra antigravity --extra litellm ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
+    uv export --frozen --extra codex --extra antigravity --extra litellm --extra harbor ${CODER_EVAL_UV_EXTRAS} | uv pip install --system -r /dev/stdin
 
 # Sanity check: the in-container entrypoint subcommand must be wired up.
 RUN coder-eval _run-task-internal --help > /dev/null
