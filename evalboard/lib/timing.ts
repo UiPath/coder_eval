@@ -165,28 +165,43 @@ export function busyMs(
     return total + (openEnd - openStart);
 }
 
-// Wall-clock milliseconds these messages' tool calls occupied.
+// Wall-clock milliseconds these messages' tool calls occupied: the UNION of
+// their BOUNDED execution intervals.
 //
-// Bounded calls are UNIONED — concurrent tools occupy the wall clock once, and
-// summing them drove the task page's Unaccounted cell to -615ms on a task with
-// two concurrent sleeps, where the honest answer was +2.5s of sandbox setup and
-// grading. A call the harness timed but did not bound contributes its own
-// `durationMs`, which is the best available statement about it and reproduces
-// the previous behaviour for that call alone.
+// Concurrent tools occupy the wall clock once, and summing them drove the task
+// page's Unaccounted cell to -615ms on a task with two concurrent sleeps, where
+// the honest answer was +2.5s of sandbox setup and grading.
+//
+// A call the harness TIMED but did not BOUND contributes nothing — no
+// `durationMs` fallback. That is a policy, and it is the same one
+// `coder_eval.timing.main_thread_tool_spans` has always had on the Python side:
+// its `is not None` filter drops a command with no `execution_started_at` /
+// `execution_completed_at`, so every Python surface already ignored these while
+// this function folded them in. A duration with no bounds cannot be placed on
+// the timeline, so it cannot be unioned with anything; adding it to a union
+// double-books whatever it overlapped and can drive the residual negative,
+// which destroys the disjointness the four-bucket identity rests on. Such time
+// lands in Unaccounted instead, which is precisely what that cell is for — the
+// harness measured a duration it cannot place.
+//
+// Measured blast radius: 9336 of 12170 commands in the run history on disk are
+// unbounded, every one a codex `Bash`, ~8 h in aggregate. That population is
+// CLOSED — codex went from 0% bounded before 2026-09-10 to 100% after — so no
+// future run changes, but on historical codex runs this moves up to ~8 h out of
+// Tool exec and into Unaccounted. Going forward the only harness reporting a
+// bare duration is the out-of-tree `delegate-sdk`; see
+// docs/agents/HARNESS_PARITY.md.
 export function toolExecutionMs(messages: MessageEvent[]): number {
     const spans: [number, number][] = [];
-    let unbounded = 0;
     for (const m of messages) {
         for (const t of m.toolUses) {
             if (t.execStartMs != null && t.execEndMs != null) {
                 spans.push([t.execStartMs, t.execEndMs]);
-            } else if (t.durationMs != null) {
-                unbounded += t.durationMs;
             }
         }
     }
-    if (spans.length === 0) return unbounded;
+    if (spans.length === 0) return 0;
     const lo = Math.min(...spans.map(([s]) => s));
     const hi = Math.max(...spans.map(([, e]) => e));
-    return busyMs(spans, lo, hi) + unbounded;
+    return busyMs(spans, lo, hi);
 }

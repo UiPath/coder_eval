@@ -538,6 +538,12 @@ divergences, so the deferred-work record is one place. Measurements in
   Coverage is ~88%, so it is not urgent. The agent lives in the separate
   `coder_eval_uipath` repo; mirror the Codex change there
   (`_item_timing` + threading the SDK stamps through the telemetry builders).
+  **Consequence, as of the turn-timing consolidation (2026-09-12):** such a
+  call now contributes to no bucket on EITHER surface — the evalboard's
+  `toolExecutionMs` lost its `durationMs` fallback, matching the `is not None`
+  filter Python has always had — so the time reads as Unaccounted rather than
+  as tool execution. Pinned by `unbounded_cases` in
+  `tests/_fixtures/timing_union_cases.json`, which both suites replay.
 
 - [ ] **Pre-existing, surfaced by this work's final review: `TokenUsage._adopt_legacy_input_tokens`
   double-counts the cache buckets.** The validator copies a legacy record's

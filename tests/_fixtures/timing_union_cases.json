@@ -15,7 +15,18 @@
     "spans' own min/max. Python replays it through coder_eval.timing.union_ms;",
     "TypeScript through evalboard/lib/timing.ts::toolExecutionMs, which derives",
     "that extent itself rather than being handed one — which is exactly why it",
-    "needs its own cases instead of being assumed to agree."
+    "needs its own cases instead of being assumed to agree.",
+    "",
+    "`unbounded_cases` pins the POLICY rather than the arithmetic: a tool call",
+    "the harness TIMED but did not BOUND contributes NOTHING to the union, on",
+    "both sides. `unbounded_ms` lists such calls; `expected_ms` is the union of",
+    "`spans` alone, so a side that folds them back in fails. A duration with no",
+    "start and end cannot be placed on the timeline, so it cannot be unioned",
+    "with anything — adding it double-books whatever it overlapped and can drive",
+    "the four-bucket residual negative. Its time reads as Unaccounted, which is",
+    "what that cell means. Python replays these through the production selector",
+    "coder_eval.timing.main_thread_tool_spans (the `is not None` filter IS the",
+    "policy), not through union_ms alone; TypeScript through toolExecutionMs."
   ],
   "cases": [
     {
@@ -154,6 +165,38 @@
       "name": "the extent is the spans' own bounds, not a window",
       "spans": [[10000, 10250]],
       "expected_ms": 250
+    }
+  ],
+  "unbounded_cases": [
+    {
+      "name": "a timed call with no bounds contributes nothing",
+      "spans": [],
+      "unbounded_ms": [250],
+      "expected_ms": 0
+    },
+    {
+      "name": "several unbounded calls still contribute nothing",
+      "spans": [],
+      "unbounded_ms": [250, 1000, 30],
+      "expected_ms": 0
+    },
+    {
+      "name": "one bounded call beside an unbounded one is just the bounded one",
+      "spans": [[1000, 2000]],
+      "unbounded_ms": [250],
+      "expected_ms": 1000
+    },
+    {
+      "name": "overlapping bounded calls union, and the unbounded one is still dropped",
+      "spans": [[1000, 6000], [2000, 7000]],
+      "unbounded_ms": [5000],
+      "expected_ms": 6000
+    },
+    {
+      "name": "an inverted pair is dropped by both sides, like an unbounded one",
+      "spans": [[900, 400], [1000, 2000]],
+      "unbounded_ms": [],
+      "expected_ms": 1000
     }
   ]
 }
