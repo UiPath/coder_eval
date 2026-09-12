@@ -709,3 +709,65 @@ divergences, so the deferred-work record is one place. Measurements in
   added on pi and opencode
   (`test_the_four_bucket_identity_closes_exactly_across_the_boundary`).
   Caught in: the timing-architecture-standardization final review.
+
+## From the turn-timing P0–P3 run (2026-09-12)
+
+- [ ] **A golden scenario's justification comment can contradict its own
+  snapshot, and nothing notices.** Three did in this run: two orphan-tool
+  comments asserted bounds the committed JSON plainly carries (`pi_d`,
+  `opencode_d`), and `opencode_c`'s exemption claimed "the snapshot still
+  records the tiling" while `SCRUB_KEYS` masks both bounds and the duration.
+  Each was found by a human/model reading the JSON beside the prose — nothing
+  mechanically ties an exemption's stated reason to what its snapshot contains.
+  A rule would have to parse prose, so this is probably not guardable; the cheap
+  substitute is the review instruction that already exists ("read every new
+  snapshot before committing") plus the habit of quoting the actual JSON in the
+  comment. Caught in: turn-timing P0–P3, phases 2 and 5.
+
+- [ ] **A rationale comment asserting a now-false premise survives a ripple that
+  updated its siblings.** The "in-process SDK" claim was corrected in six files
+  and left standing in two (`test_event_collector.py`,
+  `message-timeline.test.tsx`), one of them directly beside a sibling that WAS
+  updated. Same shape as CE026/CE047 (doc-surface parity) but over a PHRASE
+  rather than a symbol, so a rule would be a phrase blocklist with an
+  ever-growing allowlist. Deferred on cost, not on value — a grep for the retired
+  phrase in the acceptance criteria is what actually caught these, and that is
+  cheap to write into a plan.
+
+- [ ] **`EventCollector` retains `_commands` and `_turn_starts` across a retry's
+  `AgentStartEvent`**, which resets only `_agent_end`. Pre-existing and NOT
+  introduced by the timing work. Blast radius is narrower than it first looks:
+  the persisted record, the reports and `max_turns` all read the AGENT's
+  collector, which is fresh per `communicate()`. Only `EarlyStopWatcher`'s
+  long-lived collector accumulates — where carrying a turn's whole engagement
+  across retry attempts is arguably what a live "did it engage the skill"
+  verdict wants, and `_check_round`'s docstring already reasons about crashed
+  attempts. Needs a decision on intent before any guard. Caught in: turn-timing
+  P0–P3 final review.
+
+- [ ] **claude-code has no `TurnClock`.** Its window bounds and span now share
+  one basis (raw `datetime.now()`), so they cannot disagree with each other —
+  but both carry the naive-local exposure `TurnClock` exists to remove: a DST
+  transition or NTP step inside a turn lands directly in a generation window,
+  and nightly runs are hours long. antigravity and pi already derive wall stamps
+  from monotonic; codex and opencode cannot (their spans are the CLI's epoch
+  stamps). claude-code is the one that could and does not. Caught in: turn-timing
+  P0–P3, phase 5.
+
+- [ ] **`pi_agent` publishes a `duration_ms` and a subtracted tool SPAN for an
+  UNRESOLVED orphan.** `_close_tool` guards on `execution_started_at is not
+  None` while its own comment claims it guards on "resolved", and the
+  `execution_completed_at` it stamps is only the instant the orphan sweep ran.
+  claude-code's `_finalize_commands` deliberately leaves the field `None` here,
+  for the reason CE058 exists. Captured in `pi_d_orphaned_tool.json`. Caught in:
+  turn-timing P0–P3, phase 2.
+
+- [ ] **`pi_agent` republishes a turn's content on a duplicate `turn_end`.**
+  `turn_text_parts` / `turn_tool_ids` are cleared only in `on_turn_start`, so a
+  second `turn_end` with no intervening start emits the previous turn's text as
+  its own assistant message and re-lists the same `tool_use_ids`. The TIMING
+  half of that same reset was deliberately fixed (`turn_started_at` moved into
+  `on_turn_end`, with a comment making exactly this argument); the content half
+  was not. Pi retries internally, so a replayed `turn_end` is a transport hiccup
+  rather than a hypothetical. Captured in `pi_f_duplicate_turn_end.json`.
+  Caught in: turn-timing P0–P3, phase 2.
