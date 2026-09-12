@@ -584,7 +584,24 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         )
 
         try:
-            emit.on_event(AgentStartEvent(task_id=task_id, prompt=user_input, iteration=self._iteration, model=model))
+            # `timestamp` from the TURN CLOCK, not the event model's raw
+            # `datetime.now()` default: this bound is subtracted against window
+            # bounds the same clock produced (`decompose_turn`), and two bases
+            # in one subtraction is what `TurnClock` exists to remove. Measured
+            # HERE: this harness's tail came out at -0.017 ms — an end stamped
+            # 17 us before its own last message finished — which clamped to the
+            # `0.0` that means "measured, and instant" (CE058). It holds its
+            # process across turns, so its true tail is ~0.1 ms, which is the
+            # only scale at which the drift between two clocks can flip a sign.
+            emit.on_event(
+                AgentStartEvent(
+                    task_id=task_id,
+                    prompt=user_input,
+                    iteration=self._iteration,
+                    model=model,
+                    timestamp=clock.now(),
+                )
+            )
 
             def _on_turn_timeout() -> None:
                 state.timeout_hit = True
@@ -1215,6 +1232,9 @@ class _AntigravityTurnState:
                 crash_reason=crash_reason,
                 max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
+                # One basis with the window bounds — see the AgentStartEvent
+                # site in `communicate`.
+                timestamp=self.clock.now(),
             )
         )
 

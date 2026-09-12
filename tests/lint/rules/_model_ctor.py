@@ -28,14 +28,12 @@ from coder_eval.models import AssistantMessage
 AGENTS_ROOT = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]agents[/\\]")
 
 _MODELS_MODULE = "coder_eval.models"
-_MODELS_TAIL = _MODELS_MODULE.rpartition(".")[2]
-
 # Taken from the model, never spelled here: a rename then moves the rules too.
 ASSISTANT_MESSAGE = AssistantMessage.__name__
 
 
-def reaches_models_module(node: ast.ImportFrom) -> bool:
-    """True if this `from ... import` reaches `coder_eval.models`.
+def reaches_module(node: ast.ImportFrom, module_path: str) -> bool:
+    """True if this `from ... import` reaches `module_path`.
 
     A relative import inside `agents/` (`from ..models import ...`) carries only
     the tail in `node.module`, so testing the absolute path alone would leave a
@@ -43,22 +41,51 @@ def reaches_models_module(node: ast.ImportFrom) -> bool:
     imports.
     """
     module = node.module or ""
-    if module.startswith(_MODELS_MODULE):
+    if module.startswith(module_path):
         return True
-    return bool(node.level) and (module == _MODELS_TAIL or module.startswith(f"{_MODELS_TAIL}."))
+    if not node.level:
+        return False
+    # A relative spelling carries only a TRAILING SLICE of the absolute path,
+    # and how much of it depends on the dot count: `from ..timing import` gives
+    # "timing", `from ..streaming.events import` gives "streaming.events". So
+    # match any suffix of the target, segment-wise, allowing the import to
+    # continue on into a submodule below it (`..models.criteria`). Comparing a
+    # single `rpartition` tail was right only while every target was
+    # one segment deep; it silently missed `coder_eval.streaming.events`
+    # entirely, which is a rule blind for a whole file rather than a near miss.
+    segments = module_path.split(".")
+    spelled = module.split(".")
+    return any(spelled[: len(segments) - i] == segments[i:] for i in range(1, len(segments)))
 
 
-def local_bindings(tree: ast.AST, class_name: str) -> set[str]:
-    """Every local name this module binds `coder_eval.models.<class_name>` to.
+def reaches_models_module(node: ast.ImportFrom) -> bool:
+    """`reaches_module` pinned to `coder_eval.models` — CE060/CE061's question."""
+    return reaches_module(node, _MODELS_MODULE)
+
+
+def bindings_from(tree: ast.AST, class_name: str, module_path: str) -> set[str]:
+    """Every local name this module binds `<module_path>.<class_name>` to.
 
     Built per file: caching it across files would leak one module's alias into
     another's matching.
+
+    Parameterized on the module because CE064 asks the identical question about
+    `coder_eval.streaming.events` and `coder_eval.timing` rather than about
+    `coder_eval.models`. Copying the resolver into it would mean a new import
+    spelling needs three fixes in three rules, and the third is the one that
+    gets missed — which is the argument this file already makes for CE060 and
+    CE061 sharing it.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and reaches_models_module(node):
+        if isinstance(node, ast.ImportFrom) and reaches_module(node, module_path):
             names.update(a.asname or a.name for a in node.names if a.name == class_name)
     return names
+
+
+def local_bindings(tree: ast.AST, class_name: str) -> set[str]:
+    """`bindings_from` pinned to `coder_eval.models` — CE060/CE061's question."""
+    return bindings_from(tree, class_name, _MODELS_MODULE)
 
 
 def constructor_name(func: ast.expr, names: set[str], class_name: str) -> str | None:

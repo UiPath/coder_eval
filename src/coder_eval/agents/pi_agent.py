@@ -768,6 +768,9 @@ class _PiTurnState:
                 crashed=crashed,
                 crash_reason=crash_reason,
                 duration_seconds=time.monotonic() - self.started_at,
+                # One basis with the window bounds — see the AgentStartEvent
+                # site in `communicate`.
+                timestamp=self.clock.now(),
             )
         )
 
@@ -1037,6 +1040,12 @@ class PiAgent(Agent[PiAgentConfig]):
                 prompt=user_input,
                 iteration=self._iteration,
                 model=self.config.model,
+                # One basis with the window bounds this is subtracted
+                # against — see `timing.TurnClock`. The event model's raw
+                # `datetime.now()` default put two clocks inside one
+                # `decompose_turn` subtraction, which clamped a -0.017 ms tail
+                # to the `0.0` that means "measured, and instant" (CE058).
+                timestamp=state.clock.now(),
             )
         )
 

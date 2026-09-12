@@ -4735,3 +4735,101 @@ class TestCE063NoBusyMsInAgents:
         target = agents / "pi_agent.py"
         target.write_text("from coder_eval.timing import busy_ms  # noqa: CE063\n", encoding="utf-8")
         assert not check_file(target, [NoBusyMsInAgents])
+
+
+class TestCE064TurnBracketOnTheClock:
+    """CE064 flags a clocked reducer that lets its turn BRACKET default.
+
+    `decompose_turn` subtracts a generation-window bound from an
+    AgentStart/AgentEnd timestamp. A harness that derives the first from a
+    `TurnClock` and lets the second fall back to `StreamEvent.timestamp`'s
+    `default_factory=datetime.now` puts two bases inside one subtraction.
+    Measured on antigravity: a tail of -0.017 ms, an agent end stamped 17 us
+    before its own last message finished, clamped to the `0.0` that means
+    "measured, and instant".
+    """
+
+    CLOCKED = "from coder_eval.timing import TurnClock\n"
+    START = "from coder_eval.streaming.events import AgentStartEvent\n"
+    END = "from coder_eval.streaming.events import AgentEndEvent\n"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
+
+        return TurnBracketOnTheClock(filepath).check(ast.parse(src))
+
+    def test_flags_a_defaulted_agent_start(self):
+        assert len(self._run(self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t', prompt='p')")) == 1
+
+    def test_flags_a_defaulted_agent_end(self):
+        assert len(self._run(self.CLOCKED + self.END + "e = AgentEndEvent(task_id='t', status=s)")) == 1
+
+    def test_flags_both_brackets_in_one_module(self):
+        src = (
+            self.CLOCKED + self.START + self.END + "a = AgentStartEvent(task_id='t')\nb = AgentEndEvent(task_id='t')\n"
+        )
+        assert len(self._run(src)) == 2
+
+    def test_accepts_an_explicit_timestamp(self):
+        src = self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t', timestamp=state.clock.now())"
+        assert not self._run(src)
+
+    def test_accepts_it_through_any_clock_expression(self):
+        """Presence, not spelling — see the rule's BLIND SPOT note.
+
+        Three harnesses reach their clock three ways (a `communicate` local,
+        `state.clock`, `self.clock`); pinning a spelling would make the rule a
+        syntax check on their internal structure.
+        """
+        for expr in ("clock.now()", "self.clock.now()", "state.clock.now()"):
+            src = self.CLOCKED + self.END + f"e = AgentEndEvent(task_id='t', timestamp={expr})"
+            assert not self._run(src), expr
+
+    def test_does_not_fire_on_an_unclocked_harness(self):
+        """Codex and OpenCode take their spans from the CLI's epoch stamps.
+
+        They deliberately have no `TurnClock`, so a raw `datetime.now()`
+        bracket is CONSISTENT with their bounds. Firing here would push them
+        toward the mixed basis the rule exists to prevent.
+        """
+        assert not self._run(self.START + "e = AgentStartEvent(task_id='t', prompt='p')")
+
+    def test_starts_applying_the_day_an_unclocked_harness_adopts_one(self):
+        # Scope is derived from the import, never a hardcoded harness list.
+        src = self.START + "e = AgentStartEvent(task_id='t')"
+        assert not self._run(src, filepath="src/coder_eval/agents/codex_agent.py")
+        assert len(self._run(self.CLOCKED + src, filepath="src/coder_eval/agents/codex_agent.py")) == 1
+
+    def test_resolves_an_aliased_import(self):
+        src = self.CLOCKED + "from coder_eval.streaming.events import AgentEndEvent as Done\n" + "e = Done(task_id='t')"
+        assert len(self._run(src)) == 1
+
+    def test_resolves_a_relative_import(self):
+        src = (
+            "from ..timing import TurnClock\nfrom ..streaming.events import AgentStartEvent\ne = AgentStartEvent(t='t')"
+        )
+        assert len(self._run(src)) == 1
+
+    def test_does_not_fire_outside_agents(self):
+        src = self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t')"
+        assert not self._run(src, filepath="src/coder_eval/streaming/collector.py")
+
+    def test_does_not_fire_on_an_unrelated_event(self):
+        src = self.CLOCKED + "from coder_eval.streaming.events import ToolEndEvent\ne = ToolEndEvent(task_id='t')"
+        assert not self._run(src)
+
+    def test_is_suppressible(self, tmp_path):
+        from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
+        from tests.lint.runner import check_file
+
+        agents = tmp_path / "src" / "coder_eval" / "agents"
+        agents.mkdir(parents=True)
+        target = agents / "pi_agent.py"
+        target.write_text(
+            self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t')  # noqa: CE064\n",
+            encoding="utf-8",
+        )
+        assert not check_file(target, [TurnBracketOnTheClock])
