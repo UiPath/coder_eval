@@ -623,6 +623,15 @@ class Orchestrator:
         agent_type = self.task.agent.type
 
         start_time = time.time()
+        # The monotonic twin of `start_time`, and the mark `setup_ms` measures
+        # from. It sits HERE rather than at `_setup()` because the phase is
+        # defined as everything before the agent runs, and the single largest
+        # item is already behind us by then: `get_version_info()` shells out for
+        # the git commit and every CLI's `--version` and costs 733 ms measured.
+        # Starting the mark at `_setup()` put that outside every named bucket,
+        # so it landed in the report's residual — 733 of the 758 ms that made
+        # "Unaccounted" look like a real unknown when it was one nameable call.
+        setup_started = time.monotonic()
         started_at = datetime.now()
 
         # Initialize result
@@ -649,7 +658,6 @@ class Orchestrator:
         with task_log_handler(task_log_file, task_id=self._log_task_id) as log_tail:
             try:
                 # Setup components
-                setup_started = time.monotonic()
                 await self._setup()
 
                 # Run pre-run commands inside the sandbox before the agent starts.
@@ -659,12 +667,14 @@ class Orchestrator:
                 # _cleanup still execute via the finally block.
                 await self._run_pre_run_commands()
                 # Everything before the agent phase, booked as ONE task-level
-                # bucket. Measured at ~1.86s on this machine for claude-code and
-                # pi alike, which is the tell that it is the orchestrator's own
-                # cost rather than any harness's: criterion discovery, sandbox
-                # setup, agent start(), pre_run. It used to land in the report's
-                # residual, where a known constant reads as unexplained time —
-                # 10% of a 19s task, and it would read 60% of a 3s one.
+                # bucket: the environment capture, criterion discovery, sandbox
+                # provisioning, agent start() and pre_run. Roughly harness-
+                # independent — measured within ~10 ms of each other for
+                # claude-code and pi on the same machine — which is the tell
+                # that it is the orchestrator's own cost rather than any
+                # harness's. It used to land in the report's residual, where a
+                # known constant reads as unexplained time: 10% of a 19s task,
+                # and it would read 60% of a 3s one.
                 self.result.setup_ms = (time.monotonic() - setup_started) * 1000.0
 
                 # Enforce task-level timeout via an OS-thread watchdog that
