@@ -454,7 +454,7 @@ export function MessageTimelineSection({
                         </div>
                         <div className="text-gray-900 font-medium">{messageCount}</div>
                     </div>
-                    <div title="wall clock before the first generation window opened. Deliberately NOT decomposed: on an in-process SDK the first window already covers dispatch and time-to-first-token so this reads ~0, while on a subprocess harness it fuses CLI boot, provider resolution, dispatch and TTFT with no marker between them. See docs/agents/HARNESS_PARITY.md.">
+                    <div title="wall clock from the turn starting until the harness first observed model output — a latency that INCLUDES time-to-first-token, and the same instant its first generation window opens. Named for the interval it measures, not for what it contains. Deliberately NOT decomposed further: a harness with a CLI to boot fuses CLI boot, provider resolution, dispatch and TTFT here, and no stream carries a marker between them. See docs/agents/HARNESS_PARITY.md.">
                         <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                             Startup
                         </div>

@@ -21,8 +21,9 @@ same invariant one level up — a turn whose stream carried no assistant message
 was never timed at either end, and a ``0.0`` there would claim the harness
 started instantly, which is exactly the reading that sends a real gap into the
 evalboard's ``Unaccounted`` cell while a named bucket says it was measured at
-zero. ``0.0`` IS the right answer for an in-process SDK whose first generation
-window already covers dispatch, so the two values must stay distinguishable.
+zero. A measured ``0.0`` remains a legitimate answer — a window subtracted
+down to nothing by the tool execution inside it, or a clamped inversion where
+both ends really were observed — so the two values must stay distinguishable.
 
 Five syntactic forms, one invariant, one id — the shapes the codebase actually
 produced:

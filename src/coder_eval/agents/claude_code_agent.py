@@ -246,6 +246,9 @@ class _ClaudeTurnState:
         self.last_assistant_message_index: int | None = None
         self.last_event_monotonic: float = turn_start_time
         self.last_event_wall: datetime = datetime.now()
+        # Re-seeded ONCE, at the first observed model output. See
+        # `_seed_first_generation_window`.
+        self.first_output_seen: bool = False
 
         # SDK ResultMessage capture.
         self.sdk_result_usage: dict[str, Any] | None = None
@@ -497,12 +500,57 @@ class _ClaudeTurnState:
                 last_msg.cache_read_tokens = int(self.sdk_result_usage.get("cache_read_input_tokens", 0) or 0)
                 last_msg.reasoning_tokens = int(self.sdk_result_usage.get("reasoning_tokens", 0) or 0)
 
+    def _seed_first_generation_window(self) -> None:
+        """Move the first window's mark to the first observed model output.
+
+        ``harness_startup_ms`` is defined as the wall clock from the turn
+        starting until the harness first observed model output, and that instant
+        is also where the first generation window opens — which is what keeps
+        the head and the generation disjoint so the four-bucket identity still
+        closes.
+
+        Without this the two marks are stamped in ``__init__``, BEFORE
+        ``AgentStartEvent`` is emitted, so the head is a small negative that
+        ``decompose_turn`` clamps to ``0.0`` — a clamped inversion published as
+        "measured, and instant", which is the exact confusion CE058 exists to
+        prevent everywhere else. Everything the CLI spent booting, resolving a
+        provider and reaching its first token was booked as msg0's generation
+        instead: ~3.6 s per turn on this harness, inflating every generation
+        figure, the Generation split and the 10 s slow-generation bar.
+
+        The old rejection rested on this harness running the model in-process.
+        It does not: ``claude-agent-sdk`` spawns the ``claude`` CLI over
+        ``anyio.open_process`` and ``_pump_messages`` calls ``query()`` once
+        per ``communicate()`` — a fresh CLI per turn, the same shape as codex,
+        opencode and pi.
+
+        ONCE PER TURN, and that is the whole contract. ``message_start`` arrives
+        for every API call in the turn; re-seeding on each would stop the
+        windows tiling and drop the gap before the next emission — a tool result
+        landing, then the next request going out — into no bucket at all, which
+        is the defect pi shipped with. The flag needs no reset: a fresh
+        ``_ClaudeTurnState`` is built per ``communicate()``, so it is
+        per-attempt by construction. If a future harness reuses a turn state,
+        the reset belongs there and not here.
+
+        A turn with no ``message_start`` — partial streaming off, a mocked
+        ``query()``, a crash before the first event — never calls this, keeps
+        the turn-entry mark and clamps to ``0.0`` exactly as before. That is the
+        correct degradation rather than a gap.
+        """
+        if self.first_output_seen:
+            return
+        self.first_output_seen = True
+        self.last_event_monotonic = time.monotonic()
+        self.last_event_wall = datetime.now()
+
     def on_stream_event(self, message: Message) -> None:
         """Recover cumulative output_tokens from raw ``message_start`` /
         ``message_delta`` stream events (handles both sub-cases internally)."""
         evt: dict[str, Any] = getattr(message, "event", None) or {}
         evt_type = evt.get("type")
         if evt_type == "message_start":
+            self._seed_first_generation_window()
             mid = (evt.get("message") or {}).get("id")
             self.current_stream_message_id = mid if isinstance(mid, str) else None
         elif evt_type == "message_delta":

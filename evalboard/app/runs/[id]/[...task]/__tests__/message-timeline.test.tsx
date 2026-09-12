@@ -726,9 +726,10 @@ describe("MessageTimelineSection — Startup and Teardown cells", () => {
     });
 
     test("a measured zero renders as 0ms, not as an em-dash", () => {
-        // claude-code and antigravity really do measure ~0 here — their first
-        // generation window already covers dispatch. "—" would report that
-        // honest measurement as a missing one.
+        // A head of 0 stays representable: a turn can reach its first model
+        // output with nothing measurable in front of it, and a clamped
+        // inversion is still a measurement because both ends were observed.
+        // "—" would report that as a missing one.
         renderStrip({
             taskDurationSeconds: 10,
             harnessStartupMs: 0,

@@ -25,8 +25,8 @@ wall clock its numbers account for.
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
 | `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock: previous `step_finish` → this one, minus tool execution inside the window | harness clock: previous `turn_end` → this one, minus tool execution inside the window |
-| what the **first** window covers | turn start → msg0, so dispatch + TTFT are INSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | turn start → first flush, so dispatch + TTFT are INSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
-| `harness_startup_ms` (turn head) | 0.0 — the window above already covers it | ~3.1 s — CLI boot fused with TTFT | 0.0 — the window above already covers it | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
+| what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
+| `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
 | `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
@@ -140,35 +140,73 @@ figures in the table above are means of six live `tasks/hello_date` turns per
 harness and move with CLI cache warmth, so read their ORDER OF MAGNITUDE, not
 the digits.
 
-What the head CONTAINS differs per harness and is deliberately **not**
-decomposed, because the divergence is real and unfixable in both directions:
+**The head means one thing on all five.** It is the wall clock from the turn
+starting until the harness first observed **model output**, and that instant is
+also where the harness opens its first generation window — which is what keeps
+the head and the generation disjoint so the four-bucket identity still closes.
+The per-harness first-output signal:
 
-- On an **in-process SDK** (claude-code, antigravity) the first generation
-  window starts at turn entry, so dispatch and time-to-first-token are already
-  inside it. Excluding them is not possible — neither harness stamps a
-  per-message arrival to fall back to, and `started_at == completed_at` would
-  be the CE059 defect. **Read their `0.0` head as "nothing is left over", not
-  as a measured interval**: the window actually opens marginally BEFORE the
-  `AgentStartEvent` stamp (claude-code builds its turn state, then
-  `_build_claude_query`, and only then emits the event), so the raw figure is
-  negative and clamps. The setup between those two points is therefore booked
-  as generation — **measured at 0.03 ms, and 0.10 ms with four plugin roots**,
-  so it is the sub-millisecond skew the clamp exists for rather than hidden
-  overhead. Emitting the event earlier would make the `0.0` a measurement
-  instead of a clamp but would not change it, since the window's start stamp
-  also precedes the build; only re-seeding the window after the build would
-  surface that time, and that is the seeding change ruled out above.
-  `TestClaudeHeadIsStructurallyZero` pins the build cost so this stays true.
-- On a **subprocess harness** (codex, opencode, pi) the first window cannot
-  start before the first event the CLI emits, so the head is one opaque
-  interval fusing CLI boot, provider resolution, dispatch and TTFT. Measured on
-  OpenCode: the process spawns in ~3 ms and its first `step_start` lands at
-  ~3.9 s, with no marker in between.
+| harness | first observed model output |
+|---|---|
+| claude-code | the first `message_start` stream event |
+| codex | the first SDK item's own start |
+| antigravity | the first `Step` |
+| opencode | the first `step_start` |
+| pi | the first `turn_start` |
+
+What the head CONTAINS still differs, and that part is deliberately **not**
+decomposed. **All five spawn a process** — the distinction is WHEN. claude-code,
+codex, opencode and pi spawn theirs per turn, so their head fuses that boot with
+provider resolution, dispatch and TTFT, and the stream carries no marker between
+them (measured on OpenCode: the process spawns in ~3 ms and its first
+`step_start` lands at ~3.9 s). Antigravity spawns its bundled `localharness`
+binary ONCE, in `start()`, and holds it across every `communicate()` — so there
+is no boot inside the turn for its head to contain, and its head is dispatch plus
+TTFT. That is a real property of the harness rather than a measurement artifact,
+which is as far as unification can honestly go.
 
 So the fields are named for the **interval they measure**, never for what they
 contain. Do not rename them `cli_boot_ms` or `ttft_ms` — that would claim a
 split nobody performed. A measured `0.0` head is an answer; `None` is what
 "never measured" looks like (a turn that produced no assistant message).
+
+**The table's head figures are SINGLE-TURN.** They are means of six live
+`tasks/hello_date` turns. A simulation (dialog) task runs each turn as its own
+`communicate()`, so on the per-turn-spawn harnesses turns 2..N book a full
+process boot *plus* session-transcript replay into `harness_startup_ms`, and
+will read well above these numbers. That is correct under the definition and is
+an improvement — the same time was previously hidden inside the first
+generation — but do not read a dialog run's larger head as a regression against
+this table.
+
+**HISTORY — why claude-code and antigravity used to report `0.0`.** Both
+stamped their first window's mark when the turn state was built, *before*
+`AgentStartEvent` was emitted, so the head was a small negative that
+`decompose_turn` clamped. The `0.0` was therefore a clamped inversion published
+as "measured, and instant" — the exact confusion CE058 exists to prevent
+everywhere else — and everything those harnesses spent before their first model
+output was booked as the first generation instead: **~3.6 s per turn on
+claude-code and ~4.7 s on antigravity**, inflating every generation figure, the
+Generation split percentages and the 10 s slow-generation bar on the two
+most-used harnesses.
+
+The re-seed was rejected once, on the premise that claude-code runs the model
+in-process so "the interval from turn entry to the first message is msg0's
+generation". That premise was simply wrong: `claude-agent-sdk` spawns the
+`claude` CLI as a subprocess (`anyio.open_process`) and `_pump_messages` calls
+`query()` once per `communicate()` — a fresh CLI per turn, the same shape as
+codex, opencode and pi. Nor was antigravity ever the in-process counterexample
+it was described as: it spawns `localharness` too, just once at `start()`
+rather than per turn.
+
+Both re-seeds are **once per turn**. `message_start` and `Step` each arrive
+many times; re-seeding on every one would stop the windows tiling and drop the
+gap before the next emission — a tool result landing, then the next request
+going out — into no bucket at all, which is the defect Pi shipped with. Neither
+flag needs a reset: both harnesses build a fresh turn state per
+`communicate()`, so it is per-attempt by construction. A turn that streams no
+`message_start` / no `Step` never re-seeds, keeps the turn-entry mark and
+clamps to `0.0` exactly as before.
 
 **Why Codex leaves `generation_completed_at` as `None`.** It means "when the
 model finished emitting the `tool_use` block". Codex's stream does not carry
@@ -222,11 +260,24 @@ the other harness where a missing id can still collapse a turn.
 
 ### Time to first token is not measured
 
-Nothing records it today. There is no `ttft` or `first_token` symbol anywhere
-in `src/`, `evalboard/`, `docs/` or `tests/`, and it **cannot be derived from
-what is stored**: `generation_duration_ms` is the whole window, and the latency
-in question is a sub-interval of it. This section is the design, so the next
-person to want it does not re-derive it. Nothing below is implemented.
+Nothing records it **as its own field** today — there is no `ttft` or
+`first_token` symbol anywhere in `src/`, `evalboard/`, `docs/` or `tests/`.
+
+But most of its value for the TURN is already delivered: `harness_startup_ms`
+now measures the wall clock up to the harness's first observed model output on
+every harness, which is a time-to-first-output latency for the first generation.
+Two things a separate `first_delta_latency_ms` would still add — and the design
+below is about both, so do not read this paragraph as retiring it:
+
+1. **Per-generation latency**, not just the first. The design measures from
+   EVERY window's mark, so it reports a first-delta latency for each emission;
+   the head covers only the interval before the first one.
+2. **The boot/prefill split** inside the head on the per-turn-spawn harnesses —
+   which is the part that genuinely cannot be derived, because no stream carries
+   a marker between them.
+
+This section is the design, so the next person to want it does not re-derive it.
+Nothing below is implemented.
 
 **The mark is the measure-from point, and every reducer already keeps one.**
 Each one records the moment its current generation window opened — which is

@@ -328,14 +328,19 @@ class TurnRecord(BaseModel):
     harness_startup_ms: float | None = Field(
         default=None,
         description=(
-            "Wall milliseconds between the agent turn starting and the first generation window "
-            "opening, measured between AGENT EVENT stamps — not from timestamp/duration_seconds "
-            "above, which are orchestrator-level and a slightly different clock, so a consumer "
-            "recomputing this from those will get a near-but-not-equal number. Its COMPOSITION "
-            "differs per harness and is deliberately not decomposed: on an in-process SDK the "
-            "first window already covers dispatch and time-to-first-token so this reads ~0, while "
-            "on a subprocess harness it fuses CLI boot, provider resolution, dispatch and TTFT, "
-            "which the event stream gives no marker to separate. See docs/agents/HARNESS_PARITY.md. "
+            "Wall milliseconds from the agent turn starting until the harness first observed "
+            "MODEL OUTPUT — one definition on all five, and the same instant at which the harness "
+            "opens its first generation window, which is what keeps the two buckets disjoint. "
+            "Measured between AGENT EVENT stamps, not from timestamp/duration_seconds above, "
+            "which are orchestrator-level and a slightly different clock, so a consumer "
+            "recomputing this from those will get a near-but-not-equal number. Only its "
+            "COMPOSITION differs per harness, and that difference is a real property rather than "
+            "a measurement artifact: a harness that spawns its process PER TURN (claude-code, "
+            "codex, opencode, pi) fuses that boot, provider resolution, dispatch and TTFT here, "
+            "while one that spawns it once at startup and holds it across turns (antigravity) has "
+            "no boot inside the turn to fuse in. It is deliberately not decomposed further "
+            "— no stream carries a marker between those parts. "
+            "See docs/agents/HARNESS_PARITY.md. "
             "None when the turn produced no assistant message — never 0.0, which would mean "
             "'measured, and instant'."
         ),

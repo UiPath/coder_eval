@@ -273,14 +273,17 @@ def decompose_turn(
     call this, because ``task.json`` carries no ``AgentStartEvent`` stamp to
     recompute a head from.
 
-    What the head CONTAINS differs per harness and is deliberately NOT split.
-    On an in-process SDK the first window already covers dispatch and
-    time-to-first-token, so this reads ~0; on a subprocess harness it fuses CLI
-    boot, provider resolution, dispatch and TTFT, and the stream carries no
-    marker between them — measured on OpenCode, the process spawns in 3 ms and
-    the first event lands at 3921 ms. Naming these for the interval they
-    MEASURE rather than for what they contain is the whole point; see
-    docs/agents/HARNESS_PARITY.md for the per-harness composition.
+    The head means ONE thing on all five: wall clock from the turn starting
+    until the harness first observed model output. Every reducer opens its first
+    generation window at that same instant, which is what keeps the two buckets
+    disjoint. What the head CONTAINS still differs and is deliberately NOT
+    split: a harness that spawns its process PER TURN fuses that boot, provider
+    resolution, dispatch and TTFT — measured on OpenCode, the process spawns in
+    3 ms and the first event lands at 3921 ms — while one that spawns it once at
+    startup and holds it across turns has no boot inside the turn to fuse in. No
+    stream carries a marker between those parts. Naming these for the
+    interval they MEASURE rather than for what they contain is the whole point;
+    see docs/agents/HARNESS_PARITY.md for the per-harness composition.
 
     Every stamp reaching this function is a naive ``datetime.now()`` — that is
     true of all of ``agents/`` and ``streaming/`` today — so a mixed pair means
