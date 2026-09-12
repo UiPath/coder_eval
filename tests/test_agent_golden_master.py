@@ -78,12 +78,24 @@ def _expect_window(harness: str, scenario_name: str) -> bool:
 # runs in well under one. No rebasing closes that; the agent's own clock would
 # have to be faked too. Everything else — every claude, antigravity and pi
 # scenario, and the codex/opencode ones that inject nothing — is checked.
+#
+# The last two entries were ADDED to buy stability, and the trade is worth
+# stating. They previously injected NO stamps at all, so `_flush_message` took
+# `_ms_to_dt(None)` for both window bounds — two adjacent `datetime.now()`
+# reads, which collide at microsecond resolution often enough that
+# `assert_timing_captured`'s `completed_at > started_at` failed roughly one run
+# in twenty under parallel load, naming a different scenario each time. Their
+# identity check was near-vacuous anyway (a window of width zero reconciles
+# trivially), so giving them real bounds trades that for a stable, meaningful
+# bounds-span assertion.
 FICTIONAL_DURATIONS: frozenset[str] = frozenset(
     {
         "codex_b_command_execution",  # 250 ms command + 150 ms generation
+        "codex_c_reasoning_placeholder",  # 300 ms of item time — see below
         "codex_d_cross_flush_is_error",  # 400 ms command
         "codex_e_orphan_tool",  # command started, never completed
         "codex_f_collab_fallback",  # 900 ms collab wait
+        "codex_h_no_turn_completed_crash",  # 200 ms of item time — see below
         "opencode_b_tool_call_resolved",  # 17 ms tool interval
     }
 )
