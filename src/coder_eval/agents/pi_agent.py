@@ -109,7 +109,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.timing import busy_ms
+from coder_eval.timing import close_window
 
 from .registry import AgentRegistry
 
@@ -573,7 +573,6 @@ class _PiTurnState:
         else:
             self.error_message = None
 
-        started = self.turn_started_at or datetime.now()
         completed = datetime.now()
         blocks: list[ContentBlock] = []
         turn_text = "".join(self.turn_text_parts)
@@ -582,23 +581,21 @@ class _PiTurnState:
         for i, tool_id in enumerate(self.turn_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
-        # A call still OPEN at this boundary counts too, bounded at `completed`.
-        # Subtracting only CLOSED intervals publishes the part of a straddling
-        # call that ran inside this window as generation, while the call's own
-        # duration_ms counts it again. No double subtraction: when the call later
-        # closes, `_finish_tool` appends its full interval to the NEXT turn's
-        # list, where busy_ms clips it to the post-boundary remainder.
-        spans = self.turn_tool_spans + [
-            (t.execution_started_at, completed) for t in self.open_tools.values() if t.execution_started_at is not None
-        ]
+        # The open calls and the double-subtraction rule they rest on live in
+        # `close_window`'s docstring.
+        started, generation_ms = close_window(
+            mark=self.turn_started_at if self.turn_started_at is not None else completed,
+            now=completed,
+            closed_spans=self.turn_tool_spans,
+            open_started_ats=[
+                t.execution_started_at for t in self.open_tools.values() if t.execution_started_at is not None
+            ],
+        )
         self.messages.append(
             AssistantMessage(
                 started_at=started,
                 completed_at=completed,
-                generation_duration_ms=max(
-                    0.0,
-                    (completed - started).total_seconds() * 1000 - busy_ms(spans, started, completed),
-                ),
+                generation_duration_ms=generation_ms,
                 content_blocks=blocks,
                 tool_use_ids=list(self.turn_tool_ids),
                 input_tokens=step_in,

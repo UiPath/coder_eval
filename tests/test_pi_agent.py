@@ -1185,3 +1185,28 @@ class TestGenerationWindowExcludesToolExecution:
             open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
         )
         assert message.generation_duration_ms == pytest.approx(200.0)
+
+    def test_the_published_window_reconciles_to_its_own_bounds(self, monkeypatch):
+        """The reducer subtracted exactly the spans the record carries.
+
+        `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
+        both recompute the tool UNION from the recorded command spans and
+        subtract it from the recorded window bounds. This asserts the reducer
+        fed the window the same set, so a span silently added or dropped on
+        the way in shows up here.
+
+        It is deliberately the narrow half: `expected` is derived from the
+        PUBLISHED bounds, so it cannot see a wrong mark, and both sides call
+        `busy_ms`, so it cannot see a union bug. Those are pinned by the cases
+        above and by tests/test_timing_close_window.py.
+        """
+        from coder_eval.timing import busy_ms
+
+        closed = [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))]
+        open_start = self.WINDOW_START + timedelta(milliseconds=500)
+        message = self._finish_turn(monkeypatch, closed, open_starts=[open_start])
+
+        spans = [*closed, (open_start, message.completed_at)]
+        span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
+        expected = span_ms - busy_ms(spans, message.started_at, message.completed_at)
+        assert message.generation_duration_ms == pytest.approx(expected)
