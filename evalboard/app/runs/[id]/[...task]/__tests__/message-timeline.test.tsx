@@ -521,8 +521,11 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
                     resultPreview: null,
                     outputTokens: null,
                     resultTokens: null,
-                    execStartMs: null,
-                    execEndMs: null,
+                    // BOUNDED. `toolExecutionMs` unions bounded intervals and
+                    // drops a bare duration, matching the Python selector, so
+                    // a durationMs-only tool would contribute 0 here.
+                    execStartMs: 0,
+                    execEndMs: 1000,
                 },
             ],
             ...overrides,
@@ -602,8 +605,8 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
             resultPreview: null,
             outputTokens: null,
             resultTokens: null,
-            execStartMs: null,
-            execEndMs: null,
+            execStartMs: 0,
+            execEndMs: 6000,
         };
         const main = makeMessage({
             index: 1,
@@ -663,11 +666,35 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
         expect(cell("Unaccounted").textContent).toBe("2.5s (26%)");
     });
 
-    test("a tool with no recorded bounds still contributes its duration", () => {
-        // Runs predating the execution bounds, and harnesses that report only
-        // a duration, must not silently drop out of the tool total.
-        renderStrip(10);
-        expect(cell("Tool exec").textContent).toBe("1.0s");
+    test("a tool with no recorded bounds contributes nothing", () => {
+        // The policy both languages now share: a duration with no start and
+        // end cannot be placed on the timeline, so it cannot be unioned with
+        // anything — folding it in double-books whatever it overlapped. Python
+        // has always dropped it (`main_thread_tool_spans` filters on
+        // `is not None`); this cell used to add it. Its time is not lost, it
+        // moves into Unaccounted, which is what that cell means.
+        renderStrip(10, {
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "tu_unbounded",
+                    summary: "ls",
+                    argText: "ls",
+                    description: null,
+                    genMs: null,
+                    durationMs: 1000,
+                    isError: false,
+                    resultPreview: null,
+                    outputTokens: null,
+                    resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
+                },
+            ],
+        });
+        expect(cell("Tool exec").textContent).toBe("0ms");
+        // 10s − 4s generation − 0s tool exec: the second is the point.
+        expect(cell("Unaccounted").textContent).toBe("6.0s (60%)");
     });
 
     test("the cell explains that the residual is not only agent time", () => {
@@ -816,8 +843,11 @@ describe("MessageTimelineSection — Startup and Teardown cells", () => {
                     resultPreview: null,
                     outputTokens: null,
                     resultTokens: null,
-                    execStartMs: null,
-                    execEndMs: null,
+                    // BOUNDED. `toolExecutionMs` unions bounded intervals and
+                    // drops a bare duration, matching the Python selector, so
+                    // a durationMs-only tool would contribute 0 here.
+                    execStartMs: 0,
+                    execEndMs: 1000,
                 },
             ],
         });

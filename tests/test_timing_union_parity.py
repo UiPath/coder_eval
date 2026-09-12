@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from coder_eval.models import CommandTelemetry
+from coder_eval.streaming.collector import main_thread_tool_spans
 from coder_eval.timing import busy_ms, union_ms
 
 
@@ -30,6 +32,7 @@ _BASE = datetime(2026, 1, 1, 12, 0, 0)
 _CORPUS = json.loads(_FIXTURE.read_text())
 _CASES = _CORPUS["cases"]
 _UNION_CASES = _CORPUS["union_cases"]
+_UNBOUNDED_CASES = _CORPUS["unbounded_cases"]
 
 
 def _at(offset_ms: float) -> datetime:
@@ -57,6 +60,45 @@ def test_union_ms_matches_the_shared_corpus(case: dict) -> None:
     assert union_ms(spans) == pytest.approx(case["expected_ms"])
 
 
+@pytest.mark.parametrize("case", _UNBOUNDED_CASES, ids=[c["name"] for c in _UNBOUNDED_CASES])
+def test_an_unbounded_call_contributes_nothing_to_the_union(case: dict) -> None:
+    """The POLICY half, replayed through the PRODUCTION selector.
+
+    ``union_ms`` alone cannot pin this: by the time a span list reaches it the
+    unbounded calls are already gone. The decision lives one layer up, in
+    ``main_thread_tool_spans``'s ``is not None`` filter — so that is what this
+    replays, over hand-built ``CommandTelemetry`` rows shaped the way a harness
+    records them. The TypeScript twin (``toolExecutionMs``) makes the same
+    decision inline, which is why the corpus and not either implementation owns
+    the answer.
+    """
+    commands = [
+        CommandTelemetry(
+            tool_id=f"bounded-{i}",
+            tool_name="Bash",
+            timestamp=_at(start),
+            execution_started_at=_at(start),
+            execution_completed_at=_at(end),
+            result_status="success",
+        )
+        for i, (start, end) in enumerate(case["spans"])
+    ]
+    commands += [
+        # Timed, never bounded: exactly the codex `Bash` shape, and the shape
+        # the out-of-tree delegate-sdk still reports.
+        CommandTelemetry(
+            tool_id=f"unbounded-{i}",
+            tool_name="Bash",
+            timestamp=_BASE,
+            duration_ms=duration,
+            result_status="success",
+        )
+        for i, duration in enumerate(case["unbounded_ms"])
+    ]
+    spans = main_thread_tool_spans([], commands)
+    assert union_ms(spans) == pytest.approx(case["expected_ms"])
+
+
 def test_the_typescript_half_replays_the_same_file() -> None:
     """A parity corpus only one side reads is not a parity corpus.
 
@@ -72,4 +114,8 @@ def test_the_typescript_half_replays_the_same_file() -> None:
     assert re.search(r"\.union_cases\b", source), (
         "the TS test must also iterate `union_cases`, the half that pins toolExecutionMs's "
         "own min/max extent against union_ms's"
+    )
+    assert re.search(r"\.unbounded_cases\b", source), (
+        "the TS test must also iterate `unbounded_cases`, the half that pins the POLICY: a "
+        "call the harness timed but did not bound contributes nothing on either side"
     )

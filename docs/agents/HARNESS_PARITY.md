@@ -460,7 +460,17 @@ needed to drive it.
 - **Delegate (`delegate-sdk`, out of tree)** records `duration_ms` but no
   execution bounds, so its tool calls cannot be placed on a timeline. Its
   coverage is ~88%. Mirror the Codex change in `coder_eval_uipath`
-  (audit P3-1).
+  (audit P3-1). **The consequence is now the same on both surfaces:** such a
+  call contributes to NO bucket. Python has always dropped it
+  (`timing.main_thread_tool_spans` filters on `is not None`), and
+  `evalboard/lib/timing.ts::toolExecutionMs` no longer folds the bare duration
+  into its union — a duration with no bounds cannot be placed on the timeline,
+  so unioning it double-books whatever it overlapped and can drive the
+  four-bucket residual negative. Its time reads as **Unaccounted**, which is
+  what that cell means: measured, but not placeable. Codex was in the same
+  state until `_item_timing` landed on 2026-09-10 (0% bounded before, 100%
+  after), so on historical codex runs ~8 h in aggregate moves out of Tool exec
+  and into Unaccounted; that population is closed and no new record joins it.
 - **Antigravity books orphan-poll waiting as agent duration.** A task can spend
   `0.8 × turn_timeout` waiting on a tool call that never reaches DONE — 14 tasks
   and 9.6h of one 83h run. Only CLOSED tool intervals are subtracted, so that
