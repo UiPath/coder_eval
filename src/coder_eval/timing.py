@@ -4,13 +4,21 @@ A cycle-free leaf (the ``models/cli_match.py`` rationale): it sits outside
 ``agents/`` because ``EventCollector`` consumes it, and importing anything
 under ``agents/`` pulls in every agent, which imports ``streaming/``.
 
-Two harnesses interleave tool execution into a single generation window —
-Antigravity (the Step for the tool arrives and only a later ``usage_metadata``
-Step cuts the message) and Codex (``_flush_message``'s window is extended to
-the last item's ``completed_at_ms``). Both must therefore subtract the tool
-time from the window before publishing ``generation_duration_ms``, and both
-must subtract the same thing: the UNION of the closed intervals, clipped to
-the window.
+EVERY harness now subtracts tool execution from its generation windows before
+publishing ``generation_duration_ms``, and all of them subtract the same
+thing: the UNION of the intervals, clipped to the window. Two interleave a
+tool into a single window outright — Antigravity (the Step for the tool
+arrives and only a later ``usage_metadata`` Step cuts the message) and Codex
+(``_flush_message``'s window is extended to the last item's
+``completed_at_ms``). The other three reach the same place from the opposite
+direction: their windows tile the turn contiguously, so a call open at a
+window boundary runs inside two of them.
+
+There is a TypeScript twin, ``evalboard/lib/timing.ts::busyMs``, which
+subtracts tool time from a task's WALL CLOCK to produce the Unaccounted
+residual. It answers the same question about the same ``task.json``, so the
+two must agree — neither owns the numbers: ``tests/_fixtures/timing_union_cases.json``
+does, and both suites replay it.
 """
 
 from datetime import datetime
