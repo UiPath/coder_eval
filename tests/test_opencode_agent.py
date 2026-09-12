@@ -514,6 +514,38 @@ class TestTwoEventToolLifecycle:
         assert len([e for e in recorder.events if isinstance(e, ToolStartEvent)]) == 1
         assert len([e for e in recorder.events if isinstance(e, ToolEndEvent)]) == 1
 
+    async def test_the_completion_time_end_becomes_execution_completed_at(self, patch_exec, tmp_path):
+        """The path the deleted second `state["time"]` read served.
+
+        `on_tool_use` parsed `state.time` twice, identically, once at the top
+        and again just before closing the tool. The second read is gone; this
+        asserts the close still gets its `end` stamp from the same dict — and
+        gets the RIGHT one, since the two events carry different times and only
+        the completion's may be published.
+        """
+        patch_exec(
+            _FakeProcess(
+                [
+                    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
+                    self._event("running", {"time": {"start": 1786663018214}}),
+                    self._event(
+                        "completed",
+                        {
+                            "input": {"command": "ls"},
+                            "output": "ok",
+                            "time": {"start": 1786663018214, "end": 1786663018231},
+                        },
+                    ),
+                ]
+            )
+        )
+        record = await _run(_agent(), tmp_path)
+
+        cmd = record.commands[0]
+        assert cmd.execution_completed_at == datetime.fromtimestamp(1786663018231 / 1000.0)
+        assert cmd.execution_started_at == datetime.fromtimestamp(1786663018214 / 1000.0)
+        assert cmd.duration_ms == pytest.approx(17.0)
+
     async def test_a_later_event_without_input_never_clears_what_we_have(self, patch_exec, tmp_path):
         """Absent evidence is not evidence of absence — the first event's args stay."""
         patch_exec(
@@ -1788,7 +1820,7 @@ class TestGenerationWindowExcludesToolExecution:
     """A tool running inside a step is not model time — asserted where it is now DECIDED.
 
     The reducer no longer subtracts anything. It publishes the RAW window, and
-    `EventCollector.subtract_tool_time` takes the tool union back out of it
+    `timing.subtract_tool_time` takes the tool union back out of it
     once, for all five harnesses. So these cases drive the reducer and then a
     real collector, and assert the PUBLISHED number — the one that reaches
     `task.json` — rather than an intermediate the reducer used to own.
@@ -2046,7 +2078,7 @@ class TestToolSpansSurviveTheStepBoundary:
     `step_start` — after the window it feeds had already opened at `gen_mark` —
     so a call closing in the gap had its span wiped before the next
     `step_finish` could subtract it. That list is gone.
-    `EventCollector.subtract_tool_time` sees every span at once and clips each
+    `timing.subtract_tool_time` sees every span at once and clips each
     to the windows it overlaps, so the property now holds by construction
     rather than by a reset rule. Kept, and re-pointed at the collector, because
     the property is what matters: a future reducer change could still break it
