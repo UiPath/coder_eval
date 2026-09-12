@@ -22,6 +22,7 @@ reading the return value (and ``pending_turn`` on crash), now event-derived.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
 from coder_eval.models import (
@@ -40,6 +41,54 @@ from coder_eval.streaming.events import (
     TurnStartEvent,
 )
 from coder_eval.timing import busy_ms, decompose_turn
+
+
+def main_thread_tool_spans(
+    messages: Iterable[TranscriptMessage], commands: Iterable[CommandTelemetry]
+) -> list[tuple[datetime, datetime]]:
+    """Bounded execution intervals of the MAIN THREAD's tool calls.
+
+    The span set the generation subtraction, the head and the tail are all
+    measured against, so they cannot disagree about which calls exist. Shared
+    with ``reports_stats.turn_time_buckets``, which answers the same question
+    about a finished ``TurnRecord`` — a second typed copy of this rule is how
+    two report surfaces come to publish two different tool totals for one run.
+    (``scripts/timing/decompose_run.py`` keeps its own, over raw ``task.json``
+    dicts rather than models; that is the sanctioned third reader, and
+    ``tests/test_timing_close_window.py::TestTheThreeToolUnionsAgree`` pins all
+    three together.)
+
+    Sub-agent tools are excluded, and that used to be the gap: ``_overhead_ms``
+    filtered its GENERATIONS to the main thread and then passed EVERY command,
+    so its claim to keep all four buckets measuring one thread was true only by
+    luck. It held because a child nests inside the parent Agent call, whose own
+    interval the union already covers — but Codex's recovered child tools carry
+    the CHILD's clock, so nothing made it true by construction. The evalboard's
+    twin (``toolExecutionMs``) does filter, so the two agreed by accident.
+
+    A sub-agent's tool ids are reachable only through the messages that own
+    them: a child generation carries ``parent_tool_use_id``, and its
+    ``tool_use_ids`` are the calls it made.
+
+    An inverted pair (``end`` before ``start``) is dropped here rather than
+    passed on. ``busy_ms`` would discard it anyway, but ``timing.union_ms``
+    documents that it does NOT filter them because its callers do — so this is
+    the caller keeping that true.
+    """
+    sub_agent_tool_ids = {
+        tool_id
+        for m in messages
+        if isinstance(m, AssistantMessage) and m.parent_tool_use_id is not None
+        for tool_id in m.tool_use_ids
+    }
+    return [
+        (c.execution_started_at, c.execution_completed_at)
+        for c in commands
+        if c.execution_started_at is not None
+        and c.execution_completed_at is not None
+        and c.execution_completed_at >= c.execution_started_at
+        and c.tool_id not in sub_agent_tool_ids
+    ]
 
 
 def subtract_tool_time(
@@ -250,38 +299,8 @@ class EventCollector:
         )
 
     def _main_thread_tool_spans(self, messages: list[TranscriptMessage]) -> list[tuple[datetime, datetime]]:
-        """Bounded execution intervals of the MAIN THREAD's tool calls.
-
-        The span set both the head/tail decomposition and the generation
-        subtraction are measured against, so they cannot disagree about which
-        calls exist.
-
-        Sub-agent tools are excluded, and this used to be the gap: ``_overhead_ms``
-        filtered its GENERATIONS to the main thread and then passed EVERY
-        command, so its docstring's claim to keep all four buckets measuring one
-        thread was true only by luck. It held because a child nests inside the
-        parent Agent call, whose own interval the union already covers — but
-        Codex's recovered child tools carry the CHILD's clock, so nothing made
-        it true by construction. The evalboard's twin (``toolExecutionMs``) does
-        filter, so the two implementations agreed by accident.
-
-        A sub-agent's tool ids are reachable only through the messages that own
-        them: a child generation carries ``parent_tool_use_id``, and its
-        ``tool_use_ids`` are the calls it made.
-        """
-        sub_agent_tool_ids = {
-            tool_id
-            for m in messages
-            if isinstance(m, AssistantMessage) and m.parent_tool_use_id is not None
-            for tool_id in m.tool_use_ids
-        }
-        return [
-            (c.execution_started_at, c.execution_completed_at)
-            for c in self._commands.values()
-            if c.execution_started_at is not None
-            and c.execution_completed_at is not None
-            and c.tool_id not in sub_agent_tool_ids
-        ]
+        """This turn's main-thread tool spans, from the reduced ToolEnd stream."""
+        return main_thread_tool_spans(messages, self._commands.values())
 
     @staticmethod
     def _reconciled_messages(messages: list[TranscriptMessage], usage: TokenUsage) -> list[TranscriptMessage]:

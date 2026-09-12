@@ -181,10 +181,14 @@ def union_ms(spans: list[tuple[datetime, datetime]]) -> float:
     and span building, because their input shapes genuinely differ; only this
     tail is shared.
 
-    It does NOT filter ``end < start``. Both callers already drop those while
-    building their span lists, so guarding again here would be a second rule
-    about the same input in a second place; keeping it at the caller preserves
-    today's behaviour exactly.
+    It does NOT filter ``end < start``. EVERY caller drops those while building
+    its span list — ``streaming.collector.main_thread_tool_spans`` (shared by
+    the collector and the report layer), ``_scrub.py`` and
+    ``decompose_run.py`` — so guarding again here would be a second rule about
+    the same input in a second place. That reasoning holds only while it stays
+    true of every caller: a new one that skips the check gets whatever
+    ``busy_ms`` does with an inverted pair, which is to discard it, but
+    silently rather than by this function's stated contract.
     """
     if not spans:
         return 0.0
