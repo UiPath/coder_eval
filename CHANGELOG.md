@@ -2,6 +2,137 @@
 
 <!-- version list -->
 
+## v0.12.1 (2026-09-12)
+
+### Bug Fixes
+
+- Code review fixes for record-cli-review-fixes
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+- Resolve py/import-and-import-from CodeQL alerts in test_regrade.py +
+  test_detached_grading_boundaries.py ([#161](https://github.com/UiPath/coder_eval/pull/161),
+  [`6ab6b87`](https://github.com/UiPath/coder_eval/commit/6ab6b87b6112e5b9122bca86dc328b26f5c29188))
+
+- **criteria**: 2/4 — a shim rule fault is an eval-config error, not an agent failure
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+- **evaluate**: Close the PR review findings on container-based detached grading
+  ([#161](https://github.com/UiPath/coder_eval/pull/161),
+  [`6ab6b87`](https://github.com/UiPath/coder_eval/commit/6ab6b87b6112e5b9122bca86dc328b26f5c29188))
+
+- **evaluate**: Close the review blockers on container-based detached grading
+  ([#161](https://github.com/UiPath/coder_eval/pull/161),
+  [`6ab6b87`](https://github.com/UiPath/coder_eval/commit/6ab6b87b6112e5b9122bca86dc328b26f5c29188))
+
+- **harbor**: Address code review findings from full 8-axis review
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **harbor**: Address PR review blockers (score-integrity, security, drops)
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **harbor**: Derive a prebuilt image's real WORKDIR instead of guessing /app
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **harbor**: Suppress pyright reportMissingImports for the harbor package
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **models**: Reference FlagPredicate at runtime so the cast is a real use
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+- **record_cli**: Close three real holes the Copilot review found
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+- **record_cli**: Reject an unusable response rule at load, and trace a shim fault
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+- **sandbox**: Give the sandbox venv system site packages
+  ([#162](https://github.com/UiPath/coder_eval/pull/162),
+  [`e7d8326`](https://github.com/UiPath/coder_eval/commit/e7d8326ddade4d63305f94238897b39db8af4317))
+
+- **test**: Strip ANSI color before asserting --workspace-dir in CLI output
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **tests**: Harden harbor CLI-error assertions and Windows chmod checks
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **timing**: Account for generation and tool time on every harness
+  ([#164](https://github.com/UiPath/coder_eval/pull/164),
+  [`87102a3`](https://github.com/UiPath/coder_eval/commit/87102a357546672ae58c9c8474e609a4be3cb681))
+
+### Build System
+
+- **docker**: Bake the harbor extra into the coder-eval-agent image
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+### Continuous Integration
+
+- **harbor**: Add Harbor E2E workflow (export + CoderEvalAgent round trip)
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+### Features
+
+- **evaluate**: Grade a `driver: docker` row inside a container of its own image
+  ([#161](https://github.com/UiPath/coder_eval/pull/161),
+  [`6ab6b87`](https://github.com/UiPath/coder_eval/commit/6ab6b87b6112e5b9122bca86dc328b26f5c29188))
+
+- **harbor**: Coder-eval as a Harbor agent (C1.2)
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **harbor**: Export coder-eval tasks to Harbor, with coder-eval as the grader
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **harbor**: Export experiment.yaml variants to Harbor task directories
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **harbor**: Fix agent workspace alignment, env passthrough, and template sources
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **harbor**: Task.yaml/experiment.yaml → Harbor export + coder-eval as a Harbor agent
+  ([#166](https://github.com/UiPath/coder_eval/pull/166),
+  [`9caffcb`](https://github.com/UiPath/coder_eval/commit/9caffcbbae1feeb498e40c83bf679289caab7148))
+
+- **record_cli**: Serve a different canned response per invocation
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+### Refactoring
+
+- **record_cli**: 1/4 — copy argv_match beside the shim instead of splicing it
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+### Testing
+
+- Close three harness gaps this review surfaced
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+- **lint**: 4/4 — put the record_cli authoring surface under CE030 doc parity
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+- **tasks**: 3/4 — add the record_cli per-invocation-response probe
+  ([#150](https://github.com/UiPath/coder_eval/pull/150),
+  [`3aca8e8`](https://github.com/UiPath/coder_eval/commit/3aca8e8010d6beb5147116d07e15118009e81991))
+
+
 ## v0.12.0 (2026-09-09)
 
 ### Bug Fixes
