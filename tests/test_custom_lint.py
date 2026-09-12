@@ -4023,8 +4023,8 @@ class TestCE061WindowViaCloseWindow:
         assert _helper.__name__ == rule_mod._HELPER
 
     def test_the_real_agents_tree_is_clean(self):
-        # After the two suppressions: claude-code's permanent one, and
-        # antigravity's temporary one pending its 5/6 migration.
+        # After claude-code's single permanent suppression. Antigravity
+        # carried a temporary one until it moved onto `close_window`.
         import pathlib
 
         from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow

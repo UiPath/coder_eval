@@ -116,20 +116,21 @@ def close_window(
 ) -> tuple[datetime, float]:
     """Close one generation window at ``now``: its ``(started, generation_ms)``.
 
-    The shape the tiling harnesses had copy-pasted; codex, opencode and pi call
-    it today. Antigravity is not merely unmigrated — it derives its span from
-    the MONOTONIC clock while unioning WALL-clock tool spans, which this
-    signature cannot express — and claude-code subtracts once at finalization
-    across every emission instead.
+    The shape four reducers had copy-pasted. Codex, opencode, pi and
+    antigravity all call it; claude-code is the one exception and carries the
+    only ``# noqa: CE061``, because it subtracts tool time once at finalization
+    across every emission rather than per flush — a call issued by an earlier
+    emission is still running when the next window closes.
 
-    ``mark`` is where the window opens — normally the previous flush's close,
-    which is what makes the windows TILE the turn contiguously instead of
-    leaving the model time that PRODUCED an item attributed to nothing. It is
-    keyword-only and has NO default so that no reducer can open a window
-    without stating what it tiles from. That constrains the call SHAPE, not the
-    VALUE: pi still passes its own turn start, so its inter-turn gaps are still
-    in no bucket until it grows a mark of its own. The signature makes the
-    omission visible; it does not fix it.
+    ``mark`` is where the window opens: the previous flush's close, which is
+    what makes the windows TILE the turn contiguously instead of leaving the
+    model time that PRODUCED an item attributed to nothing. It is keyword-only
+    and has NO default so that no reducer can open a window without stating
+    what it tiles from — which is the defect pi shipped with, measuring from
+    its own turn start so that every inter-turn gap fell into no bucket at all.
+    Note what the signature does and does not buy: it constrains the call
+    SHAPE, not the VALUE. A reducer can still pass the wrong mark; what it
+    cannot do is fail to have one.
 
     ``item_start`` is this emission's own first stamp, when the harness has
     one. The ``min()`` against ``mark`` is the tiling defense and nothing else:
