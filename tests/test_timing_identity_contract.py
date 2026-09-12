@@ -61,7 +61,7 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.streaming.callbacks import CompositeStreamCallback
-from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.collector import EventCollector, main_thread_tool_spans
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -134,9 +134,9 @@ def assert_identity_closes(turn: Turn) -> None:
     scripted, so the only slack is float representation. A bound wide enough to
     absorb a real defect is the sensor this module exists to replace.
 
-    Main thread only on the generation side, mirroring the collector and
-    ``decompose_run.py``: a sub-agent's generations bubble into the same stream
-    and the spawning Agent call's own interval already spans them.
+    MAIN THREAD ONLY on both sides, and both through production's own helpers:
+    a sub-agent's generations bubble into the same stream, and the spawning
+    Agent call's own interval already spans them and their tools.
     """
     record = _record(turn)
     span_ms = turn.ended_ms - turn.started_ms
@@ -146,13 +146,14 @@ def assert_identity_closes(turn: Turn) -> None:
         for m in record.messages
         if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None
     )
-    tool_ms = union_ms(
-        [
-            (c.execution_started_at, c.execution_completed_at)
-            for c in record.commands
-            if c.execution_started_at is not None and c.execution_completed_at is not None
-        ]
-    )
+    # The PRODUCTION selector, not a re-derivation of it. Unioning every command
+    # would assert a different identity than the collector computes: production,
+    # the golden sensor, the live residual gate and the HTML report all exclude
+    # a sub-agent's own tools (the spawning Agent call's interval already spans
+    # them). No case here has a child command yet, so a local copy stayed green
+    # while quietly testing something else — and the first sub-agent case added
+    # would have reported a false regression.
+    tool_ms = union_ms(main_thread_tool_spans(record.messages, record.commands))
     assert record.harness_startup_ms is not None, "a turn that generated has a measured head"
     assert record.harness_teardown_ms is not None, "a turn that generated has a measured tail"
     bucket_sum = record.harness_startup_ms + generation_ms + tool_ms + record.harness_teardown_ms

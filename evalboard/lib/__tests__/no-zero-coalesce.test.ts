@@ -35,7 +35,10 @@ import { describe, expect, test } from "vitest";
 //   * only the three files below are covered; anything else gains no protection;
 //   * a timing field named by NONE of those conventions is invisible — the
 //     convention IS the rule, and it is a convention rather than a type;
-//   * `?? 0.0`, `|| 0.0` and an `if (x == null) x = 0` assignment are not matched.
+//   * `?? 0.0`, `|| 0.0` and an `if (x == null) x = 0` assignment are not matched;
+//   * comment stripping cuts from the FIRST `//` on a line, so a coalesce that
+//     follows a URL or a `//` inside a string literal is invisible. Cheap to
+//     hit only on purpose, and the alternative is parsing TypeScript.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "../..");

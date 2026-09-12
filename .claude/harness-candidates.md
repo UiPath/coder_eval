@@ -569,10 +569,10 @@ divergences, so the deferred-work record is one place. Measurements in
   `evalboard/lib/__tests__/no-zero-coalesce.test.ts` is a vitest source scan
   (there is no eslint in `evalboard/`) over `lib/runs.ts`, `lib/timing.ts` and
   `_sections.tsx`. It is an ALLOWLIST rather than a ban, exactly because the
-  residual arithmetic uses `?? 0` correctly — each of the 13 entries carries a
+  residual arithmetic uses `?? 0` correctly — each of its 14 entries carries a
   one-line reason, and a new occurrence fails until its author justifies it or
   keeps the value null. It is keyed on the codebase's own `…Ms` naming
-  convention rather than on every `?? 0`: a blanket scan matches 60
+  convention rather than on every `?? 0`: a blanket scan matches 58
   occurrences, ~40 of them token buckets where zero is a fine answer, and an
   allowlist that long is one nobody reads. Blind spots are declared in the
   file. Two meta-tests keep it honest — a negative control (so the scan cannot

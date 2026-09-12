@@ -832,6 +832,17 @@ class TestSubtractToolTime:
         out = subtract_tool_time([self._msg(0, 1000, 900.0, parent_tool_use_id="t1")], [(self._at(0), self._at(500))])
         assert out[0].generation_duration_ms == pytest.approx(900.0)
 
+    def test_a_crash_partial_with_no_messages_and_live_spans_is_safe(self):
+        """The shape a crashed turn actually produces.
+
+        `Agent._finalize` builds a record from whatever the collector saw, and
+        a turn that died before its first emission has resolved tool calls but
+        NO messages. Nothing to group, nothing to subtract — and no
+        ZeroDivisionError, no IndexError, and no invented entry.
+        """
+        out = subtract_tool_time([], [(self._at(0), self._at(500))])
+        assert out == []
+
     def test_non_assistant_entries_pass_through_by_identity(self):
         reconciliation = ReconciliationMessage(
             input_tokens=1, output_tokens=1, cache_creation_tokens=0, cache_read_tokens=0, note="n"

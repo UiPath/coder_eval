@@ -26,7 +26,7 @@ wall clock its numbers account for.
 |---|---|---|---|---|---|
 | `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | harness clock: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
 | tool time subtracted from it | centrally | centrally | centrally | centrally | centrally |
-| what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
+| what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first MODEL-source `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
 | `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
 | `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
@@ -37,16 +37,29 @@ wall clock its numbers account for.
 | clock basis for recorded stamps | wall bounds, wall duration (raw `datetime.now()`) | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
-[^identity]: "yes" is load-bearing but the committed sensor is one-sided.
-`tests/_fixtures/golden_streams/_scrub.py` asserts only `overshoot <= …`, so it
-catches a bucket claiming MORE time than the turn contains and says nothing
-about one claiming less — an unmeasured bucket passes every test in the suite.
-Worse, that suite cannot see the magnitudes at all: `SCRUB_KEYS` masks
-`generation_duration_ms` and both bounds to a placeholder, so a golden snapshot
-records that a window was measured, never what it measured. The two-sided check
-is `scripts/timing/decompose_run.py --max-residual-pct N`, which gates on each
-turn's `|residual|` as a share of its own wall clock. It is report-only and
-nothing runs it on a schedule; run it by hand against real `task.json` files.
+[^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
+something the others cannot.
+
+`tests/test_timing_identity_contract.py` is the committed two-sided one: it
+drives every built-in reducer off a scripted clock, through a real
+`EventCollector`, and asserts the four buckets tile the turn to the
+MILLISECOND. Magnitudes are only real where a scripted clock makes them real,
+which is why it is not in the golden corpus.
+
+`tests/_fixtures/golden_streams/_scrub.py` replays recorded streams but asserts
+only `overshoot <= …` — it catches a bucket claiming MORE time than the turn
+contains and says nothing about one claiming less. It cannot be made two-sided
+either: those replays run in ~0.3 ms of synthetic wall clock, where a relative
+bound is vacuous. Nor can it see magnitudes at all — `SCRUB_KEYS` masks
+`generation_duration_ms` and both bounds to a placeholder, so a snapshot records
+that a window was measured, never what it measured. That is not a gap to close;
+it is why the contract test exists.
+
+`scripts/timing/decompose_run.py --max-residual-pct N` is the two-sided check on
+LIVE runs, gating each turn's `|residual|` as a share of its own wall clock.
+`.github/workflows/pr-checks.yml` runs it over the `smoke-pass` bucket's real
+`task.json` files, which covers claude-code only (`experiments/default.yaml`
+sets that type); run it by hand for the others.
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
 All five harnesses can have tool execution inside a generation window, and it is
@@ -204,7 +217,7 @@ The per-harness first-output signal:
 |---|---|
 | claude-code | the first `message_start` stream event |
 | codex | the first SDK item's own start |
-| antigravity | the first `Step` |
+| antigravity | the first MODEL-source `Step` (a SYSTEM/USER Step does not seed) |
 | opencode | the first `step_start` |
 | pi | the first `turn_start` |
 

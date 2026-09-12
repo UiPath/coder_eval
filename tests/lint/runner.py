@@ -56,6 +56,11 @@ from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
 from tests.lint.violation import Violation
 
 
+# CE062 IS DELIBERATELY UNUSED and must stay that way — the ids above jump 061
+# to 063. It was claimed during the turn-timing work and then folded into CE063
+# rather than shipped. An id is a permanent documentation anchor: a suppression
+# comment carrying 062 in an older branch, review or commit message must never
+# start meaning something new. Claim 064 next.
 type RuleClass = type[BaseRule]
 
 ALL_RULES: list[RuleClass] = [
