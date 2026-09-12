@@ -191,6 +191,27 @@ export function busyMs(
 // Tool exec and into Unaccounted. Going forward the only harness reporting a
 // bare duration is the out-of-tree `delegate-sdk`; see
 // docs/agents/HARNESS_PARITY.md.
+// The same union, but `null` when NOTHING bounded was recorded — the direct
+// twin of `reports_stats._turn_tool_union_ms`, and the one a display cell wants.
+//
+// `toolExecutionMs` above returns `0` for an empty span list because that is
+// what a UNION of nothing is, and what `coder_eval.timing.union_ms` returns;
+// the shared corpus pins both sides on exactly that. The None-vs-0.0 decision
+// sits one layer up on the Python side too (`main_thread_tool_spans` returns a
+// list, and its caller turns an empty one into `None`), and this is that layer.
+//
+// The distinction is not academic. A turn that ran no tools, and a turn whose
+// tools were all TIMED BUT UNBOUNDED — the historical-codex and out-of-tree
+// `delegate-sdk` population — both produce an empty span list. Rendering `0ms`
+// there claims the tools were measured and took no time, while every Python
+// surface renders a dash for the same run.
+export function measuredToolExecutionMs(messages: MessageEvent[]): number | null {
+    const anyBounded = messages.some((m) =>
+        m.toolUses.some((t) => t.execStartMs != null && t.execEndMs != null),
+    );
+    return anyBounded ? toolExecutionMs(messages) : null;
+}
+
 export function toolExecutionMs(messages: MessageEvent[]): number {
     const spans: [number, number][] = [];
     for (const m of messages) {

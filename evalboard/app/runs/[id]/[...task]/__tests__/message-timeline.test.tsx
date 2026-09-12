@@ -692,8 +692,15 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
                 },
             ],
         });
-        expect(cell("Tool exec").textContent).toBe("0ms");
-        // 10s − 4s generation − 0s tool exec: the second is the point.
+        // A DASH, not "0ms". No bounded span was recorded, so nothing measured
+        // the tool time — and `0ms` would claim it was measured and instant,
+        // which is the one thing certainly false about a call the harness DID
+        // time. Every Python surface renders a dash for the same run; this cell
+        // used to disagree with them, which is the defect class this branch
+        // exists to remove, relocated across the language boundary.
+        expect(cell("Tool exec").textContent).toBe("—");
+        // The time is not lost: an unmeasured bucket is subtracted as 0, so it
+        // stays IN the residual instead of vanishing.
         expect(cell("Unaccounted").textContent).toBe("6.0s (60%)");
     });
 
@@ -962,6 +969,19 @@ describe("MessageTimelineSection — Startup and Teardown cells", () => {
     test("a run predating the field falls back to the message stream", () => {
         renderStrip({ taskDurationSeconds: 10 });
         expect(cell("Tool exec").textContent).toBe("1.0s");
+    });
+
+    test("the fallback renders a dash, not 0ms, when nothing was bounded", () => {
+        // Both halves of the None-vs-0.0 contract have to survive the fallback,
+        // or a modern run that simply ran no tools reads as "measured, and
+        // instant" on this surface and as a dash on every Python one.
+        render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 4000, textMs: 4000, toolUses: [] })]}
+                taskDurationSeconds={10}
+            />,
+        );
+        expect(cell("Tool exec").textContent).toBe("—");
     });
 
     test("each bucket says what it measures and that it is not decomposed", () => {

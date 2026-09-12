@@ -85,6 +85,10 @@ const ALLOWED = new Map<string, string>([
         "A threshold comparison: an untimed call is not a slow call, so 0 answers the question asked.",
     ],
     [
+        "(toolExecMs ?? 0) -",
+        "The residual's tool half, and the reason the cell itself now renders a dash: a turn with no BOUNDED span measured no tool time, so its time belongs IN the residual rather than being subtracted as a zero.",
+    ],
+    [
         "(harnessStartupMs ?? 0) -",
         "The residual. Subtracting only what was measured is the whole point; an unmeasured head leaves its time IN the residual rather than silently claiming it.",
     ],
