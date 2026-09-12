@@ -201,7 +201,15 @@ export function toolExecutionMs(messages: MessageEvent[]): number {
         }
     }
     if (spans.length === 0) return 0;
-    const lo = Math.min(...spans.map(([s]) => s));
-    const hi = Math.max(...spans.map(([, e]) => e));
+    // Folded rather than `Math.min(...spans.map(…))`: the spread passes one
+    // ARGUMENT per span, so a long enough trace throws RangeError and the whole
+    // task page fails to render. The Python twin uses generator `min`/`max` and
+    // has no such ceiling; this keeps the two bounded the same way.
+    let lo = spans[0][0];
+    let hi = spans[0][1];
+    for (const [start, end] of spans) {
+        if (start < lo) lo = start;
+        if (end > hi) hi = end;
+    }
     return busyMs(spans, lo, hi);
 }

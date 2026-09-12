@@ -364,6 +364,23 @@ def main_thread_tool_spans(
     ]
 
 
+#: How far a published window may sit from the span its own bounds describe.
+#:
+#: ONE MILLISECOND, which is the coarsest unit a field named ``_ms`` can
+#: honestly be published in: a producer that records microsecond-precision
+#: bounds and rounds its duration to whole milliseconds is within its rights,
+#: and crashing its turns over 0.001 ms would be the guard relocating a defect
+#: rather than removing one. The exposure this check is actually for is a
+#: third-party agent registered through the ``coder_eval.plugins`` SPI, which is
+#: exactly the producer most likely to round — so the tolerance has to admit it.
+#:
+#: It still catches everything it is for. The defect class is a reducer that
+#: NARROWED or WIDENED a window without moving its bounds — subtracting its own
+#: tool time, most plausibly — which is tens to thousands of milliseconds, three
+#: to six orders of magnitude above this.
+_WINDOW_TOLERANCE_MS = 1.0
+
+
 def subtract_tool_time(
     messages: list[TranscriptMessage],
     spans: list[tuple[datetime, datetime]],
@@ -459,10 +476,22 @@ def subtract_tool_time(
         raw_total = sum(raw for _, raw in members)
         # Nothing to apportion, and dividing by it is a ZeroDivisionError. A
         # group already at zero stays at zero.
+        #
+        # THE SKIP RUNS BEFORE THE CHECK BELOW, and that order is load-bearing
+        # rather than incidental. `close_window` clamps an inverted window —
+        # `now` before `mark`, two clocks disagreeing — to `0.0` while the
+        # bounds it writes still say `completed_at < started_at`, so `bounds_ms`
+        # is NEGATIVE and the equality fails. That is a measured inversion, the
+        # case `decompose_turn` deliberately clamps because both ends were
+        # observed; raising on it would kill turns on exactly the shape the
+        # clamp exists to tolerate. The cost is that a `0.0` published beside a
+        # POSITIVE window slips through — a shape no in-tree reducer produces,
+        # and one that reads downstream as "measured, and instant" rather than
+        # as a crashed turn.
         if raw_total <= 0:
             continue
         bounds_ms = (completed - started).total_seconds() * 1000.0
-        if not math.isclose(raw_total, bounds_ms, rel_tol=1e-9, abs_tol=1e-6):
+        if not math.isclose(raw_total, bounds_ms, rel_tol=1e-9, abs_tol=_WINDOW_TOLERANCE_MS):
             raise ValueError(
                 f"generation_duration_ms: a group of {len(members)} message(s) bounded "
                 + f"{started} -> {completed} ({bounds_ms:.6f} ms) publishes {raw_total:.6f} ms of "
@@ -479,7 +508,14 @@ def subtract_tool_time(
         for n, (index, raw) in enumerate(members):
             # The last member takes the remainder so the parts reconstruct the
             # group's net exactly, rather than drifting by the rounding.
-            share = net - assigned if n == len(members) - 1 else round(net * (raw / raw_total), 6)
+            # NOT rounded. The last member already takes the remainder, so the
+            # parts reconstruct the group's net exactly without it — while
+            # rounding each earlier share UP could push `assigned` past `net`
+            # and hand the last member a NEGATIVE duration. That needs a net of
+            # well under a microsecond (a window almost entirely covered by
+            # tool execution) and so had never been seen, but a negative
+            # generation is an invariant break, not a rounding artifact.
+            share = net - assigned if n == len(members) - 1 else net * (raw / raw_total)
             out[index] = out[index].model_copy(update={"generation_duration_ms": share})
             assigned += share
     return out

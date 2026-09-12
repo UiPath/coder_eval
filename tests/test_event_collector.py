@@ -932,17 +932,41 @@ class TestAPublishedWindowMustMatchItsOwnBounds:
         with pytest.raises(ValueError):
             subtract_tool_time([self._msg(0, 1000, 400.0, message_id="m"), self._msg(0, 1000, 400.0)], [])
 
-    def test_a_zero_group_is_skipped_before_the_check_runs(self):
-        """The `raw_total <= 0` skip runs FIRST, and must keep running first.
+    def test_a_clamped_inversion_is_skipped_before_the_check_runs(self):
+        """The `raw_total <= 0` skip runs FIRST, and that order is load-bearing.
 
-        A window measured at zero between IDENTICAL bounds would satisfy the
-        equality anyway; the case that needs the order is a `0.0` published
-        beside bounds that are not identical, which is a shape the tree
-        tolerates today. Raising on it would turn a tolerated record into a
-        killed turn, so the bounds here are deliberately 500 ms apart.
+        `close_window` clamps an inverted window — `now` before `mark`, two
+        clocks disagreeing — to `0.0` while the bounds it writes still say
+        `completed_at < started_at`. `bounds_ms` is then NEGATIVE and the
+        equality fails, so checking first would kill the turn on exactly the
+        measured inversion `decompose_turn` deliberately clamps because both
+        ends were observed.
         """
-        out = subtract_tool_time([self._msg(0, 500, 0.0)], [])
+        out = subtract_tool_time([self._msg(500, 0, 0.0)], [])
         assert out[0].generation_duration_ms == 0.0
+
+    def test_a_duration_rounded_to_whole_milliseconds_is_admitted(self):
+        """The tolerance has to fit the producer it exists for.
+
+        A third-party agent registered through the `coder_eval.plugins` SPI is
+        the exposure this check is actually for, and is the producer most
+        likely to record microsecond bounds while publishing a duration rounded
+        to whole milliseconds. Crashing its turns over 0.4 ms would relocate a
+        defect rather than remove one.
+        """
+        started = self._at(0)
+        completed = started + timedelta(microseconds=1000 * 1000 + 400)  # 1000.4 ms
+        message = AssistantMessage(started_at=started, completed_at=completed, generation_duration_ms=1000.0)
+        assert subtract_tool_time([message], [])[0].generation_duration_ms == pytest.approx(1000.0)
+
+    def test_a_narrowing_larger_than_the_tolerance_still_raises(self):
+        """The control: widening for rounding must not admit the defect class.
+
+        A reducer subtracting its own tool time narrows a window by tens to
+        thousands of milliseconds, orders of magnitude past the tolerance.
+        """
+        with pytest.raises(ValueError):
+            subtract_tool_time([self._msg(0, 1000, 998.0)], [])
 
     def test_an_unmeasured_window_never_reaches_the_check(self):
         out = subtract_tool_time([self._msg(0, 5000, None)], [])
