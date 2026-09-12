@@ -857,3 +857,19 @@ re-derive from scratch.
   or enclosing timing-constructor keyword — matches `_TIMING_NAME`. Deferred
   because the target-name resolution is new machinery rather than a variant of
   an existing form. Caught in: the turn-timing consolidation, Phase 5 review.
+
+- [ ] **Pre-existing, surfaced by the turn-timing final review:
+  `reports_stats.regularized_incomplete_beta` clamps an out-of-domain `x`
+  instead of raising.** Its docstring says "Raises ValueError outside that
+  domain — returning NaN would let a bad input render as a real-looking
+  statistic downstream", and it does raise for a non-finite `a`/`b`/`x` and for
+  a non-positive `a`/`b`. But the boundary branches are `if x <= 0.0: return
+  0.0` / `if x >= 1.0: return 1.0`, so a NEGATIVE `x` or one above 1 silently
+  becomes a valid-looking probability — exactly the outcome the docstring says
+  it prevents. `x == 0.0` and `x == 1.0` are legitimately in the domain, so the
+  fix is to split the equality from the inequality, not to tighten the branch.
+  The internal Student-t callers construct an in-range `x`, so nothing ships
+  wrong today; the exposure is a future or external caller. NOT touched by the
+  timing work (the function is zero lines of its diff) and not a guardrail
+  candidate — a small real bug needing its own change. Caught in: the
+  turn-timing consolidation final review (gpt-5.6-sol).
