@@ -5,6 +5,7 @@ optional ``google-antigravity`` SDK (all SDK use is lazy, inside ``start()``).
 """
 
 import asyncio
+import inspect
 import os
 import sys
 from collections.abc import Callable
@@ -1500,16 +1501,26 @@ _CLOCK_BASE = datetime(2026, 1, 1, 12, 0, 0)
 
 
 class _Clock:
-    """Controlled stand-in for the two clocks the reducer reads.
+    """Controlled stand-in for the reducer's clocks — a `TurnClock` and `time`.
 
-    ONE monotonically advancing counter, read by both clocks: every read —
-    `time.monotonic()` or `datetime.now()` — costs TICK_MS. So the fixture's
-    timeline is driven by read ORDER, not by elapsed time, and the two clocks
-    are deliberately coupled rather than independent. That is enough to pin
-    the arithmetic exactly; it is NOT a cross-check that the reducer keeps the
-    two clocks in their proper roles (a variant deriving the span from the
-    wall stamps would pass every test here). The module's only clock uses are
-    `time.monotonic` and `datetime.now`, so patching these two covers it.
+    ONE monotonically advancing counter, read by both: every read — the turn
+    clock's `now()` or `time.monotonic()` — costs TICK_MS. So the fixture's
+    timeline is driven by read ORDER, not by elapsed time, and the two are
+    deliberately coupled rather than independent. That is enough to pin the
+    arithmetic exactly.
+
+    Every WALL stamp the reducer records now derives from its per-turn
+    `TurnClock`, so this stands in for that object rather than for the
+    module's `datetime`. That distinction is load-bearing, not cosmetic: a
+    derived stamp does not read `datetime.now()`, so the old patch would no
+    longer reach it and these tests would quietly measure the real clock and
+    pass by accident. `time` is still patched because `duration_seconds` and
+    the poll deadlines read `time.monotonic()` directly, and must — a deadline
+    may not move when the wall clock steps.
+
+    What it still does NOT prove is that the reducer keeps the two in their
+    proper roles; with one basis for every wall stamp there is no longer a
+    second role to confuse it with.
     """
 
     TICK_MS = 100.0
@@ -1529,8 +1540,15 @@ class _Clock:
 
 
 def _install_clock(monkeypatch, clock: _Clock) -> None:
+    """Hand the reducer this clock for the turn it is about to build.
+
+    `TurnClock` is replaced by a factory rather than the fake being passed
+    positionally, because the state — and therefore its clock — is built
+    inside `communicate()`, out of the caller's reach. One typed seam, and the
+    stand-in has to satisfy `now()`.
+    """
     monkeypatch.setattr(agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
-    monkeypatch.setattr(agent_module, "datetime", SimpleNamespace(now=clock.now))
+    monkeypatch.setattr(agent_module, "TurnClock", lambda: clock)
 
 
 def _assistant(record):
@@ -1704,14 +1722,22 @@ async def test_tool_execution_is_subtracted_from_the_window(monkeypatch):
     second = messages[1]
     bash = next(c for c in record.commands if c.tool_name == "Bash")
 
-    # The window spans 400ms of wall clock and contains a 100ms tool call, so
-    # 300ms of it was the model generating. Cross-checked against the recorded
-    # bounds, which come from the OTHER clock the reducer reads.
+    # The window contains a 100ms tool call, so what is left of it was the
+    # model generating. That relation is the assertion that matters, and it is
+    # independent of the fixture's tick size.
     span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
     assert bash.duration_ms == pytest.approx(100.0)
-    assert span_ms == pytest.approx(400.0)
     assert second.generation_duration_ms == pytest.approx(span_ms - bash.duration_ms)
-    assert second.generation_duration_ms == pytest.approx(300.0)
+
+    # The absolute figures are artifacts of `_Clock`, which charges one TICK_MS
+    # per clock READ. They moved from 400/300 to 300/200 when the reducer
+    # stopped taking a monotonic reading it no longer needs: a flush now reads
+    # the turn clock once where it used to read two clocks, so each window is
+    # one tick shorter on this fixture's read-driven timeline. Nothing about
+    # real elapsed time changed — the 100ms tool, which is still two reads
+    # apart, is unmoved.
+    assert span_ms == pytest.approx(300.0)
+    assert second.generation_duration_ms == pytest.approx(200.0)
 
 
 async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypatch):
@@ -1909,3 +1935,106 @@ async def test_timing_change_moves_no_token_bucket():
     # local re-implementation of two of its four buckets.
     assert_reconciliation(record.model_dump(mode="json"))
     assert all(m.generation_duration_ms is not None for m in _assistant(record))
+
+
+async def test_the_published_window_reconciles_to_its_own_bounds(monkeypatch):
+    """The reducer subtracted exactly the spans the record carries.
+
+    The per-migrated-reducer check its three siblings gained when they moved
+    onto `close_window`; antigravity could not have it until its span stopped
+    being monotonic while these intervals were wall. `decompose_run.py` and the
+    evalboard's Unaccounted cell both recompute the tool UNION from the
+    recorded command spans and subtract it from the recorded window bounds, so
+    this asserts the reducer fed the window that same set.
+    """
+    from coder_eval.timing import busy_ms
+
+    _install_clock(monkeypatch, _Clock())
+    steps = [
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
+        ),
+        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    second = _assistant(record)[1]
+    spans = [
+        (c.execution_started_at, c.execution_completed_at)
+        for c in record.commands
+        if c.execution_started_at is not None and c.execution_completed_at is not None
+    ]
+    span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
+    expected = span_ms - busy_ms(spans, second.started_at, second.completed_at)
+    assert second.generation_duration_ms == pytest.approx(expected)
+
+
+async def test_the_window_is_measured_without_relying_on_the_negative_clamp(monkeypatch):
+    """A positive window, and no clamp underneath it.
+
+    The span used to be read off `time.monotonic()` while the tool intervals
+    were wall, so the two could disagree and drive the result negative; the
+    clamp that caught it published a `0.0` indistinguishable from a real
+    instant generation, and a debug line was the only trace. One basis makes
+    that unrepresentable: `busy_ms` clips to the window and unions overlaps, so
+    it cannot exceed a span derived from the same clock.
+    """
+    _install_clock(monkeypatch, _Clock())
+    steps = [
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+        _step(
+            "TOOL_CALL",
+            "ACTIVE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
+        ),
+        _step(
+            "TOOL_CALL",
+            "DONE",
+            target="TARGET_ENVIRONMENT",
+            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
+        ),
+        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
+    ]
+    record = await _agent_with_steps(steps).communicate("go")
+
+    second = _assistant(record)[1]
+    assert second.generation_duration_ms > 0.0
+    assert second.completed_at > second.started_at
+    # The branch and its debug line are deleted, not merely unreachable.
+    source = inspect.getsource(agent_module)
+    assert "Generation window went negative" not in source
+    assert "_gen_mark_monotonic" not in source
+
+
+async def test_each_turn_gets_a_fresh_clock():
+    """A second turn on the same agent re-anchors rather than inheriting.
+
+    One clock per turn is the rule: a clock outliving its turn would stamp the
+    next one with the previous turn's wall origin, and over a long run would
+    accumulate drift against real wall time.
+    """
+    step = _step("THINKING", "DONE", thinking="a", usage=_usage(100, 0, 5, 5))
+    agent = _agent_with_steps([step])
+    first = _assistant(await agent.communicate("go"))
+    # The fake conversation yields one batch and is then spent, so borrow a
+    # fresh one. The agent INSTANCE is deliberately the same: what is under
+    # test is that its second turn builds its own clock rather than inheriting
+    # the first turn's origin.
+    agent._sdk_agent = _agent_with_steps([step])._sdk_agent
+    second = _assistant(await agent.communicate("again"))
+
+    assert first and second
+    # Re-anchored: the later turn's window opens after the earlier one closed.
+    assert second[0].started_at >= first[0].completed_at
+    assert second[0].completed_at > second[0].started_at

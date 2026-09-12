@@ -109,7 +109,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.timing import close_window
+from coder_eval.timing import TurnClock, close_window
 
 from .registry import AgentRegistry
 
@@ -262,12 +262,27 @@ class _PiTurnState:
     to force-close orphans when a turn dies mid-flight.
     """
 
-    def __init__(self, *, task_id: str, iteration: int, user_input: str, model: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        iteration: int,
+        user_input: str,
+        model: str | None,
+        clock: TurnClock | None = None,
+    ) -> None:
         self.task_id = task_id
         self.iteration = iteration
         self.user_input = user_input
         self.model = model
 
+        # ONE clock per turn, and every wall stamp below derives from it, so
+        # the tool spans and the window bounds they are subtracted from cannot
+        # end up on different bases. Injectable so a test can supply a fake
+        # rather than monkeypatching this module's `datetime` global — which a
+        # derived stamp would silently escape, leaving the test passing against
+        # the real clock instead of failing.
+        self.clock = clock or TurnClock()
         self.started_at = time.monotonic()
         self.thread_id: str | None = None
 
@@ -363,7 +378,7 @@ class _PiTurnState:
         self.turn_count += 1
         self.turn_open = True
         self.turn_id = f"turn_{self.turn_count}"
-        self.turn_started_at = datetime.now()
+        self.turn_started_at = self.clock.now()
         self.turn_text_parts = []
         self.turn_tool_ids = []
         # `turn_tool_spans` is deliberately NOT reset here — see the identical
@@ -401,7 +416,7 @@ class _PiTurnState:
         tool_name = _TOOL_NAME_MAP.get(raw_tool.lower(), raw_tool)
         args = obj.get("args")
         params = args if isinstance(args, dict) else {}
-        started = datetime.now()
+        started = self.clock.now()
         telemetry = CommandTelemetry(
             tool_name=tool_name,
             tool_id=call_id,
@@ -448,10 +463,10 @@ class _PiTurnState:
                 tool_name="unknown",
                 tool_id=call_id,
                 assistant_turn_index=self.turn_count,
-                timestamp=datetime.now(),
+                timestamp=self.clock.now(),
                 sequence_number=self.sequence,
             )
-        completed = datetime.now()
+        completed = self.clock.now()
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
@@ -587,7 +602,7 @@ class _PiTurnState:
         else:
             self.error_message = None
 
-        completed = datetime.now()
+        completed = self.clock.now()
         blocks: list[ContentBlock] = []
         turn_text = "".join(self.turn_text_parts)
         if turn_text:
@@ -1011,6 +1026,10 @@ class PiAgent(Agent[PiAgentConfig]):
             )
         )
 
+        # Deadlines stay on `time.monotonic()` and are deliberately NOT routed
+        # through the turn clock: a deadline must not move when the wall clock
+        # steps. `TurnClock` exists to give the RECORDED stamps one basis; this
+        # is the one place a raw monotonic reading is the right answer.
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         stderr_drain: asyncio.Future[bytes] | None = None
