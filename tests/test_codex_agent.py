@@ -2302,7 +2302,7 @@ class TestGenerationWindowExcludesToolExecution:
         assert gen_ms + tool_ms == pytest.approx(window_ms)
 
     async def test_the_published_window_reconciles_to_its_own_bounds(self):
-        """The reducer subtracted exactly the spans the record carries.
+        """The collector subtracted exactly the spans the record carries.
 
         `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
         both recompute the tool UNION from the recorded command spans and
@@ -2409,11 +2409,12 @@ class TestFlushMessageWindowBounds:
     """Where `_flush_message`'s window OPENS, driven at the reducer.
 
     The end-to-end cases above all describe a stream whose stamps advance, so
-    they cannot reach the two arguments the reducer hands `close_window` for
-    the awkward cases: the emission's own first stamp (`item_start`) and the
-    calls still open at the flush. Both moved from inline code into the shared
-    helper, so without these they are pinned only in the helper's own unit
-    tests — the wiring between the two would be free to rot.
+    they cannot reach the awkward case the reducer still hands `close_window`:
+    the emission's own first stamp (`item_start`), whose `min()` against the
+    mark is the backwards-clock defence. The tool-span arguments this class
+    also used to cover are gone — the subtraction moved to
+    `EventCollector.subtract_tool_time`, and
+    `tests/test_event_collector.py::TestSubtractToolTime` pins it there.
     """
 
     @staticmethod
@@ -2466,17 +2467,24 @@ class TestFlushMessageWindowBounds:
         assert message.started_at == _ms_to_dt(_BOUNDS_EPOCH_MS + 500)
         assert message.generation_duration_ms == pytest.approx(600.0)
 
-    def test_a_call_still_open_at_the_flush_is_subtracted_bounded_at_the_end(self):
-        # It has no completion yet, so only [start, window end] is not model
-        # time. Its full interval joins the NEXT window's closed spans, where
-        # busy_ms clips it to the remainder — subtracted once, not twice.
+    def test_the_published_window_is_raw_and_ignores_a_call_still_open(self):
+        """The reducer publishes the RAW span; the collector subtracts.
+
+        It used to bound a still-open call at the window's end and take that
+        slice out here. `EventCollector.subtract_tool_time` sees every span at
+        once, so a call is subtracted from the windows its REAL interval
+        overlaps once it resolves — no boundary approximation, and nothing for
+        this reducer to remember. A call that never resolves has no
+        `execution_completed_at` and contributes nothing, which is what "never
+        timed" should cost.
+        """
         message = self._flush(
             gen_mark_ms=_BOUNDS_EPOCH_MS,
             open_start_ms=_BOUNDS_EPOCH_MS,
             open_end_ms=_BOUNDS_EPOCH_MS + 1000,
             open_tool_started_ms=_BOUNDS_EPOCH_MS + 700,
         )
-        assert message.generation_duration_ms == pytest.approx(700.0)
+        assert message.generation_duration_ms == pytest.approx(1000.0)
 
     def test_a_call_opening_after_the_window_closes_is_ignored(self):
         message = self._flush(
@@ -2609,3 +2617,99 @@ class TestFlushMessageGenTimeSplit:
         # sub-message produced.
         assert [m.generation_duration_ms for m in assistant] == [400.0, 600.0]
         assert sum(m.generation_duration_ms or 0.0 for m in assistant) == 1000.0
+
+
+class TestTwoSpecGenerationContainingATool:
+    """A thinking+action window holding a tool: the case the split and the
+    subtraction have to survive TOGETHER.
+
+    Codex is the only harness that cuts one window into several messages, and
+    a generation that calls a tool is a two-spec window by construction — the
+    thinking block plus the tool_use. `TestFlushMessageGenTimeSplit` drives two
+    specs with no tool; `TestGenerationWindowExcludesToolExecution` on the
+    other harnesses drives a tool into a single-spec window. Neither reaches
+    the interaction, which is where grouping by bounds earns its keep: subtract
+    per message and the overlap comes out twice, and the parts stop summing to
+    the window.
+    """
+
+    @staticmethod
+    def _published(*, window_ms: int, tool_from_ms: int, tool_to_ms: int, think_out: int, action_out: int):
+        from coder_eval.agents.codex_agent import _CodexTurnState, _ms_to_dt
+        from coder_eval.models import CommandTelemetry, ContentBlock, TokenUsage
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.collector import EventCollector
+        from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent, ToolEndEvent
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        collector = EventCollector()
+        state = _CodexTurnState(
+            agent,
+            emit=CompositeStreamCallback([collector]),
+            task_id="codex",
+            turn_id="codex-1",
+            collector=collector,
+            commands=[],
+            messages=[],
+            user_input="go",
+            iteration=1,
+            turn_start_time=0.0,
+        )
+        command = CommandTelemetry(
+            tool_name="bash",
+            tool_id="c1",
+            timestamp=_ms_to_dt(_BOUNDS_EPOCH_MS + tool_from_ms),
+            execution_started_at=_ms_to_dt(_BOUNDS_EPOCH_MS + tool_from_ms),
+            execution_completed_at=_ms_to_dt(_BOUNDS_EPOCH_MS + tool_to_ms),
+            result_status="success",
+        )
+        state.commands.append(command)
+        state.open_blocks = [
+            ContentBlock(block_type="thinking", sequence=0, thinking="plan"),
+            ContentBlock(block_type="tool_use", sequence=0, tool_use_id="c1"),
+        ]
+        state.open_start_ms = _BOUNDS_EPOCH_MS
+        state.open_end_ms = _BOUNDS_EPOCH_MS + window_ms
+        state._flush_message(
+            SimpleNamespace(
+                input_tokens=100,
+                cached_input_tokens=0,
+                output_tokens=think_out + action_out,
+                reasoning_output_tokens=think_out,
+            )
+        )
+
+        collector.on_event(
+            AgentStartEvent(task_id="codex", prompt="go", iteration=1, timestamp=_ms_to_dt(_BOUNDS_EPOCH_MS))
+        )
+        collector.on_event(ToolEndEvent(task_id="codex", turn_id="codex-1", tool=command))
+        collector.on_event(
+            AgentEndEvent(
+                task_id="codex",
+                status=AgentEndStatus.COMPLETED,
+                messages=list(state.messages),
+                usage=TokenUsage(),
+                timestamp=_ms_to_dt(_BOUNDS_EPOCH_MS + window_ms),
+            )
+        )
+        record = collector.build_turn_record()
+        return [m for m in record.messages if m.role == "assistant"]
+
+    def test_the_group_is_subtracted_once_and_the_parts_still_sum(self):
+        # A 1000 ms window, split 80/20 by output share, holding a 250 ms tool.
+        published = self._published(window_ms=1000, tool_from_ms=300, tool_to_ms=550, think_out=800, action_out=200)
+        assert len(published) == 2, "a thinking + tool_use window is two sub-messages"
+        total = sum(m.generation_duration_ms or 0.0 for m in published)
+        # ONCE: 1000 - 250. Subtracting per message would give 500.
+        assert total == pytest.approx(750.0)
+        assert [m.generation_duration_ms for m in published] == [pytest.approx(600.0), pytest.approx(150.0)]
+
+    def test_both_sub_messages_still_share_one_window(self):
+        """The bounds are what the grouping keys on, so they must stay identical."""
+        published = self._published(window_ms=1000, tool_from_ms=300, tool_to_ms=550, think_out=800, action_out=200)
+        assert published[0].started_at == published[1].started_at
+        assert published[0].completed_at == published[1].completed_at
+
+    def test_a_window_entirely_covered_by_its_tool_splits_zero_two_ways(self):
+        published = self._published(window_ms=1000, tool_from_ms=0, tool_to_ms=1000, think_out=800, action_out=200)
+        assert [m.generation_duration_ms for m in published] == [0.0, 0.0]

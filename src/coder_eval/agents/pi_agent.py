@@ -303,14 +303,6 @@ class _PiTurnState:
         self.turn_started_at: datetime | None = None
         self.turn_text_parts: list[str] = []
         self.turn_tool_ids: list[str] = []
-        # Execution intervals of tools that CLOSED inside the open
-        # generation window. Every tool call runs INSIDE the window, so
-        # publishing the raw span as generation time counts the same
-        # milliseconds twice — once here and once as the tool's own
-        # duration_ms. Intervals, not a running total: they overlap
-        # whenever the harness runs tools concurrently, and only their
-        # union may be subtracted (timing.py::busy_ms).
-        self.turn_tool_spans: list[tuple[datetime, datetime]] = []
         # Where the NEXT generation window starts: the previous turn's end.
         # Pi was the only harness measuring from its own `turn_start`, so the
         # wall clock between one `turn_end` and the next `turn_start` — the
@@ -381,11 +373,10 @@ class _PiTurnState:
         self.turn_started_at = self.clock.now()
         self.turn_text_parts = []
         self.turn_tool_ids = []
-        # `turn_tool_spans` is deliberately NOT reset here — see the identical
-        # note in `opencode_agent.on_step_start`. Now that the window opens at
-        # `gen_mark` rather than at this `turn_start`, a call closing in the
-        # gap between them belongs to it, and clearing the list here would
-        # publish that call's execution as the next window's model time.
+        # No per-turn span list to reset here any more — see the identical note
+        # in `opencode_agent.on_step_start`. The collector subtracts from final
+        # bounds with every span known, so nothing has to remember a call that
+        # closed in the gap before this `turn_start`.
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -470,10 +461,6 @@ class _PiTurnState:
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
-            # This tool ran inside the open generation window, so its time is
-            # not model time. Only a RESOLVED tool contributes: one force-closed
-            # without a result was never timed.
-            self.turn_tool_spans.append((telemetry.execution_started_at, completed))
         telemetry.result_status = _RESULT_STATUS[status]
         # Stored untruncated by design (sub-agent returns must survive whole).
         telemetry.result_summary = summary
@@ -610,17 +597,14 @@ class _PiTurnState:
         for i, tool_id in enumerate(self.turn_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
-        # The open calls and the double-subtraction rule they rest on live in
-        # `close_window`'s docstring.
+        # Tile from the previous turn's end. The RAW window only —
+        # `EventCollector.subtract_tool_time` takes the tool union back out of
+        # it, once, for every harness.
         turn_start = self.turn_started_at if self.turn_started_at is not None else completed
         started, generation_ms = close_window(
             mark=self.gen_mark if self.gen_mark is not None else turn_start,
             now=completed,
             item_start=turn_start,
-            closed_spans=self.turn_tool_spans,
-            open_started_ats=[
-                t.execution_started_at for t in self.open_tools.values() if t.execution_started_at is not None
-            ],
         )
         self.messages.append(
             AssistantMessage(
@@ -642,10 +626,9 @@ class _PiTurnState:
         # A message was appended, so the next window starts where this one
         # ended. Only a finished turn advances the mark: one that never
         # finished published nothing, so tiling past it would attribute its
-        # time to whichever turn finishes next. The span list is cleared with
-        # it, and only with it — see `on_turn_start`.
+        # time to whichever turn finishes next. There is no span list to clear
+        # alongside it any more — see `on_turn_start`.
         self.gen_mark = completed
-        self.turn_tool_spans = []
         # And so is this turn's own start stamp, because it has now been SPENT.
         # It is passed to `close_window` as `item_start`, whose `min()` pulls
         # the window open to cover it; left in place, a second `turn_end` with

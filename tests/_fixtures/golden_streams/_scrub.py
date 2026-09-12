@@ -117,10 +117,32 @@ _IDENTITY_FLOOR_MS = 0.1
 _IDENTITY_SHARE = 0.20
 
 
+def _sub_agent_tool_ids(record: dict[str, Any]) -> set[str]:
+    """Tool ids owned by a SUB-AGENT generation.
+
+    Must match `EventCollector._main_thread_tool_spans` and
+    `scripts/timing/decompose_run.py::_sub_agent_tool_ids`: all three recompute
+    the tool union for the same identity, so a filter applied by one and not
+    the others reports a residual that is an artifact of the disagreement.
+    """
+    ids: set[str] = set()
+    for message in record.get("messages") or []:
+        if message.get("role") == "assistant" and message.get("parent_tool_use_id") is not None:
+            ids.update(message.get("tool_use_ids") or [])
+    return ids
+
+
 def _tool_union_ms(record: dict[str, Any]) -> float:
-    """Wall ms this turn spent executing tools — the union, never the sum."""
+    """Wall ms this turn's MAIN-THREAD tools occupied — the union, never the sum.
+
+    Sub-agent tools are excluded for the same reason their generations are: the
+    spawning Agent call's own interval already spans the child's whole run.
+    """
+    excluded = _sub_agent_tool_ids(record)
     spans: list[tuple[datetime, datetime]] = []
     for command in record.get("commands") or []:
+        if command.get("tool_id") in excluded:
+            continue
         start = _parse_stamp(command.get("execution_started_at"))
         end = _parse_stamp(command.get("execution_completed_at"))
         if start is not None and end is not None and end >= start:
@@ -275,8 +297,10 @@ def assert_timing_captured(
             "They are meant to be DISJOINT, so a sum this far over the turn means something is "
             "booked twice — most likely a tool that ran outside every generation window and was "
             "left in the head or tail as well as in the tool union, or a generation window that "
-            "kept tool time it should have subtracted (see docs/agents/HARNESS_PARITY.md — all "
-            "five harnesses subtract, claude-code at finalization rather than as it flushes)"
+            "kept tool time it should have subtracted (see docs/agents/HARNESS_PARITY.md — the "
+            "subtraction happens once, in streaming/collector.py::subtract_tool_time, so a "
+            "double-count is a span the collector saw twice or a reducer publishing a window it "
+            "already narrowed)"
         )
 
     if not expect_generation_window:

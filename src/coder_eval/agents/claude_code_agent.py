@@ -76,7 +76,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.timing import busy_ms
+from coder_eval.timing import close_window
 from coder_eval.utils import dump_dataclass, process_plugins
 
 
@@ -244,7 +244,15 @@ class _ClaudeTurnState:
         self.sequence_number = 0
 
         self.last_assistant_message_index: int | None = None
-        self.last_event_monotonic: float = turn_start_time
+        # ONE clock basis for the window. The duration used to be a MONOTONIC
+        # delta while these bounds were wall, which is the split
+        # `timing.TurnClock` exists to eliminate: the central subtraction clips
+        # WALL tool spans to these WALL bounds, so a monotonic-measured
+        # duration would have the two disagreeing inside one subtraction —
+        # exactly the defect that let antigravity's window go negative.
+        # `turn_start_time` stays monotonic and is untouched: `duration_seconds`
+        # and the turn deadline read it, and a deadline must not move when the
+        # wall clock steps.
         self.last_event_wall: datetime = datetime.now()
         # Re-seeded ONCE, at the first observed model output. See
         # `_seed_first_generation_window`.
@@ -315,10 +323,8 @@ class _ClaudeTurnState:
 
     def on_assistant_message(self, message: Message) -> None:
         """Capture ToolUseBlocks + build the AssistantMessage telemetry record."""
-        message_arrival_monotonic = time.monotonic()
         message_arrival_wall = datetime.now()
         generation_started_wall = self.last_event_wall
-        generation_duration_ms = (message_arrival_monotonic - self.last_event_monotonic) * 1000
 
         current_turn_index = len(self.sdk_messages)
         self.assistant_turn_count += 1
@@ -428,17 +434,17 @@ class _ClaudeTurnState:
                 out_tok = int(msg_usage.get("output_tokens", 0) or 0)
             self.pending_delta_output_tokens = None
 
-        # CE061's one permanent exception. This harness measures its
-        # window as a monotonic delta and subtracts tool time ONCE at
-        # finalization across every emission (`_subtract_tool_time_from_windows`),
-        # because a call issued by an earlier emission is still running when the
-        # next window closes. `close_window` subtracts per flush; forcing both
-        # shapes into it means a mode flag on a helper whose whole value is
-        # having one shape. It already uses the shared `busy_ms`.
-        assistant_telemetry = AssistantMessageTelemetry(  # noqa: CE061
-            started_at=generation_started_wall,
+        # The RAW window. Tool execution comes out of it once, centrally, in
+        # `EventCollector.build_turn_record` — so this harness now asks the same
+        # helper as the other four and CE061 no longer needs its one permanent
+        # exception. The mark is the only harness-shaped decision left, and it
+        # stays here: `started` is the mark, since this stream carries no
+        # per-emission item start to pull the window open to.
+        started, raw_generation_ms = close_window(mark=generation_started_wall, now=message_arrival_wall)
+        assistant_telemetry = AssistantMessageTelemetry(
+            started_at=started,
             completed_at=message_arrival_wall,
-            generation_duration_ms=max(0.0, generation_duration_ms),
+            generation_duration_ms=raw_generation_ms,
             content_blocks=turn_content_blocks,
             tool_use_ids=turn_tool_use_ids,
             input_tokens=in_tok,
@@ -461,7 +467,6 @@ class _ClaudeTurnState:
             self.emission_proxies_by_id.setdefault(message_id, []).append(emission_content_chars)
         self.last_assistant_message_index = len(self.sdk_messages) - 1
 
-        self.last_event_monotonic = message_arrival_monotonic
         self.last_event_wall = message_arrival_wall
 
     def on_task_notification(self, message: Message) -> None:
@@ -541,7 +546,6 @@ class _ClaudeTurnState:
         if self.first_output_seen:
             return
         self.first_output_seen = True
-        self.last_event_monotonic = time.monotonic()
         self.last_event_wall = datetime.now()
 
     def on_stream_event(self, message: Message) -> None:
@@ -573,7 +577,6 @@ class _ClaudeTurnState:
         """Process tool results (and a sub-agent's terminal generation) from a
         tool-result UserMessage. The sub-agent message is appended BEFORE the
         tool-result loop — its position in ``sdk_messages`` is observable."""
-        self.last_event_monotonic = time.monotonic()
         self.last_event_wall = datetime.now()
 
         sub_msg = self._agent._synthesize_subagent_terminal_message(message, self.sdk_model_used)
@@ -638,49 +641,6 @@ class _ClaudeTurnState:
             self._agent._reprice_for_litellm(usage, self.effective_model)
         return usage
 
-    def _subtract_tool_time_from_windows(self, commands: list[CommandTelemetry]) -> None:
-        """Take tool execution back out of the generation windows it overlapped.
-
-        The other four harnesses do this as they flush, because their stream
-        interleaves tool calls into one window. claude-code was exempted on the
-        premise that a tool's execution falls BETWEEN two windows — but a tool's
-        timer starts at the emission carrying its ``tool_use`` block, and one
-        assistant turn spans several emissions, so a later emission's window
-        runs concurrently with a tool already timing. Measured on a task with
-        two concurrent ``Bash`` calls: 482 ms and 340 ms of a ~18-25 s turn
-        counted as both generation and tool, which is exactly the amount by
-        which the four-bucket identity missed.
-
-        Deferred to finalization rather than done in ``on_assistant_message``
-        because that is the first point where every span is known: a tool
-        issued by an earlier emission is still running when the next window
-        closes, so its interval does not exist yet.
-
-        ``generation_duration_ms`` therefore means the same thing on all five
-        harnesses — wall time inside the window with no tool running. A window
-        entirely covered by tool execution legitimately reads ``0.0``; that is
-        a measurement, and ``None`` remains what "never measured" means.
-        """
-        spans = [
-            (c.execution_started_at, c.execution_completed_at)
-            for c in commands
-            if c.execution_started_at is not None and c.execution_completed_at is not None
-        ]
-        if not spans:
-            return
-        for emission in self.sdk_messages:
-            # A sub-agent's generation is not on this timeline: its own tools
-            # are not in `commands`, and the Agent call that spawned it already
-            # spans its whole run. A UserMessage / ReconciliationMessage has no
-            # window at all.
-            if not isinstance(emission, AssistantMessageTelemetry):
-                continue
-            if emission.generation_duration_ms is None or emission.parent_tool_use_id is not None:
-                continue
-            overlap = busy_ms(spans, emission.started_at, emission.completed_at)
-            if overlap > 0.0:
-                emission.generation_duration_ms = max(emission.generation_duration_ms - overlap, 0.0)
-
     def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
         """Close orphaned tools + the open turn, emit the terminal AgentEndEvent,
         and on a crash build the partial TurnRecord. Idempotent."""
@@ -689,7 +649,6 @@ class _ClaudeTurnState:
         self.finalized = True
 
         commands = self._agent._finalize_commands(self.pending_commands, self.messages)
-        self._subtract_tool_time_from_windows(commands)
         for cmd in commands:
             if cmd.tool_id in self.emitted_tool_ends:
                 continue

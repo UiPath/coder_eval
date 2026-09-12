@@ -1457,13 +1457,11 @@ class TestClaudeFirstWindowReseed:
         clock.at_ms = 800
         state._seed_first_generation_window()
         seeded_wall = state.last_event_wall
-        seeded_monotonic = state.last_event_monotonic
 
         clock.at_ms = 5000
         state._seed_first_generation_window()
 
         assert state.last_event_wall == seeded_wall
-        assert state.last_event_monotonic == seeded_monotonic
 
     def test_a_stream_with_no_message_start_still_clamps_to_zero(self, monkeypatch):
         """Partial streaming off, a mocked query(), or a crash before the first event.

@@ -869,13 +869,6 @@ class _AntigravityTurnState:
         # Re-seeded ONCE, at the first observed Step. See
         # `_seed_first_generation_window`.
         self._first_output_seen: bool = False
-        # Execution intervals of tools that CLOSED since the mark. This harness
-        # interleaves tool calls into one generation — the Step for the tool
-        # arrives and only a later usage_metadata Step cuts the message — so a
-        # window legitimately contains tool time that is not model time. Kept
-        # as intervals, not a running total, because they overlap (see
-        # busy_ms).
-        self._tool_spans_since_mark: list[tuple[datetime, datetime]] = []
 
     @property
     def ended_cleanly(self) -> bool:
@@ -1046,12 +1039,6 @@ class _AntigravityTurnState:
                     "duration_ms": tool_ms,
                 }
             )
-            # This tool closed inside the open generation window, so its time is
-            # not model time. The INTERVAL is recorded, not the duration: tool
-            # calls overlap here, and only their union may be subtracted (see
-            # busy_ms). Only the DONE path records one — a tool force-closed at
-            # finalize has duration_ms None and was never timed.
-            self._tool_spans_since_mark.append((started, completed))
             self.commands.append(end_tel)
             self.emit.on_event(
                 ToolEndEvent(
@@ -1098,15 +1085,17 @@ class _AntigravityTurnState:
         # skill-rpa-uia-google-search, a harness-local Read closed 8 ms after
         # it opened while 6.4 s of model time separated the two flushes around
         # it — a reset would have reported 8 ms and dropped the 6.4 s.
-        # Subtracting closed tool time handles that case AND its opposite (a
-        # 43 s Bash, where the model time really is the flush-to-DONE
-        # remainder).
+        # Publishing the RAW window and letting the collector subtract the tool
+        # union handles that case AND its opposite (a 43 s Bash, where the
+        # model time really is the flush-to-DONE remainder).
         #
-        # The window arithmetic itself, and why a call still open at this
-        # boundary counts against it, live in `close_window`'s docstring.
-        # Measured here before the helper existed: a Bash opening 1.7 ms before
-        # the flush drove Sum(generation) + Sum(command) 0.26 ms PAST the turn
-        # wall, on a turn whose whole headroom was 1.4 ms.
+        # This harness interleaves a tool INTO a window rather than tiling
+        # around it, so the window legitimately contains time that is not model
+        # time. `EventCollector.subtract_tool_time` clips the union to these
+        # bounds and takes it out. Measured here before any of that existed: a
+        # Bash opening 1.7 ms before the flush drove Sum(generation) +
+        # Sum(command) 0.26 ms PAST the turn wall, on a turn whose whole
+        # headroom was 1.4 ms.
         #
         # The span used to be read off `time.monotonic()` while these intervals
         # were wall, and subtracting one from the other is the only reason this
@@ -1114,16 +1103,7 @@ class _AntigravityTurnState:
         # real instant generation. Both bounds now derive from `self.clock`, so
         # the disagreement is unrepresentable and the branch that hid it is
         # gone.
-        _, generation_ms = close_window(
-            mark=self._gen_mark_wall,
-            now=now_wall,
-            closed_spans=self._tool_spans_since_mark,
-            open_started_ats=[
-                tel.execution_started_at
-                for cid, tel in self._open_tools.items()
-                if cid not in self._closed_tools and tel.execution_started_at is not None
-            ],
-        )
+        _, generation_ms = close_window(mark=self._gen_mark_wall, now=now_wall)
         for i, block in enumerate(self._blocks):
             block.sequence = i
         self.messages.append(
@@ -1151,7 +1131,6 @@ class _AntigravityTurnState:
         # early return above means a no-op flush leaves the window open, so a
         # later real generation still measures from where it began.
         self._gen_mark_wall = now_wall
-        self._tool_spans_since_mark = []
 
     def _agent_output(self) -> str:
         if self._output_parts:

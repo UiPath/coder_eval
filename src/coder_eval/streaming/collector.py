@@ -39,7 +39,86 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     TurnStartEvent,
 )
-from coder_eval.timing import decompose_turn
+from coder_eval.timing import busy_ms, decompose_turn
+
+
+def subtract_tool_time(
+    messages: list[TranscriptMessage],
+    spans: list[tuple[datetime, datetime]],
+) -> list[TranscriptMessage]:
+    """Take tool execution back out of the generation windows it overlapped.
+
+    THE one place this happens. Five reducers used to do it themselves — four
+    through ``close_window`` as they flushed, claude-code once at finalization —
+    while the head and tail were already computed centrally, right here. That
+    asymmetry was the complexity, and every timing defect this branch fixed
+    lived in the per-reducer bookkeeping around the subtraction rather than in
+    the subtraction itself: when to reset a span list, when to clear a start
+    stamp, when to advance a mark. A reducer now publishes the RAW window and
+    keeps only the genuinely harness-shaped decision, which is where its window
+    opens.
+
+    NON-MUTATING, and the reason is aliasing rather than repeated calls. Every
+    agent builds its terminal event as ``AgentEndEvent(messages=list(...))`` —
+    that copies the LIST, not the message objects — so writing in place would
+    reach back into the agent's own live state from the collector, which is
+    exactly the layering "the collector is the sole capture seam" exists to
+    prevent. ``model_copy`` keeps it one-directional. It is also unconditionally
+    safe for any caller that builds a record twice: ``EarlyStopWatcher`` holds
+    one collector across a turn's tool-call rounds and calls
+    ``build_turn_record`` on every one.
+
+    GROUPED BY IDENTICAL BOUNDS, not by ``message_id``. Codex splits one window
+    across two sub-messages (thinking and action) that share ``started_at`` and
+    ``completed_at`` and divide the window by output-token share; subtracting
+    the group's overlap from each part separately would subtract it twice and
+    stop the parts summing to the window. Bounds identity covers that, and it
+    also covers OpenCode and Pi, which can legitimately carry
+    ``message_id is None`` — so keying on the id would silently collapse every
+    id-less message of a turn into one group.
+
+    MAIN THREAD ONLY. A sub-agent generation (``parent_tool_use_id`` set) is
+    skipped: its own tools are not in this span set, and the Agent call that
+    spawned it already covers its whole run.
+
+    A ``generation_duration_ms`` of ``None`` means no window was ever measured
+    (codex's rollout rebuild, claude's synthesized sub-agent terminal), so there
+    is nothing to subtract from and it passes through untouched — never
+    coerced to ``0.0`` (CE058). Every non-``AssistantMessage`` entry — a
+    simulation ``UserMessage``, the appended ``ReconciliationMessage`` — passes
+    through by identity.
+
+    A window entirely covered by tool execution reaches ``0.0``, and that is a
+    measurement rather than an absence.
+    """
+    # (index, raw window ms) per group. The raw value is captured HERE, where
+    # the message is already narrowed to AssistantMessage, so the apportioning
+    # loop below needs no second narrowing.
+    groups: dict[tuple[datetime, datetime], list[tuple[int, float]]] = {}
+    for index, message in enumerate(messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        raw = message.generation_duration_ms
+        if raw is None or message.parent_tool_use_id is not None:
+            continue
+        groups.setdefault((message.started_at, message.completed_at), []).append((index, raw))
+
+    out = list(messages)
+    for (started, completed), members in groups.items():
+        raw_total = sum(raw for _, raw in members)
+        # Nothing to apportion, and dividing by it is a ZeroDivisionError. A
+        # group already at zero stays at zero.
+        if raw_total <= 0:
+            continue
+        net = max(raw_total - busy_ms(spans, started, completed), 0.0)
+        assigned = 0.0
+        for n, (index, raw) in enumerate(members):
+            # The last member takes the remainder so the parts reconstruct the
+            # group's net exactly, rather than drifting by the rounding.
+            share = net - assigned if n == len(members) - 1 else round(net * (raw / raw_total), 6)
+            out[index] = out[index].model_copy(update={"generation_duration_ms": share})
+            assigned += share
+    return out
 
 
 class EventCollector:
@@ -115,7 +194,9 @@ class EventCollector:
     def _ordered_commands(self) -> list[CommandTelemetry]:
         return sorted(self._commands.values(), key=lambda c: c.sequence_number)
 
-    def _overhead_ms(self, messages: list[TranscriptMessage]) -> tuple[float | None, float | None]:
+    def _overhead_ms(
+        self, messages: list[TranscriptMessage], tool_spans: list[tuple[datetime, datetime]] | None = None
+    ) -> tuple[float | None, float | None]:
         """The turn's head and tail — the wall clock the generations do not cover.
 
         Measured against ``AssistantMessage`` entries only: a simulation turn
@@ -165,12 +246,42 @@ class EventCollector:
             max(m.completed_at for m in generations),
             self._agent_start_at,
             self._agent_end.timestamp if self._agent_end is not None else None,
-            [
-                (c.execution_started_at, c.execution_completed_at)
-                for c in self._commands.values()
-                if c.execution_started_at is not None and c.execution_completed_at is not None
-            ],
+            tool_spans if tool_spans is not None else self._main_thread_tool_spans(messages),
         )
+
+    def _main_thread_tool_spans(self, messages: list[TranscriptMessage]) -> list[tuple[datetime, datetime]]:
+        """Bounded execution intervals of the MAIN THREAD's tool calls.
+
+        The span set both the head/tail decomposition and the generation
+        subtraction are measured against, so they cannot disagree about which
+        calls exist.
+
+        Sub-agent tools are excluded, and this used to be the gap: ``_overhead_ms``
+        filtered its GENERATIONS to the main thread and then passed EVERY
+        command, so its docstring's claim to keep all four buckets measuring one
+        thread was true only by luck. It held because a child nests inside the
+        parent Agent call, whose own interval the union already covers — but
+        Codex's recovered child tools carry the CHILD's clock, so nothing made
+        it true by construction. The evalboard's twin (``toolExecutionMs``) does
+        filter, so the two implementations agreed by accident.
+
+        A sub-agent's tool ids are reachable only through the messages that own
+        them: a child generation carries ``parent_tool_use_id``, and its
+        ``tool_use_ids`` are the calls it made.
+        """
+        sub_agent_tool_ids = {
+            tool_id
+            for m in messages
+            if isinstance(m, AssistantMessage) and m.parent_tool_use_id is not None
+            for tool_id in m.tool_use_ids
+        }
+        return [
+            (c.execution_started_at, c.execution_completed_at)
+            for c in self._commands.values()
+            if c.execution_started_at is not None
+            and c.execution_completed_at is not None
+            and c.tool_id not in sub_agent_tool_ids
+        ]
 
     @staticmethod
     def _reconciled_messages(messages: list[TranscriptMessage], usage: TokenUsage) -> list[TranscriptMessage]:
@@ -259,10 +370,22 @@ class EventCollector:
         # to the total — making the stream self-reconciling for any downstream
         # consumer (e.g. the evalboard) without a competing aggregate.
         messages: list[TranscriptMessage] = list(end.messages)
+        # Tool execution comes out of the generation windows HERE, once, for
+        # every harness — the reducers publish raw windows.
+        #
+        # The span set is computed ONCE and handed to both consumers. That is
+        # the invariant worth protecting, and it is the one that is easy to
+        # break: the subtraction and the head/tail must agree about which calls
+        # exist, or the buckets stop being disjoint. (The ORDER of the two is
+        # not load-bearing — `_overhead_ms` reads only the bounds, the
+        # main-thread flag and whether the duration is `None`, none of which
+        # `subtract_tool_time` changes. Do not add a comment claiming it is.)
+        tool_spans = self._main_thread_tool_spans(messages)
+        messages = subtract_tool_time(messages, tool_spans)
         if token_usage is not None:
             messages = self._reconciled_messages(messages, token_usage)
 
-        startup_ms, teardown_ms = self._overhead_ms(messages)
+        startup_ms, teardown_ms = self._overhead_ms(messages, tool_spans)
 
         return TurnRecord(
             iteration=end.iteration or self._iteration,

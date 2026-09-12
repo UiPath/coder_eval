@@ -1,0 +1,109 @@
+{
+  "_comment": "Scrubbed representative run for the timing residual report. Prompts, outputs, tokens and cost are removed; only the wall-clock fields decompose_run.py reads are kept. NOT a before/after instrument \u2014 see the header in this directory.",
+  "agent_type": "codex",
+  "iterations": [
+    {
+      "duration_seconds": 19.704716542037204,
+      "iteration": 1,
+      "harness_startup_ms": 4209.975,
+      "harness_teardown_ms": 6.189,
+      "crashed": false,
+      "messages": [
+        {
+          "completed_at": "2026-09-11T07:14:25.044000",
+          "started_at": "2026-09-11T07:14:22.104000",
+          "generation_duration_ms": 1593.815668,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:25.044000",
+          "started_at": "2026-09-11T07:14:22.104000",
+          "generation_duration_ms": 1337.184332,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:31.755000",
+          "started_at": "2026-09-11T07:14:25.044000",
+          "generation_duration_ms": 6436.0,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:37.592000",
+          "started_at": "2026-09-11T07:14:31.755000",
+          "generation_duration_ms": 4040.0,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        }
+      ],
+      "commands": [
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T07:14:25.044000",
+          "execution_started_at": "2026-09-11T07:14:25.035000",
+          "tool_id": "call_MFDN1SquQKjnPMAC7cdID6es",
+          "result_status": "success",
+          "duration_ms": 9.0
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:31.452000",
+          "execution_started_at": "2026-09-11T07:14:31.452000",
+          "tool_id": "call_XoyG0xCaUZkVh4gs4HscEQY6",
+          "result_status": "success",
+          "duration_ms": 0.0
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:31.474000",
+          "execution_started_at": "2026-09-11T07:14:31.474000",
+          "tool_id": "call_3xwdnJ9958Qws766mtNMUmum",
+          "result_status": "success",
+          "duration_ms": 0.0
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:31.480000",
+          "execution_started_at": "2026-09-11T07:14:31.480000",
+          "tool_id": "call_kQU4wxYIqLLd7MxdhVBXt1fz",
+          "result_status": "success",
+          "duration_ms": 0.0
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:33.552000",
+          "execution_started_at": "2026-09-11T07:14:31.480000",
+          "tool_id": "call_EHI6niBRHKpW9GSxYgbSGPQn",
+          "result_status": "success",
+          "duration_ms": 2072.0
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:31.483000",
+          "execution_started_at": "2026-09-11T07:14:31.483000",
+          "tool_id": "call_5UNrspGHKnOkwpcR5PedDt5B",
+          "result_status": "success",
+          "duration_ms": 0.0
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:31.487000",
+          "execution_started_at": "2026-09-11T07:14:31.487000",
+          "tool_id": "call_xOqzas8ctiA0ri1wIsfiJobK",
+          "result_status": "success",
+          "duration_ms": 0.0
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": null,
+          "execution_started_at": null,
+          "tool_id": "call_zAeVW6TDp7vxHy3HilRTAa3i",
+          "result_status": null,
+          "duration_ms": null
+        }
+      ]
+    }
+  ]
+}

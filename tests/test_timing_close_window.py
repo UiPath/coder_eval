@@ -33,113 +33,58 @@ def _load_decompose_run():
 
 
 class TestCloseWindow:
-    def test_no_tools_keeps_the_whole_window(self):
-        started, generation_ms = close_window(mark=MARK, now=_at(1000), closed_spans=[], open_started_ats=[])
+    """The RAW window: where it opens, where it ends, and the clamp.
+
+    The tool subtraction these cases used to cover moved to
+    `streaming/collector.py::subtract_tool_time`, where it happens once for all
+    five harnesses instead of five times in five reducers — see
+    `tests/test_event_collector.py::TestSubtractToolTime`, which carries the
+    union, grouping, clamping and non-mutation cases. What is left here is the
+    part that is genuinely per-reducer: the mark.
+    """
+
+    def test_the_window_is_the_whole_span_from_the_mark(self):
+        started, span_ms = close_window(mark=MARK, now=_at(1000))
         assert started == MARK
-        assert generation_ms == pytest.approx(1000.0)
-
-    def test_a_contained_closed_tool_is_subtracted_once(self):
-        _, generation_ms = close_window(
-            mark=MARK,
-            now=_at(1000),
-            closed_spans=[(_at(200), _at(700))],
-            open_started_ats=[],
-        )
-        assert generation_ms == pytest.approx(500.0)
-
-    def test_overlapping_closed_tools_subtract_their_union_not_their_sum(self):
-        # Two 500 ms calls overlapping by 400 ms occupy 600 ms of wall clock.
-        # Summing them would leave 0 generation for a window that generated 400.
-        _, generation_ms = close_window(
-            mark=MARK,
-            now=_at(1000),
-            closed_spans=[(_at(100), _at(600)), (_at(200), _at(700))],
-            open_started_ats=[],
-        )
-        assert generation_ms == pytest.approx(400.0)
-
-    def test_an_open_tool_is_bounded_at_now(self):
-        # Still running when the window closes: it owns [300, 1000], not nothing.
-        _, generation_ms = close_window(mark=MARK, now=_at(1000), closed_spans=[], open_started_ats=[_at(300)])
-        assert generation_ms == pytest.approx(300.0)
-
-    def test_a_tool_straddling_the_mark_is_clipped_to_the_post_mark_part(self):
-        # The pre-mark half belongs to the PREVIOUS window, which already
-        # subtracted it. Counting it again here would over-subtract.
-        _, generation_ms = close_window(
-            mark=MARK,
-            now=_at(1000),
-            closed_spans=[(_at(-400), _at(300))],
-            open_started_ats=[],
-        )
-        assert generation_ms == pytest.approx(700.0)
+        assert span_ms == pytest.approx(1000.0)
 
     def test_item_start_before_the_mark_wins(self):
         # A stamp that went backwards: the window must cover the item, so the
         # min() moves the start back rather than inverting the span.
-        started, generation_ms = close_window(
-            mark=MARK,
-            now=_at(1000),
-            item_start=_at(-200),
-            closed_spans=[],
-            open_started_ats=[],
-        )
+        started, span_ms = close_window(mark=MARK, now=_at(1000), item_start=_at(-200))
         assert started == _at(-200)
-        assert generation_ms == pytest.approx(1200.0)
+        assert span_ms == pytest.approx(1200.0)
 
     def test_item_start_after_the_mark_keeps_the_mark(self):
         # The normal tiling case: the gap between the previous close and this
         # item's first stamp IS model time and belongs inside the window.
-        started, generation_ms = close_window(
-            mark=MARK,
-            now=_at(1000),
-            item_start=_at(400),
-            closed_spans=[],
-            open_started_ats=[],
-        )
+        started, span_ms = close_window(mark=MARK, now=_at(1000), item_start=_at(400))
         assert started == MARK
-        assert generation_ms == pytest.approx(1000.0)
+        assert span_ms == pytest.approx(1000.0)
 
     def test_an_inverted_window_clamps_to_zero_rather_than_going_negative(self):
-        started, generation_ms = close_window(mark=_at(1000), now=MARK, closed_spans=[], open_started_ats=[])
+        started, span_ms = close_window(mark=_at(1000), now=MARK)
         assert started == _at(1000)
-        assert generation_ms == 0.0
-
-    def test_an_open_tool_starting_after_now_is_ignored(self):
-        _, generation_ms = close_window(mark=MARK, now=_at(1000), closed_spans=[], open_started_ats=[_at(1500)])
-        assert generation_ms == pytest.approx(1000.0)
-
-    def test_an_open_tool_starting_exactly_at_now_is_ignored(self):
-        _, generation_ms = close_window(mark=MARK, now=_at(1000), closed_spans=[], open_started_ats=[_at(1000)])
-        assert generation_ms == pytest.approx(1000.0)
-
-    def test_closed_and_open_spans_are_unioned_together(self):
-        # A closed [100, 400] and an open from 300 bounded at 1000 union to
-        # [100, 1000] — 900 ms busy, 100 ms of generation.
-        _, generation_ms = close_window(
-            mark=MARK,
-            now=_at(1000),
-            closed_spans=[(_at(100), _at(400))],
-            open_started_ats=[_at(300)],
-        )
-        assert generation_ms == pytest.approx(100.0)
-
-    def test_tools_covering_the_whole_window_leave_zero_not_a_negative(self):
-        _, generation_ms = close_window(
-            mark=MARK,
-            now=_at(1000),
-            closed_spans=[(_at(-500), _at(1500))],
-            open_started_ats=[],
-        )
-        assert generation_ms == 0.0
+        assert span_ms == 0.0
 
     def test_mark_is_keyword_only_and_has_no_default(self):
         # A reducer cannot open a window without STATING what it tiles from.
         # The value is still the caller's to get right — see the docstring.
         with pytest.raises(TypeError):
-            close_window(MARK, _at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[misc]
+            close_window(MARK, _at(1000))  # type: ignore[misc]
         with pytest.raises(TypeError):
-            close_window(now=_at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[call-arg]
+            close_window(now=_at(1000))  # type: ignore[call-arg]
+
+    def test_it_no_longer_accepts_the_span_arguments_that_moved(self):
+        """The subtraction moved; the parameters must not linger as no-ops.
+
+        A reducer still passing `closed_spans=` would otherwise keep compiling
+        while its tool time was silently subtracted a second time centrally.
+        """
+        with pytest.raises(TypeError):
+            close_window(mark=MARK, now=_at(1000), closed_spans=[])  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            close_window(mark=MARK, now=_at(1000), open_started_ats=[])  # type: ignore[call-arg]
 
 
 class TestNaiveAwareMix:
@@ -340,3 +285,98 @@ class TestTurnClock:
 
         assert second._mono0 > first._mono0
         assert second._wall0 >= first._wall0
+
+
+class TestTheThreeToolUnionsAgree:
+    """Three implementations recompute the turn's tool union. They must agree.
+
+    * `EventCollector._main_thread_tool_spans` — what the harness subtracts
+      from the generation windows and measures the head and tail against.
+    * `tests/_fixtures/golden_streams/_scrub.py::_tool_union_ms` — the golden
+      corpus's identity check.
+    * `scripts/timing/decompose_run.py::_tool_ms` — the LIVE two-sided residual
+      gate, which `.github/workflows/pr-checks.yml` runs against a real run.
+
+    They agreed by luck once and it cost a defect: the collector filtered its
+    GENERATIONS to the main thread and then passed EVERY command as a tool
+    span. A child nests inside the parent Agent call, whose interval the union
+    already covers, so nothing failed — but Codex's recovered child tools carry
+    the CHILD's clock, so the nesting is not guaranteed. When the collector
+    started filtering, the other two did not, and a gate computing a different
+    tool total than the harness reports a residual that is an artifact of the
+    disagreement rather than a bucket error. That is the worst possible place
+    for a divergence, because this is the only live sensor for the identity.
+    """
+
+    @staticmethod
+    def _record() -> dict:
+        """A turn with a sub-agent whose own tool sits OUTSIDE the parent call.
+
+        Inside, the three agree whatever they filter, so the fixture has to put
+        the child's tool where the parent's interval does not cover it.
+        """
+        return {
+            "duration_seconds": 3.0,
+            "commands": [
+                {
+                    "tool_id": "agent-call",
+                    "execution_started_at": _at(1000).isoformat(),
+                    "execution_completed_at": _at(1500).isoformat(),
+                },
+                {
+                    "tool_id": "child-tool",
+                    "execution_started_at": _at(2000).isoformat(),
+                    "execution_completed_at": _at(2400).isoformat(),
+                },
+            ],
+            "messages": [
+                {"role": "assistant", "parent_tool_use_id": None, "tool_use_ids": ["agent-call"]},
+                {"role": "assistant", "parent_tool_use_id": "agent-call", "tool_use_ids": ["child-tool"]},
+            ],
+        }
+
+    def test_the_two_recomputing_readers_exclude_the_sub_agent_tool(self):
+        from tests._fixtures.golden_streams._scrub import _tool_union_ms
+
+        tool_ms = _load_decompose_run()._tool_ms
+        record = self._record()
+        # Only the parent Agent call's own 500 ms. Counting the child's 400 ms
+        # books time no main-thread bucket claims.
+        assert _tool_union_ms(record) == pytest.approx(500.0)
+        assert tool_ms(record) == pytest.approx(500.0)
+
+    def test_the_collector_excludes_it_too(self):
+        from coder_eval.models import AssistantMessage, CommandTelemetry
+        from coder_eval.streaming.collector import EventCollector
+        from coder_eval.streaming.events import ToolEndEvent
+
+        collector = EventCollector()
+        for tool_id, lo, hi in (("agent-call", 1000, 1500), ("child-tool", 2000, 2400)):
+            collector.on_event(
+                ToolEndEvent(
+                    task_id="t",
+                    turn_id="t1",
+                    tool=CommandTelemetry(
+                        tool_name="Agent",
+                        tool_id=tool_id,
+                        timestamp=_at(lo),
+                        execution_started_at=_at(lo),
+                        execution_completed_at=_at(hi),
+                        result_status="success",
+                    ),
+                )
+            )
+        messages = [
+            AssistantMessage(
+                started_at=_at(0), completed_at=_at(1000), generation_duration_ms=1000.0, tool_use_ids=["agent-call"]
+            ),
+            AssistantMessage(
+                started_at=_at(2000),
+                completed_at=_at(2400),
+                generation_duration_ms=400.0,
+                parent_tool_use_id="agent-call",
+                tool_use_ids=["child-tool"],
+            ),
+        ]
+        spans = collector._main_thread_tool_spans(messages)
+        assert union_ms(spans) == pytest.approx(500.0), "the same 500 ms the other two report"

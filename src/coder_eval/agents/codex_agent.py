@@ -477,31 +477,17 @@ class _CodexTurnState:
         window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
         mark = _ms_to_dt(mark_ms)
         completed = _ms_to_dt(window_end_ms)
-        # The window is extended to the LAST item's completion, so any
+        # The RAW window. It is extended to the LAST item's completion, so a
         # generation containing a tool call already CONTAINS that tool's
-        # execution. Publishing the raw span as generation time double-counts
-        # it against the tool's own duration_ms: a tool-only emission reported
-        # 250ms of "generation" for a 250ms `echo hi`, and the task page's
-        # Generation + Tool exec then exceeded the wall clock they must
-        # reconcile to.
-        #
-        # Same shared helper as the other tiling harnesses: the UNION of the
-        # tool intervals clipped to this window, the open calls bounded at its
-        # end, and the double-subtraction rule they rest on — all in
-        # `close_window`'s docstring rather than restated here.
-        tool_spans = [
-            (c.execution_started_at, c.execution_completed_at)
-            for c in self.commands
-            if c.execution_started_at is not None and c.execution_completed_at is not None
-        ]
+        # execution — but taking it back out is no longer this reducer's job.
+        # `EventCollector.subtract_tool_time` does it for all five, which is
+        # also what makes the sub-message split below safe: the two specs share
+        # these bounds, so the collector groups them and subtracts the overlap
+        # ONCE rather than once per part.
         started, gen_ms = close_window(
             mark=mark,
             now=completed,
             item_start=_ms_to_dt(self.open_start_ms) if self.open_start_ms is not None else None,
-            closed_spans=tool_spans,
-            open_started_ats=[
-                t.execution_started_at for t in self.open_tools.values() if t.execution_started_at is not None
-            ],
         )
         message_id = f"{self.turn_id}-msg-{self.gen_index}"
 

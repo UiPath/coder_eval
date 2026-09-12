@@ -39,6 +39,7 @@ from tests.lint.rules.ce058_no_timing_literal import NoTimingLiteral
 from tests.lint.rules.ce059_generation_window_is_two_reads import GenerationWindowIsTwoReads
 from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
 from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -101,6 +102,7 @@ ALL_RULES: list[RuleClass] = [
     GenerationWindowIsTwoReads,
     MessageIdDeclared,
     WindowViaCloseWindow,
+    NoBusyMsInAgents,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

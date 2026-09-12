@@ -4034,11 +4034,17 @@ class TestCE061WindowViaCloseWindow:
         found = [v for path in sorted(root.glob("*.py")) for v in check_file(path, [WindowViaCloseWindow])]
         assert not found, found
 
-    def test_each_suppression_is_load_bearing(self):
-        # A noqa nobody needs is a noqa that outlives its reason, so the set is
-        # pinned rather than merely non-empty. It has already earned that:
-        # antigravity carried a TEMPORARY suppression until it moved onto
-        # `close_window`, and this test is what failed when the reason expired.
+    def test_the_rule_is_now_exemption_free(self):
+        """No reducer needs a `# noqa: CE061` any more, and the set is PINNED empty.
+
+        A noqa nobody needs is a noqa that outlives its reason, so this asserts
+        the exact set rather than merely that it shrank. It has earned that
+        twice: antigravity carried a TEMPORARY suppression until it moved onto
+        `close_window`, and claude-code carried a permanent one until the tool
+        subtraction moved to `EventCollector.subtract_tool_time` — at which
+        point it could call the same shrunken helper as the other four. This
+        test is what failed each time the reason expired.
+        """
         import ast
         import pathlib
 
@@ -4050,7 +4056,7 @@ class TestCE061WindowViaCloseWindow:
             for path in sorted(root.glob("*.py"))
             if WindowViaCloseWindow(str(path)).check(ast.parse(path.read_text(encoding="utf-8")))
         }
-        assert suppressed == {"claude_code_agent.py"}
+        assert suppressed == set()
 
 
 class TestRuffExternalCoversEveryRule:
@@ -4662,3 +4668,70 @@ class TestCE060MessageIdDeclared:
         path = SRC / "coder_eval/agents/antigravity_agent.py"
         assert path.is_file(), "the fixture file must exist or this test passes vacuously"
         assert not [v for v in check_file(path) if v.rule_id == "CE060"]
+
+
+class TestCE063NoBusyMsInAgents:
+    """CE063 flags a reducer that would subtract tool time itself.
+
+    The subtraction lives once, in
+    `coder_eval.streaming.collector.subtract_tool_time`. A reducer that also
+    does it has its tool time taken out TWICE — once by itself, once by the
+    collector — which under-reports generation on that harness alone.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
+
+        return NoBusyMsInAgents(filepath).check(ast.parse(src))
+
+    def test_flags_the_bare_name_import(self):
+        assert len(self._run("from coder_eval.timing import busy_ms")) == 1
+
+    def test_flags_it_under_an_alias(self):
+        # The import is what is banned, whatever it is bound to.
+        assert len(self._run("from coder_eval.timing import busy_ms as union")) == 1
+
+    def test_flags_it_alongside_an_allowed_import(self):
+        assert len(self._run("from coder_eval.timing import busy_ms, close_window")) == 1
+
+    def test_flags_a_relative_import(self):
+        # `agents/` uses relative imports; matching only the absolute path
+        # would leave the rule blind for a whole file.
+        assert len(self._run("from ..timing import busy_ms")) == 1
+
+    def test_flags_the_module_attribute_spelling(self):
+        assert len(self._run("from coder_eval import timing\nx = timing.busy_ms(s, lo, hi)")) == 1
+
+    def test_does_not_fire_on_close_window_through_the_module(self):
+        """The exact false positive a naive inversion of CE061's resolver gives.
+
+        `_imports_the_helper` returns True for a bare module import so that
+        `timing.close_window(...)` counts as reaching the helper. Inverted into
+        a ban, that branch flags every reducer importing the module — which
+        after the migration is four of the five.
+        """
+        assert not self._run("from coder_eval import timing\nx = timing.close_window(mark=m, now=n)")
+
+    def test_does_not_fire_on_close_window_by_name(self):
+        assert not self._run("from coder_eval.timing import close_window\nx = close_window(mark=m, now=n)")
+
+    def test_does_not_fire_on_an_unrelated_attribute_named_busy_ms(self):
+        # `self.busy_ms` is not `timing.busy_ms`; only the module spelling counts.
+        assert not self._run("x = self.busy_ms")
+
+    def test_does_not_fire_outside_agents(self):
+        # The collector is where the subtraction belongs, so it must import it.
+        assert not self._run("from coder_eval.timing import busy_ms", filepath="src/coder_eval/streaming/collector.py")
+
+    def test_is_suppressible(self, tmp_path):
+        from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
+        from tests.lint.runner import check_file
+
+        agents = tmp_path / "src" / "coder_eval" / "agents"
+        agents.mkdir(parents=True)
+        target = agents / "pi_agent.py"
+        target.write_text("from coder_eval.timing import busy_ms  # noqa: CE063\n", encoding="utf-8")
+        assert not check_file(target, [NoBusyMsInAgents])

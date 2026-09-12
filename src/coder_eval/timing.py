@@ -4,15 +4,18 @@ A cycle-free leaf (the ``models/cli_match.py`` rationale): it sits outside
 ``agents/`` because ``EventCollector`` consumes it, and importing anything
 under ``agents/`` pulls in every agent, which imports ``streaming/``.
 
-EVERY harness now subtracts tool execution from its generation windows before
-publishing ``generation_duration_ms``, and all of them subtract the same
-thing: the UNION of the intervals, clipped to the window. Two interleave a
-tool into a single window outright — Antigravity (the Step for the tool
-arrives and only a later ``usage_metadata`` Step cuts the message) and Codex
-(``_flush_message``'s window is extended to the last item's
-``completed_at_ms``). The other three reach the same place from the opposite
-direction: their windows tile the turn contiguously, so a call open at a
-window boundary runs inside two of them.
+NO harness subtracts tool execution from its own generation windows. Each
+publishes the RAW window it measured, and ``streaming/collector.py::subtract_tool_time``
+takes the UNION of the tool intervals back out of them once, for all five, at
+the single capture seam — the same place the head and the tail are already
+computed. A reducer's only remaining timing decision is where its window
+opens, which is the one genuinely harness-shaped part: two interleave a tool
+into a single window outright (Antigravity, whose Step for the tool arrives and
+only a later ``usage_metadata`` Step cuts the message, and Codex, whose
+``_flush_message`` window extends to the last item's ``completed_at_ms``) while
+the other three tile the turn contiguously, so a call open at a boundary runs
+inside two windows. Central subtraction handles both without either reducer
+knowing which it is.
 
 There is a TypeScript twin, ``evalboard/lib/timing.ts::busyMs``, which
 subtracts tool time from a task's WALL CLOCK to produce the Unaccounted
@@ -66,6 +69,13 @@ class TurnClock:
     CLI's own epoch-millisecond stamps, unreachable from the host, so
     converting only the window bounds would put two bases inside one
     ``busy_ms`` subtraction — relocating the defect instead of removing it.
+
+    claude-code does not use it either, but for no good reason: it has no
+    epoch-stamp constraint, it simply has not been converted. Its window bounds
+    and its span now share one basis (raw ``datetime.now()``), so the two cannot
+    disagree with each other — but both carry the naive-local exposure this
+    class removes. Converting it is the remaining work; see
+    docs/agents/HARNESS_PARITY.md.
     """
 
     def __init__(self) -> None:
@@ -181,21 +191,16 @@ def union_ms(spans: list[tuple[datetime, datetime]]) -> float:
     return busy_ms(spans, min(s for s, _ in spans), max(e for _, e in spans))
 
 
-def close_window(
-    *,
-    mark: datetime,
-    now: datetime,
-    item_start: datetime | None = None,
-    closed_spans: list[tuple[datetime, datetime]],
-    open_started_ats: list[datetime],
-) -> tuple[datetime, float]:
-    """Close one generation window at ``now``: its ``(started, generation_ms)``.
+def close_window(*, mark: datetime, now: datetime, item_start: datetime | None = None) -> tuple[datetime, float]:
+    """Open one generation window at ``mark`` and close it at ``now``: its ``(started, span_ms)``.
 
-    The shape four reducers had copy-pasted. Codex, opencode, pi and
-    antigravity all call it; claude-code is the one exception and carries the
-    only ``# noqa: CE061``, because it subtracts tool time once at finalization
-    across every emission rather than per flush — a call issued by an earlier
-    emission is still running when the next window closes.
+    The shape all five reducers share. What it returns is the RAW window —
+    tool execution is taken back out of it once, centrally, in
+    ``streaming/collector.py::subtract_tool_time``, which is the only place
+    that arithmetic lives. It used to happen here too, per flush, and in
+    claude-code at finalization; the per-reducer bookkeeping that required
+    (a span list, its reset rule, the set of still-open calls) is where every
+    timing defect on this branch actually lived.
 
     ``mark`` is where the window opens: the previous flush's close, which is
     what makes the windows TILE the turn contiguously instead of leaving the
@@ -210,22 +215,12 @@ def close_window(
     ``item_start`` is this emission's own first stamp, when the harness has
     one. The ``min()`` against ``mark`` is the tiling defense and nothing else:
     a stamp that went backwards must never push the window start PAST the first
-    item and invert the span.
+    item and invert the span. claude-code passes none — its stream carries no
+    per-emission item start — so its window opens exactly at the mark.
 
-    A call still OPEN at this boundary counts against the window too, bounded
-    at ``now``. Subtracting only CLOSED intervals publishes the part of a
-    straddling call that ran inside this window as generation, while the call's
-    own ``duration_ms`` counts it again.
-
-    NO DOUBLE SUBTRACTION, and this is the rationale that used to sit copy-
-    pasted at four call sites: when that open call later closes, the reducer
-    appends its FULL interval to the next window's ``closed_spans``, where
-    ``busy_ms`` clips it to the post-boundary remainder. Each millisecond of
-    tool time is therefore subtracted from exactly one window.
-
-    The UNION is subtracted, never the sum (see ``busy_ms``), and the result is
-    clamped at ``0.0`` — an inverted window (``now`` before ``mark``, two
-    clocks disagreeing) is a measured zero, not a negative generation.
+    The result is clamped at ``0.0``: an inverted window (``now`` before
+    ``mark``, two clocks disagreeing) is a measured zero, not a negative
+    generation.
 
     It deliberately does NOT return ``completed``. The window always ends at
     ``now``, which the caller passed in, so handing it back would be an
@@ -233,9 +228,7 @@ def close_window(
     write ``completed_at=now`` directly.
     """
     started = min(mark, item_start) if item_start is not None else mark
-    bounded = [(s, now) for s in open_started_ats if s < now]
-    span_ms = (now - started).total_seconds() * 1000.0
-    return started, max(0.0, span_ms - busy_ms(closed_spans + bounded, started, now))
+    return started, max(0.0, (now - started).total_seconds() * 1000.0)
 
 
 def decompose_turn(

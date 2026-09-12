@@ -46,20 +46,49 @@ def _parse(stamp: object) -> datetime | None:
         return None
 
 
-def _tool_ms(turn: dict) -> float:
-    """Wall ms this turn spent executing tools — the UNION, not the sum.
+def _sub_agent_tool_ids(turn: dict) -> set:
+    """Tool ids owned by a SUB-AGENT generation, which the main thread excludes.
 
-    The same rule `coder_eval.timing.union_ms` applies when a harness subtracts
-    tool time out of a generation window, and it has to be the same rule here
-    or the identity does not close: Pi resolved a `Write` and a `Bash` that
-    overlapped by 18.4 ms in one measured turn, and summing their durations
+    Derived the only way it can be: a child generation carries
+    `parent_tool_use_id`, and its `tool_use_ids` are the calls it made.
+
+    This MUST match `EventCollector._main_thread_tool_spans`, which applies the
+    same filter when it computes the head, the tail and the generation
+    subtraction. The two used to disagree — the collector passed every command
+    while filtering its generations — and they agreed only by luck, because a
+    child nests inside the parent Agent call whose interval the union already
+    covers. Codex's recovered child tools carry the CHILD's clock, so the
+    nesting is not guaranteed, and a gate computing a different tool total than
+    the harness reports a residual that is an artifact of the disagreement
+    rather than a bucket error. This is the only two-sided live sensor for the
+    identity, so that is the worst place for the two to drift.
+    """
+    ids = set()
+    for message in turn.get("messages") or []:
+        if message.get("role") == "assistant" and message.get("parent_tool_use_id") is not None:
+            ids.update(message.get("tool_use_ids") or [])
+    return ids
+
+
+def _tool_ms(turn: dict) -> float:
+    """Wall ms this turn's MAIN-THREAD tools occupied — the UNION, not the sum.
+
+    The same rule `coder_eval.timing.union_ms` applies when the collector
+    subtracts tool time out of a generation window, and it has to be the same
+    rule here or the identity does not close: Pi resolved a `Write` and a `Bash`
+    that overlapped by 18.4 ms in one measured turn, and summing their durations
     booked that overlap twice, which is precisely the 18.3 ms residual that
     found this. A command with no recorded bounds cannot be placed on the
     timeline at all, so it contributes nothing rather than being summed in
-    blind — see docs/agents/HARNESS_PARITY.md's Delegate divergence.
+    blind — see docs/agents/HARNESS_PARITY.md's Delegate divergence. Sub-agent
+    tools are excluded for the same reason their generations are; see
+    `_sub_agent_tool_ids`.
     """
+    excluded = _sub_agent_tool_ids(turn)
     spans = []
     for command in turn.get("commands") or []:
+        if command.get("tool_id") in excluded:
+            continue
         start = _parse(command.get("execution_started_at"))
         end = _parse(command.get("execution_completed_at"))
         if start is not None and end is not None and end >= start:
