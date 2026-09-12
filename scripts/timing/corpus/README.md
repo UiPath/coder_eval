@@ -2,11 +2,20 @@
 
 One scrubbed, representative `task.json` per harness, from a real
 `tasks/timing-parallel-tools` run. Prompts, outputs, tokens and cost are
-stripped; only the wall-clock fields `scripts/timing/decompose_run.py` reads
-survive.
+stripped; the wall-clock fields `scripts/timing/decompose_run.py` reads survive,
+plus the handful `TurnRecord` requires (`user_input`, `agent_output`, each
+command's `timestamp`) as neutral placeholders — the script validates each turn
+into the model so it can call production's own span selector, and the original
+scrub had left these records below what that requires.
+
+**NO TEST MAY READ THIS DIRECTORY.** That is why it lives under `scripts/` and
+not under `tests/_fixtures/`. Two of the five records deliberately preserve
+defects the live code no longer has (see below); a green assertion over them
+would pin a fixed defect as expected behaviour, and a reader who finds
+stale-by-design data under `tests/` has every reason to point a test at it.
 
 ```
-uv run python scripts/timing/decompose_run.py tests/_fixtures/timing_runs/*.json --min-turn-ms 0
+uv run python scripts/timing/decompose_run.py scripts/timing/corpus/*.json --min-turn-ms 0
 ```
 
 ## What this is NOT

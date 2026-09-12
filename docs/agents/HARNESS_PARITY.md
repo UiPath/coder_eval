@@ -65,7 +65,7 @@ sets that type); run it by hand for the others.
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
 All five harnesses can have tool execution inside a generation window, and it is
 subtracted out of every one of them — **once, centrally**, by
-`streaming/collector.py::subtract_tool_time`. No reducer does it itself; each
+`timing.py::subtract_tool_time`. No reducer does it itself; each
 publishes the raw window (see the two sections below). Every harness has the
 problem: Antigravity reports a `Step` for the tool and only a later
 `usage_metadata` `Step` cuts the message; Codex's message window is seeded from
@@ -98,7 +98,7 @@ publishing a measured `generation_duration_ms` to import the helper, and is now
 needs it.
 
 **Tool execution comes out of the windows ONCE, at the collector.**
-`streaming/collector.py::subtract_tool_time` takes the union of the main-thread
+`timing.py::subtract_tool_time` takes the union of the main-thread
 tool intervals, clipped to each window, out of the raw spans the reducers
 publish. Before, that happened five times in five places — four inside
 `close_window` as the reducer flushed, claude-code once at finalization — while
@@ -205,7 +205,7 @@ emission's window runs concurrently with a tool already timing. On a task
 issuing five parallel writes, five reads and two concurrent `Bash` calls the
 overlap was 482 ms and 340 ms on two ~18-25 s turns, and the four-bucket
 residual came out at exactly `-481 ms` and `-339 ms`. (That run is pinned at
-`tests/_fixtures/timing_runs/claude-code.json`, which still reconciles at
+`scripts/timing/corpus/claude-code.json`, which still reconciles at
 -481 ms — it is a RECORD of the defect, not of current behaviour; see the README
 there.)
 
@@ -241,7 +241,13 @@ generation window) and **tail** (last window → turn end) are booked as
 `EventCollector` seam by `coder_eval/timing.py::decompose_turn`. The tool term
 is the **union** of the command intervals, for the same reason the subtraction
 above is — Pi resolved a `Write` and a `Bash` overlapping by 18.4 ms in one
-measured turn, and summing their durations books that overlap twice. The head
+measured turn, and summing their durations books that overlap twice — and it is
+the THIRD stored bucket, `TurnRecord.tool_union_ms`, written at the same seam
+from the same span set the head and the tail are measured against. Generation is
+deliberately not stored: it is a one-line sum over the message stream, and the
+reconciliation entry exists so a consumer sums that stream rather than reading a
+separate aggregate. The tool union is the opposite case — union arithmetic plus
+a sub-agent filter — which is what a dict consumer cannot cheaply reproduce. The head
 and tail exclude tool execution by that same rule and that same helper, which
 is what keeps the four buckets disjoint: a tool is not confined to a
 generation window (Antigravity force-closes an orphan at finalization, inside

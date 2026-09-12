@@ -20,8 +20,8 @@ on `abs(share)` covers both signs.
 
 Not wired into `make`: it needs live runs, not fixtures. NOTE `scripts/` is
 outside the Makefile's LINT_PATHS, so this file is neither formatted nor
-ruff-checked — keep it small and dependency-free (stdlib plus the one shared
-`union_ms` import, so the union rule has a single definition).
+ruff-checked — keep it small and dependency-free (stdlib plus the shared
+timing helpers and `TurnRecord`, so the union rule has a single definition).
 """
 
 from __future__ import annotations
@@ -34,66 +34,61 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from coder_eval.timing import union_ms
+from pydantic import ValidationError
+
+from coder_eval.models import TurnRecord
+from coder_eval.timing import main_thread_tool_spans, union_ms
 
 
-def _parse(stamp: object) -> datetime | None:
-    if not isinstance(stamp, str):
-        return None
-    try:
-        return datetime.fromisoformat(stamp)
-    except ValueError:
-        return None
-
-
-def _sub_agent_tool_ids(turn: dict) -> set:
-    """Tool ids owned by a SUB-AGENT generation, which the main thread excludes.
-
-    Derived the only way it can be: a child generation carries
-    `parent_tool_use_id`, and its `tool_use_ids` are the calls it made.
-
-    This MUST match `EventCollector._main_thread_tool_spans`, which applies the
-    same filter when it computes the head, the tail and the generation
-    subtraction. The two used to disagree — the collector passed every command
-    while filtering its generations — and they agreed only by luck, because a
-    child nests inside the parent Agent call whose interval the union already
-    covers. Codex's recovered child tools carry the CHILD's clock, so the
-    nesting is not guaranteed, and a gate computing a different tool total than
-    the harness reports a residual that is an artifact of the disagreement
-    rather than a bucket error. This is the only two-sided live sensor for the
-    identity, so that is the worst place for the two to drift.
-    """
-    ids = set()
-    for message in turn.get("messages") or []:
-        if message.get("role") == "assistant" and message.get("parent_tool_use_id") is not None:
-            ids.update(message.get("tool_use_ids") or [])
-    return ids
+# A stored `tool_union_ms` and the union computed here should be the same
+# number; JSON round-tripping is the only slack, so the tolerance is absolute
+# and tiny.
+_UNION_TOLERANCE_MS = 1e-6
 
 
 def _tool_ms(turn: dict) -> float:
     """Wall ms this turn's MAIN-THREAD tools occupied — the UNION, not the sum.
 
-    The same rule `coder_eval.timing.union_ms` applies when the collector
-    subtracts tool time out of a generation window, and it has to be the same
-    rule here or the identity does not close: Pi resolved a `Write` and a `Bash`
-    that overlapped by 18.4 ms in one measured turn, and summing their durations
-    booked that overlap twice, which is precisely the 18.3 ms residual that
-    found this. A command with no recorded bounds cannot be placed on the
-    timeline at all, so it contributes nothing rather than being summed in
-    blind — see docs/agents/HARNESS_PARITY.md's Delegate divergence. Sub-agent
-    tools are excluded for the same reason their generations are; see
-    `_sub_agent_tool_ids`.
+    Validates the raw dict into a `TurnRecord` and calls the SAME typed
+    selector the collector uses, rather than reimplementing the selection rule
+    (which commands count, the sub-agent exclusion, the stamp parse, the
+    `end >= start` filter) over dicts. Three copies of that rule existed and
+    they agreed only because someone kept checking; Pi resolved a `Write` and a
+    `Bash` overlapping by 18.4 ms in one measured turn, and a selector that
+    disagreed with the collector's would report a residual that is an artifact
+    of the disagreement rather than a bucket error. This is the only two-sided
+    live sensor for the identity, so that is the worst place for a copy.
+
+    What is shared is the SELECTION and `union_ms`. What is NOT shared is the
+    bookkeeping around them — this still builds its own span set and computes
+    its own union, so it stays a sensor rather than a restatement of the
+    producer's answer. Do not "simplify" it into reading `tool_union_ms`; the
+    cross-check below is how that field is verified, not how this is computed.
     """
-    excluded = _sub_agent_tool_ids(turn)
-    spans = []
-    for command in turn.get("commands") or []:
-        if command.get("tool_id") in excluded:
-            continue
-        start = _parse(command.get("execution_started_at"))
-        end = _parse(command.get("execution_completed_at"))
-        if start is not None and end is not None and end >= start:
-            spans.append((start, end))
-    return union_ms(spans)
+    record = TurnRecord.model_validate(turn)
+    return union_ms(main_thread_tool_spans(record.messages, record.commands))
+
+
+def _union_breach(turn: dict) -> str | None:
+    """The stored `tool_union_ms` disagrees with what we just computed, if so.
+
+    Skips when the field is absent: `decompose_run.py` reads corpora recorded
+    before `TurnRecord` carried it, so that is the common case here rather than
+    an exotic one. A DISAGREEMENT is its own named breach, distinct from a
+    residual breach — a residual says the buckets do not tile the turn, this
+    says the producer and an independent recomputation of one bucket do not
+    agree about its value, which is a different fault with a different fix.
+    """
+    stored = turn.get("tool_union_ms")
+    if not isinstance(stored, (int, float)):
+        return None
+    computed = _tool_ms(turn)
+    if abs(stored - computed) <= _UNION_TOLERANCE_MS:
+        return None
+    return (
+        f"tool_union_ms={stored:.6f}ms but this turn's main-thread command spans union to "
+        f"{computed:.6f}ms (off by {stored - computed:+.6f}ms)"
+    )
 
 
 def _turn_buckets(turn: dict) -> tuple[float, float, float, float, float] | None:
@@ -183,6 +178,12 @@ def main(argv: list[str]) -> int:
     # reason as the two above: an exclusion nobody can see understates how much
     # of the corpus the gate actually looked at.
     skipped_untimed = 0
+    # A turn whose STORED tool bucket disagrees with the union recomputed here.
+    # Its own list, not folded into the residual breaches: a residual says the
+    # buckets do not tile the turn; this says the producer and an independent
+    # recomputation of one bucket disagree about its value.
+    union_breaches: list[tuple[str, Path, int, str]] = []
+    invalid: list[tuple[Path, int, int]] = []
     for path in args.task_json:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -210,10 +211,22 @@ def main(argv: list[str]) -> int:
                 skipped_crashed += int(crashed)
                 skipped_no_window += int(no_window)
                 continue
-            buckets = _turn_buckets(turn)
+            try:
+                buckets = _turn_buckets(turn)
+            except ValidationError as exc:
+                # A real record failing TurnRecord validation is a FINDING, not
+                # a nuisance: measured across the whole run history on disk,
+                # 2466 of 2466 turns validated. Name it and move on rather than
+                # falling back to dict access, which is the second selection
+                # path this script just removed.
+                invalid.append((path, index, exc.error_count()))
+                continue
             if buckets is None:
                 skipped_untimed += 1
                 continue
+            breach = _union_breach(turn)
+            if breach is not None:
+                union_breaches.append((harness, path, index, breach))
             by_harness[harness].append((path, index, buckets))
 
     if not by_harness:
@@ -287,12 +300,25 @@ def main(argv: list[str]) -> int:
         f"{skipped_short} short (< {args.min_turn_ms:.0f}ms)"
     )
 
+    if invalid:
+        print(f"\n{len(invalid)} turn(s) failed TurnRecord validation:", file=sys.stderr)
+        for path, index, count in invalid:
+            print(f"  {path} turn {index}: {count} error(s)", file=sys.stderr)
+    if union_breaches:
+        print(f"\nSTORED TOOL UNION disagrees on {len(union_breaches)} turn(s):", file=sys.stderr)
+        for harness, path, index, detail in union_breaches:
+            print(f"  {harness:<14} {path} turn {index}: {detail}", file=sys.stderr)
+
     if not gateable_total:
         # A gate that passes because it measured nothing is the exact failure
         # this script exists to remove, so it only passes when none was asked for.
         print("no gateable turns", file=sys.stderr)
         return 1 if args.max_residual_pct is not None else 0
 
+    if union_breaches or invalid:
+        # Independent of --max-residual-pct: neither is a residual question, and
+        # a disagreement about a stored bucket is exactly what a gate is for.
+        return 1
     if args.max_residual_pct is None:
         return 0
     if not breaches:

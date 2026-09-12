@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.timing import busy_ms, close_window, decompose_turn, union_ms
+from coder_eval.timing import busy_ms, close_window, decompose_turn, main_thread_tool_spans, union_ms
 
 
 MARK = datetime(2026, 9, 11, 12, 0, 0)
@@ -36,7 +36,7 @@ class TestCloseWindow:
     """The RAW window: where it opens, where it ends, and the clamp.
 
     The tool subtraction these cases used to cover moved to
-    `streaming/collector.py::subtract_tool_time`, where it happens once for all
+    `timing.py::subtract_tool_time`, where it happens once for all
     five harnesses instead of five times in five reducers — see
     `tests/test_event_collector.py::TestSubtractToolTime`, which carries the
     union, grouping, clamping and non-mutation cases. What is left here is the
@@ -213,9 +213,9 @@ class TestUnionMs:
 
         They read the SAME `task.json` shape — the golden sensor from a dumped
         record, the gate from the file on disk — and a divergence would let one
-        pass while the other failed on identical bytes. They keep their own
-        stamp parsing (the inputs differ in how they are reached); the union
-        tail is what this pins.
+        pass while the other failed on identical bytes. Both now validate into a
+        `TurnRecord` and call the one typed selector, so what this pins is that
+        neither has quietly grown a second path back.
         """
         from tests._fixtures.golden_streams._scrub import _tool_union_ms
 
@@ -223,17 +223,17 @@ class TestUnionMs:
         # outside the Makefile's LINT_PATHS), so there is no import to make.
         _tool_ms = _load_decompose_run()._tool_ms
 
-        turn = {
-            "commands": [
-                {"execution_started_at": _at(100).isoformat(), "execution_completed_at": _at(600).isoformat()},
-                {"execution_started_at": _at(200).isoformat(), "execution_completed_at": _at(700).isoformat()},
+        turn = _turn(
+            commands=[
+                _command("a", _at(100), _at(600)),
+                _command("b", _at(200), _at(700)),
                 # Never timed: contributes nothing on either side.
-                {"execution_started_at": None, "execution_completed_at": None},
-                # Inverted bounds: both readers drop these while BUILDING their
-                # span list, which is why `union_ms` does not filter them.
-                {"execution_started_at": _at(900).isoformat(), "execution_completed_at": _at(800).isoformat()},
+                _command("c", None, None),
+                # Inverted bounds: dropped while BUILDING the span list, which
+                # is why `union_ms` itself does not filter them.
+                _command("d", _at(900), _at(800)),
             ]
-        }
+        )
         assert _tool_union_ms(turn) == pytest.approx(600.0)
         assert _tool_ms(turn) == _tool_union_ms(turn)
 
@@ -287,25 +287,55 @@ class TestTurnClock:
         assert second._wall0 >= first._wall0
 
 
+def _command(tool_id: str, started, completed) -> dict:
+    """A recorded command, MODEL-VALID: both sensors validate before selecting."""
+    return {
+        "tool_id": tool_id,
+        "tool_name": "Bash",
+        "timestamp": (started or _at(0)).isoformat(),
+        "execution_started_at": started.isoformat() if started is not None else None,
+        "execution_completed_at": completed.isoformat() if completed is not None else None,
+    }
+
+
+def _turn(*, commands: list[dict], messages: list[dict] | None = None, duration_seconds: float = 3.0) -> dict:
+    """A `task.json` turn dict that validates as a `TurnRecord`.
+
+    The two sensors no longer parse stamps out of a raw dict; they validate and
+    call the typed selector, so a fixture below the model's required fields
+    would fail in validation rather than on the thing the test is about.
+    """
+    return {
+        "iteration": 1,
+        "user_input": "",
+        "agent_output": "",
+        "duration_seconds": duration_seconds,
+        "commands": commands,
+        "messages": messages or [],
+    }
+
+
 class TestTheThreeToolUnionsAgree:
-    """Three implementations recompute the turn's tool union. They must agree.
+    """Three readers answer "how long did this turn's tools run". They must agree.
 
-    * `EventCollector._main_thread_tool_spans` — what the harness subtracts
-      from the generation windows and measures the head and tail against.
+    * `timing.main_thread_tool_spans` + `union_ms` — the TYPED selector the
+      collector subtracts from its generation windows and measures the head and
+      tail against, and which now writes `TurnRecord.tool_union_ms`.
     * `tests/_fixtures/golden_streams/_scrub.py::_tool_union_ms` — the golden
-      corpus's identity check.
+      corpus's identity check, which validates the dump and calls that selector.
     * `scripts/timing/decompose_run.py::_tool_ms` — the LIVE two-sided residual
-      gate, which `.github/workflows/pr-checks.yml` runs against a real run.
+      gate, which `.github/workflows/pr-checks.yml` runs against a real run, and
+      which does the same.
 
-    They agreed by luck once and it cost a defect: the collector filtered its
-    GENERATIONS to the main thread and then passed EVERY command as a tool
-    span. A child nests inside the parent Agent call, whose interval the union
-    already covers, so nothing failed — but Codex's recovered child tools carry
-    the CHILD's clock, so the nesting is not guaranteed. When the collector
-    started filtering, the other two did not, and a gate computing a different
-    tool total than the harness reports a residual that is an artifact of the
-    disagreement rather than a bucket error. That is the worst possible place
-    for a divergence, because this is the only live sensor for the identity.
+    The three used to be three COPIES of the selection rule, and they agreed by
+    luck once at a real cost: the collector filtered its GENERATIONS to the main
+    thread and then passed EVERY command as a tool span. A child nests inside
+    the parent Agent call, whose interval the union already covers, so nothing
+    failed — but Codex's recovered child tools carry the CHILD's clock, so the
+    nesting is not guaranteed. Now there is ONE selector and two callers of it,
+    and what remains worth pinning is that neither sensor has grown a second
+    path back, and that each still computes its OWN union rather than reading
+    the producer's stored answer.
     """
 
     @staticmethod
@@ -315,25 +345,29 @@ class TestTheThreeToolUnionsAgree:
         Inside, the three agree whatever they filter, so the fixture has to put
         the child's tool where the parent's interval does not cover it.
         """
-        return {
-            "duration_seconds": 3.0,
-            "commands": [
+        return _turn(
+            duration_seconds=3.0,
+            commands=[
+                _command("agent-call", _at(1000), _at(1500)),
+                _command("child-tool", _at(2000), _at(2400)),
+            ],
+            messages=[
                 {
-                    "tool_id": "agent-call",
-                    "execution_started_at": _at(1000).isoformat(),
-                    "execution_completed_at": _at(1500).isoformat(),
+                    "role": "assistant",
+                    "started_at": _at(0).isoformat(),
+                    "completed_at": _at(1000).isoformat(),
+                    "parent_tool_use_id": None,
+                    "tool_use_ids": ["agent-call"],
                 },
                 {
-                    "tool_id": "child-tool",
-                    "execution_started_at": _at(2000).isoformat(),
-                    "execution_completed_at": _at(2400).isoformat(),
+                    "role": "assistant",
+                    "started_at": _at(2000).isoformat(),
+                    "completed_at": _at(2400).isoformat(),
+                    "parent_tool_use_id": "agent-call",
+                    "tool_use_ids": ["child-tool"],
                 },
             ],
-            "messages": [
-                {"role": "assistant", "parent_tool_use_id": None, "tool_use_ids": ["agent-call"]},
-                {"role": "assistant", "parent_tool_use_id": "agent-call", "tool_use_ids": ["child-tool"]},
-            ],
-        }
+        )
 
     def test_the_two_recomputing_readers_exclude_the_sub_agent_tool(self):
         from tests._fixtures.golden_streams._scrub import _tool_union_ms
@@ -378,5 +412,122 @@ class TestTheThreeToolUnionsAgree:
                 tool_use_ids=["child-tool"],
             ),
         ]
-        spans = collector._main_thread_tool_spans(messages)
+        spans = main_thread_tool_spans(messages, collector._commands.values())
         assert union_ms(spans) == pytest.approx(500.0), "the same 500 ms the other two report"
+
+
+class TestTheSensorsCrossCheckTheStoredUnion:
+    """Each sensor verifies the producer's BOOKKEEPING, not its answer.
+
+    `TurnRecord.tool_union_ms` is written by the collector from the span set it
+    measures all four buckets against. A sensor that simply READ it would stop
+    being a sensor — it would restate the implementation. So each computes its
+    own union from the commands and asserts the stored value agrees, which
+    catches exactly the class of defect this branch kept producing: a span that
+    reached one consumer and not the other.
+    """
+
+    @staticmethod
+    def _scrub_check(turn: dict) -> None:
+        from tests._fixtures.golden_streams._scrub import assert_timing_captured
+
+        assert_timing_captured(turn, expect_generation_window=False, check_identity=True)
+
+    @staticmethod
+    def _generating_turn(*, stored: float | None, tool_ms: float = 500.0) -> dict:
+        turn = _turn(
+            duration_seconds=10.0,
+            commands=[_command("t1", _at(1000), _at(1000 + tool_ms))],
+            messages=[
+                {
+                    "role": "assistant",
+                    "started_at": _at(0).isoformat(),
+                    "completed_at": _at(1000).isoformat(),
+                    "generation_duration_ms": 1000.0,
+                }
+            ],
+        )
+        turn["harness_startup_ms"] = 0.0
+        turn["harness_teardown_ms"] = 5.0
+        if stored is not None:
+            turn["tool_union_ms"] = stored
+        return turn
+
+    def test_the_golden_sensor_fails_when_the_stored_value_disagrees(self):
+        with pytest.raises(AssertionError, match="tool_union_ms is"):
+            self._scrub_check(self._generating_turn(stored=999.0))
+
+    def test_the_golden_sensor_passes_when_it_agrees(self):
+        self._scrub_check(self._generating_turn(stored=500.0))
+
+    def test_the_golden_sensor_skips_a_record_without_the_field(self):
+        """The legacy case, and the common one for records already on disk."""
+        self._scrub_check(self._generating_turn(stored=None))
+
+    def test_the_live_gate_reports_a_disagreement(self):
+        breach = _load_decompose_run()._union_breach(self._generating_turn(stored=999.0))
+        assert breach is not None
+        assert "999.000000" in breach and "500.000000" in breach
+
+    def test_the_live_gate_is_silent_when_they_agree_or_the_field_is_absent(self):
+        union_breach = _load_decompose_run()._union_breach
+        assert union_breach(self._generating_turn(stored=500.0)) is None
+        assert union_breach(self._generating_turn(stored=None)) is None
+
+    def test_a_sub_agent_tool_outside_the_parent_call_is_excluded_by_all_three(self):
+        """One record carrying every shape the selection rule has to decide.
+
+        A sub-agent tool NESTED inside its parent call is covered by the
+        parent's own interval whatever anyone filters, so the fixture puts one
+        outside it — which is the only arrangement in which a missing filter
+        changes the answer.
+        """
+        from tests._fixtures.golden_streams._scrub import _tool_union_ms
+
+        turn = _turn(
+            duration_seconds=10.0,
+            commands=[
+                _command("agent-call", _at(1000), _at(2000)),
+                _command("nested-child", _at(1200), _at(1400)),
+                _command("outside-child", _at(3000), _at(3400)),
+                _command("unbounded", None, None),
+                _command("inverted", _at(5000), _at(4000)),
+            ],
+            messages=[
+                {
+                    "role": "assistant",
+                    "started_at": _at(0).isoformat(),
+                    "completed_at": _at(1000).isoformat(),
+                    "generation_duration_ms": 1000.0,
+                    "tool_use_ids": ["agent-call", "unbounded", "inverted"],
+                },
+                {
+                    "role": "assistant",
+                    "started_at": _at(1200).isoformat(),
+                    "completed_at": _at(3400).isoformat(),
+                    "generation_duration_ms": 400.0,
+                    "parent_tool_use_id": "agent-call",
+                    "tool_use_ids": ["nested-child", "outside-child"],
+                },
+            ],
+        )
+        # Only the parent Agent call's own 1000 ms: both children excluded, the
+        # unbounded one unplaceable, the inverted one dropped.
+        expected = 1000.0
+        assert _tool_union_ms(turn) == pytest.approx(expected)
+        assert _load_decompose_run()._tool_ms(turn) == pytest.approx(expected)
+
+        from coder_eval.models import TurnRecord
+
+        record = TurnRecord.model_validate(turn)
+        assert union_ms(main_thread_tool_spans(record.messages, record.commands)) == pytest.approx(expected)
+
+    def test_a_turn_missing_messages_or_commands_produces_an_empty_span_set(self):
+        from coder_eval.models import TurnRecord
+        from tests._fixtures.golden_streams._scrub import _tool_union_ms
+
+        for turn in ({"iteration": 1, "user_input": "", "agent_output": ""},):
+            record = TurnRecord.model_validate(turn)
+            assert main_thread_tool_spans(record.messages, record.commands) == []
+            assert _tool_union_ms(turn) == 0.0
+            assert _load_decompose_run()._tool_ms(turn) == 0.0
