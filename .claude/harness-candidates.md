@@ -674,3 +674,25 @@ divergences, so the deferred-work record is one place. Measurements in
   CE054-shaped but over a `str` description rather than a key. The cheap version
   is to fix the sentence in the next change that touches the model.
   Caught in: the CE060 / antigravity `message_id` final review.
+
+- [ ] **The golden corpus pins that a timing value EXISTS, never what it is.**
+  `tests/_fixtures/golden_streams/_scrub.py::SCRUB_KEYS` masks
+  `generation_duration_ms`, `started_at`, `completed_at` and both
+  `execution_*_at` to a placeholder, and the one assertion that does look at
+  magnitudes (`assert_timing_captured`'s four-bucket check) is an UPPER BOUND —
+  it catches a bucket claiming more time than the turn contains and says
+  nothing about one claiming less. So the committed suite cannot see a
+  per-harness generation number move at all, in either direction. Not
+  hypothetical: a whole phase of the timing plan was written on the premise
+  that changing those numbers would turn the golden master red, and it never
+  did. The two-sided check exists (`scripts/timing/decompose_run.py
+  --max-residual-pct`) but runs only against live `task.json` files, by hand.
+  Not cheap to guard: porting the two-sided residual into `_scrub.py` means
+  deciding a per-scenario tolerance for replays whose real wall clock is under
+  a millisecond while their SDK stamps declare hundreds — the same problem
+  `FICTIONAL_DURATIONS` already exempts six scenarios from, so the honest
+  version needs those scenarios to fake the agent's own clock too, not just
+  their item stamps. Interim cover is the per-reducer ms-exact identity test
+  added on pi and opencode
+  (`test_the_four_bucket_identity_closes_exactly_across_the_boundary`).
+  Caught in: the timing-architecture-standardization final review.
