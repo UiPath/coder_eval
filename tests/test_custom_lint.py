@@ -4807,6 +4807,16 @@ class TestCE064TurnBracketOnTheClock:
         src = self.CLOCKED + "from coder_eval.streaming.events import AgentEndEvent as Done\n" + "e = Done(task_id='t')"
         assert len(self._run(src)) == 1
 
+    def test_resolves_an_aliased_clock_import(self):
+        """The scope side of the same question: `TurnClock as Clock` still clocks the module.
+
+        A harness reaching its clock through an alias is still a clocked
+        harness; missing the binding would put it silently out of scope, which
+        is the half a hardcoded harness list would also get wrong.
+        """
+        src = "from coder_eval.timing import TurnClock as Clock\n" + self.START + "e = AgentStartEvent(task_id='t')"
+        assert len(self._run(src)) == 1
+
     def test_resolves_a_relative_import(self):
         src = (
             "from ..timing import TurnClock\nfrom ..streaming.events import AgentStartEvent\ne = AgentStartEvent(t='t')"

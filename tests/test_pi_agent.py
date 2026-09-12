@@ -40,6 +40,7 @@ from coder_eval.streaming.events import (
     TurnStartEvent,
 )
 from coder_eval.timing import TurnClock
+from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams.pi_fixtures import (
     EXPECTED_CACHE_READ,
     EXPECTED_COST,
@@ -1559,3 +1560,41 @@ class TestClockIsFreshPerTurn:
 
         leaked = [name for name, value in vars(agent).items() if isinstance(value, _PiTurnState | TurnClock)]
         assert not leaked, f"a turn's clock outlived its turn via {leaked}"
+
+
+class TestTheTurnBracketComesFromTheTurnClock:
+    """CE064's behavioural half: the SOURCE of the two bracket stamps.
+
+    The rule can only see that `timestamp=` is present. Reverting it to
+    `StreamEvent.timestamp`'s `default_factory=datetime.now` would leave the
+    stamp within microseconds of the clock-derived one, which is precisely why
+    the stand-in is anchored a year out — the revert then fails by a year.
+    """
+
+    async def test_both_brackets_are_stamped_from_the_injected_clock(
+        self, patch_exec, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from coder_eval.agents import pi_agent as agent_module
+
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        await _run(_agent(), tmp_path, stream_callback=recorder)
+
+        assert_bracket_on_the_clock(recorder.events)
+
+    async def test_the_head_and_tail_are_measured_within_one_basis(
+        self, patch_exec, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Both ends of `decompose_turn`'s subtraction come from one clock.
+
+        A mixed pair is off by the anchor offset, not by a millisecond, so the
+        bound here is what the assertion rests on rather than the sign.
+        """
+        from coder_eval.agents import pi_agent as agent_module
+
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        record = await _run(_agent(), tmp_path)
+
+        assert_overhead_is_measured(record)
