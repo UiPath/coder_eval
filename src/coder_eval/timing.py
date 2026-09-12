@@ -39,11 +39,11 @@ class TurnClock:
       unioning WALL-clock tool intervals and subtracting one from the other.
       That is the only reason its window could go negative at all, and the
       clamp that hid it was indistinguishable from a real instant generation.
-    * Pi stamped with naive-LOCAL ``datetime.now()``. A DST transition or an
-      NTP step inside a turn lands directly in a generation window — an
-      hour-long jump in a millisecond field. Nightly runs start at 04:18 and
-      run for hours, so it is reachable rather than theoretical. A
-      monotonic-derived stamp cannot express it.
+    * Pi stamped with naive-LOCAL ``datetime.now()``, and claude-code did the
+      same. A DST transition or an NTP step inside a turn lands directly in a
+      generation window — an hour-long jump in a millisecond field. Nightly
+      runs start at 04:18 and run for hours, so it is reachable rather than
+      theoretical. A monotonic-derived stamp cannot express it.
 
     It is an EXTRACTION, not an invention: antigravity already captured this
     exact pair at the top of ``communicate`` and simply did not use it for
@@ -70,12 +70,10 @@ class TurnClock:
     converting only the window bounds would put two bases inside one
     ``busy_ms`` subtraction — relocating the defect instead of removing it.
 
-    claude-code does not use it either, but for no good reason: it has no
-    epoch-stamp constraint, it simply has not been converted. Its window bounds
-    and its span now share one basis (raw ``datetime.now()``), so the two cannot
-    disagree with each other — but both carry the naive-local exposure this
-    class removes. Converting it is the remaining work; see
-    docs/agents/HARNESS_PARITY.md.
+    claude-code DOES use it, and is the third of the three that can. Its one
+    remaining raw ``datetime.now()`` is the synthesized sub-agent terminal
+    message, whose bounds are an admitted placeholder that no bucket reads —
+    see the comment at that call site.
     """
 
     def __init__(self) -> None:

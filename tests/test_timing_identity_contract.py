@@ -28,15 +28,15 @@ Three clock-injection styles are needed, and all three already exist in the
 per-harness suites (this module reuses their idiom rather than inventing a
 fourth):
 
-* an injected ``TurnClock`` — pi and antigravity take ``clock=`` / build one
-  through a patched ``TurnClock`` factory;
+* an injected ``TurnClock`` — pi, antigravity and claude-code take ``clock=``
+  / build one through a patched ``TurnClock`` factory;
 * a ``datetime`` SUBCLASS monkeypatched onto the module — opencode, which also
   calls ``datetime.fromtimestamp`` through the same global (see
   ``tests/test_opencode_agent.py``'s ``_SteppedClock`` for why a stub breaks);
-* ``time.monotonic`` AND ``datetime`` both patched — claude-code. Its window is
-  wall-derived now, but ``turn_start_time`` and the turn deadline still read
-  ``time.monotonic()``, so patching only one leaves the reducer straddling a
-  real clock and a scripted one.
+* ``time.monotonic`` patched ON TOP of an injected clock — claude-code, whose
+  ``turn_start_time``, turn deadline and measured tool durations still read
+  ``time.monotonic()``, so scripting only the clock leaves the reducer
+  straddling a real clock and a scripted one.
 
 Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
 from any host clock, so its case scripts those stamps directly.
@@ -414,17 +414,22 @@ def _codex_turn() -> Turn:
 
 
 # --------------------------------------------------------------------------
-# claude-code — BOTH the monotonic and the wall clock patched
+# claude-code — an injected TurnClock, plus the monotonic global
 # --------------------------------------------------------------------------
 
 
 def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     """A tool call between two emissions, with a real head and a real tail.
 
-    Both module globals are patched off one counter. The window itself is
-    wall-derived, but ``turn_start_time`` and the deadline still read
-    ``time.monotonic()``, so patching only one leaves the reducer straddling a
-    real clock and a scripted one.
+    The clock is INJECTED, like pi's and antigravity's: every wall stamp this
+    reducer records now derives from the turn's ``TurnClock``, and a derived
+    stamp escapes a monkeypatched module ``datetime`` entirely — the case would
+    quietly measure the real clock and pass by accident. ``time.monotonic`` is
+    still patched off the same counter, because ``turn_start_time``, the
+    deadline and the tool call's own measured duration read it; leaving it real
+    leaves the reducer straddling a scripted clock and a live one, and the tool
+    span (a monotonic duration subtracted back off a clock reading) would be
+    nonsense.
 
     The first `message_start` re-seeds the window, so the CLI spawn and the
     query build before it are head rather than msg0's generation. That a LATER
@@ -444,24 +449,18 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
     from tests._fixtures.golden_streams.claude_fixtures import ToolUseBlock, UserMessage, message_start
 
-    class _Stepped(datetime):
-        at_ms = 0.0
-
-        @staticmethod
-        def now(tz: Any = None) -> datetime:  # type: ignore[override]
-            return at(_Stepped.at_ms)
+    clock = _InjectedClock()
 
     def _monotonic() -> float:
-        return _Stepped.at_ms / 1000.0
+        return clock.at_ms / 1000.0
 
-    monkeypatch.setattr(claude_module, "datetime", _Stepped)
     monkeypatch.setattr(claude_module, "time", SimpleNamespace(monotonic=_monotonic))
 
     agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
     collector = EventCollector()
     commands: list[CommandTelemetry] = []
 
-    _Stepped.at_ms = 500  # the turn state is built here; the head runs past it
+    clock.at_ms = 500  # the turn state is built here; the head runs past it
     state = _ClaudeTurnState(
         agent,
         emit=CompositeStreamCallback(
@@ -478,15 +477,16 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
         log=agent._log,
         turn_start_time=_monotonic(),
         deadline=None,
+        clock=clock,
     )
 
     # The stream really does put `message_start` before the emission it
     # announces — the recorded corpus shows it and the SDK guarantees it — and
     # the FIRST one is what re-seeds the window, so an ordering this case got
     # wrong would silently stop exercising the re-seed at all.
-    _Stepped.at_ms = 800
+    clock.at_ms = 800
     state.on_stream_event(message_start("m1"))
-    _Stepped.at_ms = 1000
+    clock.at_ms = 1000
     state.on_assistant_message(
         SdkAssistantMessage(
             [ToolUseBlock("c1", "Bash", {"command": "ls"})],
@@ -494,11 +494,11 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
             message_id="m1",
         )
     )
-    _Stepped.at_ms = 1800  # the tool ran for the whole gap
+    clock.at_ms = 1800  # the tool ran for the whole gap
     state.on_user_message(UserMessage("c1", False, "ok"))
-    _Stepped.at_ms = 2000
+    clock.at_ms = 2000
     state.on_stream_event(message_start("m2"))  # does NOT re-seed: once per turn
-    _Stepped.at_ms = 2500
+    clock.at_ms = 2500
     state.on_assistant_message(SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id="m2"))
     state.finalize(_AgentEndStatus.COMPLETED)
 

@@ -34,7 +34,7 @@ wall clock its numbers account for.
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
-| clock basis for recorded stamps | wall bounds, wall duration (raw `datetime.now()`) | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
@@ -125,14 +125,23 @@ Two consequences worth stating, because both are behaviour changes:
   (not on `message_id`, which OpenCode and Pi can legitimately leave `None`),
   subtracts the overlap once, and re-apportions so the parts still sum.
 
-**Three clock bases remain, and the row above says which.** Antigravity and Pi
-derive every recorded wall stamp from one `TurnClock` per turn, so a turn's
-bounds and the tool spans subtracted from them cannot disagree. Antigravity
-needed it: its span was monotonic while its tool intervals were wall, which is
-the only reason its window could go negative, and the clamp that caught it was
-indistinguishable from a real instant generation. Pi needed it for a different
-reason — its stamps were naive-local, so a DST transition or an NTP step inside
-a turn lands directly in a generation window.
+**Two clock bases remain, and the row above says which.** Antigravity, Pi and
+claude-code derive every recorded wall stamp from one `TurnClock` per turn, so
+a turn's bounds and the tool spans subtracted from them cannot disagree, and
+neither can be moved by a DST transition or an NTP step inside the turn.
+Antigravity needed it first: its span was monotonic while its tool intervals
+were wall, which is the only reason its window could go negative, and the clamp
+that caught it was indistinguishable from a real instant generation. Pi and
+claude-code needed it for the other reason — their stamps were naive-local, and
+nightly runs start at 04:18 and last hours, so an hour-long jump landing in a
+millisecond field is reachable rather than theoretical.
+
+claude-code has exactly one raw `datetime.now()` left, on the synthesized
+sub-agent terminal message. Those bounds are an admitted placeholder for a
+generation that arrives as a tool result and is never streamed
+(`generation_duration_ms is None`, `parent_tool_use_id` set), which is what
+excludes the message from `subtract_tool_time` and from the head/tail bracket.
+A stamp no bucket reads has no basis to share.
 
 Codex and OpenCode are **not** converted and the hazard is narrowed rather than
 removed. Their tool spans are the CLI's own epoch-millisecond stamps
@@ -140,15 +149,6 @@ removed. Their tool spans are the CLI's own epoch-millisecond stamps
 cannot be re-derived host-side; converting only the window bounds would put two
 bases inside one `busy_ms` subtraction, relocating the defect instead of
 removing it. Both therefore keep the naive-local exposure.
-
-claude-code is the third case and the newest. Its window duration used to be a
-monotonic delta while its bounds were wall stamps — the split `TurnClock`
-exists to remove — and central subtraction made that untenable, because it
-clips WALL tool spans against those WALL bounds. It now measures the span from
-the bounds, so the two agree; but the bounds are still raw `datetime.now()`,
-so it keeps the same naive-local exposure as codex and opencode, for a
-different reason: no epoch-stamp constraint, it simply has not been converted.
-That conversion is the remaining improvement here and is not done.
 
 Deadlines on every harness stay on raw `time.monotonic()` and must — a deadline
 may not move when the wall clock steps.
@@ -174,16 +174,23 @@ own. Central subtraction dissolves the special case: the collector is *already*
 the place where every span is known, so claude-code needs no separate pass and
 no exemption.
 
-Its window is also now measured on ONE clock. The duration used to be a
-monotonic delta while the bounds were wall stamps, which is exactly the split
-`TurnClock` exists to eliminate — and it became load-bearing with central
-subtraction, which clips WALL tool spans against those WALL bounds. A
-monotonic-measured duration would have had the two disagreeing inside one
-subtraction, which is the defect that let Antigravity's window go negative.
-`turn_start_time` stays monotonic and is untouched: `duration_seconds` and the
-turn deadline read it, and a deadline must not move when the wall clock steps.
-Adopting a full `TurnClock` here (deriving the wall stamps from monotonic, as
-antigravity and pi do) is the remaining improvement and is not done.
+Its window is also now measured on ONE clock, and that clock is a `TurnClock`.
+The duration used to be a monotonic delta while the bounds were wall stamps,
+which is exactly the split `TurnClock` exists to eliminate — and it became
+load-bearing with central subtraction, which clips WALL tool spans against
+those WALL bounds. A monotonic-measured duration would have had the two
+disagreeing inside one subtraction, which is the defect that let Antigravity's
+window go negative. Sharing raw `datetime.now()` fixed the disagreement and
+left both sides naive-local; deriving both from the turn's monotonic anchor
+removes that too. The clock is INJECTED into `_ClaudeTurnState` rather than
+read from a module global, because a derived stamp escapes a monkeypatched
+`datetime` — a test that patched one would quietly measure the real clock and
+pass. `_resolve_pending_command` takes the reading as an argument for the same
+reason: it stamps the tool span that is clipped against those bounds, so a
+second basis at that one call site would put two clocks inside one subtraction.
+`turn_start_time` stays raw monotonic and is untouched: `duration_seconds` and
+the turn deadline read it, and a deadline must not move when the wall clock
+steps.
 
 **The head and tail are measured, not normalized.** Generation and tool are
 only two of the four buckets. The turn's **head** (turn start → first

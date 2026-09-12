@@ -273,16 +273,15 @@ def _build_catalogue() -> list[PiScenario]:
     # (d) a tool the CLI opens and never resolves — force-closed as `unresolved`
     # by the orphan sweep at finalization.
     #
-    # READ THE SNAPSHOT: it carries a `duration_ms` and BOTH execution bounds,
-    # and that span is subtracted from the generation window. Its
-    # `execution_completed_at` is the instant the sweep ran, not a completion
-    # anybody observed, so the duration is manufactured — and `_close_tool`'s
-    # own comment ("Only a RESOLVED tool contributes: one force-closed without
-    # a result was never timed") describes a guard it does not have: the test
-    # is `execution_started_at is not None`, which an orphan passes.
-    # claude-code's `_finalize_commands` deliberately leaves `duration_ms`
-    # None in exactly this case, and says why. Captured rather than fixed:
-    # this scenario is what makes it visible.
+    # READ THE SNAPSHOT: the command carries `execution_started_at` (the CLI
+    # really did emit that start) and NEITHER `execution_completed_at` NOR
+    # `duration_ms`. Nothing observed this call finishing, so the instant the
+    # sweep runs is not a completion; stamping it used to manufacture both, and
+    # the pair then read as a measured span that the collector subtracted from
+    # a generation window the tool never occupied. One bound alone forms no
+    # span (`main_thread_tool_spans` requires both), so the window is left
+    # whole. Same rule as claude-code's `_finalize_commands`: unknown status
+    # and unknown duration are one fact (CE058).
     scenarios.append(
         PiScenario(
             name="d_orphaned_tool",
@@ -321,13 +320,13 @@ def _build_catalogue() -> list[PiScenario]:
     # reproduced as 3000 ms of generation for a 2000 ms turn. It had a unit test
     # and no golden.
     #
-    # READ THE SNAPSHOT: it records that the TIMING half of that reset is fixed
-    # and the CONTENT half is not. `turn_text_parts` / `turn_tool_ids` are
-    # cleared in `on_turn_start` only, so the second `turn_end` publishes the
-    # first turn's text a second time, as its own assistant message. The
-    # argument `on_turn_end`'s comment makes for moving `turn_started_at` out of
-    # `on_turn_start` applies to those two lists unchanged. Captured here rather
-    # than fixed: this scenario is what makes it visible at all.
+    # READ THE SNAPSHOT: both halves of that reset are now in `on_turn_end`.
+    # The second assistant message carries NO content block and an empty
+    # `tool_use_ids` — it booked the duplicate's own usage and nothing else.
+    # `turn_text_parts` / `turn_tool_ids` used to be cleared in `on_turn_start`
+    # only, so the replayed line published the first turn's text a second time
+    # as its own message; the argument `on_turn_end`'s comment makes for
+    # `turn_started_at` applies to those two lists unchanged.
     scenarios.append(
         PiScenario(
             name="f_duplicate_turn_end",

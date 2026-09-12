@@ -4,9 +4,9 @@
   "commands": [
     {
       "assistant_turn_index": 1,
-      "duration_ms": "<scrubbed>",
+      "duration_ms": null,
       "error_message": "no result observed",
-      "execution_completed_at": "<scrubbed>",
+      "execution_completed_at": null,
       "execution_started_at": "<scrubbed>",
       "generation_completed_at": null,
       "parameters": {
