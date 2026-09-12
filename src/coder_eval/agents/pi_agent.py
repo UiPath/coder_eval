@@ -457,10 +457,25 @@ class _PiTurnState:
                 timestamp=self.clock.now(),
                 sequence_number=self.sequence,
             )
-        completed = self.clock.now()
-        telemetry.execution_completed_at = completed
-        if telemetry.execution_started_at is not None:
-            telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
+        # Only a RESOLVED tool is timed. An orphan force-closed by
+        # `close_open_tools` was never observed finishing, so the instant the
+        # sweep runs is not a completion — stamping it manufactures both an
+        # `execution_completed_at` and the `duration_ms` derived from it, and
+        # the pair then reads as a measured span that
+        # `EventCollector.subtract_tool_time` takes back out of a generation
+        # window it never actually occupied. `execution_started_at` IS kept:
+        # the CLI really did emit that start, and one bound alone forms no
+        # span (`main_thread_tool_spans` requires both). This is the guard the
+        # old comment here claimed and the code did not have — it tested
+        # `execution_started_at is not None`, which an orphan passes.
+        # claude-code's `_finalize_commands` leaves the same field `None` for
+        # the same reason: unknown status and unknown duration are one fact
+        # (CE058).
+        if status is not ToolEndStatus.UNRESOLVED:
+            completed = self.clock.now()
+            telemetry.execution_completed_at = completed
+            if telemetry.execution_started_at is not None:
+                telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
         telemetry.result_status = _RESULT_STATUS[status]
         # Stored untruncated by design (sub-agent returns must survive whole).
         telemetry.result_summary = summary
@@ -637,6 +652,14 @@ class _PiTurnState:
         # at the previous turn's start and publish that whole span a second
         # time. Reproduced: 3000 ms of generation for a 2000 ms turn.
         self.turn_started_at = None
+        # The CONTENT half of the same reset, and the same argument: both
+        # lists have now been SPENT into the message appended above.
+        # Cleared only in `on_turn_start`, a second `turn_end` with no
+        # intervening start re-emitted the previous turn's text as its own
+        # assistant message and re-listed the same `tool_use_ids`, so one
+        # tool call appeared to belong to two generations.
+        self.turn_text_parts = []
+        self.turn_tool_ids = []
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,

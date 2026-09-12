@@ -1361,20 +1361,24 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
 class TestClaudeFirstWindowReseed:
     """The first `message_start` moves the window mark; a later one must not.
 
-    Driven at `_ClaudeTurnState` with both clocks patched off one counter.
-    claude-code derives the window's DURATION from `time.monotonic()` and its
-    BOUNDS from `datetime.now()`, so patching one leaves the other real and
-    these tests would measure nothing while still passing.
+    Driven at `_ClaudeTurnState` with both clocks moved off one counter. The
+    window's BOUNDS come from the turn's `TurnClock`, which is INJECTED — a
+    derived stamp escapes a monkeypatched module `datetime` entirely, so these
+    tests would measure the real clock and still pass. Its DURATION side still
+    reads `time.monotonic()` for `turn_start_time` and the deadline, so that
+    global is patched off the same counter; leaving it real would straddle a
+    scripted clock and a live one.
     """
 
     BASE = datetime(2026, 9, 11, 9, 0, 0)
 
-    class _Stepped(datetime):
+    class _Stepped:
+        """A `TurnClock` stand-in the test moves by hand, in ms from `BASE`."""
+
         at_ms = 0.0
 
-        @staticmethod
-        def now(tz=None):  # type: ignore[override]
-            return TestClaudeFirstWindowReseed.BASE + timedelta(milliseconds=TestClaudeFirstWindowReseed._Stepped.at_ms)
+        def now(self):
+            return TestClaudeFirstWindowReseed.BASE + timedelta(milliseconds=self.at_ms)
 
     def _state(self, monkeypatch):
         from coder_eval.agents import claude_code_agent as claude_module
@@ -1382,9 +1386,7 @@ class TestClaudeFirstWindowReseed:
         from coder_eval.streaming.callbacks import CompositeStreamCallback
         from coder_eval.streaming.collector import EventCollector
 
-        stepped = self._Stepped
-        stepped.at_ms = 0.0
-        monkeypatch.setattr(claude_module, "datetime", stepped)
+        stepped = self._Stepped()
         monkeypatch.setattr(claude_module, "time", SimpleNamespace(monotonic=lambda: stepped.at_ms / 1000.0))
 
         agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
@@ -1400,6 +1402,7 @@ class TestClaudeFirstWindowReseed:
             log=agent._log,
             turn_start_time=0.0,
             deadline=None,
+            clock=stepped,
         )
 
     @staticmethod

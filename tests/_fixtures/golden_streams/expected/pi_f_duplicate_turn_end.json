@@ -41,17 +41,7 @@
       "cache_creation_tokens": 0,
       "cache_read_tokens": 0,
       "completed_at": "<scrubbed>",
-      "content_blocks": [
-        {
-          "block_type": "text",
-          "is_error": false,
-          "sequence": 0,
-          "signature": null,
-          "text": "First.",
-          "thinking": null,
-          "tool_use_id": null
-        }
-      ],
+      "content_blocks": [],
       "generation_duration_ms": "<scrubbed>",
       "input_tokens": 10,
       "message_id": null,

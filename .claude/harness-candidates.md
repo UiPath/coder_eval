@@ -745,29 +745,43 @@ divergences, so the deferred-work record is one place. Measurements in
   attempts. Needs a decision on intent before any guard. Caught in: turn-timing
   P0–P3 final review.
 
-- [ ] **claude-code has no `TurnClock`.** Its window bounds and span now share
-  one basis (raw `datetime.now()`), so they cannot disagree with each other —
-  but both carry the naive-local exposure `TurnClock` exists to remove: a DST
-  transition or NTP step inside a turn lands directly in a generation window,
-  and nightly runs are hours long. antigravity and pi already derive wall stamps
-  from monotonic; codex and opencode cannot (their spans are the CLI's epoch
-  stamps). claude-code is the one that could and does not. Caught in: turn-timing
-  P0–P3, phase 5.
+- [x] ~~**claude-code has no `TurnClock`.**~~ **RESOLVED.** `_ClaudeTurnState`
+  now takes an injected `TurnClock` and every wall stamp the turn records
+  derives from it — both window bounds, the tool span
+  `_resolve_pending_command` stamps (which takes the reading as an argument, so
+  the span and the bounds it is clipped against cannot end up on two clocks),
+  and the fallback tool timestamp. One raw `datetime.now()` is deliberately
+  left, on the synthesized sub-agent terminal message: those bounds are an
+  admitted placeholder that `subtract_tool_time` and the head/tail bracket both
+  exclude, so no arithmetic reads them and there is no basis to share. The
+  ms-exact sensor was re-pointed at the injected clock rather than the module
+  `datetime` — a derived stamp escapes a monkeypatch, so the old patch would
+  have left `tests/test_timing_identity_contract.py` measuring the real clock
+  and passing by accident; reverting the conversion now fails it by ~10^7 ms.
 
-- [ ] **`pi_agent` publishes a `duration_ms` and a subtracted tool SPAN for an
-  UNRESOLVED orphan.** `_close_tool` guards on `execution_started_at is not
-  None` while its own comment claims it guards on "resolved", and the
-  `execution_completed_at` it stamps is only the instant the orphan sweep ran.
-  claude-code's `_finalize_commands` deliberately leaves the field `None` here,
-  for the reason CE058 exists. Captured in `pi_d_orphaned_tool.json`. Caught in:
-  turn-timing P0–P3, phase 2.
+- [x] ~~**`pi_agent` publishes a `duration_ms` and a subtracted tool SPAN for an
+  UNRESOLVED orphan.**~~ **RESOLVED.** `_close_tool` now stamps
+  `execution_completed_at` and derives `duration_ms` only when the status is
+  not `UNRESOLVED`; the guard the old comment claimed is the guard the code
+  has. `execution_started_at` is kept (the CLI really did emit that start) and
+  one bound alone forms no span, so the orphan no longer has time subtracted
+  from a generation window it never occupied. `pi_d_orphaned_tool.json` now
+  records both fields as `null`.
 
-- [ ] **`pi_agent` republishes a turn's content on a duplicate `turn_end`.**
-  `turn_text_parts` / `turn_tool_ids` are cleared only in `on_turn_start`, so a
-  second `turn_end` with no intervening start emits the previous turn's text as
-  its own assistant message and re-lists the same `tool_use_ids`. The TIMING
-  half of that same reset was deliberately fixed (`turn_started_at` moved into
-  `on_turn_end`, with a comment making exactly this argument); the content half
-  was not. Pi retries internally, so a replayed `turn_end` is a transport hiccup
-  rather than a hypothetical. Captured in `pi_f_duplicate_turn_end.json`.
-  Caught in: turn-timing P0–P3, phase 2.
+  **Sibling, NOT fixed:** `antigravity_agent` does the same thing at its own
+  orphan sweep (`tel.model_copy(update={..., "execution_completed_at":
+  self.clock.now()})`), though it stops short of a `duration_ms`. Deliberately
+  left: `timing.decompose_turn`'s docstring reasons about that stamped
+  completion landing inside the tail, and the `antigravity_d_orphaned_tool`
+  residual was measured against it, so changing it is a separate piece of work
+  with its own fixture to re-derive — not a ride-along.
+
+- [x] ~~**`pi_agent` republishes a turn's content on a duplicate `turn_end`.**~~
+  **RESOLVED.** `turn_text_parts` / `turn_tool_ids` are now cleared in
+  `on_turn_end` beside `turn_started_at`, on the argument that comment already
+  made: all three have been SPENT into the message just appended.
+  `pi_f_duplicate_turn_end.json` now records the second message with an empty
+  `content_blocks` and no `tool_use_ids` — it books the duplicate's own usage
+  and nothing else. The timing half had a unit test that stayed green while the
+  content half was broken, so the two are now asserted separately
+  (`test_a_duplicate_turn_end_does_not_republish_the_previous_content`).

@@ -1410,6 +1410,85 @@ class TestToolSpansSurviveTheTurnBoundary:
         assert messages[1].started_at == messages[0].completed_at
         assert sum(m.generation_duration_ms or 0.0 for m in messages) == pytest.approx(2000.0)
 
+    def test_a_duplicate_turn_end_does_not_republish_the_previous_content(self):
+        """The CONTENT half of the same reset, and the same argument.
+
+        `turn_text_parts` / `turn_tool_ids` were cleared in `on_turn_start`
+        only, so the replayed line re-emitted the first turn's text as its own
+        assistant message and re-listed the same `tool_use_ids` — one tool call
+        appearing to belong to two generations, and the text counted twice by
+        anything that reads the transcript. The sibling above pinned the timing
+        half while this one silently stayed broken, which is why it is asserted
+        separately rather than folded in.
+        """
+        clock = _SteppedClock()
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
+        state.on_turn_start()
+        state.on_message_update(
+            {"assistantMessageEvent": {"type": "text_delta", "delta": "First."}},
+        )
+        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
+        clock.at_ms = 1000
+        state.on_turn_end(_turn_end_payload())
+        clock.at_ms = 2000
+        state.on_turn_end(_turn_end_payload())  # no intervening `turn_start`
+
+        messages = [m for m in state.messages if m.role == "assistant"]
+        assert len(messages) == 2
+        assert [b.text for b in messages[0].content_blocks if b.block_type == "text"] == ["First."]
+        assert messages[0].tool_use_ids == ["c1"]
+        assert messages[1].content_blocks == []
+        assert messages[1].tool_use_ids == []
+
+    def test_an_unresolved_orphan_is_not_given_a_completion_or_a_duration(self):
+        """Force-closing is not observing a completion.
+
+        The orphan sweep runs at finalization; stamping its instant as
+        `execution_completed_at` manufactures a bound, and the `duration_ms`
+        derived from it is the distance to whenever the sweep happened to run.
+        The pair then reads as a measured span that
+        `EventCollector.subtract_tool_time` takes back out of a generation
+        window the tool never occupied. `execution_started_at` IS kept: the CLI
+        really did emit that start, and one bound alone forms no span. Same
+        rule as claude-code's `_finalize_commands` — unknown status and unknown
+        duration are one fact (CE058).
+        """
+        clock = _SteppedClock()
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
+        state.on_turn_start()
+        clock.at_ms = 500
+        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
+        clock.at_ms = 4000
+        closed: list[CommandTelemetry] = []
+        state.bind(lambda e: closed.append(e.tool) if isinstance(e, ToolEndEvent) else None)
+        state.close_open_tools()
+
+        assert len(closed) == 1
+        assert closed[0].result_status == "unknown"
+        assert closed[0].execution_started_at == _SPAN_BASE + timedelta(milliseconds=500)
+        assert closed[0].execution_completed_at is None
+        assert closed[0].duration_ms is None
+
+    def test_a_resolved_tool_still_gets_both_bounds_and_a_duration(self):
+        """The guard narrows the UNRESOLVED case only.
+
+        Without this, deleting the whole stamping block would leave the sibling
+        above green while every real tool call lost its timing.
+        """
+        clock = _SteppedClock()
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
+        state.on_turn_start()
+        clock.at_ms = 500
+        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
+        clock.at_ms = 1200
+        closed: list[CommandTelemetry] = []
+        state.bind(lambda e: closed.append(e.tool) if isinstance(e, ToolEndEvent) else None)
+        state.on_tool_execution_end({"toolCallId": "c1", "result": "ok"})
+
+        assert len(closed) == 1
+        assert closed[0].execution_completed_at == _SPAN_BASE + timedelta(milliseconds=1200)
+        assert closed[0].duration_ms == pytest.approx(700.0)
+
     def test_a_turn_that_never_finishes_does_not_advance_the_mark(self):
         """The half of this that is still the reducer's job.
 
