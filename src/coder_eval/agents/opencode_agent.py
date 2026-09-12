@@ -363,7 +363,7 @@ class _OpenCodeTurnState:
         self.step_text_parts = []
         self.step_tool_ids = []
         # There is no per-step span list to reset here any more, and that whole
-        # class of defect is gone with it: `EventCollector.subtract_tool_time`
+        # class of defect is gone with it: `timing.subtract_tool_time`
         # sees every span at once and clips each to the window it overlaps, so
         # a call closing in the gap before this `step_start` needs nobody to
         # remember it. The reset rule that used to live here was wrong once
@@ -452,8 +452,10 @@ class _OpenCodeTurnState:
             message = None
             status = ToolEndStatus.OK
 
-        time_val = state.get("time")
-        times = time_val if isinstance(time_val, dict) else {}
+        # `times` is the SAME dict read at the top of this function: `state` is
+        # bound once at the start and nothing between here and there rebinds or
+        # mutates it, so re-reading `state["time"]` produced an identical value
+        # from an identical source. One read, one name.
         self._close_tool(
             call_id,
             status=status,
@@ -703,7 +705,7 @@ class _OpenCodeTurnState:
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
         # Tile from the previous step's finish. The RAW window only —
-        # `EventCollector.subtract_tool_time` takes the tool union back out of
+        # `timing.subtract_tool_time` takes the tool union back out of
         # it, once, for every harness.
         started, generation_ms = close_window(
             mark=self.gen_mark if self.gen_mark is not None else step_start,
