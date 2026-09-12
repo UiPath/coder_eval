@@ -1075,7 +1075,12 @@ class _AntigravityTurnState:
         for i, block in enumerate(self._blocks):
             block.sequence = i
         self.messages.append(
-            AssistantMessage(
+            # CE061 suppressed TEMPORARILY, removed in 5/6. This window cannot be
+            # expressed by `close_window` yet: its span is monotonic while its
+            # tool spans are wall, so the helper (which derives the span from
+            # `now - started`, both wall) would change the published number.
+            # The clock conversion and this migration land together.
+            AssistantMessage(  # noqa: CE061
                 started_at=self._gen_mark_wall,
                 completed_at=now_wall,
                 generation_duration_ms=max(0.0, generation_ms),

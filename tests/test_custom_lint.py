@@ -3935,6 +3935,122 @@ class TestCE052ProcessLethalMustBeContainerGated:
         assert "_os._exit(137)" in source, "the guarded call must still exist"
 
 
+class TestCE061WindowViaCloseWindow:
+    """CE061 flags a reducer that computes a generation window of its own.
+
+    Every source string carries its own import line: the rule derives its
+    constructor set from the module's own `coder_eval.models` imports (shared
+    with CE060 via `_model_ctor`), so a bare `AssistantMessage(...)` with no
+    import is correctly invisible to it.
+    """
+
+    _IMPORT = "from coder_eval.models import AssistantMessage\n"
+    _HELPER = "from coder_eval.timing import close_window\n"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+
+        return WindowViaCloseWindow(filepath).check(ast.parse(src))
+
+    def test_flags_a_measured_window_without_the_helper(self):
+        assert len(self._run(self._IMPORT + "m = AssistantMessage(generation_duration_ms=x)")) == 1
+
+    def test_allows_a_measured_window_when_the_helper_is_imported(self):
+        assert not self._run(self._IMPORT + self._HELPER + "m = AssistantMessage(generation_duration_ms=x)")
+
+    def test_allows_an_explicit_none(self):
+        # "Never measured" is an honest claim and needs no window arithmetic —
+        # codex's rollout rebuild and claude-code's sub-agent synthesis.
+        assert not self._run(self._IMPORT + "m = AssistantMessage(generation_duration_ms=None)")
+
+    def test_allows_the_kwarg_absent(self):
+        # Defaults to None, which is the same honest claim.
+        assert not self._run(self._IMPORT + "m = AssistantMessage(model=model)")
+
+    def test_flags_an_arbitrary_alias(self):
+        # The gap CE058 concedes: a name list guards the in-tree spelling by
+        # coincidence and misses `as Msg` outright.
+        assert (
+            len(self._run("from coder_eval.models import AssistantMessage as Msg\nm = Msg(generation_duration_ms=x)"))
+            == 1
+        )
+
+    def test_flags_the_module_attribute_spelling(self):
+        assert (
+            len(self._run("import coder_eval.models as models\nm = models.AssistantMessage(generation_duration_ms=x)"))
+            == 1
+        )
+
+    def test_accepts_a_relative_helper_import(self):
+        # `agents/` uses relative imports; matching only the absolute path
+        # would leave the rule blind for a whole file.
+        assert not self._run(
+            self._IMPORT + "from ..timing import close_window\nm = AssistantMessage(generation_duration_ms=x)"
+        )
+
+    def test_accepts_the_module_import_spelling_of_the_helper(self):
+        # `timing.close_window(...)` is a working call site; a rule that saw
+        # only the from-import would tell its author to change it.
+        assert not self._run(
+            self._IMPORT + "from coder_eval import timing\nm = AssistantMessage(generation_duration_ms=x)"
+        )
+
+    def test_an_unrelated_timing_import_does_not_disarm_the_rule(self):
+        # `from somewhere.else import timing` is not this module; accepting any
+        # name spelled `timing` would switch the rule off for a whole file.
+        assert (
+            len(
+                self._run(
+                    self._IMPORT + "from vendor.sdk import timing\nm = AssistantMessage(generation_duration_ms=x)"
+                )
+            )
+            == 1
+        )
+
+    def test_ignores_a_file_outside_agents(self):
+        assert not self._run(
+            self._IMPORT + "m = AssistantMessage(generation_duration_ms=x)",
+            filepath="src/coder_eval/streaming/collector.py",
+        )
+
+    def test_keys_on_the_helper_name_rather_than_a_literal(self):
+        from coder_eval.timing import close_window as _helper
+        from tests.lint.rules import ce061_window_via_close_window as rule_mod
+
+        assert _helper.__name__ == rule_mod._HELPER
+
+    def test_the_real_agents_tree_is_clean(self):
+        # After the two suppressions: claude-code's permanent one, and
+        # antigravity's temporary one pending its 5/6 migration.
+        import pathlib
+
+        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+        from tests.lint.runner import check_file
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "coder_eval" / "agents"
+        found = [v for path in sorted(root.glob("*.py")) for v in check_file(path, [WindowViaCloseWindow])]
+        assert not found, found
+
+    def test_each_suppression_is_load_bearing(self):
+        # A noqa nobody needs is a noqa that outlives its reason. Both of these
+        # must correspond to a violation the rule actually raises.
+        import ast
+        import pathlib
+
+        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "coder_eval" / "agents"
+        suppressed = {
+            path.name
+            for path in sorted(root.glob("*.py"))
+            if WindowViaCloseWindow(str(path)).check(ast.parse(path.read_text(encoding="utf-8")))
+        }
+        assert suppressed == {"claude_code_agent.py", "antigravity_agent.py"}
+
+
 class TestRuffExternalCoversEveryRule:
     """Every CE rule's documented `# noqa` must be accepted by ruff.
 
@@ -4499,10 +4615,12 @@ class TestCE060MessageIdDeclared:
         assert self._run("from ..models import AssistantMessage\nm = AssistantMessage(model=model)")
 
     def test_keys_on_the_model_name_rather_than_a_literal(self):
+        # The constant moved into the shared resolver when CE061 was added; it
+        # is still derived from the model, which is the property under test.
         from coder_eval.models import AssistantMessage as _Model
-        from tests.lint.rules import ce060_message_id_declared as rule_mod
+        from tests.lint.rules import _model_ctor
 
-        assert _Model.__name__ == rule_mod._CLASS
+        assert _Model.__name__ == _model_ctor.ASSISTANT_MESSAGE
 
     def test_flags_a_star_expanded_call(self):
         # `**fields` has not declared the field at the site.
