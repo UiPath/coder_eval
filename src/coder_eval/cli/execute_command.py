@@ -181,6 +181,29 @@ def execute_command(
             "-D sandbox.driver.)"
         ),
     ),
+    format: str | None = typer.Option(
+        None,
+        "--format",
+        help=(
+            "Emit an additional interchange trajectory alongside task.json. Only 'harbor' is "
+            "supported: writes a sibling trajectory.json (ATIF format) for every task, so an "
+            "external `coder-eval evaluate --format harbor` invocation can grade the trajectory "
+            "without access to this process's task.json. This is the flag a Harbor agent's "
+            "`coder-eval execute --format harbor --run-dir <its logs dir>` invocation passes."
+        ),
+    ),
+    workspace_dir: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--workspace-dir",
+        help=(
+            "Run the single resolved task's agent in-place at this absolute path instead of the "
+            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
+            "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
+            "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
+            "container's own WORKDIR, where Harbor's verifier phase looks for them."
+        ),
+    ),
 ) -> None:
     """Run evaluation tasks WITHOUT checking their success criteria.
 
@@ -233,4 +256,6 @@ def execute_command(
         repeats=repeats,
         driver=driver,
         set_overrides=set_overrides,
+        format=format,
+        workspace_dir=workspace_dir,
     )

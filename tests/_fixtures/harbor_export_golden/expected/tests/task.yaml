@@ -1,0 +1,28 @@
+task_id: golden_export_example
+description: A canonical task exercising every C2 mapping row at once (golden fixture
+  — do not edit casually).
+agent:
+  type: claude-code
+initial_prompt: (unused placeholder — this file is graded via `coder-eval evaluate`,
+  which does not invoke an agent on this path)
+success_criteria:
+- type: file_exists
+  description: greeting.txt exists
+  weight: 1.0
+  pass_threshold: 0.9
+  path: greeting.txt
+- type: reference_comparison
+  description: matches the reference greeting
+  weight: 1.0
+  pass_threshold: 0.8
+  agent_file: greeting.txt
+  reference_file: greeting.txt
+  comparison_method: ast
+  similarity_threshold: 0.8
+reference:
+  directory: reference
+run_limits:
+  task_timeout: 300
+  count_cached_input: false
+  count_cache_creation: false
+  stop_early_gate_threshold: 1.0

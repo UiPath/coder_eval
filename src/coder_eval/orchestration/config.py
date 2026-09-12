@@ -111,6 +111,24 @@ class BatchRunConfig(BaseModel):
     # Logging
     verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")
 
+    # Docker WORKDIR alignment for the non-docker-driver dispatch path (host
+    # process, or already inside a container someone else built — e.g. a Harbor
+    # trial container running `coder-eval execute` as its agent). Mirrors what
+    # `DockerRunner`/`_run-task-internal` already do for `sandbox.driver: docker`
+    # (see `Orchestrator.workspace_dir`'s docstring); this is the same mechanism,
+    # exposed publicly for the case where coder-eval's OWN docker driver isn't
+    # the one building the container. Only meaningful for a single resolved task
+    # — `run_batch` raises if more than one task would collide on it.
+    workspace_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Run the agent in-place at this absolute path instead of the standard "
+            "run_dir/artifacts workspace, copying it out to run_dir/artifacts/<task> at "
+            "cleanup. For a single task only. Not for sandbox.driver: docker tasks — "
+            "the docker driver already aligns automatically via sandbox.docker.working_dir."
+        ),
+    )
+
     # TODO(container-death-diagnostics): consider a run-level default resource
     # cap. Containers run uncapped today (sandbox.limits.{max_memory_mb,
     # max_cpus,max_pids} default to None -> _build_argv emits no --memory/

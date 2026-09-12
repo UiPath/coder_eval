@@ -1,0 +1,91 @@
+name: Harbor E2E
+
+# Deliberately NOT triggered on pull_request: this exercises real Docker
+# builds, a real `harbor` install, and (for the llm_judge scenario) a real
+# model call, so it is informational rather than a required PR check for now
+# (see .github/scripts/harbor_e2e.py's module docstring). workflow_dispatch
+# lets a maintainer run it on demand; the nightly schedule catches drift
+# between coder-eval's own release and Harbor's own upstream releases without
+# blocking anyone's PR.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *" # nightly, off the hour to avoid GitHub's peak-load pile-up
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TELEMETRY_ENABLED: "false"
+  # Route through Bedrock, mirroring pr-checks.yml's smoke-pass job -- keeps
+  # Anthropic-credit spend off this path; DirectRoute is exercised elsewhere.
+  API_BACKEND: "bedrock"
+  CLAUDE_CODE_USE_BEDROCK: "1"
+  AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
+
+jobs:
+  harbor-e2e:
+    name: Harbor export + CoderEvalAgent round trip
+    runs-on: uipath-ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Cache dependencies
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+          key: ${{ runner.os }}-py3.13-harbor-e2e-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-py3.13-harbor-e2e-
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade "pip>=26.2"
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        # --extra harbor installs `harbor` into the SAME venv as coder-eval:
+        # CoderEvalAgent is resolved by `hb run -a
+        # coder_eval.harbor.agent:CoderEvalAgent` on the HOST process, so
+        # `harbor` and `coder_eval` must be importable from the same
+        # interpreter (see harbor/agent.py's module docstring). The version is
+        # pinned once, in pyproject.toml's `harbor` extra -- bump it there.
+        run: uv sync --frozen --extra dev --extra harbor
+
+      - name: Put the project venv on PATH
+        run: echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Build coder-eval-agent base Docker image
+        run: make docker-image
+
+      - name: Build BYOD template Docker image
+        run: docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/
+
+      - name: Run Harbor E2E scenarios
+        run: python .github/scripts/harbor_e2e.py

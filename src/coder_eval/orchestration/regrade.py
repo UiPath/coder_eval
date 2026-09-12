@@ -1128,6 +1128,21 @@ async def regrade_in_place(
     """
     from coder_eval.orchestrator import Orchestrator
 
+    # Every path through this function grades, so an empty `success_criteria`
+    # is never legal here the way it is for `execute` (which never calls this
+    # function at all). Checked once, at the single choke point every re-grade
+    # entry point (`evaluate <run_dir>`, `run --resume`'s `to_grade` set, and
+    # the container-dispatch branch below) shares -- a criteria-free task would
+    # otherwise finalize as `FinalStatus.SUCCESS` at `weighted_score: 0.0`
+    # (`all_criteria_passed([])` is vacuously `True`,
+    # `calculate_weighted_score([])` writes `0.0`), an internally contradictory
+    # "successful" result for what is actually a misconfigured task.
+    if not task.success_criteria:
+        raise RegradeError(
+            f"task {task.task_id!r} has no `success_criteria` and cannot be graded (it would silently "
+            + "score SUCCESS at weighted_score 0.0). Add at least one criterion before re-grading it."
+        )
+
     # A `driver: docker` row is graded INSIDE a container of the same image,
     # which is the only place its criteria mean what they meant during the run.
     # Dispatched before anything else here, including the reference check, so the

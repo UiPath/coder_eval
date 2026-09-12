@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -354,6 +355,29 @@ def run_command(
             "-D sandbox.driver.)"
         ),
     ),
+    format: str | None = typer.Option(
+        None,
+        "--format",
+        help=(
+            "Emit an additional interchange trajectory alongside task.json. Only 'harbor' is "
+            "supported: writes a sibling trajectory.json (ATIF format) for every task, so an "
+            "external `coder-eval evaluate --format harbor` invocation can grade the trajectory "
+            "without access to this process's task.json. Meant for `coder-eval execute --format "
+            "harbor --run-dir <harbor agent's logs dir>`, invoked by a Harbor agent."
+        ),
+    ),
+    workspace_dir: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--workspace-dir",
+        help=(
+            "Run the single resolved task's agent in-place at this absolute path instead of the "
+            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
+            "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
+            "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
+            "container's own WORKDIR, where Harbor's verifier phase looks for them."
+        ),
+    ),
 ) -> None:
     """Run evaluation tasks (optionally in parallel).
 
@@ -404,6 +428,8 @@ def run_command(
         repeats=repeats,
         driver=driver,
         set_overrides=set_overrides,
+        format=format,
+        workspace_dir=workspace_dir,
     )
 
 
@@ -432,6 +458,8 @@ def run_pipeline(
     repeats: int | None,
     driver: str | None,
     set_overrides: list[str],
+    format: str | None = None,
+    workspace_dir: Path | None = None,
 ) -> None:
     """The shared body of ``coder-eval run`` and ``coder-eval execute``.
 
@@ -441,6 +469,8 @@ def run_pipeline(
     commands are pure flag-parsing wrappers over this function, so a behavior
     change can never apply to one and miss the other.
     """
+    if format is not None and format != "harbor":
+        raise typer.BadParameter(f"Unsupported --format {format!r}. Supported: harbor.")
     # --resume needs an explicit run dir to resume into (auto-generated dirs are always fresh).
     if resume and run_dir is None:
         raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
@@ -513,6 +543,8 @@ def run_pipeline(
                 include_skipped=include_skipped,
                 junit_xml=junit_xml,
                 grade=grade,
+                format=format,
+                workspace_dir=workspace_dir,
             )
         )
     except KeyboardInterrupt:
@@ -540,6 +572,8 @@ async def _run_all_tasks(
     include_skipped: bool = False,
     junit_xml: Path | None = None,
     grade: bool = True,
+    format: str | None = None,
+    workspace_dir: Path | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -561,6 +595,22 @@ async def _run_all_tasks(
         junit_xml: Optional path to write a JUnit XML report to, after the run
             summary is persisted and before the failure exit-code gate.
         grade: False for `coder-eval execute` — run and capture, score nothing.
+        format: 'harbor' writes a trajectory.json (ATIF) sibling for every
+            task.json once the run finishes — see `harbor.atif_emit.emit_trajectories_for_run`.
+            When the run wrote exactly ONE trajectory (the shape a `CoderEvalAgent`
+            Harbor agent invocation always produces — one fixed-path agent-phase
+            task.yaml, no dataset/experiment fan-out), it is additionally copied to
+            `<run_dir>/trajectory.json` so a caller that pointed `--run-dir` at a
+            fixed discovery path (e.g. Harbor's `self.logs_dir`) can find it there
+            without knowing coder-eval's internal `<variant>/<task_id>/<replicate>/`
+            nesting. Multi-task runs are left nested only — there is no single
+            trajectory to promote.
+        workspace_dir: Run the single resolved task's agent in-place at this path
+            instead of run_dir/artifacts (see `BatchRunConfig.workspace_dir` and
+            `Orchestrator.workspace_dir`). Meant for a `CoderEvalAgent` invocation
+            inside a container someone else already built (Harbor's), so the
+            agent's writes land where that container's own verifier looks for
+            them, rather than in a throwaway tempdir the verifier never sees.
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -587,6 +637,7 @@ async def _run_all_tasks(
         verbose=verbose,
         include_skipped=include_skipped,
         grade=grade,
+        workspace_dir=workspace_dir,
     )
 
     from ..telemetry import flush_telemetry, track_event
@@ -631,6 +682,17 @@ async def _run_all_tasks(
         from ..logging_config import aggregate_task_logs
 
         aggregate_task_logs(run_dir)
+
+        if format == "harbor":
+            from ..harbor.atif_emit import emit_trajectories_for_run
+
+            written = emit_trajectories_for_run(run_dir)
+            console.print(f"[dim]Wrote {len(written)} trajectory.json (ATIF) file(s) under {run_dir}[/dim]")
+
+            flat_trajectory_path = run_dir / "trajectory.json"
+            if len(written) == 1 and written[0] != flat_trajectory_path:
+                await asyncio.to_thread(shutil.copy2, written[0], flat_trajectory_path)
+                console.print(f"[dim]Copied the single trajectory to {flat_trajectory_path}[/dim]")
 
         # Print execution summary
         print_execution_summary(run_dir, summary)
@@ -880,6 +942,13 @@ async def _apply_resume(
     # to_grade is deliberately NOT cleared: its artifacts are the run's output
     # and the very thing being graded.
     cleared = clear_rerun_artifacts(part.to_run)
+    # `to_grade` rows are about to be graded by `_grade_resumed_tasks` below
+    # (which delegates to `regrade_in_place`), so the same refusal `to_run`
+    # gets via `_reject_empty_criteria_under_grade` applies here too -- checked
+    # explicitly rather than relying solely on `regrade_in_place`'s own guard
+    # so the whole batch is refused up front (exit 2) instead of one row at a
+    # time turning into a per-task "could not grade" warning mid-resume.
+    _reject_empty_criteria_under_grade(part.to_grade, grade=grade)
     console.print(
         f"[cyan]↻ Resume:[/] {len(prior_results)} task(s) already complete, "
         + f"running {len(part.to_run)} remaining"
@@ -915,6 +984,40 @@ def _reject_simulation_under_execute(resolved: list[ResolvedTask], *, grade: boo
             + "logic depends on criteria results): "
             + ", ".join(simulated)
             + ". Use `coder-eval run` for these."
+        )
+
+
+def _reject_empty_criteria_under_grade(resolved: list[ResolvedTask], *, grade: bool) -> None:
+    """Refuse a task with zero ``success_criteria`` under ``run``/``evaluate`` rather than scoring it.
+
+    ``TaskDefinition.success_criteria`` accepts an empty list at the model level
+    (needed so the Harbor agent-phase ``task.yaml`` -- criteria-free by design,
+    see ``harbor/packager.py::_write_agent_phase_task_yaml`` -- can round-trip
+    through ``coder-eval execute``, which never grades). But `EvaluationResult`'s
+    scoring is vacuous over an empty list: `all_criteria_passed` returns `True`
+    and `calculate_weighted_score` returns `0.0`, so a criteria-free task graded
+    under `run` would silently finalize as `FinalStatus.SUCCESS` with
+    `weighted_score: 0.0` -- an internally contradictory "successful" result for
+    what is actually a misconfigured task (a typo, a bad merge, a `-D` override
+    that cleared the list). `execute` (`grade=False`) is exactly the case this
+    is legal for, so the check is scoped to `grade` the same way
+    ``_reject_simulation_under_execute`` scopes its own check.
+
+    Callers must pass the POST-`--resume` set (``to_run``, not the full
+    ``resolved``): a resumed, already-finalized row is folded back from
+    ``prior_results`` and never re-executed or re-graded, so its own
+    (possibly empty) criteria are moot to this run and must not block one
+    that is not actually going to grade it.
+    """
+    if not grade:
+        return
+    empty = sorted(rt.task.task_id for rt in resolved if not rt.task.success_criteria)
+    if empty:
+        raise typer.BadParameter(
+            "task(s) with no `success_criteria` cannot be graded (they would silently score "
+            + "SUCCESS at weighted_score 0.0): "
+            + ", ".join(empty)
+            + ". Add at least one criterion, or use `coder-eval execute` to run without grading."
         )
 
 
@@ -1036,21 +1139,35 @@ async def _run_with_experiment(
             resolved, grade=grade, allow_host_grading=allow_host_grading
         )
 
+    # Checked against `to_run`, not `resolved`: a `--resume` peels off tasks
+    # already finalized (folded back from `prior_results`, never re-executed
+    # or re-graded), so an already-finalized row with empty success_criteria
+    # (e.g. it was originally run via `execute`) must not block a `run
+    # --resume` that isn't actually going to grade it.
+    _reject_empty_criteria_under_grade(to_run, grade=grade)
+
     # Print execution mode
     print_execution_mode(len(to_run), max_parallel)
 
-    summary, task_results = await _run_with_callbacks(
-        execute_fn=lambda **kwargs: run_batch(
-            resolved_tasks=to_run,
-            config=config,
-            skipped_tasks=skipped,
-            prior_results=prior_results,
-            prior_resolved=prior_resolved,
-            **kwargs,
-        ),
-        task_count=len(to_run),
-        stream_mode=stream_mode,
-    )
+    try:
+        summary, task_results = await _run_with_callbacks(
+            execute_fn=lambda **kwargs: run_batch(
+                resolved_tasks=to_run,
+                config=config,
+                skipped_tasks=skipped,
+                prior_results=prior_results,
+                prior_resolved=prior_resolved,
+                **kwargs,
+            ),
+            task_count=len(to_run),
+            stream_mode=stream_mode,
+        )
+    except ValueError as e:
+        # run_batch's own resolution-time guards (e.g. --workspace-dir requiring
+        # exactly one non-docker task) raise a plain ValueError -- convert it to
+        # the same clean CLI error every other resolution-time refusal in this
+        # function gets, instead of an unhandled traceback.
+        raise typer.BadParameter(str(e)) from e
 
     # Generate experiment reports
     experiment_result = aggregate_results(

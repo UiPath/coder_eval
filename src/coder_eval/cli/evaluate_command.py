@@ -11,6 +11,8 @@ import typer
 from rich.markup import escape
 
 from ..evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE
+from ..harbor.atif_hydrate import seed_from_atif_trajectory
+from ..harbor.atif_models import Trajectory
 from ..logging_config import setup_logging
 from ..models import (
     AgentKind,
@@ -311,6 +313,23 @@ def evaluate_command(
         "--run-dir",
         help="Where the graded task.json lands (default: auto-generated timestamped directory in runs/)",
     ),
+    format: str | None = typer.Option(
+        None,
+        "--format",
+        help=(
+            "Only 'harbor' is supported: grade a directory whose agent phase ran OUTSIDE this "
+            "process (a Harbor agent's `coder-eval execute --format harbor`) by hydrating trajectory "
+            "context from an ATIF trajectory.json instead of a run directory's task.json. Requires "
+            "--trajectory and the two-argument `TASK_FILE WORK_DIR` form."
+        ),
+    ),
+    trajectory: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--trajectory",
+        help="Path to an ATIF trajectory.json to hydrate trajectory context from. Required with --format harbor.",
+        exists=True,
+        dir_okay=False,
+    ),
 ) -> None:
     """Evaluate criteria against a directory, or re-grade a finished run.
 
@@ -343,6 +362,8 @@ def evaluate_command(
         allow_recorded_commands=allow_recorded_commands,
         allow_host_grading=allow_host_grading,
         run_dir=run_dir,
+        format=format,
+        trajectory=trajectory,
     )
 
 
@@ -357,6 +378,8 @@ def run_evaluation(
     allow_recorded_commands: bool = False,
     allow_host_grading: bool = False,
     run_dir: Path | None = None,
+    format: str | None = None,
+    trajectory: Path | None = None,
 ) -> None:
     """The body of ``coder-eval evaluate``, with real Python defaults.
 
@@ -383,6 +406,43 @@ def run_evaluation(
     task_file = inputs.task_file
     prior = inputs.prior
     target = inputs.target
+
+    if format is not None and format != "harbor":
+        console.print(f"[red]✗ Unsupported --format {format!r}. Supported: harbor.[/red]")
+        raise typer.Exit(1)
+    if format == "harbor":
+        if target.mode is not EvaluateMode.WORK_DIR:
+            console.print(
+                "[red]✗ --format harbor only applies to the two-argument `TASK_FILE WORK_DIR` form — "
+                + "a run directory already carries its own trajectory in task.json.[/red]"
+            )
+            raise typer.Exit(1)
+        if trajectory is None:
+            console.print("[red]✗ --format harbor requires --trajectory <path to trajectory.json>.[/red]")
+            raise typer.Exit(1)
+        try:
+            atif_trajectory = Trajectory.model_validate_json(trajectory.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            console.print(f"[red]✗ Could not read {trajectory} as an ATIF trajectory:[/red] {escape(str(e))}")
+            raise typer.Exit(1) from e
+        prior = seed_from_atif_trajectory(
+            atif_trajectory,
+            task_id=task.task_id,
+            task_description=task.description,
+        )
+
+    if not task.success_criteria:
+        # `evaluate` always grades -- unlike `execute`, there is no legal reason
+        # for a zero-criteria task to reach here. `regrade_in_place` guards its
+        # own delegating branch; this guard covers the sibling orchestrator-direct
+        # branch below (fresh work-dir grading, or `--copy`), which never calls
+        # `regrade_in_place` and would otherwise finalize a criteria-free task as
+        # SUCCESS at weighted_score 0.0.
+        console.print(
+            f"[red]✗ Task {task.task_id!r} has no `success_criteria` and cannot be graded "
+            + "(it would silently score SUCCESS at weighted_score 0.0). Add at least one criterion.[/red]"
+        )
+        raise typer.Exit(1)
 
     grade_in_place = resolve_grade_in_place(target, in_place)
 
@@ -565,7 +625,15 @@ def _report_and_exit(
     if result.sandbox_path:
         console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")
 
-    if prior is not None:
+    # `prior is not None` alone is not enough: `--format harbor` seeds a
+    # SYNTHETIC prior on the WORK_DIR shape (from the supplied
+    # `--trajectory`), which is not a run directory and carries no
+    # `task.execute.json` sibling to preserve. `_write_back` is documented as
+    # "replace the graded RUN's task.json" and writes into `target.target`,
+    # which in WORK_DIR mode is the directory being graded, not a run dir --
+    # writing there planted a spurious task.json into the Harbor-synced
+    # workdir and wedged a later `evaluate` on it into RUN_DIR mode.
+    if prior is not None and target.mode is EvaluateMode.RUN_DIR:
         console.print(
             f"[dim]Re-graded {prior.final_status.value} → {result.final_status.value} "
             + f"over {len(result.iterations)} recorded turn(s).[/dim]"

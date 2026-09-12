@@ -8,6 +8,8 @@ from .aggregate_command import aggregate_command
 from .console import console
 from .evaluate_command import evaluate_command
 from .execute_command import execute_command
+from .export_command import export_command
+from .harbor_command import harbor_app, reward_command
 from .plan_command import plan_command
 from .report_command import report_command
 from .run_command import run_command
@@ -82,6 +84,9 @@ app.command(name="plan")(track_command("plan")(plan_command))
 app.command(name="evaluate")(track_command("evaluate")(evaluate_command))
 app.command(name="report")(track_command("report")(report_command))
 app.command(name="aggregate")(track_command("aggregate")(aggregate_command))
+app.command(name="export")(track_command("export")(export_command))
+harbor_app.command(name="reward")(track_command("harbor-reward")(reward_command))
+app.add_typer(harbor_app, name="harbor")
 # Hidden internal command invoked inside the Docker container only — UNWRAPPED
 # (it runs inside the run-task subprocess and would double-count / pollute events).
 app.command(name="_run-task-internal", hidden=True)(run_task_internal_command)

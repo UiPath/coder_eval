@@ -30,6 +30,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.3",
+    "tomli-w>=1.0.0",
     "typer>=0.24.1",
     "click>=8.3.3",
     "rich>=14.3.3",
@@ -160,6 +161,23 @@ opencode = []
 # the CLI on PATH the framework still installs and runs; Pi tasks fail at start()
 # with a clear hint pointing here. See docs/agents/PI.md.
 pi = []
+# Optional extra for the Harbor-interop direction: coder-eval AS a Harbor agent
+# (`coder_eval.harbor.agent:CoderEvalAgent`, a `harbor.agents.installed.base.BaseInstalledAgent`
+# subclass) run via `harbor run -a coder_eval.harbor.agent:CoderEvalAgent`. `harbor` itself
+# is never imported by anything OUTSIDE `coder_eval.harbor` (the export/packager side of
+# the integration reads/writes Harbor's task.toml directly and needs no `harbor` import at
+# all), so this extra exists only to satisfy that one module -- a task-image author (or a CI
+# job driving `hb run`) installs it with `pip install 'coder-eval[harbor]'` into the SAME
+# interpreter that also has `coder_eval`, since Harbor resolves the agent class on the host
+# process (see harbor/agent.py's module docstring). Pinned exactly, mirroring the other
+# harness pins: Harbor's own trial/environment/agent-context models are a load-bearing
+# runtime contract for this class, not a loose API. Without this extra the framework still
+# installs and runs; `coder_eval.harbor.agent` fails to import with a clear hint pointing
+# back here (it is not needed to EXPORT a task to Harbor format, only to run coder-eval
+# itself as Harbor's agent).
+harbor = [
+    "harbor==0.22.0",
+]
 
 [project.scripts]
 coder-eval = "coder_eval.cli:app"
