@@ -425,7 +425,14 @@ class _ClaudeTurnState:
                 out_tok = int(msg_usage.get("output_tokens", 0) or 0)
             self.pending_delta_output_tokens = None
 
-        assistant_telemetry = AssistantMessageTelemetry(
+        # CE061's one permanent exception. This harness measures its
+        # window as a monotonic delta and subtracts tool time ONCE at
+        # finalization across every emission (`_subtract_tool_time_from_windows`),
+        # because a call issued by an earlier emission is still running when the
+        # next window closes. `close_window` subtracts per flush; forcing both
+        # shapes into it means a mode flag on a helper whose whole value is
+        # having one shape. It already uses the shared `busy_ms`.
+        assistant_telemetry = AssistantMessageTelemetry(  # noqa: CE061
             started_at=generation_started_wall,
             completed_at=message_arrival_wall,
             generation_duration_ms=max(0.0, generation_duration_ms),

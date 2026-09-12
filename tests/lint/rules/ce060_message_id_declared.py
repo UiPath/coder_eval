@@ -36,6 +36,10 @@ own name still has to be known, so it is taken from the model itself
 CE056 imports ``IN_CONTAINER_ENV`` and CE057 derives its target set from
 ``SIDECAR_MODULES``. Renaming the model therefore moves this rule with it.
 
+That resolution lives in ``_model_ctor.py`` and is shared with CE061, which
+needs the identical answer to a different question. Keeping two copies would
+mean a new import spelling needs two fixes in two rules.
+
 BLIND SPOT 1: the runtime ``None``. The rule requires the kwarg to be
 *present*, not non-``None`` when it runs. ``opencode_agent.py`` passes
 ``str(part.get("messageID") or "") or None`` and ``pi_agent.py`` the same shape
@@ -48,15 +52,12 @@ what the id is. The sensor for that case is the golden corpus, and only
 partially — a snapshot is written from whatever the code currently does, so it
 catches a later change, never an initial omission.
 
-BLIND SPOT 2: a binding this file cannot resolve. ``check()`` reads one
-module's own imports, so it sees the direct forms — absolute or relative
-``from ... import AssistantMessage``, under any alias — and the attribute
-spelling ``<module>.AssistantMessage(...)``, which is matched on the attribute
-alone precisely because the module binding it comes through (``import
-coder_eval.models as models``, ``from coder_eval import models``) is the part a
-class-binding walk misses. What remains invisible is a re-export through an
-intermediate module (``from .sibling import AssistantMessage``): resolving that
-means following imports across files, which no rule in this package does.
+BLIND SPOT 2: a binding the resolver cannot follow. It reads one module's own
+imports, so it sees the direct forms — absolute or relative ``from ... import
+AssistantMessage``, under any alias — and the attribute spelling
+``<module>.AssistantMessage(...)``. What remains invisible is a re-export
+through an intermediate module (``from .sibling import AssistantMessage``); see
+``_model_ctor.py``.
 
 A ``**``-expanded call fires: such a call has not declared the field at the
 site. There is no carve-out because no site in ``src/coder_eval/agents/`` uses
@@ -65,38 +66,17 @@ site. There is no carve-out because no site in ``src/coder_eval/agents/`` uses
 """
 
 import ast
-import re
 
-from coder_eval.models import AssistantMessage
+from tests.lint.rules._model_ctor import (
+    AGENTS_ROOT,
+    ASSISTANT_MESSAGE,
+    constructor_name,
+    is_none,
+    keywords_of,
+    local_bindings,
+)
 from tests.lint.rules.base import BaseRule
 from tests.lint.violation import Violation
-
-
-_AGENTS_ROOT = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]agents[/\\]")
-
-_MODELS_MODULE = "coder_eval.models"
-_MODELS_TAIL = _MODELS_MODULE.rpartition(".")[2]
-
-# Taken from the model, never spelled here: a rename then moves the rule too.
-_CLASS = AssistantMessage.__name__
-
-
-def _binds_the_model(node: ast.ImportFrom) -> bool:
-    """True if this `from ... import` reaches `coder_eval.models`.
-
-    A relative import inside `agents/` (`from ..models import ...`) carries only
-    the tail in `node.module`, so testing the absolute path alone would leave the
-    rule silently blind for a whole file — and `agents/` does use relative
-    imports.
-    """
-    module = node.module or ""
-    if module.startswith(_MODELS_MODULE):
-        return True
-    return bool(node.level) and (module == _MODELS_TAIL or module.startswith(f"{_MODELS_TAIL}."))
-
-
-def _is_none(node: ast.expr | None) -> bool:
-    return isinstance(node, ast.Constant) and node.value is None
 
 
 class MessageIdDeclared(BaseRule):
@@ -104,35 +84,19 @@ class MessageIdDeclared(BaseRule):
 
     def __init__(self, filepath: str) -> None:
         super().__init__(filepath)
-        self._in_scope = bool(_AGENTS_ROOT.search(filepath))
-        # Local bindings of coder_eval.models.AssistantMessage in THIS module.
-        # Built per file in check(): caching it across files would leak one
-        # module's alias into another's matching.
+        self._in_scope = bool(AGENTS_ROOT.search(filepath))
         self._names: set[str] = set()
 
     def check(self, tree: ast.AST) -> list[Violation]:
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and _binds_the_model(node):
-                self._names.update(a.asname or a.name for a in node.names if a.name == _CLASS)
+        self._names = local_bindings(tree, ASSISTANT_MESSAGE)
         return super().check(tree)
 
     def visit_Call(self, node: ast.Call) -> None:
         if self._in_scope:
-            func = node.func
-            # A bare name has to be bound in this module to be ours; the
-            # attribute spelling is matched on the attribute alone, since the
-            # module binding it arrives through is what an import walk over one
-            # file's class bindings cannot see (see BLIND SPOT 2).
-            name = (
-                func.id
-                if isinstance(func, ast.Name) and func.id in self._names
-                else func.attr
-                if isinstance(func, ast.Attribute) and func.attr == _CLASS
-                else None
-            )
+            name = constructor_name(node.func, self._names, ASSISTANT_MESSAGE)
             if name is not None:
-                kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
-                if "message_id" not in kwargs or _is_none(kwargs["message_id"]):
+                kwargs = keywords_of(node)
+                if "message_id" not in kwargs or is_none(kwargs["message_id"]):
                     self.violation(
                         node,
                         f"{name}(...) leaves 'message_id' undeclared — absent, or an explicit None — "
