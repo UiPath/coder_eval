@@ -214,6 +214,29 @@ figures in the table above are means of six live `tasks/hello_date` turns per
 harness and move with CLI cache warmth, so read their ORDER OF MAGNITUDE, not
 the digits.
 
+**Four turn buckets, two task buckets — and they are different scopes.** The
+four above tile ONE TURN and their identity (`head + Σgeneration + UNION(tool)
++ tail == the turn's span`) is asserted to the millisecond by
+`tests/test_timing_identity_contract.py`. A task's wall clock is longer than
+its turns, and the difference is the orchestrator's own work: criterion
+discovery, sandbox provisioning, `agent.start()` and `pre_run` before the first
+turn; criteria checking, `post_run` and cleanup after the last. Those are
+booked as `EvaluationResult.setup_ms` and `EvaluationResult.grading_ms` —
+TASK-scoped, deliberately NOT a fifth and sixth member of the turn's four.
+
+Folding setup into the first turn's `harness_startup_ms` was considered and is
+wrong three times over: it would break the turn identity by construction; a
+dialog-mode task runs N turns against ONE setup, so turn 1 would stop being
+comparable with turns 2..N; and it is not harness time at all — measured at
+~1.86 s for claude-code and pi alike on the same machine, which is the tell.
+
+Naming them is what makes the evalboard's **Unaccounted** cell a residual
+rather than a label. It used to hold that ~1.9 s constant on every row, which
+reads as 10% of a 19 s task and would read 60% of a 3 s one. Measured after the
+split: 1.9% (claude-code) and 7.3% (pi) of task wall clock, and what remains is
+post-`AgentEnd` subprocess reaping, `post_run`, cleanup and record persistence —
+which is why the remainder is larger for the harnesses that drain a CLI.
+
 **The head means one thing on all five.** It is the wall clock from the turn
 starting until the harness first observed **model output**, and that instant is
 also where the harness opens its first generation window — which is what keeps

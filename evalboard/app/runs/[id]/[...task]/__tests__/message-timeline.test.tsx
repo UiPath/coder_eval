@@ -674,7 +674,116 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
         renderStrip(10);
         expect(
             screen.getByText("Unaccounted").parentElement,
-        ).toHaveAttribute("title", expect.stringContaining("sandbox setup"));
+        ).toHaveAttribute("title", expect.stringContaining("post_run"));
+    });
+
+    test("it no longer claims to hold the setup phase, which has its own cell", () => {
+        // The residual used to name sandbox setup as one of its contents, and
+        // that was ~1.9s of known, constant orchestrator cost on every row —
+        // a named phase hiding inside a bucket called "unaccounted".
+        renderStrip(10);
+        const title = screen
+            .getByText("Unaccounted")
+            .parentElement!.getAttribute("title")!;
+        expect(title).not.toContain("sandbox setup");
+    });
+
+    test("setup and grading are subtracted out of the residual", () => {
+        render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000 })]}
+                taskDurationSeconds={10}
+                setupMs={2000}
+                gradingMs={500}
+            />,
+        );
+        expect(cell("Setup").textContent).toBe("2.0s");
+        expect(cell("Grading").textContent).toBe("500ms");
+        // 10s − 1s generation − 2s setup − 0.5s grading = 6.5s.
+        expect(cell("Unaccounted").textContent).toBe("6.5s (65%)");
+    });
+
+    test("a run predating the fields leaves their time IN the residual", () => {
+        // The whole point of subtracting only what was measured: an absent
+        // field must not be silently taken off as a zero, and must not turn
+        // the residual into a different number than the run used to publish.
+        render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000 })]}
+                taskDurationSeconds={10}
+            />,
+        );
+        expect(cell("Setup").textContent).toBe("—");
+        expect(cell("Grading").textContent).toBe("—");
+        expect(cell("Unaccounted").textContent).toBe("9.0s (90%)");
+    });
+});
+
+describe("MessageTimelineSection — a row's EXEC cell", () => {
+    function span(start: number, end: number) {
+        return {
+            toolName: "Bash",
+            toolUseId: `tu_${start}`,
+            summary: "sleep",
+            argText: "sleep",
+            description: null,
+            genMs: null,
+            durationMs: end - start,
+            isError: false,
+            resultPreview: null,
+            outputTokens: null,
+            resultTokens: null,
+            execStartMs: start,
+            execEndMs: end,
+        };
+    }
+
+    // The message row lays out GEN then EXEC as the first two numeric spans of
+    // its own grid; `:scope >` keeps expanded tool sub-rows out of the match.
+    function execOf(container: HTMLElement): string {
+        // The message row is `ol > li > details > summary`, laying out
+        // #, GEN, EXEC as its first three numeric spans. `:scope >` keeps the
+        // expanded tool sub-rows inside the <details> body out of the match.
+        const row = container.querySelector("ol > li > details > summary") as HTMLElement;
+        const nums = row.querySelectorAll(":scope > span.tabular-nums");
+        return nums[2]?.textContent ?? "";
+    }
+
+    function execCell(toolUses: ReturnType<typeof span>[]): string {
+        const { container } = render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000, toolUses })]}
+            />,
+        );
+        return execOf(container);
+    }
+
+    test("concurrent calls count their overlap ONCE", () => {
+        // The bug this replaced: two `sleep 2` Bash calls overlapping almost
+        // entirely rendered 4.1s for 2.1s of wall clock — more tool time in
+        // one message than the whole task's Tool exec cell, which is
+        // impossible on its face.
+        // union 0->3000 = 3.0s; the sum of the two durations would be 4.0s.
+        expect(execCell([span(0, 2_000), span(1_000, 3_000)])).toBe("3.0s");
+    });
+
+    test("sequential calls still add up, so the row reconciles with its parts", () => {
+        // Expanding the row shows each call's own wall clock. When they did
+        // not overlap, those add to this number; when they did, they do not,
+        // and that difference is the concurrency.
+        expect(execCell([span(0, 1_000), span(2_000, 3_000)])).toBe("2.0s");
+    });
+
+    test("it agrees with the header for a single message", () => {
+        const toolUses = [span(0, 2_000), span(1_000, 3_000)];
+        const { container } = render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000, toolUses })]}
+                taskDurationSeconds={10}
+            />,
+        );
+        const header = screen.getByText("Tool exec").parentElement!.querySelectorAll("div")[1];
+        expect(execOf(container)).toBe(header.textContent);
     });
 });
 

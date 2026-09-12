@@ -370,6 +370,14 @@ export interface TaskDetail extends TaskResultSummary {
     // that residual is what is left after every named bucket.
     harnessStartupMs: number | null;
     harnessTeardownMs: number | null;
+    // TASK-scoped phases either side of the agent's turns, so the timeline's
+    // Unaccounted cell is a residual rather than a name for the setup phase.
+    // `setupMs` is sandbox provisioning + agent start() + pre_run; `gradingMs`
+    // is every success-criteria check the row made. Both `null` when the run
+    // predates the fields or (for grading) when nothing was graded — never 0,
+    // which would claim the phase ran instantly.
+    setupMs: number | null;
+    gradingMs: number | null;
     // Per-call ACTUAL cost + cache audit rows, grouped by turn iteration. Only
     // turns whose `provider_call_costs` list is non-empty appear (LiteLLM/
     // open-weight backend; empty on Claude/Bedrock). Rendered as a standalone
@@ -2522,6 +2530,10 @@ export async function readTaskDetail(
         success_criteria_results?: RawCriterionResult[];
         post_failure_criteria_results?: RawCriterionResult[];
         iterations?: TurnEntry[];
+        // Task-scoped phases either side of the turns. Absent on runs that
+        // predate them, which `sumMeasured` maps to null rather than 0.
+        setup_ms?: number | null;
+        grading_ms?: number | null;
         environment_info?: RawRunJson["environment_info"];
     }>(path.join(contentDir, "task.json"));
 
@@ -2565,6 +2577,11 @@ export async function readTaskDetail(
     const subAgentUsageByToolId = aggregateSubAgentUsage(messages);
     const { startupMs: harnessStartupMs, teardownMs: harnessTeardownMs } =
         sumHarnessOverhead(task?.iterations ?? []);
+    // Through `sumMeasured` for the single-value case too, so the None-vs-0
+    // and non-finite rules have ONE implementation: a `?? null` here would
+    // pass a NaN straight into the Unaccounted subtraction.
+    const setupMs = sumMeasured([task?.setup_ms]);
+    const gradingMs = sumMeasured([task?.grading_ms]);
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
@@ -2607,6 +2624,8 @@ export async function readTaskDetail(
         subAgentUsageByToolId,
         harnessStartupMs,
         harnessTeardownMs,
+        setupMs,
+        gradingMs,
         providerCalls,
     };
 }

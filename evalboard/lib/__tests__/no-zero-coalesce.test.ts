@@ -89,8 +89,16 @@ const ALLOWED = new Map<string, string>([
         "The residual. Subtracting only what was measured is the whole point; an unmeasured head leaves its time IN the residual rather than silently claiming it.",
     ],
     [
-        "(harnessTeardownMs ?? 0)",
+        "(harnessTeardownMs ?? 0) -",
         "The residual's tail half: subtracting only what was measured leaves unmeasured time IN the residual.",
+    ],
+    [
+        "(setupMs ?? 0) -",
+        "Same residual rule: a run predating the field leaves its setup time IN the residual rather than having it silently subtracted as zero.",
+    ],
+    [
+        "(gradingMs ?? 0)",
+        "Same residual rule, and it is also the ungraded case — `coder-eval execute` grades nothing, so there is no grading time to subtract.",
     ],
     [
         "const slowExec = (execMs ?? 0) >= SLOW_TOOL_MS;",
@@ -103,10 +111,6 @@ const ALLOWED = new Map<string, string>([
     [
         "const slowTool = m.toolUses.some((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS);",
         "A threshold comparison: an untimed call is not a slow call.",
-    ],
-    [
-        "const execMs = m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0);",
-        "Summing the measured calls of one message; an untimed call adds nothing to that sum.",
     ],
 ]);
 

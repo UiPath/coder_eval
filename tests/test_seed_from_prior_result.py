@@ -57,6 +57,11 @@ CARRIED = {
     "post_run_results",
     "sandbox_path",
     "environment_info",
+    # A fact about the run being graded, not about the grading pass — the same
+    # rule `duration_seconds` follows. A detached grade adopts an existing
+    # workspace instead of building one, so its own "setup" is a different
+    # activity entirely; overwriting would report it as the run's.
+    "setup_ms",
 }
 
 # Recomputed by this pass — carrying them would defeat the point.
@@ -85,6 +90,12 @@ RECOMPUTED = {
     # when the row reached its final state, which the grade genuinely changes.
     "duration_seconds",
     "completed_at",
+    # The cost of THIS pass's grading, which is the only grading that produced
+    # the verdict the row now carries. Its sibling `duration_seconds` is
+    # restored from the prior instead, for the opposite reason: that one is a
+    # fact about the agent run. The pair is the same split
+    # `environment_info["grading_duration_seconds"]` already makes.
+    "grading_ms",
 }
 
 
@@ -116,6 +127,10 @@ def _prior() -> EvaluationResult:
         pre_run_results=[PostRunResult(command="prior-pre", exit_code=0)],
         post_run_results=[PostRunResult(command="prior-post", exit_code=0)],
         sandbox_path="/prior/workspace",
+        # Distinctive, not the model default: the re-grade adopts a workspace
+        # rather than provisioning one, so the run's own setup cost has to
+        # survive or the row reports the cheap adoption as the run's.
+        setup_ms=1234.5,
         environment_info={"installed_tools": "prior", "coder_eval": "1.0.0-run"},
         early_stop=EarlyStopInfo(
             reason=EarlyStopReason.CRITERION_FAILED,
