@@ -22,6 +22,7 @@ reading the return value (and ``pending_turn`` on crash), now event-derived.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from datetime import datetime
 
@@ -139,6 +140,35 @@ def subtract_tool_time(
 
     A window entirely covered by tool execution reaches ``0.0``, and that is a
     measurement rather than an absence.
+
+    THE GROUP'S RAW TOTAL MUST EQUAL THE SPAN ITS BOUNDS DESCRIBE, and this
+    function raises if it does not. That equality is the contract that lets
+    ``generation_duration_ms`` stay a PUBLISHED field rather than one the
+    collector derives from the bounds: a reducer publishes the raw window it
+    measured, so the duration is ``completed_at - started_at`` (or, for a group
+    Codex split across two sub-messages, sums to it). Deriving it here instead
+    was considered and cut — it would cost five reducers, a regeneration of
+    every golden and a rewrite of CE059, whose exemption keys on the kwarg being
+    present at the call site — and this assertion is the sensor that makes
+    deferring that safe. A mismatch means a reducer narrowed or widened a window
+    without moving its bounds, which is the drift
+    ``tests/_fixtures/golden_streams/_scrub.py::assert_timing_captured``'s
+    "bounds that span it" check catches one replay at a time.
+
+    It OVERLAPS with CE061 and is deliberately kept anyway. All five reducers
+    build the window with ``timing.close_window(mark=…, now=…)`` and write
+    ``started_at=started, completed_at=now``, and CE061 — now exemption-free —
+    forces that shape statically, so the equality is largely true by
+    construction. What this adds is the runtime half: a reducer that bypasses
+    ``close_window`` in a way an import-level check cannot see, and a
+    third-party agent registered through the ``coder_eval.plugins`` SPI, which
+    lives outside ``src/coder_eval/agents/`` where no lint rule reaches it. It
+    is not load-bearing on its own.
+
+    RAISING KILLS THE TURN, and that is accepted — the same trade
+    ``timing._require_same_awareness`` makes at this seam. The condition is
+    unreachable without a reducer bug; all five are exercised by the golden
+    corpus and by the ms-exact identity contract.
     """
     # (index, raw window ms) per group. The raw value is captured HERE, where
     # the message is already narrowed to AssistantMessage, so the apportioning
@@ -159,6 +189,19 @@ def subtract_tool_time(
         # group already at zero stays at zero.
         if raw_total <= 0:
             continue
+        bounds_ms = (completed - started).total_seconds() * 1000.0
+        if not math.isclose(raw_total, bounds_ms, rel_tol=1e-9, abs_tol=1e-6):
+            raise ValueError(
+                f"generation_duration_ms: a group of {len(members)} message(s) bounded "
+                + f"{started} -> {completed} ({bounds_ms:.6f} ms) publishes {raw_total:.6f} ms of "
+                + "generation. A reducer publishes the RAW window it measured, so its duration is "
+                + "`completed_at - started_at` (or, across the sub-messages Codex splits one window "
+                + "into, sums to it) — tool execution comes back out HERE, once, for every harness. "
+                + "A disagreement means the reducer narrowed or widened a window without moving its "
+                + "bounds, which makes the duration and the bounds two answers to one question and "
+                + "breaks the four-bucket identity. Build the window with `timing.close_window` and "
+                + "write `completed_at=now` (CE061), rather than adjusting the duration in place."
+            )
         net = max(raw_total - busy_ms(spans, started, completed), 0.0)
         assigned = 0.0
         for n, (index, raw) in enumerate(members):

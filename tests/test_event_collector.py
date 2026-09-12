@@ -220,9 +220,10 @@ class TestFullFieldParity:
 
     def _full_agent_end(self) -> AgentEndEvent:
         """An AgentEndEvent with every verbatim field set to a non-default sentinel."""
+        started = datetime(2026, 9, 11, 9, 0, 0)
         msg = AssistantMessage(
-            started_at=datetime.now(),
-            completed_at=datetime.now(),
+            started_at=started,
+            completed_at=started + timedelta(milliseconds=12.0),
             generation_duration_ms=12.0,
             output_tokens=7,
         )
@@ -282,18 +283,33 @@ class TestFullFieldParity:
                 assert record_value == event_value, f"{name}: record={record_value!r} event={event_value!r}"
 
 
+_GEN_BASE = datetime(2026, 9, 11, 9, 0, 0)
+_GEN_WINDOW_MS = 1.0
+
+
 def _assistant(
     *,
+    window: int = 0,
     input_tokens: int = 0,
     output_tokens: int = 0,
     cache_creation_tokens: int = 0,
     cache_read_tokens: int = 0,
     parent_tool_use_id: str | None = None,
 ) -> AssistantMessage:
+    """One generation, shaped the way a reducer emits one.
+
+    The bounds SPAN the published duration, and `window` tiles successive
+    messages rather than leaving them on one instant. Both matter to
+    `subtract_tool_time`, which asserts that a group's published total equals
+    the span its bounds describe and which GROUPS on those bounds: two
+    messages sharing an instant would be read as one Codex-style split window
+    and then violate the equality by summing to twice it.
+    """
+    started = _GEN_BASE + timedelta(milliseconds=_GEN_WINDOW_MS * window)
     return AssistantMessage(
-        started_at=datetime.now(),
-        completed_at=datetime.now(),
-        generation_duration_ms=1.0,
+        started_at=started,
+        completed_at=started + timedelta(milliseconds=_GEN_WINDOW_MS),
+        generation_duration_ms=_GEN_WINDOW_MS,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_creation_tokens=cache_creation_tokens,
@@ -346,8 +362,8 @@ class TestReconciliation:
         # Claude: model_usage total exceeds the per-message sum (a fixed ~512 input
         # slice + sub-agent input ride on no streamed message).
         messages = [
-            _assistant(input_tokens=100, output_tokens=40, cache_read_tokens=2000),
-            _assistant(input_tokens=50, output_tokens=20, cache_read_tokens=3000),
+            _assistant(window=0, input_tokens=100, output_tokens=40, cache_read_tokens=2000),
+            _assistant(window=1, input_tokens=50, output_tokens=20, cache_read_tokens=3000),
         ]
         usage = TokenUsage(
             uncached_input_tokens=662,  # 150 + 512 unattributed
@@ -375,8 +391,8 @@ class TestReconciliation:
         # Codex: parent + recovered sub-agent (parent_tool_use_id) generations, with
         # the folded total slightly above the streamed sum.
         messages = [
-            _assistant(input_tokens=200, output_tokens=80, cache_read_tokens=1000),
-            _assistant(input_tokens=300, output_tokens=20, parent_tool_use_id="call_sub"),
+            _assistant(window=0, input_tokens=200, output_tokens=80, cache_read_tokens=1000),
+            _assistant(window=1, input_tokens=300, output_tokens=20, parent_tool_use_id="call_sub"),
         ]
         usage = TokenUsage(
             uncached_input_tokens=520,  # 500 + 20 residual
@@ -474,6 +490,11 @@ class TestNoTerminalEvent:
         assert [c.tool_id for c in record.commands] == ["a"]
 
 
+def _span_ms(started: datetime, completed: datetime) -> float:
+    """The window its own bounds describe — what every reducer publishes."""
+    return (completed - started).total_seconds() * 1000.0
+
+
 class TestHarnessOverheadBuckets:
     """The turn's two unexplained ends: before the first generation, after the last.
 
@@ -497,7 +518,9 @@ class TestHarnessOverheadBuckets:
         return AssistantMessage(
             started_at=started,
             completed_at=completed,
-            generation_duration_ms=1.0 if measurable else None,
+            # Derived, not a literal: `subtract_tool_time` asserts a published
+            # window equals the span its own bounds describe.
+            generation_duration_ms=_span_ms(started, completed) if measurable else None,
         )
 
     @staticmethod
@@ -507,7 +530,7 @@ class TestHarnessOverheadBuckets:
         return AssistantMessage(
             started_at=started,
             completed_at=completed,
-            generation_duration_ms=1.0,
+            generation_duration_ms=_span_ms(started, completed),
             parent_tool_use_id="toolu_agent",
         )
 
@@ -849,6 +872,88 @@ class TestSubtractToolTime:
         )
         out = subtract_tool_time([self._msg(0, 1000, 1000.0), reconciliation], [(self._at(0), self._at(200))])
         assert out[1] is reconciliation
+
+
+class TestAPublishedWindowMustMatchItsOwnBounds:
+    """The seam assertion: a group's raw total is the span its bounds describe.
+
+    That equality is what lets `generation_duration_ms` stay a PUBLISHED field
+    instead of one the collector derives from the bounds — the migration that
+    was considered and cut, on the grounds that this check makes deferring it
+    safe. It is largely true by construction (CE061 forces every reducer
+    through `timing.close_window`); what it catches is a reducer that bypasses
+    the helper, and a third-party agent registered through the
+    `coder_eval.plugins` SPI, which no lint rule scoped to `agents/` can see.
+    """
+
+    BASE: ClassVar[datetime] = datetime(2026, 9, 11, 9, 0, 0)
+
+    @classmethod
+    def _at(cls, ms: float) -> datetime:
+        return cls.BASE + timedelta(milliseconds=ms)
+
+    @classmethod
+    def _msg(cls, lo: float, hi: float, gen: float | None, **kwargs) -> AssistantMessage:
+        return AssistantMessage(started_at=cls._at(lo), completed_at=cls._at(hi), generation_duration_ms=gen, **kwargs)
+
+    def test_a_narrowed_window_raises_and_names_both_numbers(self):
+        with pytest.raises(ValueError) as excinfo:
+            subtract_tool_time([self._msg(0, 1000, 400.0)], [])
+        message = str(excinfo.value)
+        assert "400.000000" in message and "1000.000000" in message
+        assert "generation_duration_ms" in message
+
+    def test_a_widened_window_raises_too(self):
+        with pytest.raises(ValueError):
+            subtract_tool_time([self._msg(0, 1000, 1600.0)], [])
+
+    def test_a_window_that_matches_its_bounds_passes(self):
+        out = subtract_tool_time([self._msg(0, 1000, 1000.0)], [])
+        assert out[0].generation_duration_ms == pytest.approx(1000.0)
+
+    def test_codexs_split_passes_when_the_parts_sum_to_the_window(self):
+        """Built with `_flush_message`'s own idiom, not a hand-picked pair.
+
+        Codex divides one window across two sub-messages by output-token share,
+        rounding every share but the last to 6 places and giving the last the
+        remainder — so the tolerance is exercised against the real rounding
+        rather than against exact halves.
+        """
+        window_ms = 1000.0
+        first = round(window_ms * (1.0 / 3.0), 6)
+        parts = [first, window_ms - first]
+        out = subtract_tool_time([self._msg(0, 1000, part, message_id="m") for part in parts], [])
+        assert sum(m.generation_duration_ms or 0.0 for m in out) == pytest.approx(window_ms)
+
+    def test_a_split_whose_parts_sum_to_the_wrong_total_raises(self):
+        with pytest.raises(ValueError):
+            subtract_tool_time([self._msg(0, 1000, 400.0, message_id="m"), self._msg(0, 1000, 400.0)], [])
+
+    def test_a_zero_group_is_skipped_before_the_check_runs(self):
+        """The `raw_total <= 0` skip runs FIRST, and must keep running first.
+
+        A window measured at zero between IDENTICAL bounds would satisfy the
+        equality anyway; the case that needs the order is a `0.0` published
+        beside bounds that are not identical, which is a shape the tree
+        tolerates today. Raising on it would turn a tolerated record into a
+        killed turn, so the bounds here are deliberately 500 ms apart.
+        """
+        out = subtract_tool_time([self._msg(0, 500, 0.0)], [])
+        assert out[0].generation_duration_ms == 0.0
+
+    def test_an_unmeasured_window_never_reaches_the_check(self):
+        out = subtract_tool_time([self._msg(0, 5000, None)], [])
+        assert out[0].generation_duration_ms is None
+
+    def test_a_sub_agent_message_is_excluded_even_with_placeholder_bounds(self):
+        """Its bounds are an admitted placeholder and cannot support its duration.
+
+        Codex's recovered child messages carry the CHILD's clock, and Claude's
+        synthesized sub-agent terminal stamps one instant on both bounds. They
+        are skipped before the group is built, so the check never sees them.
+        """
+        out = subtract_tool_time([self._msg(0, 0, 900.0, parent_tool_use_id="toolu_agent")], [])
+        assert out[0].generation_duration_ms == pytest.approx(900.0)
 
 
 class TestBuildTurnRecordIsIdempotent:
