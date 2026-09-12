@@ -221,9 +221,21 @@ def _build_catalogue() -> list[CodexScenario]:
         CodexScenario(
             name="c_reasoning_placeholder",
             notifications=[
-                _item("item/completed", _reasoning(text="")),
+                # Real bounds, and they are load-bearing rather than decorative:
+                # with none, `_flush_message` takes `_ms_to_dt(None)` for BOTH
+                # ends, which is two adjacent `datetime.now()` reads. Those
+                # collide at microsecond resolution often enough that this
+                # scenario failed `assert_timing_captured`'s
+                # `completed_at > started_at` roughly one run in twenty under
+                # parallel load, naming a different scenario each time.
+                _item("item/completed", _reasoning(text=""), started_at_ms=_T0_MS, completed_at_ms=_T0_MS + 40),
                 _delta("final answer"),
-                _item("item/completed", _agent_message("final answer")),
+                _item(
+                    "item/completed",
+                    _agent_message("final answer"),
+                    started_at_ms=_T0_MS + 40,
+                    completed_at_ms=_T0_MS + 300,
+                ),
                 _token_usage(inp=100, out=50, cached=8, reasoning=20),
                 _turn_completed(),
             ],
@@ -294,7 +306,13 @@ def _build_catalogue() -> list[CodexScenario]:
             name="h_no_turn_completed_crash",
             notifications=[
                 _delta("partial"),
-                _item("item/completed", _agent_message("partial")),
+                # Bounded for the same reason as (c) above.
+                _item(
+                    "item/completed",
+                    _agent_message("partial"),
+                    started_at_ms=_T0_MS,
+                    completed_at_ms=_T0_MS + 200,
+                ),
                 _token_usage(inp=100, out=40, cached=8),
             ],
             expects=AgentCrashError,
