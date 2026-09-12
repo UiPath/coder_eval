@@ -827,3 +827,33 @@ re-derive from scratch.
   wrong instant. REVISIT IF: an inversion is observed on a live run after
   CE064, which would mean a basis is still mixed somewhere the rule cannot see
   (the plugin SPI, or a harness whose spans come from a CLI).
+
+- [ ] **`test_codex_golden[a_agent_message_only]` is FLAKY, ~5% — measured, and
+  pre-existing.** Forty consecutive runs on an unmodified tree (`-n 0`): 2
+  failures, `"no assistant message reports a positive generation window with
+  bounds that span it"` with `(0.0, '...164797', '...164797')`. The replay
+  finishes faster than `datetime`'s 1 us resolution, so codex's rebased item
+  stamps can collapse to one instant and the window rounds to `0.0` — which
+  `assert_timing_captured`'s `expect_generation_window` arm then correctly
+  refuses. Surfaced (not caused) by the turn-timing consolidation, which runs
+  that file repeatedly. Not fixed here because the fix is in the codex fixture's
+  stamp rebasing (`_rebase_notifications`), which is its own change with its own
+  risk of ratifying whatever it then produces; the honest options are to give
+  the fixture's items a floor above the clock's resolution, or to give the
+  scenario `expect_generation_window=False` and say why. Caught in: the
+  turn-timing consolidation, Phase 6.
+
+- [ ] **CE058 misses a sixth form: `<expr> if <test> else <numeric literal>`.**
+  Its five forms are a zero constructor keyword, `x or 0`, `x if x is not None
+  else 0.0`, an `if x is None: x = 0.0` assignment, and a `model_copy(update=)`
+  dict. Form 3 keys on an `is None` / `is not None` COMPARISON, so the shape the
+  single production writer of `tool_union_ms` actually uses —
+  `union_ms(tool_spans) if tool_spans else None`, a truthiness test on a list —
+  is invisible to the rule in either polarity. Nothing ships wrong today (that
+  line correctly writes `None`, and `test_a_turn_with_no_bounded_span_records_none_not_zero`
+  covers it), but an author flipping it to `else 0.0` would publish "measured,
+  and instant" with the rule silent. Candidate: a form that fires on an
+  `ast.IfExp` whose `orelse` is a numeric literal and whose assignment target —
+  or enclosing timing-constructor keyword — matches `_TIMING_NAME`. Deferred
+  because the target-name resolution is new machinery rather than a variant of
+  an existing form. Caught in: the turn-timing consolidation, Phase 5 review.

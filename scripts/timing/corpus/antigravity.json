@@ -38,7 +38,8 @@
           "execution_started_at": "2026-09-11T21:25:55.122510",
           "tool_id": "b7747e76d7fb722e11ea267731099383:2",
           "result_status": "success",
-          "duration_ms": 4.08
+          "duration_ms": 4.08,
+          "timestamp": "2026-09-11T21:25:55.122510"
         },
         {
           "tool_name": "Edit",
@@ -46,7 +47,8 @@
           "execution_started_at": "2026-09-11T21:25:55.452684",
           "tool_id": "b7747e76d7fb722e11ea267731099383:3",
           "result_status": "success",
-          "duration_ms": 2.7039999999999997
+          "duration_ms": 2.7039999999999997,
+          "timestamp": "2026-09-11T21:25:55.452684"
         },
         {
           "tool_name": "Edit",
@@ -54,7 +56,8 @@
           "execution_started_at": "2026-09-11T21:25:55.796438",
           "tool_id": "b7747e76d7fb722e11ea267731099383:4",
           "result_status": "success",
-          "duration_ms": 2.5260000000000002
+          "duration_ms": 2.5260000000000002,
+          "timestamp": "2026-09-11T21:25:55.796438"
         },
         {
           "tool_name": "Edit",
@@ -62,7 +65,8 @@
           "execution_started_at": "2026-09-11T21:25:56.099180",
           "tool_id": "b7747e76d7fb722e11ea267731099383:5",
           "result_status": "success",
-          "duration_ms": 2.733
+          "duration_ms": 2.733,
+          "timestamp": "2026-09-11T21:25:56.099180"
         },
         {
           "tool_name": "Edit",
@@ -70,7 +74,8 @@
           "execution_started_at": "2026-09-11T21:25:56.133426",
           "tool_id": "b7747e76d7fb722e11ea267731099383:6",
           "result_status": "success",
-          "duration_ms": 7.332
+          "duration_ms": 7.332,
+          "timestamp": "2026-09-11T21:25:56.133426"
         },
         {
           "tool_name": "Read",
@@ -78,7 +83,8 @@
           "execution_started_at": "2026-09-11T21:25:59.323643",
           "tool_id": "b7747e76d7fb722e11ea267731099383:8",
           "result_status": "success",
-          "duration_ms": 4.558000000000001
+          "duration_ms": 4.558000000000001,
+          "timestamp": "2026-09-11T21:25:59.323643"
         },
         {
           "tool_name": "Read",
@@ -86,7 +92,8 @@
           "execution_started_at": "2026-09-11T21:25:59.549154",
           "tool_id": "b7747e76d7fb722e11ea267731099383:9",
           "result_status": "success",
-          "duration_ms": 1.613
+          "duration_ms": 1.613,
+          "timestamp": "2026-09-11T21:25:59.549154"
         },
         {
           "tool_name": "Read",
@@ -94,7 +101,8 @@
           "execution_started_at": "2026-09-11T21:25:59.800660",
           "tool_id": "b7747e76d7fb722e11ea267731099383:10",
           "result_status": "success",
-          "duration_ms": 1.1720000000000002
+          "duration_ms": 1.1720000000000002,
+          "timestamp": "2026-09-11T21:25:59.800660"
         },
         {
           "tool_name": "Read",
@@ -102,7 +110,8 @@
           "execution_started_at": "2026-09-11T21:26:00.086176",
           "tool_id": "b7747e76d7fb722e11ea267731099383:11",
           "result_status": "success",
-          "duration_ms": 0.832
+          "duration_ms": 0.832,
+          "timestamp": "2026-09-11T21:26:00.086176"
         },
         {
           "tool_name": "Read",
@@ -110,7 +119,8 @@
           "execution_started_at": "2026-09-11T21:26:00.394123",
           "tool_id": "b7747e76d7fb722e11ea267731099383:12",
           "result_status": "success",
-          "duration_ms": 1.738
+          "duration_ms": 1.738,
+          "timestamp": "2026-09-11T21:26:00.394123"
         },
         {
           "tool_name": "Bash",
@@ -118,7 +128,8 @@
           "execution_started_at": "2026-09-11T21:26:00.725396",
           "tool_id": "b7747e76d7fb722e11ea267731099383:13",
           "result_status": "success",
-          "duration_ms": 2043.1840000000002
+          "duration_ms": 2043.1840000000002,
+          "timestamp": "2026-09-11T21:26:00.725396"
         },
         {
           "tool_name": "Bash",
@@ -126,9 +137,12 @@
           "execution_started_at": "2026-09-11T21:26:00.773556",
           "tool_id": "b7747e76d7fb722e11ea267731099383:14",
           "result_status": "success",
-          "duration_ms": 2084.5950000000003
+          "duration_ms": 2084.5950000000003,
+          "timestamp": "2026-09-11T21:26:00.773556"
         }
-      ]
+      ],
+      "user_input": "",
+      "agent_output": ""
     }
   ]
 }

@@ -363,7 +363,14 @@ class TestAssertTimingCaptured:
         identity is trivially satisfied, so these cases constrain only what
         each is about; the identity has its own cases below.
         """
+        # MODEL-VALID, not merely shaped like a record. `assert_timing_captured`
+        # validates the dump into a `TurnRecord` so it can call production's own
+        # span selector instead of re-deriving one, and a fixture missing the
+        # required fields would fail there rather than on the thing it is about.
         return {
+            "iteration": 1,
+            "user_input": "",
+            "agent_output": "",
             "duration_seconds": duration_seconds,
             "messages": [
                 {
@@ -374,7 +381,7 @@ class TestAssertTimingCaptured:
                 }
                 for w in windows
             ],
-            "commands": list(commands),
+            "commands": [{"tool_name": "Bash", "timestamp": "2026-01-01T00:00:00", **command} for command in commands],
             "harness_startup_ms": overhead[0],
             "harness_teardown_ms": overhead[1],
         }

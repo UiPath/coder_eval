@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
-from coder_eval.timing import union_ms
+from coder_eval.models import TurnRecord
+from coder_eval.timing import main_thread_tool_spans, union_ms
 
 
 SCRUB_PLACEHOLDER = "<scrubbed>"
@@ -120,46 +120,30 @@ _IDENTITY_FLOOR_MS = 0.1
 _IDENTITY_SHARE = 0.20
 
 
-def _sub_agent_tool_ids(record: dict[str, Any]) -> set[str]:
-    """Tool ids owned by a SUB-AGENT generation.
-
-    Must match `EventCollector._main_thread_tool_spans` and
-    `scripts/timing/decompose_run.py::_sub_agent_tool_ids`: all three recompute
-    the tool union for the same identity, so a filter applied by one and not
-    the others reports a residual that is an artifact of the disagreement.
-    """
-    ids: set[str] = set()
-    for message in record.get("messages") or []:
-        if message.get("role") == "assistant" and message.get("parent_tool_use_id") is not None:
-            ids.update(message.get("tool_use_ids") or [])
-    return ids
-
-
 def _tool_union_ms(record: dict[str, Any]) -> float:
     """Wall ms this turn's MAIN-THREAD tools occupied — the union, never the sum.
 
-    Sub-agent tools are excluded for the same reason their generations are: the
-    spawning Agent call's own interval already spans the child's whole run.
+    Validates the raw dump into a ``TurnRecord`` and calls the SAME typed
+    selector the collector uses, rather than reimplementing the selection rule
+    (the sub-agent-id derivation, the stamp parse, the ``end >= start`` filter)
+    over dicts. Three copies of that rule existed and agreed only because
+    someone kept checking; the collector's own version once passed every command
+    while filtering only its generations, and the two agreed by luck.
+
+    What is shared with production is the SELECTION and ``union_ms``. What is
+    NOT shared is the bookkeeping around them — this still builds its own span
+    set and computes its own union, which is where every timing defect on this
+    branch actually lived (see CE063's docstring). Do not "simplify" it into
+    reading ``tool_union_ms``: that would make the sensor a restatement of the
+    producer's answer, and the cross-check below is what verifies that field.
     """
-    excluded = _sub_agent_tool_ids(record)
-    spans: list[tuple[datetime, datetime]] = []
-    for command in record.get("commands") or []:
-        if command.get("tool_id") in excluded:
-            continue
-        start = _parse_stamp(command.get("execution_started_at"))
-        end = _parse_stamp(command.get("execution_completed_at"))
-        if start is not None and end is not None and end >= start:
-            spans.append((start, end))
-    return union_ms(spans)
+    turn = TurnRecord.model_validate(record)
+    return union_ms(main_thread_tool_spans(turn.messages, turn.commands))
 
 
-def _parse_stamp(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
+# The stored bucket and the union recomputed here should be the same number;
+# a JSON round-trip is the only slack.
+_UNION_TOLERANCE_MS = 1e-6
 
 
 def assert_timing_captured(
@@ -286,6 +270,22 @@ def assert_timing_captured(
             if m.get("role") == "assistant" and m.get("parent_tool_use_id") is None
         )
         tool_ms = _tool_union_ms(record)
+        # CROSS-CHECK, before the identity assertion: the producer's stored
+        # bucket must agree with the one just computed independently. This is
+        # what keeps the sensor a sensor — it verifies the producer's
+        # BOOKKEEPING (which spans reached the union) rather than reading the
+        # producer's answer. Skipped when the field is absent, which is a record
+        # written before it existed rather than a disagreement.
+        stored_union = record.get("tool_union_ms")
+        if isinstance(stored_union, (int, float)):
+            assert abs(stored_union - tool_ms) <= _UNION_TOLERANCE_MS, (
+                f"tool_union_ms is {stored_union!r}, but this turn's main-thread command spans "
+                f"union to {tool_ms:.6f} ms (off by {stored_union - tool_ms:+.6f} ms). The "
+                "collector writes that field from the same span set it measures the head and the "
+                "tail against, so a disagreement means a span reached one and not the other — "
+                "most likely a sub-agent command counted on one side, or a command whose bounds "
+                "moved after the field was written."
+            )
         bucket_sum = (
             generation_ms
             + tool_ms
