@@ -478,10 +478,12 @@ class TestHarnessOverheadBuckets:
     Measured live across all five harnesses, these two plus generation plus tool
     execution account for the turn to within 0.1 ms — so what the evalboard shows
     as "Unaccounted" is fully explained rather than merely displayed. The head is
-    where the harnesses differ most (OpenCode ~3.0 s of CLI boot + TTFT fused,
-    claude-code a measured 0.0 because its first window already covers dispatch),
-    which is exactly why it is booked as its own bucket instead of being folded
-    into generation.
+    where the harnesses differ most — every one of them now measures it up to
+    its first observed model output, but what that interval CONTAINS ranges from
+    ~0.23 s on Pi to ~4.7 s on Antigravity, depending on whether the harness
+    spawns its process per turn and how long the provider takes to first token.
+    That spread is exactly why it is booked as its own bucket instead of being
+    folded into generation.
     """
 
     @staticmethod

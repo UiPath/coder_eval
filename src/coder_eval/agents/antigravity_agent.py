@@ -866,6 +866,9 @@ class _AntigravityTurnState:
         # recorded bounds and the measured duration describe one span.
         # Advanced only by a flush that actually emitted a message.
         self._gen_mark_wall: datetime = clock.now()
+        # Re-seeded ONCE, at the first observed Step. See
+        # `_seed_first_generation_window`.
+        self._first_output_seen: bool = False
         # Execution intervals of tools that CLOSED since the mark. This harness
         # interleaves tool calls into one generation — the Step for the tool
         # arrives and only a later usage_metadata Step cuts the message — so a
@@ -894,11 +897,65 @@ class _AntigravityTurnState:
         """
         return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
 
+    def _seed_first_generation_window(self, source: Any) -> None:
+        """Move the first window's mark to the first observed MODEL output.
+
+        ``harness_startup_ms`` is defined as the wall clock from the turn
+        starting until the harness first observed model output, and that instant
+        is also where the first generation window opens — which is what keeps
+        the head and the generation disjoint so the four-bucket identity still
+        closes.
+
+        Without this ``_gen_mark_wall`` is stamped when the turn state is built,
+        BEFORE ``AgentStartEvent`` is emitted, so the head is a small negative
+        that ``decompose_turn`` clamps to ``0.0`` — a clamped inversion
+        published as "measured, and instant", which is the exact confusion CE058
+        exists to prevent everywhere else. Everything before the first ``Step``
+        — dispatch and time to first token — was booked as the first
+        generation instead: ~4.7 s per turn on this harness, measured against a
+        later-window median of 3.3 s.
+
+        What differs from claude-code is not in-process versus subprocess —
+        this harness spawns a ``localharness`` binary too. It is spawned ONCE,
+        in ``start()``, and held across every ``communicate()``, so there is no
+        boot inside a turn for the head to contain: it is dispatch plus time to
+        first token. claude-code spawns a fresh CLI per turn and so fuses that
+        boot in. The head means the same thing on both; only its COMPOSITION
+        differs, which is a real property of the harness rather than a
+        measurement artifact.
+
+        GATED ON ``source``, because the field is defined as model output and
+        the SDK streams Steps that are not. ``StepSource`` carries ``SYSTEM``
+        and ``USER`` besides ``MODEL``, and ``StepType`` carries
+        ``SYSTEM_MESSAGE`` / ``COMPACTION`` / ``FINISH``; the SDK's event
+        processor queues every ``step_update`` verbatim, so a turn can
+        legitimately open with one. Seeding on such a Step would put the mark
+        BEFORE the model spoke and hand the remainder back to msg0's
+        generation, which is the defect this method exists to remove. The same
+        gate guards text streaming a few lines below, for the same reason.
+
+        ONCE PER TURN, and that is the whole contract. ``process_step`` runs for
+        every Step in the turn; re-seeding on each would stop the windows tiling
+        and drop the gap before the next emission into no bucket at all, which
+        is the defect pi shipped with. The flag needs no reset: a fresh turn
+        state (and a fresh ``TurnClock``) is built per ``communicate()``, so it
+        is per-attempt by construction.
+
+        A turn that streams no MODEL Step at all never latches, keeps the
+        turn-entry mark and clamps to ``0.0`` exactly as before — the same
+        fail-safe degradation as an unrecognized source.
+        """
+        if self._first_output_seen or _enum_value(source) != _SOURCE_MODEL:
+            return
+        self._first_output_seen = True
+        self._gen_mark_wall = self.clock.now()
+
     def process_step(self, step: Any) -> None:
         """Route one streamed ``Step`` to events + transcript reconstruction."""
         stype = _enum_value(step.type)
         sstatus = _enum_value(step.status)
         ssource = _enum_value(step.source)
+        self._seed_first_generation_window(ssource)
         starget = _enum_value(step.target)
         done = sstatus in (_STATUS_DONE, _STATUS_ERROR)
 

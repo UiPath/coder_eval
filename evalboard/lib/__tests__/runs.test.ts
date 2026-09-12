@@ -258,8 +258,10 @@ describe("sumHarnessOverhead", () => {
     });
 
     test("a measured zero is a measurement and still sums", () => {
-        // An in-process SDK whose first generation window already covers
-        // dispatch legitimately reports 0.0 — that is a number, not a gap.
+        // A harness that reached its first model output with nothing
+        // measurable in front of it legitimately reports 0.0 — a clamped
+        // inversion where both ends were still observed. That is a number,
+        // not a gap, and the assertion holds however the head is produced.
         expect(
             sumHarnessOverhead([{ harness_startup_ms: 0, harness_teardown_ms: 3.5 }]),
         ).toEqual({ startupMs: 0, teardownMs: 3.5 });

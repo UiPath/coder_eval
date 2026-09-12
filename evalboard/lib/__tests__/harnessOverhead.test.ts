@@ -68,8 +68,9 @@ describe("readTaskDetail: harness startup/teardown", () => {
     });
 
     test("a measured zero head is preserved as 0", async () => {
-        // An in-process SDK's first generation window already covers dispatch,
-        // so 0.0 is its honest answer and must not read as "never measured".
+        // A head of 0.0 stays representable: a turn can reach its first model
+        // output with nothing measurable in front of it. It must not read as
+        // "never measured", which is what null means.
         await writeTask([{ harness_startup_ms: 0.0, harness_teardown_ms: 834.7 }]);
         const { readTaskDetail } = await loadRuns();
         const detail = await readTaskDetail(RUN, TASK);

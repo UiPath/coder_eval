@@ -1867,10 +1867,17 @@ async def test_a_no_op_flush_does_not_move_the_mark(monkeypatch):
 
 
 async def test_generation_and_tool_time_account_for_the_turn():
-    """Σ generation + Σ tool execution lands inside the turn's own duration.
+    """Σ generation + Σ tool + head + tail lands inside the turn's own duration.
 
     Bounds, not equality: the fake conversation's own overhead sits in the
-    residual. Before this change the generation half was identically 0.
+    residual. Before the window existed the generation half was identically 0.
+
+    The HEAD is part of the sum, and has to be: the first window now opens at
+    the first observed `Step` rather than at turn entry, so the dispatch before
+    it is a measured bucket instead of time hidden inside msg0's generation.
+    Asserting `generation + tool` alone against a share of the turn was an
+    assertion that the head stays empty — which is what this phase deliberately
+    stopped being true.
     """
     steps = [
         _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
@@ -1894,11 +1901,14 @@ async def test_generation_and_tool_time_account_for_the_turn():
 
     gen_ms = sum(m.generation_duration_ms or 0.0 for m in _assistant(record))
     tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
+    head_ms = record.harness_startup_ms or 0.0
+    tail_ms = record.harness_teardown_ms or 0.0
     turn_ms = record.duration_seconds * 1000.0
 
     assert gen_ms > 0
-    assert gen_ms + tool_ms <= turn_ms
-    assert gen_ms + tool_ms >= 0.5 * turn_ms
+    assert head_ms > 0, "the dispatch before the first Step is now a measured bucket, not 0.0"
+    assert gen_ms + tool_ms + head_ms + tail_ms <= turn_ms
+    assert gen_ms + tool_ms + head_ms + tail_ms >= 0.5 * turn_ms
 
 
 async def test_timing_change_moves_no_token_bucket():
@@ -2038,3 +2048,130 @@ async def test_each_turn_gets_a_fresh_clock():
     # Re-anchored: the later turn's window opens after the earlier one closed.
     assert second[0].started_at >= first[0].completed_at
     assert second[0].completed_at > second[0].started_at
+
+
+class TestAntigravityFirstWindowReseed:
+    """The first `Step` moves `_gen_mark_wall`; a later one must not.
+
+    Driven at `_AntigravityTurnState` with an injected clock, NOT through
+    `communicate()`: the fake conversation yields with no delay, so an
+    end-to-end run cannot pin the MAGNITUDE — the two stamps land within
+    microseconds of each other, so no assertion there could say the mark moved
+    by the right amount.
+
+    It can detect the mark moving at all, and does:
+    `test_generation_and_tool_time_account_for_the_turn` asserts `head_ms > 0`
+    and fails if the re-seed call is removed. These tests are the ones that say
+    WHERE it moved to and that it moves only once.
+    """
+
+    BASE = datetime(2026, 9, 11, 9, 0, 0)
+
+    class _Clock:
+        def __init__(self, at_ms: float = 0.0) -> None:
+            self.at_ms = at_ms
+
+        def now(self) -> datetime:
+            return TestAntigravityFirstWindowReseed.BASE + timedelta(milliseconds=self.at_ms)
+
+    def _state(self, clock):
+        from coder_eval.agents.antigravity_agent import _AntigravityTurnState
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.collector import EventCollector
+
+        agent = AntigravityAgent(parse_agent_config(type="antigravity", model="gemini-3.5-flash"))
+        collector = EventCollector()
+        return _AntigravityTurnState(
+            agent=agent,
+            emit=CompositeStreamCallback([collector]),
+            task_id="t",
+            turn_id="turn",
+            collector=collector,
+            user_input="go",
+            iteration=1,
+            model="gemini-3.5-flash",
+            turn_start_time=0.0,
+            clock=clock,
+        )
+
+    def test_the_first_step_moves_the_mark_off_the_turn_entry_stamp(self):
+        """Dispatch before the first Step is head, not the first generation.
+
+        Before the re-seed the mark was stamped when the turn state was built,
+        so this interval was published as generation — ~4.7 s per turn against
+        a later-window median of 3.3 s.
+        """
+        clock = self._Clock()
+        state = self._state(clock)
+        assert state._gen_mark_wall == self.BASE
+
+        clock.at_ms = 900  # dispatch + TTFT
+        state.process_step(_step("THINKING", "ACTIVE", thinking="..."))
+
+        assert state._gen_mark_wall == self.BASE + timedelta(milliseconds=900)
+
+    def test_a_later_step_does_not_move_it(self):
+        """Re-seeding more than once per turn is the defect, not the feature."""
+        clock = self._Clock()
+        state = self._state(clock)
+        clock.at_ms = 900
+        state.process_step(_step("THINKING", "ACTIVE", thinking="..."))
+        seeded = state._gen_mark_wall
+
+        clock.at_ms = 5000
+        state.process_step(_step("THINKING", "ACTIVE", thinking="more"))
+
+        assert state._gen_mark_wall == seeded
+
+    def test_seeding_twice_by_hand_is_a_no_op_the_second_time(self):
+        """The once-per-turn guard, stated outright rather than inferred."""
+        clock = self._Clock()
+        state = self._state(clock)
+        clock.at_ms = 900
+        state._seed_first_generation_window("MODEL")
+        seeded = state._gen_mark_wall
+
+        clock.at_ms = 5000
+        state._seed_first_generation_window("MODEL")
+
+        assert state._gen_mark_wall == seeded
+
+    def test_a_flush_still_advances_the_mark_and_opens_at_the_reseeded_one(self):
+        """The re-seed must not break the tiling it sits in front of."""
+        clock = self._Clock()
+        state = self._state(clock)
+        clock.at_ms = 900
+        state.process_step(_step("THINKING", "ACTIVE", thinking="plan"))
+        clock.at_ms = 2000
+        state.process_step(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)))
+
+        message = _assistant(state)[0]
+        assert message.started_at == self.BASE + timedelta(milliseconds=900), "opens at the RE-SEEDED mark"
+        assert message.generation_duration_ms == pytest.approx(1100.0)
+        assert state._gen_mark_wall == self.BASE + timedelta(milliseconds=2000), "and the flush advances it"
+
+    def test_a_non_model_step_does_not_seed_the_window(self):
+        """The field is MODEL output, and the SDK streams Steps that are not.
+
+        `StepSource` carries SYSTEM and USER besides MODEL, and the SDK's event
+        processor queues every `step_update` verbatim, so a turn can open with
+        one. Seeding on it would put the mark before the model spoke and hand
+        the remainder back to msg0's generation — the defect being fixed.
+        """
+        clock = self._Clock()
+        state = self._state(clock)
+
+        clock.at_ms = 400
+        state.process_step(_step("SYSTEM_MESSAGE", "DONE", source="SYSTEM", content="compacting"))
+        assert state._first_output_seen is False
+        assert state._gen_mark_wall == self.BASE, "a system Step must not open the generation window"
+
+        clock.at_ms = 900
+        state.process_step(_step("THINKING", "ACTIVE", thinking="..."))
+        assert state._gen_mark_wall == self.BASE + timedelta(milliseconds=900), "the first MODEL Step does"
+
+    def test_a_turn_that_streams_no_step_keeps_the_turn_entry_mark(self):
+        clock = self._Clock()
+        state = self._state(clock)
+        assert state._first_output_seen is False
+        assert state._gen_mark_wall == self.BASE

@@ -424,6 +424,12 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     one counter. Patching either alone leaves the other reading the real clock,
     and the case would then assert a measured span against an unmeasured one.
 
+    The first `message_start` re-seeds the window, so the CLI spawn and the
+    query build before it are head rather than msg0's generation. That a LATER
+    one must not re-seed is asserted directly in
+    `tests/test_agent_telemetry.py`; here it shows up as the windows still
+    tiling.
+
     Note where its windows do NOT tile: the tool result resets both marks, so
     the interval between the emission that ISSUED the call and the result is
     left outside every window. That gap is the tool's own execution, which is
@@ -434,7 +440,7 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
     from coder_eval.streaming.events import AgentEndStatus as _AgentEndStatus
     from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
-    from tests._fixtures.golden_streams.claude_fixtures import ToolUseBlock, UserMessage
+    from tests._fixtures.golden_streams.claude_fixtures import ToolUseBlock, UserMessage, message_start
 
     class _Stepped(datetime):
         at_ms = 0.0
@@ -453,7 +459,7 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     collector = EventCollector()
     commands: list[CommandTelemetry] = []
 
-    _Stepped.at_ms = 500  # CLI spawn + dispatch, before the state exists: head
+    _Stepped.at_ms = 500  # the turn state is built here; the head runs past it
     state = _ClaudeTurnState(
         agent,
         emit=CompositeStreamCallback(
@@ -472,6 +478,12 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
         deadline=None,
     )
 
+    # The stream really does put `message_start` before the emission it
+    # announces — the recorded corpus shows it and the SDK guarantees it — and
+    # the FIRST one is what re-seeds the window, so an ordering this case got
+    # wrong would silently stop exercising the re-seed at all.
+    _Stepped.at_ms = 800
+    state.on_stream_event(message_start("m1"))
     _Stepped.at_ms = 1000
     state.on_assistant_message(
         SdkAssistantMessage(
@@ -482,6 +494,8 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     )
     _Stepped.at_ms = 1800  # the tool ran for the whole gap
     state.on_user_message(UserMessage("c1", False, "ok"))
+    _Stepped.at_ms = 2000
+    state.on_stream_event(message_start("m2"))  # does NOT re-seed: once per turn
     _Stepped.at_ms = 2500
     state.on_assistant_message(SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id="m2"))
     state.finalize(_AgentEndStatus.COMPLETED)
