@@ -62,6 +62,15 @@ NO_GENERATION_WINDOW: frozenset[str] = frozenset(
         # subtraction in codex_agent._flush_message.
         "codex_d_cross_flush_is_error",  # flush lands before the tool completes: zero-width window
         "codex_e_orphan_tool",  # the tool never completes, so the window never opens
+        # Same shape, reached from the opposite direction. This scenario injects
+        # a 5 ms CLI tool interval into a replay whose whole turn is well under
+        # one millisecond, so the tool spans BOTH windows entirely and the
+        # central subtraction takes each down to a measured 0.0. It is the tool
+        # interval that is fictional, not the subtraction — which is why the
+        # scenario is also in FICTIONAL_DURATIONS. Its point is the TILING (the
+        # second window opens at the first `step_finish`), and the snapshot
+        # still records that.
+        "opencode_c_multi_step_tiling",
     }
 )
 

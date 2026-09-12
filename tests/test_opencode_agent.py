@@ -32,8 +32,9 @@ from coder_eval.agents.opencode_agent import (
     _unwrap,
 )
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AssistantMessage, CommandTelemetry, OpenCodeAgentConfig, PermissionMode
+from coder_eval.models import AssistantMessage, CommandTelemetry, OpenCodeAgentConfig, PermissionMode, TokenUsage
 from coder_eval.pricing import calculate_cost
+from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -1784,24 +1785,35 @@ class TestToolFailureCapture:
 
 
 class TestGenerationWindowExcludesToolExecution:
-    """A tool running inside a step is not model time.
+    """A tool running inside a step is not model time — asserted where it is now DECIDED.
 
-    OpenCode marks the window at `step_start` and closes it at
-    `step_finish`, and every tool call executes INSIDE it while also
-    publishing its own measured `duration_ms`. Publishing the raw span as
-    generation time counted the same milliseconds twice, which the task
-    page's Unaccounted cell renders as a ~-100% residual.
+    The reducer no longer subtracts anything. It publishes the RAW window, and
+    `EventCollector.subtract_tool_time` takes the tool union back out of it
+    once, for all five harnesses. So these cases drive the reducer and then a
+    real collector, and assert the PUBLISHED number — the one that reaches
+    `task.json` — rather than an intermediate the reducer used to own.
 
-    Driven at the reducer rather than through `communicate()`: the window is
-    two `datetime.now()` reads and the tool interval comes from the event
-    payload, so only setting both explicitly makes the arithmetic
-    deterministic.
+    They are not duplicates of
+    `tests/test_event_collector.py::TestSubtractToolTime`: those pin the
+    arithmetic, these pin that THIS reducer hands the collector a window and a
+    span set the arithmetic can be right about.
     """
 
     WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
     WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms step
 
     def _finish_step(self, monkeypatch, spans, open_starts=()):
+        """Drive the reducer, then publish through a real collector.
+
+        `spans` are RESOLVED calls (both bounds); `open_starts` are calls that
+        never returned. An unresolved call now contributes NO span — it has no
+        `execution_completed_at`, and inventing one is what `None` exists to
+        prevent — where the reducer used to bound it at the window's end. That
+        is a real change and a better one: the collector sees every span at
+        once, so a call straddling a boundary is clipped to each window it
+        actually overlapped instead of approximated at the boundary.
+        """
+
         class _Clock(datetime):
             @staticmethod
             def now(tz=None):
@@ -1809,37 +1821,56 @@ class TestGenerationWindowExcludesToolExecution:
 
         state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
         state.step_started_at = self.WINDOW_START
-        state.step_tool_spans = list(spans)
-        for i, started in enumerate(open_starts):
-            state.open_tools[f"open-{i}"] = CommandTelemetry(
+        commands = [
+            CommandTelemetry(
                 tool_name="bash",
-                tool_id=f"open-{i}",
+                tool_id=f"closed-{i}",
                 timestamp=started,
                 execution_started_at=started,
+                execution_completed_at=completed,
+                result_status="success",
             )
+            for i, (started, completed) in enumerate(spans)
+        ]
+        commands += [
+            CommandTelemetry(tool_name="bash", tool_id=f"open-{i}", timestamp=st, execution_started_at=st)
+            for i, st in enumerate(open_starts)
+        ]
         monkeypatch.setattr(agent_module, "datetime", _Clock)
         state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
-        assistant = [m for m in state.messages if m.role == "assistant"]
-        assert len(assistant) == 1
-        return assistant[0]
+
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t1", prompt="do it", iteration=1, timestamp=self.WINDOW_START))
+        for command in commands:
+            collector.on_event(ToolEndEvent(task_id="t1", turn_id="s1", tool=command))
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t1",
+                status=AgentEndStatus.COMPLETED,
+                messages=list(state.messages),
+                usage=TokenUsage(),
+                timestamp=self.WINDOW_END,
+            )
+        )
+        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
+        assert len(published) == 1
+        return published[0]
 
     def test_tool_time_inside_the_step_is_subtracted(self, monkeypatch):
-        # A 500ms tool squarely inside the 1000ms step.
         message = self._finish_step(
             monkeypatch,
             [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
         )
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        assert span_ms == pytest.approx(1000.0)
+        assert span_ms == pytest.approx(1000.0), "the reducer still publishes the whole window as its bounds"
         assert message.generation_duration_ms == pytest.approx(500.0)
 
     def test_a_step_with_no_tools_keeps_its_whole_window(self, monkeypatch):
-        message = self._finish_step(monkeypatch, [])
-        assert message.generation_duration_ms == pytest.approx(1000.0)
+        assert self._finish_step(monkeypatch, []).generation_duration_ms == pytest.approx(1000.0)
 
     def test_concurrent_tools_are_subtracted_once(self, monkeypatch):
-        # Two overlapping 500ms tools occupy 600ms of wall clock, not 1000ms.
-        # Summing them would leave 0 generation for a step that generated 400.
+        # Two overlapping 500ms tools occupy 600ms, not 1000ms. Summing them
+        # would leave 0 generation for a step that generated 400.
         message = self._finish_step(
             monkeypatch,
             [
@@ -1850,34 +1881,30 @@ class TestGenerationWindowExcludesToolExecution:
         assert message.generation_duration_ms == pytest.approx(400.0)
 
     def test_the_window_never_goes_negative(self, monkeypatch):
-        # A tool whose recorded interval straddles the step is clipped to it.
         message = self._finish_step(
             monkeypatch,
             [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
         )
         assert message.generation_duration_ms == 0.0
 
-    def test_a_tool_still_open_at_the_boundary_is_subtracted(self, monkeypatch):
-        # The windows tile from the previous step's finish, so a call that
-        # opens inside this step and closes inside the NEXT one straddles the
-        # boundary. Counting only closed intervals published the pre-boundary
-        # 400ms as generation while the call's own duration_ms counted it
-        # again — the exact double-count `busy_ms` exists to prevent.
-        message = self._finish_step(
-            monkeypatch,
-            [],
-            open_starts=[self.WINDOW_START + timedelta(milliseconds=600)],
-        )
-        assert message.generation_duration_ms == pytest.approx(600.0)
+    def test_a_tool_still_open_at_the_boundary_contributes_no_span(self, monkeypatch):
+        """The behaviour that CHANGED with the move, stated rather than implied.
 
-    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self, monkeypatch):
-        # Union, not sum, across the closed and still-open sets alike.
+        The reducer used to bound a still-open call at the window's end and
+        subtract that slice. The collector cannot: a call with no
+        `execution_completed_at` was never timed. Its time is subtracted when it
+        RESOLVES, from whichever windows its real interval overlaps.
+        """
+        message = self._finish_step(monkeypatch, [], open_starts=[self.WINDOW_START + timedelta(milliseconds=600)])
+        assert message.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_a_resolved_tool_overlapping_an_unresolved_one_counts_only_the_resolved(self, monkeypatch):
         message = self._finish_step(
             monkeypatch,
             [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
             open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
         )
-        assert message.generation_duration_ms == pytest.approx(200.0)
+        assert message.generation_duration_ms == pytest.approx(500.0)
 
     def test_a_mark_later_than_the_step_start_does_not_invert_the_window(self, monkeypatch):
         """The backwards-clock defence, pinned at the reducer, not in isolation.
@@ -1886,7 +1913,9 @@ class TestGenerationWindowExcludesToolExecution:
         step's own start as `item_start`. Drop that argument and the window
         opens at the (later) mark instead, so the span shrinks — or inverts and
         clamps to 0.0, publishing a fabricated instant generation. Nothing else
-        in this file fails when it is dropped.
+        in this file fails when it is dropped, which is the whole reason it is
+        here: the mark is what the reducer still owns after the tool
+        subtraction moved to the collector.
         """
         state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="m")
         state.step_started_at = self.WINDOW_START
@@ -1907,28 +1936,20 @@ class TestGenerationWindowExcludesToolExecution:
         assert message.generation_duration_ms == pytest.approx(1000.0)
 
     def test_the_published_window_reconciles_to_its_own_bounds(self, monkeypatch):
-        """The reducer subtracted exactly the spans the record carries.
+        """The collector subtracted exactly the spans the record carries.
 
         `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
         both recompute the tool UNION from the recorded command spans and
-        subtract it from the recorded window bounds. This asserts the reducer
-        fed the window the same set, so a span silently added or dropped on
-        the way in shows up here.
-
-        It is deliberately the narrow half: `expected` is derived from the
-        PUBLISHED bounds, so it cannot see a wrong mark, and both sides call
-        `busy_ms`, so it cannot see a union bug. Those are pinned by the cases
-        above and by tests/test_timing_close_window.py.
+        subtract it from the recorded window bounds. This asserts the published
+        record is internally consistent under that recomputation, so a span
+        silently added or dropped on the way in shows up here.
         """
         from coder_eval.timing import busy_ms
 
         closed = [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))]
-        open_start = self.WINDOW_START + timedelta(milliseconds=500)
-        message = self._finish_step(monkeypatch, closed, open_starts=[open_start])
-
-        spans = [*closed, (open_start, message.completed_at)]
+        message = self._finish_step(monkeypatch, closed)
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        expected = span_ms - busy_ms(spans, message.started_at, message.completed_at)
+        expected = span_ms - busy_ms(closed, message.started_at, message.completed_at)
         assert message.generation_duration_ms == pytest.approx(expected)
 
 
@@ -1957,7 +1978,6 @@ class TestGenerationWindowsTileTheTurn:
                 return now
 
         state.step_started_at = step_start
-        state.step_tool_spans = []
         monkeypatch.setattr(agent_module, "datetime", _Clock)
         state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
 
@@ -2022,11 +2042,15 @@ class _SteppedClock(datetime):
 class TestToolSpansSurviveTheStepBoundary:
     """A tool that closes BETWEEN two steps still belongs to the next window.
 
-    `step_tool_spans` used to be cleared at `step_start`, which is after the
-    window it feeds has already opened at `gen_mark`. A call closing in that
-    gap had its span wiped before the next `step_finish` could subtract it, so
-    the window published the call's execution as model time while the call's
-    own `duration_ms` counted the same milliseconds again.
+    This used to be a bookkeeping problem: a per-step span list, cleared at
+    `step_start` — after the window it feeds had already opened at `gen_mark` —
+    so a call closing in the gap had its span wiped before the next
+    `step_finish` could subtract it. That list is gone.
+    `EventCollector.subtract_tool_time` sees every span at once and clips each
+    to the windows it overlaps, so the property now holds by construction
+    rather than by a reset rule. Kept, and re-pointed at the collector, because
+    the property is what matters: a future reducer change could still break it
+    by moving a mark or failing to emit the ToolEnd the collector reduces.
 
     It needs the NON-TERMINAL tool path to reach: the CLI normally emits one
     already-`completed` event per call, which closes inside the step that
@@ -2061,7 +2085,24 @@ class TestToolSpansSurviveTheStepBoundary:
         state.on_step_start({"messageID": "m2"})
         _SteppedClock.at_ms = 2000
         state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
-        return resolved, [m for m in state.messages if m.role == "assistant"]
+
+        # Published through the real collector: the reducer hands over raw
+        # windows, and the tool subtraction happens once, there.
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t1", prompt="go", iteration=1, timestamp=_SPAN_BASE))
+        for command in resolved:
+            collector.on_event(ToolEndEvent(task_id="t1", turn_id="s1", tool=command))
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t1",
+                status=AgentEndStatus.COMPLETED,
+                messages=list(state.messages),
+                usage=TokenUsage(),
+                timestamp=_SPAN_BASE + timedelta(milliseconds=2000),
+            )
+        )
+        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
+        return resolved, published
 
     def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self, monkeypatch):
         _, messages = self._run(monkeypatch)
@@ -2123,7 +2164,14 @@ class TestToolSpansSurviveTheStepBoundary:
         assert messages[1].started_at == messages[0].completed_at
         assert sum(m.generation_duration_ms or 0.0 for m in messages) == pytest.approx(2000.0)
 
-    def test_a_step_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self, monkeypatch):
+    def test_a_step_that_never_finishes_does_not_advance_the_mark(self, monkeypatch):
+        """The half of this that is still the reducer's job.
+
+        There is no span list to preserve any more — the collector reduces the
+        ToolEnd stream itself. What the reducer still owns is the MARK: a step
+        that published nothing must not advance it, or its time is handed to
+        whichever step finishes next.
+        """
         monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
         state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")
         _SteppedClock.at_ms = 0
@@ -2145,10 +2193,4 @@ class TestToolSpansSurviveTheStepBoundary:
         _SteppedClock.at_ms = 1900
         state.close_open_tools()  # crash/timeout orphan sweep — no message appended
 
-        # Published nothing, so tiling past it would hand its time to whichever
-        # step finishes next, and wiping the spans would publish c2's execution
-        # as that step's model time.
         assert state.gen_mark == mark_after_flush
-        assert state.step_tool_spans == [
-            (_SPAN_BASE + timedelta(milliseconds=1700), _SPAN_BASE + timedelta(milliseconds=1900))
-        ]

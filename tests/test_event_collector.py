@@ -5,7 +5,7 @@ asserts ``build_turn_record()`` honors the coalescing / filtering / ordering
 rules in ``coder_eval/streaming/collector.py``.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import ClassVar
 
 import pytest
@@ -18,13 +18,15 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
-from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.collector import EventCollector, subtract_tool_time
 from coder_eval.streaming.events import (
     AgentEndEvent,
+    AgentEndStatus,
     AgentStartEvent,
     ToolEndEvent,
     TurnStartEvent,
 )
+from coder_eval.timing import union_ms
 
 
 TASK_ID = "collector-test"
@@ -725,3 +727,298 @@ class TestHarnessOverheadBuckets:
         rec = collector.build_turn_record()
         assert rec.harness_startup_ms is None
         assert rec.harness_teardown_ms is None
+
+
+class TestSubtractToolTime:
+    """The ONE tool subtraction, moved here from five reducers.
+
+    Four of them did it inside `close_window` as they flushed; claude-code did
+    it once at finalization. Head and tail were already computed centrally, in
+    this module — that asymmetry was the complexity, and every timing defect
+    this branch fixed lived in the per-reducer bookkeeping around the
+    subtraction rather than in the subtraction itself.
+    """
+
+    BASE: ClassVar[datetime] = datetime(2026, 9, 11, 9, 0, 0)
+
+    @classmethod
+    def _at(cls, ms: float) -> datetime:
+        return cls.BASE + timedelta(milliseconds=ms)
+
+    @classmethod
+    def _msg(cls, lo: float, hi: float, gen: float | None, **kwargs) -> AssistantMessage:
+        return AssistantMessage(started_at=cls._at(lo), completed_at=cls._at(hi), generation_duration_ms=gen, **kwargs)
+
+    def test_a_contained_tool_is_subtracted_exactly_once(self):
+        out = subtract_tool_time([self._msg(0, 1000, 1000.0)], [(self._at(200), self._at(700))])
+        assert out[0].generation_duration_ms == pytest.approx(500.0)
+
+    def test_the_input_messages_are_not_mutated(self):
+        """Non-mutating because of ALIASING, not because of repeated calls.
+
+        Every agent builds its terminal event as
+        `AgentEndEvent(messages=list(...))`, which copies the LIST and not the
+        message objects — so an in-place write would reach back into the
+        agent's own live state from the collector.
+        """
+        messages = [self._msg(0, 1000, 1000.0)]
+        subtract_tool_time(messages, [(self._at(200), self._at(700))])
+        assert messages[0].generation_duration_ms == pytest.approx(1000.0)
+
+    def test_a_group_sharing_bounds_is_subtracted_once_and_the_parts_still_sum(self):
+        """Codex splits one window across two sub-messages by output share.
+
+        Subtracting the group's overlap from each part separately would take it
+        twice and stop the parts summing to the window. Grouping is on the
+        BOUNDS, not on `message_id` — OpenCode and Pi can carry `None` there.
+        """
+        # A 1000 ms window split 25/75, with a 250 ms tool inside it.
+        out = subtract_tool_time(
+            [self._msg(0, 1000, 250.0, message_id="m"), self._msg(0, 1000, 750.0, message_id="m")],
+            [(self._at(300), self._at(550))],
+        )
+        assert [m.generation_duration_ms for m in out] == [pytest.approx(187.5), pytest.approx(562.5)]
+        assert sum(m.generation_duration_ms or 0.0 for m in out) == pytest.approx(750.0)
+
+    def test_a_group_with_no_message_id_is_still_grouped_by_its_bounds(self):
+        """The case keying on `message_id` would break.
+
+        Two id-less messages sharing a window must be one group; keying on the
+        id would instead collapse every id-less message of the turn into one.
+        """
+        out = subtract_tool_time(
+            [self._msg(0, 1000, 500.0), self._msg(0, 1000, 500.0), self._msg(2000, 3000, 1000.0)],
+            [(self._at(200), self._at(400))],
+        )
+        assert sum(m.generation_duration_ms or 0.0 for m in out[:2]) == pytest.approx(800.0)
+        assert out[2].generation_duration_ms == pytest.approx(1000.0), "a different window is a different group"
+
+    def test_concurrent_tools_subtract_their_union_not_their_sum(self):
+        """Summing would clamp a real generation to zero.
+
+        The expectation is DERIVED from `union_ms` rather than written as a
+        literal, so this cannot drift from the rule the rest of the codebase
+        applies — and the sum is asserted separately to be the wrong answer.
+        """
+        spans = [
+            (self._at(100), self._at(500)),
+            (self._at(150), self._at(550)),
+            (self._at(200), self._at(600)),
+            (self._at(250), self._at(650)),
+        ]
+        out = subtract_tool_time([self._msg(0, 1000, 1000.0)], spans)
+        assert out[0].generation_duration_ms == pytest.approx(1000.0 - union_ms(spans))
+        assert sum((e - s).total_seconds() * 1000.0 for s, e in spans) > 1000.0, (
+            "the fixture must actually over-subtract when summed, or this proves nothing"
+        )
+        assert out[0].generation_duration_ms > 0.0
+
+    def test_a_window_entirely_covered_by_tools_is_a_measured_zero(self):
+        out = subtract_tool_time([self._msg(0, 1000, 1000.0)], [(self._at(0), self._at(1000))])
+        assert out[0].generation_duration_ms == 0.0, "a measurement, not an absence"
+
+    def test_a_none_duration_stays_none(self):
+        """`None` means no window was ever measured, and CE058 keeps it distinct."""
+        out = subtract_tool_time([self._msg(0, 1000, None)], [(self._at(0), self._at(500))])
+        assert out[0].generation_duration_ms is None
+
+    def test_a_zero_group_does_not_divide_by_zero(self):
+        out = subtract_tool_time([self._msg(0, 1000, 0.0)], [(self._at(0), self._at(500))])
+        assert out[0].generation_duration_ms == 0.0
+
+    def test_a_sub_agent_generation_is_skipped(self):
+        """Its own tools are not in this span set, and the spawning Agent call
+        already covers its whole run."""
+        out = subtract_tool_time([self._msg(0, 1000, 900.0, parent_tool_use_id="t1")], [(self._at(0), self._at(500))])
+        assert out[0].generation_duration_ms == pytest.approx(900.0)
+
+    def test_non_assistant_entries_pass_through_by_identity(self):
+        reconciliation = ReconciliationMessage(
+            input_tokens=1, output_tokens=1, cache_creation_tokens=0, cache_read_tokens=0, note="n"
+        )
+        out = subtract_tool_time([self._msg(0, 1000, 1000.0), reconciliation], [(self._at(0), self._at(200))])
+        assert out[1] is reconciliation
+
+
+class TestBuildTurnRecordIsIdempotent:
+    """Building the record twice must give the same numbers.
+
+    `EventCollector` is not built once and read once. `EarlyStopWatcher` holds
+    ONE across a turn's tool-call rounds and calls `build_turn_record()` on
+    every one, and the crash path builds it again from `Agent._finalize`. The
+    tool subtraction now happens inside that method, so a version of it that
+    mutated would subtract again on every call — and the numbers would depend
+    on how many times something happened to look.
+    """
+
+    BASE: ClassVar[datetime] = datetime(2026, 9, 11, 9, 0, 0)
+
+    def _collector(self) -> EventCollector:
+        at = lambda ms: self.BASE + timedelta(milliseconds=ms)  # noqa: E731
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=at(0)))
+        collector.on_event(
+            ToolEndEvent(
+                task_id="t",
+                turn_id="t1",
+                tool=CommandTelemetry(
+                    tool_name="bash",
+                    tool_id="c1",
+                    timestamp=at(700),
+                    execution_started_at=at(700),
+                    execution_completed_at=at(1200),
+                    result_status="success",
+                ),
+            )
+        )
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t",
+                status=AgentEndStatus.COMPLETED,
+                messages=[
+                    AssistantMessage(
+                        started_at=at(500), completed_at=at(2000), generation_duration_ms=1500.0, output_tokens=5
+                    )
+                ],
+                usage=TokenUsage(output_tokens=5),
+                timestamp=at(2500),
+            )
+        )
+        return collector
+
+    def test_two_builds_agree_on_every_timing_figure(self):
+        collector = self._collector()
+        first, second = collector.build_turn_record(), collector.build_turn_record()
+
+        assert [m.generation_duration_ms for m in first.messages if m.role == "assistant"] == [
+            m.generation_duration_ms for m in second.messages if m.role == "assistant"
+        ]
+        assert first.harness_startup_ms == second.harness_startup_ms
+        assert first.harness_teardown_ms == second.harness_teardown_ms
+
+    def test_the_first_build_already_subtracted_once(self):
+        """Guards the other direction: identical-but-wrong would also pass above."""
+        record = self._collector().build_turn_record()
+        generation = [m.generation_duration_ms for m in record.messages if m.role == "assistant"]
+        # A 1500 ms window holding a 500 ms tool.
+        assert generation == [pytest.approx(1000.0)]
+
+    def test_the_agents_own_message_objects_are_not_written_through(self):
+        """The aliasing case, which is the real reason for `model_copy`.
+
+        `AgentEndEvent(messages=list(...))` copies the LIST, not the messages,
+        so the objects the collector receives are the agent's own live state.
+        """
+        at = lambda ms: self.BASE + timedelta(milliseconds=ms)  # noqa: E731
+        message = AssistantMessage(started_at=at(0), completed_at=at(1000), generation_duration_ms=1000.0)
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=at(0)))
+        collector.on_event(
+            ToolEndEvent(
+                task_id="t",
+                turn_id="t1",
+                tool=CommandTelemetry(
+                    tool_name="bash",
+                    tool_id="c1",
+                    timestamp=at(200),
+                    execution_started_at=at(200),
+                    execution_completed_at=at(700),
+                    result_status="success",
+                ),
+            )
+        )
+        collector.on_event(
+            AgentEndEvent(task_id="t", status=AgentEndStatus.COMPLETED, messages=[message], timestamp=at(1000))
+        )
+        collector.build_turn_record()
+
+        assert message.generation_duration_ms == pytest.approx(1000.0), "the agent's own object must be untouched"
+
+
+class TestOverheadExcludesSubAgentTools:
+    """The head and tail are bracketed on the MAIN thread, commands included.
+
+    `_overhead_ms` filtered its GENERATIONS to the main thread and then passed
+    EVERY command as a tool span, so its own claim to keep all four buckets
+    measuring one thread was true only by luck: a child nests inside the parent
+    Agent call, whose interval the union already covers. Codex's recovered
+    child tools carry the CHILD's clock, so nothing made it true by
+    construction — and the evalboard's twin DOES filter, so the two agreed by
+    accident.
+    """
+
+    BASE: ClassVar[datetime] = datetime(2026, 9, 11, 9, 0, 0)
+
+    def test_a_sub_agent_tool_inside_the_head_does_not_shrink_it(self):
+        at = lambda ms: self.BASE + timedelta(milliseconds=ms)  # noqa: E731
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=at(0)))
+        # A sub-agent's own tool call, sitting inside what is otherwise head.
+        collector.on_event(
+            ToolEndEvent(
+                task_id="t",
+                turn_id="t1",
+                tool=CommandTelemetry(
+                    tool_name="Bash",
+                    tool_id="child-1",
+                    timestamp=at(100),
+                    execution_started_at=at(100),
+                    execution_completed_at=at(400),
+                    result_status="success",
+                ),
+            )
+        )
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t",
+                status=AgentEndStatus.COMPLETED,
+                messages=[
+                    AssistantMessage(started_at=at(500), completed_at=at(1000), generation_duration_ms=500.0),
+                    # The child generation that OWNS child-1.
+                    AssistantMessage(
+                        started_at=at(100),
+                        completed_at=at(400),
+                        generation_duration_ms=300.0,
+                        parent_tool_use_id="agent-call",
+                        tool_use_ids=["child-1"],
+                    ),
+                ],
+                timestamp=at(1500),
+            )
+        )
+        record = collector.build_turn_record()
+
+        # 500 ms of head, all of it. Counting the child's tool would book 300 ms
+        # of it as tool execution that no main-thread bucket claims.
+        assert record.harness_startup_ms == pytest.approx(500.0)
+        assert record.harness_teardown_ms == pytest.approx(500.0)
+
+    def test_a_main_thread_tool_inside_the_head_still_shrinks_it(self):
+        """The control: the filter must exclude children, not all commands."""
+        at = lambda ms: self.BASE + timedelta(milliseconds=ms)  # noqa: E731
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=at(0)))
+        collector.on_event(
+            ToolEndEvent(
+                task_id="t",
+                turn_id="t1",
+                tool=CommandTelemetry(
+                    tool_name="Bash",
+                    tool_id="main-1",
+                    timestamp=at(100),
+                    execution_started_at=at(100),
+                    execution_completed_at=at(400),
+                    result_status="success",
+                ),
+            )
+        )
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t",
+                status=AgentEndStatus.COMPLETED,
+                messages=[AssistantMessage(started_at=at(500), completed_at=at(1000), generation_duration_ms=500.0)],
+                timestamp=at(1500),
+            )
+        )
+        record = collector.build_turn_record()
+        assert record.harness_startup_ms == pytest.approx(200.0), "500 ms of head minus a 300 ms tool"

@@ -25,8 +25,9 @@ import pytest
 
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig
+from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig, TokenUsage
 from coder_eval.pricing import calculate_cost
+from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -1104,52 +1105,78 @@ class _FixedClock:
 
 
 class TestGenerationWindowExcludesToolExecution:
-    """A tool running inside a turn is not model time.
+    """A tool running inside a turn is not model time — asserted where it is now DECIDED.
 
-    Pi marks the window at `turn_start` and closes it at `turn_end`, and
-    every tool call executes INSIDE it while also publishing its own
-    measured `duration_ms`. Publishing the raw span as generation time
-    counted the same milliseconds twice, which the task page's Unaccounted
-    cell renders as a ~-100% residual.
+    The reducer no longer subtracts anything. It publishes the RAW window, and
+    `EventCollector.subtract_tool_time` takes the tool union back out of it
+    once, for all five harnesses. So these cases drive the reducer and then a
+    real collector, and assert the PUBLISHED number — the one that reaches
+    `task.json` — rather than an intermediate the reducer used to own.
 
-    Driven at the reducer with an injected clock frozen at `WINDOW_END`: the
-    window's end and the tool intervals both have to be set explicitly for the
-    arithmetic to be deterministic.
+    They are not duplicates of
+    `tests/test_event_collector.py::TestSubtractToolTime`: those pin the
+    arithmetic, these pin that THIS reducer hands the collector a window and a
+    span set the arithmetic can be right about.
     """
 
     WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
     WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms turn
 
     def _finish_turn(self, spans, open_starts=()):
-        state = _PiTurnState(
-            task_id="t",
-            iteration=1,
-            user_input="x",
-            model="m",
-            clock=_FixedClock(self.WINDOW_END),
-        )
+        """Drive the reducer, then publish through a real collector.
+
+        `spans` are RESOLVED calls (both bounds); `open_starts` are calls that
+        never returned. An unresolved call now contributes NO span — it has no
+        `execution_completed_at`, and inventing one is what `None` exists to
+        prevent — where the reducer used to bound it at the window's end. That
+        is a real change and a better one: the collector sees every span at
+        once, so a call straddling a boundary is clipped to each window it
+        actually overlapped instead of approximated at the boundary.
+        """
+        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m", clock=_FixedClock(self.WINDOW_END))
         state.turn_started_at = self.WINDOW_START
-        state.turn_tool_spans = list(spans)
-        for i, started in enumerate(open_starts):
-            state.open_tools[f"open-{i}"] = CommandTelemetry(
+        commands = [
+            CommandTelemetry(
                 tool_name="bash",
-                tool_id=f"open-{i}",
+                tool_id=f"closed-{i}",
                 timestamp=started,
                 execution_started_at=started,
+                execution_completed_at=completed,
+                result_status="success",
             )
+            for i, (started, completed) in enumerate(spans)
+        ]
+        commands += [
+            CommandTelemetry(tool_name="bash", tool_id=f"open-{i}", timestamp=s, execution_started_at=s)
+            for i, s in enumerate(open_starts)
+        ]
         state.on_turn_end(
             {"message": {"role": "assistant", "usage": {"input": 100, "output": 20}, "stopReason": "stop"}}
         )
-        assistant = [m for m in state.messages if m.role == "assistant"]
-        assert len(assistant) == 1
-        return assistant[0]
+
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t", prompt="x", iteration=1, timestamp=self.WINDOW_START))
+        for command in commands:
+            collector.on_event(ToolEndEvent(task_id="t", turn_id="t1", tool=command))
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t",
+                status=AgentEndStatus.COMPLETED,
+                messages=list(state.messages),
+                usage=TokenUsage(),
+                timestamp=self.WINDOW_END,
+            )
+        )
+        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
+        assert len(published) == 1
+        return published[0]
 
     def test_tool_time_inside_the_turn_is_subtracted(self):
         message = self._finish_turn(
             [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
         )
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        assert span_ms == pytest.approx(1000.0)
+        assert span_ms == pytest.approx(1000.0), "the reducer still publishes the whole window as its bounds"
         assert message.generation_duration_ms == pytest.approx(500.0)
 
     def test_a_turn_with_no_tools_keeps_its_whole_window(self):
@@ -1172,48 +1199,39 @@ class TestGenerationWindowExcludesToolExecution:
         )
         assert message.generation_duration_ms == 0.0
 
-    def test_a_tool_still_open_at_the_boundary_is_subtracted(self):
-        # A call that opens inside this turn and closes inside the NEXT one
-        # straddles the boundary. Counting only closed intervals published the
-        # pre-boundary 400ms as generation while the call's own duration_ms
-        # counted it again.
-        message = self._finish_turn(
-            [],
-            open_starts=[self.WINDOW_START + timedelta(milliseconds=600)],
-        )
-        assert message.generation_duration_ms == pytest.approx(600.0)
+    def test_a_tool_still_open_at_the_boundary_contributes_no_span(self):
+        """The behaviour that CHANGED with the move, stated rather than implied.
 
-    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self):
-        # Union, not sum, across the closed and still-open sets alike.
+        The reducer used to bound a still-open call at the window's end and
+        subtract that slice. The collector cannot: a call with no
+        `execution_completed_at` was never timed. Its time is subtracted when it
+        RESOLVES, from whichever windows its real interval overlaps.
+        """
+        message = self._finish_turn([], open_starts=[self.WINDOW_START + timedelta(milliseconds=600)])
+        assert message.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_a_resolved_tool_overlapping_an_unresolved_one_counts_only_the_resolved(self):
         message = self._finish_turn(
             [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
             open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
         )
-        assert message.generation_duration_ms == pytest.approx(200.0)
+        assert message.generation_duration_ms == pytest.approx(500.0)
 
     def test_the_published_window_reconciles_to_its_own_bounds(self):
-        """The reducer subtracted exactly the spans the record carries.
+        """The collector subtracted exactly the spans the record carries.
 
         `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
         both recompute the tool UNION from the recorded command spans and
-        subtract it from the recorded window bounds. This asserts the reducer
-        fed the window the same set, so a span silently added or dropped on
-        the way in shows up here.
-
-        It is deliberately the narrow half: `expected` is derived from the
-        PUBLISHED bounds, so it cannot see a wrong mark, and both sides call
-        `busy_ms`, so it cannot see a union bug. Those are pinned by the cases
-        above and by tests/test_timing_close_window.py.
+        subtract it from the recorded window bounds. This asserts the published
+        record is internally consistent under that recomputation, so a span
+        silently added or dropped on the way in shows up here.
         """
         from coder_eval.timing import busy_ms
 
         closed = [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))]
-        open_start = self.WINDOW_START + timedelta(milliseconds=500)
-        message = self._finish_turn(closed, open_starts=[open_start])
-
-        spans = [*closed, (open_start, message.completed_at)]
+        message = self._finish_turn(closed)
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        expected = span_ms - busy_ms(spans, message.started_at, message.completed_at)
+        expected = span_ms - busy_ms(closed, message.started_at, message.completed_at)
         assert message.generation_duration_ms == pytest.approx(expected)
 
 
@@ -1282,12 +1300,16 @@ class TestGenerationWindowsTileTheTurn:
 class TestToolSpansSurviveTheTurnBoundary:
     """A tool that closes BETWEEN two turns still belongs to the next window.
 
-    `turn_tool_spans` used to be cleared at `turn_start`, which is after the
-    window it feeds has opened at the mark. Pi was protected from that only by
-    NOT tiling: its window opened at `turn_start`, so a call that ended before
-    then fell outside it anyway. Tiling without moving the reset therefore
-    takes a correct harness and introduces the double-count — which is why both
-    changes land in one commit, reset first.
+    This used to be a bookkeeping problem: a per-turn span list, cleared at
+    `turn_start` — after the window it feeds had already opened at the mark —
+    so a call closing in the gap had its span wiped before the flush could
+    subtract it. That list is gone. `EventCollector.subtract_tool_time` sees
+    every span at once and clips each to the windows it overlaps, so the
+    property now holds by construction rather than by a reset rule.
+
+    Kept, and re-pointed at the collector, because the property itself is what
+    matters and a future reducer change could still break it — by moving a
+    mark, or by failing to emit the ToolEnd the collector reduces.
     """
 
     def _run(self):
@@ -1309,7 +1331,24 @@ class TestToolSpansSurviveTheTurnBoundary:
         state.on_turn_start()
         clock.at_ms = 2000
         state.on_turn_end(_turn_end_payload())
-        return resolved, [m for m in state.messages if m.role == "assistant"]
+
+        # Published through the real collector: the reducer hands over raw
+        # windows, and the tool subtraction happens once, there.
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=_SPAN_BASE))
+        for command in resolved:
+            collector.on_event(ToolEndEvent(task_id="t", turn_id="t1", tool=command))
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t",
+                status=AgentEndStatus.COMPLETED,
+                messages=list(state.messages),
+                usage=TokenUsage(),
+                timestamp=_SPAN_BASE + timedelta(milliseconds=2000),
+            )
+        )
+        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
+        return resolved, published
 
     def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self):
         _, messages = self._run()
@@ -1371,7 +1410,14 @@ class TestToolSpansSurviveTheTurnBoundary:
         assert messages[1].started_at == messages[0].completed_at
         assert sum(m.generation_duration_ms or 0.0 for m in messages) == pytest.approx(2000.0)
 
-    def test_a_turn_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self):
+    def test_a_turn_that_never_finishes_does_not_advance_the_mark(self):
+        """The half of this that is still the reducer's job.
+
+        There is no span list to preserve any more — the collector reduces the
+        ToolEnd stream itself. What the reducer still owns is the MARK: a turn
+        that published nothing must not advance it, or its time is handed to
+        whichever turn finishes next.
+        """
         clock = _SteppedClock()
         state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
         state.on_turn_start()
@@ -1386,13 +1432,7 @@ class TestToolSpansSurviveTheTurnBoundary:
         clock.at_ms = 1900
         state.close_open_tools()  # crash/timeout orphan sweep — no message appended
 
-        # Published nothing, so tiling past it would hand its time to whichever
-        # turn finishes next, and wiping the spans would publish c2's execution
-        # as that turn's model time.
         assert state.gen_mark == mark_after_flush
-        assert [(s, e) for s, e in state.turn_tool_spans] == [
-            (_SPAN_BASE + timedelta(milliseconds=1700), _SPAN_BASE + timedelta(milliseconds=1900))
-        ]
 
 
 class TestClockIsFreshPerTurn:

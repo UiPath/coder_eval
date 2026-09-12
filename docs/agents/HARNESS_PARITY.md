@@ -24,7 +24,8 @@ wall clock its numbers account for.
 
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
-| `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock: previous `step_finish` → this one, minus tool execution inside the window | harness clock: previous `turn_end` → this one, minus tool execution inside the window |
+| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | harness clock: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
+| tool time subtracted from it | centrally | centrally | centrally | centrally | centrally |
 | what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
 | `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
 | `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
@@ -33,8 +34,8 @@ wall clock its numbers account for.
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
-| clock basis for recorded stamps | monotonic duration, wall bounds | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
-| window built by `timing.py::close_window` | no — see below | yes | yes | yes | yes |
+| clock basis for recorded stamps | wall bounds, wall duration (raw `datetime.now()`) | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
+| window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing but the committed sensor is one-sided.
 `tests/_fixtures/golden_streams/_scrub.py` asserts only `overshoot <= …`, so it
@@ -48,40 +49,70 @@ turn's `|residual|` as a share of its own wall clock. It is report-only and
 nothing runs it on a schedule; run it by hand against real `task.json` files.
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
-All five harnesses can have tool execution inside a generation window, and all
-five subtract it. Four interleave it structurally: Antigravity reports a `Step`
-for the tool and only a later
+All five harnesses can have tool execution inside a generation window, and it is
+subtracted out of every one of them — **once, centrally**, by
+`streaming/collector.py::subtract_tool_time`. No reducer does it itself; each
+publishes the raw window (see the two sections below). Every harness has the
+problem: Antigravity reports a `Step` for the tool and only a later
 `usage_metadata` `Step` cuts the message; Codex's message window is seeded from
-the first item's start and extended to the last item's completion; OpenCode and Pi
-tile: each window opens where the previous `step_finish` / `turn_end` closed it
-and runs to the next, with every tool call in between running inside. In each the
+the first item's start and extended to the last item's completion; OpenCode, Pi
+and claude-code tile, each window opening where the previous one closed and
+running to the next, with every tool call in between running inside. In each the
 span between the recorded bounds legitimately CONTAINS tool time that the model
-did not spend generating, so each subtracts it — the **union** of the closed tool intervals
-clipped to the window (`coder_eval/timing.py::busy_ms`), never the sum, because
-tool calls overlap: Antigravity resolves several from one `Step` and backgrounds
-anything over ten seconds, and Codex spawns collab agents concurrently. Summing
-them over-subtracts by exactly the overlap and, with enough concurrency, drives
-the result to a clamped zero.
+did not spend generating. What comes out is the **union** of the resolved
+main-thread tool intervals clipped to the window
+(`coder_eval/timing.py::busy_ms`), never the sum, because tool calls overlap:
+Antigravity resolves several from one `Step` and backgrounds anything over ten
+seconds, and Codex spawns collab agents concurrently. Summing them
+over-subtracts by exactly the overlap and, with enough concurrency, drives the
+result to a clamped zero.
 
 The consequence worth knowing: on an emission that carries *only* a tool call,
 the whole measured window was that tool running, so the recorded generation
 time is legitimately `0.0`. That is a measurement, not a placeholder — `None`
 is what "never measured" looks like.
 
-**One helper builds four of the five windows.** Codex, OpenCode, Pi and
-Antigravity call `coder_eval/timing.py::close_window`, which is the whole
-arithmetic in one place: tile from the mark, keep a stamp that went backwards
-from inverting the span, bound the calls still open at the boundary, subtract
-the union clipped to the window, clamp at zero. It had been copy-pasted four
-times, and Pi shipped a variant of it that measured from its own turn start —
-so every inter-turn gap fell into no bucket, and nothing failed, because the
-identity above is asserted on one side only. **CE061** now requires any module
-in `agents/` that publishes a measured `generation_duration_ms` to import the
-helper. claude-code is the single documented exception and carries the only
-`# noqa: CE061`: it subtracts once at finalization (below) rather than per
-flush, a shape `close_window` cannot take without a mode flag.
+**One helper opens all five windows, and the subtraction is not in it.** Every
+reducer calls `coder_eval/timing.py::close_window`, which is now only the
+window's own geometry: tile from the mark, keep a stamp that went backwards
+from inverting the span, clamp at zero. It had been copy-pasted four times, and
+Pi shipped a variant that measured from its own turn start — so every
+inter-turn gap fell into no bucket, and nothing failed, because the identity
+above is asserted on one side only. **CE061** requires any module in `agents/`
+publishing a measured `generation_duration_ms` to import the helper, and is now
+**exemption-free**: claude-code was its one permanent `# noqa` and no longer
+needs it.
 
-**Two clock bases remain, and the row above says which.** Antigravity and Pi
+**Tool execution comes out of the windows ONCE, at the collector.**
+`streaming/collector.py::subtract_tool_time` takes the union of the main-thread
+tool intervals, clipped to each window, out of the raw spans the reducers
+publish. Before, that happened five times in five places — four inside
+`close_window` as the reducer flushed, claude-code once at finalization — while
+the head and the tail were already computed centrally at the same seam. That
+asymmetry was the complexity, and every timing defect on this branch lived in
+the per-reducer bookkeeping around the subtraction rather than in the
+subtraction: when to reset a span list (clearing it at `step_start` wiped a span
+before the flush could subtract it — a 100% overstatement of that window), when
+to clear a spent start stamp (a second flush with no intervening start
+republished the previous span — 3000 ms of generation for a 2000 ms turn), when
+to advance the mark. Those three lists, their reset rules, and the bounding of
+still-open calls are all deleted. **CE063** stops a sixth harness rebuilding
+them: no module in `agents/` may import `busy_ms`.
+
+Two consequences worth stating, because both are behaviour changes:
+
+- **A call still open when a window closes is no longer subtracted at that
+  boundary.** The reducer used to bound it at the window's end and take that
+  slice. The collector sees every span at once, so the call is subtracted from
+  the windows its REAL interval overlaps, once it resolves — no approximation.
+  A call that never resolves has no `execution_completed_at`, contributes
+  nothing, and says so.
+- **Codex's two sub-messages are one group.** They share a pair of bounds and
+  divide the window by output-token share; the collector groups on the bounds
+  (not on `message_id`, which OpenCode and Pi can legitimately leave `None`),
+  subtracts the overlap once, and re-apportions so the parts still sum.
+
+**Three clock bases remain, and the row above says which.** Antigravity and Pi
 derive every recorded wall stamp from one `TurnClock` per turn, so a turn's
 bounds and the tool spans subtracted from them cannot disagree. Antigravity
 needed it: its span was monotonic while its tool intervals were wall, which is
@@ -95,28 +126,51 @@ removed. Their tool spans are the CLI's own epoch-millisecond stamps
 (`codex_agent.py::_ms_to_dt`, `opencode_agent.py::_epoch_ms_to_dt`), which
 cannot be re-derived host-side; converting only the window bounds would put two
 bases inside one `busy_ms` subtraction, relocating the defect instead of
-removing it. Both therefore keep the naive-local exposure. Deadlines on every
-harness stay on raw `time.monotonic()` and must — a deadline may not move when
-the wall clock steps.
+removing it. Both therefore keep the naive-local exposure.
 
-**`claude-code` subtracts at finalization, not as it flushes.** It was once
-exempt entirely, on the premise that because it marks the end of the previous
-SDK event and reads again when the next message arrives, a tool's execution
-falls *between* two windows rather than inside one. Measured, that premise does
-not hold: a tool's timer starts at the **emission** carrying its `tool_use`
-block, and one assistant turn spans several emissions, so a later emission's
-window runs concurrently with a tool already timing. On a task issuing five
-parallel writes, five reads and two concurrent `Bash` calls the overlap was
-482 ms and 340 ms on two ~18-25 s turns, and the four-bucket residual came out
-at exactly `-481 ms` and `-339 ms`; the other four overlapped by ~2.0-2.3 s on
-the same task and still reconciled to within 1.2 ms, because they subtract it.
+claude-code is the third case and the newest. Its window duration used to be a
+monotonic delta while its bounds were wall stamps — the split `TurnClock`
+exists to remove — and central subtraction made that untenable, because it
+clips WALL tool spans against those WALL bounds. It now measures the span from
+the bounds, so the two agree; but the bounds are still raw `datetime.now()`,
+so it keeps the same naive-local exposure as codex and opencode, for a
+different reason: no epoch-stamp constraint, it simply has not been converted.
+That conversion is the remaining improvement here and is not done.
 
-It cannot subtract while flushing, because a tool issued by an earlier emission
-is still running when the next window closes and its interval does not exist
-yet. `_ClaudeTurnState._subtract_tool_time_from_windows` therefore runs once at
-finalization, when every span is known. After it, the same task reconciles to
-**1.4 ms (0.006% of wall)** over four turns that all carried overlapping tool
-calls.
+Deadlines on every harness stay on raw `time.monotonic()` and must — a deadline
+may not move when the wall clock steps.
+
+**HISTORY — why claude-code needed a special case at all.** It was once exempt
+from subtracting entirely, on the premise that because it marks the end of the
+previous SDK event and reads again when the next message arrives, a tool's
+execution falls *between* two windows rather than inside one. Measured, that
+premise does not hold: a tool's timer starts at the **emission** carrying its
+`tool_use` block, and one assistant turn spans several emissions, so a later
+emission's window runs concurrently with a tool already timing. On a task
+issuing five parallel writes, five reads and two concurrent `Bash` calls the
+overlap was 482 ms and 340 ms on two ~18-25 s turns, and the four-bucket
+residual came out at exactly `-481 ms` and `-339 ms`. (That run is pinned at
+`tests/_fixtures/timing_runs/claude-code.json`, which still reconciles at
+-481 ms — it is a RECORD of the defect, not of current behaviour; see the README
+there.)
+
+It could not subtract while flushing, because a tool issued by an earlier
+emission is still running when the next window closes and its interval does not
+exist yet — so it subtracted once at finalization instead, in a method of its
+own. Central subtraction dissolves the special case: the collector is *already*
+the place where every span is known, so claude-code needs no separate pass and
+no exemption.
+
+Its window is also now measured on ONE clock. The duration used to be a
+monotonic delta while the bounds were wall stamps, which is exactly the split
+`TurnClock` exists to eliminate — and it became load-bearing with central
+subtraction, which clips WALL tool spans against those WALL bounds. A
+monotonic-measured duration would have had the two disagreeing inside one
+subtraction, which is the defect that let Antigravity's window go negative.
+`turn_start_time` stays monotonic and is untouched: `duration_seconds` and the
+turn deadline read it, and a deadline must not move when the wall clock steps.
+Adopting a full `TurnClock` here (deriving the wall stamps from monotonic, as
+antigravity and pi do) is the remaining improvement and is not done.
 
 **The head and tail are measured, not normalized.** Generation and tool are
 only two of the four buckets. The turn's **head** (turn start → first

@@ -33,9 +33,10 @@ fourth):
 * a ``datetime`` SUBCLASS monkeypatched onto the module — opencode, which also
   calls ``datetime.fromtimestamp`` through the same global (see
   ``tests/test_opencode_agent.py``'s ``_SteppedClock`` for why a stub breaks);
-* ``time.monotonic`` AND ``datetime`` both patched — claude-code, which derives
-  the DURATION from the monotonic clock and the BOUNDS from the wall clock, so
-  patching one leaves the other real and the test measures nothing.
+* ``time.monotonic`` AND ``datetime`` both patched — claude-code. Its window is
+  wall-derived now, but ``turn_start_time`` and the turn deadline still read
+  ``time.monotonic()``, so patching only one leaves the reducer straddling a
+  real clock and a scripted one.
 
 Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
 from any host clock, so its case scripts those stamps directly.
@@ -419,10 +420,10 @@ def _codex_turn() -> Turn:
 def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     """A tool call between two emissions, with a real head and a real tail.
 
-    This reducer derives the window's DURATION from ``time.monotonic()`` and
-    its BOUNDS from ``datetime.now()``, so both module globals are patched off
-    one counter. Patching either alone leaves the other reading the real clock,
-    and the case would then assert a measured span against an unmeasured one.
+    Both module globals are patched off one counter. The window itself is
+    wall-derived, but ``turn_start_time`` and the deadline still read
+    ``time.monotonic()``, so patching only one leaves the reducer straddling a
+    real clock and a scripted one.
 
     The first `message_start` re-seeds the window, so the CLI spawn and the
     query build before it are head rather than msg0's generation. That a LATER
