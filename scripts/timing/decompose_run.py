@@ -309,16 +309,20 @@ def main(argv: list[str]) -> int:
         for harness, path, index, detail in union_breaches:
             print(f"  {harness:<14} {path} turn {index}: {detail}", file=sys.stderr)
 
+    # BEFORE the no-gateable-turns arm below, not after. Neither of these is a
+    # residual question, so neither depends on a turn being long enough to gate
+    # on — and a corpus whose turns are all under --min-turn-ms would otherwise
+    # print a real validation failure to stderr and exit 0, which is the
+    # "measured nothing, reported success" shape the arm below exists to refuse.
+    if union_breaches or invalid:
+        return 1
+
     if not gateable_total:
         # A gate that passes because it measured nothing is the exact failure
         # this script exists to remove, so it only passes when none was asked for.
         print("no gateable turns", file=sys.stderr)
         return 1 if args.max_residual_pct is not None else 0
 
-    if union_breaches or invalid:
-        # Independent of --max-residual-pct: neither is a residual question, and
-        # a disagreement about a stored bucket is exactly what a gate is for.
-        return 1
     if args.max_residual_pct is None:
         return 0
     if not breaches:

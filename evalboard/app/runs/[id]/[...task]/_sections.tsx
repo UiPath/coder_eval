@@ -13,7 +13,7 @@ import type {
     TokenTotals,
     ToolCall,
 } from "@/lib/runs";
-import { toolExecutionMs } from "@/lib/timing";
+import { measuredToolExecutionMs, toolExecutionMs } from "@/lib/timing";
 import {
     type PerMessageImpact,
     buildThinkingModel,
@@ -421,7 +421,7 @@ export function MessageTimelineSection({
     // computed from the messages — the reconciliation entry exists so a
     // consumer sums that stream rather than reading a separate aggregate. The
     // mixed sourcing is intentional; see `sumTurnBuckets` in lib/runs.ts.
-    const toolExecMs = storedToolMs ?? toolExecutionMs(mainThread);
+    const toolExecMs = storedToolMs ?? measuredToolExecutionMs(mainThread);
     const slowGen = mainThread.filter(
         (m) => (m.generationMs ?? 0) >= SLOW_GEN_MS,
     ).length;
@@ -451,7 +451,7 @@ export function MessageTimelineSection({
         taskMs != null
             ? taskMs -
               totalGenMs -
-              toolExecMs -
+              (toolExecMs ?? 0) -
               (harnessStartupMs ?? 0) -
               (harnessTeardownMs ?? 0) -
               (setupMs ?? 0) -
@@ -1560,8 +1560,12 @@ function MessageRow({
     // `toolExecutionMs` was changed to union and this line was not. Expand the
     // row to see each call's own wall clock: sequential calls still add up to
     // this number, concurrent ones deliberately do not.
-    const execMs = toolExecutionMs([m]);
-    const hasExec = m.toolUses.some((t) => t.durationMs != null);
+    // `measured…`, so a row whose calls were TIMED BUT UNBOUNDED reads "—"
+    // rather than "0ms". Under the union policy such a call contributes to no
+    // bucket, and claiming it took no time is the one thing that is certainly
+    // false. This replaces a `durationMs != null` guard, which asked whether
+    // the harness timed anything rather than whether it bounded anything.
+    const execMs = measuredToolExecutionMs([m]);
     // Render full body only when something more than the summary exists.
     const hasBody =
         m.toolUses.length > 0 ||
@@ -1606,7 +1610,7 @@ function MessageRow({
                                 : "text-gray-600")
                         }
                     >
-                        {hasExec ? fmtMs(execMs) : "—"}
+                        {fmtMs(execMs)}
                     </span>
                     <span className="flex items-center gap-2 min-w-0">
                         <span

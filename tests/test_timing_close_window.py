@@ -7,6 +7,7 @@ which pin that a given reducer feeds it the right bounds and spans.
 """
 
 import importlib.util
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -531,3 +532,68 @@ class TestTheSensorsCrossCheckTheStoredUnion:
             assert main_thread_tool_spans(record.messages, record.commands) == []
             assert _tool_union_ms(turn) == 0.0
             assert _load_decompose_run()._tool_ms(turn) == 0.0
+
+
+class TestTheLiveGatesExitCode:
+    """`main()`'s return value, driven end to end.
+
+    Everything else about this script is asserted on its helpers. The exit code
+    is what CI actually reads, and the ORDER of its arms is load-bearing: a
+    validation failure and a stored-union disagreement are not residual
+    questions, so neither may depend on a turn being long enough to gate on.
+    They were once checked after the no-gateable-turns arm, where a corpus of
+    only-short turns printed a real breach to stderr and exited 0.
+    """
+
+    @staticmethod
+    def _record(tmp_path, *, stored: float | None = None, valid: bool = True) -> str:
+        turn = _turn(
+            duration_seconds=10.0,
+            commands=[_command("t1", _at(1000), _at(1500))],
+            messages=[
+                {
+                    "role": "assistant",
+                    "started_at": _at(0).isoformat(),
+                    "completed_at": _at(1000).isoformat(),
+                    "generation_duration_ms": 1000.0,
+                }
+            ],
+        )
+        turn["harness_startup_ms"] = 0.0
+        turn["harness_teardown_ms"] = 8500.0
+        if stored is not None:
+            turn["tool_union_ms"] = stored
+        if not valid:
+            # Below what `TurnRecord` requires — the shape the whole run history
+            # measured zero of, so a non-zero count is news rather than noise.
+            del turn["user_input"]
+        path = tmp_path / "task.json"
+        path.write_text(json.dumps({"agent_type": "pi", "iterations": [turn]}), encoding="utf-8")
+        return str(path)
+
+    def test_a_clean_record_exits_zero(self, tmp_path):
+        main = _load_decompose_run().main
+        assert main([self._record(tmp_path, stored=500.0), "--min-turn-ms", "0"]) == 0
+
+    def test_a_union_disagreement_exits_one_even_with_no_gate_asked_for(self, tmp_path):
+        main = _load_decompose_run().main
+        assert main([self._record(tmp_path, stored=999.0), "--min-turn-ms", "0"]) == 1
+
+    def test_a_union_disagreement_exits_one_even_when_every_turn_is_too_short_to_gate(self, tmp_path):
+        """The arm-order regression, asserted directly.
+
+        The turn is excluded from the share columns and the gate, so the
+        no-gateable-turns arm fires — and used to return before the breach was
+        ever consulted.
+        """
+        main = _load_decompose_run().main
+        assert main([self._record(tmp_path, stored=999.0), "--min-turn-ms", "999999999"]) == 1
+
+    def test_an_invalid_record_exits_one(self, tmp_path):
+        main = _load_decompose_run().main
+        assert main([self._record(tmp_path, valid=False), "--min-turn-ms", "0"]) == 1
+
+    def test_a_legacy_record_without_the_field_exits_zero(self, tmp_path):
+        """The cross-check SKIPS rather than failing — the common case on disk."""
+        main = _load_decompose_run().main
+        assert main([self._record(tmp_path), "--min-turn-ms", "0"]) == 0
