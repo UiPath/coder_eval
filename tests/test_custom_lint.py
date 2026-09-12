@@ -46,6 +46,57 @@ def test_no_violations(rule_class: type) -> None:
 
 
 @pytest.mark.lint
+class TestNoTestReadsThePinnedTimingCorpus:
+    """`scripts/timing/corpus/` is stale BY DESIGN, so no test may read it.
+
+    Two of its five records deliberately preserve defects the live code no
+    longer has — claude-code reconciling at -481 ms (the pre-subtraction
+    defect) and a `0.0` head on two harnesses (the clamped inversion). Its
+    README says outright that it exists to carry wall-clock MAGNITUDES for
+    `scripts/timing/decompose_run.py`, and that re-recording it after a change
+    would destroy the only thing it is good for.
+
+    A test pointed at it would pin a fixed defect as expected behaviour, and it
+    would look entirely reasonable while doing so — a green assertion over real
+    recorded numbers. Moving it out of `tests/_fixtures/` removes the
+    invitation; this removes the possibility. The rule lived only in the
+    README, which is the shape this repo converts to a check.
+    """
+
+    #: The rule is about `tests/` reading the corpus. `decompose_run.py` is its
+    #: intended reader and the README documents that invocation, so `scripts/`
+    #: and the README itself are out of scope by construction — this only walks
+    #: the test tree.
+    _CORPUS = "scripts/timing/corpus"
+
+    def test_the_corpus_exists_where_the_rule_says_it_does(self):
+        """A rule guarding a directory that has moved guards nothing."""
+        corpus = Path(__file__).parents[1] / self._CORPUS
+        assert corpus.is_dir(), f"{self._CORPUS} is gone; move this rule with it or retire it"
+        assert list(corpus.glob("*.json")), f"{self._CORPUS} holds no records"
+
+    def test_no_test_module_references_it(self):
+        tests_root = Path(__file__).parent
+        offenders = [
+            str(path.relative_to(tests_root))
+            for path in tests_root.rglob("*.py")
+            if path != Path(__file__) and self._CORPUS in path.read_text(encoding="utf-8")
+        ]
+        assert not offenders, (
+            f"{offenders} reads {self._CORPUS}, which is stale by design: two of its records "
+            "preserve defects the live code no longer has, so an assertion over them pins a "
+            "fixed defect as expected behaviour. Point the test at a fixture that moves with "
+            "the code — tests/_fixtures/golden_streams/ for a replay, or "
+            "tests/test_timing_identity_contract.py for a magnitude."
+        )
+
+    def test_the_readme_still_states_the_rule(self):
+        """The prose and the check have to agree, or one of them is wrong."""
+        readme = (Path(__file__).parents[1] / self._CORPUS / "README.md").read_text(encoding="utf-8")
+        assert "NO TEST MAY READ THIS DIRECTORY" in readme
+
+
+@pytest.mark.lint
 class TestCE016NoComputedTokenUsageKwargs:
     """CE016 fires on TokenUsage(input_tokens=/total_tokens=) but not elsewhere."""
 
