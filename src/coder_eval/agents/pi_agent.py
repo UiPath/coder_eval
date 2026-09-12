@@ -646,6 +646,14 @@ class _PiTurnState:
         # it, and only with it — see `on_turn_start`.
         self.gen_mark = completed
         self.turn_tool_spans = []
+        # And so is this turn's own start stamp, because it has now been SPENT.
+        # It is passed to `close_window` as `item_start`, whose `min()` pulls
+        # the window open to cover it; left in place, a second `turn_end` with
+        # no intervening `turn_start` — a duplicate or replayed line, which
+        # this reducer promises to survive — would reopen the next window back
+        # at the previous turn's start and publish that whole span a second
+        # time. Reproduced: 3000 ms of generation for a 2000 ms turn.
+        self.turn_started_at = None
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,

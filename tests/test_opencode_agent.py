@@ -2097,6 +2097,32 @@ class TestToolSpansSurviveTheStepBoundary:
 
         assert generation_ms + tool_ms == pytest.approx((hi - lo).total_seconds() * 1000.0)
 
+    def test_a_duplicate_step_finish_does_not_republish_the_previous_window(self, monkeypatch):
+        """A spent `step_started_at` must not seed the next window.
+
+        `close_window`'s `min(mark, item_start)` pulls the window open to cover
+        the item's own start. That is the backwards-clock defence — which this
+        reducer genuinely needs, since its stamps are raw `datetime.now()` and
+        not on a `TurnClock`. But a start stamp left in place after its step was
+        published is not a backwards clock: it is a stale value BEFORE the mark,
+        so the guard reopens the next window at the previous step's start and
+        publishes that whole span again. Reproduced on Pi's identical twin
+        before the fix: 3000 ms of generation for a 2000 ms turn.
+        """
+        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")
+        _SteppedClock.at_ms = 0
+        state.on_step_start({"messageID": "m1"})
+        _SteppedClock.at_ms = 1000
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
+        _SteppedClock.at_ms = 2000
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
+
+        messages = [m for m in state.messages if m.role == "assistant"]
+        assert len(messages) == 2
+        assert messages[1].started_at == messages[0].completed_at
+        assert sum(m.generation_duration_ms or 0.0 for m in messages) == pytest.approx(2000.0)
+
     def test_a_step_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self, monkeypatch):
         monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
         state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")

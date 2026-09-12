@@ -1345,6 +1345,32 @@ class TestToolSpansSurviveTheTurnBoundary:
 
         assert generation_ms + tool_ms == pytest.approx((hi - lo).total_seconds() * 1000.0)
 
+    def test_a_duplicate_turn_end_does_not_republish_the_previous_window(self):
+        """A spent `turn_started_at` must not seed the next window.
+
+        `close_window`'s `min(mark, item_start)` pulls the window open to cover
+        the item's own start. That is the backwards-clock defence, but a start
+        stamp left in place after its turn was published is not a backwards
+        clock — it is a stale value BEFORE the mark, so the guard reopens the
+        next window at the previous turn's start and publishes that whole span
+        again. Reproduced before the fix: 3000 ms of generation for a 2000 ms
+        turn. This reducer promises to survive a malformed stream, and Pi's CLI
+        retries internally, so a duplicate or replayed `turn_end` is a transport
+        hiccup rather than a hypothetical.
+        """
+        clock = _SteppedClock()
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
+        state.on_turn_start()
+        clock.at_ms = 1000
+        state.on_turn_end(_turn_end_payload())
+        clock.at_ms = 2000
+        state.on_turn_end(_turn_end_payload())  # no intervening `turn_start`
+
+        messages = [m for m in state.messages if m.role == "assistant"]
+        assert len(messages) == 2
+        assert messages[1].started_at == messages[0].completed_at
+        assert sum(m.generation_duration_ms or 0.0 for m in messages) == pytest.approx(2000.0)
+
     def test_a_turn_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self):
         clock = _SteppedClock()
         state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)

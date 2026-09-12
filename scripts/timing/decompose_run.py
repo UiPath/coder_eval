@@ -151,6 +151,11 @@ def main(argv: list[str]) -> int:
     by_harness: dict[str, list[tuple[Path, int, tuple[float, float, float, float, float]]]] = defaultdict(list)
     skipped_crashed = 0
     skipped_no_window = 0
+    # A turn `_turn_buckets` cannot place on the timeline at all (no numeric
+    # `duration_seconds`). Counted rather than silently dropped, for the same
+    # reason as the two above: an exclusion nobody can see understates how much
+    # of the corpus the gate actually looked at.
+    skipped_untimed = 0
     for path in args.task_json:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -179,8 +184,10 @@ def main(argv: list[str]) -> int:
                 skipped_no_window += int(no_window)
                 continue
             buckets = _turn_buckets(turn)
-            if buckets is not None:
-                by_harness[harness].append((path, index, buckets))
+            if buckets is None:
+                skipped_untimed += 1
+                continue
+            by_harness[harness].append((path, index, buckets))
 
     if not by_harness:
         print("no timed turns found", file=sys.stderr)
@@ -249,7 +256,8 @@ def main(argv: list[str]) -> int:
     print(f"worst single-turn |residual| = {worst_turn:.3f}ms")
     print(
         f"skipped: {skipped_crashed} crashed, {skipped_no_window} no-window "
-        f"(a turn can be both), {skipped_short} short (< {args.min_turn_ms:.0f}ms)"
+        f"(a turn can be both), {skipped_untimed} untimed, "
+        f"{skipped_short} short (< {args.min_turn_ms:.0f}ms)"
     )
 
     if not gateable_total:

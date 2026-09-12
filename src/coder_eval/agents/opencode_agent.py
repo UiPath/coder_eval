@@ -750,6 +750,15 @@ class _OpenCodeTurnState:
         # it, and only with it — see `on_step_start`.
         self.gen_mark = completed
         self.step_tool_spans = []
+        # And so is this step's own start stamp, because it has now been SPENT.
+        # It is passed to `close_window` as `item_start`, whose `min()` pulls
+        # the window open to cover it; left in place, a second `step_finish`
+        # with no intervening `step_start` would reopen the next window back at
+        # the previous step's start and publish that whole span a second time.
+        # The `min()` still defends a genuinely OPEN step against a backwards
+        # clock, which is what it is for — this reducer's stamps are raw
+        # `datetime.now()` and are not on a `TurnClock`.
+        self.step_started_at = None
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,
