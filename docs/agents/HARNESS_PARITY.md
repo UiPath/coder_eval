@@ -231,11 +231,27 @@ comparable with turns 2..N; and it is not harness time at all — measured at
 ~1.86 s for claude-code and pi alike on the same machine, which is the tell.
 
 Naming them is what makes the evalboard's **Unaccounted** cell a residual
-rather than a label. It used to hold that ~1.9 s constant on every row, which
-reads as 10% of a 19 s task and would read 60% of a 3 s one. Measured after the
-split: 1.9% (claude-code) and 7.3% (pi) of task wall clock, and what remains is
-post-`AgentEnd` subprocess reaping, `post_run`, cleanup and record persistence —
-which is why the remainder is larger for the harnesses that drain a CLI.
+rather than a label. It used to hold a ~1.9 s constant on every row, which
+reads as 10% of a 19 s task and would read 60% of a 3 s one.
+
+`setup_ms` is marked from the top of `run()` and not from `_setup()`, which
+matters more than it sounds: instrumenting the seams showed **733 of the
+remaining 758 ms was one call**, `utils.get_version_info()`, which shells out
+for the git commit and every CLI's `--version` while `EvaluationResult` is
+being constructed — before `_setup()` is reached. Marking from `_setup()` left
+it outside every named bucket. The rest of that 758 ms was `post_run` (32 ms),
+`_cleanup()` (1.4 ms), `task.json` persistence (1.9 ms) and ~5 ms of loop
+preamble.
+
+Measured after the move: **42 ms, 0.26%** of task wall clock on a 16 s
+claude-code task. What remains is that tail — `post_run`, sandbox preservation,
+persistence and post-`AgentEnd` reaping — with no single nameable phase left in
+it, which is what "unaccounted" should mean.
+
+NOTE `setup_ms` therefore carries a ~733 ms constant that is instrumentation
+overhead rather than work the task needed. Naming it is not the same as making
+it cheap; caching `get_version_info()` across a batch run is the obvious
+follow-up and would take ~0.7 s off every task in a suite.
 
 **The head means one thing on all five.** It is the wall clock from the turn
 starting until the harness first observed **model output**, and that instant is

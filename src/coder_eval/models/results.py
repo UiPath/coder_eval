@@ -551,8 +551,10 @@ class EvaluationResult(BaseModel):
     setup_ms: float | None = Field(
         default=None,
         description=(
-            "Wall milliseconds from the task starting until the agent phase begins — sandbox "
-            "setup, agent construction and start(), and any pre_run commands. TASK-scoped, "
+            "Wall milliseconds from the task starting until the agent phase begins — the environment "
+            "capture (`get_version_info`, which shells out for the git commit and every CLI "
+            "version: 733 ms measured, the single largest item), criterion discovery, sandbox "
+            "provisioning, agent construction and start(), and any pre_run commands. TASK-scoped, "
             "which is why it is here and not a fifth member of TurnRecord's four buckets: "
             "those tile ONE TURN and their identity (head + generation + tool + tail == the "
             "turn's span) is asserted to the millisecond, while setup happens once for a task "
