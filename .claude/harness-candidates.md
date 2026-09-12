@@ -791,3 +791,39 @@ divergences, so the deferred-work record is one place. Measurements in
   and nothing else. The timing half had a unit test that stayed green while the
   content half was broken, so the two are now asserted separately
   (`test_a_duplicate_turn_end_does_not_republish_the_previous_content`).
+
+## From the turn-timing consolidation (2026-09-12)
+
+Two findings from `c/turn-audit.md` were CUT during planning, on evidence. They
+are registered here with their corrected cost/benefit and the trigger that would
+reopen them — not because they are cheap guards waiting to be written, but
+because the reason they were cut is the part a later reader will otherwise
+re-derive from scratch.
+
+- [ ] **A2-full — reducers publish BOUNDS only; the collector derives the raw
+  window.** The audit justified this partly as retiring two lint rules. Neither
+  holds. `CE058` form 1 is a generic keyword rule over five constructors
+  (`ce058_no_timing_literal.py:71-76`) and stays live whatever a reducer
+  publishes. `CE059` keys its exemption on `generation_duration_ms=None` being
+  PRESENT at the call site (`ce059_generation_window_is_two_reads.py:68`), so
+  removing the kwarg makes `claims_a_window` true at the three legitimate
+  placeholder sites and forces a rule REWRITE rather than a retirement. Net
+  cost: five reducers, a regeneration of every golden, and a CE059 rework; net
+  benefit: SSOT alone. **Deferring it is safe because the seam assertion in
+  `timing.subtract_tool_time` now checks the property at runtime** — a group's
+  raw total must equal the span its own bounds describe — which also covers a
+  third-party agent registered through the `coder_eval.plugins` SPI, where no
+  lint rule scoped to `agents/` reaches. REVISIT IF: that assertion ever has to
+  be relaxed for a legitimate reducer, which would mean the equality is no
+  longer the contract and storage has stopped paying for itself.
+
+- [ ] **C2 — a persisted `clock_inversions` counter.** The audit wanted the
+  number of clamped negatives recorded on the turn. CE064 removed the reachable
+  cause (the cross-basis head/tail comparison), and a field nothing may ever
+  read is YAGNI. The DOC half was done instead: the two contradictory clamp
+  docstrings now state one position — a measured inversion IS a real zero,
+  because both ends were observed (`timing.decompose_turn`), and claude-code's
+  case was never about the clamp but about the head being measured against the
+  wrong instant. REVISIT IF: an inversion is observed on a live run after
+  CE064, which would mean a basis is still mixed somewhere the rule cannot see
+  (the plugin SPI, or a harness whose spans come from a CLI).
