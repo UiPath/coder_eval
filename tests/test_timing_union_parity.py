@@ -21,8 +21,7 @@ from pathlib import Path
 import pytest
 
 from coder_eval.models import CommandTelemetry
-from coder_eval.streaming.collector import main_thread_tool_spans
-from coder_eval.timing import busy_ms, union_ms
+from coder_eval.timing import busy_ms, main_thread_tool_spans, union_ms
 
 
 _FIXTURE = Path(__file__).parent / "_fixtures" / "timing_union_cases.json"

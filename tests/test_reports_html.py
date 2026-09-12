@@ -1374,6 +1374,7 @@ class TestGenerationMetricsBuckets:
         generations: list[tuple[float, float, float | None]],
         tools: tuple[float, float] | None = None,
         sub_agent: tuple[float, float, float] | None = None,
+        tool_union_ms: float | None = None,
     ) -> TurnRecord:
         messages: list = [
             AssistantMessage(started_at=cls._at(lo), completed_at=cls._at(hi), generation_duration_ms=gen)
@@ -1421,6 +1422,10 @@ class TestGenerationMetricsBuckets:
             messages=messages,
             harness_startup_ms=startup,
             harness_teardown_ms=teardown,
+            # Left UNSET by default, which is the LEGACY shape: every test in
+            # this class that does not pass it exercises the derive-from-commands
+            # fallback, and the parity test below pins the two paths together.
+            tool_union_ms=tool_union_ms,
         )
 
     def test_each_bucket_is_summed_across_turns(self):
@@ -1547,6 +1552,64 @@ class TestGenerationMetricsBuckets:
         buckets = turn_time_buckets(result)
         assert buckets.generation_ms == pytest.approx(800.0), "the child's 400ms is not main-thread generation"
         assert buckets.tool_ms == pytest.approx(200.0), "and its tool is not a main-thread span"
+
+    def test_a_stored_tool_union_renders_the_same_grid_as_a_derived_one(self):
+        """The two paths must be indistinguishable, or a legacy run reads differently.
+
+        Everything else in this class leaves `tool_union_ms` unset, so the
+        suite already covers the fallback; this is the control that the STORED
+        path — which every run recorded from now on takes — reaches the same
+        cell.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        kwargs = {"startup": 500.0, "teardown": 100.0, "generations": [(500, 1500, 800.0)], "tools": (600, 800)}
+        legacy = _make_result(iterations=[self._turn(**kwargs)])
+        stored = _make_result(iterations=[self._turn(**kwargs, tool_union_ms=200.0)])
+
+        assert turn_time_buckets(legacy) == turn_time_buckets(stored)
+        assert self._stat(HTMLReportGenerator().generate_task_html(legacy), "Tool exec") == self._stat(
+            HTMLReportGenerator().generate_task_html(stored), "Tool exec"
+        )
+
+    def test_a_stored_measured_zero_is_not_re_derived(self):
+        """`0.0` is a measurement and must not fall through to the fallback.
+
+        The fallback would find this turn's bounded command and report 200ms,
+        so reading the stored value with truthiness instead of `is not None`
+        would silently replace a measurement with a re-derivation.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(
+            iterations=[
+                self._turn(
+                    startup=500.0,
+                    teardown=100.0,
+                    generations=[(500, 1500, 800.0)],
+                    tools=(600, 800),
+                    tool_union_ms=0.0,
+                )
+            ]
+        )
+        assert turn_time_buckets(result).tool_ms == 0.0
+
+    def test_a_legacy_record_missing_the_field_entirely_still_validates(self):
+        """A `task.json` written before the field existed must stay renderable.
+
+        `TurnRecord` declares no `model_config`, so pydantic's default
+        `extra="ignore"` applies and an absent optional validates to `None` —
+        which is what routes it to the fallback.
+        """
+        turn = self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)], tools=(600, 800))
+        raw = turn.model_dump()
+        raw.pop("tool_union_ms")
+        restored = TurnRecord.model_validate(raw)
+        assert restored.tool_union_ms is None
+
+        from coder_eval.reports_stats import turn_time_buckets
+
+        assert turn_time_buckets(_make_result(iterations=[restored])).tool_ms == pytest.approx(200.0)
 
     def test_the_existing_four_stats_are_unchanged(self):
         result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])

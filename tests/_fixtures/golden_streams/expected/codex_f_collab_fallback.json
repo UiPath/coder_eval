@@ -123,5 +123,6 @@
   "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": null,
+  "tool_union_ms": "<scrubbed>",
   "user_input": "do it"
 }

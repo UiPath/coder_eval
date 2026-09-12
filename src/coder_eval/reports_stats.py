@@ -23,8 +23,7 @@ from coder_eval.models import (
     TaskExperimentSummary,
     TurnRecord,
 )
-from coder_eval.streaming.collector import main_thread_tool_spans
-from coder_eval.timing import union_ms
+from coder_eval.timing import main_thread_tool_spans, union_ms
 
 from .path_utils import TASK_JSON_FILENAME
 
@@ -435,16 +434,28 @@ def _sum_measured(values: Iterable[float | None]) -> float | None:
 def _turn_tool_union_ms(turn: TurnRecord) -> float | None:
     """One turn's tool execution — the UNION of its main-thread command spans.
 
-    ``None`` when the turn recorded no bounded span at all, which is different
-    from a turn whose tools took no time. Never the sum: concurrent calls
-    occupy the wall clock once, and summing them books the overlap twice.
+    PREFERS THE STORED VALUE. ``EventCollector.build_turn_record`` writes
+    ``TurnRecord.tool_union_ms`` from the single span set it measures all four
+    buckets against, so reading it is how this surface and the collector are
+    guaranteed to agree rather than merely observed to. The derivation below is
+    the LEGACY path: a ``task.json`` written before that field existed carries
+    neither it nor any way to recover it except by recomputing, and every such
+    run must stay renderable.
 
-    The span SELECTION is ``streaming.collector.main_thread_tool_spans``, not a
+    Note the two paths cannot be distinguished by value — both return ``None``
+    for a turn with no bounded span and a float otherwise — which is why the
+    stored one is checked with ``is not None`` rather than by truthiness: a
+    stored ``0.0`` is a measurement (spans were recorded and occupied no
+    measurable time) and must not fall through to a re-derivation.
+
+    The span SELECTION is ``timing.main_thread_tool_spans``, not a
     copy of it. That rule (which commands count, and the sub-agent exclusion)
     is what the collector measures the generation subtraction and the head and
     tail against, so a second typed implementation here is how two surfaces
     come to publish two different tool totals for one run.
     """
+    if turn.tool_union_ms is not None:
+        return turn.tool_union_ms
     spans = main_thread_tool_spans(turn.messages, turn.commands)
     return union_ms(spans) if spans else None
 

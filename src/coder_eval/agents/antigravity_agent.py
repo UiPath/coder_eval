@@ -1108,7 +1108,7 @@ class _AntigravityTurnState:
         #
         # This harness interleaves a tool INTO a window rather than tiling
         # around it, so the window legitimately contains time that is not model
-        # time. `EventCollector.subtract_tool_time` clips the union to these
+        # time. `timing.subtract_tool_time` clips the union to these
         # bounds and takes it out. Measured here before any of that existed: a
         # Bash opening 1.7 ms before the flush drove Sum(generation) +
         # Sum(command) 0.26 ms PAST the turn wall, on a turn whose whole

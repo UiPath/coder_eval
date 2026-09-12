@@ -4041,7 +4041,7 @@ class TestCE061WindowViaCloseWindow:
         the exact set rather than merely that it shrank. It has earned that
         twice: antigravity carried a TEMPORARY suppression until it moved onto
         `close_window`, and claude-code carried a permanent one until the tool
-        subtraction moved to `EventCollector.subtract_tool_time` — at which
+        subtraction moved to `timing.subtract_tool_time` — at which
         point it could call the same shrunken helper as the other four. This
         test is what failed each time the reason expired.
         """
@@ -4501,6 +4501,28 @@ class TestCE058NoTimingLiteral:
         assert not self._run("cfg = TurnRecord(startup_ms_limit=0)")
         assert not self._run("x = startup_ms_limit or 0")
 
+    # The tool-union family — the turn's THIRD wall-clock bucket, on the same
+    # model and under the same contract, and matching no arm of the regex until
+    # it was widened for it.
+    def test_flags_a_zero_tool_union(self):
+        assert self._run("rec = TurnRecord(iteration=0, tool_union_ms=0.0)")
+
+    def test_flags_the_tool_union_coalesce(self):
+        assert self._run("x = rec.tool_union_ms or 0")
+
+    def test_allows_an_unmeasured_tool_union(self):
+        assert not self._run("rec = TurnRecord(iteration=0, tool_union_ms=None)")
+
+    def test_allows_a_measured_tool_union(self):
+        assert not self._run("rec = TurnRecord(iteration=0, tool_union_ms=union_ms(spans))")
+
+    def test_ignores_a_bare_union_ms(self):
+        # `union_ms` is the ARITHMETIC helper, not a published bucket, and it
+        # returns 0.0 for an empty span list by contract. The family needs a
+        # leading segment for the same reason `_startup_ms` does.
+        assert not self._run("x = union_ms(spans) or 0")
+        assert not self._run("cfg = TurnRecord(tool_union_ms_limit=0)")
+
     # Scope + suppression.
     def test_is_out_of_scope_outside_src(self):
         assert not self._run(
@@ -4674,7 +4696,7 @@ class TestCE063NoBusyMsInAgents:
     """CE063 flags a reducer that would subtract tool time itself.
 
     The subtraction lives once, in
-    `coder_eval.streaming.collector.subtract_tool_time`. A reducer that also
+    `coder_eval.timing.subtract_tool_time`. A reducer that also
     does it has its tool time taken out TWICE — once by itself, once by the
     collector — which under-reports generation on that harness alone.
     """

@@ -462,7 +462,7 @@ class _PiTurnState:
         # sweep runs is not a completion — stamping it manufactures both an
         # `execution_completed_at` and the `duration_ms` derived from it, and
         # the pair then reads as a measured span that
-        # `EventCollector.subtract_tool_time` takes back out of a generation
+        # `timing.subtract_tool_time` takes back out of a generation
         # window it never actually occupied. `execution_started_at` IS kept:
         # the CLI really did emit that start, and one bound alone forms no
         # span (`main_thread_tool_spans` requires both). This is the guard the
@@ -613,7 +613,7 @@ class _PiTurnState:
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
         # Tile from the previous turn's end. The RAW window only —
-        # `EventCollector.subtract_tool_time` takes the tool union back out of
+        # `timing.subtract_tool_time` takes the tool union back out of
         # it, once, for every harness.
         turn_start = self.turn_started_at if self.turn_started_at is not None else completed
         started, generation_ms = close_window(

@@ -61,9 +61,18 @@ from tests.lint.rules.base import BaseRule
 # arms need a leading segment for the same reason the `_duration_ms` arm does:
 # the shipped fields are `harness_*`, and a bare `startup_ms` is more likely a
 # budget than a measurement.
+#
+# THREE field families, not two. `tool_union_ms` is the turn's third wall-clock
+# bucket, on the same model and under the same None-vs-0.0 contract as the
+# `harness_*` pair — and it matched NO arm above, so `TurnRecord(tool_union_ms=0.0)`
+# would have been invisible even though `TurnRecord` is already in
+# `_TIMING_CONSTRUCTORS`. Naming the field `tool_union_duration_ms` to inherit
+# the generic `_duration_ms` arm for free was considered and rejected: the two
+# fields beside it needed their own arm for exactly this reason, and one
+# spelling across the four buckets is worth two lines of regex.
 _TIMING_NAME = re.compile(
     r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms"
-    r"|[a-z_]*_duration_ms|[a-z_]*_(?:startup|teardown)_ms)$"
+    r"|[a-z_]*_duration_ms|[a-z_]*_(?:startup|teardown)_ms|[a-z_]*_union_ms)$"
 )
 
 # The constructors that carry a timing field. Keying on the callee name is what

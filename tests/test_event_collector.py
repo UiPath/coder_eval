@@ -18,7 +18,7 @@ from coder_eval.models import (
     TokenUsage,
     TurnRecord,
 )
-from coder_eval.streaming.collector import EventCollector, subtract_tool_time
+from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -26,7 +26,7 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     TurnStartEvent,
 )
-from coder_eval.timing import union_ms
+from coder_eval.timing import subtract_tool_time, union_ms
 
 
 TASK_ID = "collector-test"
@@ -216,6 +216,9 @@ class TestFullFieldParity:
         # AgentEndEvent, because no agent computes them.
         "harness_startup_ms",
         "harness_teardown_ms",
+        # The union of the same span set those two are measured against,
+        # computed once at the seam for the same reason.
+        "tool_union_ms",
     }
 
     def _full_agent_end(self) -> AgentEndEvent:
@@ -954,6 +957,156 @@ class TestAPublishedWindowMustMatchItsOwnBounds:
         """
         out = subtract_tool_time([self._msg(0, 0, 900.0, parent_tool_use_id="toolu_agent")], [])
         assert out[0].generation_duration_ms == pytest.approx(900.0)
+
+
+class TestTheToolUnionIsStored:
+    """`TurnRecord.tool_union_ms`: the turn's tool bucket, written once.
+
+    It is the one bucket a dict consumer cannot cheaply reproduce — union
+    arithmetic plus the sub-agent filter — so it is stored rather than left to
+    four surfaces to re-derive. The generation total deliberately is NOT: that
+    is a one-line sum over the message stream, and the reconciliation entry
+    exists precisely so a consumer sums the stream instead of reading a
+    separate aggregate.
+    """
+
+    BASE: ClassVar[datetime] = datetime(2026, 9, 11, 9, 0, 0)
+
+    @classmethod
+    def _at(cls, ms: float) -> datetime:
+        return cls.BASE + timedelta(milliseconds=ms)
+
+    def _tool(self, tool_id: str, lo: float, hi: float) -> ToolEndEvent:
+        return ToolEndEvent(
+            task_id=TASK_ID,
+            tool=CommandTelemetry(
+                tool_id=tool_id,
+                tool_name="Bash",
+                timestamp=self._at(lo),
+                sequence_number=0,
+                execution_started_at=self._at(lo),
+                execution_completed_at=self._at(hi),
+                result_status="success",
+            ),
+        )
+
+    def _record(self, messages, tools=()) -> TurnRecord:
+        collector = EventCollector()
+        _feed(
+            collector,
+            [
+                AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1, timestamp=self._at(0)),
+                *tools,
+                AgentEndEvent(
+                    task_id=TASK_ID,
+                    usage=TokenUsage(output_tokens=1),
+                    messages=list(messages),
+                    timestamp=self._at(10_000),
+                ),
+            ],
+        )
+        return collector.build_turn_record()
+
+    def _msg(self, lo: float, hi: float, **kwargs) -> AssistantMessage:
+        return AssistantMessage(
+            started_at=self._at(lo),
+            completed_at=self._at(hi),
+            generation_duration_ms=_span_ms(self._at(lo), self._at(hi)),
+            **kwargs,
+        )
+
+    def test_overlapping_calls_record_their_union_not_their_sum(self):
+        """The property that justifies storing the field at all.
+
+        Two 2 s calls overlapping almost entirely occupy ~2.1 s of wall clock,
+        not 4.1 s. A consumer summing `duration_ms` reports more tool time in
+        one message than the whole task's tool bucket, which is impossible on
+        its face — measured on a live antigravity turn.
+        """
+        rec = self._record(
+            [self._msg(0, 9_000)],
+            tools=[self._tool("t1", 1_000, 3_000), self._tool("t2", 1_100, 3_100)],
+        )
+        assert rec.tool_union_ms == pytest.approx(2_100.0)
+
+    def test_sequential_calls_record_their_total(self):
+        rec = self._record(
+            [self._msg(0, 9_000)],
+            tools=[self._tool("t1", 1_000, 2_000), self._tool("t2", 4_000, 4_500)],
+        )
+        assert rec.tool_union_ms == pytest.approx(1_500.0)
+
+    def test_a_sub_agent_tool_is_excluded(self):
+        """MAIN THREAD ONLY — the same filter the other three buckets use.
+
+        The spawning Agent call's own interval already spans the child's whole
+        run, so counting the child's tools books that time twice.
+        """
+        rec = self._record(
+            [
+                self._msg(0, 9_000),
+                self._msg(1_000, 1_400, parent_tool_use_id="agent-call", tool_use_ids=["child-1"]),
+            ],
+            tools=[self._tool("child-1", 1_000, 1_400)],
+        )
+        assert rec.tool_union_ms is None, "a turn whose only bounded span belongs to a child measured none"
+
+    def test_a_turn_with_no_bounded_span_records_none_not_zero(self):
+        """`None` means no span was recorded; `0.0` would mean spans took no time."""
+        unbounded = ToolEndEvent(
+            task_id=TASK_ID,
+            tool=CommandTelemetry(
+                tool_id="t1",
+                tool_name="Bash",
+                timestamp=self._at(1_000),
+                duration_ms=500.0,
+                result_status="success",
+            ),
+        )
+        rec = self._record([self._msg(0, 9_000)], tools=[unbounded])
+        assert rec.tool_union_ms is None
+
+    def test_a_zero_length_bounded_span_records_zero_not_none(self):
+        """The other side of the same distinction: this one WAS measured."""
+        rec = self._record([self._msg(0, 9_000)], tools=[self._tool("t1", 2_000, 2_000)])
+        assert rec.tool_union_ms == 0.0
+
+    def test_a_mid_stream_record_leaves_it_unset(self):
+        """No terminal event means no span set was built, so nothing was measured."""
+        collector = EventCollector()
+        _feed(collector, [AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1, timestamp=self._at(0))])
+        assert collector.build_turn_record().tool_union_ms is None
+
+    def test_the_span_set_is_computed_exactly_once(self):
+        """All four buckets must be measured against ONE selection.
+
+        `_overhead_ms` used to accept `tool_spans=None` and fall back to
+        building its own set — a second selection, which is what the comment at
+        the single call site says must never happen. The parameter is now
+        required, so the fallback is unrepresentable rather than merely unused.
+        """
+        import inspect
+
+        parameter = inspect.signature(EventCollector._overhead_ms).parameters["tool_spans"]
+        assert parameter.default is inspect.Parameter.empty
+
+    def test_two_builds_agree(self):
+        """`EarlyStopWatcher` holds one collector across a turn's rounds."""
+        collector = EventCollector()
+        _feed(
+            collector,
+            [
+                AgentStartEvent(task_id=TASK_ID, prompt="go", iteration=1, timestamp=self._at(0)),
+                self._tool("t1", 1_000, 3_000),
+                AgentEndEvent(
+                    task_id=TASK_ID,
+                    usage=TokenUsage(output_tokens=1),
+                    messages=[self._msg(0, 9_000)],
+                    timestamp=self._at(10_000),
+                ),
+            ],
+        )
+        assert collector.build_turn_record().tool_union_ms == collector.build_turn_record().tool_union_ms
 
 
 class TestBuildTurnRecordIsIdempotent:

@@ -43,5 +43,6 @@
   "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": null,
+  "tool_union_ms": null,
   "user_input": "do the thing"
 }
