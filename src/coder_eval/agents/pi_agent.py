@@ -296,6 +296,16 @@ class _PiTurnState:
         # whenever the harness runs tools concurrently, and only their
         # union may be subtracted (timing.py::busy_ms).
         self.turn_tool_spans: list[tuple[datetime, datetime]] = []
+        # Where the NEXT generation window starts: the previous turn's end.
+        # Pi was the only harness measuring from its own `turn_start`, so the
+        # wall clock between one `turn_end` and the next `turn_start` — the
+        # model time that PRODUCED that turn — fell into no bucket at all.
+        #
+        # None until the first turn finishes, and deliberately so: the first
+        # window keeps its own `turn_start`, because everything before it is
+        # CLI process spawn, not model time. Same shape as OpenCode's
+        # `gen_mark` and Codex's `gen_mark_ms`.
+        self.gen_mark: datetime | None = None
 
         # toolCallId -> telemetry for tools awaiting a result.
         self.open_tools: dict[str, CommandTelemetry] = {}
@@ -356,7 +366,11 @@ class _PiTurnState:
         self.turn_started_at = datetime.now()
         self.turn_text_parts = []
         self.turn_tool_ids = []
-        self.turn_tool_spans = []
+        # `turn_tool_spans` is deliberately NOT reset here — see the identical
+        # note in `opencode_agent.on_step_start`. Now that the window opens at
+        # `gen_mark` rather than at this `turn_start`, a call closing in the
+        # gap between them belongs to it, and clearing the list here would
+        # publish that call's execution as the next window's model time.
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -583,9 +597,11 @@ class _PiTurnState:
 
         # The open calls and the double-subtraction rule they rest on live in
         # `close_window`'s docstring.
+        turn_start = self.turn_started_at if self.turn_started_at is not None else completed
         started, generation_ms = close_window(
-            mark=self.turn_started_at if self.turn_started_at is not None else completed,
+            mark=self.gen_mark if self.gen_mark is not None else turn_start,
             now=completed,
+            item_start=turn_start,
             closed_spans=self.turn_tool_spans,
             open_started_ats=[
                 t.execution_started_at for t in self.open_tools.values() if t.execution_started_at is not None
@@ -608,6 +624,13 @@ class _PiTurnState:
                 message_id=str(message.get("responseId") or "") or None,
             )
         )
+        # A message was appended, so the next window starts where this one
+        # ended. Only a finished turn advances the mark: one that never
+        # finished published nothing, so tiling past it would attribute its
+        # time to whichever turn finishes next. The span list is cleared with
+        # it, and only with it — see `on_turn_start`.
+        self.gen_mark = completed
+        self.turn_tool_spans = []
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,
