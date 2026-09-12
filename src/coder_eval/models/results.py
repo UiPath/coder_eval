@@ -548,6 +548,34 @@ class EvaluationResult(BaseModel):
     started_at: datetime = Field(description="When evaluation started")
     completed_at: datetime | None = Field(default=None, description="When evaluation completed")
     duration_seconds: float = Field(default=0.0, description="Total evaluation duration")
+    setup_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds from the task starting until the agent phase begins — sandbox "
+            "setup, agent construction and start(), and any pre_run commands. TASK-scoped, "
+            "which is why it is here and not a fifth member of TurnRecord's four buckets: "
+            "those tile ONE TURN and their identity (head + generation + tool + tail == the "
+            "turn's span) is asserted to the millisecond, while setup happens once for a task "
+            "that may run N turns. Folding it into the first turn's harness_startup_ms would "
+            "break that identity by construction AND make turn 1 incomparable with turns "
+            "2..N. It is also not harness time: it is the orchestrator's own, measured at "
+            "~1.86s for claude-code and pi alike. Named rather than left in the report's "
+            "residual because it is a known, measurable phase, and a residual holding a "
+            "nameable constant is how a number stops meaning what it says."
+        ),
+    )
+    grading_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds spent checking success criteria, summed across every "
+            "``SuccessChecker.check_all_async`` call this evaluation made — the single-shot "
+            "check, the per-dialog-turn checks, and the post-failure diagnostic pass. "
+            "Accumulated on the checker rather than at the four call sites so a fifth one "
+            "cannot be added without it. ``None`` on an ungraded row (``coder-eval "
+            "execute``), where nothing was checked — never 0.0, which would claim a "
+            "measurement was taken and came back instant (CE058)."
+        ),
+    )
 
     # Results
     final_status: FinalStatus = Field(description="Final status of the evaluation")

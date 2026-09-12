@@ -7,6 +7,7 @@ the criteria registry.
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -93,6 +94,15 @@ class SuccessChecker:
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
         self.route = route
+        # Cumulative wall ms spent grading, across every `check_all_async` call
+        # this checker serves. Accumulated HERE rather than at the four
+        # orchestrator call sites (single-shot, evaluate-only, the per-dialog-turn
+        # check, the post-failure diagnostics) so a fifth call site cannot be
+        # added without it — the same reason the tool subtraction lives at the
+        # one collector seam. `None` until something is actually checked, so an
+        # ungraded row reports "never measured" rather than an instant 0.0
+        # (CE058).
+        self.grading_ms: float | None = None
 
         # V3: Lazy initialization - registry loaded here, not at import
         if init_registry:
@@ -205,12 +215,22 @@ class SuccessChecker:
         """
         records, ref_dir = self._resolve_refs(turn_records, reference_dir)
 
+        # Monotonic, like every other duration in this codebase: a wall-clock
+        # delta would move if the clock stepped mid-grade, and an `agent_judge`
+        # criterion can run for minutes.
+        started = time.monotonic()
         results: list[CriterionResult] = []
-        for criterion in criteria:
-            if self._is_native_async(criterion.type):
-                results.append(await self._check_single_async(criterion, records, ref_dir))
-            else:
-                results.append(await asyncio.to_thread(self._check_single, criterion, records, ref_dir))
+        try:
+            for criterion in criteria:
+                if self._is_native_async(criterion.type):
+                    results.append(await self._check_single_async(criterion, records, ref_dir))
+                else:
+                    results.append(await asyncio.to_thread(self._check_single, criterion, records, ref_dir))
+        finally:
+            # In `finally` so a grade that raises still books the time it spent.
+            # Its cost is what the caller is trying to account for, and a crash
+            # does not un-spend it.
+            self.grading_ms = (self.grading_ms or 0.0) + (time.monotonic() - started) * 1000.0
         return results
 
     def _is_native_async(self, criterion_type: str) -> bool:

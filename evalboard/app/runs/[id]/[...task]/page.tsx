@@ -366,6 +366,8 @@ export default async function TaskPage({
                     recordedCostUsd={task.totalCostUsd}
                     taskDurationSeconds={task.durationSeconds}
                     harnessStartupMs={task.harnessStartupMs}
+                    setupMs={task.setupMs}
+                    gradingMs={task.gradingMs}
                     harnessTeardownMs={task.harnessTeardownMs}
                 />
             )}
