@@ -370,7 +370,14 @@ class _OpenCodeTurnState:
         self.step_started_at = datetime.now()
         self.step_text_parts = []
         self.step_tool_ids = []
-        self.step_tool_spans = []
+        # `step_tool_spans` is deliberately NOT reset here. The window this
+        # list feeds opened at `gen_mark` — the PREVIOUS step's finish — so a
+        # call closing in the gap before this `step_start` belongs to it, and
+        # clearing the list now wipes the span before `step_finish` can
+        # subtract it. Reproduced: the window then published the call's
+        # execution as model time while the call's own `duration_ms` counted
+        # the same milliseconds again — a 100% overstatement of that window.
+        # It is cleared at the flush instead, right after the mark advances.
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -739,8 +746,10 @@ class _OpenCodeTurnState:
         # A message was appended, so the next window starts where this one
         # ended. Only `step_finish` advances the mark: a step that never
         # finished published nothing, so tiling past it would attribute its
-        # time to whichever step finishes next.
+        # time to whichever step finishes next. The span list is cleared with
+        # it, and only with it — see `on_step_start`.
         self.gen_mark = completed
+        self.step_tool_spans = []
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,

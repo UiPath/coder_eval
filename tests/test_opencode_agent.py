@@ -1996,3 +1996,133 @@ class TestGenerationWindowsTileTheTurn:
         covered = (second.completed_at - first.started_at).total_seconds() * 1000.0
         gen = sum(m.generation_duration_ms or 0.0 for m in (first, second))
         assert gen == pytest.approx(covered)
+
+
+_SPAN_EPOCH_MS = 1_800_000_000_000
+_SPAN_BASE = datetime.fromtimestamp(_SPAN_EPOCH_MS / 1000)
+
+
+class _SteppedClock(datetime):
+    """A clock the test moves by hand, in ms from `_SPAN_BASE`.
+
+    Subclasses `datetime` rather than stubbing it, because `_epoch_ms_to_dt`
+    calls `datetime.fromtimestamp` through the same module global and must keep
+    resolving to the real implementation — the CLI's epoch stamps and the
+    reducer's own `now()` reads have to land on ONE timeline for the span
+    arithmetic under test to mean anything.
+    """
+
+    at_ms = 0.0
+
+    @staticmethod
+    def now(tz=None):
+        return _SPAN_BASE + timedelta(milliseconds=_SteppedClock.at_ms)
+
+
+class TestToolSpansSurviveTheStepBoundary:
+    """A tool that closes BETWEEN two steps still belongs to the next window.
+
+    `step_tool_spans` used to be cleared at `step_start`, which is after the
+    window it feeds has already opened at `gen_mark`. A call closing in that
+    gap had its span wiped before the next `step_finish` could subtract it, so
+    the window published the call's execution as model time while the call's
+    own `duration_ms` counted the same milliseconds again.
+
+    It needs the NON-TERMINAL tool path to reach: the CLI normally emits one
+    already-`completed` event per call, which closes inside the step that
+    opened it. That is why the measured corpus reads 0.00% and a reproduction
+    has to drive the state object.
+    """
+
+    def _run(self, monkeypatch):
+        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")
+        # The resolved telemetry leaves the state via ToolEnd; the identity
+        # case below reconciles against what was RECORDED, not against the
+        # clock the test scripted.
+        resolved: list[Any] = []
+        state.bind(lambda e: resolved.append(e.tool) if isinstance(e, ToolEndEvent) else None)
+
+        def tool(status, *, end_ms=None):
+            times = {"start": _SPAN_EPOCH_MS + 100}
+            if end_ms is not None:
+                times["end"] = _SPAN_EPOCH_MS + end_ms
+            state.on_tool_use({"callID": "c1", "tool": "bash", "state": {"status": status, "time": times}})
+
+        _SteppedClock.at_ms = 0
+        state.on_step_start({"messageID": "m1"})
+        _SteppedClock.at_ms = 100
+        tool("running")  # non-terminal: stays open across the boundary
+        _SteppedClock.at_ms = 1000
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
+        _SteppedClock.at_ms = 1500
+        tool("completed", end_ms=1500)  # closes in the GAP between the steps
+        _SteppedClock.at_ms = 1600
+        state.on_step_start({"messageID": "m2"})
+        _SteppedClock.at_ms = 2000
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
+        return resolved, [m for m in state.messages if m.role == "assistant"]
+
+    def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self, monkeypatch):
+        _, messages = self._run(monkeypatch)
+        assert len(messages) == 2
+        # Window 2 tiles 1000 -> 2000. c1 ran for 1000 -> 1500 of it, so 500ms
+        # is model time. Before the reset moved, this published 1000.0 — a 100%
+        # overstatement, with c1's own duration_ms counting the same 500ms.
+        assert messages[1].generation_duration_ms == pytest.approx(500.0)
+
+    def test_the_call_is_subtracted_from_exactly_one_window(self, monkeypatch):
+        # Window 1 owns c1's 100 -> 1000 slice (it was open at that boundary
+        # and bounded there); window 2 owns 1000 -> 1500. Neither owns both.
+        _, messages = self._run(monkeypatch)
+        assert messages[0].generation_duration_ms == pytest.approx(100.0)
+        assert messages[1].generation_duration_ms == pytest.approx(500.0)
+
+    def test_the_four_bucket_identity_closes_exactly_across_the_boundary(self, monkeypatch):
+        """generation + UNION(tool) accounts for the whole span, to the ms.
+
+        The assertion the golden corpus CANNOT make: `_scrub.py` masks
+        `generation_duration_ms` and both bounds to a placeholder, so a
+        snapshot records that a window was measured and never what it
+        measured, and its identity check is an upper bound besides — so
+        under-accounting, the defect this phase fixes, passes it silently.
+        """
+        from coder_eval.timing import busy_ms
+
+        resolved, messages = self._run(monkeypatch)
+        lo, hi = messages[0].started_at, messages[1].completed_at
+        generation_ms = sum(m.generation_duration_ms or 0.0 for m in messages)
+        command = next(c for c in resolved if c.tool_id == "c1")
+        tool_ms = busy_ms([(command.execution_started_at, command.execution_completed_at)], lo, hi)
+
+        assert generation_ms + tool_ms == pytest.approx((hi - lo).total_seconds() * 1000.0)
+
+    def test_a_step_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self, monkeypatch):
+        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")
+        _SteppedClock.at_ms = 0
+        state.on_step_start({"messageID": "m1"})
+        _SteppedClock.at_ms = 1000
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
+        mark_after_flush = state.gen_mark
+
+        _SteppedClock.at_ms = 1600
+        state.on_step_start({"messageID": "m2"})
+        _SteppedClock.at_ms = 1700
+        state.on_tool_use(
+            {
+                "callID": "c2",
+                "tool": "bash",
+                "state": {"status": "running", "time": {"start": _SPAN_EPOCH_MS + 1700}},
+            }
+        )
+        _SteppedClock.at_ms = 1900
+        state.close_open_tools()  # crash/timeout orphan sweep — no message appended
+
+        # Published nothing, so tiling past it would hand its time to whichever
+        # step finishes next, and wiping the spans would publish c2's execution
+        # as that step's model time.
+        assert state.gen_mark == mark_after_flush
+        assert state.step_tool_spans == [
+            (_SPAN_BASE + timedelta(milliseconds=1700), _SPAN_BASE + timedelta(milliseconds=1900))
+        ]

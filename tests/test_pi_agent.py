@@ -1210,3 +1210,156 @@ class TestGenerationWindowExcludesToolExecution:
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
         expected = span_ms - busy_ms(spans, message.started_at, message.completed_at)
         assert message.generation_duration_ms == pytest.approx(expected)
+
+
+_SPAN_BASE = datetime(2026, 3, 1, 9, 0, 0)
+
+
+class _SteppedClock(datetime):
+    """A clock the test moves by hand, in ms from `_SPAN_BASE`.
+
+    Pi self-stamps its tool spans with `datetime.now()`, so the tool intervals
+    and the window bounds come from this one source; scripting it is what makes
+    the span arithmetic deterministic.
+    """
+
+    at_ms = 0.0
+
+    @staticmethod
+    def now(tz=None):
+        return _SPAN_BASE + timedelta(milliseconds=_SteppedClock.at_ms)
+
+
+def _turn_end_payload():
+    return {"message": {"role": "assistant", "usage": {"input": 10, "output": 5}, "stopReason": "stop"}}
+
+
+class TestGenerationWindowsTileTheTurn:
+    """Each window runs from the PREVIOUS `turn_end`, not from its own `turn_start`.
+
+    Pi was the only harness measuring from its own turn start, so the wall
+    clock between one `turn_end` and the next `turn_start` — the model time
+    that PRODUCED the next turn — fell into no bucket at all. The four-bucket
+    identity is asserted only as an upper bound, so nothing failed.
+
+    The gap is small in practice (measured across 25 real window pairs: median
+    0.25 ms, max 0.75 ms). The value here is that it closes, and that the tool
+    spans keep working once it does — see TestToolSpansSurviveTheTurnBoundary,
+    which is the half that carries the weight.
+    """
+
+    def _two_turns(self, monkeypatch):
+        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m")
+        _SteppedClock.at_ms = 0
+        state.on_turn_start()
+        _SteppedClock.at_ms = 1000
+        state.on_turn_end(_turn_end_payload())
+        _SteppedClock.at_ms = 1600
+        state.on_turn_start()
+        _SteppedClock.at_ms = 2000
+        state.on_turn_end(_turn_end_payload())
+        return [m for m in state.messages if m.role == "assistant"]
+
+    def test_the_second_window_abuts_the_first(self, monkeypatch):
+        messages = self._two_turns(monkeypatch)
+        assert len(messages) == 2
+        assert messages[1].started_at == messages[0].completed_at
+
+    def test_the_inter_turn_gap_is_inside_a_window_rather_than_unaccounted(self, monkeypatch):
+        messages = self._two_turns(monkeypatch)
+        # 1000 -> 2000, which includes the 600ms between `turn_end` and the
+        # next `turn_start`. Untiled this reported 400ms and lost the 600.
+        assert messages[1].generation_duration_ms == pytest.approx(1000.0)
+
+
+class TestToolSpansSurviveTheTurnBoundary:
+    """A tool that closes BETWEEN two turns still belongs to the next window.
+
+    `turn_tool_spans` used to be cleared at `turn_start`, which is after the
+    window it feeds has opened at the mark. Pi was protected from that only by
+    NOT tiling: its window opened at `turn_start`, so a call that ended before
+    then fell outside it anyway. Tiling without moving the reset therefore
+    takes a correct harness and introduces the double-count — which is why both
+    changes land in one commit, reset first.
+    """
+
+    def _run(self, monkeypatch):
+        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m")
+        # The resolved telemetry leaves the state via ToolEnd; the identity
+        # case below reconciles against what was RECORDED, not against the
+        # clock the test scripted.
+        resolved: list[Any] = []
+        state.bind(lambda e: resolved.append(e.tool) if isinstance(e, ToolEndEvent) else None)
+        _SteppedClock.at_ms = 0
+        state.on_turn_start()
+        _SteppedClock.at_ms = 100
+        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
+        _SteppedClock.at_ms = 1000
+        state.on_turn_end(_turn_end_payload())
+        _SteppedClock.at_ms = 1500
+        state.on_tool_execution_end({"toolCallId": "c1", "result": "ok"})  # closes in the GAP
+        _SteppedClock.at_ms = 1600
+        state.on_turn_start()
+        _SteppedClock.at_ms = 2000
+        state.on_turn_end(_turn_end_payload())
+        return resolved, [m for m in state.messages if m.role == "assistant"]
+
+    def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self, monkeypatch):
+        _, messages = self._run(monkeypatch)
+        # Window 2 tiles 1000 -> 2000. c1 ran for 1000 -> 1500 of it, so 500ms
+        # is model time. With the reset left at `turn_start` this reads 1000.0.
+        assert messages[1].generation_duration_ms == pytest.approx(500.0)
+
+    def test_the_call_is_subtracted_from_exactly_one_window(self, monkeypatch):
+        _, messages = self._run(monkeypatch)
+        # Window 1 bounded c1 at its own close (100 -> 1000); window 2 takes
+        # only the remainder.
+        assert messages[0].generation_duration_ms == pytest.approx(100.0)
+        assert messages[1].generation_duration_ms == pytest.approx(500.0)
+
+    def test_the_four_bucket_identity_closes_exactly_across_the_boundary(self, monkeypatch):
+        """generation + UNION(tool) accounts for the whole span, to the ms.
+
+        This is the assertion the golden corpus CANNOT make: `_scrub.py` masks
+        `generation_duration_ms` and both bounds to a placeholder, so a
+        snapshot records that a window was measured and never what it measured.
+        Its identity check (`_scrub.py`) is an upper bound besides, so
+        under-accounting — the defect this phase fixes — passes it silently.
+        `scripts/timing/decompose_run.py --max-residual-pct` is the two-sided
+        check on live runs; this is the committed one.
+        """
+        from coder_eval.timing import busy_ms
+
+        resolved, messages = self._run(monkeypatch)
+        lo, hi = messages[0].started_at, messages[1].completed_at
+        generation_ms = sum(m.generation_duration_ms or 0.0 for m in messages)
+        command = next(c for c in resolved if c.tool_id == "c1")
+        tool_ms = busy_ms([(command.execution_started_at, command.execution_completed_at)], lo, hi)
+
+        assert generation_ms + tool_ms == pytest.approx((hi - lo).total_seconds() * 1000.0)
+
+    def test_a_turn_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self, monkeypatch):
+        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m")
+        _SteppedClock.at_ms = 0
+        state.on_turn_start()
+        _SteppedClock.at_ms = 1000
+        state.on_turn_end(_turn_end_payload())
+        mark_after_flush = state.gen_mark
+
+        _SteppedClock.at_ms = 1600
+        state.on_turn_start()
+        _SteppedClock.at_ms = 1700
+        state.on_tool_execution_start({"toolCallId": "c2", "toolName": "bash", "args": {}})
+        _SteppedClock.at_ms = 1900
+        state.close_open_tools()  # crash/timeout orphan sweep — no message appended
+
+        # Published nothing, so tiling past it would hand its time to whichever
+        # turn finishes next, and wiping the spans would publish c2's execution
+        # as that turn's model time.
+        assert state.gen_mark == mark_after_flush
+        assert [(s, e) for s, e in state.turn_tool_spans] == [
+            (_SPAN_BASE + timedelta(milliseconds=1700), _SPAN_BASE + timedelta(milliseconds=1900))
+        ]
