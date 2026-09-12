@@ -185,6 +185,10 @@ export interface RunListingRow {
     // leaves BOTH sides of every rate, so this — not tasksRun — is the pass-rate
     // denominator. Equals tasksRun on any graded run.
     tasksGraded: number;
+    // Rows that actually ran: tasksRun minus the ones the nightly carried
+    // forward as mature passes. taskDurationSeconds is compute time over
+    // exactly these, so the Duration cell can say what it is describing.
+    tasksExecuted: number;
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
     // Run-level harness (coder-eval AgentKind) for the Harness column; null on
@@ -1065,6 +1069,12 @@ export interface ScopedRun {
     tasks: RunOverviewTask[];
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
+    // Rows in `tasks` that actually ran. Carried rather than re-derived by each
+    // consumer because on the whole-run slice it comes from the same helper
+    // that produced taskDurationSeconds (over run.json's task_results), and a
+    // second count over `tasks` — which drops rows with no task_id — could
+    // disagree with the duration's own denominator.
+    tasksExecuted: number;
 }
 
 export function scopeRunTasks(
@@ -1077,6 +1087,8 @@ export function scopeRunTasks(
         tasks: overview.tasks,
         totalCostUsd: overview.totalCostUsd,
         taskDurationSeconds: overview.taskDurationSeconds,
+        // ?? for an overview built before the field existed (test factories).
+        tasksExecuted: overview.tasksExecuted ?? overview.tasks.length,
     };
     if (tag == null && needle == null) return wholeRun;
 
@@ -1098,6 +1110,13 @@ export function scopeRunTasks(
     // Cost sums any matching task that recorded one; duration is only meaningful
     // when every matching task has one (otherwise the partial sum would
     // understate the slice — mirrors readRunOverview's whole-run rule).
+    //
+    // Mature-skipped rows leave BOTH sides of the duration, exactly as they do
+    // in deriveRunDuration: they are carried-forward passes that never ran.
+    // Without this the filtered slice used a different definition than the
+    // unfiltered one — and worse, ONE skipped row with no duration flipped
+    // durAllPresent and rendered "—" for a run whose executed rows were all
+    // timed.
     let costSum = 0;
     let costHasAny = false;
     let durSum = 0;
@@ -1107,6 +1126,7 @@ export function scopeRunTasks(
             costSum += t.totalCostUsd;
             costHasAny = true;
         }
+        if (t.matureSkipped) continue;
         if (t.durationSeconds != null) {
             durSum += t.durationSeconds;
         } else {
@@ -1117,6 +1137,7 @@ export function scopeRunTasks(
         tasks: matching,
         totalCostUsd: costHasAny ? costSum : null,
         taskDurationSeconds: durAllPresent ? durSum : null,
+        tasksExecuted: matching.filter((t) => !t.matureSkipped).length,
     };
 }
 
@@ -1131,6 +1152,7 @@ function rowFromScoped(
             .length,
         tasksRun: scoped.tasks.length,
         tasksGraded: scoped.tasks.filter((t) => isGraded(t.status)).length,
+        tasksExecuted: scoped.tasksExecuted,
         totalCostUsd: scoped.totalCostUsd,
         taskDurationSeconds: scoped.taskDurationSeconds,
         harness: harness ?? null,
@@ -1245,6 +1267,7 @@ export function buildAdhocRows(
             ).length,
             tasksRun: overview.tasks.length,
             tasksGraded: overview.tasks.filter((t) => isGraded(t.status)).length,
+            tasksExecuted: overview.tasksExecuted ?? overview.tasks.length,
             totalCostUsd: overview.totalCostUsd,
             taskDurationSeconds: overview.taskDurationSeconds,
             // Harness is a main-table-only (internal) column; ad-hoc rows omit it.

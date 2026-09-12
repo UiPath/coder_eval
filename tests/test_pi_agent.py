@@ -17,14 +17,16 @@ import asyncio
 import json
 import os
 import signal
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from coder_eval.agents import pi_agent as agent_module
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AgentKind, AssistantMessage, PiAgentConfig
+from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.events import (
     AgentEndEvent,
@@ -37,124 +39,20 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-
-
-_FIXTURE = Path(__file__).parent / "fixtures" / "pi_happy_stream.jsonl"
-HAPPY_STREAM = _FIXTURE.read_text(encoding="utf-8").splitlines()
-
-# Derived from the fixture's three `turn_end` usages (per-generation, summed):
-#   input   406 + 512 + 79   = 997
-#   output  (69+8)+(49+3)+(28+3) = 160   (reasoning folds into the output rate)
-#   cacheRead 1024 + 1024 + 1536 = 3584
-#   cost.total 0.002177194 + 0.002192494 + 0.000951666 = 0.005321354
-EXPECTED_INPUT = 997
-EXPECTED_OUTPUT = 160
-EXPECTED_CACHE_READ = 3584
-EXPECTED_COST = 0.005321354
-
-
-def _turn_start() -> str:
-    return json.dumps({"type": "turn_start"})
-
-
-def _turn_end(*, inp: int, out: int, cache_read: int = 0, cache_write: int = 0, reasoning: int = 0, cost: float = 0.0):
-    """A `turn_end` event carrying that step's own (per-generation) usage."""
-    usage: dict[str, Any] = {
-        "input": inp,
-        "output": out,
-        "cacheRead": cache_read,
-        "cacheWrite": cache_write,
-        "reasoning": reasoning,
-        "totalTokens": inp + out + cache_read + cache_write,
-        "cost": {"total": cost},
-    }
-    return json.dumps(
-        {"type": "turn_end", "message": {"role": "assistant", "usage": usage, "stopReason": "stop"}, "toolResults": []}
-    )
-
-
-def _tool_start(call_id: str, name: str, args: dict[str, Any]) -> str:
-    return json.dumps({"type": "tool_execution_start", "toolCallId": call_id, "toolName": name, "args": args})
-
-
-def _tool_end(call_id: str, name: str, text: str, *, is_error: bool = False) -> str:
-    return json.dumps(
-        {
-            "type": "tool_execution_end",
-            "toolCallId": call_id,
-            "toolName": name,
-            "result": {"content": [{"type": "text", "text": text}]},
-            "isError": is_error,
-        }
-    )
-
-
-class _FakeProcess:
-    def __init__(self, lines: list[str], returncode: int = 0, stderr: bytes = b"") -> None:
-        self._lines = [f"{line}\n".encode() for line in lines]
-        self.returncode: int | None = None
-        self._final_returncode = returncode
-        self._stderr = stderr
-        self.pid = 4242
-        self.terminated = False
-        self.killed = False
-        self.stdout = self
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        self.returncode = self._final_returncode
-        return b""
-
-    async def read(self) -> bytes:
-        return self._stderr
-
-    async def wait(self) -> int:
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = self._final_returncode
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = self._final_returncode
-
-
-class _RunningProcess(_FakeProcess):
-    """A process that stays alive until it is explicitly terminated or killed."""
-
-    def __init__(self, lines: list[str], **kwargs: Any) -> None:
-        super().__init__(lines, **kwargs)
-        self._exited = asyncio.Event()
-
-    async def wait(self) -> int:
-        await self._exited.wait()
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self._exited.set()
-
-    def kill(self) -> None:
-        self.killed = True
-        self._exited.set()
-
-
-class _ExplodingRunningProcess(_RunningProcess):
-    """Raises from ``readline`` mid-stream AND stays alive, like the real CLI.
-
-    ``_ExplodingProcess`` inherits the plain fake's ``wait()``, which reports an
-    exit code the instant it is awaited — so it can never model the case that
-    matters for teardown: the read loop dying while the CLI is still streaming.
-    """
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        raise ValueError("Separator is not found, and chunk exceed the limit")
+from tests._fixtures.golden_streams.pi_fixtures import (
+    EXPECTED_CACHE_READ,
+    EXPECTED_COST,
+    EXPECTED_INPUT,
+    EXPECTED_OUTPUT,
+    HAPPY_STREAM,
+    _ExplodingRunningProcess,
+    _FakeProcess,
+    _RunningProcess,
+    _tool_end,
+    _tool_start,
+    _turn_end,
+    _turn_start,
+)
 
 
 @pytest.fixture
@@ -1193,3 +1091,97 @@ class TestCostFallsBackToTheRateCard:
         record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == 0.0
+
+
+class TestGenerationWindowExcludesToolExecution:
+    """A tool running inside a turn is not model time.
+
+    Pi marks the window at `turn_start` and closes it at `turn_end`, and
+    every tool call executes INSIDE it while also publishing its own
+    measured `duration_ms`. Publishing the raw span as generation time
+    counted the same milliseconds twice, which the task page's Unaccounted
+    cell renders as a ~-100% residual.
+
+    Driven at the reducer: the window is two `datetime.now()` reads and the
+    tool interval comes from the event payload, so only setting both
+    explicitly makes the arithmetic deterministic.
+    """
+
+    WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
+    WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms turn
+
+    def _finish_turn(self, monkeypatch, spans, open_starts=()):
+        class _Clock(datetime):
+            @staticmethod
+            def now(tz=None):
+                return TestGenerationWindowExcludesToolExecution.WINDOW_END
+
+        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m")
+        state.turn_started_at = self.WINDOW_START
+        state.turn_tool_spans = list(spans)
+        for i, started in enumerate(open_starts):
+            state.open_tools[f"open-{i}"] = CommandTelemetry(
+                tool_name="bash",
+                tool_id=f"open-{i}",
+                timestamp=started,
+                execution_started_at=started,
+            )
+        monkeypatch.setattr(agent_module, "datetime", _Clock)
+        state.on_turn_end(
+            {"message": {"role": "assistant", "usage": {"input": 100, "output": 20}, "stopReason": "stop"}}
+        )
+        assistant = [m for m in state.messages if m.role == "assistant"]
+        assert len(assistant) == 1
+        return assistant[0]
+
+    def test_tool_time_inside_the_turn_is_subtracted(self, monkeypatch):
+        message = self._finish_turn(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+        )
+        span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
+        assert span_ms == pytest.approx(1000.0)
+        assert message.generation_duration_ms == pytest.approx(500.0)
+
+    def test_a_turn_with_no_tools_keeps_its_whole_window(self, monkeypatch):
+        assert self._finish_turn(monkeypatch, []).generation_duration_ms == pytest.approx(1000.0)
+
+    def test_concurrent_tools_are_subtracted_once(self, monkeypatch):
+        # Two overlapping 500ms tools occupy 600ms, not 1000ms. Summing them
+        # would leave 0 generation for a turn that generated 400.
+        message = self._finish_turn(
+            monkeypatch,
+            [
+                (self.WINDOW_START + timedelta(milliseconds=100), self.WINDOW_START + timedelta(milliseconds=600)),
+                (self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700)),
+            ],
+        )
+        assert message.generation_duration_ms == pytest.approx(400.0)
+
+    def test_the_window_never_goes_negative(self, monkeypatch):
+        message = self._finish_turn(
+            monkeypatch,
+            [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
+        )
+        assert message.generation_duration_ms == 0.0
+
+    def test_a_tool_still_open_at_the_boundary_is_subtracted(self, monkeypatch):
+        # A call that opens inside this turn and closes inside the NEXT one
+        # straddles the boundary. Counting only closed intervals published the
+        # pre-boundary 400ms as generation while the call's own duration_ms
+        # counted it again.
+        message = self._finish_turn(
+            monkeypatch,
+            [],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=600)],
+        )
+        assert message.generation_duration_ms == pytest.approx(600.0)
+
+    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self, monkeypatch):
+        # Union, not sum, across the closed and still-open sets alike.
+        message = self._finish_turn(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
+        )
+        assert message.generation_duration_ms == pytest.approx(200.0)

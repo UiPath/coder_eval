@@ -17,6 +17,73 @@ This page is the contract for what each run limit means per harness, plus the sh
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
 
+## Timing capture
+
+What each harness records about *when* things happened, and how much of a task's
+wall clock its numbers account for.
+
+| Field | claude-code | codex | antigravity | opencode | pi |
+|---|---|---|---|---|---|
+| `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock per CLI step, minus tool execution inside the step | harness clock per CLI turn, minus tool execution inside the turn |
+| tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
+| `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
+| `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
+| `Σ generation + Σ tool ≈ turn duration` | yes | yes | yes | yes | yes |
+
+**`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
+Four of the five harnesses interleave tool execution into a single generation
+window. Antigravity reports a `Step` for the tool and only a later
+`usage_metadata` `Step` cuts the message; Codex's message window is seeded from
+the first item's start and extended to the last item's completion; OpenCode
+opens its window at `step_start` and closes it at `step_finish`, and Pi at
+`turn_start` / `turn_end`, with every tool call running inside. In all four the
+span between the recorded bounds legitimately CONTAINS tool time that the model
+did not spend generating, so all four subtract it — the **union** of the closed tool intervals
+clipped to the window (`agents/_timing.py::busy_ms`), never the sum, because
+tool calls overlap: Antigravity resolves several from one `Step` and backgrounds
+anything over ten seconds, and Codex spawns collab agents concurrently. Summing
+them over-subtracts by exactly the overlap and, with enough concurrency, drives
+the result to a clamped zero.
+
+The consequence worth knowing: on an emission that carries *only* a tool call,
+the whole measured window was that tool running, so the recorded generation
+time is legitimately `0.0`. That is a measurement, not a placeholder — `None`
+is what "never measured" looks like. Only `claude-code` does not need the
+subtraction: it marks the end of the previous SDK event and reads again when
+the next message arrives, so a tool's execution falls between two windows
+rather than inside one.
+
+**Why Codex leaves `generation_completed_at` as `None`.** It means "when the
+model finished emitting the `tool_use` block". Codex's stream does not carry
+that per tool; deriving it from the flush time would be a guess. Note also that
+`CommandTelemetry.timestamp` is the tool's own start on codex, antigravity,
+opencode and pi, and the generation-completed moment on claude-code. Nothing
+orders on it — `TurnRecord.commands` is sorted by `sequence_number` — but the
+field's own docstring still describes only the claude-code reading.
+
+**Codex `duration_ms` covers more than the command run.** Derived from the item
+stamps, it is the item's lifecycle (queueing and approval included) rather than
+the SDK's own narrower command-execution figure, which it deliberately overrides
+— the SDK reported `0` for 70 of 211 commands in one nightly. `fileChange` and
+generic tool items now carry a duration where they previously carried none, so
+`avg_command_time_ms` and `total_command_time_ms` for a Codex run describe every
+tool call rather than shell commands alone.
+
+### Known divergences
+
+- **Delegate (`delegate-sdk`, out of tree)** records `duration_ms` but no
+  execution bounds, so its tool calls cannot be placed on a timeline. Its
+  coverage is ~88%. Mirror the Codex change in `coder_eval_uipath`
+  (audit P3-1).
+- **Antigravity books orphan-poll waiting as agent duration.** A task can spend
+  `0.8 × turn_timeout` waiting on a tool call that never reaches DONE — 14 tasks
+  and 9.6h of one 83h run. Only CLOSED tool intervals are subtracted, so that
+  wait stays inside whichever generation window contains it, and the force-close
+  records `execution_completed_at` while leaving `duration_ms` as `None`
+  (audit P2-1).
+
+Both are deliberately deferred; see `c/time-bugs-audit.md` for the measurements.
+
 ## `max_turns` counts visible turns on Codex and Antigravity
 
 A "visible turn" is one entry in the run's timeline: one resolved tool call. It is

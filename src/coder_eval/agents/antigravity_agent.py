@@ -31,6 +31,7 @@ from typing import Any, ClassVar
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
+from coder_eval.agents._timing import busy_ms
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
@@ -554,6 +555,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
         self._begin_turn()
         turn_start_time = time.monotonic()
+        turn_start_wall = datetime.now()
         task_id = str(self.config.type)
         model = self._effective_model()
         collector = EventCollector()
@@ -570,6 +572,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             iteration=self._iteration,
             model=model,
             turn_start_time=turn_start_time,
+            turn_start_wall=turn_start_wall,
             max_turns=max_turns,
         )
 
@@ -803,6 +806,7 @@ class _AntigravityTurnState:
         iteration: int,
         model: str,
         turn_start_time: float,
+        turn_start_wall: datetime,
         max_turns: int | None = None,
     ) -> None:
         self._agent = agent
@@ -842,6 +846,22 @@ class _AntigravityTurnState:
         self._tool_last_status: dict[str, Any] = {}
         # Content blocks accumulated since the last per-generation flush.
         self._blocks: list[ContentBlock] = []
+        # Generation-window mark: where the CURRENT generation started. Set to
+        # the turn's own start so the first window includes prompt submission
+        # and connection setup — real time the model call cost, and the same
+        # choice Claude makes (its mark is also the turn start). Both stamps
+        # come from the SAME instant, captured by communicate(), so the
+        # recorded bounds and the measured duration describe one span.
+        # Advanced only by a flush that actually emitted a message.
+        self._gen_mark_monotonic: float = turn_start_time
+        self._gen_mark_wall: datetime = turn_start_wall
+        # Execution intervals of tools that CLOSED since the mark. This harness
+        # interleaves tool calls into one generation — the Step for the tool
+        # arrives and only a later usage_metadata Step cuts the message — so a
+        # window legitimately contains tool time that is not model time. Kept
+        # as intervals, not a running total, because they overlap (see
+        # busy_ms).
+        self._tool_spans_since_mark: list[tuple[datetime, datetime]] = []
 
     @property
     def ended_cleanly(self) -> bool:
@@ -947,6 +967,7 @@ class _AntigravityTurnState:
             )
             completed = datetime.now()
             started = start_tel.execution_started_at or completed
+            tool_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
             end_tel = start_tel.model_copy(
                 update={
                     "parameters": self._params(start_tel.tool_name, call.args, self._tool_input_keys.get(cid)),
@@ -954,9 +975,15 @@ class _AntigravityTurnState:
                     "result_summary": str(result_text) if result_text is not None else None,
                     "error_message": (step.error or "tool failed") if errored else None,
                     "execution_completed_at": completed,
-                    "duration_ms": max((completed - started).total_seconds() * 1000.0, 0.0),
+                    "duration_ms": tool_ms,
                 }
             )
+            # This tool closed inside the open generation window, so its time is
+            # not model time. The INTERVAL is recorded, not the duration: tool
+            # calls overlap here, and only their union may be subtracted (see
+            # busy_ms). Only the DONE path records one — a tool force-closed at
+            # finalize has duration_ms None and was never timed.
+            self._tool_spans_since_mark.append((started, completed))
             self.commands.append(end_tel)
             self.emit.on_event(
                 ToolEndEvent(
@@ -997,14 +1024,61 @@ class _AntigravityTurnState:
         """
         if not self._blocks and gen.is_empty():
             return
-        now = datetime.now()
+        now_monotonic = time.monotonic()
+        now_wall = datetime.now()
+        # Model-generation time = the whole window MINUS the tool execution
+        # that happened inside it.
+        #
+        # Do NOT "simplify" this to resetting the mark when a tool ends. That
+        # loses real model time: measured on run 2026-09-09_04-18-50, task
+        # skill-rpa-uia-google-search, a harness-local Read closed 8 ms after
+        # it opened while 6.4 s of model time separated the two flushes around
+        # it — a reset would have reported 8 ms and dropped the 6.4 s.
+        # Subtracting closed tool time handles that case AND its opposite (a
+        # 43 s Bash, where the model time really is the flush-to-DONE
+        # remainder).
+        #
+        # A tool that is still OPEN at flush time counts too, bounded at
+        # `now_wall`. Subtracting only CLOSED intervals published the portion
+        # of a straddling call that ran before the boundary as generation,
+        # while the call's own duration_ms counted it again — the one
+        # double-count that this harness's contiguous windows have no slack to
+        # absorb. Measured on tasks/hello_date: a Bash opening 1.7 ms before
+        # the flush drove Sum(generation) + Sum(command) 0.26 ms PAST the turn
+        # wall, on a turn whose whole headroom was 1.4 ms. The four sibling
+        # runs passed by 1.2-8.7 ms out of ~12 s, so this was a coin flip, not
+        # a rounding artifact.
+        #
+        # No double subtraction: when the call later closes, the DONE path
+        # appends its full interval to the NEXT window's list, where busy_ms
+        # clips it to the post-flush remainder.
+        span_ms = (now_monotonic - self._gen_mark_monotonic) * 1000.0
+        still_open = [
+            (tel.execution_started_at, now_wall)
+            for cid, tel in self._open_tools.items()
+            if cid not in self._closed_tools and tel.execution_started_at is not None
+        ]
+        tool_ms = busy_ms(self._tool_spans_since_mark + still_open, self._gen_mark_wall, now_wall)
+        generation_ms = span_ms - tool_ms
+        if generation_ms < 0:
+            # busy_ms clips to this window and unions overlaps, so it cannot
+            # exceed the window's own wall span. Reaching here means the two
+            # clocks disagree (the span is monotonic, the tool intervals are
+            # wall), i.e. jitter — worth a line in the task log, because the
+            # clamped 0.0 below is otherwise indistinguishable from a real
+            # instant generation. Numbers only: no agent output is logged.
+            self._agent._log.debug(
+                "Generation window went negative (span=%.1fms tool=%.1fms); clamping to 0.",
+                span_ms,
+                tool_ms,
+            )
         for i, block in enumerate(self._blocks):
             block.sequence = i
         self.messages.append(
             AssistantMessage(
-                started_at=now,
-                completed_at=now,
-                generation_duration_ms=0.0,
+                started_at=self._gen_mark_wall,
+                completed_at=now_wall,
+                generation_duration_ms=max(0.0, generation_ms),
                 content_blocks=list(self._blocks),
                 tool_use_ids=[b.tool_use_id for b in self._blocks if b.block_type == "tool_use" and b.tool_use_id],
                 input_tokens=gen.uncached_input_tokens,
@@ -1017,6 +1091,12 @@ class _AntigravityTurnState:
         )
         self._assistant_turns += 1
         self._blocks = []
+        # Advance the mark ONLY after a message was actually appended. The
+        # early return above means a no-op flush leaves the window open, so a
+        # later real generation still measures from where it began.
+        self._gen_mark_monotonic = now_monotonic
+        self._gen_mark_wall = now_wall
+        self._tool_spans_since_mark = []
 
     def _agent_output(self) -> str:
         if self._output_parts:

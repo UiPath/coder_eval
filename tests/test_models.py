@@ -588,3 +588,59 @@ class TestDockerWorkingDir:
 
         with pytest.raises(ValidationError, match="must be an absolute path"):
             DockerDriverConfig(working_dir="root")
+
+
+class TestAssistantMessageGenerationWindow:
+    """`generation_duration_ms` must be able to say "never measured".
+
+    The field was a required `float`, so a harness with no measurable window
+    had to invent one — and every producer that did wrote `0.0`, which reads
+    downstream as a real, instant generation (Antigravity's task pages showed
+    0ms of generation and a 0% breakdown for months). It is now `float | None`,
+    aligning it with `UserMessage.generation_duration_ms` in the same module.
+    """
+
+    @staticmethod
+    def _msg(**overrides):
+        from datetime import datetime
+
+        from coder_eval.models import AssistantMessage
+
+        now = datetime.now()
+        return AssistantMessage(started_at=now, completed_at=now, **overrides)
+
+    def test_omitting_it_yields_none_not_zero(self):
+        assert self._msg().generation_duration_ms is None
+
+    def test_a_measured_zero_is_still_legal(self):
+        # Only a PLACEHOLDER zero is the defect. A clamped real measurement
+        # (Antigravity subtracts tool time from its window) can be exactly 0.0.
+        assert self._msg(generation_duration_ms=0.0).generation_duration_ms == 0.0
+
+    def test_round_trip_preserves_none(self):
+        from coder_eval.models import AssistantMessage
+
+        dumped = self._msg().model_dump()
+        assert dumped["generation_duration_ms"] is None
+        assert AssistantMessage.model_validate(dumped).generation_duration_ms is None
+
+    def test_round_trip_preserves_a_value(self):
+        from coder_eval.models import AssistantMessage
+
+        dumped = self._msg(generation_duration_ms=1234.5).model_dump()
+        assert AssistantMessage.model_validate(dumped).generation_duration_ms == 1234.5
+
+    def test_a_historical_record_still_validates(self):
+        # task.json files already on disk carry a number; nothing to migrate.
+        from coder_eval.models import AssistantMessage
+
+        assert (
+            AssistantMessage.model_validate(
+                {
+                    "started_at": "2026-01-01T00:00:00",
+                    "completed_at": "2026-01-01T00:00:01",
+                    "generation_duration_ms": 1000.0,
+                }
+            ).generation_duration_ms
+            == 1000.0
+        )

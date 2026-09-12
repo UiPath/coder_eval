@@ -1,0 +1,100 @@
+{
+  "_comment": [
+    "Shared replay corpus for the tool-execution UNION, in milliseconds relative",
+    "to an arbitrary base instant. Two implementations must agree on it:",
+    "  * Python  — coder_eval.agents._timing.busy_ms, which subtracts tool time",
+    "              from an agent's generation window.",
+    "  * TypeScript — evalboard/lib/runs.ts::busyMs, which subtracts tool time",
+    "              from a task's wall clock to produce the Unaccounted residual.",
+    "They answer the same question about the same task.json, so a divergence",
+    "means the evalboard and the harness disagree about how long the tools ran.",
+    "tests/test_timing_union_parity.py and evalboard/lib/__tests__/timing-union-parity.test.ts",
+    "both replay this file; neither owns the numbers."
+  ],
+  "cases": [
+    {
+      "name": "no spans at all",
+      "window": [0, 1000],
+      "spans": [],
+      "expected_ms": 0
+    },
+    {
+      "name": "one span squarely inside the window",
+      "window": [0, 1000],
+      "spans": [[200, 700]],
+      "expected_ms": 500
+    },
+    {
+      "name": "two disjoint spans add up",
+      "window": [0, 1000],
+      "spans": [[100, 200], [400, 900]],
+      "expected_ms": 600
+    },
+    {
+      "name": "overlapping spans are counted once, not summed",
+      "window": [0, 1000],
+      "spans": [[100, 600], [200, 700]],
+      "expected_ms": 600
+    },
+    {
+      "name": "a span fully contained in another adds nothing",
+      "window": [0, 1000],
+      "spans": [[100, 900], [300, 400]],
+      "expected_ms": 800
+    },
+    {
+      "name": "adjacent spans merge without a gap",
+      "window": [0, 1000],
+      "spans": [[100, 400], [400, 700]],
+      "expected_ms": 600
+    },
+    {
+      "name": "unsorted input gives the same answer as sorted",
+      "window": [0, 1000],
+      "spans": [[600, 800], [100, 300], [200, 250]],
+      "expected_ms": 400
+    },
+    {
+      "name": "a span straddling both edges is clipped to the window",
+      "window": [1000, 2000],
+      "spans": [[0, 5000]],
+      "expected_ms": 1000
+    },
+    {
+      "name": "a span entirely before the window contributes nothing",
+      "window": [1000, 2000],
+      "spans": [[0, 900]],
+      "expected_ms": 0
+    },
+    {
+      "name": "a span entirely after the window contributes nothing",
+      "window": [1000, 2000],
+      "spans": [[2100, 2500]],
+      "expected_ms": 0
+    },
+    {
+      "name": "a zero-length span contributes nothing",
+      "window": [0, 1000],
+      "spans": [[500, 500]],
+      "expected_ms": 0
+    },
+    {
+      "name": "a span touching only the window's start edge contributes nothing",
+      "window": [1000, 2000],
+      "spans": [[500, 1000]],
+      "expected_ms": 0
+    },
+    {
+      "name": "three-way overlap collapses to one run",
+      "window": [0, 1000],
+      "spans": [[100, 400], [150, 500], [450, 800]],
+      "expected_ms": 700
+    },
+    {
+      "name": "four concurrent calls cannot exceed the window",
+      "window": [0, 1000],
+      "spans": [[100, 500], [150, 550], [200, 600], [250, 650]],
+      "expected_ms": 550
+    }
+  ]
+}

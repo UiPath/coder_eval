@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { epochMs } from "./timing";
 import path from "node:path";
 import { cache } from "react";
 import {
@@ -57,6 +58,10 @@ export interface RunSummary {
     // (run end - run start) when per-task durations are unavailable.
     taskDurationSeconds: number | null;
     tasksRun: number;
+    // Rows that actually executed: tasksRun minus the ones the nightly carried
+    // forward as mature passes. taskDurationSeconds is the compute time of
+    // exactly these, so a UI showing one must be able to name the other.
+    tasksExecuted: number;
     tasksSucceeded: number;
     tasksFailed: number;
     tasksError: number;
@@ -215,6 +220,19 @@ export interface MessageEvent {
     thinkingMs: number | null;    // portion of generationMs attributable to thinking blocks
     textMs: number | null;        // portion of generationMs attributable to text blocks
     toolGenMs: number | null;     // portion of generationMs attributable to tool_use blocks
+    // Generation time in an emission that mixed block kinds but carried no
+    // apportionable content, so it belongs to no kind. Null when everything
+    // was attributable — which is every single-kind (claude-code) emission.
+    // Rendered as "unsplit" (the MIXED badge already means something else).
+    //
+    // thinkingMs + textMs + toolGenMs + mixedGenMs === generationMs, always.
+    //
+    // The OUTPUT side has no such bucket, so its sibling invariant —
+    // thinkingOutputTokens + textOutputTokens + Σ toolUses[].outputTokens
+    // === outputTokens — holds for every emission EXCEPT one with no
+    // sizeable content, whose output is attributed to no kind. It can only
+    // under-sum, never over: over-summing was the double-count this replaced.
+    mixedGenMs: number | null;
     blockTypes: ("thinking" | "tool_use" | "text")[];
     thinkingText: string | null;  // concatenated thinking blocks
     text: string | null;          // concatenated text blocks (final reply chunks)
@@ -279,6 +297,14 @@ export interface MessageToolUse {
     description: string | null;
     genMs: number | null;         // LLM generation time for this tool_use block
     durationMs: number | null;    // tool execution time (separate from generationMs)
+    // The same execution as epoch milliseconds, so overlapping calls can be
+    // UNIONED rather than summed. `durationMs` alone cannot do that: two
+    // concurrent 5s calls sum to 10s of wall clock that only took 5, and a
+    // residual computed against the sum goes negative for a healthy run.
+    // Null on a call the harness never timed, or on a run predating the
+    // fields — such a call falls back to `durationMs` (see busyMs callers).
+    execStartMs: number | null;
+    execEndMs: number | null;
     isError: boolean;
     resultPreview: string | null; // short truncated preview of the result
     // Output tokens for this tool_use — the tool emission's recorded
@@ -400,7 +426,9 @@ export function aggregateSubAgentUsage(
 
 // ---------- run.json schema ----------
 
-interface RawTaskResult {
+// Exported so a test can type its fixtures against deriveRunDuration's
+// published signature rather than restating the row shape.
+export interface RawTaskResult {
     task_id?: string;
     // Experiment arm that produced this row (the <variant> sub-dir). Written by
     // reports_experiment.py on every run; absent on runs that predate it, which
@@ -818,6 +846,40 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
     };
 }
 
+export interface RunDurationTotals {
+    // Σ duration over EXECUTED rows, or the wall-clock fallback.
+    seconds: number | null;
+    // Rows that actually ran (mature-skipped excluded).
+    executedTasks: number;
+}
+
+// Compute time for a run, and how many of its rows actually produced it.
+//
+// Mature-skipped rows leave BOTH sides: they are carried-forward passes that
+// never executed, so counting their (absent or zero) duration alongside the
+// rows that did work reports one number and describes another — a codex
+// nightly rendered "1300 tasks · 15h 29m" for 397 tasks that ran. Mirrors
+// overview.ts::timePerPassedTaskForTasks, which already excludes them.
+//
+// The sum is only trusted when EVERY executed row recorded a duration;
+// otherwise the partial sum would understate the run drastically (1/50 rows
+// with a duration would render as that single task's time), so it falls back
+// to the run's wall clock.
+export function deriveRunDuration(
+    taskResults: RawTaskResult[],
+    totalDurationSeconds: number | null | undefined,
+): RunDurationTotals {
+    const executed = taskResults.filter((t) => !t.mature_skipped);
+    const allHaveDuration =
+        executed.length > 0 && executed.every((t) => t.duration != null);
+    return {
+        seconds: allHaveDuration
+            ? executed.reduce((a, t) => a + (t.duration ?? 0), 0)
+            : (totalDurationSeconds ?? null),
+        executedTasks: executed.length,
+    };
+}
+
 export async function readRunSummary(
     id: string,
     source: Source = DEFAULT_SOURCE,
@@ -829,27 +891,18 @@ export async function readRunSummary(
         (a, t) => a + (t.total_cost_usd ?? 0),
         0,
     );
-    // Sum of per-task durations (compute time). Only use the sum when every
-    // task has a duration recorded; otherwise the partial sum would understate
-    // the run drastically (e.g. 1/50 tasks with a duration would render as that
-    // single task's time). Fall back to wall-clock in that case.
-    const taskDurationSum = taskResults.reduce(
-        (a, t) => a + (t.duration ?? 0),
-        0,
+    const duration = deriveRunDuration(
+        taskResults,
+        data.total_duration_seconds,
     );
-    const allHaveDuration =
-        taskResults.length > 0 &&
-        taskResults.every((t) => t.duration != null);
-    const taskDurationSeconds = allHaveDuration
-        ? taskDurationSum
-        : (data.total_duration_seconds ?? null);
     const models = tallyModels(taskResults);
     return {
         id,
         startTime: data.start_time ?? null,
         endTime: data.end_time ?? null,
-        taskDurationSeconds,
+        taskDurationSeconds: duration.seconds,
         tasksRun: data.tasks_run ?? taskResults.length,
+        tasksExecuted: duration.executedTasks,
         tasksSucceeded: data.tasks_succeeded ?? 0,
         tasksFailed: data.tasks_failed ?? 0,
         tasksError: data.tasks_error ?? 0,
@@ -1049,6 +1102,12 @@ export interface RunOverview {
     // front-page table and the chart can be built from a single read.
     totalCostUsd: number | null;
     taskDurationSeconds: number | null;
+    // Rows that actually executed (mature-skipped excluded) — the set
+    // taskDurationSeconds is summed over, so the two always describe the same
+    // rows. Optional only so test factories predating it stay valid; a reader
+    // with no value falls back to the full task count, which is what every
+    // pre-mature_skipped run means anyway.
+    tasksExecuted?: number;
     componentShas: ComponentSha[];
     // Run-level harness (coder-eval AgentKind) from the RunConfig stamp
     // (environment_info.run_config), falling back to the most common per-task
@@ -1168,20 +1227,16 @@ export async function readRunOverview(
         (a, t) => a + (t.total_cost_usd ?? 0),
         0,
     );
-    const taskDurationSum = taskResults.reduce(
-        (a, t) => a + (t.duration ?? 0),
-        0,
+    const duration = deriveRunDuration(
+        taskResults,
+        data.total_duration_seconds,
     );
-    const allHaveDuration =
-        taskResults.length > 0 &&
-        taskResults.every((t) => t.duration != null);
     return {
         id,
         tasks,
         totalCostUsd: taskResults.length ? totalCost : null,
-        taskDurationSeconds: allHaveDuration
-            ? taskDurationSum
-            : (data.total_duration_seconds ?? null),
+        taskDurationSeconds: duration.seconds,
+        tasksExecuted: duration.executedTasks,
         componentShas: extractComponentShas(data.environment_info),
         ...extractRunConfig(data),
         startedAt: data.start_time ?? null,
@@ -1406,6 +1461,11 @@ interface CommandEntry {
     tool_id?: string;
     parameters?: Record<string, unknown>;
     duration_ms?: number;
+    // Wall-clock bounds of the tool's execution (CommandTelemetry). Present on
+    // every harness that times a resolved call; absent on a force-closed one,
+    // which was never timed at all.
+    execution_started_at?: string | null;
+    execution_completed_at?: string | null;
     result_status?: string;
     result_summary?: unknown;
     error_message?: string | null;
@@ -1623,6 +1683,72 @@ export function approxTokens(params: Record<string, unknown> | null | undefined)
     }
 }
 
+// Approximate share of one emission's generated content per block kind, in
+// ~tokens. Used to apportion BOTH generation time and output tokens inside a
+// mixed-kind emission, so the two can never disagree.
+//
+// Content size is a proxy, not a measurement: thinking is generated at a
+// slower per-token rate than tool args (see thinkingSim.ts), so this
+// apportions the emission's own recorded totals rather than claiming to
+// measure each kind.
+//
+// NOT derived from outputTokens. The first pass assigns a raw's ENTIRE
+// outputTokens to its tools, so `outputTokens - toolWeight` is always 0
+// whenever a tool is present — 150 of 174 sampled Delegate emissions — which
+// would produce the exact mirror of the bug this fixes: 100% tool, 0%
+// thinking. The weights depend on no output figure at all.
+export interface KindWeights {
+    thinking: number;
+    tool: number;
+    text: number;
+    total: number;
+}
+
+export function kindWeights(
+    thinkingChars: number,
+    textChars: number,
+    toolProxies: number[],
+): KindWeights {
+    // toolTokenProxies are ALREADY in approxTokens units, so all three terms
+    // are the same unit — do not mix chars with tokens here.
+    const thinking = Math.ceil(thinkingChars / CHARS_PER_TOKEN);
+    const text = Math.ceil(textChars / CHARS_PER_TOKEN);
+    const tool = toolProxies.reduce((a, b) => a + b, 0);
+    return { thinking, tool, text, total: thinking + tool + text };
+}
+
+// Split `amount` across the kinds that are present, in proportion to `w`,
+// rounding each and giving the LAST present kind the exact remainder so the
+// parts sum to `amount` with no drift.
+//
+// `tool` is deliberately FIRST, so it is never the remainder kind. The tool
+// share is also computed independently in the first pass (it is booked
+// per-tool there), and the two must agree exactly — if `tool` took the
+// remainder here while the first pass rounded, the two rounders disagree at
+// a tie and the parts OVER-sum by 1, which is the double-count this phase
+// exists to remove. Keeping `tool` on the rounded branch makes both sites
+// compute the identical expression.
+function splitByWeight(
+    amount: number,
+    w: KindWeights,
+): { thinking: number; tool: number; text: number } {
+    const out = { thinking: 0, tool: 0, text: 0 };
+    if (w.total <= 0) return out;
+    const kinds = (["tool", "thinking", "text"] as const).filter((k) => w[k] > 0);
+    let assigned = 0;
+    for (let i = 0; i < kinds.length; i++) {
+        const k = kinds[i];
+        if (i === kinds.length - 1) {
+            out[k] = amount - assigned;
+        } else {
+            const share = Math.round((amount * w[k]) / w.total);
+            out[k] = share;
+            assigned += share;
+        }
+    }
+    return out;
+}
+
 export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
     const out: MessageEvent[] = [];
     let order = 0;
@@ -1654,6 +1780,11 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             textParts: string[];
             toolUses: MessageToolUse[];
             toolTokenProxies: number[];
+            // Per-kind content weights, computed ONCE at the end of the first
+            // pass and read by both the per-tool split there and flush()'s
+            // group-level attribution. Stored rather than recomputed so the
+            // two cannot drift apart.
+            kindW: KindWeights;
             inputTokens: number | null;
             outputTokens: number | null;
             cacheWriteTokens: number | null;
@@ -1687,6 +1818,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 textParts: [],
                 toolUses: [],
                 toolTokenProxies: [],
+                kindW: { thinking: 0, tool: 0, text: 0, total: 0 },
                 inputTokens:
                     typeof msg.input_tokens === "number" ? msg.input_tokens : null,
                 outputTokens:
@@ -1739,6 +1871,8 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                             typeof cmd?.duration_ms === "number"
                                 ? cmd.duration_ms
                                 : null,
+                        execStartMs: epochMs(cmd?.execution_started_at),
+                        execEndMs: epochMs(cmd?.execution_completed_at),
                         isError:
                             b.is_error === true ||
                             (cmd?.result_status != null &&
@@ -1755,37 +1889,70 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     });
                 }
             }
-            // Split the raw's generation time across its tool_use blocks,
-            // weighted by an approximate token count (param payload size).
-            // The SDK only reports one generation_duration_ms per raw, so for
-            // parallel tool_uses we attribute proportional to argument size —
-            // larger calls plausibly cost more output tokens to generate. Falls
-            // back to even-split when all proxies are zero.
+            // ONE weight vector for this raw, apportioning its generation time
+            // AND its output tokens across the block kinds it carries. Computed
+            // once here so the per-tool figures below and the group-level
+            // buckets in flush() cannot disagree.
+            r.kindW = kindWeights(
+                r.thinkingParts.join("").length,
+                r.textParts.join("").length,
+                r.toolTokenProxies,
+            );
+            const kindW = r.kindW;
+            // The TOOL SHARE of the raw's generation time, then that share
+            // across the raw's own tools by argument size — larger calls
+            // plausibly cost more output tokens to generate. Falls back to an
+            // even split when all proxies are zero.
+            //
+            // The share matters: a mixed emission used to hand each tool row
+            // the raw's ENTIRE generationMs, so a single tool could render
+            // 10000ms directly beneath a 99ms tool total in the same section.
+            // For a single-kind tool raw the share is 1, so claude-code's
+            // per-tool numbers are unchanged.
             if (r.generationMs != null && r.toolUses.length > 0) {
                 const proxies = r.toolTokenProxies;
                 const total = proxies.reduce((a, b) => a + b, 0);
+                // Short-circuit when the tool IS the whole emission, rather
+                // than computing (x*n)/n — which is not bit-identical to x for
+                // every IEEE-754 input. Makes "claude-code's per-tool numbers
+                // are unchanged" structural instead of empirical.
+                const toolGenTotal =
+                    kindW.total <= 0 || kindW.tool === kindW.total
+                        ? r.generationMs
+                        : (r.generationMs * kindW.tool) / kindW.total;
                 for (let i = 0; i < r.toolUses.length; i++) {
                     const weight =
                         total > 0 ? proxies[i] / total : 1 / r.toolUses.length;
-                    r.toolUses[i].genMs = r.generationMs * weight;
+                    r.toolUses[i].genMs = toolGenTotal * weight;
                 }
             }
-            // Per-tool output tokens. The agent records output_tokens per
-            // emission, so a tool emission's output_tokens belongs to its
-            // tool_use block(s) directly — no gen-time guesswork. Only when a
-            // single emission carries multiple parallel tool_uses do we split
-            // it (by arg-size proxy, exact remainder on the last tool).
+            // Per-tool output tokens. The TOOL SHARE of the emission's output
+            // first (by the same weight vector that splits its generation
+            // time, so the two can never disagree), then that share across the
+            // raw's own tools by arg-size proxy, exact remainder on the last.
+            //
+            // The tool share used to be the raw's ENTIRE outputTokens, while
+            // flush() ALSO added the whole figure to thinkingOutSum whenever
+            // the raw carried a thinking block — attributing the same tokens
+            // twice for 93% of Delegate's emissions and inflating the cost
+            // simulator's thinking lever.
             if (r.outputTokens != null && r.toolUses.length > 0) {
+                // Same expression splitByWeight uses for its `tool` part, so
+                // the two sites round identically and cannot over-sum.
+                const toolOutTotal =
+                    kindW.total > 0
+                        ? Math.round((r.outputTokens * kindW.tool) / kindW.total)
+                        : r.outputTokens;
                 const proxies = r.toolTokenProxies;
                 const total = proxies.reduce((a, b) => a + b, 0);
                 let assigned = 0;
                 for (let i = 0; i < r.toolUses.length; i++) {
                     if (i === r.toolUses.length - 1) {
-                        r.toolUses[i].outputTokens = r.outputTokens - assigned;
+                        r.toolUses[i].outputTokens = toolOutTotal - assigned;
                     } else {
                         const weight =
                             total > 0 ? proxies[i] / total : 1 / r.toolUses.length;
-                        const share = Math.round(r.outputTokens * weight);
+                        const share = Math.round(toolOutTotal * weight);
                         r.toolUses[i].outputTokens = share;
                         assigned += share;
                     }
@@ -1817,6 +1984,11 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
             let haveText = false;
             let toolGenSum = 0;
             let haveToolGen = false;
+            // Generation time in a mixed-kind emission with no apportionable
+            // content at all, so it belongs to no kind. Keeps
+            // thinkingMs + textMs + toolGenMs + mixedGenMs === generationMs.
+            let mixedSum = 0;
+            let haveMixed = false;
             let inputTokSum = 0;
             let haveInputTok = false;
             let outputTokSum = 0;
@@ -1849,15 +2021,50 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 if (r.generationMs != null) {
                     genSum += r.generationMs;
                     haveGen = true;
-                    if (r.blockTypes.includes("thinking")) {
-                        thinkSum += r.generationMs;
-                        haveThink = true;
-                    } else if (r.blockTypes.includes("tool_use")) {
-                        toolGenSum += r.generationMs;
-                        haveToolGen = true;
-                    } else if (r.blockTypes.includes("text")) {
-                        textSum += r.generationMs;
-                        haveText = true;
+                }
+                // ONE weight vector per raw, apportioning both its generation
+                // time and its output tokens — that is what keeps the two
+                // consistent. Distinct kinds, not array length, so a raw
+                // carrying ['tool_use','tool_use'] stays single-kind.
+                const kinds = new Set(r.blockTypes);
+                const w = r.kindW;
+                if (r.generationMs != null) {
+                    if (kinds.size === 1) {
+                        // The claude-code path: one kind, all of it. Byte-for-byte
+                        // as before — these numbers must not move.
+                        const only = [...kinds][0];
+                        if (only === "thinking") {
+                            thinkSum += r.generationMs;
+                            haveThink = true;
+                        } else if (only === "tool_use") {
+                            toolGenSum += r.generationMs;
+                            haveToolGen = true;
+                        } else {
+                            textSum += r.generationMs;
+                            haveText = true;
+                        }
+                    } else if (w.total > 0) {
+                        const part = splitByWeight(r.generationMs, w);
+                        if (w.thinking > 0) {
+                            thinkSum += part.thinking;
+                            haveThink = true;
+                        }
+                        if (w.tool > 0) {
+                            toolGenSum += part.tool;
+                            haveToolGen = true;
+                        }
+                        if (w.text > 0) {
+                            textSum += part.text;
+                            haveText = true;
+                        }
+                    } else {
+                        // Mixed kinds but nothing sizeable to apportion by (a
+                        // tokens-only emission, or hidden CoT with empty args).
+                        // It belongs to no kind — a missing number beats a
+                        // wrong one. Only a POSITIVE amount sets the flag, so a
+                        // legal measured 0 does not invent a mixed bucket.
+                        mixedSum += r.generationMs;
+                        if (r.generationMs > 0) haveMixed = true;
                     }
                 }
                 if (r.inputTokens != null) {
@@ -1867,15 +2074,26 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 if (r.outputTokens != null) {
                     outputTokSum += r.outputTokens;
                     haveOutputTok = true;
-                    // Attribute the emission's output to its block kind (each
-                    // raw is one kind; priority mirrors the gen-time split).
-                    // Tool output is attached per-tool in the first pass.
-                    if (r.blockTypes.includes("thinking")) {
-                        thinkingOutSum += r.outputTokens;
-                        haveThinkingOut = true;
-                    } else if (r.blockTypes.includes("text")) {
-                        textOutSum += r.outputTokens;
-                        haveTextOut = true;
+                    // The non-tool share only: the tool share was booked
+                    // per-tool in the first pass, from THIS SAME vector.
+                    if (kinds.size === 1) {
+                        if (kinds.has("thinking")) {
+                            thinkingOutSum += r.outputTokens;
+                            haveThinkingOut = true;
+                        } else if (kinds.has("text")) {
+                            textOutSum += r.outputTokens;
+                            haveTextOut = true;
+                        }
+                    } else if (w.total > 0) {
+                        const part = splitByWeight(r.outputTokens, w);
+                        if (w.thinking > 0) {
+                            thinkingOutSum += part.thinking;
+                            haveThinkingOut = true;
+                        }
+                        if (w.text > 0) {
+                            textOutSum += part.text;
+                            haveTextOut = true;
+                        }
                     }
                 }
                 if (r.cacheWriteTokens != null) {
@@ -1891,11 +2109,18 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                     haveReasoning = true;
                 }
             }
-            // Per-block output comes straight from each emission's recorded
-            // output_tokens (thinking + text here, tools in the first pass) —
-            // the agent already split the call total across blocks by content
-            // length, so there's no re-approximation to do. These sum to the
-            // group's outputTokens.
+            // Per-block output. For a SINGLE-KIND emission it comes straight
+            // from the recorded output_tokens (thinking + text here, tools in
+            // the first pass) — the agent already split the call total across
+            // block-emissions by content length, so there is nothing to
+            // re-approximate. A MIXED emission is one recorded figure covering
+            // several kinds, so the reducer does apportion it, by kindWeights.
+            //
+            // These sum to the group's outputTokens EXCEPT for an emission
+            // with no sizeable content at all (kindWeights total 0), which
+            // attributes its output to no kind: there is no unsplit bucket on
+            // the output side, only on the time side. Reachable on claude-code
+            // via a sub-agent terminal message with empty result text.
             const textOutputTokens = haveTextOut ? textOutSum : null;
             out.push({
                 index: ++order,
@@ -1906,6 +2131,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 thinkingMs: haveThink ? thinkSum : null,
                 textMs: haveText ? textSum : null,
                 toolGenMs: haveToolGen ? toolGenSum : null,
+                mixedGenMs: haveMixed ? mixedSum : null,
                 blockTypes,
                 thinkingText: previewString(
                     thinkingParts.join("\n").trim(),
@@ -1983,6 +2209,7 @@ export function parseMessages(turns: TurnEntry[]): MessageEvent[] {
                 thinkingMs: null,
                 textMs: null,
                 toolGenMs: null,
+                mixedGenMs: null,
                 blockTypes: [],
                 thinkingText: null,
                 text: null,

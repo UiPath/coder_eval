@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
+from coder_eval.agents._timing import busy_ms
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
@@ -179,6 +180,64 @@ def _ms_to_dt(ms: int | None) -> datetime:
     return datetime.fromtimestamp(ms / 1000)
 
 
+class _ItemTiming(NamedTuple):
+    """When a Codex tool item ran, as the four fields CommandTelemetry records."""
+
+    timestamp: datetime
+    execution_started_at: datetime | None
+    execution_completed_at: datetime | None
+    duration_ms: float | None
+
+
+def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_ms: float | None) -> _ItemTiming:
+    """Resolve a tool item's timing from the SDK's millisecond stamps.
+
+    One helper for all three telemetry builders, so a command, a file change
+    and an MCP call cannot disagree about what a missing stamp means.
+
+    BOTH stamps or neither. Pairing a real stamp with ``_ms_to_dt(None)`` —
+    which is ``datetime.now()`` — would fabricate an interval out of one
+    reading and the current time, so the raw ``int | None`` values are checked
+    BEFORE conversion, never after.
+
+    With both present, ``timestamp`` becomes the tool's own start. It used to
+    be ``datetime.now()`` at COMPLETION, which places the call after its own
+    execution. Ordering is unaffected either way: ``TurnRecord.commands`` is
+    sorted on ``sequence_number`` (``collector._ordered_commands``).
+
+    Without them, the SDK item's own ``duration_ms`` is used only when it
+    reports something. A ``0`` (or, defensively, a negative) there is an
+    UNREPORTED duration, not an instant command — 70 of 211 commands in one
+    nightly reported ``0`` for calls the message gaps show took seconds — so
+    it becomes ``None`` and leaves both sides of every average instead of
+    dragging them toward zero.
+
+    ``generation_completed_at`` is deliberately absent from this tuple, for
+    all three builders: it means "when the model finished emitting the
+    ``tool_use`` block", which Codex's stream does not carry per tool.
+    Deriving it from the flush time would be a guess.
+    """
+    if started_ms is not None and completed_ms is not None:
+        started = _ms_to_dt(started_ms)
+        return _ItemTiming(
+            timestamp=started,
+            execution_started_at=started,
+            execution_completed_at=_ms_to_dt(completed_ms),
+            # Clamped for clock skew; both bounds stay as reported so the
+            # anomaly remains visible in the record.
+            duration_ms=max(0.0, float(completed_ms - started_ms)),
+        )
+    # Explicit `is None or <= 0`, never `sdk_duration_ms or None` — that is
+    # the CE058 coalesce read backwards, and it hides the decision being made.
+    duration = None if sdk_duration_ms is None or sdk_duration_ms <= 0 else float(sdk_duration_ms)
+    return _ItemTiming(
+        timestamp=datetime.now(),
+        execution_started_at=None,
+        execution_completed_at=None,
+        duration_ms=duration,
+    )
+
+
 def _status_value(status: Any) -> str:
     """Normalize a Codex status (enum or str) to its lowercase string value."""
     value = getattr(status, "value", status)
@@ -334,6 +393,15 @@ class _CodexTurnState:
         self.open_blocks: list[ContentBlock] = []
         self.open_start_ms: int | None = None
         self.open_end_ms: int | None = None
+        # Where the NEXT generation window starts: the previous flush's end.
+        # Windows tile the turn contiguously, as they do on Antigravity and
+        # claude-code. None until the first flush, which falls back to its own
+        # first item — the SDK gives no "turn began" stamp, and inventing one
+        # from time.time() would mix our clock with the SDK's inside a single
+        # subtraction. Advanced ONLY by a flush that actually appended a
+        # message, so a no-op flush leaves the window open and a later real
+        # generation still measures from where it began.
+        self.gen_mark_ms: int | None = None
         self.start_ms_by_id: dict[str, int] = {}
         self.blocks_by_id: dict[str, ContentBlock] = {}
         # Tools that emitted item/started but not item/completed; whatever remains
@@ -395,9 +463,57 @@ class _CodexTurnState:
 
         thinking_blocks = [b for b in self.open_blocks if b.block_type == "thinking"]
         action_blocks = [b for b in self.open_blocks if b.block_type != "thinking"]
-        started = _ms_to_dt(self.open_start_ms)
-        completed = _ms_to_dt(self.open_end_ms if self.open_end_ms is not None else self.open_start_ms)
-        gen_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
+        # The window runs from the PREVIOUS flush's end, not from this
+        # generation's first item. The SDK stamps an item with the moment it
+        # began EXECUTING, so seeding from it discarded the model time that
+        # produced the item — the gap between the last item's completion and
+        # this one's start. Measured on tasks/hello_date: a Write emission
+        # spanning 2 ms (start 20:50:39.063, end .065) reported 98 output
+        # tokens, and the 2694 ms of real generation sat in the preceding gap,
+        # attributed to nothing. Across that turn only 15.8% of the 17 s wall
+        # clock was accounted for. Tiling matches Antigravity and claude-code,
+        # and is what lets Sum(generation) + Sum(tool) reconcile to the turn.
+        #
+        # min() is defensive: a stamp that goes backwards must never push the
+        # window start PAST the first item and invert the span.
+        window_start_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
+        if window_start_ms is not None and self.open_start_ms is not None:
+            window_start_ms = min(window_start_ms, self.open_start_ms)
+        window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
+        started = _ms_to_dt(window_start_ms)
+        completed = _ms_to_dt(window_end_ms)
+        # The window is extended to the LAST item's completion, so any
+        # generation containing a tool call already CONTAINS that tool's
+        # execution. Publishing the raw span as generation time double-counts
+        # it against the tool's own duration_ms: a tool-only emission reported
+        # 250ms of "generation" for a 250ms `echo hi`, and the task page's
+        # Generation + Tool exec then exceeded the wall clock they must
+        # reconcile to.
+        #
+        # Same treatment, and the same shared helper, as Antigravity: subtract
+        # the UNION of the tool intervals clipped to this window. A sum would
+        # over-subtract wherever they overlap, which Codex produces natively
+        # via concurrent collab agents.
+        #
+        # Closed intervals, plus any call still OPEN at this flush bounded at
+        # the window end. Excluding the open ones publishes the part of a
+        # straddling call that ran inside this window as generation while the
+        # call's own duration_ms counts it again — harmless while the windows
+        # were too narrow to overlap a tool, and a live double-count now that
+        # they tile. Antigravity hit exactly that and broke the invariant by
+        # 0.26 ms; the fix travels with the tiling that makes it reachable.
+        tool_spans = [
+            (c.execution_started_at, c.execution_completed_at)
+            for c in self.commands
+            if c.execution_started_at is not None and c.execution_completed_at is not None
+        ]
+        tool_spans += [
+            (t.execution_started_at, completed)
+            for t in self.open_tools.values()
+            if t.execution_started_at is not None and t.execution_started_at < completed
+        ]
+        span_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
+        gen_ms = max(0.0, span_ms - busy_ms(tool_spans, started, completed))
         message_id = f"{self.turn_id}-msg-{self.gen_index}"
 
         # Output split: reasoning portion to the thinking row, the remainder to
@@ -405,13 +521,39 @@ class _CodexTurnState:
         think_out = reasoning_tok if action_blocks else total_output
         action_out = max(total_output - reasoning_tok, 0) if thinking_blocks else total_output
 
-        # Sub-message specs in generation order (thinking first). The FIRST carries
-        # the gen's input/cache + gen-time; the rest carry 0 (no double-count).
+        # Sub-message specs in generation order (thinking first). The FIRST
+        # carries the gen's input/cache — those are per-CALL billing figures
+        # and must not be split. Generation TIME is different: it is a
+        # property of the content, so it is apportioned below.
         specs: list[tuple[list[ContentBlock], int, int]] = []
         if thinking_blocks:
             specs.append((thinking_blocks, think_out, reasoning_tok))
         if action_blocks:
             specs.append((action_blocks, action_out, 0))
+
+        # Split gen_ms across the sub-messages by their own OUTPUT-TOKEN
+        # share, giving the last the remainder so the parts reconstruct
+        # gen_ms (to float precision — the shares are rounded to 1e-6 ms, so
+        # do not assert exact equality on an arbitrary measured window).
+        # Concentrating it all on the first reported the thinking row as the
+        # entire generation and the action row as instant. With no output
+        # recorded anywhere, split evenly — there is nothing to weigh by, and
+        # one row taking all of it would be a guess dressed as a measurement.
+        #
+        # NOTE this weighs by output tokens while the evalboard's own
+        # mixed-emission split weighs by CONTENT SIZE. Deliberate, not an
+        # oversight to unify: here the SDK hands us a real per-spec token
+        # count, so there is no need to approximate one from content length.
+        out_total = sum(out_tok for _, out_tok, _ in specs)
+        gen_parts: list[float] = []
+        assigned = 0.0
+        for idx, (_, out_tok, _) in enumerate(specs):
+            if idx == len(specs) - 1:
+                gen_parts.append(gen_ms - assigned)
+            else:
+                share = round(gen_ms * (out_tok / out_total if out_total > 0 else 1 / len(specs)), 6)
+                gen_parts.append(share)
+                assigned += share
 
         for idx, (blocks, out_tok, reas_tok) in enumerate(specs):
             for i, blk in enumerate(blocks):
@@ -421,7 +563,7 @@ class _CodexTurnState:
                 AssistantMessage(
                     started_at=started,
                     completed_at=completed,
-                    generation_duration_ms=gen_ms if first else 0.0,
+                    generation_duration_ms=gen_parts[idx],
                     content_blocks=blocks,
                     tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
                     input_tokens=gen_input if first else 0,
@@ -434,6 +576,10 @@ class _CodexTurnState:
                 )
             )
         self.gen_index += 1
+        # A message was appended, so the next window starts where this one
+        # ended. Both early returns above leave the mark alone on purpose.
+        if window_end_ms is not None:
+            self.gen_mark_ms = window_end_ms
         self.open_blocks = []
         self.open_start_ms = None
         self.open_end_ms = None
@@ -498,10 +644,17 @@ class _CodexTurnState:
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
             tool_id = item_id or f"{root_type}_{self.next_sequence}"
             self.seq_by_id[tool_id] = self.next_sequence
+            # The start stamp is known HERE, so record it on the start
+            # telemetry too. close_open_tools publishes this object verbatim
+            # for an orphan, and without it Codex was the only harness whose
+            # unresolved tool calls could not be placed on a timeline at all
+            # (OpenCode, Pi and Antigravity all set it at tool start).
+            started_at = _ms_to_dt(started_at_ms) if started_at_ms is not None else None
             start_tel = CommandTelemetry(
                 tool_name=self._agent._tool_name(root_type),
                 tool_id=tool_id,
-                timestamp=datetime.now(),
+                timestamp=started_at or datetime.now(),
+                execution_started_at=started_at,
                 parameters=self._agent._tool_parameters(root, root_type),
                 sequence_number=self.next_sequence,
             )
@@ -527,7 +680,18 @@ class _CodexTurnState:
             # This tool is now resolved — drop it from the orphan set.
             self.open_tools.pop(tool_id, None)
 
-            telemetry, is_error = self._agent._telemetry_for_item(root, root_type, tool_id, seq)
+            # The SDK reports both ends of the execution; `on_item_started`
+            # banked the start. Passing them in is what lets the builders
+            # record real execution bounds instead of a duration the SDK often
+            # leaves at 0.
+            telemetry, is_error = self._agent._telemetry_for_item(
+                root,
+                root_type,
+                tool_id,
+                seq,
+                started_ms=self.start_ms_by_id.get(tool_id),
+                completed_ms=completed_ms,
+            )
             if telemetry:
                 self.commands.append(telemetry)
             self.emit.on_event(
@@ -1599,8 +1763,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Rebuild the assistant transcript from a Turn's ``items`` list (fallback).
 
         Same item→block mapping as the streaming path, but Turn items carry no
-        per-item timestamps, so timing falls back to now()/0.0. Used only when the
-        stream produced no messages.
+        per-item timestamps, so there is no window to measure: the bounds fall back
+        to now() and ``generation_duration_ms`` is None (unknown), never 0.0 (an
+        instant generation). Used only when the stream produced no messages.
         """
         if not items:
             return []
@@ -1619,7 +1784,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 AssistantMessage(
                     started_at=now,
                     completed_at=now,
-                    generation_duration_ms=0.0,
+                    generation_duration_ms=None,
                     content_blocks=open_blocks,
                     tool_use_ids=[b.tool_use_id for b in open_blocks if b.block_type == "tool_use" and b.tool_use_id],
                     model=self._effective_model(),
@@ -1701,26 +1866,46 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return {}
 
     def _telemetry_for_item(
-        self, root: Any, root_type: str | None, tool_id: str, seq: int
+        self,
+        root: Any,
+        root_type: str | None,
+        tool_id: str,
+        seq: int,
+        *,
+        started_ms: int | None = None,
+        completed_ms: int | None = None,
     ) -> tuple[CommandTelemetry | None, bool]:
         """Build (telemetry, is_error) for a completed tool item.
 
         commandExecution/fileChange keep their dedicated rich extractors; every
         other tool kind routes through the generic builder so it still produces
         countable telemetry.
+
+        The SDK's millisecond stamps arrive as arguments rather than being read
+        back out of the reducer, so each builder stays a pure function of what
+        it is given.
         """
         if root_type == "commandExecution":
             exit_code = getattr(root, "exit_code", None)
-            return self._extract_command_telemetry(root, seq), exit_code != 0
+            return self._extract_command_telemetry(root, seq, started_ms, completed_ms), exit_code != 0
         if root_type == "fileChange":
             changes = getattr(root, "changes", []) or []
             status_str = _status_value(getattr(root, "status", "completed"))
             failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
-            return self._extract_file_change_telemetry(tool_id, changes, status_str, seq), failed
-        return self._extract_generic_telemetry(root, root_type, tool_id, seq)
+            return (
+                self._extract_file_change_telemetry(tool_id, changes, status_str, seq, started_ms, completed_ms),
+                failed,
+            )
+        return self._extract_generic_telemetry(root, root_type, tool_id, seq, started_ms, completed_ms)
 
     def _extract_generic_telemetry(
-        self, root: Any, root_type: str | None, tool_id: str, seq: int
+        self,
+        root: Any,
+        root_type: str | None,
+        tool_id: str,
+        seq: int,
+        started_ms: int | None = None,
+        completed_ms: int | None = None,
     ) -> tuple[CommandTelemetry | None, bool]:
         """CommandTelemetry for any tool item without a dedicated extractor.
 
@@ -1732,13 +1917,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
             err = getattr(root, "error", None)
             success = getattr(root, "success", None)
             is_error = bool(err) or success is False or status_str in _FILE_CHANGE_FAILURE_STATUSES
-            duration_ms = getattr(root, "duration_ms", None)
+            timing = _item_timing(started_ms, completed_ms, getattr(root, "duration_ms", None))
             return (
                 CommandTelemetry(
                     tool_name=self._tool_name(root_type),
                     tool_id=tool_id,
-                    timestamp=datetime.now(),
-                    duration_ms=float(duration_ms) if duration_ms is not None else None,
+                    timestamp=timing.timestamp,
+                    execution_started_at=timing.execution_started_at,
+                    execution_completed_at=timing.execution_completed_at,
+                    duration_ms=timing.duration_ms,
                     parameters=self._tool_parameters(root, root_type),
                     result_status="error" if is_error else ("success" if status_str else "unknown"),
                     result_summary=self._summarize_tool_item(root, root_type),
@@ -2123,7 +2310,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return AssistantMessage(
             started_at=now,
             completed_at=now,
-            generation_duration_ms=0.0,
+            generation_duration_ms=None,
             content_blocks=blocks,
             tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
             input_tokens=fresh,
@@ -2149,7 +2336,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         return AssistantMessage(
             started_at=now,
             completed_at=now,
-            generation_duration_ms=0.0,
+            generation_duration_ms=None,
             content_blocks=[ContentBlock(block_type="text", sequence=0, text=text)],
             tool_use_ids=[],
             input_tokens=0,
@@ -2161,7 +2348,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
             parent_tool_use_id=parent_tool_use_id,
         )
 
-    def _extract_command_telemetry(self, command_item: Any, sequence: int) -> CommandTelemetry | None:
+    def _extract_command_telemetry(
+        self,
+        command_item: Any,
+        sequence: int,
+        started_ms: int | None = None,
+        completed_ms: int | None = None,
+    ) -> CommandTelemetry | None:
         """Extract CommandTelemetry from a CommandExecutionThreadItem.
 
         Maps Codex command execution details to the CommandTelemetry format used by Claude Code.
@@ -2198,11 +2391,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # Build parameters from command string
             parameters = {"command": command}
 
+            timing = _item_timing(started_ms, completed_ms, duration_ms)
             return CommandTelemetry(
                 tool_name="Bash",
                 tool_id=command_id,
-                timestamp=datetime.now(),
-                duration_ms=float(duration_ms) if duration_ms is not None else None,
+                timestamp=timing.timestamp,
+                execution_started_at=timing.execution_started_at,
+                execution_completed_at=timing.execution_completed_at,
+                duration_ms=timing.duration_ms,
                 parameters=parameters,
                 result_status=result_status,
                 result_summary=result_summary,
@@ -2215,7 +2411,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return None
 
     def _extract_file_change_telemetry(
-        self, change_id: str, changes: Any, status: Any, sequence: int
+        self,
+        change_id: str,
+        changes: Any,
+        status: Any,
+        sequence: int,
+        started_ms: int | None = None,
+        completed_ms: int | None = None,
     ) -> CommandTelemetry | None:
         """Build CommandTelemetry for a Codex fileChange item.
 
@@ -2230,11 +2432,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
             paths = [str(c.path) for c in changes if hasattr(c, "path")] if changes else []
             status_str = _status_value(status)
             failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
+            timing = _item_timing(started_ms, completed_ms, None)
             return CommandTelemetry(
                 tool_name="Write",
                 tool_id=change_id,
-                timestamp=datetime.now(),
-                duration_ms=None,
+                timestamp=timing.timestamp,
+                execution_started_at=timing.execution_started_at,
+                execution_completed_at=timing.execution_completed_at,
+                duration_ms=timing.duration_ms,
                 parameters={"paths": paths},
                 result_status="error" if failed else "success",
                 result_summary=(

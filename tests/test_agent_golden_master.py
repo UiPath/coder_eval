@@ -23,8 +23,12 @@ from typing import Any
 
 import pytest
 
-from tests._fixtures.golden_streams import assert_reconciliation, scrub
+from coder_eval.models import AgentKind
+from tests._fixtures.golden_streams import assert_reconciliation, assert_timing_captured, scrub
+from tests._fixtures.golden_streams.antigravity_fixtures import ANTIGRAVITY_SCENARIOS, run_antigravity_scenario
 from tests._fixtures.golden_streams.claude_fixtures import CLAUDE_SCENARIOS, run_claude_scenario
+from tests._fixtures.golden_streams.opencode_fixtures import OPENCODE_SCENARIOS, run_opencode_scenario
+from tests._fixtures.golden_streams.pi_fixtures import PI_SCENARIOS, run_pi_scenario
 
 
 # Codex is an optional extra (mirrors test_codex_agent's guard). Import its
@@ -36,6 +40,34 @@ if _HAS_CODEX:
 else:  # pragma: no cover - only without the optional codex extra
     CODEX_SCENARIOS = []
     run_codex_scenario = None
+
+
+# Scenarios that legitimately produce no measurable generation window. Strict
+# is the default: a new scenario is asserted to have one until it is named
+# here, so a harness that silently stops recording windows fails instead of
+# passing. Each entry carries the reason it cannot have one.
+NO_GENERATION_WINDOW: frozenset[str] = frozenset(
+    {
+        "claude_g_crash_format_placeholder",  # crash partial: 0 assistant messages
+        "claude_h1_timeout_process_error",  # timeout partial: 0 assistant messages
+        "claude_h2_process_error_crash",  # crash partial: 0 assistant messages
+        # Drives a SCRIPTED monotonic clock (a constant 1000.0 until the
+        # deadline flips) so the deadline break is deterministic. The window
+        # is zero by fixture construction, not by anything the harness did.
+        "claude_i_in_loop_deadline_break",
+        "codex_g_items_rebuild",  # rollout rebuild: Turn items carry no timestamps
+        # Codex emissions whose ENTIRE measurable window was tool execution.
+        # The window is subtracted down to 0 because that is the honest
+        # answer, not because nothing was recorded — see the generation-window
+        # subtraction in codex_agent._flush_message.
+        "codex_d_cross_flush_is_error",  # flush lands before the tool completes: zero-width window
+        "codex_e_orphan_tool",  # the tool never completes, so the window never opens
+    }
+)
+
+
+def _expect_window(harness: str, scenario_name: str) -> bool:
+    return f"{harness}_{scenario_name}" not in NO_GENERATION_WINDOW
 
 
 _EXPECTED_DIR = Path(__file__).parent / "_fixtures" / "golden_streams" / "expected"
@@ -69,6 +101,7 @@ async def test_claude_golden(scenario, tmp_path):
     # Reconciliation is asserted on the UNscrubbed dump (token buckets are never
     # scrubbed, but cost/timestamps are — assert before masking to be explicit).
     assert_reconciliation(raw)
+    assert_timing_captured(raw, expect_generation_window=_expect_window("claude", scenario.name))
     _compare_or_regen(f"claude_{scenario.name}", scrub(raw))
 
 
@@ -78,6 +111,7 @@ async def test_claude_golden(scenario, tmp_path):
 async def test_codex_golden(scenario, tmp_path):
     raw = await run_codex_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
+    assert_timing_captured(raw, expect_generation_window=_expect_window("codex", scenario.name))
     _compare_or_regen(f"codex_{scenario.name}", scrub(raw))
 
 
@@ -96,3 +130,235 @@ async def test_codex_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Codex snapshot."""
     raw = await run_codex_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ANTIGRAVITY_SCENARIOS, ids=lambda s: s.name)
+async def test_antigravity_golden(scenario, tmp_path):
+    raw = await run_antigravity_scenario(scenario, str(tmp_path))
+    assert_reconciliation(raw)
+    assert_timing_captured(raw, expect_generation_window=_expect_window("antigravity", scenario.name))
+    _compare_or_regen(f"antigravity_{scenario.name}", scrub(raw))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ANTIGRAVITY_SCENARIOS, ids=lambda s: s.name)
+async def test_antigravity_reconciliation_invariant(scenario, tmp_path):
+    """The per-bucket reconciliation invariant holds for every Antigravity snapshot."""
+    assert_reconciliation(await run_antigravity_scenario(scenario, str(tmp_path)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", OPENCODE_SCENARIOS, ids=lambda s: s.name)
+async def test_opencode_golden(scenario, tmp_path):
+    raw = await run_opencode_scenario(scenario, str(tmp_path))
+    assert_reconciliation(raw)
+    assert_timing_captured(raw, expect_generation_window=_expect_window("opencode", scenario.name))
+    _compare_or_regen(f"opencode_{scenario.name}", scrub(raw))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", OPENCODE_SCENARIOS, ids=lambda s: s.name)
+async def test_opencode_reconciliation_invariant(scenario, tmp_path):
+    """The per-bucket reconciliation invariant holds for every OpenCode snapshot."""
+    assert_reconciliation(await run_opencode_scenario(scenario, str(tmp_path)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", PI_SCENARIOS, ids=lambda s: s.name)
+async def test_pi_golden(scenario, tmp_path):
+    raw = await run_pi_scenario(scenario, str(tmp_path))
+    assert_reconciliation(raw)
+    assert_timing_captured(raw, expect_generation_window=_expect_window("pi", scenario.name))
+    _compare_or_regen(f"pi_{scenario.name}", scrub(raw))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", PI_SCENARIOS, ids=lambda s: s.name)
+async def test_pi_reconciliation_invariant(scenario, tmp_path):
+    """The per-bucket reconciliation invariant holds for every Pi snapshot."""
+    assert_reconciliation(await run_pi_scenario(scenario, str(tmp_path)))
+
+
+# The ONE place a harness is listed for golden coverage. Derived from AgentKind
+# rather than from register_builtins, whose built-in list is a hardcoded tuple
+# inside the function body that returns nothing and exposes no set.
+SCENARIOS_BY_AGENT: dict[AgentKind, list[Any]] = {
+    AgentKind.CLAUDE_CODE: CLAUDE_SCENARIOS,
+    AgentKind.CODEX: CODEX_SCENARIOS,
+    AgentKind.ANTIGRAVITY: ANTIGRAVITY_SCENARIOS,
+    AgentKind.OPENCODE: OPENCODE_SCENARIOS,
+    AgentKind.PI: PI_SCENARIOS,
+}
+
+# An ALLOWLIST of exclusions, not a denylist of inclusions: a new AgentKind
+# member fails the coverage test until someone decides which it is.
+_NO_GOLDEN_COVERAGE: dict[AgentKind, str] = {
+    # The agentless backend (NoOpAgent): it runs no model and streams nothing,
+    # so there is no event stream to record.
+    AgentKind.NONE: "agentless backend — runs no model, streams nothing",
+    # A sentinel for "agent type could not be determined". Never registered.
+    AgentKind.UNKNOWN: "sentinel for an undeterminable type — never registered",
+}
+
+
+def unaccounted_harnesses(mapping: dict[AgentKind, list[Any]]) -> set[AgentKind]:
+    """AgentKind members that are neither covered by `mapping` nor excluded."""
+    return set(AgentKind) - (set(mapping) | set(_NO_GOLDEN_COVERAGE))
+
+
+def harnesses_without_scenarios(mapping: dict[AgentKind, list[Any]]) -> set[AgentKind]:
+    """Covered harnesses whose scenario list is EMPTY.
+
+    An empty list must fail: a coverage check guarding zero streams is not a
+    coverage check (mirrors runner.py's "a lint rule guarding zero files must
+    fail, not pass").
+    """
+    return {kind for kind, scenarios in mapping.items() if not scenarios}
+
+
+class TestGoldenCoverage:
+    """Every built-in harness has at least one recorded stream.
+
+    A third-party plugin agent (e.g. coder_eval_uipath's ``delegate-sdk``, when
+    that package happens to be installed in the dev env) is deliberately out of
+    scope — which is why this keys on ``AgentKind`` and not on the live
+    registry.
+
+    The two checks are extracted as module-level functions so the negative
+    cases below can run the REAL check against a mutated copy, rather than
+    restating the condition (which passes whatever the check does).
+    """
+
+    def test_every_builtin_agent_kind_is_accounted_for(self):
+        missing = unaccounted_harnesses(SCENARIOS_BY_AGENT)
+        assert not missing, (
+            f"AgentKind member(s) {sorted(k.value for k in missing)} have no golden scenarios and are "
+            "not excluded. Add scenarios, or add an entry to _NO_GOLDEN_COVERAGE with the reason."
+        )
+        assert not (set(SCENARIOS_BY_AGENT) & set(_NO_GOLDEN_COVERAGE)), "a harness cannot be both covered and excluded"
+
+    def test_every_covered_harness_has_scenarios(self):
+        empty = harnesses_without_scenarios(SCENARIOS_BY_AGENT)
+        if not _HAS_CODEX:
+            # The optional extra is absent, so CODEX_SCENARIOS is [] by
+            # construction — not by anyone forgetting to record a stream.
+            empty -= {AgentKind.CODEX}
+        assert not empty, f"listed as covered but has NO scenarios: {sorted(k.value for k in empty)}"
+
+    def test_the_check_catches_an_unaccounted_member(self):
+        # Mutate a COPY and run the REAL check against it.
+        shrunk = {k: v for k, v in SCENARIOS_BY_AGENT.items() if k is not AgentKind.PI}
+        assert unaccounted_harnesses(shrunk) == {AgentKind.PI}
+
+    def test_the_check_catches_an_empty_scenario_list(self):
+        emptied = dict(SCENARIOS_BY_AGENT) | {AgentKind.PI: []}
+        assert AgentKind.PI in harnesses_without_scenarios(emptied)
+
+
+class TestAssertTimingCaptured:
+    """The sensor itself. An AST rule cannot see that an SDK returned 0.0."""
+
+    @staticmethod
+    def _record(
+        *,
+        windows: list[float | None] = (),
+        commands: list[dict[str, Any]] = (),
+        bounds_collapse: bool = False,
+    ) -> dict[str, Any]:
+        """A record whose bounds span each window, unless `bounds_collapse`."""
+        return {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "generation_duration_ms": w,
+                    "started_at": "2026-01-01T00:00:00",
+                    "completed_at": "2026-01-01T00:00:00" if bounds_collapse else "2026-01-01T00:00:01",
+                }
+                for w in windows
+            ],
+            "commands": list(commands),
+        }
+
+    def test_a_positive_window_passes(self):
+        assert_timing_captured(self._record(windows=[12.5]), expect_generation_window=True)
+
+    def test_a_none_window_raises_when_one_is_expected(self):
+        with pytest.raises(AssertionError, match="positive generation window"):
+            assert_timing_captured(self._record(windows=[None]), expect_generation_window=True)
+
+    def test_exactly_zero_raises_too(self):
+        # The Antigravity defect's exact signature: a value that is present,
+        # numeric, and means nothing was measured.
+        with pytest.raises(AssertionError, match="positive generation window"):
+            assert_timing_captured(self._record(windows=[0.0]), expect_generation_window=True)
+
+    def test_collapsed_bounds_raise_even_with_a_healthy_duration(self):
+        # Two harnesses take the duration from a MONOTONIC clock and the
+        # bounds from the wall clock, so a reducer can report a real duration
+        # beside two stamps that collapsed to one instant. CE059 sees that
+        # statically only when both bounds are the same ast.Name; this is the
+        # check for when they are two different names holding one value.
+        with pytest.raises(AssertionError, match="bounds that span it"):
+            assert_timing_captured(self._record(windows=[500.0], bounds_collapse=True), expect_generation_window=True)
+
+    def test_a_none_window_passes_when_none_is_expected(self):
+        assert_timing_captured(self._record(windows=[None]), expect_generation_window=False)
+
+    def test_one_positive_among_several_passes(self):
+        # The FLOOR, not a per-entry rule. claude_d_subagent_terminal holds two
+        # content-bearing messages of which exactly one is legitimately None,
+        # and no scenario-level flag could express "this one but not that one".
+        assert_timing_captured(self._record(windows=[None, 8.0]), expect_generation_window=True)
+
+    def test_a_resolved_command_missing_a_bound_raises(self):
+        record = self._record(
+            windows=[5.0],
+            commands=[
+                {
+                    "tool_id": "t1",
+                    "result_status": "success",
+                    "duration_ms": 10.0,
+                    "execution_started_at": "2026-01-01T00:00:00",
+                    "execution_completed_at": None,
+                }
+            ],
+        )
+        with pytest.raises(AssertionError, match="execution_completed_at"):
+            assert_timing_captured(record, expect_generation_window=True)
+
+    def test_a_resolved_command_missing_its_duration_raises(self):
+        record = self._record(
+            windows=[5.0],
+            commands=[
+                {
+                    "tool_id": "t1",
+                    "result_status": "error",
+                    "duration_ms": None,
+                    "execution_started_at": "2026-01-01T00:00:00",
+                    "execution_completed_at": "2026-01-01T00:00:01",
+                }
+            ],
+        )
+        with pytest.raises(AssertionError, match="duration_ms"):
+            assert_timing_captured(record, expect_generation_window=True)
+
+    def test_an_unresolved_command_is_exempt(self):
+        # Force-closed without a result: never timed, and saying so is the
+        # honest record.
+        record = self._record(
+            windows=[5.0],
+            commands=[
+                {
+                    "tool_id": "orphan",
+                    "result_status": "unknown",
+                    "duration_ms": None,
+                    "execution_started_at": None,
+                    "execution_completed_at": None,
+                }
+            ],
+        )
+        assert_timing_captured(record, expect_generation_window=True)
+
+    def test_a_scenario_with_no_commands_is_vacuously_fine(self):
+        assert_timing_captured(self._record(windows=[5.0]), expect_generation_window=True)

@@ -2973,11 +2973,19 @@ class Orchestrator:
             # append it as a standalone entry so its telemetry is not lost. (If the simulator's opener
             # had stop_requested, we never entered the agent loop, so don't record it.)
             if agent_turn_attempted and pending_user_turn is not None and self.result is not None:
+                # TurnRecord.duration_seconds defaults to 0.0 and no caller passes
+                # it, so this turn used to report 0s for a simulator call that
+                # really took seconds — halving `avg_turn` in the HTML report for
+                # every simulation task. A pinned opener has no simulator call
+                # behind it (generation_duration_ms is None by design), so 0.0
+                # there is the real duration, not a placeholder.
+                sim_ms = pending_user_turn.generation_duration_ms
                 standalone_turn = TurnRecord(
                     iteration=turns_completed,
                     user_input=pending_user_turn.text or "",
                     agent_output="",
                     messages=[pending_user_turn],
+                    duration_seconds=sim_ms / 1000.0 if sim_ms is not None else 0.0,
                 )
                 self.result.iterations.append(standalone_turn)
 

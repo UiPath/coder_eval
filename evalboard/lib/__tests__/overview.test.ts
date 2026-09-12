@@ -45,6 +45,7 @@ describe("summarizeListing", () => {
             tasksSucceeded: 0,
             tasksRun: 0,
             tasksGraded: 0,
+            tasksExecuted: 0,
             totalCostUsd: null,
             taskDurationSeconds: null,
             ...overrides,
@@ -1100,6 +1101,65 @@ describe("projectRunRow", () => {
             totalCostUsd: 10,
             taskDurationSeconds: 100,
         });
+    });
+
+    test("unfiltered, tasksExecuted comes from the overview, not a recount", () => {
+        // The whole-run count must come from the same helper that produced
+        // taskDurationSeconds (which runs over run.json's task_results), not
+        // from a second filter over `tasks` — that list drops rows with no
+        // task_id, so a recount could disagree with the duration's own
+        // denominator.
+        const r = run("r", [task({ taskId: "a" }), task({ taskId: "b" })]);
+        r.overview!.tasksExecuted = 1;
+        expect(projectRunRow(r, null, null)).toMatchObject({
+            tasksRun: 2,
+            tasksExecuted: 1,
+        });
+    });
+
+    test("unfiltered, an overview predating the field counts every task", () => {
+        const row = projectRunRow(
+            run("r", [task({ taskId: "a" }), task({ taskId: "b" })]),
+            null,
+            null,
+        );
+        expect(row).toMatchObject({ tasksRun: 2, tasksExecuted: 2 });
+    });
+
+    test("filtered, a mature-skipped match leaves BOTH sides of the duration", () => {
+        // The unfiltered path goes through deriveRunDuration, which excludes
+        // them. Before this, typing a filter switched to a different
+        // definition — and one skipped row with no duration flipped the
+        // all-present guard, rendering "—" for a run whose executed rows were
+        // all timed.
+        const row = projectRunRow(
+            run("r", [
+                task({ taskId: "a", tags: ["keep"], durationSeconds: 30 }),
+                task({ taskId: "b", tags: ["keep"], durationSeconds: 20 }),
+                task({
+                    taskId: "c",
+                    tags: ["keep"],
+                    durationSeconds: null,
+                    matureSkipped: true,
+                }),
+            ]),
+            "keep",
+            null,
+        );
+        expect(row?.taskDurationSeconds).toBe(50);
+        expect(row?.tasksExecuted).toBe(2);
+    });
+
+    test("filtered, tasksExecuted excludes a mature-skipped match", () => {
+        const row = projectRunRow(
+            run("r", [
+                task({ taskId: "a", tags: ["keep"] }),
+                task({ taskId: "b", tags: ["keep"], matureSkipped: true }),
+            ]),
+            "keep",
+            null,
+        );
+        expect(row).toMatchObject({ tasksRun: 2, tasksExecuted: 1 });
     });
 
     test("drops a run with no task matching the tag", () => {
