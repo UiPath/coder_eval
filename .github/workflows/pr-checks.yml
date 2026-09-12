@@ -593,6 +593,21 @@ jobs:
           test "$FAILED" = "0" || { echo "smoke-pass had unexpected failures"; exit 1; }
           test "$ERRORED" = "0" || { echo "smoke-pass had errors"; exit 1; }
 
+      # The four wall-clock buckets (head + generation + UNION(tool) + tail)
+      # must account for each turn's own duration. This is the TWO-SIDED gate:
+      # the committed golden sensor only catches an OVERSHOOT, so a bucket that
+      # claims LESS time than it should — the defect class this area keeps
+      # producing — passes every test in the suite. It needs live task.json
+      # files, which the smoke-pass run above already leaves on disk.
+      #
+      # COVERS CLAUDE-CODE ONLY: experiments/default.yaml sets type: claude-code,
+      # so every turn here is that harness. The other four are covered by
+      # tests/test_timing_identity_contract.py, which is ms-exact but synthetic.
+      - name: Verify timing residual (claude-code only)
+        run: |
+          .venv/bin/python scripts/timing/decompose_run.py \
+            $(find runs/ci-smoke-pass -name task.json) --max-residual-pct 5
+
       - name: Verify smoke-fail bucket
         run: |
           F=runs/ci-smoke-fail/experiment.json

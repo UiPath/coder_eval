@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from coder_eval.timing import busy_ms
+from coder_eval.timing import union_ms
 
 
 SCRUB_PLACEHOLDER = "<scrubbed>"
@@ -125,9 +125,7 @@ def _tool_union_ms(record: dict[str, Any]) -> float:
         end = _parse_stamp(command.get("execution_completed_at"))
         if start is not None and end is not None and end >= start:
             spans.append((start, end))
-    if not spans:
-        return 0.0
-    return busy_ms(spans, min(s for s, _ in spans), max(e for _, e in spans))
+    return union_ms(spans)
 
 
 def _parse_stamp(value: Any) -> datetime | None:
@@ -201,6 +199,14 @@ def assert_timing_captured(
     that catches a DOUBLE-COUNT rather than an absence — it is how an orphaned
     tool force-closed inside the tail, booked both as tool and as teardown, was
     found reconciling at -86% of wall clock while all 72 golden tests passed.
+
+    The check is ONE-SIDED on purpose and stays that way. A symmetric bound
+    would be a sensor in name only here: the replays run in ~0.3 ms of
+    synthetic wall clock, so ``abs(residual) <= max(0.1 ms, 20% x wall)``
+    passes essentially any magnitude. The two-sided, millisecond-exact check
+    lives in ``tests/test_timing_identity_contract.py``, where a scripted clock
+    makes the magnitudes real, and the live two-sided gate is
+    ``scripts/timing/decompose_run.py --max-residual-pct``.
 
     ``check_identity`` is off for the scenarios that inject their own SDK
     timestamps (see ``FICTIONAL_DURATIONS``): those declare integer-millisecond

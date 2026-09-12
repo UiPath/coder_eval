@@ -21,7 +21,7 @@ on `abs(share)` covers both signs.
 Not wired into `make`: it needs live runs, not fixtures. NOTE `scripts/` is
 outside the Makefile's LINT_PATHS, so this file is neither formatted nor
 ruff-checked — keep it small and dependency-free (stdlib plus the one shared
-`busy_ms` import, so the union rule has a single definition).
+`union_ms` import, so the union rule has a single definition).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from coder_eval.timing import busy_ms
+from coder_eval.timing import union_ms
 
 
 def _parse(stamp: object) -> datetime | None:
@@ -49,7 +49,7 @@ def _parse(stamp: object) -> datetime | None:
 def _tool_ms(turn: dict) -> float:
     """Wall ms this turn spent executing tools — the UNION, not the sum.
 
-    The same rule `coder_eval.timing.busy_ms` applies when a harness subtracts
+    The same rule `coder_eval.timing.union_ms` applies when a harness subtracts
     tool time out of a generation window, and it has to be the same rule here
     or the identity does not close: Pi resolved a `Write` and a `Bash` that
     overlapped by 18.4 ms in one measured turn, and summing their durations
@@ -64,9 +64,7 @@ def _tool_ms(turn: dict) -> float:
         end = _parse(command.get("execution_completed_at"))
         if start is not None and end is not None and end >= start:
             spans.append((start, end))
-    if not spans:
-        return 0.0
-    return busy_ms(spans, min(s for s, _ in spans), max(e for _, e in spans))
+    return union_ms(spans)
 
 
 def _turn_buckets(turn: dict) -> tuple[float, float, float, float, float] | None:

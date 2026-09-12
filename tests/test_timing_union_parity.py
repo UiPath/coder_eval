@@ -20,14 +20,16 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.timing import busy_ms
+from coder_eval.timing import busy_ms, union_ms
 
 
 _FIXTURE = Path(__file__).parent / "_fixtures" / "timing_union_cases.json"
 _TS_TEST = Path(__file__).parents[1] / "evalboard" / "lib" / "__tests__" / "timing-union-parity.test.ts"
 _BASE = datetime(2026, 1, 1, 12, 0, 0)
 
-_CASES = json.loads(_FIXTURE.read_text())["cases"]
+_CORPUS = json.loads(_FIXTURE.read_text())
+_CASES = _CORPUS["cases"]
+_UNION_CASES = _CORPUS["union_cases"]
 
 
 def _at(offset_ms: float) -> datetime:
@@ -39,6 +41,20 @@ def test_busy_ms_matches_the_shared_corpus(case: dict) -> None:
     lo, hi = case["window"]
     spans = [(_at(s), _at(e)) for s, e in case["spans"]]
     assert busy_ms(spans, _at(lo), _at(hi)) == pytest.approx(case["expected_ms"])
+
+
+@pytest.mark.parametrize("case", _UNION_CASES, ids=[c["name"] for c in _UNION_CASES])
+def test_union_ms_matches_the_shared_corpus(case: dict) -> None:
+    """The same union, with the extent derived rather than handed in.
+
+    ``union_ms`` is what the golden sensor and the live residual gate both
+    call; the TypeScript side of these cases is ``toolExecutionMs``, which
+    derives the extent with its own ``min``/``max`` rather than being given
+    one. That derivation is the only part of the union rule the ``cases``
+    array above cannot reach.
+    """
+    spans = [(_at(s), _at(e)) for s, e in case["spans"]]
+    assert union_ms(spans) == pytest.approx(case["expected_ms"])
 
 
 def test_the_typescript_half_replays_the_same_file() -> None:
@@ -53,3 +69,7 @@ def test_the_typescript_half_replays_the_same_file() -> None:
     # The TS side must exercise every case, not a hand-picked subset — it reads
     # the array rather than restating it.
     assert re.search(r"\.cases\b", source), "the TS test must iterate the corpus, not inline cases"
+    assert re.search(r"\.union_cases\b", source), (
+        "the TS test must also iterate `union_cases`, the half that pins toolExecutionMs's "
+        "own min/max extent against union_ms's"
+    )

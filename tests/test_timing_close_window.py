@@ -6,11 +6,13 @@ the sensor for the arithmetic ITSELF, as distinct from the per-reducer tests,
 which pin that a given reducer feeds it the right bounds and spans.
 """
 
+import importlib.util
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from coder_eval.timing import close_window
+from coder_eval.timing import close_window, union_ms
 
 
 MARK = datetime(2026, 9, 11, 12, 0, 0)
@@ -18,6 +20,16 @@ MARK = datetime(2026, 9, 11, 12, 0, 0)
 
 def _at(ms: int) -> datetime:
     return MARK + timedelta(milliseconds=ms)
+
+
+def _load_decompose_run():
+    """Import `scripts/timing/decompose_run.py`, which is not an importable package."""
+    path = Path(__file__).parents[1] / "scripts" / "timing" / "decompose_run.py"
+    spec = importlib.util.spec_from_file_location("decompose_run_for_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class TestCloseWindow:
@@ -128,6 +140,62 @@ class TestCloseWindow:
             close_window(MARK, _at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[misc]
         with pytest.raises(TypeError):
             close_window(now=_at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[call-arg]
+
+
+class TestUnionMs:
+    """`union_ms` is `busy_ms` over the spans' own extent.
+
+    Extracted because the golden sensor (`tests/_fixtures/golden_streams/_scrub.py`)
+    and the live residual gate (`scripts/timing/decompose_run.py`) had copied
+    that same `min`/`max`/`busy_ms` tail. Both answer the same question about
+    the same recorded commands, so the two copies could only ever agree by
+    hand — `test_the_two_recorded_command_readers_agree` below is the half
+    that pins them together.
+    """
+
+    def test_no_spans_is_zero_not_a_min_of_an_empty_sequence(self):
+        assert union_ms([]) == 0.0
+
+    def test_overlapping_spans_are_the_union_not_the_sum(self):
+        # Two 500 ms calls overlapping by 400 ms occupy 600 ms of wall clock.
+        assert union_ms([(_at(100), _at(600)), (_at(200), _at(700))]) == pytest.approx(600.0)
+
+    def test_disjoint_spans_add(self):
+        assert union_ms([(_at(100), _at(200)), (_at(400), _at(900))]) == pytest.approx(600.0)
+
+    def test_the_extent_is_the_spans_own_bounds(self):
+        # No window is passed, so nothing clips: a span far from the origin is
+        # measured in full rather than dropped as out of range.
+        assert union_ms([(_at(10_000), _at(10_250))]) == pytest.approx(250.0)
+
+    def test_the_two_recorded_command_readers_agree(self):
+        """`_scrub.py` and `decompose_run.py` must report one tool total.
+
+        They read the SAME `task.json` shape — the golden sensor from a dumped
+        record, the gate from the file on disk — and a divergence would let one
+        pass while the other failed on identical bytes. They keep their own
+        stamp parsing (the inputs differ in how they are reached); the union
+        tail is what this pins.
+        """
+        from tests._fixtures.golden_streams._scrub import _tool_union_ms
+
+        # Loaded by path: `scripts/` is deliberately not a package (it sits
+        # outside the Makefile's LINT_PATHS), so there is no import to make.
+        _tool_ms = _load_decompose_run()._tool_ms
+
+        turn = {
+            "commands": [
+                {"execution_started_at": _at(100).isoformat(), "execution_completed_at": _at(600).isoformat()},
+                {"execution_started_at": _at(200).isoformat(), "execution_completed_at": _at(700).isoformat()},
+                # Never timed: contributes nothing on either side.
+                {"execution_started_at": None, "execution_completed_at": None},
+                # Inverted bounds: both readers drop these while BUILDING their
+                # span list, which is why `union_ms` does not filter them.
+                {"execution_started_at": _at(900).isoformat(), "execution_completed_at": _at(800).isoformat()},
+            ]
+        }
+        assert _tool_union_ms(turn) == pytest.approx(600.0)
+        assert _tool_ms(turn) == _tool_union_ms(turn)
 
 
 class TestTurnClock:
