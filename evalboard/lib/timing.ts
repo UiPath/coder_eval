@@ -138,7 +138,7 @@ export function epochMs(value: string | null | undefined): number | null {
 //
 // The TypeScript twin of `coder_eval.timing.busy_ms`, deliberately the
 // same algorithm — the harness subtracts tool time from its generation windows
-// with it (once, in streaming/collector.py::subtract_tool_time), and this file
+// with it (once, in coder_eval/timing.py::subtract_tool_time), and this file
 // subtracts tool time from a task's wall clock, so the two must agree about
 // what "tool execution took N ms" means. Held in step by
 // tests/_fixtures/timing_union_cases.json, which both suites replay.

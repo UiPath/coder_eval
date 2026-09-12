@@ -826,6 +826,7 @@ describe("MessageTimelineSection — Startup and Teardown cells", () => {
         taskDurationSeconds?: number | null;
         harnessStartupMs?: number | null;
         harnessTeardownMs?: number | null;
+        storedToolMs?: number | null;
     }) {
         const m = makeMessage({
             generationMs: 4000,
@@ -938,6 +939,29 @@ describe("MessageTimelineSection — Startup and Teardown cells", () => {
         });
         expect(cell("Unaccounted").textContent).toBe("-1.5s (-30%)");
         expect(cell("Unaccounted").className).toContain("text-amber-700");
+    });
+
+    test("the stored tool bucket is preferred over recomputing it", () => {
+        // The collector wrote `tool_union_ms` from the same span set it
+        // measured the head and the tail against, so reading it is how this
+        // cell and the harness are guaranteed to agree. The fixture's own
+        // messages would compute 1.0s, so a number that is not 2.5s proves the
+        // stored value was ignored.
+        renderStrip({ taskDurationSeconds: 10, storedToolMs: 2500 });
+        expect(cell("Tool exec").textContent).toBe("2.5s");
+    });
+
+    test("a stored measured zero wins over the fallback", () => {
+        // `0` is a measurement: spans were recorded and occupied no measurable
+        // time. Coalescing it away would silently replace it with the 1.0s the
+        // messages compute.
+        renderStrip({ taskDurationSeconds: 10, storedToolMs: 0 });
+        expect(cell("Tool exec").textContent).toBe("0ms");
+    });
+
+    test("a run predating the field falls back to the message stream", () => {
+        renderStrip({ taskDurationSeconds: 10 });
+        expect(cell("Tool exec").textContent).toBe("1.0s");
     });
 
     test("each bucket says what it measures and that it is not decomposed", () => {

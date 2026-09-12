@@ -18,6 +18,22 @@ from claude_agent_sdk import (
 logger = logging.getLogger(__name__)
 
 
+def format_ms(ms: float | None) -> str:
+    """A duration in ms, or an em dash when it was never measured.
+
+    SHARED by the HTML report and the markdown one. They render the same four
+    wall-clock buckets from the same `reports_stats.turn_time_buckets` call, so
+    formatting them twice is how one surface comes to print `0ms` where the
+    other prints a dash — the `None`-vs-`0.0` distinction CE058 enforces on the
+    producing side, thrown away at the last step.
+    """
+    if ms is None:
+        return "—"
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    return f"{ms / 1000:.2f}s"
+
+
 def format_messages(
     messages: list[Message],
     *,
