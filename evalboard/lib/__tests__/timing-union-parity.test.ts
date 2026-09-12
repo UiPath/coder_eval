@@ -25,7 +25,19 @@ interface UnionCase {
     expected_ms: number;
 }
 
-const corpus: { cases: UnionCase[] } = JSON.parse(readFileSync(fixture, "utf8"));
+// `union_cases` carries no window: the extent is the spans' own bounds. It is
+// the half that pins `toolExecutionMs`, which derives that extent with its own
+// min/max instead of being handed one — the Python twin is
+// `coder_eval.timing.union_ms`.
+interface ExtentCase {
+    name: string;
+    spans: [number, number][];
+    expected_ms: number;
+}
+
+const corpus: { cases: UnionCase[]; union_cases: ExtentCase[] } = JSON.parse(
+    readFileSync(fixture, "utf8"),
+);
 
 describe("busyMs matches the shared union corpus", () => {
     test("the corpus is non-empty (a silently emptied file must not pass)", () => {
@@ -137,4 +149,31 @@ describe("toolExecutionMs", () => {
     test("a call the harness never timed contributes nothing", () => {
         expect(toolExecutionMs([message([toolUse({})])])).toBe(0);
     });
+});
+
+describe("toolExecutionMs matches the shared extent corpus", () => {
+    test("the extent corpus is non-empty (a silently emptied file must not pass)", () => {
+        expect(corpus.union_cases.length).toBeGreaterThan(5);
+    });
+
+    // Each span becomes one bounded tool call on one message, so
+    // `toolExecutionMs` has to derive the extent itself — the one part of the
+    // union rule the windowed `cases` above cannot reach. Python replays the
+    // same array through `coder_eval.timing.union_ms`.
+    for (const c of corpus.union_cases) {
+        test(c.name, () => {
+            const ms = toolExecutionMs([
+                message(
+                    c.spans.map(([s, e], i) =>
+                        toolUse({
+                            toolUseId: `t${i}`,
+                            execStartMs: s,
+                            execEndMs: e,
+                        }),
+                    ),
+                ),
+            ]);
+            expect(ms).toBeCloseTo(c.expected_ms, 6);
+        });
+    }
 });

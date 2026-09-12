@@ -106,6 +106,28 @@ def busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) 
     return total + (open_end - open_start).total_seconds() * 1000.0
 
 
+def union_ms(spans: list[tuple[datetime, datetime]]) -> float:
+    """Wall milliseconds at least ONE span was running, over their full extent.
+
+    ``busy_ms`` with the window set to the spans' own bounds. It exists because
+    two callers had copy-pasted that same ``min``/``max``/``busy_ms`` tail —
+    ``tests/_fixtures/golden_streams/_scrub.py`` (the golden sensor) and
+    ``scripts/timing/decompose_run.py`` (the live residual gate) — and they
+    answer the same question about the same recorded commands, so a divergence
+    would let one pass while the other failed. Each keeps its OWN stamp parsing
+    and span building, because their input shapes genuinely differ; only this
+    tail is shared.
+
+    It does NOT filter ``end < start``. Both callers already drop those while
+    building their span lists, so guarding again here would be a second rule
+    about the same input in a second place; keeping it at the caller preserves
+    today's behaviour exactly.
+    """
+    if not spans:
+        return 0.0
+    return busy_ms(spans, min(s for s, _ in spans), max(e for _, e in spans))
+
+
 def close_window(
     *,
     mark: datetime,
