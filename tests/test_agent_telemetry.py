@@ -3,6 +3,7 @@
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -1521,3 +1522,57 @@ class TestClaudeFirstWindowReseed:
         generation = sum(m.generation_duration_ms or 0.0 for m in record.messages if m.role == "assistant")
         assert generation == pytest.approx(200.0)
         assert record.harness_startup_ms + generation + record.harness_teardown_ms == pytest.approx(1500.0)
+
+
+class TestTheTurnBracketComesFromTheTurnClock:
+    """CE064's behavioural half for claude-code: the SOURCE of the two stamps.
+
+    The rule can only see that `timestamp=` is present — it cannot tell
+    `state.clock.now()` from a `datetime.now()` spelled out at the call site.
+    Anchoring the stand-in a year from real time is what makes a reverted
+    argument fail by a year instead of by the microseconds that separate the
+    two clocks in practice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_both_brackets_are_stamped_from_the_injected_clock(self, tmp_path, monkeypatch):
+        import coder_eval.agents.claude_code_agent as agent_module
+        from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock
+
+        _, assistant_message_cls, _, text_block_cls, _, result_message_cls = create_mock_sdk_messages()
+        assistant_msg = assistant_message_cls([text_block_cls("done")], message_id="m1")
+
+        async def mock_query(prompt, options):
+            yield assistant_msg
+            yield result_message_cls()
+
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr(agent_module, "query", mock_query)
+
+        agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        await agent.start(str(tmp_path))
+        seen: list[Any] = []
+        await agent.communicate("go", stream_callback=SimpleNamespace(on_event=seen.append))
+
+        assert_bracket_on_the_clock(seen)
+
+    @pytest.mark.asyncio
+    async def test_the_head_and_tail_are_measured_within_one_basis(self, tmp_path, monkeypatch):
+        import coder_eval.agents.claude_code_agent as agent_module
+        from tests._bracket_clock import AnchoredClock, assert_overhead_is_measured
+
+        _, assistant_message_cls, _, text_block_cls, _, result_message_cls = create_mock_sdk_messages()
+        assistant_msg = assistant_message_cls([text_block_cls("done")], message_id="m1")
+
+        async def mock_query(prompt, options):
+            yield assistant_msg
+            yield result_message_cls()
+
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr(agent_module, "query", mock_query)
+
+        agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        await agent.start(str(tmp_path))
+        record = await agent.communicate("go")
+
+        assert_overhead_is_measured(record)

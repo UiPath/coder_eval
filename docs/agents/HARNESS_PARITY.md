@@ -35,6 +35,7 @@ wall clock its numbers account for.
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
 | clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
@@ -135,6 +136,35 @@ that caught it was indistinguishable from a real instant generation. Pi and
 claude-code needed it for the other reason — their stamps were naive-local, and
 nightly runs start at 04:18 and last hours, so an hour-long jump landing in a
 millisecond field is reachable rather than theoretical.
+
+**The turn BRACKET is on that clock too, and was the last seam that was not.**
+`timing.decompose_turn` produces `harness_startup_ms` / `harness_teardown_ms` by
+subtracting a generation-window bound from an `AgentStartEvent` /
+`AgentEndEvent` timestamp, so those two stamps have to share a basis. All three
+clocked harnesses derived their window bounds from the `TurnClock` and let the
+bracket fall back to `StreamEvent.timestamp`'s `default_factory=datetime.now` —
+a monotonic-derived stamp and a raw wall stamp meeting inside one subtraction.
+Measured on a live antigravity turn:
+
+```
+PROBE tail: elapsed=-0.017000ms busy=0.000000ms raw=-0.017000ms
+            last_completed = 09:05:22.033099
+            agent_end      = 09:05:22.033082
+```
+
+an `AgentEndEvent` stamped 17 us BEFORE its own last message finished, which
+cannot happen — the event is constructed strictly after the final flush.
+`decompose_turn` clamped the negative and published `0.0`, "measured, and
+instant", for a harness whose real tail is ~0.1 ms; the same task now records
+0.035 ms. It surfaced only here because the drift between the two clocks is
+tens of microseconds and antigravity holds its process across turns, so nothing
+happens between its last flush and its end event; every other harness books a
+tail of 7-543 ms, where the drift is invisible rather than absent. **CE064**
+keeps a sixth harness from reintroducing it: a module under `agents/` that
+imports `TurnClock` must pass an explicit `timestamp=` on both brackets. Codex
+and OpenCode have no `TurnClock`, so the rule does not see them and their raw
+`datetime.now()` bracket stays — which is *consistent* with their own CLI-epoch
+bounds rather than a gap.
 
 claude-code has exactly one raw `datetime.now()` left, on the synthesized
 sub-agent terminal message. Those bounds are an admitted placeholder for a

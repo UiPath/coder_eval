@@ -28,6 +28,7 @@ from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import AgentKind, AntigravityAgentConfig, AssistantMessage, parse_agent_config
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.pricing import calculate_cost
+from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams._scrub import assert_reconciliation
 from tests._fixtures.golden_streams.antigravity_fixtures import (
     _agent_with_steps,
@@ -2189,3 +2190,50 @@ class TestAntigravityFirstWindowReseed:
         state = self._state(clock)
         assert state._first_output_seen is False
         assert state._gen_mark_wall == self.BASE
+
+
+class TestTheTurnBracketComesFromTheTurnClock:
+    """CE064's behavioural half: the SOURCE of the two bracket stamps.
+
+    This is the harness the defect was measured on. It holds its process across
+    turns, so nothing happens between its last flush and its `AgentEndEvent`
+    and its true tail is ~0.1 ms — the only scale at which the drift between a
+    raw `datetime.now()` and a monotonic-derived stamp can flip a sign. It did:
+    a tail of -0.017 ms, clamped and published as the `0.0` that means
+    "measured, and instant".
+    """
+
+    @staticmethod
+    def _steps():
+        return [
+            _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+            _step(
+                "TEXT_RESPONSE",
+                "DONE",
+                content="done",
+                content_delta="done",
+                complete=True,
+                usage=_usage(200, 0, 10, 0),
+            ),
+        ]
+
+    async def test_both_brackets_are_stamped_from_the_injected_clock(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        seen: list[Any] = []
+        await _agent_with_steps(self._steps()).communicate("go", stream_callback=SimpleNamespace(on_event=seen.append))
+
+        assert_bracket_on_the_clock(seen)
+
+    async def test_the_tail_is_a_measurement_rather_than_a_clamped_zero(self, monkeypatch: pytest.MonkeyPatch):
+        """The published defect, asserted directly.
+
+        `harness_teardown_ms` was `0.0` here because `decompose_turn` clamped a
+        negative produced by two clock bases. With one basis the interval is
+        tiny but real, so a strict `> 0` is the assertion that fails on a
+        revert.
+        """
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        record = await _agent_with_steps(self._steps()).communicate("go")
+
+        assert_overhead_is_measured(record)
+        assert record.harness_teardown_ms > 0.0
