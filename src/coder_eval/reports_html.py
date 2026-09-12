@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
 from .reports import early_stop_gate_note
-from .reports_stats import format_score, is_env_table_key
+from .reports_stats import format_score, is_env_table_key, turn_time_buckets
 
 
 if TYPE_CHECKING:
@@ -932,8 +932,20 @@ def _render_token_usage(result: EvaluationResult) -> str:
 """
 
 
+def _format_signed_ms(ms: float | None) -> str:
+    """Like `_format_ms`, but keeps a NEGATIVE residual visible and signed.
+
+    A negative Unaccounted is real and means generation and tool execution
+    overlapped, so it is rendered rather than clamped — the evalboard does the
+    same. Clamping would turn a measurable inconsistency into a clean zero.
+    """
+    if ms is None:
+        return "—"
+    return f"-{_format_ms(-ms)}" if ms < 0 else _format_ms(ms)
+
+
 def _render_generation_metrics(result: EvaluationResult) -> str:
-    """Render Generation Metrics — latency, turns."""
+    """Render Generation Metrics — latency, turns, and the four wall-clock buckets."""
     from .reports import count_partials_by_outcome, group_consecutive_by_iteration
 
     turns = result.iterations or []
@@ -951,6 +963,22 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
             f'<div class="stat"><div class="label">Crashed Partials</div>'
             f'<div class="value">{_esc(breakdown)}</div></div>'
         )
+    # The four wall-clock buckets. The arithmetic is in reports_stats; this
+    # only formats it. An unmeasured bucket renders as an em dash, never 0ms —
+    # a run predating the head/tail capture measured nothing, and a zero would
+    # claim it measured instantly (CE058).
+    buckets = turn_time_buckets(result)
+    startup = _format_ms(buckets.startup_ms)
+    generation = _format_ms(buckets.generation_ms)
+    tool_exec = _format_ms(buckets.tool_ms)
+    teardown = _format_ms(buckets.teardown_ms)
+    unaccounted = _format_signed_ms(buckets.unaccounted_ms)
+    unaccounted_title = _esc(
+        "the task's wall clock minus the four buckets. Measured against the whole task, so it "
+        + "legitimately includes sandbox setup and grading — it is LARGER than the per-turn residual "
+        + "scripts/timing/decompose_run.py reports, and the two are not comparable. Negative means "
+        + "generation and tool execution overlapped."
+    )
     return f"""
 <h2>Generation Metrics</h2>
 <div class="card">
@@ -960,6 +988,15 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
     <div class="stat"><div class="label">Assistant Turns</div><div class="value">{asst_turns}</div></div>
     <div class="stat"><div class="label">Avg Turn Latency</div><div class="value">{avg_latency}</div></div>
     {crashed_stat}
+  </div>
+  <div class="grid">
+    <div class="stat"><div class="label">Startup</div><div class="value">{startup}</div></div>
+    <div class="stat"><div class="label">Generation</div><div class="value">{generation}</div></div>
+    <div class="stat"><div class="label">Tool exec</div><div class="value">{tool_exec}</div></div>
+    <div class="stat"><div class="label">Teardown</div><div class="value">{teardown}</div></div>
+    <div class="stat" title="{unaccounted_title}">
+      <div class="label">Unaccounted (incl. setup + grading)</div><div class="value">{unaccounted}</div>
+    </div>
   </div>
 </div>
 """

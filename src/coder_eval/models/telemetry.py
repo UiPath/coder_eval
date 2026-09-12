@@ -290,9 +290,20 @@ class AssistantMessage(BaseModel):
     message_id: str | None = Field(
         default=None,
         description=(
-            "Anthropic API message_id. Multiple AssistantMessage records can share this id "
-            "when the Claude Code CLI splits one API response into per-block-kind events. "
-            "Downstream tooling can group by this id to recover one logical generation."
+            "Identity of the generation this emission belongs to. Several AssistantMessage "
+            "records can share one id, and downstream tooling groups by it to recover a single "
+            "logical generation — the evalboard's timeline renders one row per group. "
+            "ALL FIVE backends write it, by three different schemes. Passed THROUGH from the "
+            "harness: claude-code (a real Anthropic API message_id, which repeats because the CLI "
+            "splits one API response into per-block-kind events — the case this field was named "
+            "for), and opencode and pi (the CLI's own id, so they can legitimately leave this None "
+            "when the payload omits it). SYNTHESIZED: codex, which deliberately repeats one id "
+            "across the sub-messages of a generation, and antigravity, which mints a distinct one "
+            "per generation because its Step stream carries none. claude-code also synthesizes in "
+            "ONE place — the sub-agent terminal message, which is delivered as a tool result and "
+            "never streamed. See docs/agents/HARNESS_PARITY.md for the per-harness row — and note "
+            "the id is a WITHIN-TURN identity only: it repeats across retry attempts of one turn "
+            "on every synthesizing harness."
         ),
     )
 

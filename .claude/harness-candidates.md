@@ -565,21 +565,32 @@ divergences, so the deferred-work record is one place. Measurements in
   replay runs in well under one, so closing that last gap needs the agent's
   own clock faked, not the fixtures' rebased.
 
-- [ ] **No TypeScript counterpart to CE058.** `evalboard/lib/runs.ts` and
-  `_sections.tsx` carry the same None-vs-0 contract as the Python side, and
-  `sumMeasured` implements it correctly, but nothing stops the next author
-  writing `?? 0` where an unmeasured value must stay null. Not a simple lint
-  rule: the residual arithmetic in `_sections.tsx` uses `?? 0` *correctly*
-  (subtract only what was measured), so a blanket ban fires on right code and
-  the rule needs a way to tell "publishing a value" from "consuming one".
+- [x] ~~No TypeScript counterpart to CE058.~~ **DONE.**
+  `evalboard/lib/__tests__/no-zero-coalesce.test.ts` is a vitest source scan
+  (there is no eslint in `evalboard/`) over `lib/runs.ts`, `lib/timing.ts` and
+  `_sections.tsx`. It is an ALLOWLIST rather than a ban, exactly because the
+  residual arithmetic uses `?? 0` correctly — each of the 13 entries carries a
+  one-line reason, and a new occurrence fails until its author justifies it or
+  keeps the value null. It is keyed on the codebase's own `…Ms` naming
+  convention rather than on every `?? 0`: a blanket scan matches 60
+  occurrences, ~40 of them token buckets where zero is a fine answer, and an
+  allowlist that long is one nobody reads. Blind spots are declared in the
+  file. Two meta-tests keep it honest — a negative control (so the scan cannot
+  pass by matching nothing) and an assertion that every allowlist entry is
+  still present, so an entry cannot outlive its reason.
   Caught in: turn head/tail timing final review.
 
-- [ ] **`timing.py::decompose_turn` raises an uncaught `TypeError` on a
-  naive/aware datetime mix**, straight out of `EventCollector.build_turn_record`,
-  killing the turn. Unreachable today — every stamp in `agents/` and
-  `streaming/` is a naive `datetime.now()` (verified by grep: zero hits for
-  `timezone.utc` / `utcnow` / `astimezone`) — but nothing pins that invariant,
-  so the first agent to record an aware stamp discovers it at runtime.
+- [x] ~~**`timing.py::decompose_turn` raises an uncaught `TypeError` on a
+  naive/aware datetime mix**~~ **DONE.** `timing.py::_require_same_awareness`
+  now raises from five call sites (`decompose_turn`'s head and tail,
+  `busy_ms`'s window bounds and each span's two ends) with one message template
+  naming the field and which side is aware. Deliberately a GUARD and not a lint
+  rule: the invariant is still unviolated in-tree, and the exposure that
+  actually matters is a third-party agent registered through the
+  `coder_eval.plugins` SPI, which lives outside `src/coder_eval/agents/` and
+  which a rule scoped to that directory could never see — so the message
+  addresses that reader directly. An empty span list is checked not at all,
+  bounds included: nothing is compared, so there is no pair to be about.
   Caught in: turn head/tail timing final review.
 
 - [x] ~~**`claude-code` does not subtract tool execution from its generation
@@ -661,18 +672,20 @@ divergences, so the deferred-work record is one place. Measurements in
   wider than any one capture fix.
   Caught in: the CE060 / antigravity `message_id` final review.
 
-- [ ] **`AssistantMessage.message_id`'s field description names one harness of
-  five** (`models/telemetry.py:283`: "Anthropic API message_id … when the Claude
-  Code CLI splits one API response"). Five backends now write the field and four
-  synthesize it, so `docs/agents/HARNESS_PARITY.md`'s new row is the real SSOT
-  while the model — which this project's DRY principle designates as
-  authoritative — describes claude-code only. Not fixed here because the plan
-  scoped out every model change (the field already existed, so touching it would
-  have put a schema file in a golden-regeneration diff for prose). No mechanical
-  guard is obvious either: "a field description must not name a single harness
-  when the union has five writers" needs a writer census per field, which is
-  CE054-shaped but over a `str` description rather than a key. The cheap version
-  is to fix the sentence in the next change that touches the model.
+- [x] ~~**`AssistantMessage.message_id`'s field description names one harness of
+  five**~~ **DONE.** It said "Anthropic API message_id … when the Claude Code
+  CLI splits one API response", while five backends write the field and four
+  synthesize it — so `docs/agents/HARNESS_PARITY.md`'s row was the real SSOT
+  and the model, which this project's DRY principle designates as
+  authoritative, described claude-code only. Rewritten agent-agnostically: what
+  the id MEANS (the generation an emission belongs to), that all five write it
+  and four synthesize it, each scheme named, a pointer to the per-harness row,
+  and the fact that it is a WITHIN-TURN identity that repeats across retry
+  attempts. No mechanical guard was added and none is obvious — "a field
+  description must not name a single harness when the union has five writers"
+  needs a writer census per field, which is CE054-shaped but over a `str`
+  description rather than a key; the cheap version was exactly this, fixing the
+  sentence in the next change that touches the model.
   Caught in: the CE060 / antigravity `message_id` final review.
 
 - [ ] **The golden corpus pins that a timing value EXISTS, never what it is.**
