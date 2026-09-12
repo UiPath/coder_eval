@@ -23,10 +23,16 @@ subtraction produced (see ``ce064_turn_bracket_on_the_clock``'s measured probe).
 import time
 from datetime import datetime, timedelta
 
+from coder_eval.models import TurnRecord
+from coder_eval.streaming.events import AgentEndEvent, AgentStartEvent, StreamEvent
+
 
 #: Far enough from ``datetime.now()`` that a defaulted bracket cannot be mistaken
-#: for a clock-derived one.
-ANCHOR = datetime(2027, 1, 15, 0, 0, 0)
+#: for a clock-derived one. RELATIVE, never a written date: a fixed anchor stops
+#: discriminating the moment wall time passes it, and the assertion below would
+#: then be satisfied by exactly the `datetime.now()` stamp it exists to reject —
+#: a green sensor measuring nothing, on a date nobody would connect to the test.
+ANCHOR = datetime.now() + timedelta(days=365)
 
 
 class AnchoredClock:
@@ -39,14 +45,12 @@ class AnchoredClock:
         return ANCHOR + timedelta(seconds=time.monotonic() - self._mono0)
 
 
-def assert_bracket_on_the_clock(events: list) -> None:
+def assert_bracket_on_the_clock(events: list[StreamEvent]) -> None:
     """Both turn brackets were stamped from the injected clock, not from ``now()``.
 
     Also asserts the pair is ordered, since a start and an end drawn from two
     different bases is exactly what produced the inverted antigravity tail.
     """
-    from coder_eval.streaming.events import AgentEndEvent, AgentStartEvent
-
     starts = [e for e in events if isinstance(e, AgentStartEvent)]
     ends = [e for e in events if isinstance(e, AgentEndEvent)]
     assert len(starts) == 1, f"expected one AgentStartEvent, saw {len(starts)}"
@@ -61,16 +65,33 @@ def assert_bracket_on_the_clock(events: list) -> None:
     assert ends[0].timestamp >= starts[0].timestamp
 
 
-def assert_overhead_is_measured(record) -> None:
-    """The turn's head and tail are real sub-second measurements on one basis.
+def assert_overhead_is_measured(record: TurnRecord) -> None:
+    """The turn's head and tail are real measurements taken on one basis.
 
-    A cross-basis subtraction shows up here rather than in the stamps: the
-    clamp in ``decompose_turn`` turns the negative into a ``0.0`` that reads as
-    "measured, and instant". Bounding them well below the anchor offset is what
-    proves both ends came from the same clock — a mixed pair would be off by
-    about a year, not by a millisecond.
+    The two ends fail differently, and each needs its own assertion.
+
+    A defaulted ``AgentStartEvent`` lands ~365 days before the clock-derived
+    first window, so the HEAD blows any sane bound by that whole offset — the
+    upper bound is what catches it.
+
+    A defaulted ``AgentEndEvent`` fails the other way: it lands ~365 days
+    BEFORE its own last message, so ``decompose_turn`` clamps the negative and
+    publishes ``0.0`` — "measured, and instant", which sails through an upper
+    bound. Only a strict ``> 0.0`` catches it, and it holds on all three
+    harnesses because a turn's last flush and its end event are separated by
+    real work. The margin is small where it is smallest: antigravity holds its
+    process across turns and measures 0.007-0.03 ms here, which is 7-30 ticks
+    of the 1 us resolution both `datetime` and `time.monotonic()` have on
+    Linux, macOS and Windows. That is the magnitude the clamped defect hid, so
+    do not relax this to ``>= 0.0`` — a zero is the defect.
     """
-    for name in ("harness_startup_ms", "harness_teardown_ms"):
-        value = getattr(record, name)
-        assert value is not None, f"{name} was never measured"
-        assert 0.0 <= value < 60_000.0, f"{name} is {value} ms — the two ends are not on one clock"
+    assert record.harness_startup_ms is not None, "harness_startup_ms was never measured"
+    assert record.harness_teardown_ms is not None, "harness_teardown_ms was never measured"
+    assert 0.0 <= record.harness_startup_ms < 60_000.0, (
+        f"harness_startup_ms is {record.harness_startup_ms} ms — the bracket and the first "
+        "window bound are not on one clock"
+    )
+    assert 0.0 < record.harness_teardown_ms < 60_000.0, (
+        f"harness_teardown_ms is {record.harness_teardown_ms} ms — a 0.0 here is the clamped "
+        "inversion CE064 exists to remove, not an instant teardown"
+    )
