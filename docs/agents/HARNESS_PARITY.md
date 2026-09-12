@@ -34,7 +34,7 @@ wall clock its numbers account for.
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
-| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn |
 | turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
@@ -173,12 +173,24 @@ generation that arrives as a tool result and is never streamed
 excludes the message from `subtract_tool_time` and from the head/tail bracket.
 A stamp no bucket reads has no basis to share.
 
-Codex and OpenCode are **not** converted and the hazard is narrowed rather than
-removed. Their tool spans are the CLI's own epoch-millisecond stamps
-(`codex_agent.py::_ms_to_dt`, `opencode_agent.py::_epoch_ms_to_dt`), which
-cannot be re-derived host-side; converting only the window bounds would put two
-bases inside one `busy_ms` subtraction, relocating the defect instead of
-removing it. Both therefore keep the naive-local exposure.
+Codex and OpenCode are **not** converted, and their reasons are DIFFERENT — they
+were stated as one, and that reading described a state OpenCode is already in.
+
+**Codex** is genuinely single-basis: both its window bounds and its tool spans
+come from `_ms_to_dt` over the CLI's own epoch milliseconds, which cannot be
+re-derived host-side. Converting only the window bounds would put two bases
+inside one `busy_ms` subtraction — relocating the defect instead of removing it —
+so it stays whole, and keeps the naive-local exposure.
+
+**OpenCode is already mixed, today.** Its window bounds are host
+`datetime.now()` (`opencode_agent.py:362` at `step_start`, `:696` at
+`step_finish`) while its tool spans are CLI epoch ms (`:406`, assigned to
+`execution_started_at` at `:420`, and `:462`), so the two bases already meet
+inside one subtraction. The argument for leaving it is therefore not the Codex
+one: it is that a monotonic-derived anchor would trade a narrow NTP exposure on
+the window bounds for intra-turn drift against the CLI's own tool stamps, which
+is the larger of the two. The mixed basis is recorded here rather than defended
+as uniform.
 
 Deadlines on every harness stay on raw `time.monotonic()` and must — a deadline
 may not move when the wall clock steps.

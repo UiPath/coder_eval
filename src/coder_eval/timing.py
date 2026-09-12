@@ -59,21 +59,22 @@ class TurnClock:
     ONE PER TURN, never module-level and never reused across turns: a long run
     would accumulate drift between the pair and real wall time. The turn-state
     constructors take it as an argument so the lifetime is visible in the
-    signature, and so tests can inject a fake instead of monkeypatching a
-    module global out from under the reducer.
+    signature, and so a unit test can pass a fake straight in. An end-to-end
+    test driving ``communicate()`` cannot: the state is built inside it, out of
+    the caller's reach, so those replace this class through the agent module
+    instead (``tests/_bracket_clock.py``). Both reach the same object.
 
     NOT for deadlines. Those stay on ``time.monotonic()`` directly: a deadline
     must not move when the wall clock steps.
 
-    Codex and OpenCode deliberately do NOT use it. Their tool spans are the
-    CLI's own epoch-millisecond stamps, unreachable from the host, so
-    converting only the window bounds would put two bases inside one
-    ``busy_ms`` subtraction — relocating the defect instead of removing it.
-
-    claude-code DOES use it, and is the third of the three that can. Its one
-    remaining raw ``datetime.now()`` is the synthesized sub-agent terminal
-    message, whose bounds are an admitted placeholder that no bucket reads —
-    see the comment at that call site.
+    Antigravity, Pi and claude-code use it — for their window bounds and, since
+    CE064, for their turn bracket. Codex and OpenCode do not. This docstring
+    deliberately says no more than that: asserting a current property of two
+    other modules from here is the drift that put a wrong OpenCode row in the
+    parity table for months, and that table is the designated SSOT for
+    per-harness composition. See the `clock basis for recorded stamps` row in
+    docs/agents/HARNESS_PARITY.md, and the paragraph below it for why each
+    unconverted harness stays that way.
     """
 
     def __init__(self) -> None:

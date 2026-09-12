@@ -523,13 +523,17 @@ class _ClaudeTurnState:
         closes.
 
         Without this the mark is stamped in ``__init__``, BEFORE
-        ``AgentStartEvent`` is emitted, so the head is a small negative that
-        ``decompose_turn`` clamps to ``0.0`` — a clamped inversion published as
-        "measured, and instant", which is the exact confusion CE058 exists to
-        prevent everywhere else. Everything the CLI spent booting, resolving a
-        provider and reaching its first token was booked as msg0's generation
-        instead: ~3.6 s per turn on this harness, inflating every generation
-        figure, the Generation split and the 10 s slow-generation bar.
+        ``AgentStartEvent`` is emitted, so the head comes out negative and
+        ``decompose_turn`` clamps it to ``0.0``. The fault is NOT the clamp —
+        that function's own docstring is right that a measured inversion is a
+        real zero, because both ends were observed. The fault is that the head
+        was measured against the WRONG INSTANT: the mark sat before the turn
+        bracket rather than at the first observed model output, so the interval
+        being measured was not the one the field is defined as. Everything the
+        CLI spent booting, resolving a provider and reaching its first token was
+        booked as msg0's generation instead: ~3.6 s per turn on this harness,
+        inflating every generation figure, the Generation split and the 10 s
+        slow-generation bar.
 
         The old rejection rested on this harness running the model in-process.
         It does not: ``claude-agent-sdk`` spawns the ``claude`` CLI over
