@@ -72,5 +72,6 @@
     "total_cost_usd": "<scrubbed>",
     "uncached_input_tokens": 90
   },
+  "tool_union_ms": "<scrubbed>",
   "user_input": "do it"
 }

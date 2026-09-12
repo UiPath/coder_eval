@@ -353,6 +353,29 @@ class TurnRecord(BaseModel):
             "caveat as harness_startup_ms. None when the turn produced no assistant message."
         ),
     )
+    tool_union_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds this turn's MAIN-THREAD tool calls occupied: the UNION of their "
+            "bounded execution intervals, never their sum. Concurrent calls occupy the wall clock "
+            "once — one measured antigravity turn ran two overlapping `sleep 2` calls, which sum "
+            "to 4.1s of a 2.1s turn — so summing books the overlap twice and can drive the "
+            "four-bucket residual negative, destroying the disjointness the identity rests on. "
+            "MAIN THREAD ONLY, the same filter the generation subtraction and the head and tail "
+            "use: a sub-agent's own calls sit inside the spawning Agent call's interval, which "
+            "the union already covers. Written once by EventCollector.build_turn_record from the "
+            "single span set it computes for the turn, so no consumer has to reproduce union "
+            "arithmetic plus a sub-agent filter over raw command dicts. A call the harness timed "
+            "but did not BOUND contributes nothing — it cannot be placed on the timeline, so its "
+            "time reads as unaccounted (see evalboard/lib/timing.ts::toolExecutionMs, which "
+            "applies the identical policy). "
+            "None when the turn recorded no bounded span at all — never 0.0, which means spans "
+            "were recorded and occupied no measurable time. It is also None on a MID-STREAM "
+            "snapshot (a record built before the terminal event), where nothing was computed "
+            "rather than nothing measured; the two are indistinguishable here and deliberately "
+            "so, because a consumer's response to both is the same — derive it or show a dash."
+        ),
+    )
     token_usage: TokenUsage | None = Field(
         default=None, description="Token usage for this turn (if available from agent SDK)"
     )

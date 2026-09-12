@@ -2413,7 +2413,7 @@ class TestFlushMessageWindowBounds:
     the emission's own first stamp (`item_start`), whose `min()` against the
     mark is the backwards-clock defence. The tool-span arguments this class
     also used to cover are gone — the subtraction moved to
-    `EventCollector.subtract_tool_time`, and
+    `timing.subtract_tool_time`, and
     `tests/test_event_collector.py::TestSubtractToolTime` pins it there.
     """
 
@@ -2471,7 +2471,7 @@ class TestFlushMessageWindowBounds:
         """The reducer publishes the RAW span; the collector subtracts.
 
         It used to bound a still-open call at the window's end and take that
-        slice out here. `EventCollector.subtract_tool_time` sees every span at
+        slice out here. `timing.subtract_tool_time` sees every span at
         once, so a call is subtracted from the windows its REAL interval
         overlaps once it resolves — no boundary approximation, and nothing for
         this reducer to remember. A call that never resolves has no

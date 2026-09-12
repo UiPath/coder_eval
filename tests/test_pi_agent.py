@@ -1109,7 +1109,7 @@ class TestGenerationWindowExcludesToolExecution:
     """A tool running inside a turn is not model time — asserted where it is now DECIDED.
 
     The reducer no longer subtracts anything. It publishes the RAW window, and
-    `EventCollector.subtract_tool_time` takes the tool union back out of it
+    `timing.subtract_tool_time` takes the tool union back out of it
     once, for all five harnesses. So these cases drive the reducer and then a
     real collector, and assert the PUBLISHED number — the one that reaches
     `task.json` — rather than an intermediate the reducer used to own.
@@ -1304,7 +1304,7 @@ class TestToolSpansSurviveTheTurnBoundary:
     This used to be a bookkeeping problem: a per-turn span list, cleared at
     `turn_start` — after the window it feeds had already opened at the mark —
     so a call closing in the gap had its span wiped before the flush could
-    subtract it. That list is gone. `EventCollector.subtract_tool_time` sees
+    subtract it. That list is gone. `timing.subtract_tool_time` sees
     every span at once and clips each to the windows it overlaps, so the
     property now holds by construction rather than by a reset rule.
 
@@ -1448,7 +1448,7 @@ class TestToolSpansSurviveTheTurnBoundary:
         `execution_completed_at` manufactures a bound, and the `duration_ms`
         derived from it is the distance to whenever the sweep happened to run.
         The pair then reads as a measured span that
-        `EventCollector.subtract_tool_time` takes back out of a generation
+        `timing.subtract_tool_time` takes back out of a generation
         window the tool never occupied. `execution_started_at` IS kept: the CLI
         really did emit that start, and one bound alone forms no span. Same
         rule as claude-code's `_finalize_commands` — unknown status and unknown

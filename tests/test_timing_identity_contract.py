@@ -61,7 +61,7 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.streaming.callbacks import CompositeStreamCallback
-from coder_eval.streaming.collector import EventCollector, main_thread_tool_spans
+from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -69,7 +69,7 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     ToolEndStatus,
 )
-from coder_eval.timing import union_ms
+from coder_eval.timing import main_thread_tool_spans, union_ms
 
 
 # The two CLI harnesses (opencode, codex) report their stamps as epoch
@@ -156,6 +156,18 @@ def assert_identity_closes(turn: Turn) -> None:
     tool_ms = union_ms(main_thread_tool_spans(record.messages, record.commands))
     assert record.harness_startup_ms is not None, "a turn that generated has a measured head"
     assert record.harness_teardown_ms is not None, "a turn that generated has a measured tail"
+    # The STORED bucket must equal the one just computed independently. Without
+    # this the ms-exact sensor would cover three of the four buckets and read
+    # the fourth from a re-derivation, leaving the published field unchecked on
+    # every harness — which is how a stored value and its consumers drift.
+    # `None` only when no bounded span exists, in which case the union is 0.0.
+    stored_tool_ms = record.tool_union_ms if record.tool_union_ms is not None else 0.0
+    assert stored_tool_ms == pytest.approx(tool_ms), (
+        f"TurnRecord.tool_union_ms is {record.tool_union_ms}, but this turn's main-thread "
+        f"command spans union to {tool_ms:.4f} ms. The collector writes the field from the same "
+        "span set it measures the head and the tail against, so a disagreement means the stored "
+        "value and the selection rule have come apart."
+    )
     bucket_sum = record.harness_startup_ms + generation_ms + tool_ms + record.harness_teardown_ms
 
     assert bucket_sum == pytest.approx(span_ms), (

@@ -32,6 +32,9 @@ SCRUB_KEYS = frozenset(
         # the value itself stays out of the snapshot.
         "harness_startup_ms",
         "harness_teardown_ms",
+        # The turn's third wall-clock bucket, and measured the same way, so it
+        # varies run to run for the same reason.
+        "tool_union_ms",
         # Cost is a rate-card-dependent float (and is backfilled from the rate
         # card on timeout/kill), so it is masked too — keeping the snapshot
         # rate-card-independent. The integer TOKEN buckets stay EXACT; those are
@@ -298,7 +301,7 @@ def assert_timing_captured(
             "booked twice — most likely a tool that ran outside every generation window and was "
             "left in the head or tail as well as in the tool union, or a generation window that "
             "kept tool time it should have subtracted (see docs/agents/HARNESS_PARITY.md — the "
-            "subtraction happens once, in streaming/collector.py::subtract_tool_time, so a "
+            "subtraction happens once, in timing.py::subtract_tool_time, so a "
             "double-count is a span the collector saw twice or a reducer publishing a window it "
             "already narrowed)"
         )

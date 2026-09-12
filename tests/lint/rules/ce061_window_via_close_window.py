@@ -39,7 +39,7 @@ computed its window from a monotonic delta and subtracted tool time once at
 finalization, because a call issued by an earlier emission is still running when
 the next window closes — and forcing that into ``close_window`` would have meant
 a mode flag on a helper whose whole value is having one shape. Moving the
-subtraction to ``EventCollector.subtract_tool_time`` dissolved the exception:
+subtraction to ``timing.subtract_tool_time`` dissolved the exception:
 the collector is already the place where every span is known, so claude-code
 needs no separate pass and calls the same shrunken helper as the other four.
 ``tests/test_custom_lint.py::TestCE061WindowViaCloseWindow::test_the_rule_is_now_exemption_free``
@@ -131,7 +131,7 @@ class WindowViaCloseWindow(BaseRule):
                     f"never imports {_TIMING_MODULE}.{_HELPER} — so it is computing a generation "
                     "window of its own. Every window is the same geometry: tile from the mark, and "
                     "keep a backwards item stamp from inverting the span. Publish that RAW span; do "
-                    "NOT subtract tool time here — EventCollector.subtract_tool_time does it once, "
+                    "NOT subtract tool time here — coder_eval.timing.subtract_tool_time does it once, "
                     "for every harness, and doing it in the reducer too takes it out twice (CE063 "
                     "guards that half). Pi got the mark wrong by measuring from its own turn start, "
                     "and nothing caught it because the golden identity check is one-sided; "

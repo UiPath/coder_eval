@@ -1,7 +1,7 @@
 """CE063: a reducer may not compute its own tool subtraction.
 
 Tool execution comes out of a generation window in exactly ONE place:
-``coder_eval.streaming.collector.subtract_tool_time``. Before that, five
+``coder_eval.timing.subtract_tool_time``. Before that, five
 reducers each did it themselves — four through ``close_window`` as they
 flushed, claude-code once at finalization — while the head and the tail were
 already computed centrally at the collector seam. That asymmetry is where every
@@ -63,7 +63,7 @@ _BANNED = busy_ms.__name__
 
 _MESSAGE = (
     f"imports '{_BANNED}', but a reducer does not subtract tool time any more — "
-    "coder_eval.streaming.collector.subtract_tool_time does it once, for every harness, "
+    "coder_eval.timing.subtract_tool_time does it once, for every harness, "
     "at the single capture seam. Publish the RAW window (close_window gives you its bounds "
     "and span) and let the collector clip the tool union out of it. Subtracting here too "
     "takes it out twice and silently under-reports generation on this harness alone."

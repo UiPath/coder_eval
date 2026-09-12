@@ -229,7 +229,7 @@ class AssistantMessage(BaseModel):
             "surfaced the message with no measurable window (a rollout rebuild, or a sub-agent "
             "generation delivered as a tool result). "
             "WRITTEN BY THE COLLECTOR, not by the agent: a reducer publishes the RAW window it "
-            "measured, and streaming/collector.py::subtract_tool_time takes the UNION of the "
+            "measured, and timing.py::subtract_tool_time takes the UNION of the "
             "main-thread tool intervals back out of it, once, for every harness. So this equals "
             "completed_at - started_at only when no tool execution overlapped the window, and a "
             "reader of an agent's own AssistantMessage(...) call is NOT looking at the published "

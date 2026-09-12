@@ -480,7 +480,7 @@ class _CodexTurnState:
         # The RAW window. It is extended to the LAST item's completion, so a
         # generation containing a tool call already CONTAINS that tool's
         # execution — but taking it back out is no longer this reducer's job.
-        # `EventCollector.subtract_tool_time` does it for all five, which is
+        # `timing.subtract_tool_time` does it for all five, which is
         # also what makes the sub-message split below safe: the two specs share
         # these bounds, so the collector groups them and subtracts the overlap
         # ONCE rather than once per part.
