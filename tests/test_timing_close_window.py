@@ -128,3 +128,52 @@ class TestCloseWindow:
             close_window(MARK, _at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[misc]
         with pytest.raises(TypeError):
             close_window(now=_at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[call-arg]
+
+
+class TestTurnClock:
+    """One (wall, monotonic) pair per turn, every later stamp derived from it."""
+
+    def test_successive_reads_never_go_backwards(self):
+        from coder_eval.timing import TurnClock
+
+        clock = TurnClock()
+        stamps = [clock.now() for _ in range(50)]
+        assert stamps == sorted(stamps)
+
+    def test_a_derived_stamp_advances_by_the_monotonic_delta(self):
+        import time as _time
+
+        from coder_eval.timing import TurnClock
+
+        clock = TurnClock()
+        before = clock.now()
+        mono_before = _time.monotonic()
+        while _time.monotonic() - mono_before < 0.01:
+            pass
+        elapsed_ms = (_time.monotonic() - mono_before) * 1000.0
+        derived_ms = (clock.now() - before).total_seconds() * 1000.0
+        assert derived_ms == pytest.approx(elapsed_ms, abs=5.0)
+
+    def test_a_fresh_clock_anchors_on_its_own_pair(self):
+        """Each clock holds its OWN (wall, monotonic) origin — the per-turn part.
+
+        Note what this deliberately does NOT assert: that two clocks report
+        different times. They should AGREE, and closely, because both derive
+        from the same monotonic source — re-anchoring exists to correct drift
+        against real wall time, not to introduce an offset. An earlier version
+        of this test asserted `second.now() != first.now()`; that passed only
+        on sub-microsecond skew between the two constructors' reads, so it was
+        flaky under load and asserted the opposite of the design.
+        """
+        import time as _time
+
+        from coder_eval.timing import TurnClock
+
+        first = TurnClock()
+        mono = _time.monotonic()
+        while _time.monotonic() - mono < 0.005:
+            pass
+        second = TurnClock()
+
+        assert second._mono0 > first._mono0
+        assert second._wall0 >= first._wall0

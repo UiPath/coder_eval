@@ -21,7 +21,59 @@ two must agree — neither owns the numbers: ``tests/_fixtures/timing_union_case
 does, and both suites replay it.
 """
 
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
+
+
+class TurnClock:
+    """One (wall, monotonic) pair per turn; every later stamp derives from it.
+
+    A turn's bounds and its durations have to share a basis or they can
+    disagree, and the disagreement lands in a field measured in milliseconds.
+    Two concrete failures this removes:
+
+    * Antigravity computed its window span on the MONOTONIC clock while
+      unioning WALL-clock tool intervals and subtracting one from the other.
+      That is the only reason its window could go negative at all, and the
+      clamp that hid it was indistinguishable from a real instant generation.
+    * Pi stamped with naive-LOCAL ``datetime.now()``. A DST transition or an
+      NTP step inside a turn lands directly in a generation window — an
+      hour-long jump in a millisecond field. Nightly runs start at 04:18 and
+      run for hours, so it is reachable rather than theoretical. A
+      monotonic-derived stamp cannot express it.
+
+    It is an EXTRACTION, not an invention: antigravity already captured this
+    exact pair at the top of ``communicate`` and simply did not use it for
+    later stamps.
+
+    Stamps stay NAIVE LOCAL, matching what the rest of the telemetry and the
+    persisted ``execution_started_at`` already are, so no consumer changes.
+
+    Within a turn the derived stamp is monotonic-accurate and may drift from
+    real wall time; each turn re-anchors. That is intended — do not "fix" it by
+    re-reading the wall clock, which is the property being removed.
+
+    ONE PER TURN, never module-level and never reused across turns: a long run
+    would accumulate drift between the pair and real wall time. The turn-state
+    constructors take it as an argument so the lifetime is visible in the
+    signature, and so tests can inject a fake instead of monkeypatching a
+    module global out from under the reducer.
+
+    NOT for deadlines. Those stay on ``time.monotonic()`` directly: a deadline
+    must not move when the wall clock steps.
+
+    Codex and OpenCode deliberately do NOT use it. Their tool spans are the
+    CLI's own epoch-millisecond stamps, unreachable from the host, so
+    converting only the window bounds would put two bases inside one
+    ``busy_ms`` subtraction — relocating the defect instead of removing it.
+    """
+
+    def __init__(self) -> None:
+        self._wall0 = datetime.now()
+        self._mono0 = time.monotonic()
+
+    def now(self) -> datetime:
+        return self._wall0 + timedelta(seconds=time.monotonic() - self._mono0)
 
 
 def busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) -> float:

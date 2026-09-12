@@ -67,7 +67,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.timing import busy_ms
+from coder_eval.timing import TurnClock, close_window
 from coder_eval.utils import expand_env_vars
 
 
@@ -554,8 +554,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         assert self.config.type is not None, "AntigravityAgent requires AgentConfig.type before communicate()"
 
         self._begin_turn()
+        # Raw monotonic, and deliberately not the turn clock: this seeds the
+        # poll deadline below and `duration_seconds`, neither of which may move
+        # when the wall clock steps. `TurnClock` is for the RECORDED stamps.
         turn_start_time = time.monotonic()
-        turn_start_wall = datetime.now()
+        # ONE clock per turn. This is the (monotonic, wall) pair the reducer
+        # already captured here and then failed to use for its later stamps —
+        # which is why its window span was monotonic while its tool intervals
+        # were wall, and why the two could disagree.
+        clock = TurnClock()
         task_id = str(self.config.type)
         model = self._effective_model()
         collector = EventCollector()
@@ -572,7 +579,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             iteration=self._iteration,
             model=model,
             turn_start_time=turn_start_time,
-            turn_start_wall=turn_start_wall,
+            clock=clock,
             max_turns=max_turns,
         )
 
@@ -806,7 +813,7 @@ class _AntigravityTurnState:
         iteration: int,
         model: str,
         turn_start_time: float,
-        turn_start_wall: datetime,
+        clock: TurnClock,
         max_turns: int | None = None,
     ) -> None:
         self._agent = agent
@@ -818,6 +825,11 @@ class _AntigravityTurnState:
         self.iteration = iteration
         self.model = model
         self.turn_start_time = turn_start_time
+        # Every wall stamp below derives from this, so the tool spans and the
+        # window bounds they are subtracted from share one basis. Injected, not
+        # read from a module global, so a test supplies a fake instead of
+        # monkeypatching `datetime` out from under the reducer.
+        self.clock = clock
 
         self.max_turns = max_turns
         self.timeout_hit = False
@@ -853,8 +865,7 @@ class _AntigravityTurnState:
         # come from the SAME instant, captured by communicate(), so the
         # recorded bounds and the measured duration describe one span.
         # Advanced only by a flush that actually emitted a message.
-        self._gen_mark_monotonic: float = turn_start_time
-        self._gen_mark_wall: datetime = turn_start_wall
+        self._gen_mark_wall: datetime = clock.now()
         # Execution intervals of tools that CLOSED since the mark. This harness
         # interleaves tool calls into one generation — the Step for the tool
         # arrives and only a later usage_metadata Step cuts the message — so a
@@ -939,7 +950,7 @@ class _AntigravityTurnState:
             self._next_seq += 1
             tool_name = _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.get(raw_name, str(raw_name))
             self._tool_input_keys[cid] = set(call.args)
-            now = datetime.now()
+            now = self.clock.now()
             tel = CommandTelemetry(
                 tool_name=tool_name,
                 tool_id=cid,
@@ -965,7 +976,7 @@ class _AntigravityTurnState:
                 or step.content
                 or None
             )
-            completed = datetime.now()
+            completed = self.clock.now()
             started = start_tel.execution_started_at or completed
             tool_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
             end_tel = start_tel.model_copy(
@@ -1024,11 +1035,7 @@ class _AntigravityTurnState:
         """
         if not self._blocks and gen.is_empty():
             return
-        now_monotonic = time.monotonic()
-        now_wall = datetime.now()
-        # Model-generation time = the whole window MINUS the tool execution
-        # that happened inside it.
-        #
+        now_wall = self.clock.now()
         # Do NOT "simplify" this to resetting the mark when a tool ends. That
         # loses real model time: measured on run 2026-09-09_04-18-50, task
         # skill-rpa-uia-google-search, a harness-local Read closed 8 ms after
@@ -1038,52 +1045,35 @@ class _AntigravityTurnState:
         # 43 s Bash, where the model time really is the flush-to-DONE
         # remainder).
         #
-        # A tool that is still OPEN at flush time counts too, bounded at
-        # `now_wall`. Subtracting only CLOSED intervals published the portion
-        # of a straddling call that ran before the boundary as generation,
-        # while the call's own duration_ms counted it again — the one
-        # double-count that this harness's contiguous windows have no slack to
-        # absorb. Measured on tasks/hello_date: a Bash opening 1.7 ms before
+        # The window arithmetic itself, and why a call still open at this
+        # boundary counts against it, live in `close_window`'s docstring.
+        # Measured here before the helper existed: a Bash opening 1.7 ms before
         # the flush drove Sum(generation) + Sum(command) 0.26 ms PAST the turn
-        # wall, on a turn whose whole headroom was 1.4 ms. The four sibling
-        # runs passed by 1.2-8.7 ms out of ~12 s, so this was a coin flip, not
-        # a rounding artifact.
+        # wall, on a turn whose whole headroom was 1.4 ms.
         #
-        # No double subtraction: when the call later closes, the DONE path
-        # appends its full interval to the NEXT window's list, where busy_ms
-        # clips it to the post-flush remainder.
-        span_ms = (now_monotonic - self._gen_mark_monotonic) * 1000.0
-        still_open = [
-            (tel.execution_started_at, now_wall)
-            for cid, tel in self._open_tools.items()
-            if cid not in self._closed_tools and tel.execution_started_at is not None
-        ]
-        tool_ms = busy_ms(self._tool_spans_since_mark + still_open, self._gen_mark_wall, now_wall)
-        generation_ms = span_ms - tool_ms
-        if generation_ms < 0:
-            # busy_ms clips to this window and unions overlaps, so it cannot
-            # exceed the window's own wall span. Reaching here means the two
-            # clocks disagree (the span is monotonic, the tool intervals are
-            # wall), i.e. jitter — worth a line in the task log, because the
-            # clamped 0.0 below is otherwise indistinguishable from a real
-            # instant generation. Numbers only: no agent output is logged.
-            self._agent._log.debug(
-                "Generation window went negative (span=%.1fms tool=%.1fms); clamping to 0.",
-                span_ms,
-                tool_ms,
-            )
+        # The span used to be read off `time.monotonic()` while these intervals
+        # were wall, and subtracting one from the other is the only reason this
+        # window could go negative — a clamp that was indistinguishable from a
+        # real instant generation. Both bounds now derive from `self.clock`, so
+        # the disagreement is unrepresentable and the branch that hid it is
+        # gone.
+        _, generation_ms = close_window(
+            mark=self._gen_mark_wall,
+            now=now_wall,
+            closed_spans=self._tool_spans_since_mark,
+            open_started_ats=[
+                tel.execution_started_at
+                for cid, tel in self._open_tools.items()
+                if cid not in self._closed_tools and tel.execution_started_at is not None
+            ],
+        )
         for i, block in enumerate(self._blocks):
             block.sequence = i
         self.messages.append(
-            # CE061 suppressed TEMPORARILY, removed in 5/6. This window cannot be
-            # expressed by `close_window` yet: its span is monotonic while its
-            # tool spans are wall, so the helper (which derives the span from
-            # `now - started`, both wall) would change the published number.
-            # The clock conversion and this migration land together.
-            AssistantMessage(  # noqa: CE061
+            AssistantMessage(
                 started_at=self._gen_mark_wall,
                 completed_at=now_wall,
-                generation_duration_ms=max(0.0, generation_ms),
+                generation_duration_ms=generation_ms,
                 content_blocks=list(self._blocks),
                 tool_use_ids=[b.tool_use_id for b in self._blocks if b.block_type == "tool_use" and b.tool_use_id],
                 input_tokens=gen.uncached_input_tokens,
@@ -1103,7 +1093,6 @@ class _AntigravityTurnState:
         # Advance the mark ONLY after a message was actually appended. The
         # early return above means a no-op flush leaves the window open, so a
         # later real generation still measures from where it began.
-        self._gen_mark_monotonic = now_monotonic
         self._gen_mark_wall = now_wall
         self._tool_spans_since_mark = []
 
@@ -1147,7 +1136,7 @@ class _AntigravityTurnState:
         for cid, tel in self._open_tools.items():
             if cid in self._closed_tools:
                 continue
-            orphan = tel.model_copy(update={"result_status": "unknown", "execution_completed_at": datetime.now()})
+            orphan = tel.model_copy(update={"result_status": "unknown", "execution_completed_at": self.clock.now()})
             self.emit.on_event(
                 ToolEndEvent(
                     task_id=self.task_id,

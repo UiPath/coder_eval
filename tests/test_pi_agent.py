@@ -23,7 +23,6 @@ from typing import Any
 
 import pytest
 
-from coder_eval.agents import pi_agent as agent_module
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig
@@ -39,6 +38,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import TurnClock
 from tests._fixtures.golden_streams.pi_fixtures import (
     EXPECTED_CACHE_READ,
     EXPECTED_COST,
@@ -1093,6 +1093,16 @@ class TestCostFallsBackToTheRateCard:
         assert record.token_usage.total_cost_usd == 0.0
 
 
+class _FixedClock:
+    """A `TurnClock` stand-in frozen at one instant, injected into the state."""
+
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+
+    def now(self) -> datetime:
+        return self.at
+
+
 class TestGenerationWindowExcludesToolExecution:
     """A tool running inside a turn is not model time.
 
@@ -1102,21 +1112,22 @@ class TestGenerationWindowExcludesToolExecution:
     counted the same milliseconds twice, which the task page's Unaccounted
     cell renders as a ~-100% residual.
 
-    Driven at the reducer: the window is two `datetime.now()` reads and the
-    tool interval comes from the event payload, so only setting both
-    explicitly makes the arithmetic deterministic.
+    Driven at the reducer with an injected clock frozen at `WINDOW_END`: the
+    window's end and the tool intervals both have to be set explicitly for the
+    arithmetic to be deterministic.
     """
 
     WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
     WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms turn
 
-    def _finish_turn(self, monkeypatch, spans, open_starts=()):
-        class _Clock(datetime):
-            @staticmethod
-            def now(tz=None):
-                return TestGenerationWindowExcludesToolExecution.WINDOW_END
-
-        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m")
+    def _finish_turn(self, spans, open_starts=()):
+        state = _PiTurnState(
+            task_id="t",
+            iteration=1,
+            user_input="x",
+            model="m",
+            clock=_FixedClock(self.WINDOW_END),
+        )
         state.turn_started_at = self.WINDOW_START
         state.turn_tool_spans = list(spans)
         for i, started in enumerate(open_starts):
@@ -1126,7 +1137,6 @@ class TestGenerationWindowExcludesToolExecution:
                 timestamp=started,
                 execution_started_at=started,
             )
-        monkeypatch.setattr(agent_module, "datetime", _Clock)
         state.on_turn_end(
             {"message": {"role": "assistant", "usage": {"input": 100, "output": 20}, "stopReason": "stop"}}
         )
@@ -1134,23 +1144,21 @@ class TestGenerationWindowExcludesToolExecution:
         assert len(assistant) == 1
         return assistant[0]
 
-    def test_tool_time_inside_the_turn_is_subtracted(self, monkeypatch):
+    def test_tool_time_inside_the_turn_is_subtracted(self):
         message = self._finish_turn(
-            monkeypatch,
             [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
         )
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
         assert span_ms == pytest.approx(1000.0)
         assert message.generation_duration_ms == pytest.approx(500.0)
 
-    def test_a_turn_with_no_tools_keeps_its_whole_window(self, monkeypatch):
-        assert self._finish_turn(monkeypatch, []).generation_duration_ms == pytest.approx(1000.0)
+    def test_a_turn_with_no_tools_keeps_its_whole_window(self):
+        assert self._finish_turn([]).generation_duration_ms == pytest.approx(1000.0)
 
-    def test_concurrent_tools_are_subtracted_once(self, monkeypatch):
+    def test_concurrent_tools_are_subtracted_once(self):
         # Two overlapping 500ms tools occupy 600ms, not 1000ms. Summing them
         # would leave 0 generation for a turn that generated 400.
         message = self._finish_turn(
-            monkeypatch,
             [
                 (self.WINDOW_START + timedelta(milliseconds=100), self.WINDOW_START + timedelta(milliseconds=600)),
                 (self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700)),
@@ -1158,35 +1166,32 @@ class TestGenerationWindowExcludesToolExecution:
         )
         assert message.generation_duration_ms == pytest.approx(400.0)
 
-    def test_the_window_never_goes_negative(self, monkeypatch):
+    def test_the_window_never_goes_negative(self):
         message = self._finish_turn(
-            monkeypatch,
             [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
         )
         assert message.generation_duration_ms == 0.0
 
-    def test_a_tool_still_open_at_the_boundary_is_subtracted(self, monkeypatch):
+    def test_a_tool_still_open_at_the_boundary_is_subtracted(self):
         # A call that opens inside this turn and closes inside the NEXT one
         # straddles the boundary. Counting only closed intervals published the
         # pre-boundary 400ms as generation while the call's own duration_ms
         # counted it again.
         message = self._finish_turn(
-            monkeypatch,
             [],
             open_starts=[self.WINDOW_START + timedelta(milliseconds=600)],
         )
         assert message.generation_duration_ms == pytest.approx(600.0)
 
-    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self, monkeypatch):
+    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self):
         # Union, not sum, across the closed and still-open sets alike.
         message = self._finish_turn(
-            monkeypatch,
             [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
             open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
         )
         assert message.generation_duration_ms == pytest.approx(200.0)
 
-    def test_the_published_window_reconciles_to_its_own_bounds(self, monkeypatch):
+    def test_the_published_window_reconciles_to_its_own_bounds(self):
         """The reducer subtracted exactly the spans the record carries.
 
         `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
@@ -1204,7 +1209,7 @@ class TestGenerationWindowExcludesToolExecution:
 
         closed = [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))]
         open_start = self.WINDOW_START + timedelta(milliseconds=500)
-        message = self._finish_turn(monkeypatch, closed, open_starts=[open_start])
+        message = self._finish_turn(closed, open_starts=[open_start])
 
         spans = [*closed, (open_start, message.completed_at)]
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
@@ -1215,19 +1220,21 @@ class TestGenerationWindowExcludesToolExecution:
 _SPAN_BASE = datetime(2026, 3, 1, 9, 0, 0)
 
 
-class _SteppedClock(datetime):
-    """A clock the test moves by hand, in ms from `_SPAN_BASE`.
+class _SteppedClock:
+    """A `TurnClock` stand-in the test moves by hand, in ms from `_SPAN_BASE`.
 
-    Pi self-stamps its tool spans with `datetime.now()`, so the tool intervals
-    and the window bounds come from this one source; scripting it is what makes
-    the span arithmetic deterministic.
+    INJECTED, never monkeypatched onto the module. Pi derives every wall stamp
+    from its turn clock now, so patching `agent_module.datetime` would no
+    longer reach it: the tests would quietly start measuring the real clock and
+    pass by accident instead of failing. Injection also puts the "one clock per
+    turn" lifetime in the constructor signature where it can be read.
     """
 
-    at_ms = 0.0
+    def __init__(self, at_ms: float = 0.0) -> None:
+        self.at_ms = at_ms
 
-    @staticmethod
-    def now(tz=None):
-        return _SPAN_BASE + timedelta(milliseconds=_SteppedClock.at_ms)
+    def now(self) -> datetime:
+        return _SPAN_BASE + timedelta(milliseconds=self.at_ms)
 
 
 def _turn_end_payload():
@@ -1248,26 +1255,25 @@ class TestGenerationWindowsTileTheTurn:
     which is the half that carries the weight.
     """
 
-    def _two_turns(self, monkeypatch):
-        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m")
-        _SteppedClock.at_ms = 0
+    def _two_turns(self):
+        clock = _SteppedClock()
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
         state.on_turn_start()
-        _SteppedClock.at_ms = 1000
+        clock.at_ms = 1000
         state.on_turn_end(_turn_end_payload())
-        _SteppedClock.at_ms = 1600
+        clock.at_ms = 1600
         state.on_turn_start()
-        _SteppedClock.at_ms = 2000
+        clock.at_ms = 2000
         state.on_turn_end(_turn_end_payload())
         return [m for m in state.messages if m.role == "assistant"]
 
-    def test_the_second_window_abuts_the_first(self, monkeypatch):
-        messages = self._two_turns(monkeypatch)
+    def test_the_second_window_abuts_the_first(self):
+        messages = self._two_turns()
         assert len(messages) == 2
         assert messages[1].started_at == messages[0].completed_at
 
-    def test_the_inter_turn_gap_is_inside_a_window_rather_than_unaccounted(self, monkeypatch):
-        messages = self._two_turns(monkeypatch)
+    def test_the_inter_turn_gap_is_inside_a_window_rather_than_unaccounted(self):
+        messages = self._two_turns()
         # 1000 -> 2000, which includes the 600ms between `turn_end` and the
         # next `turn_start`. Untiled this reported 400ms and lost the 600.
         assert messages[1].generation_duration_ms == pytest.approx(1000.0)
@@ -1284,42 +1290,41 @@ class TestToolSpansSurviveTheTurnBoundary:
     changes land in one commit, reset first.
     """
 
-    def _run(self, monkeypatch):
-        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m")
+    def _run(self):
+        clock = _SteppedClock()
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
         # The resolved telemetry leaves the state via ToolEnd; the identity
         # case below reconciles against what was RECORDED, not against the
         # clock the test scripted.
         resolved: list[Any] = []
         state.bind(lambda e: resolved.append(e.tool) if isinstance(e, ToolEndEvent) else None)
-        _SteppedClock.at_ms = 0
         state.on_turn_start()
-        _SteppedClock.at_ms = 100
+        clock.at_ms = 100
         state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
-        _SteppedClock.at_ms = 1000
+        clock.at_ms = 1000
         state.on_turn_end(_turn_end_payload())
-        _SteppedClock.at_ms = 1500
+        clock.at_ms = 1500
         state.on_tool_execution_end({"toolCallId": "c1", "result": "ok"})  # closes in the GAP
-        _SteppedClock.at_ms = 1600
+        clock.at_ms = 1600
         state.on_turn_start()
-        _SteppedClock.at_ms = 2000
+        clock.at_ms = 2000
         state.on_turn_end(_turn_end_payload())
         return resolved, [m for m in state.messages if m.role == "assistant"]
 
-    def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self, monkeypatch):
-        _, messages = self._run(monkeypatch)
+    def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self):
+        _, messages = self._run()
         # Window 2 tiles 1000 -> 2000. c1 ran for 1000 -> 1500 of it, so 500ms
         # is model time. With the reset left at `turn_start` this reads 1000.0.
         assert messages[1].generation_duration_ms == pytest.approx(500.0)
 
-    def test_the_call_is_subtracted_from_exactly_one_window(self, monkeypatch):
-        _, messages = self._run(monkeypatch)
+    def test_the_call_is_subtracted_from_exactly_one_window(self):
+        _, messages = self._run()
         # Window 1 bounded c1 at its own close (100 -> 1000); window 2 takes
         # only the remainder.
         assert messages[0].generation_duration_ms == pytest.approx(100.0)
         assert messages[1].generation_duration_ms == pytest.approx(500.0)
 
-    def test_the_four_bucket_identity_closes_exactly_across_the_boundary(self, monkeypatch):
+    def test_the_four_bucket_identity_closes_exactly_across_the_boundary(self):
         """generation + UNION(tool) accounts for the whole span, to the ms.
 
         This is the assertion the golden corpus CANNOT make: `_scrub.py` masks
@@ -1332,7 +1337,7 @@ class TestToolSpansSurviveTheTurnBoundary:
         """
         from coder_eval.timing import busy_ms
 
-        resolved, messages = self._run(monkeypatch)
+        resolved, messages = self._run()
         lo, hi = messages[0].started_at, messages[1].completed_at
         generation_ms = sum(m.generation_duration_ms or 0.0 for m in messages)
         command = next(c for c in resolved if c.tool_id == "c1")
@@ -1340,20 +1345,19 @@ class TestToolSpansSurviveTheTurnBoundary:
 
         assert generation_ms + tool_ms == pytest.approx((hi - lo).total_seconds() * 1000.0)
 
-    def test_a_turn_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self, monkeypatch):
-        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m")
-        _SteppedClock.at_ms = 0
+    def test_a_turn_that_never_finishes_neither_advances_the_mark_nor_clears_the_spans(self):
+        clock = _SteppedClock()
+        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
         state.on_turn_start()
-        _SteppedClock.at_ms = 1000
+        clock.at_ms = 1000
         state.on_turn_end(_turn_end_payload())
         mark_after_flush = state.gen_mark
 
-        _SteppedClock.at_ms = 1600
+        clock.at_ms = 1600
         state.on_turn_start()
-        _SteppedClock.at_ms = 1700
+        clock.at_ms = 1700
         state.on_tool_execution_start({"toolCallId": "c2", "toolName": "bash", "args": {}})
-        _SteppedClock.at_ms = 1900
+        clock.at_ms = 1900
         state.close_open_tools()  # crash/timeout orphan sweep — no message appended
 
         # Published nothing, so tiling past it would hand its time to whichever
@@ -1363,3 +1367,50 @@ class TestToolSpansSurviveTheTurnBoundary:
         assert [(s, e) for s, e in state.turn_tool_spans] == [
             (_SPAN_BASE + timedelta(milliseconds=1700), _SPAN_BASE + timedelta(milliseconds=1900))
         ]
+
+
+class TestClockIsFreshPerTurn:
+    """A retried turn must not inherit the crashed turn's clock.
+
+    `TurnClock` anchors once and derives every later stamp from that anchor, so
+    one surviving a retry would stamp the new turn against the old turn's wall
+    origin — and over a long run accumulate drift against real wall time. The
+    lifetime is structural (the clock is built with the turn state, and the
+    state is built per `communicate()`), which is exactly the kind of property
+    that stays true only while someone is checking.
+    """
+
+    async def test_a_turn_after_a_crash_is_anchored_to_a_fresh_clock(self, patch_exec, tmp_path):
+        agent = _agent()
+        patch_exec(_FakeProcess([], returncode=1, stderr=b"boom: bad model"))
+        with pytest.raises(AgentCrashError):
+            await _run(agent, tmp_path)
+        crashed_clock = agent  # the state is gone; only the agent survives a crash
+
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        record = await crashed_clock.communicate("try again")
+
+        # The recovered turn measured a real window of its own, rather than one
+        # anchored before the crash — which a stale clock would have produced
+        # as an inflated first generation.
+        windows = [m for m in record.messages if m.role == "assistant" and m.generation_duration_ms is not None]
+        assert windows
+        for message in windows:
+            assert message.completed_at >= message.started_at
+            assert message.generation_duration_ms < 60_000, "a window spanning the crashed turn means a stale clock"
+
+    async def test_the_agent_retains_no_clock_between_turns(self, patch_exec, tmp_path):
+        """Nothing to reset, because nothing survives — the structural half.
+
+        The clock is reachable only through the turn state, and the turn state
+        is a local of `communicate()`. If either were ever hoisted onto the
+        agent (a plausible refactor — several other fields are), the next turn
+        would silently inherit the previous turn's anchor and no assertion
+        about a single turn's numbers would notice.
+        """
+        agent = _agent()
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(agent, tmp_path)
+
+        leaked = [name for name, value in vars(agent).items() if isinstance(value, _PiTurnState | TurnClock)]
+        assert not leaked, f"a turn's clock outlived its turn via {leaked}"

@@ -4035,8 +4035,10 @@ class TestCE061WindowViaCloseWindow:
         assert not found, found
 
     def test_each_suppression_is_load_bearing(self):
-        # A noqa nobody needs is a noqa that outlives its reason. Both of these
-        # must correspond to a violation the rule actually raises.
+        # A noqa nobody needs is a noqa that outlives its reason, so the set is
+        # pinned rather than merely non-empty. It has already earned that:
+        # antigravity carried a TEMPORARY suppression until it moved onto
+        # `close_window`, and this test is what failed when the reason expired.
         import ast
         import pathlib
 
@@ -4048,7 +4050,7 @@ class TestCE061WindowViaCloseWindow:
             for path in sorted(root.glob("*.py"))
             if WindowViaCloseWindow(str(path)).check(ast.parse(path.read_text(encoding="utf-8")))
         }
-        assert suppressed == {"claude_code_agent.py", "antigravity_agent.py"}
+        assert suppressed == {"claude_code_agent.py"}
 
 
 class TestRuffExternalCoversEveryRule:
