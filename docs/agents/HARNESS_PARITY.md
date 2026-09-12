@@ -24,7 +24,7 @@ wall clock its numbers account for.
 
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
-| `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock per CLI step, minus tool execution inside the step | harness clock per CLI turn, minus tool execution inside the turn |
+| `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock: previous `step_finish` → this one, minus tool execution inside the window | harness clock: previous `turn_end` → this one, minus tool execution inside the window |
 | what the **first** window covers | turn start → msg0, so dispatch + TTFT are INSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | turn start → first flush, so dispatch + TTFT are INSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
 | `harness_startup_ms` (turn head) | 0.0 — the window above already covers it | ~3.1 s — CLI boot fused with TTFT | 0.0 — the window above already covers it | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
 | `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
@@ -32,16 +32,29 @@ wall clock its numbers account for.
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
-| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes | yes | yes | yes | yes |
+| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
+| clock basis for recorded stamps | monotonic duration, wall bounds | SDK epoch ms — the subprocess's own clock, unreachable from the host | one `TurnClock` per turn | CLI epoch ms (`_epoch_ms_to_dt`), `datetime.now()` only as a fallback | one `TurnClock` per turn |
+| window built by `timing.py::close_window` | no — see below | yes | yes | yes | yes |
+
+[^identity]: "yes" is load-bearing but the committed sensor is one-sided.
+`tests/_fixtures/golden_streams/_scrub.py` asserts only `overshoot <= …`, so it
+catches a bucket claiming MORE time than the turn contains and says nothing
+about one claiming less — an unmeasured bucket passes every test in the suite.
+Worse, that suite cannot see the magnitudes at all: `SCRUB_KEYS` masks
+`generation_duration_ms` and both bounds to a placeholder, so a golden snapshot
+records that a window was measured, never what it measured. The two-sided check
+is `scripts/timing/decompose_run.py --max-residual-pct N`, which gates on each
+turn's `|residual|` as a share of its own wall clock. It is report-only and
+nothing runs it on a schedule; run it by hand against real `task.json` files.
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
 All five harnesses can have tool execution inside a generation window, and all
 five subtract it. Four interleave it structurally: Antigravity reports a `Step`
 for the tool and only a later
 `usage_metadata` `Step` cuts the message; Codex's message window is seeded from
-the first item's start and extended to the last item's completion; OpenCode
-opens its window at `step_start` and closes it at `step_finish`, and Pi at
-`turn_start` / `turn_end`, with every tool call running inside. In each the
+the first item's start and extended to the last item's completion; OpenCode and Pi
+tile: each window opens where the previous `step_finish` / `turn_end` closed it
+and runs to the next, with every tool call in between running inside. In each the
 span between the recorded bounds legitimately CONTAINS tool time that the model
 did not spend generating, so each subtracts it — the **union** of the closed tool intervals
 clipped to the window (`coder_eval/timing.py::busy_ms`), never the sum, because
@@ -54,6 +67,37 @@ The consequence worth knowing: on an emission that carries *only* a tool call,
 the whole measured window was that tool running, so the recorded generation
 time is legitimately `0.0`. That is a measurement, not a placeholder — `None`
 is what "never measured" looks like.
+
+**One helper builds four of the five windows.** Codex, OpenCode, Pi and
+Antigravity call `coder_eval/timing.py::close_window`, which is the whole
+arithmetic in one place: tile from the mark, keep a stamp that went backwards
+from inverting the span, bound the calls still open at the boundary, subtract
+the union clipped to the window, clamp at zero. It had been copy-pasted four
+times, and Pi shipped a variant of it that measured from its own turn start —
+so every inter-turn gap fell into no bucket, and nothing failed, because the
+identity above is asserted on one side only. **CE061** now requires any module
+in `agents/` that publishes a measured `generation_duration_ms` to import the
+helper. claude-code is the single documented exception and carries the only
+`# noqa: CE061`: it subtracts once at finalization (below) rather than per
+flush, a shape `close_window` cannot take without a mode flag.
+
+**Two clock bases remain, and the row above says which.** Antigravity and Pi
+derive every recorded wall stamp from one `TurnClock` per turn, so a turn's
+bounds and the tool spans subtracted from them cannot disagree. Antigravity
+needed it: its span was monotonic while its tool intervals were wall, which is
+the only reason its window could go negative, and the clamp that caught it was
+indistinguishable from a real instant generation. Pi needed it for a different
+reason — its stamps were naive-local, so a DST transition or an NTP step inside
+a turn lands directly in a generation window.
+
+Codex and OpenCode are **not** converted and the hazard is narrowed rather than
+removed. Their tool spans are the CLI's own epoch-millisecond stamps
+(`codex_agent.py::_ms_to_dt`, `opencode_agent.py::_epoch_ms_to_dt`), which
+cannot be re-derived host-side; converting only the window bounds would put two
+bases inside one `busy_ms` subtraction, relocating the defect instead of
+removing it. Both therefore keep the naive-local exposure. Deadlines on every
+harness stay on raw `time.monotonic()` and must — a deadline may not move when
+the wall clock steps.
 
 **`claude-code` subtracts at finalization, not as it flushes.** It was once
 exempt entirely, on the premise that because it marks the end of the previous
@@ -175,6 +219,47 @@ still carry `null` and still depend on the gap fallback, which is why it stays
 which is the case CE060 cannot see (it requires the kwarg to be present, not
 non-`None` at runtime). OpenCode tiles its windows contiguously too, so it is
 the other harness where a missing id can still collapse a turn.
+
+### Time to first token is not measured
+
+Nothing records it today. There is no `ttft` or `first_token` symbol anywhere
+in `src/`, `evalboard/`, `docs/` or `tests/`, and it **cannot be derived from
+what is stored**: `generation_duration_ms` is the whole window, and the latency
+in question is a sub-interval of it. This section is the design, so the next
+person to want it does not re-derive it. Nothing below is implemented.
+
+**The mark is the measure-from point, and every reducer already keeps one.**
+Each one records the moment its current generation window opened — which is
+exactly what a latency is measured from. Read the current attribute off `src/`
+rather than trusting a table here; the last note that transcribed those names
+went stale in precisely that way.
+
+**The first-delta signal already exists in every reducer.** claude-code has raw
+`content_block_delta` (already delivered — `include_partial_messages=True`),
+codex `item/agentMessage/delta`, antigravity `step.content_delta`, OpenCode the
+text part event, Pi `text_delta`.
+
+Four rules, each of which changes what gets built:
+
+- **Name it `first_delta_latency_ms`, never `ttft_ms`.** Four harnesses' windows
+  tile, so the mark is the *previous step's close* and the interval fuses
+  queueing and tool time. That is queue latency, not prefill latency. Only
+  claude-code's `message_start` sits near "the request went out". This is the
+  same rule the head and tail already follow: a field is named for the interval
+  it MEASURES, never for what it contains.
+- **It is never a fifth bucket.** It is a sub-interval of head + first window.
+  Adding it to the four-bucket identity breaks the disjointness the whole
+  design rests on. Report it beside the identity, never inside it.
+- **Take the first delta of ANY kind**, not the first visible-text delta. The
+  codex, OpenCode and Pi handlers ignore thinking deltas, so a reasoning-heavy
+  turn would report its first token late by the entire thinking phase.
+- **Never write `0.0` for "not measured"** (CE058). Use `None` when no delta
+  arrived.
+
+The verification hook is `tests/_fixtures/golden_streams/_scrub.py`'s
+`assert_timing_captured`, where a floor belongs; the five
+`tests/_fixtures/golden_streams/*_fixtures.py` modules already carry the deltas
+needed to drive it.
 
 ### Known divergences
 
