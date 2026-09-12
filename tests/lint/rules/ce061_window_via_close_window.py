@@ -21,6 +21,11 @@ built from one clock read, a missing identity. This one is about PROVENANCE:
 where the arithmetic came from. One invariant per id is what makes a ``# noqa``
 mean one thing.
 
+NOTE what this rule no longer covers, and deliberately: the tool SUBTRACTION is
+not part of a window's geometry any more, so "did this reducer subtract
+correctly" is not a question here. CE063 owns it — no module in ``agents/`` may
+import ``busy_ms`` at all.
+
 BLIND SPOT, and it is the whole weakness of the chosen shape: this proves the
 module IMPORTS the helper, never that any particular call used it. The value
 passed to ``generation_duration_ms=`` is always a local (``generation_ms``,
@@ -29,11 +34,16 @@ the arithmetic itself are ``tests/test_timing_close_window.py`` and the
 per-reducer window tests; this rule adds only the cheap structural half that
 neither can reach — a sixth harness rolling its own.
 
-It costs exactly one permanent suppression. ``claude_code_agent.py`` computes
-its window from a monotonic delta and subtracts tool time ONCE at finalization
-across every emission, because a call issued by an earlier emission is still
-running when the next window closes. Forcing that into ``close_window`` means a
-mode flag on a helper whose whole value is having one shape.
+It costs NO suppression. It used to cost exactly one: ``claude_code_agent.py``
+computed its window from a monotonic delta and subtracted tool time once at
+finalization, because a call issued by an earlier emission is still running when
+the next window closes — and forcing that into ``close_window`` would have meant
+a mode flag on a helper whose whole value is having one shape. Moving the
+subtraction to ``EventCollector.subtract_tool_time`` dissolved the exception:
+the collector is already the place where every span is known, so claude-code
+needs no separate pass and calls the same shrunken helper as the other four.
+``tests/test_custom_lint.py::TestCE061WindowViaCloseWindow::test_the_rule_is_now_exemption_free``
+pins the suppression set EMPTY, so a new exemption has to be argued for.
 
 EXEMPT, because both are honest claims that no window was measured: an explicit
 ``generation_duration_ms=None`` (codex's rollout rebuild, claude-code's
@@ -119,13 +129,13 @@ class WindowViaCloseWindow(BaseRule):
                     node,
                     f"{name}(...) publishes a measured 'generation_duration_ms' but this module "
                     f"never imports {_TIMING_MODULE}.{_HELPER} — so it is computing a generation "
-                    "window of its own. Every window is the same arithmetic: tile from the mark, "
-                    "keep a backwards stamp from inverting the span, bound the calls still open at "
-                    "the boundary, subtract the UNION of the tool intervals clipped to the window, "
-                    "clamp at zero. Pi got that wrong by measuring from its own turn start, and "
-                    "nothing caught it because the four-bucket identity is only asserted as an "
-                    f"upper bound. Call {_HELPER} instead. If this harness genuinely cannot use it "
-                    "— claude-code subtracts once at finalization across every emission — add "
-                    "'# noqa: CE061' with a comment saying why.",
+                    "window of its own. Every window is the same geometry: tile from the mark, and "
+                    "keep a backwards item stamp from inverting the span. Publish that RAW span; do "
+                    "NOT subtract tool time here — EventCollector.subtract_tool_time does it once, "
+                    "for every harness, and doing it in the reducer too takes it out twice (CE063 "
+                    "guards that half). Pi got the mark wrong by measuring from its own turn start, "
+                    "and nothing caught it because the golden identity check is one-sided; "
+                    "tests/test_timing_identity_contract.py is the two-sided one. "
+                    f"Call {_HELPER} instead.",
                 )
         self.generic_visit(node)

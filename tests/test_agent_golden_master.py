@@ -67,9 +67,20 @@ NO_GENERATION_WINDOW: frozenset[str] = frozenset(
         # one millisecond, so the tool spans BOTH windows entirely and the
         # central subtraction takes each down to a measured 0.0. It is the tool
         # interval that is fictional, not the subtraction — which is why the
-        # scenario is also in FICTIONAL_DURATIONS. Its point is the TILING (the
-        # second window opens at the first `step_finish`), and the snapshot
-        # still records that.
+        # scenario is in FICTIONAL_DURATIONS too.
+        #
+        # BE HONEST ABOUT WHAT IS LEFT. With both exemptions on, this snapshot
+        # asserts neither the identity nor a positive window, and it does NOT
+        # record the tiling the scenario is named for — `SCRUB_KEYS` masks
+        # `started_at`, `completed_at` and `generation_duration_ms`, so nothing
+        # about where a window opened survives into the JSON. What it still
+        # pins is the STRUCTURE: two assistant messages, their content blocks,
+        # their token buckets, and one resolved command. OpenCode's tiling is
+        # asserted where it can be — `tests/test_timing_identity_contract.py`
+        # (scripted clock, ms-exact) and
+        # `tests/test_opencode_agent.py::TestGenerationWindowsTileTheTurn`.
+        # `pi_c_multi_turn_tiling` is the same scenario shape on a harness whose
+        # stamps come from its own clock, and it needs neither exemption.
         "opencode_c_multi_step_tiling",
     }
 )

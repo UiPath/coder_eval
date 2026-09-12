@@ -514,7 +514,7 @@ class _ClaudeTurnState:
         the head and the generation disjoint so the four-bucket identity still
         closes.
 
-        Without this the two marks are stamped in ``__init__``, BEFORE
+        Without this the mark is stamped in ``__init__``, BEFORE
         ``AgentStartEvent`` is emitted, so the head is a small negative that
         ``decompose_turn`` clamps to ``0.0`` — a clamped inversion published as
         "measured, and instant", which is the exact confusion CE058 exists to
@@ -538,10 +538,18 @@ class _ClaudeTurnState:
         per-attempt by construction. If a future harness reuses a turn state,
         the reset belongs there and not here.
 
-        A turn with no ``message_start`` — partial streaming off, a mocked
-        ``query()``, a crash before the first event — never calls this, keeps
-        the turn-entry mark and clamps to ``0.0`` exactly as before. That is the
-        correct degradation rather than a gap.
+        A turn with no ``message_start`` — a mocked ``query()``, a crash before
+        the first event — never calls this, keeps the turn-entry mark and clamps
+        to ``0.0`` exactly as before. That is the correct degradation rather
+        than a gap.
+
+        One route to it is OPERATOR-REACHABLE and worth knowing: this harness
+        sets ``include_partial_messages=True`` BEFORE spreading
+        ``**self.config.sdk_options``, so
+        ``-D agent.sdk_options.include_partial_messages=false`` turns the raw
+        stream off, and with it this re-seed — the head silently returns to the
+        clamped ``0.0`` it used to publish. Nothing warns; the degradation is
+        safe but the number changes meaning.
         """
         if self.first_output_seen:
             return
