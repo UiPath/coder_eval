@@ -2228,12 +2228,12 @@ class TestTheTurnBracketComesFromTheTurnClock:
         """The published defect, asserted directly.
 
         `harness_teardown_ms` was `0.0` here because `decompose_turn` clamped a
-        negative produced by two clock bases. With one basis the interval is
-        tiny but real, so a strict `> 0` is the assertion that fails on a
-        revert.
+        negative produced by two clock bases. The strict `> 0.0` that catches a
+        revert lives in `assert_overhead_is_measured`, which every harness
+        shares — this harness is simply where the margin is thinnest, since it
+        holds its process across turns and so has the shortest real tail.
         """
         monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
         record = await _agent_with_steps(self._steps()).communicate("go")
 
         assert_overhead_is_measured(record)
-        assert record.harness_teardown_ms > 0.0
