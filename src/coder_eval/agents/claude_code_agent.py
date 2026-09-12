@@ -723,6 +723,9 @@ class _ClaudeTurnState:
                 crashed=crashed,
                 crash_reason=crash_reason,
                 duration_seconds=time.monotonic() - self.turn_start_time,
+                # One basis with the window bounds — see the AgentStartEvent
+                # site in `communicate`.
+                timestamp=self.clock.now(),
             )
         )
 
@@ -1084,6 +1087,20 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     prompt=user_input,
                     iteration=self._iteration,
                     model=effective_model,
+                    # Stamped from the TURN CLOCK, not the event model's raw
+                    # `datetime.now()` default. This bound is subtracted against
+                    # window bounds the same clock produced (`decompose_turn`), and
+                    # two bases inside one subtraction is what `TurnClock` exists to
+                    # remove. Measured: antigravity's tail came out at -0.017 ms —
+                    # an `AgentEndEvent` stamped 17 us BEFORE its own last message
+                    # finished, which cannot happen — and `decompose_turn` clamped
+                    # it to the `0.0` that means "measured, and instant" (CE058).
+                    # It only bites where the true interval is smaller than the
+                    # drift between the two clocks, which is the one harness that
+                    # holds its process across turns; the fix belongs at every
+                    # clocked site regardless, since that is what makes the
+                    # subtraction single-basis rather than usually-close.
+                    timestamp=state.clock.now(),
                 )
             )
 
