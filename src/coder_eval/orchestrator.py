@@ -318,6 +318,23 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
     # An absent dimension drops out of the average instead.
     if result.weighted_score is not None:
         props["Score"] = float(result.weighted_score)
+    # The four wall-clock buckets, from the ONE canonical summation — this
+    # function does not add anything up itself. Each is OMITTED rather than
+    # coalesced to 0, for the same reason as `Score` above: a dashboard
+    # averaging `StartupMs` with no filter would read a laundered zero as a
+    # harness that booted instantly, which is indistinguishable from a run that
+    # predates the capture. An absent dimension drops out of the average.
+    from .reports_stats import turn_time_buckets
+
+    buckets = turn_time_buckets(result)
+    for name, value in (
+        ("StartupMs", buckets.startup_ms),
+        ("GenerationMs", buckets.generation_ms),
+        ("ToolExecMs", buckets.tool_ms),
+        ("TeardownMs", buckets.teardown_ms),
+    ):
+        if value is not None:
+            props[name] = float(value)
     return "CoderEval.Task.End", props
 
 

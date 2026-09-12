@@ -102,7 +102,7 @@ def eval_result_to_task_dict(
             downstream consumers (evalboard) collapse them to one. ``None`` when
             the caller doesn't track replicates (repeats disabled / legacy).
     """
-    from coder_eval.reports_stats import expected_turns_overage, visible_turn_count
+    from coder_eval.reports_stats import expected_turns_overage, turn_time_buckets, visible_turn_count
     from coder_eval.reports_stats import has_final_reply as _has_final_reply
 
     ref_similarity: float | None = None
@@ -134,6 +134,8 @@ def eval_result_to_task_dict(
             if isinstance(raw, int) and raw >= 1:
                 expected_turns_value = raw
 
+    _buckets = turn_time_buckets(result)
+
     d: dict[str, Any] = {
         "task_id": result.task_id,
         "replicate_index": replicate_index,
@@ -154,6 +156,17 @@ def eval_result_to_task_dict(
             }
             for t in result.iterations
         ],
+        # The four wall-clock buckets, computed ONCE here through the canonical
+        # `turn_time_buckets` and carried as TASK-level keys. `iterations` below
+        # is a deliberate 6-key projection with no `messages`, no `commands` and
+        # no `harness_*_ms`, so the markdown report cannot re-derive them from
+        # it — and a second implementation of the summation is exactly what that
+        # function exists to prevent. Each stays `float | None`: an unmeasured
+        # bucket renders as a dash, never as `0ms` (CE049).
+        "startup_ms": _buckets.startup_ms,
+        "generation_ms": _buckets.generation_ms,
+        "tool_ms": _buckets.tool_ms,
+        "teardown_ms": _buckets.teardown_ms,
         "model_used": result.model_used,
         "reference_similarity": ref_similarity,
         "input_tokens": (result.total_token_usage.uncached_input_tokens if result.total_token_usage else None),

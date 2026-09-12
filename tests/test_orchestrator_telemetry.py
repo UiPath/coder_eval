@@ -236,3 +236,108 @@ async def test_docker_path_emits_task_end_host_side(tmp_path):
     assert name == "CoderEval.Task.End"
     assert props["Driver"] == "docker"
     assert props["TaskId"] == hash_identifier("dock-task")
+
+
+class TestTheFourBucketDimensions:
+    """`CoderEval.Task.End` carries the wall-clock buckets, each independently optional.
+
+    Each is OMITTED rather than coalesced to 0 when unmeasured, for the same
+    reason `Score` is: a dashboard averaging `StartupMs` with no filter reads a
+    laundered zero as a harness that booted instantly, which is
+    indistinguishable from a run predating the capture. Four separate
+    assertions, not one combined — a single `all four present` check passes
+    even if one dimension were wired to another's value.
+    """
+
+    _NAMES = ("StartupMs", "GenerationMs", "ToolExecMs", "TeardownMs")
+
+    @staticmethod
+    def _result(turns):
+        from coder_eval.models import TurnRecord
+
+        return EvaluationResult(
+            task_id="t",
+            task_description="d",
+            variant_id="v",
+            agent_type=AgentKind.CLAUDE_CODE,
+            started_at=datetime.now(),
+            final_status=FinalStatus.SUCCESS,
+            iteration_count=len(turns),
+            environment_info={},
+            duration_seconds=10.0,
+            iterations=[TurnRecord.model_validate(t) for t in turns],
+        )
+
+    @staticmethod
+    def _turn(**overrides):
+        from datetime import timedelta
+
+        base = datetime(2026, 9, 11, 9, 0, 0)
+        turn = {
+            "iteration": 1,
+            "user_input": "go",
+            "agent_output": "done",
+            "duration_seconds": 5.0,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "started_at": base.isoformat(),
+                    "completed_at": (base + timedelta(milliseconds=800)).isoformat(),
+                    "generation_duration_ms": 800.0,
+                }
+            ],
+            "harness_startup_ms": 500.0,
+            "harness_teardown_ms": 100.0,
+            "tool_union_ms": 200.0,
+        }
+        turn.update(overrides)
+        return turn
+
+    def _props(self, **overrides):
+        from coder_eval.orchestrator import build_task_event
+
+        _, props = build_task_event(self._result([self._turn(**overrides)]), driver="tempdir", variant_id="v1")
+        return props
+
+    def test_every_dimension_is_present_and_carries_its_own_value(self):
+        props = self._props()
+        assert props["StartupMs"] == pytest.approx(500.0)
+        assert props["GenerationMs"] == pytest.approx(800.0)
+        assert props["ToolExecMs"] == pytest.approx(200.0)
+        assert props["TeardownMs"] == pytest.approx(100.0)
+
+    def test_an_unmeasured_startup_is_omitted(self):
+        props = self._props(harness_startup_ms=None)
+        assert "StartupMs" not in props
+        assert "GenerationMs" in props and "ToolExecMs" in props and "TeardownMs" in props
+
+    def test_an_unmeasured_teardown_is_omitted(self):
+        props = self._props(harness_teardown_ms=None)
+        assert "TeardownMs" not in props
+        assert "StartupMs" in props
+
+    def test_an_unmeasured_tool_bucket_is_omitted(self):
+        # No stored value AND no bounded command to derive one from.
+        props = self._props(tool_union_ms=None, commands=[])
+        assert "ToolExecMs" not in props
+        assert "GenerationMs" in props
+
+    def test_an_unmeasured_generation_is_omitted(self):
+        props = self._props(messages=[])
+        assert "GenerationMs" not in props
+        assert "StartupMs" in props
+
+    def test_a_measured_zero_is_emitted_rather_than_omitted(self):
+        """The control: 0.0 is a measurement and must reach the dashboard."""
+        props = self._props(harness_startup_ms=0.0)
+        assert props["StartupMs"] == 0.0
+
+    def test_it_does_not_sum_anything_itself(self):
+        """One producer for the buckets, and `build_task_event` is not it."""
+        import inspect
+
+        from coder_eval.orchestrator import build_task_event
+
+        source = inspect.getsource(build_task_event)
+        assert "turn_time_buckets(result)" in source
+        assert "harness_startup_ms" not in source, "the summation belongs to reports_stats"

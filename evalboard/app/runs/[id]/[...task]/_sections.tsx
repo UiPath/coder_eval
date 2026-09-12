@@ -320,6 +320,7 @@ export function MessageTimelineSection({
     taskDurationSeconds,
     harnessStartupMs,
     harnessTeardownMs,
+    storedToolMs,
     setupMs,
     gradingMs,
 }: {
@@ -343,6 +344,15 @@ export function MessageTimelineSection({
     // the cells then read "—" while Unaccounted keeps exactly its old meaning.
     harnessStartupMs?: number | null;
     harnessTeardownMs?: number | null;
+    // The tool bucket as the HARNESS recorded it, summed over the task's turns
+    // (`TurnRecord.tool_union_ms`). Preferred over recomputing it from the
+    // message stream, because the collector wrote it from the same span set it
+    // measured the head and the tail against — reading it is how this cell and
+    // the harness are guaranteed to agree rather than merely observed to.
+    // Null/absent on a run predating the field, and the cell then computes the
+    // union itself; the two agree by construction, since `toolExecutionMs`
+    // applies the same bounded-spans-only policy as the Python selector.
+    storedToolMs?: number | null;
     // TASK-scoped phases either side of the turns: provisioning before the
     // first turn, criteria checking after the last. Named so Unaccounted is a
     // residual instead of a label for the setup phase — it was ~1.9s of known,
@@ -401,7 +411,17 @@ export function MessageTimelineSection({
     // occupy the wall clock once. Summing them made Unaccounted negative on
     // any task that ran tools in parallel, reporting overlap as if the
     // harness had lost time.
-    const toolExecMs = toolExecutionMs(mainThread);
+    //
+    // STORED first, computed as the fallback. `?? null` and not `??  computed`
+    // in one expression because `storedToolMs` of 0 is a measurement and must
+    // win: the harness recorded spans and they occupied no measurable time.
+    // Only its ABSENCE (a run predating the field) routes here.
+    //
+    // The Generation cell below has no stored twin and is deliberately still
+    // computed from the messages — the reconciliation entry exists so a
+    // consumer sums that stream rather than reading a separate aggregate. The
+    // mixed sourcing is intentional; see `sumTurnBuckets` in lib/runs.ts.
+    const toolExecMs = storedToolMs ?? toolExecutionMs(mainThread);
     const slowGen = mainThread.filter(
         (m) => (m.generationMs ?? 0) >= SLOW_GEN_MS,
     ).length;
@@ -496,7 +516,7 @@ export function MessageTimelineSection({
                             Tool exec
                         </div>
                         <div className="text-gray-900 font-medium">
-                            {fmtMs(toolExecMs)}
+                            {fmtMs(toolExecMs ?? null)}
                         </div>
                     </div>
                     <div title="wall clock after the last generation window closed: SDK/CLI finalization, result assembly and process teardown">
@@ -840,6 +860,7 @@ export function CostExplorerSection({
     taskDurationSeconds,
     harnessStartupMs,
     harnessTeardownMs,
+    storedToolMs,
     setupMs,
     gradingMs,
 }: {
@@ -852,6 +873,7 @@ export function CostExplorerSection({
     // Forwarded verbatim to the timeline's Startup/Teardown cells.
     harnessStartupMs?: number | null;
     harnessTeardownMs?: number | null;
+    storedToolMs?: number | null;
     // Forwarded straight through to MessageTimelineSection — this component
     // renders it and owns no timing of its own.
     setupMs?: number | null;
@@ -896,6 +918,7 @@ export function CostExplorerSection({
                 taskDurationSeconds={taskDurationSeconds}
                 harnessStartupMs={harnessStartupMs}
                 harnessTeardownMs={harnessTeardownMs}
+                storedToolMs={storedToolMs}
                 setupMs={setupMs}
                 gradingMs={gradingMs}
             />
