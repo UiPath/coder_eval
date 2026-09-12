@@ -30,6 +30,7 @@ from typing import Any
 from unittest.mock import patch
 
 from coder_eval.agents.opencode_agent import OpenCodeAgent
+from coder_eval.errors import AgentCrashError
 from coder_eval.models import OpenCodeAgentConfig
 
 
@@ -201,17 +202,22 @@ def _agent() -> OpenCodeAgent:
 class OpenCodeScenario:
     """One recorded CLI event stream.
 
-    No ``expects`` knob: every scenario here replays cleanly. The crash and
-    timeout paths live in the agent's own test module, which asserts on the
-    exception rather than on a snapshot.
+    ``expects`` names the exception a scenario is supposed to raise, and the
+    runner then snapshots ``pending_turn`` instead of the returned record —
+    the same knob ``ClaudeScenario`` carries, for the same reason: the partial
+    a crash preserves is a real capture path, and one nobody was comparing
+    against a snapshot on this harness.
     """
 
     name: str
     lines: list[str]
+    expects: type[BaseException] | None = None
 
 
 async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) -> dict[str, Any]:
     """Replay one scenario and return the resulting record as a plain dump."""
+    import pytest
+
     proc = _FakeProcess(_rebase_lines(scenario.lines))
 
     async def fake_exec(*_argv: str, **_kwargs: Any) -> _FakeProcess:
@@ -225,7 +231,13 @@ async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) ->
         patch.object(os, "killpg", lambda _pgid, _sig: None, create=True),
     ):
         await agent.start(working_dir)
-        record = await agent.communicate("do it")
+        if scenario.expects is not None:
+            with pytest.raises(scenario.expects):
+                await agent.communicate("do it")
+            record = agent.pending_turn
+            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
+        else:
+            record = await agent.communicate("do it")
     return record.model_dump(mode="json")
 
 
@@ -256,6 +268,105 @@ def _build_catalogue() -> list[OpenCodeScenario]:
     # (b) a resolved tool call inside a step.
     scenarios.append(
         OpenCodeScenario(name="b_tool_call_resolved", lines=list(HAPPY_STREAM)),
+    )
+
+    # (c) two generations with a tool resolving between them. The TILING case:
+    # the second window opens at the first `step_finish`, not at its own
+    # `step_start`, so the wall clock between the two steps — the model time
+    # that produced the second one — lands inside a window rather than in no
+    # bucket at all. That is the defect this harness shipped with, and it had
+    # a unit test but no golden.
+    scenarios.append(
+        OpenCodeScenario(
+            name="c_multi_step_tiling",
+            lines=[
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt(
+                    "tool_use",
+                    {
+                        "id": "prt_2",
+                        "messageID": "msg_1",
+                        "tool": "bash",
+                        "callID": "call_1",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "ls"},
+                            "output": "main.py",
+                            "time": {"start": _T0_MS, "end": _T0_MS + 5},
+                        },
+                    },
+                ),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_3", "messageID": "msg_1", "reason": "tool-calls", "tokens": _tokens(100, 20)},
+                ),
+                _evt("step_start", {"id": "prt_4", "messageID": "msg_2"}),
+                _evt("text", {"id": "prt_5", "messageID": "msg_2", "text": "Listed it."}),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_6", "messageID": "msg_2", "reason": "stop", "tokens": _tokens(50, 30)},
+                ),
+            ],
+        )
+    )
+
+    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved`
+    # by the orphan sweep at finalization. It carries NO `state.time`, which is
+    # the honest shape for a call that never returned: with no
+    # `execution_started_at` there is no `duration_ms` and no span.
+    #
+    # READ THE SNAPSHOT: the sweep still stamps `execution_completed_at`, which
+    # it does on every close path, so the record holds an end with no
+    # beginning. Compare `pi_d_orphaned_tool`, where the start IS stamped and a
+    # manufactured duration follows from it.
+    scenarios.append(
+        OpenCodeScenario(
+            name="d_orphaned_tool",
+            lines=[
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt(
+                    "tool_use",
+                    {
+                        "id": "prt_2",
+                        "messageID": "msg_1",
+                        "tool": "bash",
+                        "callID": "call_1",
+                        "state": {"status": "pending", "input": {"command": "sleep 600"}},
+                    },
+                ),
+                _evt("text", {"id": "prt_3", "messageID": "msg_1", "text": "Waiting."}),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_4", "messageID": "msg_1", "reason": "stop", "tokens": _tokens(100, 20)},
+                ),
+            ],
+        )
+    )
+
+    # (e) the CLI's own structured error AFTER a complete generation. `_settle_turn`
+    # crashes on it, and the partial `pending_turn` must still carry that
+    # generation and its head/tail — a crash does not un-measure what was
+    # measured before it.
+    scenarios.append(
+        OpenCodeScenario(
+            name="e_error_after_generation",
+            lines=[
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt("text", {"id": "prt_2", "messageID": "msg_1", "text": "Starting."}),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_3", "messageID": "msg_1", "reason": "stop", "tokens": _tokens(100, 20)},
+                ),
+                json.dumps(
+                    {
+                        "type": "error",
+                        "sessionID": SESSION,
+                        "error": {"name": "ProviderAuthError", "data": {"message": "401 from the provider"}},
+                    }
+                ),
+            ],
+            expects=AgentCrashError,
+        )
     )
 
     return scenarios

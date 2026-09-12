@@ -97,6 +97,15 @@ FICTIONAL_DURATIONS: frozenset[str] = frozenset(
         "codex_f_collab_fallback",  # 900 ms collab wait
         "codex_h_no_turn_completed_crash",  # 200 ms of item time — see below
         "opencode_b_tool_call_resolved",  # 17 ms tool interval
+        # 5 ms tool interval, injected as CLI epoch stamps. OpenCode takes its
+        # tool bounds from the CLI payload rather than from its own clock, so
+        # every scenario of this harness that resolves a tool injects them —
+        # there is no version of this scenario that stays commensurable with a
+        # sub-millisecond replay. Its TILING property (the second window opens
+        # at the first `step_finish`) is what the scenario is for, and that is
+        # still snapshotted; the identity is asserted for this harness by
+        # tests/test_timing_identity_contract.py, on a scripted clock.
+        "opencode_c_multi_step_tiling",
     }
 )
 
