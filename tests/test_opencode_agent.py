@@ -19,10 +19,12 @@ import asyncio
 import json
 import os
 import signal
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
 
+from coder_eval.agents import opencode_agent as agent_module
 from coder_eval.agents.opencode_agent import (
     OpenCodeAgent,
     _OpenCodeTurnState,
@@ -30,7 +32,7 @@ from coder_eval.agents.opencode_agent import (
     _unwrap,
 )
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AssistantMessage, OpenCodeAgentConfig, PermissionMode
+from coder_eval.models import AssistantMessage, CommandTelemetry, OpenCodeAgentConfig, PermissionMode
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.events import (
     AgentEndEvent,
@@ -43,130 +45,14 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-
-
-SESSION = "ses_test123"
-
-
-def _evt(event_type: str, part: dict[str, Any]) -> str:
-    """One CLI event line: payload under ``part``, sessionID on the envelope."""
-    return json.dumps(
-        {"type": event_type, "timestamp": 1786663016802, "sessionID": SESSION, "part": {"sessionID": SESSION, **part}}
-    )
-
-
-def _tokens(inp: int, out: int, *, write: int = 0, read: int = 0, reasoning: int = 0) -> dict[str, Any]:
-    """Token payload in the NESTED convention (total = input+output+reasoning, cache
-    counted inside `input`); see TestTokenShapeIsObservable for the flat one."""
-    return {
-        "total": inp + out + reasoning,
-        "input": inp,
-        "output": out,
-        "reasoning": reasoning,
-        "cache": {"write": write, "read": read},
-    }
-
-
-HAPPY_STREAM = [
-    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
-    _evt(
-        "tool_use",
-        {
-            "id": "prt_2",
-            "messageID": "msg_1",
-            "type": "tool",
-            "tool": "read",
-            "callID": "call_1",
-            "state": {
-                "status": "completed",
-                "input": {"filePath": "main.py"},
-                "output": "print('hi')",
-                "time": {"start": 1786663018214, "end": 1786663018231},
-            },
-        },
-    ),
-    _evt(
-        "step_finish",
-        {
-            "id": "prt_3",
-            "messageID": "msg_1",
-            "reason": "tool-calls",
-            "cost": 0.001,
-            "tokens": _tokens(100, 20, write=5, read=10),
-        },
-    ),
-    _evt("step_start", {"id": "prt_4", "messageID": "msg_2", "type": "step-start"}),
-    _evt("text", {"id": "prt_5", "messageID": "msg_2", "type": "text", "text": "Created the file."}),
-    _evt(
-        "step_finish",
-        {
-            "id": "prt_6",
-            "messageID": "msg_2",
-            "reason": "stop",
-            "cost": 0.002,
-            "tokens": _tokens(50, 30, read=40, reasoning=7),
-        },
-    ),
-]
-
-
-class _FakeProcess:
-    def __init__(self, lines: list[str], returncode: int = 0, stderr: bytes = b"") -> None:
-        self._lines = [f"{line}\n".encode() for line in lines]
-        self.returncode: int | None = None
-        self._final_returncode = returncode
-        self._stderr = stderr
-        self.pid = 4242
-        self.terminated = False
-        self.killed = False
-        self.stdout = self
-
-    async def readline(self) -> bytes:
-        if self._lines:
-            return self._lines.pop(0)
-        self.returncode = self._final_returncode
-        return b""
-
-    async def read(self) -> bytes:
-        return self._stderr
-
-    async def wait(self) -> int:
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = self._final_returncode
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = self._final_returncode
-
-
-class _RunningProcess(_FakeProcess):
-    """A process that stays alive until it is explicitly terminated or killed.
-
-    Needed for teardown assertions: the plain fake reports an exit code as soon
-    as ``wait()`` is awaited, so ``kill()`` would (correctly) skip ``terminate()``
-    on an already-dead process and the test would prove nothing.
-    """
-
-    def __init__(self, lines: list[str], **kwargs: Any) -> None:
-        super().__init__(lines, **kwargs)
-        self._exited = asyncio.Event()
-
-    async def wait(self) -> int:
-        await self._exited.wait()
-        self.returncode = self._final_returncode
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self._exited.set()
-
-    def kill(self) -> None:
-        self.killed = True
-        self._exited.set()
+from tests._fixtures.golden_streams.opencode_fixtures import (
+    HAPPY_STREAM,
+    SESSION,
+    _evt,
+    _FakeProcess,
+    _RunningProcess,
+    _tokens,
+)
 
 
 @pytest.fixture
@@ -1895,3 +1781,166 @@ class TestToolFailureCapture:
         assert event.tool.tool_name == "unknown"
         assert event.tool.result_status == "unknown"
         assert event.tool.error_message == "no result observed"
+
+
+class TestGenerationWindowExcludesToolExecution:
+    """A tool running inside a step is not model time.
+
+    OpenCode marks the window at `step_start` and closes it at
+    `step_finish`, and every tool call executes INSIDE it while also
+    publishing its own measured `duration_ms`. Publishing the raw span as
+    generation time counted the same milliseconds twice, which the task
+    page's Unaccounted cell renders as a ~-100% residual.
+
+    Driven at the reducer rather than through `communicate()`: the window is
+    two `datetime.now()` reads and the tool interval comes from the event
+    payload, so only setting both explicitly makes the arithmetic
+    deterministic.
+    """
+
+    WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
+    WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms step
+
+    def _finish_step(self, monkeypatch, spans, open_starts=()):
+        class _Clock(datetime):
+            @staticmethod
+            def now(tz=None):
+                return TestGenerationWindowExcludesToolExecution.WINDOW_END
+
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
+        state.step_started_at = self.WINDOW_START
+        state.step_tool_spans = list(spans)
+        for i, started in enumerate(open_starts):
+            state.open_tools[f"open-{i}"] = CommandTelemetry(
+                tool_name="bash",
+                tool_id=f"open-{i}",
+                timestamp=started,
+                execution_started_at=started,
+            )
+        monkeypatch.setattr(agent_module, "datetime", _Clock)
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
+        assistant = [m for m in state.messages if m.role == "assistant"]
+        assert len(assistant) == 1
+        return assistant[0]
+
+    def test_tool_time_inside_the_step_is_subtracted(self, monkeypatch):
+        # A 500ms tool squarely inside the 1000ms step.
+        message = self._finish_step(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+        )
+        span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
+        assert span_ms == pytest.approx(1000.0)
+        assert message.generation_duration_ms == pytest.approx(500.0)
+
+    def test_a_step_with_no_tools_keeps_its_whole_window(self, monkeypatch):
+        message = self._finish_step(monkeypatch, [])
+        assert message.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_concurrent_tools_are_subtracted_once(self, monkeypatch):
+        # Two overlapping 500ms tools occupy 600ms of wall clock, not 1000ms.
+        # Summing them would leave 0 generation for a step that generated 400.
+        message = self._finish_step(
+            monkeypatch,
+            [
+                (self.WINDOW_START + timedelta(milliseconds=100), self.WINDOW_START + timedelta(milliseconds=600)),
+                (self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700)),
+            ],
+        )
+        assert message.generation_duration_ms == pytest.approx(400.0)
+
+    def test_the_window_never_goes_negative(self, monkeypatch):
+        # A tool whose recorded interval straddles the step is clipped to it.
+        message = self._finish_step(
+            monkeypatch,
+            [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
+        )
+        assert message.generation_duration_ms == 0.0
+
+    def test_a_tool_still_open_at_the_boundary_is_subtracted(self, monkeypatch):
+        # The windows tile from the previous step's finish, so a call that
+        # opens inside this step and closes inside the NEXT one straddles the
+        # boundary. Counting only closed intervals published the pre-boundary
+        # 400ms as generation while the call's own duration_ms counted it
+        # again — the exact double-count `busy_ms` exists to prevent.
+        message = self._finish_step(
+            monkeypatch,
+            [],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=600)],
+        )
+        assert message.generation_duration_ms == pytest.approx(600.0)
+
+    def test_an_open_tool_overlapping_a_closed_one_is_counted_once(self, monkeypatch):
+        # Union, not sum, across the closed and still-open sets alike.
+        message = self._finish_step(
+            monkeypatch,
+            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
+            open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
+        )
+        assert message.generation_duration_ms == pytest.approx(200.0)
+
+
+class TestGenerationWindowsTileTheTurn:
+    """Each step's window runs from the PREVIOUS step's finish, not its own `step_start`.
+
+    The CLI announces a step only once it is already producing one, so the
+    model time that PRODUCED the step lands in the gap before it. Measured on
+    tasks/hello_date with a live claude-haiku-4.5: gaps of 857 ms and 851 ms
+    carrying no tool at all (the Write inside them took 7 ms), attributed to
+    nothing — 24% of the turn, on its own enough to hold OpenCode above the
+    evalboard's 25% "Unaccounted" red threshold.
+
+    Driven at the reducer for the same reason as the sibling class above: the
+    window is two `datetime.now()` reads, so only setting them explicitly
+    makes the arithmetic deterministic.
+    """
+
+    T0 = datetime(2026, 1, 1, 12, 0, 0)
+
+    @staticmethod
+    def _finish_at(monkeypatch, state, *, step_start, now):
+        class _Clock(datetime):
+            @staticmethod
+            def now(tz=None):
+                return now
+
+        state.step_started_at = step_start
+        state.step_tool_spans = []
+        monkeypatch.setattr(agent_module, "datetime", _Clock)
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
+
+    def _two_steps(self, monkeypatch):
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
+        # Step 1 runs T0 -> T0+1000.
+        self._finish_at(monkeypatch, state, step_start=self.T0, now=self.T0 + timedelta(milliseconds=1000))
+        # 800ms of model time, then a step the CLI only announces at T0+1800.
+        self._finish_at(
+            monkeypatch,
+            state,
+            step_start=self.T0 + timedelta(milliseconds=1800),
+            now=self.T0 + timedelta(milliseconds=2000),
+        )
+        return [m for m in state.messages if m.role == "assistant"]
+
+    def test_the_gap_before_a_step_is_its_generation_time(self, monkeypatch):
+        first, second = self._two_steps(monkeypatch)
+        # Bounded by its own step_start, this window was 200ms and the 800ms
+        # that produced it was attributed to nothing.
+        assert second.generation_duration_ms == pytest.approx(1000.0)
+        assert second.started_at == first.completed_at
+
+    def test_the_first_step_keeps_its_own_start(self, monkeypatch):
+        """Everything before the first `step_start` is CLI spawn, not model time.
+
+        Tiling the first window back to the turn's start would report Node's
+        boot — 3.1 s of OpenCode's measured head — as generation.
+        """
+        first, _ = self._two_steps(monkeypatch)
+        assert first.started_at == self.T0
+        assert first.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_the_steps_leave_no_gap_between_them(self, monkeypatch):
+        first, second = self._two_steps(monkeypatch)
+        covered = (second.completed_at - first.started_at).total_seconds() * 1000.0
+        gen = sum(m.generation_duration_ms or 0.0 for m in (first, second))
+        assert gen == pytest.approx(covered)

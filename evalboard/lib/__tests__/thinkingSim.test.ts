@@ -31,6 +31,8 @@ function toolUse(
         resultPreview,
         outputTokens,
         resultTokens,
+        execStartMs: null,
+        execEndMs: null,
     };
 }
 
@@ -43,8 +45,10 @@ function toolUse(
 // map on them, so fixtures must not all collide on index 0.
 let __callIndex = 0;
 function call(opts: {
-    generationMs: number;
-    thinkingMs: number;
+    // Nullable to match MessageEvent: a rollout rebuild or a sub-agent
+    // generation delivered as a tool result has no measurable window.
+    generationMs: number | null;
+    thinkingMs: number | null;
     outputTokens: number;
     cacheWriteTokens?: number | null;
     thinkingOutputTokens?: number | null;
@@ -63,6 +67,7 @@ function call(opts: {
         thinkingMs: opts.thinkingMs,
         textMs: null,
         toolGenMs: null,
+        mixedGenMs: null,
         blockTypes: [],
         thinkingText: null,
         text: null,
@@ -1135,3 +1140,29 @@ describe("projectThinking — robust across ALL lever combinations", () => {
         expect(b.coeffOutput).toBeCloseTo(a.coeffOutput, 5);
     });
 });
+
+// `generation_duration_ms` is `float | None`: a rollout rebuild or a sub-agent
+// generation delivered as a tool result has no measurable window. A turn built
+// entirely from those used to weigh every model at 0, so the primary model was
+// decided by map-insertion order.
+describe("buildThinkingModel — primary model with no generation timing", () => {
+    test("falls back to output tokens when no message has a window", () => {
+        // Haiku is listed FIRST and would win on insertion order alone, but
+        // Sonnet produced 10x the output.
+        const messages = [
+            call({ generationMs: null, thinkingMs: null, outputTokens: 30, model: "claude-haiku-4-5" }),
+            call({ generationMs: null, thinkingMs: null, outputTokens: 300, model: "claude-sonnet-4-6" }),
+        ];
+        const m = buildThinkingModel(messages, TOTALS, 0.5);
+        expect(m).not.toBeNull();
+        expect(m?.model).toBe("claude-sonnet-4-6");
+    });
+
+    test("generation time still wins where it exists", () => {
+        const messages = [
+            call({ generationMs: 10, thinkingMs: 0, outputTokens: 900, model: "claude-haiku-4-5" }),
+            call({ generationMs: 500, thinkingMs: 0, outputTokens: 10, model: "claude-sonnet-4-6" }),
+        ];
+        expect(buildThinkingModel(messages, TOTALS, 0.5)?.model).toBe("claude-sonnet-4-6");
+    });
+})

@@ -194,7 +194,10 @@ class TestCommandTelemetryStatus:
             assert cmd.tool_name == "Write"
             assert cmd.result_status == "unknown"
             assert cmd.error_message is None
-            assert cmd.duration_ms == 0.0
+            # Force-closed without a tool result, so it was never timed. None
+            # keeps it out of BOTH sides of avg_command_time_ms; a 0.0 here
+            # would drag the average toward zero with an invented measurement.
+            assert cmd.duration_ms is None
 
         finally:
             agent_module.query = original_query
@@ -558,6 +561,10 @@ class TestAssistantMessageTelemetry:
 
             # Verify basic fields
             assert aturn.role == "assistant"
+            # Strong, not `is None or >= 0`: the Claude streaming path always
+            # measures a window, so this is the one assertion in the suite that
+            # a refactor dropping the kwarg (defaulting it to None) would trip.
+            assert aturn.generation_duration_ms is not None
             assert aturn.generation_duration_ms >= 0
             assert aturn.input_tokens == 100
             assert aturn.output_tokens == 50

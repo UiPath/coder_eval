@@ -299,11 +299,20 @@ export function buildThinkingModel(
     // output (the main agent model, not background haiku compaction calls).
     const modelOut = new Map<string, number>();
     const totalGen = messages.reduce((s, m) => s + (m.generationMs ?? 0), 0);
+    const totalOut = messages.reduce((s, m) => s + (m.outputTokens ?? 0), 0);
     for (const m of messages) {
-        // Weight by generation time, not output_tokens: the CLI's per-message
-        // output is unreliable (see thinking estimate below), but generation
-        // time is recorded for every emission.
-        const w = m.generationMs ?? 0;
+        // Weight by generation time where there is any: the CLI's per-message
+        // output is unreliable (see thinking estimate below).
+        //
+        // But generation time is NOT recorded for every emission — a rollout
+        // rebuild or a sub-agent generation delivered as a tool result has no
+        // measurable window and reports null. A turn built entirely from those
+        // weighs every model at 0, and the first one encountered wins by
+        // accident: a Haiku sub-agent listed before the main Opus message
+        // would price the whole task at Haiku rates. Fall back to output
+        // tokens, then to an equal vote, so the choice is at least a stated
+        // rule rather than map-insertion order.
+        const w = totalGen > 0 ? (m.generationMs ?? 0) : totalOut > 0 ? (m.outputTokens ?? 0) : 1;
         if (m.model) modelOut.set(m.model, (modelOut.get(m.model) ?? 0) + w);
     }
     let primaryModel: string | null = null;

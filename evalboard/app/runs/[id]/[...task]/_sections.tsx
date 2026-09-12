@@ -13,6 +13,7 @@ import type {
     TokenTotals,
     ToolCall,
 } from "@/lib/runs";
+import { toolExecutionMs } from "@/lib/timing";
 import {
     type PerMessageImpact,
     buildThinkingModel,
@@ -253,11 +254,17 @@ export function ToolTimelineSection({
     );
 }
 
+// Sign-aware: the Unaccounted residual goes negative when generation and tool
+// execution overlap (parallel tool calls, or Antigravity closing a tool inside
+// a generation window), and "-1.2s" reads as an overlap where "-1200ms" reads
+// as a formatting bug.
 function fmtMs(ms: number | null): string {
     if (ms == null) return "—";
-    if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`;
-    if (ms >= 1_000) return `${(ms / 1_000).toFixed(1)}s`;
-    return `${Math.round(ms)}ms`;
+    const sign = ms < 0 ? "-" : "";
+    const abs = Math.abs(ms);
+    if (abs >= 60_000) return `${sign}${(abs / 60_000).toFixed(1)}m`;
+    if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}s`;
+    return `${sign}${Math.round(abs)}ms`;
 }
 
 function fmtTokens(n: number | null): string {
@@ -310,6 +317,7 @@ export function MessageTimelineSection({
     messages,
     subAgentUsageByToolId = {},
     impactByIndex,
+    taskDurationSeconds,
 }: {
     messages: MessageEvent[];
     // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
@@ -320,6 +328,10 @@ export function MessageTimelineSection({
     // by message index. Renders an inline Δ badge on each affected row. Empty
     // (no badges) when levers sit at as-run, or undefined when no simulator.
     impactByIndex?: Map<number, PerMessageImpact>;
+    // The task's recorded wall clock, so the strip can show what generation +
+    // tool execution do NOT account for. Null/absent on a run predating
+    // duration capture — the cell then renders "—" rather than a fake residual.
+    taskDurationSeconds?: number | null;
 }) {
     // Token columns can be shown as counts or as their estimated USD value.
     const [unit, setUnit] = useState<Unit>("tokens");
@@ -351,23 +363,50 @@ export function MessageTimelineSection({
     const messageCount = messages.filter((m) => m.role === "assistant").length;
 
     // Roll-up stats for the summary strip.
-    const totalGenMs = messages.reduce((s, m) => s + (m.generationMs ?? 0), 0);
-    const thinkingMs = messages.reduce((s, m) => s + (m.thinkingMs ?? 0), 0);
-    const textMs = messages.reduce((s, m) => s + (m.textMs ?? 0), 0);
-    const toolGenMs = messages.reduce((s, m) => s + (m.toolGenMs ?? 0), 0);
-    const toolExecMs = messages.reduce(
-        (s, m) => s + m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0),
-        0,
-    );
-    const slowGen = messages.filter(
+    //
+    // MAIN THREAD ONLY. A sub-agent's emissions carry a parentToolUseId and
+    // are nested under the Agent tool call that spawned them — and that call's
+    // own durationMs already spans the sub-agent's entire run, generation and
+    // nested tools alike. Summing over every message counts the sub-agent
+    // twice: once as generation, once inside its parent's execution. On a 140s
+    // task with a 120s Agent call containing 90s of sub-agent generation, the
+    // Unaccounted residual came out at -57%.
+    const mainThread = messages.filter((m) => m.parentToolUseId == null);
+    const totalGenMs = mainThread.reduce((s, m) => s + (m.generationMs ?? 0), 0);
+    const thinkingMs = mainThread.reduce((s, m) => s + (m.thinkingMs ?? 0), 0);
+    const textMs = mainThread.reduce((s, m) => s + (m.textMs ?? 0), 0);
+    const toolGenMs = mainThread.reduce((s, m) => s + (m.toolGenMs ?? 0), 0);
+    const mixedMs = mainThread.reduce((s, m) => s + (m.mixedGenMs ?? 0), 0);
+    // The UNION of the tool executions, not their sum — concurrent calls
+    // occupy the wall clock once. Summing them made Unaccounted negative on
+    // any task that ran tools in parallel, reporting overlap as if the
+    // harness had lost time.
+    const toolExecMs = toolExecutionMs(mainThread);
+    const slowGen = mainThread.filter(
         (m) => (m.generationMs ?? 0) >= SLOW_GEN_MS,
     ).length;
-    const slowTool = messages.reduce(
+    const slowTool = mainThread.reduce(
         (s, m) =>
             s + m.toolUses.filter((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS).length,
         0,
     );
-    const thinkingShare = totalGenMs > 0 ? thinkingMs / totalGenMs : 0;
+    // TINT ONLY. Against the ATTRIBUTABLE part, because an emission no kind
+    // could claim would otherwise drag the thinking share down for a reason
+    // unrelated to thinking. The DISPLAYED percentages all divide by
+    // totalGenMs instead, so the four of them sum to 100% — mixing the two
+    // denominators made them sum to 190%.
+    const attributableGenMs = totalGenMs - mixedMs;
+    const thinkingShare = attributableGenMs > 0 ? thinkingMs / attributableGenMs : 0;
+
+    // Wall clock the agent stream does not explain. Negative means generation
+    // and tool execution overlapped, which is a real signal — never clamped.
+    const taskMs =
+        taskDurationSeconds != null ? taskDurationSeconds * 1000 : null;
+    const unaccountedMs = taskMs != null ? taskMs - totalGenMs - toolExecMs : null;
+    const unaccountedShare =
+        taskMs != null && taskMs > 0 && unaccountedMs != null
+            ? unaccountedMs / taskMs
+            : null;
 
     return (
         <section className="space-y-2">
@@ -380,21 +419,90 @@ export function MessageTimelineSection({
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums">
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Messages
+            {/* TWO LEVELS, two rows. The top row's Generation, Tool exec and
+                Unaccounted sum to the task's wall clock; the bottom row splits
+                Generation alone and sums to IT. Rendering the split as a
+                sub-cell of one top-row cell put both sums on one line, where
+                nothing said which total each part belonged to. */}
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums space-y-3">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+                    <div>
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Messages
+                        </div>
+                        <div className="text-gray-900 font-medium">{messageCount}</div>
                     </div>
-                    <div className="text-gray-900 font-medium">{messageCount}</div>
+                    <div title="model-generation time, split per block kind on the row below">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Generation
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(totalGenMs)}
+                        </div>
+                    </div>
+                    <div title="wall clock the tools occupied — overlapping calls counted once, not twice">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Tool exec
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(toolExecMs)}
+                        </div>
+                    </div>
+                    <div title="task wall clock minus generation and tool execution — includes sandbox setup, grading, simulator calls, and any time the harness did not report">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Unaccounted
+                        </div>
+                        <div
+                            className={
+                                unaccountedMs != null && unaccountedMs < 0
+                                    ? // Overlap or unreported overrun, not
+                                      // unexplained time — a different fact
+                                      // from a large positive residual, so a
+                                      // different colour rather than the same
+                                      // grey a healthy row gets.
+                                      "text-amber-700 font-medium"
+                                    : unaccountedShare != null && unaccountedShare >= 0.25
+                                      ? "text-red-700 font-medium"
+                                      : "text-gray-900 font-medium"
+                            }
+                        >
+                            {fmtMs(unaccountedMs)}
+                            {unaccountedShare != null && (
+                                <span className="text-gray-400">
+                                    {" "}
+                                    ({Math.round(unaccountedShare * 100)}%)
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                    <div>
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Slow events
+                        </div>
+                        <div
+                            className={
+                                slowGen + slowTool > 0
+                                    ? "text-red-700 font-medium"
+                                    : "text-gray-900 font-medium"
+                            }
+                        >
+                            {slowGen} gen · {slowTool} tool
+                        </div>
+                    </div>
                 </div>
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Generation
+                <div
+                    className="border-t border-gray-200 pt-2 text-[10px]"
+                    title="how the Generation figure above divides across block kinds. Within an emission that mixed kinds the split is apportioned by content size — an estimate for those emissions, not a measurement. 'unsplit' is time in an emission with no apportionable content at all, so it belongs to no kind."
+                >
+                    <div className="text-gray-500 uppercase tracking-wide">
+                        Generation split
                     </div>
-                    <div className="text-gray-900 font-medium">
-                        {fmtMs(totalGenMs)}
-                    </div>
-                    <div className="mt-1 grid grid-cols-3 gap-2 text-[10px]">
+                    <div
+                        className={
+                            "mt-1 grid gap-2 " +
+                            (mixedMs > 0 ? "grid-cols-4" : "grid-cols-3")
+                        }
+                    >
                         <div>
                             <div className="text-gray-500">thinking</div>
                             <div
@@ -408,13 +516,17 @@ export function MessageTimelineSection({
                                 {totalGenMs > 0 && (
                                     <span className="text-gray-400">
                                         {" "}
-                                        ({Math.round(thinkingShare * 100)}%)
+                                        ({Math.round((thinkingMs / totalGenMs) * 100)}%)
                                     </span>
                                 )}
                             </div>
                         </div>
                         <div>
-                            <div className="text-gray-500">tool</div>
+                            {/* "tool args", never "tool": this is time the model
+                                spent WRITING a tool call, and the Tool exec cell
+                                one row up is time the tool spent RUNNING. The
+                                bare word named both. */}
+                            <div className="text-gray-500">tool args</div>
                             <div className="text-gray-800 font-medium tabular-nums">
                                 {fmtMs(toolGenMs)}
                                 {totalGenMs > 0 && (
@@ -437,28 +549,26 @@ export function MessageTimelineSection({
                                 )}
                             </div>
                         </div>
-                    </div>
-                </div>
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Tool exec
-                    </div>
-                    <div className="text-gray-900 font-medium">
-                        {fmtMs(toolExecMs)}
-                    </div>
-                </div>
-                <div>
-                    <div className="text-gray-500 uppercase tracking-wide text-[10px]">
-                        Slow events
-                    </div>
-                    <div
-                        className={
-                            slowGen + slowTool > 0
-                                ? "text-red-700 font-medium"
-                                : "text-gray-900 font-medium"
-                        }
-                    >
-                        {slowGen} gen · {slowTool} tool
+                        {mixedMs > 0 && (
+                            <div>
+                                {/* NOT "mixed": the legend above already uses
+                                    MIXED for a message carrying multiple block
+                                    types, which is ~93% of Delegate's rows and
+                                    the very case this cell is usually EMPTY
+                                    for. This is the leftover no kind claimed.
+                                    Backed by MessageEvent.mixedGenMs. */}
+                                <div className="text-gray-500">unsplit</div>
+                                <div className="text-gray-800 font-medium tabular-nums">
+                                    {fmtMs(mixedMs)}
+                                    {totalGenMs > 0 && (
+                                        <span className="text-gray-400">
+                                            {" "}
+                                            ({Math.round((mixedMs / totalGenMs) * 100)}%)
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
@@ -660,11 +770,14 @@ export function CostExplorerSection({
     subAgentUsageByToolId = {},
     tokens,
     recordedCostUsd,
+    taskDurationSeconds,
 }: {
     messages: MessageEvent[];
     subAgentUsageByToolId?: Record<string, SubAgentTotals>;
     tokens: TokenTotals;
     recordedCostUsd: number | null;
+    // Forwarded verbatim to the timeline's Unaccounted cell.
+    taskDurationSeconds?: number | null;
 }) {
     const [scale, setScale] = useState(1);
     const [toolScale, setToolScale] = useState(1);
@@ -702,6 +815,7 @@ export function CostExplorerSection({
                 messages={messages}
                 subAgentUsageByToolId={subAgentUsageByToolId}
                 impactByIndex={impactByIndex}
+                taskDurationSeconds={taskDurationSeconds}
             />
             {model && tokens.total > 0 && (
                 <section className="space-y-2">

@@ -14,8 +14,9 @@ stay exact.
 from tests._fixtures.golden_streams._scrub import (
     SCRUB_PLACEHOLDER,
     assert_reconciliation,
+    assert_timing_captured,
     scrub,
 )
 
 
-__all__ = ["SCRUB_PLACEHOLDER", "assert_reconciliation", "scrub"]
+__all__ = ["SCRUB_PLACEHOLDER", "assert_reconciliation", "assert_timing_captured", "scrub"]

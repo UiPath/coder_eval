@@ -43,6 +43,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Literal, NoReturn
 
 from coder_eval.agent import Agent
+from coder_eval.agents._timing import busy_ms
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -308,8 +309,30 @@ class _OpenCodeTurnState:
         # needs it to close a TurnStartEvent the stream never got to close.
         self.step_open = False
         self.step_started_at: datetime | None = None
+        # Where the NEXT generation window starts: the previous step's finish.
+        # The CLI announces a step only once it is already producing one, so a
+        # window bounded by `step_start` drops the model time that PRODUCED the
+        # step into the gap before it. Measured on tasks/hello_date with a live
+        # claude-haiku-4.5: two gaps of 857 ms and 851 ms, carrying no tool
+        # (the Write inside them took 7 ms), attributed to nothing — 24% of the
+        # turn's wall clock, enough on its own to hold OpenCode above the
+        # evalboard's 25% "Unaccounted" red threshold.
+        #
+        # None until the first step finishes, and deliberately so: the first
+        # window keeps its own `step_start`, because everything before it is
+        # CLI process spawn, not model time. Tiling that in would report Node's
+        # boot as generation. Same shape as Codex's `gen_mark_ms`.
+        self.gen_mark: datetime | None = None
         self.step_text_parts: list[str] = []
         self.step_tool_ids: list[str] = []
+        # Execution intervals of tools that CLOSED inside the open
+        # generation window. Every tool call runs INSIDE the window, so
+        # publishing the raw span as generation time counts the same
+        # milliseconds twice — once here and once as the tool's own
+        # duration_ms. Intervals, not a running total: they overlap
+        # whenever the harness runs tools concurrently, and only their
+        # union may be subtracted (agents/_timing.py::busy_ms).
+        self.step_tool_spans: list[tuple[datetime, datetime]] = []
 
         # callID -> (telemetry, started_at) for tools awaiting a result.
         self.open_tools: dict[str, CommandTelemetry] = {}
@@ -347,6 +370,7 @@ class _OpenCodeTurnState:
         self.step_started_at = datetime.now()
         self.step_text_parts = []
         self.step_tool_ids = []
+        self.step_tool_spans = []
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -464,6 +488,10 @@ class _OpenCodeTurnState:
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
+            # This tool ran inside the open generation window, so its time is
+            # not model time. Only a RESOLVED tool contributes: one force-closed
+            # without a result was never timed.
+            self.step_tool_spans.append((telemetry.execution_started_at, completed))
         telemetry.result_status = _RESULT_STATUS[status]
         # Stored untruncated by design (sub-agent returns must survive whole).
         telemetry.result_summary = summary
@@ -671,8 +699,11 @@ class _OpenCodeTurnState:
         if isinstance(finish, str) and finish:
             self.stop_reason = finish
 
-        started = self.step_started_at or datetime.now()
         completed = datetime.now()
+        step_start = self.step_started_at or completed
+        # Tile from the previous step's finish; min() keeps a clock that went
+        # backwards from inverting the span.
+        started = min(self.gen_mark, step_start) if self.gen_mark is not None else step_start
         blocks: list[ContentBlock] = []
         step_text = "".join(self.step_text_parts)
         if step_text:
@@ -680,11 +711,24 @@ class _OpenCodeTurnState:
         for i, tool_id in enumerate(self.step_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
+        # A call still OPEN at this boundary counts too, bounded at `completed`.
+        # Subtracting only CLOSED intervals publishes the part of a straddling
+        # call that ran inside this window as generation, while the call's own
+        # duration_ms counts it again — a live double-count now that the windows
+        # tile contiguously from `gen_mark`. No double subtraction: when the call
+        # later closes, `_finish_tool` appends its full interval to the NEXT
+        # window's list, where busy_ms clips it to the post-boundary remainder.
+        spans = self.step_tool_spans + [
+            (t.execution_started_at, completed) for t in self.open_tools.values() if t.execution_started_at is not None
+        ]
         self.messages.append(
             AssistantMessage(
                 started_at=started,
                 completed_at=completed,
-                generation_duration_ms=(completed - started).total_seconds() * 1000,
+                generation_duration_ms=max(
+                    0.0,
+                    (completed - started).total_seconds() * 1000 - busy_ms(spans, started, completed),
+                ),
                 content_blocks=blocks,
                 tool_use_ids=list(self.step_tool_ids),
                 input_tokens=step_in,
@@ -697,6 +741,11 @@ class _OpenCodeTurnState:
                 message_id=str(part.get("messageID") or "") or None,
             )
         )
+        # A message was appended, so the next window starts where this one
+        # ended. Only `step_finish` advances the mark: a step that never
+        # finished published nothing, so tiling past it would attribute its
+        # time to whichever step finishes next.
+        self.gen_mark = completed
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,

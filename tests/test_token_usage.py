@@ -1099,6 +1099,18 @@ class TestSynthesizeSubagentTerminalMessage:
         # The sub-agent's returned text becomes a text content block.
         assert result.content_blocks and result.content_blocks[0].text == "answer: 5050"
 
+    def test_records_no_generation_window(self):
+        # This generation arrives as a tool result and is never streamed, so
+        # there is no window to measure. None says that; 0.0 would claim the
+        # sub-agent answered instantly.
+        msg = self._make_msg(
+            {"agentId": "agent-abc", "usage": {"input_tokens": 1, "output_tokens": 2}},
+            result_content="done",
+        )
+        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, "claude-x")
+        assert result is not None
+        assert result.generation_duration_ms is None
+
     def test_returns_none_for_non_agent_tool(self):
         # Bash/Read/Write results have no agentId
         msg = self._make_msg({"status": "completed", "output": "hello"})

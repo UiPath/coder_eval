@@ -13,6 +13,7 @@ function makeMessage(overrides: Partial<MessageEvent> = {}): MessageEvent {
         thinkingMs: null,
         textMs: 1000,
         toolGenMs: null,
+        mixedGenMs: null,
         blockTypes: ["text"],
         thinkingText: null,
         text: "hello",
@@ -225,6 +226,8 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
                     resultPreview: null,
                     outputTokens: 80,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
             outputTokens: 80,
@@ -258,6 +261,8 @@ describe("MessageTimelineSection — expanded sub-rows", () => {
                     resultPreview: null,
                     outputTokens: 5,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
         });
@@ -284,6 +289,8 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
             resultPreview: "[1, 2]",
             outputTokens: 10,
             resultTokens: null,
+            execStartMs: null,
+            execEndMs: null,
         };
     }
 
@@ -370,6 +377,8 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
                     resultPreview: "hi",
                     outputTokens: 121,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
         });
@@ -425,6 +434,8 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
                     resultPreview: "hi",
                     outputTokens: 3,
                     resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
                 },
             ],
         });
@@ -474,5 +485,317 @@ describe("MessageTimelineSection — sub-agent grouping", () => {
         render(<MessageTimelineSection messages={[m, recon]} />);
         // One real generation → "Message timeline (1)", not (2).
         expect(screen.getByText("Message timeline (1)")).toBeInTheDocument();
+    });
+});
+
+// The strip must reconcile: generation + tool exec are shown against the wall
+// clock they should add up to, so a harness that stops reporting one of them
+// is visible on the page instead of silently reading as fast.
+describe("MessageTimelineSection — Unaccounted cell", () => {
+    // Each summary cell is <label><value>[<sub-grid>]. Read the value element
+    // itself so a matching string elsewhere in the strip (the Generation
+    // sub-cells also render times and percentages) cannot satisfy an
+    // assertion about this cell.
+    function cell(label: string): HTMLElement {
+        const parent = screen.getByText(label).parentElement as HTMLElement;
+        return parent.children[1] as HTMLElement;
+    }
+
+    function renderStrip(
+        taskDurationSeconds: number | null | undefined,
+        overrides: Partial<MessageEvent> = {},
+    ) {
+        const m = makeMessage({
+            generationMs: 4000,
+            textMs: 4000,
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "tu_1",
+                    summary: "ls",
+                    argText: "ls",
+                    description: null,
+                    genMs: null,
+                    durationMs: 1000,
+                    isError: false,
+                    resultPreview: null,
+                    outputTokens: null,
+                    resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
+                },
+            ],
+            ...overrides,
+        });
+        return render(
+            <MessageTimelineSection
+                messages={[m]}
+                taskDurationSeconds={taskDurationSeconds}
+            />,
+        );
+    }
+
+    test("renders the residual and its share of the wall clock", () => {
+        // 10s wall clock − 4s generation − 1s tool exec = 5s (50%).
+        renderStrip(10);
+        expect(cell("Unaccounted").textContent).toBe("5.0s (50%)");
+    });
+
+    test("the four pre-existing cells still render their values", () => {
+        renderStrip(10);
+        expect(cell("Messages").textContent).toBe("1");
+        expect(cell("Generation").textContent).toBe("4.0s");
+        expect(cell("Tool exec").textContent).toBe("1.0s");
+        expect(cell("Slow events").textContent).toBe("0 gen · 0 tool");
+    });
+
+    test("a residual at or above 25% is tinted red", () => {
+        // 5s of 10s = 50%.
+        renderStrip(10);
+        expect(cell("Unaccounted").className).toContain("text-red-700");
+    });
+
+    test("a residual below 25% is not tinted", () => {
+        // 5s gen+tool of 5.5s wall clock ≈ 9%.
+        renderStrip(5.5);
+        expect(cell("Unaccounted").textContent).toBe("500ms (9%)");
+        expect(cell("Unaccounted").className).not.toContain("text-red-700");
+    });
+
+    test("no recorded duration renders an em-dash, no NaN and no percentage", () => {
+        const { container } = renderStrip(undefined);
+        expect(cell("Unaccounted").textContent).toBe("—");
+        expect(container.textContent).not.toContain("NaN");
+    });
+
+    test("a zero-second task shows the raw residual with no percentage", () => {
+        const { container } = renderStrip(0);
+        expect(cell("Unaccounted").textContent).toBe("-5.0s");
+        expect(container.textContent).not.toContain("NaN");
+    });
+
+    test("a negative residual renders signed and is NOT tinted red", () => {
+        // Overlap (parallel tools, or a tool closing inside a generation
+        // window) is a signal, not unreported time — so it is neither clamped
+        // nor flagged. The share stays signed too: 5s accounted against a 1s
+        // task is a 4x overlap, and saying so beats hiding it.
+        renderStrip(1);
+        expect(cell("Unaccounted").textContent).toBe("-4.0s (-400%)");
+        expect(cell("Unaccounted").className).not.toContain("text-red-700");
+        // Its own colour: overlap is a different fact from a large positive
+        // residual, and identical grey to a healthy row would hide it.
+        expect(cell("Unaccounted").className).toContain("text-amber-700");
+    });
+
+    test("a sub-agent is not counted as both generation and parent tool time", () => {
+        // The Agent call's durationMs already spans the sub-agent's whole run,
+        // so adding the sub-agent's own generation on top double-counts it.
+        const agentCall = {
+            toolName: "Agent",
+            toolUseId: "tu_agent",
+            summary: "spawn",
+            argText: null,
+            description: null,
+            genMs: null,
+            durationMs: 6000,
+            isError: false,
+            resultPreview: null,
+            outputTokens: null,
+            resultTokens: null,
+            execStartMs: null,
+            execEndMs: null,
+        };
+        const main = makeMessage({
+            index: 1,
+            generationMs: 1000,
+            textMs: 1000,
+            toolUses: [agentCall],
+        });
+        const child = makeMessage({
+            index: 2,
+            generationMs: 5000,
+            textMs: 5000,
+            parentToolUseId: "tu_agent",
+        });
+        render(
+            <MessageTimelineSection messages={[main, child]} taskDurationSeconds={10} />,
+        );
+        // 10s − 1s main generation − 6s Agent call = 3s. Counting the child's
+        // 5s of generation too would report -2s.
+        expect(cell("Unaccounted").textContent).toBe("3.0s (30%)");
+        expect(cell("Generation").textContent).toBe("1.0s");
+        expect(cell("Tool exec").textContent).toBe("6.0s");
+    });
+
+    test("concurrent tools are counted once, so the residual stays honest", () => {
+        // Two 5s sleeps started 1s apart occupy 6s of wall clock, not 10s.
+        // Summing their durations reported -615ms on a live task where the
+        // honest answer was positive: sandbox setup and grading.
+        const span = (start: number, end: number) => ({
+            toolName: "Bash",
+            toolUseId: `tu_${start}`,
+            summary: "sleep 5",
+            argText: "sleep 5",
+            description: null,
+            genMs: null,
+            durationMs: end - start,
+            isError: false,
+            resultPreview: null,
+            outputTokens: null,
+            resultTokens: null,
+            execStartMs: start,
+            execEndMs: end,
+        });
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        textMs: 1000,
+                        toolUses: [span(1_000, 6_000), span(2_000, 7_000)],
+                    }),
+                ]}
+                taskDurationSeconds={9.5}
+            />,
+        );
+        expect(cell("Tool exec").textContent).toBe("6.0s");
+        // 9.5s − 1s generation − 6s of tool wall clock = 2.5s.
+        expect(cell("Unaccounted").textContent).toBe("2.5s (26%)");
+    });
+
+    test("a tool with no recorded bounds still contributes its duration", () => {
+        // Runs predating the execution bounds, and harnesses that report only
+        // a duration, must not silently drop out of the tool total.
+        renderStrip(10);
+        expect(cell("Tool exec").textContent).toBe("1.0s");
+    });
+
+    test("the cell explains that the residual is not only agent time", () => {
+        renderStrip(10);
+        expect(
+            screen.getByText("Unaccounted").parentElement,
+        ).toHaveAttribute("title", expect.stringContaining("sandbox setup"));
+    });
+});
+
+// A mixed-kind emission's per-kind split is apportioned by content size, so
+// the page must say so and must not let the unattributable part distort the
+// thinking share.
+describe("MessageTimelineSection — mixed generation sub-cell", () => {
+    function cellValue(label: string): string {
+        const parent = screen.getByText(label).parentElement as HTMLElement;
+        return (parent.children[1] as HTMLElement).textContent ?? "";
+    }
+
+    test("a mixed message renders the mixed sub-cell with its value", () => {
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: null,
+                        mixedGenMs: 900,
+                    }),
+                ]}
+            />,
+        );
+        expect(screen.getByText("unsplit")).toBeInTheDocument();
+        expect(cellValue("unsplit")).toContain("900ms");
+    });
+
+    test("a fully attributed message renders no mixed sub-cell at all", () => {
+        // claude-code's shape: the layout must look exactly as it does today.
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: null,
+                        textMs: 1000,
+                        toolGenMs: null,
+                        mixedGenMs: null,
+                    }),
+                ]}
+            />,
+        );
+        expect(screen.queryByText("unsplit")).toBeNull();
+    });
+
+    test("the thinking tint is computed against the ATTRIBUTABLE part", () => {
+        // 100ms of thinking out of 100ms attributable is 100% — red — even
+        // though it is only 10% of the raw generation total.
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: null,
+                        mixedGenMs: 900,
+                    }),
+                ]}
+            />,
+        );
+        const thinking = screen.getByText("thinking").parentElement as HTMLElement;
+        expect((thinking.children[1] as HTMLElement).className).toContain("text-red-700");
+    });
+
+    test("a low thinking share against a fully attributed total is not tinted", () => {
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: 900,
+                        mixedGenMs: null,
+                    }),
+                ]}
+            />,
+        );
+        const thinking = screen.getByText("thinking").parentElement as HTMLElement;
+        expect((thinking.children[1] as HTMLElement).className).not.toContain("text-red-700");
+    });
+
+    test("the four sub-cell percentages sum to 100%, not 190%", () => {
+        // The tint uses the ATTRIBUTABLE denominator; the displayed shares
+        // must not, or thinking reads as 100% of a generation it was 10% of
+        // — on exactly the emission class this phase stops over-crediting.
+        render(
+            <MessageTimelineSection
+                messages={[
+                    makeMessage({
+                        generationMs: 1000,
+                        thinkingMs: 100,
+                        textMs: null,
+                        toolGenMs: null,
+                        mixedGenMs: 900,
+                    }),
+                ]}
+            />,
+        );
+        const pct = (label: string) => {
+            const cell = screen.getByText(label).parentElement as HTMLElement;
+            const m = /\((-?\d+)%\)/.exec(cell.textContent ?? "");
+            return m ? Number(m[1]) : 0;
+        };
+        expect(pct("thinking")).toBe(10);
+        expect(pct("tool args") + pct("text") + pct("unsplit") + pct("thinking")).toBe(100);
+    });
+
+    test("the split row says the mixed split is an estimate", () => {
+        // The caveat travels with the SPLIT, which is what it qualifies — the
+        // Generation total above it is measured, not apportioned.
+        render(<MessageTimelineSection messages={[makeMessage()]} />);
+        expect(
+            screen.getByText("Generation split").parentElement,
+        ).toHaveAttribute(
+            "title",
+            expect.stringContaining("apportioned by content size"),
+        );
     });
 });

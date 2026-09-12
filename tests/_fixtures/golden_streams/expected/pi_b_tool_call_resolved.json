@@ -1,0 +1,155 @@
+{
+  "agent_output": "Created `hello.txt` and read it back. Contents: **hi**",
+  "assistant_turn_count": 3,
+  "commands": [
+    {
+      "assistant_turn_index": 1,
+      "duration_ms": "<scrubbed>",
+      "error_message": null,
+      "execution_completed_at": "<scrubbed>",
+      "execution_started_at": "<scrubbed>",
+      "generation_completed_at": null,
+      "parameters": {
+        "content": "hi",
+        "file_path": "hello.txt"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "Successfully wrote 2 bytes to hello.txt",
+      "result_tokens": 10,
+      "sequence_number": 1,
+      "timestamp": "<scrubbed>",
+      "tool_id": "write:0",
+      "tool_name": "Write"
+    },
+    {
+      "assistant_turn_index": 2,
+      "duration_ms": "<scrubbed>",
+      "error_message": null,
+      "execution_completed_at": "<scrubbed>",
+      "execution_started_at": "<scrubbed>",
+      "generation_completed_at": null,
+      "parameters": {
+        "file_path": "hello.txt"
+      },
+      "result_data": null,
+      "result_status": "success",
+      "result_summary": "hi",
+      "result_tokens": 1,
+      "sequence_number": 2,
+      "timestamp": "<scrubbed>",
+      "tool_id": "read:1",
+      "tool_name": "Read"
+    }
+  ],
+  "crash_reason": null,
+  "crashed": false,
+  "duration_seconds": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 1024,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "write:0"
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 406,
+      "message_id": "gen-1788516760-h7AqlA8rocYqvzr5bE9l",
+      "model": "openrouter/moonshotai/kimi-k3",
+      "output_tokens": 77,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 8,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": "toolUse",
+      "tool_use_ids": [
+        "write:0"
+      ]
+    },
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 1024,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "tool_use",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": null,
+          "thinking": null,
+          "tool_use_id": "read:1"
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 512,
+      "message_id": "gen-1788516762-S6qNOttzQjEAZuTdBsee",
+      "model": "openrouter/moonshotai/kimi-k3",
+      "output_tokens": 52,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 3,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": "toolUse",
+      "tool_use_ids": [
+        "read:1"
+      ]
+    },
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 1536,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "text",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": "Created `hello.txt` and read it back. Contents: **hi**",
+          "thinking": null,
+          "tool_use_id": null
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 79,
+      "message_id": "gen-1788516764-PDS1DE9HRseKaqHTeGIx",
+      "model": "openrouter/moonshotai/kimi-k3",
+      "output_tokens": 31,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 3,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": "stop",
+      "tool_use_ids": []
+    }
+  ],
+  "model_used": "openrouter/moonshotai/kimi-k3",
+  "num_turns": 3,
+  "result_summary": {
+    "is_error": false,
+    "result": null,
+    "stop_reason": "stop",
+    "subtype": "completed"
+  },
+  "timestamp": "<scrubbed>",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 3584,
+    "input_tokens": 4581,
+    "output_tokens": 160,
+    "total_cost_usd": "<scrubbed>",
+    "uncached_input_tokens": 997
+  },
+  "user_input": "do it"
+}

@@ -1,3 +1,5 @@
+import type { MessageEvent } from "./runs";
+
 // Wall-clock efficiency: how a task's duration compares to the time it is
 // expected to take.
 //
@@ -118,4 +120,72 @@ export function expectedTimeTitle(expectedSeconds: number | null): string {
     return expectedSeconds != null
         ? `expected time: ${fmtTaskSeconds(expectedSeconds)}`
         : "no expected time yet (needs a passing run on this harness)";
+}
+
+// Epoch milliseconds for a `CommandTelemetry` timestamp, or null when it is
+// absent or unparseable. The stamps are naive local ISO strings (Python
+// `datetime.now()`), which `Date` reads as local time — every stamp in a run
+// comes from one machine, and only DIFFERENCES are ever taken, so the offset
+// cancels.
+export function epochMs(value: string | null | undefined): number | null {
+    if (typeof value !== "string" || !value) return null;
+    const t = Date.parse(value);
+    return Number.isFinite(t) ? t : null;
+}
+
+// Milliseconds inside [lo, hi] where at least ONE span was running: the UNION,
+// not the sum.
+//
+// The TypeScript twin of `coder_eval.agents._timing.busy_ms`, deliberately the
+// same algorithm — the agents subtract tool time from a generation window with
+// it, and this file subtracts tool time from a task's wall clock, so the two
+// must agree about what "tool execution took N ms" means. Held in step by
+// tests/_fixtures/timing_union_cases.json, which both suites replay.
+export function busyMs(
+    spans: [number, number][],
+    lo: number,
+    hi: number,
+): number {
+    const clipped = spans
+        .map(([s, e]) => [Math.max(s, lo), Math.min(e, hi)] as [number, number])
+        .filter(([s, e]) => e > s)
+        .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    if (clipped.length === 0) return 0;
+    let total = 0;
+    let [openStart, openEnd] = clipped[0];
+    for (const [start, end] of clipped.slice(1)) {
+        if (start > openEnd) {
+            total += openEnd - openStart;
+            [openStart, openEnd] = [start, end];
+        } else {
+            openEnd = Math.max(openEnd, end);
+        }
+    }
+    return total + (openEnd - openStart);
+}
+
+// Wall-clock milliseconds these messages' tool calls occupied.
+//
+// Bounded calls are UNIONED — concurrent tools occupy the wall clock once, and
+// summing them drove the task page's Unaccounted cell to -615ms on a task with
+// two concurrent sleeps, where the honest answer was +2.5s of sandbox setup and
+// grading. A call the harness timed but did not bound contributes its own
+// `durationMs`, which is the best available statement about it and reproduces
+// the previous behaviour for that call alone.
+export function toolExecutionMs(messages: MessageEvent[]): number {
+    const spans: [number, number][] = [];
+    let unbounded = 0;
+    for (const m of messages) {
+        for (const t of m.toolUses) {
+            if (t.execStartMs != null && t.execEndMs != null) {
+                spans.push([t.execStartMs, t.execEndMs]);
+            } else if (t.durationMs != null) {
+                unbounded += t.durationMs;
+            }
+        }
+    }
+    if (spans.length === 0) return unbounded;
+    const lo = Math.min(...spans.map(([s]) => s));
+    const hi = Math.max(...spans.map(([, e]) => e));
+    return busyMs(spans, lo, hi) + unbounded;
 }
