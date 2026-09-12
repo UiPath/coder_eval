@@ -7,12 +7,12 @@ which pin that a given reducer feeds it the right bounds and spans.
 """
 
 import importlib.util
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from coder_eval.timing import close_window, union_ms
+from coder_eval.timing import busy_ms, close_window, decompose_turn, union_ms
 
 
 MARK = datetime(2026, 9, 11, 12, 0, 0)
@@ -140,6 +140,101 @@ class TestCloseWindow:
             close_window(MARK, _at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[misc]
         with pytest.raises(TypeError):
             close_window(now=_at(1000), closed_spans=[], open_started_ats=[])  # type: ignore[call-arg]
+
+
+class TestNaiveAwareMix:
+    """A mixed naive/aware pair fails loudly at the seam, not cryptically inside it.
+
+    `decompose_turn`'s bare arithmetic raised `TypeError: can't subtract
+    offset-naive and offset-aware datetimes` straight out of
+    `EventCollector.build_turn_record`, killing the turn with a message naming
+    neither the field nor the harness.
+
+    Unreachable from this repo — every stamp in `agents/` and `streaming/` is a
+    naive `datetime.now()`. The exposure is a THIRD-PARTY agent registered
+    through the `coder_eval.plugins` SPI, which lives outside
+    `src/coder_eval/agents/` and which a lint rule scoped to that directory
+    could never see. That is why this is a guard and not a rule.
+    """
+
+    AWARE = MARK.replace(tzinfo=UTC)
+
+    def test_a_mixed_head_names_the_field(self):
+        with pytest.raises(TypeError, match="harness_startup_ms"):
+            decompose_turn(self.AWARE, None, MARK, None)
+
+    def test_a_mixed_tail_names_the_field(self):
+        with pytest.raises(TypeError, match="harness_teardown_ms"):
+            decompose_turn(None, self.AWARE, None, MARK)
+
+    def test_a_mixed_busy_ms_window_names_the_field(self):
+        with pytest.raises(TypeError, match="busy_ms window"):
+            busy_ms([(MARK, _at(500))], MARK, self.AWARE)
+
+    def test_a_mixed_span_start_is_caught_too_and_not_by_the_bare_comparison(self):
+        """The clipping compares each span against the window.
+
+        Left unguarded that raises "can't compare offset-naive and offset-aware
+        datetimes" — the exact message this replaces — so checking only the
+        bounds would leave the guard not covering its own function.
+        """
+        with pytest.raises(TypeError, match="tool span's start"):
+            busy_ms([(self.AWARE, self.AWARE)], MARK, _at(1000))
+
+    def test_a_mixed_span_end_is_caught_by_its_own_branch(self):
+        """The end is a separate check against `hi`, so it needs its own case.
+
+        A span whose START matches the window and whose END does not passes the
+        previous branch and must still raise — otherwise that branch is live,
+        reachable and unexercised.
+        """
+        with pytest.raises(TypeError, match="tool span's end"):
+            busy_ms([(MARK, self.AWARE)], MARK, _at(1000))
+
+    def test_one_wording_for_every_call_site(self):
+        """One helper, so one template — checked across ALL FIVE call sites.
+
+        Two inline guards would drift, and a test asserting the text would then
+        pin only whichever one it happened to call. What varies between sites
+        is deliberate and only that: the field name, and which side is aware.
+        Everything after that clause is the advice, and it must be identical or
+        the sites are no longer sharing a helper.
+        """
+        advice = set()
+        for call in (
+            lambda: decompose_turn(self.AWARE, None, MARK, None),  # head
+            lambda: decompose_turn(None, self.AWARE, None, MARK),  # tail
+            lambda: busy_ms([(MARK, _at(500))], MARK, self.AWARE),  # window bounds
+            lambda: busy_ms([(self.AWARE, self.AWARE)], MARK, _at(1000)),  # span start
+            lambda: busy_ms([(MARK, self.AWARE)], MARK, _at(1000)),  # span end
+        ):
+            with pytest.raises(TypeError) as excinfo:
+                call()
+            message = str(excinfo.value)
+            assert "is timezone-aware and the other is naive" in message
+            advice.add(message.split("), ", 1)[1])
+        assert len(advice) == 1, advice
+
+    def test_all_naive_is_unchanged(self):
+        assert decompose_turn(_at(1000), _at(2000), MARK, _at(3000)) == (1000.0, 1000.0)
+
+    def test_all_aware_works_because_the_guard_is_about_the_mix(self):
+        def aware(ms: int) -> datetime:
+            return _at(ms).replace(tzinfo=UTC)
+
+        assert decompose_turn(aware(1000), aware(2000), self.AWARE, aware(3000)) == (1000.0, 1000.0)
+
+    def test_an_empty_span_list_is_not_checked_at_all(self):
+        """Not even the bounds, and the MIXED case is the one that proves it.
+
+        With no spans the comprehension never runs: nothing is compared and
+        nothing is subtracted, so there is no pair for the guard to be about.
+        Checking the bounds anyway rejected a call that has always returned
+        `0.0` — asserted here on mixed bounds, because the naive case would
+        pass either way and so could not tell the two behaviours apart.
+        """
+        assert busy_ms([], MARK, _at(1000)) == 0.0
+        assert busy_ms([], MARK, self.AWARE) == 0.0
 
 
 class TestUnionMs:

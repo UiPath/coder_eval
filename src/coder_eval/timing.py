@@ -76,6 +76,39 @@ class TurnClock:
         return self._wall0 + timedelta(seconds=time.monotonic() - self._mono0)
 
 
+def _require_same_awareness(a: datetime, b: datetime, *, field: str) -> None:
+    """Raise if one stamp is timezone-aware and the other is naive.
+
+    Subtracting the two raises ``TypeError: can't subtract offset-naive and
+    offset-aware datetimes`` deep inside the arithmetic below, which surfaces
+    out of ``EventCollector.build_turn_record`` and kills the turn with a
+    message naming neither the field nor the harness. This turns that into a
+    statement of which pair disagreed and which side is aware.
+
+    Unreachable from this repo today, and that is the point: every stamp in
+    ``agents/`` and ``streaming/`` is a naive ``datetime.now()`` (verified by
+    grep — zero ``timezone.utc`` / ``astimezone`` / ``tzinfo`` hits), so this
+    guards the SEAM rather than a live defect. The exposure it is actually for
+    is a third-party agent registered through the ``coder_eval.plugins`` SPI,
+    which lives outside ``src/coder_eval/agents/`` and which no lint rule
+    scoped to that directory could ever see. That is why this is a runtime
+    guard and not a rule.
+
+    Only the MIX raises. An agent that is internally consistent in UTC is not
+    this function's problem, and neither is one that is consistently naive.
+    """
+    if (a.tzinfo is None) == (b.tzinfo is None):
+        return
+    aware, naive = ("first", "second") if a.tzinfo is not None else ("second", "first")
+    raise TypeError(
+        f"{field}: one stamp is timezone-aware and the other is naive (the {aware} is aware, "
+        + f"the {naive} is not), so the interval between them cannot be measured. Every stamp "
+        + "this harness records is a naive local `datetime.now()`; if you are writing an agent "
+        + "outside this repo (the `coder_eval.plugins` SPI), make its stamps naive local too "
+        + "rather than normalizing here, so its tool spans and its window bounds keep one basis."
+    )
+
+
 def busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) -> float:
     """Wall milliseconds inside ``[lo, hi]`` where at least ONE span was running.
 
@@ -91,7 +124,27 @@ def busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) 
     Clipping to ``[lo, hi]`` is the other half: a tool that opened before this
     window only spent part of its life inside it, and only that part is not
     generation time here.
+
+    Every stamp reaching this function is a naive ``datetime.now()`` today —
+    that is true of all of ``agents/`` and ``streaming/`` — so a mixed pair
+    means an agent has started recording aware stamps, and
+    ``_require_same_awareness`` names which pair rather than letting a bare
+    ``TypeError`` escape from the arithmetic. The spans are checked as well as
+    the bounds, not instead of them: the clipping below compares each span
+    against BOTH ``lo`` and ``hi``, so a guard on the bounds alone would leave
+    this function uncovered by it.
+
+    An EMPTY span list is checked NOT AT ALL, bounds included. The comprehension
+    never runs, nothing is compared and nothing is subtracted, so there is no
+    pair for the guard to be about — and raising there would reject a call that
+    has always returned ``0.0``.
     """
+    if not spans:
+        return 0.0
+    _require_same_awareness(lo, hi, field="busy_ms window")
+    for span_start, span_end in spans:
+        _require_same_awareness(lo, span_start, field="busy_ms window vs a tool span's start")
+        _require_same_awareness(hi, span_end, field="busy_ms window vs a tool span's end")
     clipped = sorted((max(s, lo), min(e, hi)) for s, e in spans if min(e, hi) > max(s, lo))
     if not clipped:
         return 0.0
@@ -229,6 +282,11 @@ def decompose_turn(
     MEASURE rather than for what they contain is the whole point; see
     docs/agents/HARNESS_PARITY.md for the per-harness composition.
 
+    Every stamp reaching this function is a naive ``datetime.now()`` — that is
+    true of all of ``agents/`` and ``streaming/`` today — so a mixed pair means
+    an agent has started recording aware stamps, and ``_require_same_awareness``
+    says so rather than letting a bare ``TypeError`` escape and kill the turn.
+
     ``None`` means never measured — a turn that produced no generation, or a
     snapshot taken before the terminal event. Never 0.0, which would claim a
     measurement was taken and came back instant (CE058). A measured inversion
@@ -245,9 +303,11 @@ def decompose_turn(
     spans = tool_spans or []
     head = tail = None
     if first_started_at is not None and agent_started_at is not None:
+        _require_same_awareness(agent_started_at, first_started_at, field="harness_startup_ms")
         elapsed = (first_started_at - agent_started_at).total_seconds() * 1000.0
         head = max(elapsed - busy_ms(spans, agent_started_at, first_started_at), 0.0)
     if last_completed_at is not None and agent_ended_at is not None:
+        _require_same_awareness(last_completed_at, agent_ended_at, field="harness_teardown_ms")
         elapsed = (agent_ended_at - last_completed_at).total_seconds() * 1000.0
         tail = max(elapsed - busy_ms(spans, last_completed_at, agent_ended_at), 0.0)
     return head, tail
