@@ -1879,6 +1879,58 @@ class TestGenerationWindowExcludesToolExecution:
         )
         assert message.generation_duration_ms == pytest.approx(200.0)
 
+    def test_a_mark_later_than_the_step_start_does_not_invert_the_window(self, monkeypatch):
+        """The backwards-clock defence, pinned at the reducer, not in isolation.
+
+        `close_window`'s `min()` only fires if the reducer actually passes the
+        step's own start as `item_start`. Drop that argument and the window
+        opens at the (later) mark instead, so the span shrinks — or inverts and
+        clamps to 0.0, publishing a fabricated instant generation. Nothing else
+        in this file fails when it is dropped.
+        """
+        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="m")
+        state.step_started_at = self.WINDOW_START
+        # A mark 400ms AFTER this step began: the CLI's step_finish for the
+        # previous step landed late, or the clock stepped.
+        state.gen_mark = self.WINDOW_START + timedelta(milliseconds=400)
+
+        class _Clock(datetime):
+            @staticmethod
+            def now(tz=None):
+                return TestGenerationWindowExcludesToolExecution.WINDOW_END
+
+        monkeypatch.setattr(agent_module, "datetime", _Clock)
+        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
+
+        message = next(m for m in state.messages if m.role == "assistant")
+        assert message.started_at == self.WINDOW_START
+        assert message.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_the_published_window_reconciles_to_its_own_bounds(self, monkeypatch):
+        """The reducer subtracted exactly the spans the record carries.
+
+        `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
+        both recompute the tool UNION from the recorded command spans and
+        subtract it from the recorded window bounds. This asserts the reducer
+        fed the window the same set, so a span silently added or dropped on
+        the way in shows up here.
+
+        It is deliberately the narrow half: `expected` is derived from the
+        PUBLISHED bounds, so it cannot see a wrong mark, and both sides call
+        `busy_ms`, so it cannot see a union bug. Those are pinned by the cases
+        above and by tests/test_timing_close_window.py.
+        """
+        from coder_eval.timing import busy_ms
+
+        closed = [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))]
+        open_start = self.WINDOW_START + timedelta(milliseconds=500)
+        message = self._finish_step(monkeypatch, closed, open_starts=[open_start])
+
+        spans = [*closed, (open_start, message.completed_at)]
+        span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
+        expected = span_ms - busy_ms(spans, message.started_at, message.completed_at)
+        assert message.generation_duration_ms == pytest.approx(expected)
+
 
 class TestGenerationWindowsTileTheTurn:
     """Each step's window runs from the PREVIOUS step's finish, not its own `step_start`.

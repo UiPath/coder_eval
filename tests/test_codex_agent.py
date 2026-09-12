@@ -2301,6 +2301,47 @@ class TestGenerationWindowExcludesToolExecution:
         assert gen_ms == pytest.approx(10.0)
         assert gen_ms + tool_ms == pytest.approx(window_ms)
 
+    async def test_the_published_window_reconciles_to_its_own_bounds(self):
+        """The reducer subtracted exactly the spans the record carries.
+
+        `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
+        both recompute the tool UNION from the recorded command spans and
+        subtract it from the recorded window bounds. The cases above pin
+        arithmetic results against known fixture constants; this one asserts
+        the reducer fed the window the same span set the record publishes.
+
+        The narrow half by design: `expected` comes from the PUBLISHED bounds,
+        so it cannot see a wrong mark (TestFlushMessageWindowBounds does), and
+        both sides call `busy_ms`, so it cannot see a union bug.
+        """
+        from coder_eval.timing import busy_ms
+
+        first = _bounds_command_item("cmd_a")
+        second = _bounds_command_item("cmd_b")
+        notifications = [
+            _item_notification("item/started", first, started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/completed", first, completed_at_ms=_BOUNDS_EPOCH_MS + 120),
+            _item_notification("item/started", second, started_at_ms=_BOUNDS_EPOCH_MS + 130),
+            _item_notification("item/completed", second, completed_at_ms=_BOUNDS_EPOCH_MS + 900),
+            _token_usage(inp=10, out=5, cached=0),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        record = await agent.communicate("go")
+
+        assistant = [m for m in record.messages if m.role == "assistant"]
+        spans = [
+            (c.execution_started_at, c.execution_completed_at)
+            for c in record.commands
+            if c.execution_started_at is not None and c.execution_completed_at is not None
+        ]
+        # Codex splits one window's gen_ms across its sub-messages by output
+        # share, so the reconciliation is against their SUM, not any one row.
+        lo = min(m.started_at for m in assistant)
+        hi = max(m.completed_at for m in assistant)
+        expected = (hi - lo).total_seconds() * 1000.0 - busy_ms(spans, lo, hi)
+        assert sum(m.generation_duration_ms or 0.0 for m in assistant) == pytest.approx(expected)
+
 
 class TestGenerationWindowsTileTheTurn:
     """Each generation window runs from the PREVIOUS one's end, not its own first item.
@@ -2362,6 +2403,89 @@ class TestGenerationWindowsTileTheTurn:
         # The turn the stream describes runs from the first stamp to the last.
         assert tool_ms == pytest.approx(150.0)
         assert gen_ms + tool_ms == pytest.approx(2050.0)
+
+
+class TestFlushMessageWindowBounds:
+    """Where `_flush_message`'s window OPENS, driven at the reducer.
+
+    The end-to-end cases above all describe a stream whose stamps advance, so
+    they cannot reach the two arguments the reducer hands `close_window` for
+    the awkward cases: the emission's own first stamp (`item_start`) and the
+    calls still open at the flush. Both moved from inline code into the shared
+    helper, so without these they are pinned only in the helper's own unit
+    tests — the wiring between the two would be free to rot.
+    """
+
+    @staticmethod
+    def _flush(*, gen_mark_ms, open_start_ms, open_end_ms, open_tool_started_ms=None):
+        from coder_eval.agents.codex_agent import _CodexTurnState, _ms_to_dt
+        from coder_eval.models import CommandTelemetry, ContentBlock
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.collector import EventCollector
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        collector = EventCollector()
+        st = _CodexTurnState(
+            agent,
+            emit=CompositeStreamCallback([collector]),
+            task_id="codex",
+            turn_id="codex-1",
+            collector=collector,
+            commands=[],
+            messages=[],
+            user_input="go",
+            iteration=1,
+            turn_start_time=0.0,
+        )
+        st.open_blocks = [ContentBlock(block_type="text", sequence=0, text="answer")]
+        st.gen_mark_ms = gen_mark_ms
+        st.open_start_ms = open_start_ms
+        st.open_end_ms = open_end_ms
+        if open_tool_started_ms is not None:
+            st.open_tools["open-1"] = CommandTelemetry(
+                tool_name="bash",
+                tool_id="open-1",
+                timestamp=_ms_to_dt(open_tool_started_ms),
+                execution_started_at=_ms_to_dt(open_tool_started_ms),
+            )
+        st._flush_message(SimpleNamespace(input_tokens=10, cached_input_tokens=0, output_tokens=5))
+        return st.messages[0]
+
+    def test_a_mark_later_than_the_first_item_does_not_invert_the_window(self):
+        # A backwards SDK stamp: the previous flush closed at +2000 while this
+        # emission's first item claims +500. The window must cover the item.
+        # Without `item_start` it opens at +2000, past its own end, and clamps
+        # to a fabricated instant generation.
+        message = self._flush(
+            gen_mark_ms=_BOUNDS_EPOCH_MS + 2000,
+            open_start_ms=_BOUNDS_EPOCH_MS + 500,
+            open_end_ms=_BOUNDS_EPOCH_MS + 1100,
+        )
+        from coder_eval.agents.codex_agent import _ms_to_dt
+
+        assert message.started_at == _ms_to_dt(_BOUNDS_EPOCH_MS + 500)
+        assert message.generation_duration_ms == pytest.approx(600.0)
+
+    def test_a_call_still_open_at_the_flush_is_subtracted_bounded_at_the_end(self):
+        # It has no completion yet, so only [start, window end] is not model
+        # time. Its full interval joins the NEXT window's closed spans, where
+        # busy_ms clips it to the remainder — subtracted once, not twice.
+        message = self._flush(
+            gen_mark_ms=_BOUNDS_EPOCH_MS,
+            open_start_ms=_BOUNDS_EPOCH_MS,
+            open_end_ms=_BOUNDS_EPOCH_MS + 1000,
+            open_tool_started_ms=_BOUNDS_EPOCH_MS + 700,
+        )
+        assert message.generation_duration_ms == pytest.approx(700.0)
+
+    def test_a_call_opening_after_the_window_closes_is_ignored(self):
+        message = self._flush(
+            gen_mark_ms=_BOUNDS_EPOCH_MS,
+            open_start_ms=_BOUNDS_EPOCH_MS,
+            open_end_ms=_BOUNDS_EPOCH_MS + 1000,
+            open_tool_started_ms=_BOUNDS_EPOCH_MS + 1500,
+        )
+        assert message.generation_duration_ms == pytest.approx(1000.0)
 
 
 class TestFlushMessageGenTimeSplit:

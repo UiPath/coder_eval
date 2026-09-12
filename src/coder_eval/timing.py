@@ -54,6 +54,62 @@ def busy_ms(spans: list[tuple[datetime, datetime]], lo: datetime, hi: datetime) 
     return total + (open_end - open_start).total_seconds() * 1000.0
 
 
+def close_window(
+    *,
+    mark: datetime,
+    now: datetime,
+    item_start: datetime | None = None,
+    closed_spans: list[tuple[datetime, datetime]],
+    open_started_ats: list[datetime],
+) -> tuple[datetime, float]:
+    """Close one generation window at ``now``: its ``(started, generation_ms)``.
+
+    The shape the tiling harnesses had copy-pasted; codex, opencode and pi call
+    it today. Antigravity is not merely unmigrated — it derives its span from
+    the MONOTONIC clock while unioning WALL-clock tool spans, which this
+    signature cannot express — and claude-code subtracts once at finalization
+    across every emission instead.
+
+    ``mark`` is where the window opens — normally the previous flush's close,
+    which is what makes the windows TILE the turn contiguously instead of
+    leaving the model time that PRODUCED an item attributed to nothing. It is
+    keyword-only and has NO default so that no reducer can open a window
+    without stating what it tiles from. That constrains the call SHAPE, not the
+    VALUE: pi still passes its own turn start, so its inter-turn gaps are still
+    in no bucket until it grows a mark of its own. The signature makes the
+    omission visible; it does not fix it.
+
+    ``item_start`` is this emission's own first stamp, when the harness has
+    one. The ``min()`` against ``mark`` is the tiling defense and nothing else:
+    a stamp that went backwards must never push the window start PAST the first
+    item and invert the span.
+
+    A call still OPEN at this boundary counts against the window too, bounded
+    at ``now``. Subtracting only CLOSED intervals publishes the part of a
+    straddling call that ran inside this window as generation, while the call's
+    own ``duration_ms`` counts it again.
+
+    NO DOUBLE SUBTRACTION, and this is the rationale that used to sit copy-
+    pasted at four call sites: when that open call later closes, the reducer
+    appends its FULL interval to the next window's ``closed_spans``, where
+    ``busy_ms`` clips it to the post-boundary remainder. Each millisecond of
+    tool time is therefore subtracted from exactly one window.
+
+    The UNION is subtracted, never the sum (see ``busy_ms``), and the result is
+    clamped at ``0.0`` — an inverted window (``now`` before ``mark``, two
+    clocks disagreeing) is a measured zero, not a negative generation.
+
+    It deliberately does NOT return ``completed``. The window always ends at
+    ``now``, which the caller passed in, so handing it back would be an
+    argument returned unchanged — redundancy dressed as symmetry. Call sites
+    write ``completed_at=now`` directly.
+    """
+    started = min(mark, item_start) if item_start is not None else mark
+    bounded = [(s, now) for s in open_started_ats if s < now]
+    span_ms = (now - started).total_seconds() * 1000.0
+    return started, max(0.0, span_ms - busy_ms(closed_spans + bounded, started, now))
+
+
 def decompose_turn(
     first_started_at: datetime | None,
     last_completed_at: datetime | None,

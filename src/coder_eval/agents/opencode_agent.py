@@ -76,7 +76,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
-from coder_eval.timing import busy_ms
+from coder_eval.timing import close_window
 
 from ._skills import _plugin_skill_dirs
 from .registry import AgentRegistry
@@ -701,9 +701,6 @@ class _OpenCodeTurnState:
 
         completed = datetime.now()
         step_start = self.step_started_at or completed
-        # Tile from the previous step's finish; min() keeps a clock that went
-        # backwards from inverting the span.
-        started = min(self.gen_mark, step_start) if self.gen_mark is not None else step_start
         blocks: list[ContentBlock] = []
         step_text = "".join(self.step_text_parts)
         if step_text:
@@ -711,24 +708,22 @@ class _OpenCodeTurnState:
         for i, tool_id in enumerate(self.step_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
-        # A call still OPEN at this boundary counts too, bounded at `completed`.
-        # Subtracting only CLOSED intervals publishes the part of a straddling
-        # call that ran inside this window as generation, while the call's own
-        # duration_ms counts it again — a live double-count now that the windows
-        # tile contiguously from `gen_mark`. No double subtraction: when the call
-        # later closes, `_finish_tool` appends its full interval to the NEXT
-        # window's list, where busy_ms clips it to the post-boundary remainder.
-        spans = self.step_tool_spans + [
-            (t.execution_started_at, completed) for t in self.open_tools.values() if t.execution_started_at is not None
-        ]
+        # Tile from the previous step's finish. The open calls and the double-
+        # subtraction rule they rest on live in `close_window`'s docstring.
+        started, generation_ms = close_window(
+            mark=self.gen_mark if self.gen_mark is not None else step_start,
+            now=completed,
+            item_start=step_start,
+            closed_spans=self.step_tool_spans,
+            open_started_ats=[
+                t.execution_started_at for t in self.open_tools.values() if t.execution_started_at is not None
+            ],
+        )
         self.messages.append(
             AssistantMessage(
                 started_at=started,
                 completed_at=completed,
-                generation_duration_ms=max(
-                    0.0,
-                    (completed - started).total_seconds() * 1000 - busy_ms(spans, started, completed),
-                ),
+                generation_duration_ms=generation_ms,
                 content_blocks=blocks,
                 tool_use_ids=list(self.step_tool_ids),
                 input_tokens=step_in,
