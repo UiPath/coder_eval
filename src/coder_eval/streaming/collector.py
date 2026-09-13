@@ -22,6 +22,8 @@ reading the return value (and ``pending_turn`` on crash), now event-derived.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from coder_eval.models import (
     AssistantMessage,
     CommandTelemetry,
@@ -37,6 +39,7 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     TurnStartEvent,
 )
+from coder_eval.timing import decompose_turn, main_thread_tool_spans, subtract_tool_time, union_ms
 
 
 class EventCollector:
@@ -54,6 +57,8 @@ class EventCollector:
         self._user_input: str = ""
         self._model: str | None = None
         self._turn_starts: int = 0
+        # Stamped by AgentStartEvent; the head is measured from it.
+        self._agent_start_at: datetime | None = None
         # tool_id -> finalized telemetry (last ToolEnd wins, mirroring last-result-wins).
         self._commands: dict[str, CommandTelemetry] = {}
         self._agent_end: AgentEndEvent | None = None
@@ -71,6 +76,13 @@ class EventCollector:
         if isinstance(event, AgentStartEvent):
             self._iteration = event.iteration
             self._user_input = event.prompt
+            self._agent_start_at = event.timestamp
+            # A new turn has begun, so the previous turn's terminal event is no
+            # longer this turn's. Every agent builds a fresh collector per
+            # communicate(), but EarlyStopWatcher keeps ONE across retries: left
+            # stale, it would pair this attempt's start with the last attempt's
+            # end and publish the clamped inversion as a measured 0.0.
+            self._agent_end = None
             if event.model:
                 self._model = event.model
         elif isinstance(event, TurnStartEvent):
@@ -102,6 +114,68 @@ class EventCollector:
 
     def _ordered_commands(self) -> list[CommandTelemetry]:
         return sorted(self._commands.values(), key=lambda c: c.sequence_number)
+
+    def _overhead_ms(
+        self, messages: list[TranscriptMessage], tool_spans: list[tuple[datetime, datetime]]
+    ) -> tuple[float | None, float | None]:
+        """The turn's head and tail — the wall clock the generations do not cover.
+
+        Measured against ``AssistantMessage`` entries only: a simulation turn
+        interleaves ``UserMessage`` entries, and a reconciled turn ends with a
+        ``ReconciliationMessage`` that carries no timestamps at all, so indexing
+        the raw list would measure the wrong thing or raise.
+
+        Two further restrictions, both of which are the difference between a
+        measurement and an invention:
+
+        A message whose ``generation_duration_ms`` is ``None`` is SKIPPED. That
+        field is the codebase's own marker for "no window was measurable here",
+        and every producer of one stamps ``started_at == completed_at ==
+        datetime.now()`` at *append* time as an admitted placeholder — Codex's
+        rollout rebuild (``_messages_from_items``), both Codex sub-agent
+        recovery builders, and Claude's ``_synthesize_subagent_terminal_message``.
+        Reading those stamps as window bounds turns a placeholder into a
+        measurement: a Codex turn rebuilt from its rollout stamps every message
+        at turn END, which would book the entire turn as harness startup. It is
+        the same exemption CE059 makes for exactly the same reason.
+
+        ``min`` / ``max`` rather than the first and last list entries, because
+        the list is not ordered by time — Codex appends recovered sub-agent
+        messages after the parent's last flush. Positional access made the
+        result depend on append order, which nothing enforces.
+
+        ``tool_spans`` is REQUIRED, never defaulted. Its one caller computes the
+        set once and hands the same object to both consumers; a fallback branch
+        here would build a SECOND set, which is precisely what the comment at
+        that call site says must never happen — the subtraction and the
+        head/tail have to agree about which calls exist or the buckets stop
+        being disjoint.
+
+        MAIN THREAD ONLY, the third restriction and the same rule its two
+        sibling call sites already apply (``codex_agent._token_usage_from_messages``
+        and ``scripts/timing/decompose_run.py``). A sub-agent's generations
+        carry the spawning Agent call's ``parent_tool_use_id``, and the identity
+        these two values complete sums generation over the main thread ONLY —
+        the parent tool call's own interval already spans the sub-agent's whole
+        run. Bracketing the span with a sub-agent message therefore shrinks the
+        head or the tail by time no other bucket claims, and Codex's recovered
+        child messages carry the CHILD's clock, so the bracket can move either
+        way. Excluding them keeps all four buckets measuring one thread.
+        """
+        generations = [
+            m
+            for m in messages
+            if isinstance(m, AssistantMessage) and m.generation_duration_ms is not None and m.parent_tool_use_id is None
+        ]
+        if not generations:
+            return None, None
+        return decompose_turn(
+            min(m.started_at for m in generations),
+            max(m.completed_at for m in generations),
+            self._agent_start_at,
+            self._agent_end.timestamp if self._agent_end is not None else None,
+            tool_spans,
+        )
 
     @staticmethod
     def _reconciled_messages(messages: list[TranscriptMessage], usage: TokenUsage) -> list[TranscriptMessage]:
@@ -190,8 +264,28 @@ class EventCollector:
         # to the total — making the stream self-reconciling for any downstream
         # consumer (e.g. the evalboard) without a competing aggregate.
         messages: list[TranscriptMessage] = list(end.messages)
+        # Tool execution comes out of the generation windows HERE, once, for
+        # every harness — the reducers publish raw windows.
+        #
+        # The span set is computed ONCE and handed to both consumers. That is
+        # the invariant worth protecting, and it is the one that is easy to
+        # break: the subtraction and the head/tail must agree about which calls
+        # exist, or the buckets stop being disjoint. (The ORDER of the two is
+        # not load-bearing — `_overhead_ms` reads only the bounds, the
+        # main-thread flag and whether the duration is `None`, none of which
+        # `subtract_tool_time` changes. Do not add a comment claiming it is.)
+        tool_spans = main_thread_tool_spans(messages, self._commands.values())
+        messages = subtract_tool_time(messages, tool_spans)
         if token_usage is not None:
             messages = self._reconciled_messages(messages, token_usage)
+
+        startup_ms, teardown_ms = self._overhead_ms(messages, tool_spans)
+        # The turn's tool bucket, stored rather than left to be re-derived. It
+        # is the UNION (never the sum) of the SAME span set above, so all four
+        # buckets are measured against one selection. `None` when no bounded
+        # span was recorded — a turn that ran tools and timed none is not a
+        # turn whose tools took no time (CE058).
+        tool_union = union_ms(tool_spans) if tool_spans else None
 
         return TurnRecord(
             iteration=end.iteration or self._iteration,
@@ -208,4 +302,7 @@ class EventCollector:
             result_summary=end.result_summary,
             crashed=end.crashed,
             crash_reason=end.crash_reason,
+            harness_startup_ms=startup_ms,
+            harness_teardown_ms=teardown_ms,
+            tool_union_ms=tool_union,
         )

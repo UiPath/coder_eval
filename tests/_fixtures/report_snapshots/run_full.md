@@ -33,10 +33,10 @@
 
 ## Generation Metrics
 
-| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency |
-|---------|---------------|-------|------------|------------------|
-| alpha | 12.5s | 1 | 3 | 4.2s |
-| beta | 8.0s | 1 | 1 | 2.0s |
+| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency | Startup | Generation | Tool exec | Teardown |
+|---------|---------------|-------|------------|------------------|---------|------------|-----------|----------|
+| alpha | 12.5s | 1 | 3 | 4.2s | — | — | — | — |
+| beta | 8.0s | 1 | 1 | 2.0s | — | — | — | — |
 
 
 ## Token Usage

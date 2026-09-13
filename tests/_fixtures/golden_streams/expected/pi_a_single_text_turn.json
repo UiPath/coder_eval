@@ -1,10 +1,12 @@
 {
-  "agent_output": "",
+  "agent_output": "All done.",
   "assistant_turn_count": 1,
   "commands": [],
   "crash_reason": null,
   "crashed": false,
   "duration_seconds": "<scrubbed>",
+  "harness_startup_ms": "<scrubbed>",
+  "harness_teardown_ms": "<scrubbed>",
   "iteration": 1,
   "max_turns_exhausted": false,
   "messages": [
@@ -12,7 +14,17 @@
       "cache_creation_tokens": 0,
       "cache_read_tokens": 64,
       "completed_at": "<scrubbed>",
-      "content_blocks": [],
+      "content_blocks": [
+        {
+          "block_type": "text",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": "All done.",
+          "thinking": null,
+          "tool_use_id": null
+        }
+      ],
       "generation_duration_ms": "<scrubbed>",
       "input_tokens": 100,
       "message_id": null,
@@ -43,5 +55,6 @@
     "total_cost_usd": "<scrubbed>",
     "uncached_input_tokens": 100
   },
+  "tool_union_ms": null,
   "user_input": "do it"
 }

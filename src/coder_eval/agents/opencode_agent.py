@@ -43,7 +43,6 @@ from datetime import datetime
 from typing import Any, ClassVar, Literal, NoReturn
 
 from coder_eval.agent import Agent
-from coder_eval.agents._timing import busy_ms
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -77,6 +76,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import close_window
 
 from ._skills import _plugin_skill_dirs
 from .registry import AgentRegistry
@@ -325,14 +325,6 @@ class _OpenCodeTurnState:
         self.gen_mark: datetime | None = None
         self.step_text_parts: list[str] = []
         self.step_tool_ids: list[str] = []
-        # Execution intervals of tools that CLOSED inside the open
-        # generation window. Every tool call runs INSIDE the window, so
-        # publishing the raw span as generation time counts the same
-        # milliseconds twice — once here and once as the tool's own
-        # duration_ms. Intervals, not a running total: they overlap
-        # whenever the harness runs tools concurrently, and only their
-        # union may be subtracted (agents/_timing.py::busy_ms).
-        self.step_tool_spans: list[tuple[datetime, datetime]] = []
 
         # callID -> (telemetry, started_at) for tools awaiting a result.
         self.open_tools: dict[str, CommandTelemetry] = {}
@@ -370,7 +362,13 @@ class _OpenCodeTurnState:
         self.step_started_at = datetime.now()
         self.step_text_parts = []
         self.step_tool_ids = []
-        self.step_tool_spans = []
+        # There is no per-step span list to reset here any more, and that whole
+        # class of defect is gone with it: `timing.subtract_tool_time`
+        # sees every span at once and clips each to the window it overlaps, so
+        # a call closing in the gap before this `step_start` needs nobody to
+        # remember it. The reset rule that used to live here was wrong once
+        # (clearing at `step_start` wiped the span before `step_finish` could
+        # subtract it — a 100% overstatement of that window).
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -454,8 +452,10 @@ class _OpenCodeTurnState:
             message = None
             status = ToolEndStatus.OK
 
-        time_val = state.get("time")
-        times = time_val if isinstance(time_val, dict) else {}
+        # `times` is the SAME dict read at the top of this function: `state` is
+        # bound once at the start and nothing between here and there rebinds or
+        # mutates it, so re-reading `state["time"]` produced an identical value
+        # from an identical source. One read, one name.
         self._close_tool(
             call_id,
             status=status,
@@ -488,10 +488,6 @@ class _OpenCodeTurnState:
         telemetry.execution_completed_at = completed
         if telemetry.execution_started_at is not None:
             telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
-            # This tool ran inside the open generation window, so its time is
-            # not model time. Only a RESOLVED tool contributes: one force-closed
-            # without a result was never timed.
-            self.step_tool_spans.append((telemetry.execution_started_at, completed))
         telemetry.result_status = _RESULT_STATUS[status]
         # Stored untruncated by design (sub-agent returns must survive whole).
         telemetry.result_summary = summary
@@ -701,9 +697,6 @@ class _OpenCodeTurnState:
 
         completed = datetime.now()
         step_start = self.step_started_at or completed
-        # Tile from the previous step's finish; min() keeps a clock that went
-        # backwards from inverting the span.
-        started = min(self.gen_mark, step_start) if self.gen_mark is not None else step_start
         blocks: list[ContentBlock] = []
         step_text = "".join(self.step_text_parts)
         if step_text:
@@ -711,24 +704,19 @@ class _OpenCodeTurnState:
         for i, tool_id in enumerate(self.step_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
-        # A call still OPEN at this boundary counts too, bounded at `completed`.
-        # Subtracting only CLOSED intervals publishes the part of a straddling
-        # call that ran inside this window as generation, while the call's own
-        # duration_ms counts it again — a live double-count now that the windows
-        # tile contiguously from `gen_mark`. No double subtraction: when the call
-        # later closes, `_finish_tool` appends its full interval to the NEXT
-        # window's list, where busy_ms clips it to the post-boundary remainder.
-        spans = self.step_tool_spans + [
-            (t.execution_started_at, completed) for t in self.open_tools.values() if t.execution_started_at is not None
-        ]
+        # Tile from the previous step's finish. The RAW window only —
+        # `timing.subtract_tool_time` takes the tool union back out of
+        # it, once, for every harness.
+        started, generation_ms = close_window(
+            mark=self.gen_mark if self.gen_mark is not None else step_start,
+            now=completed,
+            item_start=step_start,
+        )
         self.messages.append(
             AssistantMessage(
                 started_at=started,
                 completed_at=completed,
-                generation_duration_ms=max(
-                    0.0,
-                    (completed - started).total_seconds() * 1000 - busy_ms(spans, started, completed),
-                ),
+                generation_duration_ms=generation_ms,
                 content_blocks=blocks,
                 tool_use_ids=list(self.step_tool_ids),
                 input_tokens=step_in,
@@ -744,8 +732,18 @@ class _OpenCodeTurnState:
         # A message was appended, so the next window starts where this one
         # ended. Only `step_finish` advances the mark: a step that never
         # finished published nothing, so tiling past it would attribute its
-        # time to whichever step finishes next.
+        # time to whichever step finishes next. There is no span list to clear
+        # alongside it any more — see `on_step_start`.
         self.gen_mark = completed
+        # And so is this step's own start stamp, because it has now been SPENT.
+        # It is passed to `close_window` as `item_start`, whose `min()` pulls
+        # the window open to cover it; left in place, a second `step_finish`
+        # with no intervening `step_start` would reopen the next window back at
+        # the previous step's start and publish that whole span a second time.
+        # The `min()` still defends a genuinely OPEN step against a backwards
+        # clock, which is what it is for — this reducer's stamps are raw
+        # `datetime.now()` and are not on a `TurnClock`.
+        self.step_started_at = None
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,

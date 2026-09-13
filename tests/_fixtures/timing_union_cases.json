@@ -2,14 +2,31 @@
   "_comment": [
     "Shared replay corpus for the tool-execution UNION, in milliseconds relative",
     "to an arbitrary base instant. Two implementations must agree on it:",
-    "  * Python  — coder_eval.agents._timing.busy_ms, which subtracts tool time",
+    "  * Python  — coder_eval.timing.busy_ms, which subtracts tool time",
     "              from an agent's generation window.",
-    "  * TypeScript — evalboard/lib/runs.ts::busyMs, which subtracts tool time",
+    "  * TypeScript — evalboard/lib/timing.ts::busyMs, which subtracts tool time",
     "              from a task's wall clock to produce the Unaccounted residual.",
     "They answer the same question about the same task.json, so a divergence",
     "means the evalboard and the harness disagree about how long the tools ran.",
     "tests/test_timing_union_parity.py and evalboard/lib/__tests__/timing-union-parity.test.ts",
-    "both replay this file; neither owns the numbers."
+    "both replay this file; neither owns the numbers.",
+    "",
+    "`union_cases` is the same question with no window given: the extent is the",
+    "spans' own min/max. Python replays it through coder_eval.timing.union_ms;",
+    "TypeScript through evalboard/lib/timing.ts::toolExecutionMs, which derives",
+    "that extent itself rather than being handed one — which is exactly why it",
+    "needs its own cases instead of being assumed to agree.",
+    "",
+    "`unbounded_cases` pins the POLICY rather than the arithmetic: a tool call",
+    "the harness TIMED but did not BOUND contributes NOTHING to the union, on",
+    "both sides. `unbounded_ms` lists such calls; `expected_ms` is the union of",
+    "`spans` alone, so a side that folds them back in fails. A duration with no",
+    "start and end cannot be placed on the timeline, so it cannot be unioned",
+    "with anything — adding it double-books whatever it overlapped and can drive",
+    "the four-bucket residual negative. Its time reads as Unaccounted, which is",
+    "what that cell means. Python replays these through the production selector",
+    "coder_eval.timing.main_thread_tool_spans (the `is not None` filter IS the",
+    "policy), not through union_ms alone; TypeScript through toolExecutionMs."
   ],
   "cases": [
     {
@@ -95,6 +112,91 @@
       "window": [0, 1000],
       "spans": [[100, 500], [150, 550], [200, 600], [250, 650]],
       "expected_ms": 550
+    }
+  ],
+
+  "union_cases": [
+    {
+      "name": "no spans at all",
+      "spans": [],
+      "expected_ms": 0
+    },
+    {
+      "name": "one span is its own length",
+      "spans": [[200, 700]],
+      "expected_ms": 500
+    },
+    {
+      "name": "two disjoint spans add up",
+      "spans": [[100, 200], [400, 900]],
+      "expected_ms": 600
+    },
+    {
+      "name": "overlapping spans are counted once, not summed",
+      "spans": [[100, 600], [200, 700]],
+      "expected_ms": 600
+    },
+    {
+      "name": "a span fully contained in another adds nothing",
+      "spans": [[100, 900], [300, 400]],
+      "expected_ms": 800
+    },
+    {
+      "name": "adjacent spans merge without a gap",
+      "spans": [[100, 400], [400, 700]],
+      "expected_ms": 600
+    },
+    {
+      "name": "unsorted input gives the same answer as sorted",
+      "spans": [[600, 800], [100, 300], [200, 250]],
+      "expected_ms": 400
+    },
+    {
+      "name": "four concurrent calls are the union, never the sum",
+      "spans": [[100, 500], [150, 550], [200, 600], [250, 650]],
+      "expected_ms": 550
+    },
+    {
+      "name": "a zero-length span contributes nothing",
+      "spans": [[500, 500], [600, 900]],
+      "expected_ms": 300
+    },
+    {
+      "name": "the extent is the spans' own bounds, not a window",
+      "spans": [[10000, 10250]],
+      "expected_ms": 250
+    }
+  ],
+  "unbounded_cases": [
+    {
+      "name": "a timed call with no bounds contributes nothing",
+      "spans": [],
+      "unbounded_ms": [250],
+      "expected_ms": 0
+    },
+    {
+      "name": "several unbounded calls still contribute nothing",
+      "spans": [],
+      "unbounded_ms": [250, 1000, 30],
+      "expected_ms": 0
+    },
+    {
+      "name": "one bounded call beside an unbounded one is just the bounded one",
+      "spans": [[1000, 2000]],
+      "unbounded_ms": [250],
+      "expected_ms": 1000
+    },
+    {
+      "name": "overlapping bounded calls union, and the unbounded one is still dropped",
+      "spans": [[1000, 6000], [2000, 7000]],
+      "unbounded_ms": [5000],
+      "expected_ms": 6000
+    },
+    {
+      "name": "an inverted pair is dropped by both sides, like an unbounded one",
+      "spans": [[900, 400], [1000, 2000]],
+      "unbounded_ms": [],
+      "expected_ms": 1000
     }
   ]
 }

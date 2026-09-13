@@ -1,6 +1,9 @@
 """Tests for command telemetry status tracking (V2 fix)."""
 
 import time
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -1278,3 +1281,298 @@ class TestPerMessageTokenCapture:
             assert second.cache_read_tokens == 50
         finally:
             agent_module.query = original_query
+
+
+class TestClaudeHeadIsMeasuredAtFirstOutput:
+    """claude-code's head is the wall clock up to the first observed model output.
+
+    `_ClaudeTurnState.__init__` stamps `last_event_wall`, and
+    `_seed_first_generation_window` re-stamps it at the first `message_start`.
+    So the first window opens where the model first spoke, and the CLI spawn,
+    provider resolution and time to first token before it are the head.
+
+    `_build_claude_query` is NOT in the head: it runs at `communicate`'s
+    `:1095`, before `AgentStartEvent` is emitted at `:1106`, so it precedes the
+    head's own start stamp. It used to sit inside msg0's generation window
+    (`last_event_wall` was stamped at state construction, ahead of the build);
+    it now sits inside `duration_seconds` but outside all four buckets, as
+    unexplained residual. That is why the budget below still matters and why it
+    is not the same guard it was: at 0.03-0.10 ms the residual is noise, and
+    the two tests keep it that way.
+
+    It used to be `0.0`, and that was a CLAMPED NEGATIVE rather than a
+    measurement: both marks were stamped before `AgentStartEvent` was emitted,
+    so `decompose_turn`'s `max(..., 0.0)` produced it. The rejection rested on
+    claude-code running the model in-process. It does not — `claude-agent-sdk`
+    spawns the `claude` CLI over `anyio.open_process` and `_pump_messages`
+    calls `query()` once per `communicate()`, a fresh CLI per turn.
+
+    The two budget tests below survive the rewrite with their meaning INVERTED.
+    `_build_claude_query`'s cost now lands in the head rather than inside msg0's
+    generation, so they no longer guard "the build is cheap enough to leave
+    hidden by the clamp" — they guard "our own setup is a negligible part of a
+    head that is now published", which is what makes the head readable as the
+    harness's latency rather than as ours.
+    """
+
+    # Measured at 0.03 ms bare and 0.10 ms with four plugin roots. The bound is
+    # ~300x that: generous enough that a loaded CI box cannot trip it, tight
+    # enough to catch a regression that would make the reasoning above wrong.
+    BUDGET_MS = 50.0
+
+    @staticmethod
+    def _build_ms(**config_kwargs) -> float:
+        from pathlib import Path
+
+        from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, model="claude-haiku-4-5-20251001", **config_kwargs)
+        agent = ClaudeCodeAgent(config)
+        agent.working_directory = Path(".")
+        # Best of N: the claim is about the work the call does, not about the
+        # worst scheduling slice a shared runner happens to hand it.
+        samples = []
+        for _ in range(5):
+            started = time.perf_counter()
+            agent._build_claude_query("hi", 60, 10, lambda _line: None)
+            samples.append((time.perf_counter() - started) * 1000.0)
+        return min(samples)
+
+    def test_the_query_build_is_a_negligible_part_of_the_published_head(self):
+        elapsed = self._build_ms()
+        assert elapsed < self.BUDGET_MS, (
+            f"_build_claude_query took {elapsed:.2f} ms, over the {self.BUDGET_MS} ms budget. It runs "
+            "BEFORE the AgentStartEvent, so it is inside the turn's duration_seconds but outside "
+            "all four buckets — unexplained residual that no bucket accounts for. At a few hundred "
+            "microseconds that is noise; at this size the four buckets would visibly stop summing "
+            "to the turn and the gap would be ours, not the harness's."
+        )
+
+    def test_plugin_resolution_does_not_change_that(self, tmp_path):
+        """A plugin-heavy task is where our own setup could plausibly dominate."""
+        (tmp_path / "skills").mkdir()
+        roots = [{"type": "local", "path": str(tmp_path)} for _ in range(4)]
+        elapsed = self._build_ms(plugins=roots)
+        assert elapsed < self.BUDGET_MS, (
+            f"_build_claude_query with 4 plugin roots took {elapsed:.2f} ms, over the "
+            f"{self.BUDGET_MS} ms budget — see the sibling test for why that matters."
+        )
+
+
+class TestClaudeFirstWindowReseed:
+    """The first `message_start` moves the window mark; a later one must not.
+
+    Driven at `_ClaudeTurnState` with both clocks moved off one counter. The
+    window's BOUNDS come from the turn's `TurnClock`, which is INJECTED — a
+    derived stamp escapes a monkeypatched module `datetime` entirely, so these
+    tests would measure the real clock and still pass. Its DURATION side still
+    reads `time.monotonic()` for `turn_start_time` and the deadline, so that
+    global is patched off the same counter; leaving it real would straddle a
+    scripted clock and a live one.
+    """
+
+    BASE = datetime(2026, 9, 11, 9, 0, 0)
+
+    class _Stepped:
+        """A `TurnClock` stand-in the test moves by hand, in ms from `BASE`."""
+
+        at_ms = 0.0
+
+        def now(self):
+            return TestClaudeFirstWindowReseed.BASE + timedelta(milliseconds=self.at_ms)
+
+    def _state(self, monkeypatch):
+        from coder_eval.agents import claude_code_agent as claude_module
+        from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.collector import EventCollector
+
+        stepped = self._Stepped()
+        monkeypatch.setattr(claude_module, "time", SimpleNamespace(monotonic=lambda: stepped.at_ms / 1000.0))
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+        collector = EventCollector()
+        return stepped, _ClaudeTurnState(
+            agent,
+            emit=CompositeStreamCallback([collector]),
+            collector=collector,
+            task_id="t",
+            user_input="go",
+            iteration=1,
+            max_turns=None,
+            log=agent._log,
+            turn_start_time=0.0,
+            deadline=None,
+            clock=stepped,
+        )
+
+    @staticmethod
+    def _assistant(mid: str):
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
+
+        return SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id=mid)
+
+    def test_cli_boot_before_the_first_message_start_is_not_msg0_generation(self, monkeypatch):
+        """The interval the CLI spent booting is head, not model time.
+
+        Before the re-seed the window opened when the turn state was built, so
+        this whole interval was published as msg0's `generation_duration_ms` —
+        ~3.6 s per turn on the measured corpus.
+        """
+        clock, state = self._state(monkeypatch)
+        clock.at_ms = 800  # CLI spawn + provider resolution + TTFT
+        state.on_stream_event(_message_start("m1"))
+        clock.at_ms = 1000
+        state.on_assistant_message(self._assistant("m1"))
+
+        message = state.sdk_messages[0]
+        assert message.started_at == self.BASE + timedelta(milliseconds=800)
+        assert message.generation_duration_ms == pytest.approx(200.0)
+
+    def test_only_the_first_message_start_reseeds_so_the_windows_still_tile(self, monkeypatch):
+        """A second re-seed would drop the gap before the next emission.
+
+        That gap — a tool result landing, then the next request going out — is
+        real model time, and falling into no bucket at all is the defect pi
+        shipped with.
+        """
+        clock, state = self._state(monkeypatch)
+        clock.at_ms = 800
+        state.on_stream_event(_message_start("m1"))
+        clock.at_ms = 1000
+        state.on_assistant_message(self._assistant("m1"))
+        clock.at_ms = 1500
+        state.on_stream_event(_message_start("m2"))
+        clock.at_ms = 2000
+        state.on_assistant_message(self._assistant("m2"))
+
+        first, second = state.sdk_messages[0], state.sdk_messages[1]
+        assert second.started_at == first.completed_at, "the second window must tile from the first"
+        assert second.generation_duration_ms == pytest.approx(1000.0)
+
+    def test_seeding_twice_by_hand_is_a_no_op_the_second_time(self, monkeypatch):
+        """The once-per-turn guard, stated outright rather than inferred.
+
+        The sibling test above would also fail if the guard were removed, but
+        only via the tiling it implies. This says the property directly, so a
+        reviewer does not have to reproduce a mutation to see it.
+        """
+        clock, state = self._state(monkeypatch)
+        clock.at_ms = 800
+        state._seed_first_generation_window()
+        seeded_wall = state.last_event_wall
+
+        clock.at_ms = 5000
+        state._seed_first_generation_window()
+
+        assert state.last_event_wall == seeded_wall
+
+    def test_a_stream_with_no_message_start_still_clamps_to_zero(self, monkeypatch):
+        """Partial streaming off, a mocked query(), or a crash before the first event.
+
+        The re-seed never fires, the turn-entry mark stands, and the head
+        clamps exactly as it did before. That is the correct degradation, and
+        asserting it is what keeps it from becoming an untested branch.
+        """
+        clock, state = self._state(monkeypatch)
+        clock.at_ms = 1000
+        state.on_assistant_message(self._assistant("m1"))
+
+        assert state.first_output_seen is False, "nothing latched, so the turn-entry mark stands"
+        # The window still opens at turn entry, which PRECEDES the
+        # AgentStartEvent — so the head is a negative that decompose_turn
+        # clamps, exactly as it did before this phase. Asserted on the mark
+        # rather than by re-deriving `max(elapsed, 0.0)` from hand-built
+        # arguments, which would restate the implementation and could not fail.
+        assert state.sdk_messages[0].started_at == self.BASE
+
+    def test_the_four_buckets_account_for_a_tool_free_turn(self, monkeypatch):
+        """head + generation + tail == the turn, with the head read DIRECTLY.
+
+        The sibling tests assert the window's `started_at`, which pins the mark
+        but never the published `harness_startup_ms` itself — so nothing here
+        read the field this phase exists to change. With no tool calls the tool
+        bucket is empty and the other three must tile the turn exactly.
+        """
+        from coder_eval.models import TokenUsage
+        from coder_eval.streaming.collector import EventCollector
+        from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
+
+        clock, state = self._state(monkeypatch)
+        clock.at_ms = 800
+        state.on_stream_event(_message_start("m1"))
+        clock.at_ms = 1000
+        state.on_assistant_message(self._assistant("m1"))
+
+        collector = EventCollector()
+        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=self.BASE))
+        collector.on_event(
+            AgentEndEvent(
+                task_id="t",
+                status=AgentEndStatus.COMPLETED,
+                messages=list(state.sdk_messages),
+                usage=TokenUsage(),
+                timestamp=self.BASE + timedelta(milliseconds=1500),
+            )
+        )
+        record = collector.build_turn_record()
+
+        assert record.harness_startup_ms == pytest.approx(800.0), "the CLI boot is the head, published"
+        assert record.harness_teardown_ms == pytest.approx(500.0)
+        generation = sum(m.generation_duration_ms or 0.0 for m in record.messages if m.role == "assistant")
+        assert generation == pytest.approx(200.0)
+        assert record.harness_startup_ms + generation + record.harness_teardown_ms == pytest.approx(1500.0)
+
+
+class TestTheTurnBracketComesFromTheTurnClock:
+    """CE064's behavioural half for claude-code: the SOURCE of the two stamps.
+
+    The rule can only see that `timestamp=` is present — it cannot tell
+    `state.clock.now()` from a `datetime.now()` spelled out at the call site.
+    Anchoring the stand-in a year from real time is what makes a reverted
+    argument fail by a year instead of by the microseconds that separate the
+    two clocks in practice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_both_brackets_are_stamped_from_the_injected_clock(self, tmp_path, monkeypatch):
+        import coder_eval.agents.claude_code_agent as agent_module
+        from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock
+
+        _, assistant_message_cls, _, text_block_cls, _, result_message_cls = create_mock_sdk_messages()
+        assistant_msg = assistant_message_cls([text_block_cls("done")], message_id="m1")
+
+        async def mock_query(prompt, options):
+            yield assistant_msg
+            yield result_message_cls()
+
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr(agent_module, "query", mock_query)
+
+        agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        await agent.start(str(tmp_path))
+        seen: list[Any] = []
+        await agent.communicate("go", stream_callback=SimpleNamespace(on_event=seen.append))
+
+        assert_bracket_on_the_clock(seen)
+
+    @pytest.mark.asyncio
+    async def test_the_head_and_tail_are_measured_within_one_basis(self, tmp_path, monkeypatch):
+        import coder_eval.agents.claude_code_agent as agent_module
+        from tests._bracket_clock import AnchoredClock, assert_overhead_is_measured
+
+        _, assistant_message_cls, _, text_block_cls, _, result_message_cls = create_mock_sdk_messages()
+        assistant_msg = assistant_message_cls([text_block_cls("done")], message_id="m1")
+
+        async def mock_query(prompt, options):
+            yield assistant_msg
+            yield result_message_cls()
+
+        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr(agent_module, "query", mock_query)
+
+        agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+        await agent.start(str(tmp_path))
+        record = await agent.communicate("go")
+
+        assert_overhead_is_measured(record)

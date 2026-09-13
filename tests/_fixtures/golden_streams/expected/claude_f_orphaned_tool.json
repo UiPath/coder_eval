@@ -26,6 +26,8 @@
   "crash_reason": null,
   "crashed": false,
   "duration_seconds": "<scrubbed>",
+  "harness_startup_ms": "<scrubbed>",
+  "harness_teardown_ms": "<scrubbed>",
   "iteration": 1,
   "max_turns_exhausted": false,
   "messages": [
@@ -76,5 +78,6 @@
     "total_cost_usd": "<scrubbed>",
     "uncached_input_tokens": 60
   },
+  "tool_union_ms": null,
   "user_input": "do the thing"
 }

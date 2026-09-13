@@ -1381,3 +1381,98 @@ class TestAnUnmeasuredRunPublishesNoRate:
 
         assert summary.pass_rate == 0.5
         assert summary.error_share == 0.25
+
+
+class TestTheGenerationMetricsBuckets:
+    """The markdown table's four bucket columns, READ off the row projection.
+
+    `reports.py` neither sums nor validates anything here: the numbers are
+    computed once by `reports_stats.turn_time_buckets` and carried as
+    task-level keys by `reports_experiment.eval_result_to_task_dict`. The rows
+    below are that projection's shape, not a `TurnRecord`.
+    """
+
+    @staticmethod
+    def _row(**overrides) -> dict:
+        row = {
+            "task_id": "alpha",
+            "duration": 12.5,
+            "iterations": [{"duration_seconds": 12.5, "assistant_turn_count": 3}],
+        }
+        row.update(overrides)
+        return row
+
+    @staticmethod
+    def _cells(row: dict) -> list[str]:
+        from coder_eval.reports import ReportGenerator
+
+        lines = ReportGenerator._generate_generation_metrics_section([row])
+        return [cell.strip() for cell in lines[-1].strip("|").split("|")]
+
+    def test_a_measured_run_renders_every_bucket(self):
+        cells = self._cells(self._row(startup_ms=500.0, generation_ms=1800.0, tool_ms=200.0, teardown_ms=100.0))
+        assert cells[-4:] == ["500ms", "1.80s", "200ms", "100ms"]
+
+    def test_a_run_json_predating_the_keys_renders_dashes_not_zeros(self):
+        """The common case for every existing run directory.
+
+        `0ms` would claim a measurement nobody took — the same distinction
+        CE058 enforces on the producing side, and the reason the keys are read
+        with `.get()` rather than indexed.
+        """
+        assert self._cells(self._row())[-4:] == ["—", "—", "—", "—"]
+
+    def test_a_measured_zero_still_renders_as_zero(self):
+        assert self._cells(self._row(startup_ms=0.0))[-4] == "0ms"
+
+    def test_each_column_carries_its_own_value(self):
+        """Pins the key-to-column WIRING: four distinct numbers, so a swap shows."""
+        cells = self._cells(self._row(startup_ms=1.0, generation_ms=2.0, tool_ms=3.0, teardown_ms=4.0))
+        assert cells[-4:] == ["1ms", "2ms", "3ms", "4ms"]
+
+    def test_the_report_neither_sums_nor_validates(self):
+        """Asserted on the compiled NAMES, not on the source text.
+
+        The function's comment legitimately names `turn_time_buckets` to say
+        where the numbers came from; a substring check over the source would
+        read that as a call. `co_names` sees what the code actually references.
+        """
+        from coder_eval.reports import ReportGenerator
+
+        names = set(ReportGenerator._generate_generation_metrics_section.__code__.co_names)
+        assert not names & {"turn_time_buckets", "TurnRecord", "harness_startup_ms", "model_validate"}
+
+
+class TestThePerformanceSectionRendersAMeasuredZero:
+    """`analysis.py` returns `None` for "nothing timed" and a float otherwise.
+
+    The guard was `if stats.avg_command_time_ms and ... > 0`, so a genuine
+    measured 0.0 average — every command resolving faster than the clock's
+    resolution — suppressed the whole section. The distinction the producer
+    makes has to survive to the surface that renders it.
+    """
+
+    @staticmethod
+    def _section(avg: float | None, total: float = 0.0) -> list[str]:
+        from coder_eval.models import CommandStatistics
+        from coder_eval.reports import ReportGenerator
+
+        stats = CommandStatistics(
+            total_commands=3,
+            successful_commands=3,
+            avg_command_time_ms=avg,
+            total_command_time_ms=total,
+        )
+        return ReportGenerator._generate_command_statistics_section(stats)
+
+    def test_a_measured_zero_average_still_renders(self):
+        lines = self._section(0.0)
+        assert any("### Performance" in line for line in lines)
+        assert any("**Average Command Time**: 0.0ms" in line for line in lines)
+
+    def test_an_unmeasured_average_is_omitted(self):
+        assert not any("### Performance" in line for line in self._section(None))
+
+    def test_an_ordinary_average_is_unchanged(self):
+        lines = self._section(150.0, total=450.0)
+        assert any("**Average Command Time**: 150.0ms" in line for line in lines)

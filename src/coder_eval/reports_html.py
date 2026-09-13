@@ -17,10 +17,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from coder_eval.formatting import format_ms
 from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
 from .reports import early_stop_gate_note
-from .reports_stats import format_score, is_env_table_key
+from .reports_stats import format_score, is_env_table_key, turn_time_buckets
 
 
 if TYPE_CHECKING:
@@ -301,14 +302,6 @@ def _format_duration(seconds: float | None) -> str:
     minutes = int(seconds // 60)
     secs = seconds % 60
     return f"{minutes}m {secs:.0f}s"
-
-
-def _format_ms(ms: float | None) -> str:
-    if ms is None:
-        return "—"
-    if ms < 1000:
-        return f"{ms:.0f}ms"
-    return f"{ms / 1000:.2f}s"
 
 
 def _format_params(params: dict[str, Any]) -> str:
@@ -675,7 +668,7 @@ def _render_command(cmd: CommandTelemetry) -> str:
       <span class="tool-seq">#{cmd.sequence_number}</span>
       <span class="tool-name">{_esc(cmd.tool_name)}</span>
       <span class="{status_cls}">{_esc(status_label)}</span>
-      <span class="tool-duration">{_esc(_format_ms(cmd.duration_ms))}</span>
+      <span class="tool-duration">{_esc(format_ms(cmd.duration_ms))}</span>
     </span>
   </summary>
   <div class="details-body">
@@ -818,13 +811,13 @@ def _render_command_stats(stats: Any | None) -> str:
         if len(params_full) > SLOW_PARAMS_PREVIEW_CHARS:
             params_preview += "..."
         slow_rows_list.append(
-            f"<tr><td class='mono'>{_esc(c.tool)}</td><td>{_esc(_format_ms(c.duration_ms))}</td>"
+            f"<tr><td class='mono'>{_esc(c.tool)}</td><td>{_esc(format_ms(c.duration_ms))}</td>"
             + f"<td class='mono dim'>{_esc(params_preview)}</td></tr>"
         )
     slow_rows = "".join(slow_rows_list) or "<tr><td colspan='3' class='muted'>—</td></tr>"
     success_pct = (stats.successful_commands / stats.total_commands * 100) if stats.total_commands else 0.0
     successful_str = f"{stats.successful_commands} ({success_pct:.0f}%)"
-    avg_str = _esc(_format_ms(stats.avg_command_time_ms))
+    avg_str = _esc(format_ms(stats.avg_command_time_ms))
 
     extras: list[str] = []
     if stats.most_common_sequence:
@@ -932,8 +925,20 @@ def _render_token_usage(result: EvaluationResult) -> str:
 """
 
 
+def _format_signed_ms(ms: float | None) -> str:
+    """Like `format_ms`, but keeps a NEGATIVE residual visible and signed.
+
+    A negative Unaccounted is real and means generation and tool execution
+    overlapped, so it is rendered rather than clamped — the evalboard does the
+    same. Clamping would turn a measurable inconsistency into a clean zero.
+    """
+    if ms is None:
+        return "—"
+    return f"-{format_ms(-ms)}" if ms < 0 else format_ms(ms)
+
+
 def _render_generation_metrics(result: EvaluationResult) -> str:
-    """Render Generation Metrics — latency, turns."""
+    """Render Generation Metrics — latency, turns, and the four wall-clock buckets."""
     from .reports import count_partials_by_outcome, group_consecutive_by_iteration
 
     turns = result.iterations or []
@@ -951,6 +956,22 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
             f'<div class="stat"><div class="label">Crashed Partials</div>'
             f'<div class="value">{_esc(breakdown)}</div></div>'
         )
+    # The four wall-clock buckets. The arithmetic is in reports_stats; this
+    # only formats it. An unmeasured bucket renders as an em dash, never 0ms —
+    # a run predating the head/tail capture measured nothing, and a zero would
+    # claim it measured instantly (CE058).
+    buckets = turn_time_buckets(result)
+    startup = format_ms(buckets.startup_ms)
+    generation = format_ms(buckets.generation_ms)
+    tool_exec = format_ms(buckets.tool_ms)
+    teardown = format_ms(buckets.teardown_ms)
+    unaccounted = _format_signed_ms(buckets.unaccounted_ms)
+    unaccounted_title = _esc(
+        "the task's wall clock minus the four buckets. Measured against the whole task, so it "
+        + "legitimately includes sandbox setup and grading — it is LARGER than the per-turn residual "
+        + "scripts/timing/decompose_run.py reports, and the two are not comparable. Negative means "
+        + "generation and tool execution overlapped."
+    )
     return f"""
 <h2>Generation Metrics</h2>
 <div class="card">
@@ -960,6 +981,15 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
     <div class="stat"><div class="label">Assistant Turns</div><div class="value">{asst_turns}</div></div>
     <div class="stat"><div class="label">Avg Turn Latency</div><div class="value">{avg_latency}</div></div>
     {crashed_stat}
+  </div>
+  <div class="grid">
+    <div class="stat"><div class="label">Startup</div><div class="value">{startup}</div></div>
+    <div class="stat"><div class="label">Generation</div><div class="value">{generation}</div></div>
+    <div class="stat"><div class="label">Tool exec</div><div class="value">{tool_exec}</div></div>
+    <div class="stat"><div class="label">Teardown</div><div class="value">{teardown}</div></div>
+    <div class="stat" title="{unaccounted_title}">
+      <div class="label">Unaccounted (incl. setup + grading)</div><div class="value">{unaccounted}</div>
+    </div>
   </div>
 </div>
 """

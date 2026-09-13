@@ -136,10 +136,11 @@ export function epochMs(value: string | null | undefined): number | null {
 // Milliseconds inside [lo, hi] where at least ONE span was running: the UNION,
 // not the sum.
 //
-// The TypeScript twin of `coder_eval.agents._timing.busy_ms`, deliberately the
-// same algorithm — the agents subtract tool time from a generation window with
-// it, and this file subtracts tool time from a task's wall clock, so the two
-// must agree about what "tool execution took N ms" means. Held in step by
+// The TypeScript twin of `coder_eval.timing.busy_ms`, deliberately the
+// same algorithm — the harness subtracts tool time from its generation windows
+// with it (once, in coder_eval/timing.py::subtract_tool_time), and this file
+// subtracts tool time from a task's wall clock, so the two must agree about
+// what "tool execution took N ms" means. Held in step by
 // tests/_fixtures/timing_union_cases.json, which both suites replay.
 export function busyMs(
     spans: [number, number][],
@@ -164,28 +165,72 @@ export function busyMs(
     return total + (openEnd - openStart);
 }
 
-// Wall-clock milliseconds these messages' tool calls occupied.
+// Wall-clock milliseconds these messages' tool calls occupied: the UNION of
+// their BOUNDED execution intervals.
 //
-// Bounded calls are UNIONED — concurrent tools occupy the wall clock once, and
-// summing them drove the task page's Unaccounted cell to -615ms on a task with
-// two concurrent sleeps, where the honest answer was +2.5s of sandbox setup and
-// grading. A call the harness timed but did not bound contributes its own
-// `durationMs`, which is the best available statement about it and reproduces
-// the previous behaviour for that call alone.
+// Concurrent tools occupy the wall clock once, and summing them drove the task
+// page's Unaccounted cell to -615ms on a task with two concurrent sleeps, where
+// the honest answer was +2.5s of sandbox setup and grading.
+//
+// A call the harness TIMED but did not BOUND contributes nothing — no
+// `durationMs` fallback. That is a policy, and it is the same one
+// `coder_eval.timing.main_thread_tool_spans` has always had on the Python side:
+// its `is not None` filter drops a command with no `execution_started_at` /
+// `execution_completed_at`, so every Python surface already ignored these while
+// this function folded them in. A duration with no bounds cannot be placed on
+// the timeline, so it cannot be unioned with anything; adding it to a union
+// double-books whatever it overlapped and can drive the residual negative,
+// which destroys the disjointness the four-bucket identity rests on. Such time
+// lands in Unaccounted instead, which is precisely what that cell is for — the
+// harness measured a duration it cannot place.
+//
+// Measured blast radius: 9336 of 12170 commands in the run history on disk are
+// unbounded, every one a codex `Bash`, ~8 h in aggregate. That population is
+// CLOSED — codex went from 0% bounded before 2026-09-10 to 100% after — so no
+// future run changes, but on historical codex runs this moves up to ~8 h out of
+// Tool exec and into Unaccounted. Going forward the only harness reporting a
+// bare duration is the out-of-tree `delegate-sdk`; see
+// docs/agents/HARNESS_PARITY.md.
+// The same union, but `null` when NOTHING bounded was recorded — the direct
+// twin of `reports_stats._turn_tool_union_ms`, and the one a display cell wants.
+//
+// `toolExecutionMs` above returns `0` for an empty span list because that is
+// what a UNION of nothing is, and what `coder_eval.timing.union_ms` returns;
+// the shared corpus pins both sides on exactly that. The None-vs-0.0 decision
+// sits one layer up on the Python side too (`main_thread_tool_spans` returns a
+// list, and its caller turns an empty one into `None`), and this is that layer.
+//
+// The distinction is not academic. A turn that ran no tools, and a turn whose
+// tools were all TIMED BUT UNBOUNDED — the historical-codex and out-of-tree
+// `delegate-sdk` population — both produce an empty span list. Rendering `0ms`
+// there claims the tools were measured and took no time, while every Python
+// surface renders a dash for the same run.
+export function measuredToolExecutionMs(messages: MessageEvent[]): number | null {
+    const anyBounded = messages.some((m) =>
+        m.toolUses.some((t) => t.execStartMs != null && t.execEndMs != null),
+    );
+    return anyBounded ? toolExecutionMs(messages) : null;
+}
+
 export function toolExecutionMs(messages: MessageEvent[]): number {
     const spans: [number, number][] = [];
-    let unbounded = 0;
     for (const m of messages) {
         for (const t of m.toolUses) {
             if (t.execStartMs != null && t.execEndMs != null) {
                 spans.push([t.execStartMs, t.execEndMs]);
-            } else if (t.durationMs != null) {
-                unbounded += t.durationMs;
             }
         }
     }
-    if (spans.length === 0) return unbounded;
-    const lo = Math.min(...spans.map(([s]) => s));
-    const hi = Math.max(...spans.map(([, e]) => e));
-    return busyMs(spans, lo, hi) + unbounded;
+    if (spans.length === 0) return 0;
+    // Folded rather than `Math.min(...spans.map(…))`: the spread passes one
+    // ARGUMENT per span, so a long enough trace throws RangeError and the whole
+    // task page fails to render. The Python twin uses generator `min`/`max` and
+    // has no such ceiling; this keeps the two bounded the same way.
+    let lo = spans[0][0];
+    let hi = spans[0][1];
+    for (const [start, end] of spans) {
+        if (start < lo) lo = start;
+        if (end > hi) hi = end;
+    }
+    return busyMs(spans, lo, hi);
 }

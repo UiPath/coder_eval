@@ -325,6 +325,57 @@ class TurnRecord(BaseModel):
     )
     timestamp: datetime = Field(default_factory=datetime.now, description="When this turn occurred")
     duration_seconds: float = Field(default=0.0, description="How long this turn took")
+    harness_startup_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds from the agent turn starting until the harness first observed "
+            "MODEL OUTPUT — one definition on all five, and the same instant at which the harness "
+            "opens its first generation window, which is what keeps the two buckets disjoint. "
+            "Measured between AGENT EVENT stamps, not from timestamp/duration_seconds above, "
+            "which are orchestrator-level and a slightly different clock, so a consumer "
+            "recomputing this from those will get a near-but-not-equal number. Only its "
+            "COMPOSITION differs per harness, and that difference is a real property rather than "
+            "a measurement artifact: a harness that spawns its process PER TURN (claude-code, "
+            "codex, opencode, pi) fuses that boot, provider resolution, dispatch and TTFT here, "
+            "while one that spawns it once at startup and holds it across turns (antigravity) has "
+            "no boot inside the turn to fuse in. It is deliberately not decomposed further "
+            "— no stream carries a marker between those parts. "
+            "See docs/agents/HARNESS_PARITY.md. "
+            "None when the turn produced no assistant message — never 0.0, which would mean "
+            "'measured, and instant'."
+        ),
+    )
+    harness_teardown_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds between the last generation window closing and the agent turn "
+            "ending: SDK/CLI finalization, result assembly and process teardown. Same clock "
+            "caveat as harness_startup_ms. None when the turn produced no assistant message."
+        ),
+    )
+    tool_union_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds this turn's MAIN-THREAD tool calls occupied: the UNION of their "
+            "bounded execution intervals, never their sum. Concurrent calls occupy the wall clock "
+            "once — one measured antigravity turn ran two overlapping `sleep 2` calls, which sum "
+            "to 4.1s of a 2.1s turn — so summing books the overlap twice and can drive the "
+            "four-bucket residual negative, destroying the disjointness the identity rests on. "
+            "MAIN THREAD ONLY, the same filter the generation subtraction and the head and tail "
+            "use: a sub-agent's own calls sit inside the spawning Agent call's interval, which "
+            "the union already covers. Written once by EventCollector.build_turn_record from the "
+            "single span set it computes for the turn, so no consumer has to reproduce union "
+            "arithmetic plus a sub-agent filter over raw command dicts. A call the harness timed "
+            "but did not BOUND contributes nothing — it cannot be placed on the timeline, so its "
+            "time reads as unaccounted (see evalboard/lib/timing.ts::toolExecutionMs, which "
+            "applies the identical policy). "
+            "None when the turn recorded no bounded span at all — never 0.0, which means spans "
+            "were recorded and occupied no measurable time. It is also None on a MID-STREAM "
+            "snapshot (a record built before the terminal event), where nothing was computed "
+            "rather than nothing measured; the two are indistinguishable here and deliberately "
+            "so, because a consumer's response to both is the same — derive it or show a dash."
+        ),
+    )
     token_usage: TokenUsage | None = Field(
         default=None, description="Token usage for this turn (if available from agent SDK)"
     )
@@ -520,6 +571,36 @@ class EvaluationResult(BaseModel):
     started_at: datetime = Field(description="When evaluation started")
     completed_at: datetime | None = Field(default=None, description="When evaluation completed")
     duration_seconds: float = Field(default=0.0, description="Total evaluation duration")
+    setup_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds from the task starting until the agent phase begins — the environment "
+            "capture (`get_version_info`, which shells out for the git commit and every CLI "
+            "version: 733 ms measured, the single largest item), criterion discovery, sandbox "
+            "provisioning, agent construction and start(), and any pre_run commands. TASK-scoped, "
+            "which is why it is here and not a fifth member of TurnRecord's four buckets: "
+            "those tile ONE TURN and their identity (head + generation + tool + tail == the "
+            "turn's span) is asserted to the millisecond, while setup happens once for a task "
+            "that may run N turns. Folding it into the first turn's harness_startup_ms would "
+            "break that identity by construction AND make turn 1 incomparable with turns "
+            "2..N. It is also not harness time: it is the orchestrator's own, measured at "
+            "~1.86s for claude-code and pi alike. Named rather than left in the report's "
+            "residual because it is a known, measurable phase, and a residual holding a "
+            "nameable constant is how a number stops meaning what it says."
+        ),
+    )
+    grading_ms: float | None = Field(
+        default=None,
+        description=(
+            "Wall milliseconds spent checking success criteria, summed across every "
+            "``SuccessChecker.check_all_async`` call this evaluation made — the single-shot "
+            "check, the per-dialog-turn checks, and the post-failure diagnostic pass. "
+            "Accumulated on the checker rather than at the four call sites so a fifth one "
+            "cannot be added without it. ``None`` on an ungraded row (``coder-eval "
+            "execute``), where nothing was checked — never 0.0, which would claim a "
+            "measurement was taken and came back instant (CE058)."
+        ),
+    )
 
     # Results
     final_status: FinalStatus = Field(description="Final status of the evaluation")

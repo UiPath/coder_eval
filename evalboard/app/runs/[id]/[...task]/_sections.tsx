@@ -13,7 +13,7 @@ import type {
     TokenTotals,
     ToolCall,
 } from "@/lib/runs";
-import { toolExecutionMs } from "@/lib/timing";
+import { measuredToolExecutionMs, toolExecutionMs } from "@/lib/timing";
 import {
     type PerMessageImpact,
     buildThinkingModel,
@@ -318,6 +318,11 @@ export function MessageTimelineSection({
     subAgentUsageByToolId = {},
     impactByIndex,
     taskDurationSeconds,
+    harnessStartupMs,
+    harnessTeardownMs,
+    storedToolMs,
+    setupMs,
+    gradingMs,
 }: {
     messages: MessageEvent[];
     // Per-Agent-call sub-agent token breakdown (input/output/cache-create/
@@ -332,6 +337,31 @@ export function MessageTimelineSection({
     // tool execution do NOT account for. Null/absent on a run predating
     // duration capture — the cell then renders "—" rather than a fake residual.
     taskDurationSeconds?: number | null;
+    // The turn-level head and tail, summed over the task's turns: wall clock
+    // before the first generation window opened and after the last one closed.
+    // Turn-scoped, so they cannot be derived from the per-message stream the
+    // other stats come from. Null/absent on a run predating the capture, and
+    // the cells then read "—" while Unaccounted keeps exactly its old meaning.
+    harnessStartupMs?: number | null;
+    harnessTeardownMs?: number | null;
+    // The tool bucket as the HARNESS recorded it, summed over the task's turns
+    // (`TurnRecord.tool_union_ms`). Preferred over recomputing it from the
+    // message stream, because the collector wrote it from the same span set it
+    // measured the head and the tail against — reading it is how this cell and
+    // the harness are guaranteed to agree rather than merely observed to.
+    // Null/absent on a run predating the field, and the cell then computes the
+    // union itself; the two agree by construction, since `toolExecutionMs`
+    // applies the same bounded-spans-only policy as the Python selector.
+    storedToolMs?: number | null;
+    // TASK-scoped phases either side of the turns: provisioning before the
+    // first turn, criteria checking after the last. Named so Unaccounted is a
+    // residual instead of a label for the setup phase — it was ~1.9s of known,
+    // constant orchestrator cost on every row, which reads as 10% of a 19s
+    // task and would read 60% of a 3s one. Null/absent on a run predating the
+    // capture, and the cells then read "—" while Unaccounted keeps exactly its
+    // old meaning.
+    setupMs?: number | null;
+    gradingMs?: number | null;
 }) {
     // Token columns can be shown as counts or as their estimated USD value.
     const [unit, setUnit] = useState<Unit>("tokens");
@@ -381,7 +411,17 @@ export function MessageTimelineSection({
     // occupy the wall clock once. Summing them made Unaccounted negative on
     // any task that ran tools in parallel, reporting overlap as if the
     // harness had lost time.
-    const toolExecMs = toolExecutionMs(mainThread);
+    //
+    // STORED first, computed as the fallback. `?? null` and not `??  computed`
+    // in one expression because `storedToolMs` of 0 is a measurement and must
+    // win: the harness recorded spans and they occupied no measurable time.
+    // Only its ABSENCE (a run predating the field) routes here.
+    //
+    // The Generation cell below has no stored twin and is deliberately still
+    // computed from the messages — the reconciliation entry exists so a
+    // consumer sums that stream rather than reading a separate aggregate. The
+    // mixed sourcing is intentional; see `sumTurnBuckets` in lib/runs.ts.
+    const toolExecMs = storedToolMs ?? measuredToolExecutionMs(mainThread);
     const slowGen = mainThread.filter(
         (m) => (m.generationMs ?? 0) >= SLOW_GEN_MS,
     ).length;
@@ -398,11 +438,25 @@ export function MessageTimelineSection({
     const attributableGenMs = totalGenMs - mixedMs;
     const thinkingShare = attributableGenMs > 0 ? thinkingMs / attributableGenMs : 0;
 
-    // Wall clock the agent stream does not explain. Negative means generation
-    // and tool execution overlapped, which is a real signal — never clamped.
+    // Wall clock the agent stream does not explain, AFTER every named bucket.
+    // Startup and teardown are subtracted because they are measured intervals,
+    // not residual — leaving them in reported a harness's CLI boot as
+    // unexplained time. `?? 0` subtracts only what was actually measured, so an
+    // older run with neither field keeps exactly its previous number.
+    // Negative means generation and tool execution overlapped, which is a real
+    // signal — never clamped.
     const taskMs =
         taskDurationSeconds != null ? taskDurationSeconds * 1000 : null;
-    const unaccountedMs = taskMs != null ? taskMs - totalGenMs - toolExecMs : null;
+    const unaccountedMs =
+        taskMs != null
+            ? taskMs -
+              totalGenMs -
+              (toolExecMs ?? 0) -
+              (harnessStartupMs ?? 0) -
+              (harnessTeardownMs ?? 0) -
+              (setupMs ?? 0) -
+              (gradingMs ?? 0)
+            : null;
     const unaccountedShare =
         taskMs != null && taskMs > 0 && unaccountedMs != null
             ? unaccountedMs / taskMs
@@ -419,18 +473,35 @@ export function MessageTimelineSection({
             <p className="text-[10px] text-gray-500">
                 MIXED = multiple block types · red = slow (gen ≥10s, tool ≥5s)
             </p>
-            {/* TWO LEVELS, two rows. The top row's Generation, Tool exec and
-                Unaccounted sum to the task's wall clock; the bottom row splits
-                Generation alone and sums to IT. Rendering the split as a
-                sub-cell of one top-row cell put both sums on one line, where
-                nothing said which total each part belonged to. */}
+            {/* TWO LEVELS, two rows. The top row's five time cells — Startup,
+                Generation, Tool exec, Teardown, Unaccounted — sum to the task's
+                wall clock; the bottom row splits Generation alone and sums to
+                IT. Rendering the split as a sub-cell of one top-row cell put
+                both sums on one line, where nothing said which total each part
+                belonged to. The time cells are ordered as the turn runs. */}
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 tabular-nums space-y-3">
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-9 gap-3 text-xs">
                     <div>
                         <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                             Messages
                         </div>
                         <div className="text-gray-900 font-medium">{messageCount}</div>
+                    </div>
+                    <div title="sandbox provisioning, agent start() and pre_run — everything before the first turn begins. TASK-scoped, so it is NOT one of the turn's four buckets: those tile a single turn and their identity is asserted to the millisecond, while this happens once for a task that may run many turns. It is the orchestrator's own cost, not the harness's — measured at ~1.9s for claude-code and pi alike. Blank on runs recorded before the field existed.">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Setup
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(setupMs ?? null)}
+                        </div>
+                    </div>
+                    <div title="wall clock from the turn starting until the harness first observed model output — a latency that INCLUDES time-to-first-token, and the same instant its first generation window opens. Named for the interval it measures, not for what it contains. Deliberately NOT decomposed further: a harness with a CLI to boot fuses CLI boot, provider resolution, dispatch and TTFT here, and no stream carries a marker between them. See docs/agents/HARNESS_PARITY.md.">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Startup
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(harnessStartupMs ?? null)}
+                        </div>
                     </div>
                     <div title="model-generation time, split per block kind on the row below">
                         <div className="text-gray-500 uppercase tracking-wide text-[10px]">
@@ -445,10 +516,26 @@ export function MessageTimelineSection({
                             Tool exec
                         </div>
                         <div className="text-gray-900 font-medium">
-                            {fmtMs(toolExecMs)}
+                            {fmtMs(toolExecMs ?? null)}
                         </div>
                     </div>
-                    <div title="task wall clock minus generation and tool execution — includes sandbox setup, grading, simulator calls, and any time the harness did not report">
+                    <div title="wall clock after the last generation window closed: SDK/CLI finalization, result assembly and process teardown">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Teardown
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(harnessTeardownMs ?? null)}
+                        </div>
+                    </div>
+                    <div title="every success-criteria check this row made, summed — the single-shot check, each dialog turn's check, and the post-failure diagnostic pass. Blank when nothing was graded (coder-eval execute) or on runs recorded before the field existed.">
+                        <div className="text-gray-500 uppercase tracking-wide text-[10px]">
+                            Grading
+                        </div>
+                        <div className="text-gray-900 font-medium">
+                            {fmtMs(gradingMs ?? null)}
+                        </div>
+                    </div>
+                    <div title="task wall clock minus every named bucket above. A TRUE residual now that setup and grading are measured: it used to hold the ~1.9s setup phase, a known constant reading as unexplained time. What is left is post_run, sandbox cleanup, simulator calls and any interval the harness did not report.">
                         <div className="text-gray-500 uppercase tracking-wide text-[10px]">
                             Unaccounted
                         </div>
@@ -771,6 +858,11 @@ export function CostExplorerSection({
     tokens,
     recordedCostUsd,
     taskDurationSeconds,
+    harnessStartupMs,
+    harnessTeardownMs,
+    storedToolMs,
+    setupMs,
+    gradingMs,
 }: {
     messages: MessageEvent[];
     subAgentUsageByToolId?: Record<string, SubAgentTotals>;
@@ -778,6 +870,14 @@ export function CostExplorerSection({
     recordedCostUsd: number | null;
     // Forwarded verbatim to the timeline's Unaccounted cell.
     taskDurationSeconds?: number | null;
+    // Forwarded verbatim to the timeline's Startup/Teardown cells.
+    harnessStartupMs?: number | null;
+    harnessTeardownMs?: number | null;
+    storedToolMs?: number | null;
+    // Forwarded straight through to MessageTimelineSection — this component
+    // renders it and owns no timing of its own.
+    setupMs?: number | null;
+    gradingMs?: number | null;
 }) {
     const [scale, setScale] = useState(1);
     const [toolScale, setToolScale] = useState(1);
@@ -816,6 +916,11 @@ export function CostExplorerSection({
                 subAgentUsageByToolId={subAgentUsageByToolId}
                 impactByIndex={impactByIndex}
                 taskDurationSeconds={taskDurationSeconds}
+                harnessStartupMs={harnessStartupMs}
+                harnessTeardownMs={harnessTeardownMs}
+                storedToolMs={storedToolMs}
+                setupMs={setupMs}
+                gradingMs={gradingMs}
             />
             {model && tokens.total > 0 && (
                 <section className="space-y-2">
@@ -1445,9 +1550,22 @@ function MessageRow({
     const slowTool = m.toolUses.some((t) => (t.durationMs ?? 0) >= SLOW_TOOL_MS);
     const hasErrorTool = m.toolUses.some((t) => t.isError);
     const preview = summaryPreview(m);
-    // Sum tool exec time for this message — matches the rollup strip.
-    const execMs = m.toolUses.reduce((a, t) => a + (t.durationMs ?? 0), 0);
-    const hasExec = m.toolUses.some((t) => t.durationMs != null);
+    // UNION, not sum — and through the same helper the rollup strip uses, so
+    // the row and the header cannot answer one question two ways. Summing
+    // double-books concurrent calls: one measured antigravity turn issued two
+    // `sleep 2` Bash calls overlapping almost entirely, and this cell read
+    // 4.1s for 2.1s of wall clock — more tool time in one message than the
+    // whole task's Tool exec cell, which is impossible on its face. The old
+    // comment here claimed parity with the strip; that stopped being true when
+    // `toolExecutionMs` was changed to union and this line was not. Expand the
+    // row to see each call's own wall clock: sequential calls still add up to
+    // this number, concurrent ones deliberately do not.
+    // `measured…`, so a row whose calls were TIMED BUT UNBOUNDED reads "—"
+    // rather than "0ms". Under the union policy such a call contributes to no
+    // bucket, and claiming it took no time is the one thing that is certainly
+    // false. This replaces a `durationMs != null` guard, which asked whether
+    // the harness timed anything rather than whether it bounded anything.
+    const execMs = measuredToolExecutionMs([m]);
     // Render full body only when something more than the summary exists.
     const hasBody =
         m.toolUses.length > 0 ||
@@ -1492,7 +1610,7 @@ function MessageRow({
                                 : "text-gray-600")
                         }
                     >
-                        {hasExec ? fmtMs(execMs) : "—"}
+                        {fmtMs(execMs)}
                     </span>
                     <span className="flex items-center gap-2 min-w-0">
                         <span

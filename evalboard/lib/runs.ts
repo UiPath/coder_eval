@@ -364,6 +364,26 @@ export interface TaskDetail extends TaskResultSummary {
     // the Agent row). The cost simulator consumes the values via Object.values().
     // Empty for runs/turns with no spawned sub-agents.
     subAgentUsageByToolId: Record<string, SubAgentTotals>;
+    // The task's harness head and tail, summed over its turns. `null` when no
+    // turn measured that end — never 0, which would claim the harness started
+    // or finished instantly. Subtracted from the timeline's Unaccounted cell so
+    // that residual is what is left after every named bucket.
+    harnessStartupMs: number | null;
+    harnessTeardownMs: number | null;
+    // The task's tool bucket as the HARNESS recorded it: the sum of its turns'
+    // `tool_union_ms`. `null` on a run predating the field, which is what makes
+    // the task page fall back to computing the union from the messages — the
+    // two agree by construction, since `toolExecutionMs` applies the same
+    // bounded-spans-only policy as `timing.main_thread_tool_spans`.
+    storedToolMs: number | null;
+    // TASK-scoped phases either side of the agent's turns, so the timeline's
+    // Unaccounted cell is a residual rather than a name for the setup phase.
+    // `setupMs` is sandbox provisioning + agent start() + pre_run; `gradingMs`
+    // is every success-criteria check the row made. Both `null` when the run
+    // predates the fields or (for grading) when nothing was graded — never 0,
+    // which would claim the phase ran instantly.
+    setupMs: number | null;
+    gradingMs: number | null;
     // Per-call ACTUAL cost + cache audit rows, grouped by turn iteration. Only
     // turns whose `provider_call_costs` list is non-empty appear (LiteLLM/
     // open-weight backend; empty on Claude/Bedrock). Rendered as a standalone
@@ -392,6 +412,48 @@ export interface SubAgentTotals {
     output: number;
     cacheCreation: number;
     cacheRead: number;
+}
+
+// Sum one optional per-turn measurement across a task's turns. `null` — never
+// 0 — when no turn carried the value, because 0 means "measured, and instant"
+// while null means nobody measured (the `TurnRecord` fields' own contract, and
+// what CE058 guards on the Python side). Non-finite values are dropped rather
+// than poisoning the total with NaN.
+function sumMeasured(values: (number | null | undefined)[]): number | null {
+    let total: number | null = null;
+    for (const v of values) {
+        if (typeof v !== "number" || !Number.isFinite(v)) continue;
+        total = (total ?? 0) + v;
+    }
+    return total;
+}
+
+// Three of the task's four wall-clock buckets, summed over its turns. The
+// per-turn values are measured by `coder_eval/timing.py` — head and tail by
+// `decompose_turn`, the tool union at the collector seam — and the summation is
+// evalboard-only, mirroring `reports_stats.turn_time_buckets` the way
+// `pricing.ts` mirrors `pricing.py`. The arithmetic that consumes it, the
+// Unaccounted residual in `_sections.tsx`, is the deliberate second
+// implementation `decompose_turn`'s docstring names.
+//
+// GENERATION is deliberately not here and has no stored twin on either side:
+// it is a one-line sum over the message stream, and the reconciliation entry
+// exists precisely so a consumer sums that stream rather than reading a
+// separate aggregate. `toolMs` is the opposite case — union arithmetic plus a
+// sub-agent filter — which is why it earns storage.
+//
+// `toolMs` is null when NO turn carries the field, which is every run recorded
+// before it existed; the caller then computes it from the messages instead.
+export function sumTurnBuckets(turns: TurnEntry[]): {
+    startupMs: number | null;
+    teardownMs: number | null;
+    toolMs: number | null;
+} {
+    return {
+        startupMs: sumMeasured(turns.map((t) => t.harness_startup_ms)),
+        teardownMs: sumMeasured(turns.map((t) => t.harness_teardown_ms)),
+        toolMs: sumMeasured(turns.map((t) => t.tool_union_ms)),
+    };
 }
 
 // Group the parsed assistant messages by `parentToolUseId` into a per-sub-agent
@@ -1531,6 +1593,18 @@ export interface TurnEntry {
     // reconciliation row, which carries no model of its own.
     model_used?: string | null;
     token_usage?: TokenUsageEntry | null;
+    // The turn's head and tail: wall ms before the first generation window
+    // opened and after the last one closed. Absent on runs predating the
+    // capture, and null on a turn that produced no assistant message — in both
+    // cases nobody measured, which is a different fact from a measured 0.
+    harness_startup_ms?: number | null;
+    harness_teardown_ms?: number | null;
+    // The turn's tool bucket: the UNION of its main-thread bounded command
+    // intervals, written by the collector from the same span set the two above
+    // are measured against. Optional for the same reason they are — a run
+    // predating the field carries none, which is what routes the task page to
+    // computing it from the messages instead.
+    tool_union_ms?: number | null;
     // Per-call actual cost + cache audit rows (LiteLLM/open-weight backend);
     // empty/absent on Claude/Bedrock. Surfaced as a standalone per-call table.
     provider_call_costs?: ProviderCallEntryRaw[];
@@ -2481,6 +2555,10 @@ export async function readTaskDetail(
         success_criteria_results?: RawCriterionResult[];
         post_failure_criteria_results?: RawCriterionResult[];
         iterations?: TurnEntry[];
+        // Task-scoped phases either side of the turns. Absent on runs that
+        // predate them, which `sumMeasured` maps to null rather than 0.
+        setup_ms?: number | null;
+        grading_ms?: number | null;
         environment_info?: RawRunJson["environment_info"];
     }>(path.join(contentDir, "task.json"));
 
@@ -2522,6 +2600,16 @@ export async function readTaskDetail(
     const tokens = selectTokenTotals(messages, task?.iterations ?? []);
 
     const subAgentUsageByToolId = aggregateSubAgentUsage(messages);
+    const {
+        startupMs: harnessStartupMs,
+        teardownMs: harnessTeardownMs,
+        toolMs: storedToolMs,
+    } = sumTurnBuckets(task?.iterations ?? []);
+    // Through `sumMeasured` for the single-value case too, so the None-vs-0
+    // and non-finite rules have ONE implementation: a `?? null` here would
+    // pass a NaN straight into the Unaccounted subtraction.
+    const setupMs = sumMeasured([task?.setup_ms]);
+    const gradingMs = sumMeasured([task?.grading_ms]);
 
     const taskDescription =
         task?.task_config?.resolved?.initial_prompt ??
@@ -2562,6 +2650,11 @@ export async function readTaskDetail(
         messages,
         tokens,
         subAgentUsageByToolId,
+        harnessStartupMs,
+        harnessTeardownMs,
+        storedToolMs,
+        setupMs,
+        gradingMs,
         providerCalls,
     };
 }

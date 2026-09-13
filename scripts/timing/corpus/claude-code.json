@@ -1,0 +1,239 @@
+{
+  "_comment": "Scrubbed representative run for the timing residual report. Prompts, outputs, tokens and cost are removed; only the wall-clock fields decompose_run.py reads are kept. NOT a before/after instrument \u2014 see the header in this directory.",
+  "agent_type": "claude-code",
+  "iterations": [
+    {
+      "duration_seconds": 17.885937000159174,
+      "iteration": 1,
+      "harness_startup_ms": 0.0,
+      "harness_teardown_ms": 857.9449999999999,
+      "crashed": false,
+      "messages": [
+        {
+          "completed_at": "2026-09-11T07:13:59.899445",
+          "started_at": "2026-09-11T07:13:56.052088",
+          "generation_duration_ms": 3847.4723750259727,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:00.221777",
+          "started_at": "2026-09-11T07:13:59.899445",
+          "generation_duration_ms": 322.3441250156611,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:01.010903",
+          "started_at": "2026-09-11T07:14:00.221777",
+          "generation_duration_ms": 789.1439578961581,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:01.672766",
+          "started_at": "2026-09-11T07:14:01.032139",
+          "generation_duration_ms": 640.6468339264393,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:02.386421",
+          "started_at": "2026-09-11T07:14:01.676561",
+          "generation_duration_ms": 709.8735831677914,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:03.064864",
+          "started_at": "2026-09-11T07:14:02.403329",
+          "generation_duration_ms": 661.5535838063806,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:03.747205",
+          "started_at": "2026-09-11T07:14:03.070861",
+          "generation_duration_ms": 676.3597088865936,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:04.328511",
+          "started_at": "2026-09-11T07:14:03.768013",
+          "generation_duration_ms": 560.5133329518139,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:04.917330",
+          "started_at": "2026-09-11T07:14:04.338140",
+          "generation_duration_ms": 579.204916022718,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:05.485979",
+          "started_at": "2026-09-11T07:14:04.920393",
+          "generation_duration_ms": 565.5976661946625,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:06.071761",
+          "started_at": "2026-09-11T07:14:05.493927",
+          "generation_duration_ms": 577.8485001064837,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:06.671228",
+          "started_at": "2026-09-11T07:14:06.078218",
+          "generation_duration_ms": 593.0241669993848,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:07.253322",
+          "started_at": "2026-09-11T07:14:06.678189",
+          "generation_duration_ms": 575.1475831493735,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:07.734996",
+          "started_at": "2026-09-11T07:14:07.253322",
+          "generation_duration_ms": 481.6872498486191,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:12.089632",
+          "started_at": "2026-09-11T07:14:09.587005",
+          "generation_duration_ms": 2502.6892910245806,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T07:14:13.079613",
+          "started_at": "2026-09-11T07:14:12.089632",
+          "generation_duration_ms": 990.0077090132982,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        }
+      ],
+      "commands": [
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T07:14:01.032594",
+          "execution_started_at": "2026-09-11T07:14:01.011427",
+          "tool_id": "toolu_01BqWiy1hXCaepichHH9dnXC",
+          "result_status": "success",
+          "duration_ms": 21.16704103536904,
+          "timestamp": "2026-09-11T07:14:01.011427"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T07:14:01.676585",
+          "execution_started_at": "2026-09-11T07:14:01.672806",
+          "tool_id": "toolu_01YN7oVP3MEuUGhNgtoYXDhV",
+          "result_status": "success",
+          "duration_ms": 3.7791249342262745,
+          "timestamp": "2026-09-11T07:14:01.672806"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T07:14:02.403402",
+          "execution_started_at": "2026-09-11T07:14:02.386537",
+          "tool_id": "toolu_01JNtoHGHMzD4QamxrePBR9T",
+          "result_status": "success",
+          "duration_ms": 16.864625038579106,
+          "timestamp": "2026-09-11T07:14:02.386537"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T07:14:03.070898",
+          "execution_started_at": "2026-09-11T07:14:03.064935",
+          "tool_id": "toolu_01DaWJKb1Hm6bxcpiKjVzeYd",
+          "result_status": "success",
+          "duration_ms": 5.963291972875595,
+          "timestamp": "2026-09-11T07:14:03.064935"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T07:14:03.768071",
+          "execution_started_at": "2026-09-11T07:14:03.747296",
+          "tool_id": "toolu_014MD2sCpV9RhaF9TjAQccFT",
+          "result_status": "success",
+          "duration_ms": 20.77529113739729,
+          "timestamp": "2026-09-11T07:14:03.747296"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T07:14:04.338200",
+          "execution_started_at": "2026-09-11T07:14:04.328605",
+          "tool_id": "toolu_01M2q1dfDu3Vsxte9dSv6AhA",
+          "result_status": "success",
+          "duration_ms": 9.594874922186136,
+          "timestamp": "2026-09-11T07:14:04.328605"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T07:14:04.920425",
+          "execution_started_at": "2026-09-11T07:14:04.917406",
+          "tool_id": "toolu_01FueR7TLLvWTEWXEbfGErzE",
+          "result_status": "success",
+          "duration_ms": 3.019041148945689,
+          "timestamp": "2026-09-11T07:14:04.917406"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T07:14:05.493992",
+          "execution_started_at": "2026-09-11T07:14:05.486085",
+          "tool_id": "toolu_017wr4qR5X22aegAGbtx9PVE",
+          "result_status": "success",
+          "duration_ms": 7.906709099188447,
+          "timestamp": "2026-09-11T07:14:05.486085"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T07:14:06.078272",
+          "execution_started_at": "2026-09-11T07:14:06.071847",
+          "tool_id": "toolu_01HDYj2UeY1Nagd1ecjbs81V",
+          "result_status": "success",
+          "duration_ms": 6.425125058740377,
+          "timestamp": "2026-09-11T07:14:06.071847"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T07:14:06.678240",
+          "execution_started_at": "2026-09-11T07:14:06.671314",
+          "tool_id": "toolu_01UbZp7DRorw4cUbo5PB2Bia",
+          "result_status": "success",
+          "duration_ms": 6.9256669376045465,
+          "timestamp": "2026-09-11T07:14:06.671314"
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:09.527272",
+          "execution_started_at": "2026-09-11T07:14:07.253341",
+          "tool_id": "toolu_0194Py8X1atsEPAA5WAWVjyT",
+          "result_status": "success",
+          "duration_ms": 2273.930750088766,
+          "timestamp": "2026-09-11T07:14:07.253341"
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T07:14:09.587030",
+          "execution_started_at": "2026-09-11T07:14:07.734993",
+          "tool_id": "toolu_018Nbqg6YSdYk6fb9c4gWAGy",
+          "result_status": "success",
+          "duration_ms": 1852.037207921967,
+          "timestamp": "2026-09-11T07:14:07.734993"
+        }
+      ],
+      "user_input": "",
+      "agent_output": ""
+    }
+  ]
+}

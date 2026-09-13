@@ -538,6 +538,12 @@ divergences, so the deferred-work record is one place. Measurements in
   Coverage is ~88%, so it is not urgent. The agent lives in the separate
   `coder_eval_uipath` repo; mirror the Codex change there
   (`_item_timing` + threading the SDK stamps through the telemetry builders).
+  **Consequence, as of the turn-timing consolidation (2026-09-12):** such a
+  call now contributes to no bucket on EITHER surface — the evalboard's
+  `toolExecutionMs` lost its `durationMs` fallback, matching the `is not None`
+  filter Python has always had — so the time reads as Unaccounted rather than
+  as tool execution. Pinned by `unbounded_cases` in
+  `tests/_fixtures/timing_union_cases.json`, which both suites replay.
 
 - [ ] **Pre-existing, surfaced by this work's final review: `TokenUsage._adopt_legacy_input_tokens`
   double-counts the cache buckets.** The validator copies a legacy record's
@@ -551,3 +557,319 @@ divergences, so the deferred-work record is one place. Measurements in
   candidate — a real bug needing its own change, with a decision about
   whether legacy records can be distinguished from current ones at all.
   Caught in: timing-capture final review (gpt-5.6-sol).
+
+- [x] ~~No golden-corpus assertion of the four-bucket identity.~~ **DONE.** The
+  fixture clocks were unified (`_rebase_notifications` / `_rebase_lines` shift
+  codex's 2027 base and opencode's month-old base onto the replay's own clock,
+  keeping every derived duration exact) and `assert_timing_captured` now
+  asserts `Σ generation + ∪ tool + head + tail` against `duration_seconds`.
+  Mutation-verified: reintroducing the defect fails
+  `test_antigravity_golden[d_orphaned_tool]`, which previously passed.
+  22 of 27 scenarios are checked. The remaining 5 are exempt via
+  `FICTIONAL_DURATIONS` for a reason rebasing cannot fix: they inject SDK
+  stamps in integer MILLISECONDS (17-900 ms of declared item time) while the
+  replay runs in well under one, so closing that last gap needs the agent's
+  own clock faked, not the fixtures' rebased.
+
+- [x] ~~No TypeScript counterpart to CE058.~~ **DONE.**
+  `evalboard/lib/__tests__/no-zero-coalesce.test.ts` is a vitest source scan
+  (there is no eslint in `evalboard/`) over `lib/runs.ts`, `lib/timing.ts` and
+  `_sections.tsx`. It is an ALLOWLIST rather than a ban, exactly because the
+  residual arithmetic uses `?? 0` correctly — each of its 14 entries carries a
+  one-line reason, and a new occurrence fails until its author justifies it or
+  keeps the value null. It is keyed on the codebase's own `…Ms` naming
+  convention rather than on every `?? 0`: a blanket scan matches 58
+  occurrences, ~40 of them token buckets where zero is a fine answer, and an
+  allowlist that long is one nobody reads. Blind spots are declared in the
+  file. Two meta-tests keep it honest — a negative control (so the scan cannot
+  pass by matching nothing) and an assertion that every allowlist entry is
+  still present, so an entry cannot outlive its reason.
+  Caught in: turn head/tail timing final review.
+
+- [x] ~~**`timing.py::decompose_turn` raises an uncaught `TypeError` on a
+  naive/aware datetime mix**~~ **DONE.** `timing.py::_require_same_awareness`
+  now raises from five call sites (`decompose_turn`'s head and tail,
+  `busy_ms`'s window bounds and each span's two ends) with one message template
+  naming the field and which side is aware. Deliberately a GUARD and not a lint
+  rule: the invariant is still unviolated in-tree, and the exposure that
+  actually matters is a third-party agent registered through the
+  `coder_eval.plugins` SPI, which lives outside `src/coder_eval/agents/` and
+  which a rule scoped to that directory could never see — so the message
+  addresses that reader directly. An empty span list is checked not at all,
+  bounds included: nothing is compared, so there is no pair to be about.
+  Caught in: turn head/tail timing final review.
+
+- [x] ~~**`claude-code` does not subtract tool execution from its generation
+  windows.**~~ **FIXED** in `_ClaudeTurnState._subtract_tool_time_from_windows`,
+  which runs at finalization (it cannot run at flush time — a tool issued by an
+  earlier emission is still running when the next window closes). Re-measured
+  on the same task: 481 ms / 2.691% -> **1.4 ms / 0.006%** over four turns that
+  all carried overlapping tool calls. Original report kept below for the
+  reasoning.
+
+  ORIGINAL: The other four
+  harnesses subtract the union (`timing.py::busy_ms`); claude-code is exempted
+  on the reasoning that it "marks the end of the previous SDK event and reads
+  again when the next message arrives, so a tool's execution falls between two
+  windows rather than inside one". But a tool's timer starts at the **emission**
+  carrying its `tool_use` block, and one assistant turn spans several emissions,
+  so a later emission's window runs concurrently with a tool already timing.
+  Measured live on a task with five parallel writes, five reads and two
+  concurrent `Bash` calls: the generation/tool overlap was **482 ms and 340 ms**
+  on two ~18-25 s turns, and the four-bucket residual came out at exactly
+  `-481 ms` / `-339 ms` — the overlap accounts for it to within 1.4 ms. The
+  other four harnesses overlapped by ~2.0-2.3 s on the same task and reconciled
+  to within 1.2 ms. Two claude-code turns with <1 ms of overlap reconciled to
+  within 0.1 ms, so the fault is precisely the missing subtraction.
+  Fix is to apply `busy_ms` in `on_assistant_message` as the other four do, but
+  it changes a PUBLISHED `generation_duration_ms` on the most-used harness, so
+  it needs its own golden regeneration and live pass. NOT introduced by the
+  head/tail work — generation-vs-tool timing predates it — but that work's
+  four-bucket identity is what made it visible.
+  Caught in: post-merge live verification of the head/tail buckets.
+
+### Deferred lint-rule widenings
+
+- [ ] **CE058 and CE059 still match `AssistantMessage` by a hardcoded constructor
+  NAME LIST** (`_MESSAGE_CONSTRUCTORS`), where CE060 derives the set from each
+  module's own `coder_eval.models` imports. The weakness is live, not
+  theoretical: `claude_code_agent.py` binds *only*
+  `AssistantMessage as AssistantMessageTelemetry` and never the bare name, so
+  the two shipped rules guard that file's two construction sites purely because
+  somebody wrote the current alias into a different file's frozenset — rename
+  the alias and both go silently blind there — and an arbitrary
+  `AssistantMessage as Msg` is missed outright by both. Adopting CE060's
+  alias-resolving `check()` pre-pass is about ten lines per rule, but it widens
+  two SHIPPED rules whose firing sets are load-bearing (CE058's constructor set
+  is a different, wider one: `CommandTelemetry`, `SlowestCommandInfo`,
+  `TurnRecord`), so it needs its own mutation check per rule and a re-measured
+  firing set over all of `src/`, not a drive-by edit. If a fourth same-scope
+  kwarg rule ever lands, extract `tests/lint/rules/_message_calls.py` at that
+  point rather than sooner.
+  Caught in: the CE060 / antigravity `message_id` run.
+
+- [ ] **Nothing pins that `message_id` is only ever a WITHIN-TURN identity.** Ids
+  repeat across retry attempts of one turn on every synthetic-id harness —
+  `Agent.discard_pending_turn` rolls the iteration counter back, so a crashed
+  partial and its retry both emit `<harness>-1-msg-0` (antigravity, codex, and
+  the out-of-tree delegate agent alike). Harmless today, and verified so: the
+  evalboard declares its grouping list INSIDE the per-turn loop
+  (`runs.ts:1822`, flushed at `:2217`) and only ever compares adjacent raws, and
+  no Python consumer reads the field at all. It stops being harmless the moment
+  anything joins on the id run-wide (a React key across turns, a cost join, a
+  dedup) — which is a natural thing to reach for once every harness populates
+  it. No cheap guard exists: the property to assert is "no consumer treats this
+  as run-unique", which is a negative over two languages, and asserting
+  within-turn uniqueness instead would pass today and catch nothing. Cheapest
+  real option is a comment on the model field; the durable one is a run-level
+  id if a consumer ever needs one.
+  Caught in: the CE060 / antigravity `message_id` final review.
+
+- [ ] **No evalboard test is fed by a Python golden snapshot.** The two halves of
+  a capture fix are pinned by two hand-written fixtures that never meet: the
+  golden (`tests/_fixtures/golden_streams/expected/antigravity_e_multi_generation.json`)
+  pins what the reducer emits, and `evalboard/lib/__tests__/parseMessages.test.ts`
+  pins what the consumer does with a fixture an author typed from the same
+  understanding. Nothing feeds a real recorded shape through `parseMessages`, so
+  a reducer change that makes the TS fixture unrepresentative breaks no test on
+  either side. Deferred as architectural: it needs a loader, a scrub-aware
+  timestamp story (the goldens mask exactly the stamps the grouping reads), and
+  a convention for which snapshots the JS suite owns — well over 30 min, and
+  wider than any one capture fix.
+  Caught in: the CE060 / antigravity `message_id` final review.
+
+- [x] ~~**`AssistantMessage.message_id`'s field description names one harness of
+  five**~~ **DONE.** It said "Anthropic API message_id … when the Claude Code
+  CLI splits one API response", while five backends write the field and four
+  synthesize it — so `docs/agents/HARNESS_PARITY.md`'s row was the real SSOT
+  and the model, which this project's DRY principle designates as
+  authoritative, described claude-code only. Rewritten agent-agnostically: what
+  the id MEANS (the generation an emission belongs to), that all five write it
+  and four synthesize it, each scheme named, a pointer to the per-harness row,
+  and the fact that it is a WITHIN-TURN identity that repeats across retry
+  attempts. No mechanical guard was added and none is obvious — "a field
+  description must not name a single harness when the union has five writers"
+  needs a writer census per field, which is CE054-shaped but over a `str`
+  description rather than a key; the cheap version was exactly this, fixing the
+  sentence in the next change that touches the model.
+  Caught in: the CE060 / antigravity `message_id` final review.
+
+- [ ] **The golden corpus pins that a timing value EXISTS, never what it is.**
+  `tests/_fixtures/golden_streams/_scrub.py::SCRUB_KEYS` masks
+  `generation_duration_ms`, `started_at`, `completed_at` and both
+  `execution_*_at` to a placeholder, and the one assertion that does look at
+  magnitudes (`assert_timing_captured`'s four-bucket check) is an UPPER BOUND —
+  it catches a bucket claiming more time than the turn contains and says
+  nothing about one claiming less. So the committed suite cannot see a
+  per-harness generation number move at all, in either direction. Not
+  hypothetical: a whole phase of the timing plan was written on the premise
+  that changing those numbers would turn the golden master red, and it never
+  did. The two-sided check exists (`scripts/timing/decompose_run.py
+  --max-residual-pct`) but runs only against live `task.json` files, by hand.
+  Not cheap to guard: porting the two-sided residual into `_scrub.py` means
+  deciding a per-scenario tolerance for replays whose real wall clock is under
+  a millisecond while their SDK stamps declare hundreds — the same problem
+  `FICTIONAL_DURATIONS` already exempts six scenarios from, so the honest
+  version needs those scenarios to fake the agent's own clock too, not just
+  their item stamps. Interim cover is the per-reducer ms-exact identity test
+  added on pi and opencode
+  (`test_the_four_bucket_identity_closes_exactly_across_the_boundary`).
+  Caught in: the timing-architecture-standardization final review.
+
+## From the turn-timing P0–P3 run (2026-09-12)
+
+- [ ] **A golden scenario's justification comment can contradict its own
+  snapshot, and nothing notices.** Three did in this run: two orphan-tool
+  comments asserted bounds the committed JSON plainly carries (`pi_d`,
+  `opencode_d`), and `opencode_c`'s exemption claimed "the snapshot still
+  records the tiling" while `SCRUB_KEYS` masks both bounds and the duration.
+  Each was found by a human/model reading the JSON beside the prose — nothing
+  mechanically ties an exemption's stated reason to what its snapshot contains.
+  A rule would have to parse prose, so this is probably not guardable; the cheap
+  substitute is the review instruction that already exists ("read every new
+  snapshot before committing") plus the habit of quoting the actual JSON in the
+  comment. Caught in: turn-timing P0–P3, phases 2 and 5.
+
+- [ ] **A rationale comment asserting a now-false premise survives a ripple that
+  updated its siblings.** The "in-process SDK" claim was corrected in six files
+  and left standing in two (`test_event_collector.py`,
+  `message-timeline.test.tsx`), one of them directly beside a sibling that WAS
+  updated. Same shape as CE026/CE047 (doc-surface parity) but over a PHRASE
+  rather than a symbol, so a rule would be a phrase blocklist with an
+  ever-growing allowlist. Deferred on cost, not on value — a grep for the retired
+  phrase in the acceptance criteria is what actually caught these, and that is
+  cheap to write into a plan.
+
+- [ ] **`EventCollector` retains `_commands` and `_turn_starts` across a retry's
+  `AgentStartEvent`**, which resets only `_agent_end`. Pre-existing and NOT
+  introduced by the timing work. Blast radius is narrower than it first looks:
+  the persisted record, the reports and `max_turns` all read the AGENT's
+  collector, which is fresh per `communicate()`. Only `EarlyStopWatcher`'s
+  long-lived collector accumulates — where carrying a turn's whole engagement
+  across retry attempts is arguably what a live "did it engage the skill"
+  verdict wants, and `_check_round`'s docstring already reasons about crashed
+  attempts. Needs a decision on intent before any guard. Caught in: turn-timing
+  P0–P3 final review.
+
+- [x] ~~**claude-code has no `TurnClock`.**~~ **RESOLVED.** `_ClaudeTurnState`
+  now takes an injected `TurnClock` and every wall stamp the turn records
+  derives from it — both window bounds, the tool span
+  `_resolve_pending_command` stamps (which takes the reading as an argument, so
+  the span and the bounds it is clipped against cannot end up on two clocks),
+  and the fallback tool timestamp. One raw `datetime.now()` is deliberately
+  left, on the synthesized sub-agent terminal message: those bounds are an
+  admitted placeholder that `subtract_tool_time` and the head/tail bracket both
+  exclude, so no arithmetic reads them and there is no basis to share. The
+  ms-exact sensor was re-pointed at the injected clock rather than the module
+  `datetime` — a derived stamp escapes a monkeypatch, so the old patch would
+  have left `tests/test_timing_identity_contract.py` measuring the real clock
+  and passing by accident; reverting the conversion now fails it by ~10^7 ms.
+
+- [x] ~~**`pi_agent` publishes a `duration_ms` and a subtracted tool SPAN for an
+  UNRESOLVED orphan.**~~ **RESOLVED.** `_close_tool` now stamps
+  `execution_completed_at` and derives `duration_ms` only when the status is
+  not `UNRESOLVED`; the guard the old comment claimed is the guard the code
+  has. `execution_started_at` is kept (the CLI really did emit that start) and
+  one bound alone forms no span, so the orphan no longer has time subtracted
+  from a generation window it never occupied. `pi_d_orphaned_tool.json` now
+  records both fields as `null`.
+
+  **Sibling, NOT fixed:** `antigravity_agent` does the same thing at its own
+  orphan sweep (`tel.model_copy(update={..., "execution_completed_at":
+  self.clock.now()})`), though it stops short of a `duration_ms`. Deliberately
+  left: `timing.decompose_turn`'s docstring reasons about that stamped
+  completion landing inside the tail, and the `antigravity_d_orphaned_tool`
+  residual was measured against it, so changing it is a separate piece of work
+  with its own fixture to re-derive — not a ride-along.
+
+- [x] ~~**`pi_agent` republishes a turn's content on a duplicate `turn_end`.**~~
+  **RESOLVED.** `turn_text_parts` / `turn_tool_ids` are now cleared in
+  `on_turn_end` beside `turn_started_at`, on the argument that comment already
+  made: all three have been SPENT into the message just appended.
+  `pi_f_duplicate_turn_end.json` now records the second message with an empty
+  `content_blocks` and no `tool_use_ids` — it books the duplicate's own usage
+  and nothing else. The timing half had a unit test that stayed green while the
+  content half was broken, so the two are now asserted separately
+  (`test_a_duplicate_turn_end_does_not_republish_the_previous_content`).
+
+## From the turn-timing consolidation (2026-09-12)
+
+Two findings from `c/turn-audit.md` were CUT during planning, on evidence. They
+are registered here with their corrected cost/benefit and the trigger that would
+reopen them — not because they are cheap guards waiting to be written, but
+because the reason they were cut is the part a later reader will otherwise
+re-derive from scratch.
+
+- [ ] **A2-full — reducers publish BOUNDS only; the collector derives the raw
+  window.** The audit justified this partly as retiring two lint rules. Neither
+  holds. `CE058` form 1 is a generic keyword rule over five constructors
+  (`ce058_no_timing_literal.py:71-76`) and stays live whatever a reducer
+  publishes. `CE059` keys its exemption on `generation_duration_ms=None` being
+  PRESENT at the call site (`ce059_generation_window_is_two_reads.py:68`), so
+  removing the kwarg makes `claims_a_window` true at the three legitimate
+  placeholder sites and forces a rule REWRITE rather than a retirement. Net
+  cost: five reducers, a regeneration of every golden, and a CE059 rework; net
+  benefit: SSOT alone. **Deferring it is safe because the seam assertion in
+  `timing.subtract_tool_time` now checks the property at runtime** — a group's
+  raw total must equal the span its own bounds describe — which also covers a
+  third-party agent registered through the `coder_eval.plugins` SPI, where no
+  lint rule scoped to `agents/` reaches. REVISIT IF: that assertion ever has to
+  be relaxed for a legitimate reducer, which would mean the equality is no
+  longer the contract and storage has stopped paying for itself.
+
+- [ ] **C2 — a persisted `clock_inversions` counter.** The audit wanted the
+  number of clamped negatives recorded on the turn. CE064 removed the reachable
+  cause (the cross-basis head/tail comparison), and a field nothing may ever
+  read is YAGNI. The DOC half was done instead: the two contradictory clamp
+  docstrings now state one position — a measured inversion IS a real zero,
+  because both ends were observed (`timing.decompose_turn`), and claude-code's
+  case was never about the clamp but about the head being measured against the
+  wrong instant. REVISIT IF: an inversion is observed on a live run after
+  CE064, which would mean a basis is still mixed somewhere the rule cannot see
+  (the plugin SPI, or a harness whose spans come from a CLI).
+
+- [ ] **`test_codex_golden[a_agent_message_only]` is FLAKY, ~5% — measured, and
+  pre-existing.** Forty consecutive runs on an unmodified tree (`-n 0`): 2
+  failures, `"no assistant message reports a positive generation window with
+  bounds that span it"` with `(0.0, '...164797', '...164797')`. The replay
+  finishes faster than `datetime`'s 1 us resolution, so codex's rebased item
+  stamps can collapse to one instant and the window rounds to `0.0` — which
+  `assert_timing_captured`'s `expect_generation_window` arm then correctly
+  refuses. Surfaced (not caused) by the turn-timing consolidation, which runs
+  that file repeatedly. Not fixed here because the fix is in the codex fixture's
+  stamp rebasing (`_rebase_notifications`), which is its own change with its own
+  risk of ratifying whatever it then produces; the honest options are to give
+  the fixture's items a floor above the clock's resolution, or to give the
+  scenario `expect_generation_window=False` and say why. Caught in: the
+  turn-timing consolidation, Phase 6.
+
+- [ ] **CE058 misses a sixth form: `<expr> if <test> else <numeric literal>`.**
+  Its five forms are a zero constructor keyword, `x or 0`, `x if x is not None
+  else 0.0`, an `if x is None: x = 0.0` assignment, and a `model_copy(update=)`
+  dict. Form 3 keys on an `is None` / `is not None` COMPARISON, so the shape the
+  single production writer of `tool_union_ms` actually uses —
+  `union_ms(tool_spans) if tool_spans else None`, a truthiness test on a list —
+  is invisible to the rule in either polarity. Nothing ships wrong today (that
+  line correctly writes `None`, and `test_a_turn_with_no_bounded_span_records_none_not_zero`
+  covers it), but an author flipping it to `else 0.0` would publish "measured,
+  and instant" with the rule silent. Candidate: a form that fires on an
+  `ast.IfExp` whose `orelse` is a numeric literal and whose assignment target —
+  or enclosing timing-constructor keyword — matches `_TIMING_NAME`. Deferred
+  because the target-name resolution is new machinery rather than a variant of
+  an existing form. Caught in: the turn-timing consolidation, Phase 5 review.
+
+- [ ] **Pre-existing, surfaced by the turn-timing final review:
+  `reports_stats.regularized_incomplete_beta` clamps an out-of-domain `x`
+  instead of raising.** Its docstring says "Raises ValueError outside that
+  domain — returning NaN would let a bad input render as a real-looking
+  statistic downstream", and it does raise for a non-finite `a`/`b`/`x` and for
+  a non-positive `a`/`b`. But the boundary branches are `if x <= 0.0: return
+  0.0` / `if x >= 1.0: return 1.0`, so a NEGATIVE `x` or one above 1 silently
+  becomes a valid-looking probability — exactly the outcome the docstring says
+  it prevents. `x == 0.0` and `x == 1.0` are legitimately in the domain, so the
+  fix is to split the equality from the inequality, not to tighten the branch.
+  The internal Student-t callers construct an in-range `x`, so nothing ships
+  wrong today; the exposure is a future or external caller. NOT touched by the
+  timing work (the function is zero lines of its diff) and not a guardrail
+  candidate — a small real bug needing its own change. Caught in: the
+  turn-timing consolidation final review (gpt-5.6-sol).

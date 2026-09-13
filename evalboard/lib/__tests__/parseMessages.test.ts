@@ -228,7 +228,7 @@ describe("parseMessages — message_id collapsing", () => {
         expect(e.generationMs).toBe(5500);
     });
 
-    test("splits when message_ids differ even with tight gap", () => {
+    test("splits differing message_ids across contiguous windows (0ms gap — the Antigravity shape)", () => {
         const turns: TurnEntry[] = [
             {
                 messages: [
@@ -242,9 +242,11 @@ describe("parseMessages — message_id collapsing", () => {
                     },
                     {
                         role: "assistant",
-                        started_at: "2026-01-01T00:00:01.010Z", // 10ms gap
+                        // Opens exactly where the previous one closed, the
+                        // way Antigravity tiles its generation windows.
+                        started_at: "2026-01-01T00:00:01.000Z",
                         completed_at: "2026-01-01T00:00:02.000Z",
-                        generation_duration_ms: 990,
+                        generation_duration_ms: 1000,
                         message_id: "msg_b",
                         content_blocks: [{ block_type: "text", text: "hi" }],
                     },

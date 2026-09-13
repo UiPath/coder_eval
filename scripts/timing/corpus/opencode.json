@@ -1,0 +1,187 @@
+{
+  "_comment": "Scrubbed representative run for the timing residual report. Prompts, outputs, tokens and cost are removed; only the wall-clock fields decompose_run.py reads are kept. NOT a before/after instrument \u2014 see the header in this directory.",
+  "agent_type": "opencode",
+  "iterations": [
+    {
+      "duration_seconds": 22.314462833106518,
+      "iteration": 1,
+      "harness_startup_ms": 3018.525,
+      "harness_teardown_ms": 26.273,
+      "crashed": false,
+      "messages": [
+        {
+          "completed_at": "2026-09-11T20:13:55.133594",
+          "started_at": "2026-09-11T20:13:53.488937",
+          "generation_duration_ms": 1640.657,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T20:13:59.771406",
+          "started_at": "2026-09-11T20:13:55.133594",
+          "generation_duration_ms": 4597.812,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T20:14:03.986747",
+          "started_at": "2026-09-11T20:13:59.771406",
+          "generation_duration_ms": 4171.340999999999,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T20:14:07.755801",
+          "started_at": "2026-09-11T20:14:03.986747",
+          "generation_duration_ms": 1705.054,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T20:14:10.259492",
+          "started_at": "2026-09-11T20:14:07.755801",
+          "generation_duration_ms": 2501.691,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T20:14:12.758747",
+          "started_at": "2026-09-11T20:14:10.259492",
+          "generation_duration_ms": 2499.2549999999997,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        }
+      ],
+      "commands": [
+        {
+          "tool_name": "TodoWrite",
+          "execution_completed_at": "2026-09-11T20:13:55.119000",
+          "execution_started_at": "2026-09-11T20:13:55.115000",
+          "tool_id": "toolu_01WfZGLMB5HLRS9E15jLYJq8",
+          "result_status": "success",
+          "duration_ms": 4.0,
+          "timestamp": "2026-09-11T20:13:55.115000"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T20:13:56.979000",
+          "execution_started_at": "2026-09-11T20:13:56.968000",
+          "tool_id": "toolu_01WLeJLQCihZjNtCgwCi1xpL",
+          "result_status": "success",
+          "duration_ms": 11.0,
+          "timestamp": "2026-09-11T20:13:56.968000"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T20:13:57.684000",
+          "execution_started_at": "2026-09-11T20:13:57.678000",
+          "tool_id": "toolu_019tjDMgudrqyntWUAh8Aupy",
+          "result_status": "success",
+          "duration_ms": 6.0,
+          "timestamp": "2026-09-11T20:13:57.678000"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T20:13:58.385000",
+          "execution_started_at": "2026-09-11T20:13:58.376000",
+          "tool_id": "toolu_013J2dP6wxbm4q1acY5PXr6s",
+          "result_status": "success",
+          "duration_ms": 9.0,
+          "timestamp": "2026-09-11T20:13:58.376000"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T20:13:59.080000",
+          "execution_started_at": "2026-09-11T20:13:59.075000",
+          "tool_id": "toolu_01DZAPiHZrcfEiDeUDVdur6H",
+          "result_status": "success",
+          "duration_ms": 5.0,
+          "timestamp": "2026-09-11T20:13:59.075000"
+        },
+        {
+          "tool_name": "Write",
+          "execution_completed_at": "2026-09-11T20:13:59.760000",
+          "execution_started_at": "2026-09-11T20:13:59.751000",
+          "tool_id": "toolu_01S2Kd2KUueP11tuBZ3hX53j",
+          "result_status": "success",
+          "duration_ms": 9.0,
+          "timestamp": "2026-09-11T20:13:59.751000"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T20:14:01.518000",
+          "execution_started_at": "2026-09-11T20:14:01.506000",
+          "tool_id": "toolu_01RbNdCyWmL3XcWUZ1BZBMVs",
+          "result_status": "success",
+          "duration_ms": 12.0,
+          "timestamp": "2026-09-11T20:14:01.506000"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T20:14:02.089000",
+          "execution_started_at": "2026-09-11T20:14:02.079000",
+          "tool_id": "toolu_01SDGHLgG9HR9aCieXd81Wz3",
+          "result_status": "success",
+          "duration_ms": 10.0,
+          "timestamp": "2026-09-11T20:14:02.079000"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T20:14:02.660000",
+          "execution_started_at": "2026-09-11T20:14:02.654000",
+          "tool_id": "toolu_01XER7fGNDxwMaaucfPhKS7C",
+          "result_status": "success",
+          "duration_ms": 6.0,
+          "timestamp": "2026-09-11T20:14:02.654000"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T20:14:03.239000",
+          "execution_started_at": "2026-09-11T20:14:03.232000",
+          "tool_id": "toolu_01TFRCQq7bYkiBwHvSpc3Cxr",
+          "result_status": "success",
+          "duration_ms": 7.0,
+          "timestamp": "2026-09-11T20:14:03.232000"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T20:14:03.974000",
+          "execution_started_at": "2026-09-11T20:14:03.965000",
+          "tool_id": "toolu_01MHcPMKPGMihm8MkmhAWBtu",
+          "result_status": "success",
+          "duration_ms": 9.0,
+          "timestamp": "2026-09-11T20:14:03.965000"
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T20:14:06.181000",
+          "execution_started_at": "2026-09-11T20:14:06.125000",
+          "tool_id": "toolu_014B6sD12tnYcpCAHbC7YJbS",
+          "result_status": "success",
+          "duration_ms": 56.0,
+          "timestamp": "2026-09-11T20:14:06.125000"
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T20:14:07.745000",
+          "execution_started_at": "2026-09-11T20:14:05.681000",
+          "tool_id": "toolu_01KCeAUpoHtjG2ssT85e4o9c",
+          "result_status": "success",
+          "duration_ms": 2064.0,
+          "timestamp": "2026-09-11T20:14:05.681000"
+        },
+        {
+          "tool_name": "TodoWrite",
+          "execution_completed_at": "2026-09-11T20:14:10.249000",
+          "execution_started_at": "2026-09-11T20:14:10.247000",
+          "tool_id": "toolu_01GMeN29huU3tN1BHpusugFh",
+          "result_status": "success",
+          "duration_ms": 2.0,
+          "timestamp": "2026-09-11T20:14:10.247000"
+        }
+      ],
+      "user_input": "",
+      "agent_output": ""
+    }
+  ]
+}

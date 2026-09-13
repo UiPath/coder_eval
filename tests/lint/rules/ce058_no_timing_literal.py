@@ -15,7 +15,17 @@ Generation cell read ``0ms`` and its thinking/tool/text breakdown rendered
 milliseconds by a command count of which 70 of 211 in one nightly had never
 been timed at all.
 
-Five syntactic forms, one invariant, one id — the shapes the codebase actually
+A third field family joined the first two: ``TurnRecord.harness_startup_ms``
+and ``harness_teardown_ms``, the turn's head and tail buckets. They are the
+same invariant one level up — a turn whose stream carried no assistant message
+was never timed at either end, and a ``0.0`` there would claim the harness
+started instantly, which is exactly the reading that sends a real gap into the
+evalboard's ``Unaccounted`` cell while a named bucket says it was measured at
+zero. A measured ``0.0`` remains a legitimate answer — a window subtracted
+down to nothing by the tool execution inside it, or a clamped inversion where
+both ends really were observed — so the two values must stay distinguishable.
+
+Six syntactic forms, one invariant, one id — the shapes the codebase actually
 produced:
 
 1. a ``0`` / ``0.0`` constructor keyword on one of the telemetry constructors
@@ -29,12 +39,43 @@ produced:
 5. ``model_copy(update={"duration_ms": 0.0})`` — a keyword rule is blind to a
    dict, and the dict is how ``CommandTelemetry.duration_ms`` is actually
    written on the Antigravity DONE path, so forms 1-4 alone would have left
-   the next author's ``"duration_ms": 0.0`` in that idiom unguarded.
+   the next author's ``"duration_ms": 0.0`` in that idiom unguarded;
+6. ``cmd.duration_ms = 0.0`` as a PLAIN assignment — form 4 without the
+   ``is None`` guard, or under a guard that tests something else.
 
-BLIND SPOT worth knowing: form 1 keys on the callee's spelling, so
+Form 6 exists because form 4 was passing the live defect by coincidence. Form 4
+keys on the ``if`` test naming a timing attribute, and the shipped
+``_finalize_commands`` bug happened to spell it that way
+(``if cmd.duration_ms is None:``) — but the assignment sat inside an outer
+``if cmd.result_status is None:`` block, and rewriting it to set the literal
+under THAT guard instead, which reads just as naturally and books the identical
+lie, was invisible to all five earlier forms. The rule was one plausible
+refactor away from silent. A guard is only evidence about the value when the
+guard names the value; without one there is no evidence at all, which is
+strictly worse and must not be the case the rule misses.
+
+It uses ``_zero_literal``, not form 4's broader ``_numeric_literal``, and the
+asymmetry is the point. Under ``if x is None`` the guard PROVES the value was
+never measured, so any invented number is a defect. A bare assignment proves
+nothing: ``cmd.duration_ms = elapsed_ms`` is how a measured value is written,
+and a literal ``1234.0`` is a legitimate test factory or replay. Only the
+placeholder zero is the tell — the same narrowing form 1 already makes, and for
+the same reason.
+
+Forms 4 and 6 overlap on the zero case, so form 4 records the statements it
+flags and form 6 skips them. The visit order makes that sound rather than
+lucky: ``visit_If`` runs its own check BEFORE ``generic_visit`` descends into
+the body, so the assignment is always registered before ``visit_Assign`` sees
+it. Form 4 keeps its wider literal set, so a guarded ``= 1234.0`` still fires
+exactly once, from form 4.
+
+BLIND SPOTS worth knowing. Form 1 keys on the callee's spelling, so
 ``AssistantMessageTelemetry`` (an import alias for ``AssistantMessage`` in
-``claude_code_agent``) is matched by name only. Renaming that alias silently
-disarms form 1 for that module.
+``claude_code_agent``) is matched by name only; renaming that alias silently
+disarms form 1 for that module. And form 6 keys on the TARGET's spelling, so it
+sees ``cmd.duration_ms = 0.0`` but not a write through a rebound local or
+``setattr(cmd, field, 0.0)`` — the same limit every AST rule here has without
+type inference.
 
 ``# noqa: CE058`` for a genuinely aggregate-internal use where a missing value
 really is a zero, with a comment saying so.
@@ -47,16 +88,29 @@ from tests.lint.rules.base import BaseRule
 
 
 # Trailing-segment match, so `cmd.duration_ms` and `generation_duration_ms`
-# fire while `duration_ms_limit` does not.
+# fire while `duration_ms_limit` does not. The `_startup_ms` / `_teardown_ms`
+# arms need a leading segment for the same reason the `_duration_ms` arm does:
+# the shipped fields are `harness_*`, and a bare `startup_ms` is more likely a
+# budget than a measurement.
+#
+# THREE field families, not two. `tool_union_ms` is the turn's third wall-clock
+# bucket, on the same model and under the same None-vs-0.0 contract as the
+# `harness_*` pair — and it matched NO arm above, so `TurnRecord(tool_union_ms=0.0)`
+# would have been invisible even though `TurnRecord` is already in
+# `_TIMING_CONSTRUCTORS`. Naming the field `tool_union_duration_ms` to inherit
+# the generic `_duration_ms` arm for free was considered and rejected: the two
+# fields beside it needed their own arm for exactly this reason, and one
+# spelling across the four buckets is worth two lines of regex.
 _TIMING_NAME = re.compile(
-    r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms|[a-z_]*_duration_ms)$"
+    r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms"
+    r"|[a-z_]*_duration_ms|[a-z_]*_(?:startup|teardown)_ms|[a-z_]*_union_ms)$"
 )
 
 # The constructors that carry a timing field. Keying on the callee name is what
 # makes the alias hazard above real; it is also the only thing an AST rule can
 # see without type inference.
 _TIMING_CONSTRUCTORS = frozenset(
-    {"AssistantMessage", "AssistantMessageTelemetry", "CommandTelemetry", "SlowestCommandInfo"}
+    {"AssistantMessage", "AssistantMessageTelemetry", "CommandTelemetry", "SlowestCommandInfo", "TurnRecord"}
 )
 
 _SRC_ROOT = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")
@@ -137,6 +191,10 @@ class NoTimingLiteral(BaseRule):
     def __init__(self, filepath: str) -> None:
         super().__init__(filepath)
         self._in_scope = bool(_SRC_ROOT.search(filepath))
+        #: Assignments form 4 has already flagged, so form 6 does not report
+        #: the same statement a second time. Populated in `visit_If` before
+        #: `generic_visit` reaches the body — see the module docstring.
+        self._flagged_assigns: set[ast.Assign] = set()
 
     def visit_Call(self, node: ast.Call) -> None:
         # Form 1: `AssistantMessage(generation_duration_ms=0.0, ...)`
@@ -200,5 +258,20 @@ class NoTimingLiteral(BaseRule):
                         and _numeric_literal(stmt.value)
                         and _same_target(stmt.targets[0], operand)
                     ):
+                        self._flagged_assigns.add(stmt)
                         self.violation(stmt, _MESSAGE)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        # Form 6: `cmd.duration_ms = 0.0` with no `is None` guard on the value
+        # itself — see the module docstring for why this is narrower than
+        # form 4 and why the dedupe below is ordering-safe rather than lucky.
+        if (
+            self._in_scope
+            and node not in self._flagged_assigns
+            and len(node.targets) == 1
+            and _timing_name(node.targets[0]) is not None
+            and _zero_literal(node.value)
+        ):
+            self.violation(node, _MESSAGE)
         self.generic_visit(node)
