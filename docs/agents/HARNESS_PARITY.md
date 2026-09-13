@@ -262,6 +262,29 @@ figures in the table above are means of six live `tasks/hello_date` turns per
 harness and move with CLI cache warmth, so read their ORDER OF MAGNITUDE, not
 the digits.
 
+**Windows tile ACROSS a tool result, on every harness.** claude-code used to
+reset its generation mark when the tool-result `UserMessage` arrived, so the
+next window opened at the result rather than tiling from the previous
+emission. Everything in between — SDK transport, CLI processing, next-request
+dispatch — fell into no bucket. The live stream delivers TWO user messages per
+tool call, ~2 s apart, and the mark was reset on each, so the window opened at
+the LAST one: measured on `tasks/dataset_example.yaml` at 1.94 s lost from an
+11.7 s turn, 16-28% of wall clock, and it is what failed CI's residual gate.
+The mark is now left where `on_assistant_message` put it and the tool's own
+interval is removed centrally by `subtract_tool_time`, exactly as pi does with
+`gen_mark`. Same task after the fix: 0.02%.
+
+Why it survived so long is the more useful half. A tool-heavy shape cannot see
+it — three concurrent `sleep 3` calls make the tool union absorb the interval
+and the residual reads 0.05%. Neither can a single-tool-result fixture:
+claude-code reconstructs `execution_started_at` by subtracting the measured
+duration from the resolve instant, so with one message the discarded interval
+and the tool's own span are the SAME milliseconds and the identity closes
+either way. It takes a FAST tool plus a SECOND user message carrying no tool
+result to separate them, which is what
+`test_a_slow_tool_result_round_trip_is_not_lost` scripts. Two earlier drafts of
+that test could not fail.
+
 **Four turn buckets, two task buckets — and they are different scopes.** The
 four above tile ONE TURN and their identity (`head + Σgeneration + UNION(tool)
 + tail == the turn's span`) is asserted to the millisecond by

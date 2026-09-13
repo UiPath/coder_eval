@@ -449,11 +449,17 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     `tests/test_agent_telemetry.py`; here it shows up as the windows still
     tiling.
 
-    Note where its windows do NOT tile: the tool result resets both marks, so
-    the interval between the emission that ISSUED the call and the result is
-    left outside every window. That gap is the tool's own execution, which is
-    exactly what the tool bucket claims — which is why the identity still
-    closes to the millisecond.
+    Its windows TILE across the tool result, and this case only proved that by
+    accident until the reducer was fixed. The mark used to be reset when the
+    result arrived, so the interval between the emission that ISSUED the call
+    and the result landed in no bucket. Here that interval IS the tool's
+    execution exactly — the case scripts the result at the instant the tool
+    ends — so the tool bucket happened to claim the same milliseconds and the
+    identity closed anyway. On a real turn the two differ: a 21.5 ms `Write`
+    can be followed by a 2.5 s round trip, and 21% of the turn goes missing.
+    `test_a_slow_tool_result_round_trip_is_not_lost` is the case that
+    discriminates; this one deliberately keeps the coincident shape so the two
+    read as a pair.
     """
     from coder_eval.agents import claude_code_agent as claude_module
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
@@ -517,6 +523,98 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     return Turn(started_ms=0.0, ended_ms=3000.0, messages=list(state.sdk_messages), commands=commands)
 
 
+def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
+    """A FAST tool followed by a SLOW result round trip — the shape that hid a defect.
+
+    ``_claude_turn`` above scripts the tool result at the instant the tool
+    finishes, so the un-tiled interval and the tool's own span were the same
+    milliseconds and the identity closed even while the mark was being reset.
+    Every live probe had the same blind spot from the other direction: three
+    concurrent ``sleep 3`` calls make the tool union so large that the round
+    trip rounds away (measured: 0.05% residual).
+
+    Here the tool runs for 20 ms and its result takes 2000 ms to come back,
+    which is `tasks/dataset_example.yaml` — the task CI actually runs, where a
+    21.5 ms ``Write`` met a 2511.7 ms round trip and 21% of the turn was
+    accounted to nothing. The identity closing here is the whole point: the
+    window after the result must tile from the previous emission, not open
+    when the result lands.
+    """
+    from coder_eval.agents import claude_code_agent as claude_module
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
+    from coder_eval.streaming.events import AgentEndStatus as _AgentEndStatus
+    from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
+    from tests._fixtures.golden_streams.claude_fixtures import ToolUseBlock, UserMessage, message_start
+
+    clock = _InjectedClock()
+
+    def _monotonic() -> float:
+        return clock.at_ms / 1000.0
+
+    monkeypatch.setattr(claude_module, "time", SimpleNamespace(monotonic=_monotonic))
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+    collector = EventCollector()
+    commands: list[CommandTelemetry] = []
+
+    clock.at_ms = 200
+    state = _ClaudeTurnState(
+        agent,
+        emit=CompositeStreamCallback(
+            [
+                collector,
+                SimpleNamespace(on_event=lambda e: commands.append(e.tool) if isinstance(e, ToolEndEvent) else None),
+            ]
+        ),
+        collector=collector,
+        task_id="t",
+        user_input="go",
+        iteration=1,
+        max_turns=None,
+        log=agent._log,
+        turn_start_time=_monotonic(),
+        deadline=None,
+        clock=clock,
+    )
+
+    clock.at_ms = 500
+    state.on_stream_event(message_start("m1"))
+    clock.at_ms = 980
+    state.on_assistant_message(
+        SdkAssistantMessage(
+            [ToolUseBlock("c1", "Write", {"file_path": "out.txt"})],
+            usage={"input_tokens": 10, "output_tokens": 5},
+            message_id="m1",
+        )
+    )
+    # The tool itself is 20 ms. What follows is the shape a live turn actually
+    # has, traced off `tasks/dataset_example.yaml`: the SDK delivers TWO user
+    # messages, the second ~2 s after the first. The old code reset the mark on
+    # each, so the next window opened at the LAST one and that 2 s vanished.
+    #
+    # One user message is not enough to catch it, and that is exactly why this
+    # shipped: claude-code reconstructs `execution_started_at` by subtracting
+    # the measured duration from the resolve instant, so with a single message
+    # the discarded interval and the tool's own span are the SAME milliseconds
+    # — `subtract_tool_time` removes them either way and the identity closes
+    # with or without the bug. The second message is what separates them.
+    clock.at_ms = 1000
+    state.on_user_message(UserMessage("c1", False, "written"))
+    clock.at_ms = 3000
+    # The second one carries NO tool-result block, which is what the live
+    # stream does — the traced turn kept its 21.5 ms Write span across it. A
+    # duplicate RESULT would instead re-resolve the call and stretch the tool
+    # span over the very interval this case exists to expose, which is a third
+    # way to write a test that cannot fail.
+    state.on_user_message(SimpleNamespace(content=[], tool_use_result=None))
+    state.on_stream_event(message_start("m2"))
+    clock.at_ms = 3400
+    state.on_assistant_message(SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id="m2"))
+    state.finalize(_AgentEndStatus.COMPLETED)
+
+    return Turn(started_ms=0.0, ended_ms=3800.0, messages=list(state.sdk_messages), commands=commands)
+
+
 # --------------------------------------------------------------------------
 # The contract
 # --------------------------------------------------------------------------
@@ -540,6 +638,16 @@ def test_codex_buckets_tile_the_turn():
 
 def test_claude_code_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
     assert_identity_closes(_claude_turn(monkeypatch))
+
+
+def test_a_slow_tool_result_round_trip_is_not_lost(monkeypatch: pytest.MonkeyPatch):
+    """The discriminating case: a fast tool whose result takes 2 s to come back.
+
+    Reverting the fix (re-adding `last_event_wall = self.clock.now()` to
+    `on_user_message`) fails THIS and leaves every other case in the file
+    green, which is exactly what happened in production.
+    """
+    assert_identity_closes(_claude_slow_result_turn(monkeypatch))
 
 
 def test_every_built_in_harness_has_a_case():

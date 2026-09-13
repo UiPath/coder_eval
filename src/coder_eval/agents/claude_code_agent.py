@@ -597,7 +597,28 @@ class _ClaudeTurnState:
         """Process tool results (and a sub-agent's terminal generation) from a
         tool-result UserMessage. The sub-agent message is appended BEFORE the
         tool-result loop — its position in ``sdk_messages`` is observable."""
-        self.last_event_wall = self.clock.now()
+        # The generation mark is DELIBERATELY NOT advanced here. It used to be
+        # reset to `self.clock.now()`, which opened the next window at the
+        # instant the tool RESULT arrived rather than tiling it from the
+        # previous window's close — so everything between the tool finishing
+        # and its result reaching this handler (SDK transport, CLI processing,
+        # next-request dispatch) fell into no bucket at all. Measured on
+        # `tasks/dataset_example.yaml`: a 21.5 ms `Write` followed by a 2511.7 ms
+        # round trip, which is 21% of an 11.7 s turn accounted to nothing and
+        # the reason CI's residual gate failed on that task while a
+        # `sleep`-heavy probe read 0.05%. A tool-heavy shape cannot see this:
+        # the tool union absorbs the interval. A fast tool leaves it exposed.
+        #
+        # Leaving the mark where `on_assistant_message` put it makes the next
+        # window run from the previous emission's arrival, so the windows tile
+        # the turn contiguously — the same rule pi follows with `gen_mark`, and
+        # the one pi was explicitly fixed for.
+        #
+        # The tool's OWN interval is not double-counted by this: it is a
+        # separate bucket, and `streaming/collector.py::subtract_tool_time`
+        # clips the tool union out of every window it overlaps, once, for all
+        # five harnesses. That is exactly why the mark can be left alone here —
+        # the reducer no longer has to carve the tool out of its own windows.
 
         sub_msg = self._agent._synthesize_subagent_terminal_message(message, self.sdk_model_used)
         if sub_msg is not None:
