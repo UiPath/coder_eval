@@ -15,6 +15,16 @@ Generation cell read ``0ms`` and its thinking/tool/text breakdown rendered
 milliseconds by a command count of which 70 of 211 in one nightly had never
 been timed at all.
 
+A third field family joined the first two: ``TurnRecord.harness_startup_ms``
+and ``harness_teardown_ms``, the turn's head and tail buckets. They are the
+same invariant one level up — a turn whose stream carried no assistant message
+was never timed at either end, and a ``0.0`` there would claim the harness
+started instantly, which is exactly the reading that sends a real gap into the
+evalboard's ``Unaccounted`` cell while a named bucket says it was measured at
+zero. A measured ``0.0`` remains a legitimate answer — a window subtracted
+down to nothing by the tool execution inside it, or a clamped inversion where
+both ends really were observed — so the two values must stay distinguishable.
+
 Five syntactic forms, one invariant, one id — the shapes the codebase actually
 produced:
 
@@ -47,16 +57,29 @@ from tests.lint.rules.base import BaseRule
 
 
 # Trailing-segment match, so `cmd.duration_ms` and `generation_duration_ms`
-# fire while `duration_ms_limit` does not.
+# fire while `duration_ms_limit` does not. The `_startup_ms` / `_teardown_ms`
+# arms need a leading segment for the same reason the `_duration_ms` arm does:
+# the shipped fields are `harness_*`, and a bare `startup_ms` is more likely a
+# budget than a measurement.
+#
+# THREE field families, not two. `tool_union_ms` is the turn's third wall-clock
+# bucket, on the same model and under the same None-vs-0.0 contract as the
+# `harness_*` pair — and it matched NO arm above, so `TurnRecord(tool_union_ms=0.0)`
+# would have been invisible even though `TurnRecord` is already in
+# `_TIMING_CONSTRUCTORS`. Naming the field `tool_union_duration_ms` to inherit
+# the generic `_duration_ms` arm for free was considered and rejected: the two
+# fields beside it needed their own arm for exactly this reason, and one
+# spelling across the four buckets is worth two lines of regex.
 _TIMING_NAME = re.compile(
-    r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms|[a-z_]*_duration_ms)$"
+    r"^(duration_ms|generation_duration_ms|total_command_time_ms|avg_command_time_ms"
+    r"|[a-z_]*_duration_ms|[a-z_]*_(?:startup|teardown)_ms|[a-z_]*_union_ms)$"
 )
 
 # The constructors that carry a timing field. Keying on the callee name is what
 # makes the alias hazard above real; it is also the only thing an AST rule can
 # see without type inference.
 _TIMING_CONSTRUCTORS = frozenset(
-    {"AssistantMessage", "AssistantMessageTelemetry", "CommandTelemetry", "SlowestCommandInfo"}
+    {"AssistantMessage", "AssistantMessageTelemetry", "CommandTelemetry", "SlowestCommandInfo", "TurnRecord"}
 )
 
 _SRC_ROOT = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")

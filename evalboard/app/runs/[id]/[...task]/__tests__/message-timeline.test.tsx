@@ -521,8 +521,11 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
                     resultPreview: null,
                     outputTokens: null,
                     resultTokens: null,
-                    execStartMs: null,
-                    execEndMs: null,
+                    // BOUNDED. `toolExecutionMs` unions bounded intervals and
+                    // drops a bare duration, matching the Python selector, so
+                    // a durationMs-only tool would contribute 0 here.
+                    execStartMs: 0,
+                    execEndMs: 1000,
                 },
             ],
             ...overrides,
@@ -602,8 +605,8 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
             resultPreview: null,
             outputTokens: null,
             resultTokens: null,
-            execStartMs: null,
-            execEndMs: null,
+            execStartMs: 0,
+            execEndMs: 6000,
         };
         const main = makeMessage({
             index: 1,
@@ -663,18 +666,338 @@ describe("MessageTimelineSection — Unaccounted cell", () => {
         expect(cell("Unaccounted").textContent).toBe("2.5s (26%)");
     });
 
-    test("a tool with no recorded bounds still contributes its duration", () => {
-        // Runs predating the execution bounds, and harnesses that report only
-        // a duration, must not silently drop out of the tool total.
-        renderStrip(10);
-        expect(cell("Tool exec").textContent).toBe("1.0s");
+    test("a tool with no recorded bounds contributes nothing", () => {
+        // The policy both languages now share: a duration with no start and
+        // end cannot be placed on the timeline, so it cannot be unioned with
+        // anything — folding it in double-books whatever it overlapped. Python
+        // has always dropped it (`main_thread_tool_spans` filters on
+        // `is not None`); this cell used to add it. Its time is not lost, it
+        // moves into Unaccounted, which is what that cell means.
+        renderStrip(10, {
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "tu_unbounded",
+                    summary: "ls",
+                    argText: "ls",
+                    description: null,
+                    genMs: null,
+                    durationMs: 1000,
+                    isError: false,
+                    resultPreview: null,
+                    outputTokens: null,
+                    resultTokens: null,
+                    execStartMs: null,
+                    execEndMs: null,
+                },
+            ],
+        });
+        // A DASH, not "0ms". No bounded span was recorded, so nothing measured
+        // the tool time — and `0ms` would claim it was measured and instant,
+        // which is the one thing certainly false about a call the harness DID
+        // time. Every Python surface renders a dash for the same run; this cell
+        // used to disagree with them, which is the defect class this branch
+        // exists to remove, relocated across the language boundary.
+        expect(cell("Tool exec").textContent).toBe("—");
+        // The time is not lost: an unmeasured bucket is subtracted as 0, so it
+        // stays IN the residual instead of vanishing.
+        expect(cell("Unaccounted").textContent).toBe("6.0s (60%)");
     });
 
     test("the cell explains that the residual is not only agent time", () => {
         renderStrip(10);
         expect(
             screen.getByText("Unaccounted").parentElement,
-        ).toHaveAttribute("title", expect.stringContaining("sandbox setup"));
+        ).toHaveAttribute("title", expect.stringContaining("post_run"));
+    });
+
+    test("it no longer claims to hold the setup phase, which has its own cell", () => {
+        // The residual used to name sandbox setup as one of its contents, and
+        // that was ~1.9s of known, constant orchestrator cost on every row —
+        // a named phase hiding inside a bucket called "unaccounted".
+        renderStrip(10);
+        const title = screen
+            .getByText("Unaccounted")
+            .parentElement!.getAttribute("title")!;
+        expect(title).not.toContain("sandbox setup");
+    });
+
+    test("setup and grading are subtracted out of the residual", () => {
+        render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000 })]}
+                taskDurationSeconds={10}
+                setupMs={2000}
+                gradingMs={500}
+            />,
+        );
+        expect(cell("Setup").textContent).toBe("2.0s");
+        expect(cell("Grading").textContent).toBe("500ms");
+        // 10s − 1s generation − 2s setup − 0.5s grading = 6.5s.
+        expect(cell("Unaccounted").textContent).toBe("6.5s (65%)");
+    });
+
+    test("a run predating the fields leaves their time IN the residual", () => {
+        // The whole point of subtracting only what was measured: an absent
+        // field must not be silently taken off as a zero, and must not turn
+        // the residual into a different number than the run used to publish.
+        render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000 })]}
+                taskDurationSeconds={10}
+            />,
+        );
+        expect(cell("Setup").textContent).toBe("—");
+        expect(cell("Grading").textContent).toBe("—");
+        expect(cell("Unaccounted").textContent).toBe("9.0s (90%)");
+    });
+});
+
+describe("MessageTimelineSection — a row's EXEC cell", () => {
+    function span(start: number, end: number) {
+        return {
+            toolName: "Bash",
+            toolUseId: `tu_${start}`,
+            summary: "sleep",
+            argText: "sleep",
+            description: null,
+            genMs: null,
+            durationMs: end - start,
+            isError: false,
+            resultPreview: null,
+            outputTokens: null,
+            resultTokens: null,
+            execStartMs: start,
+            execEndMs: end,
+        };
+    }
+
+    // The message row lays out GEN then EXEC as the first two numeric spans of
+    // its own grid; `:scope >` keeps expanded tool sub-rows out of the match.
+    function execOf(container: HTMLElement): string {
+        // The message row is `ol > li > details > summary`, laying out
+        // #, GEN, EXEC as its first three numeric spans. `:scope >` keeps the
+        // expanded tool sub-rows inside the <details> body out of the match.
+        const row = container.querySelector("ol > li > details > summary") as HTMLElement;
+        const nums = row.querySelectorAll(":scope > span.tabular-nums");
+        return nums[2]?.textContent ?? "";
+    }
+
+    function execCell(toolUses: ReturnType<typeof span>[]): string {
+        const { container } = render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000, toolUses })]}
+            />,
+        );
+        return execOf(container);
+    }
+
+    test("concurrent calls count their overlap ONCE", () => {
+        // The bug this replaced: two `sleep 2` Bash calls overlapping almost
+        // entirely rendered 4.1s for 2.1s of wall clock — more tool time in
+        // one message than the whole task's Tool exec cell, which is
+        // impossible on its face.
+        // union 0->3000 = 3.0s; the sum of the two durations would be 4.0s.
+        expect(execCell([span(0, 2_000), span(1_000, 3_000)])).toBe("3.0s");
+    });
+
+    test("sequential calls still add up, so the row reconciles with its parts", () => {
+        // Expanding the row shows each call's own wall clock. When they did
+        // not overlap, those add to this number; when they did, they do not,
+        // and that difference is the concurrency.
+        expect(execCell([span(0, 1_000), span(2_000, 3_000)])).toBe("2.0s");
+    });
+
+    test("it agrees with the header for a single message", () => {
+        const toolUses = [span(0, 2_000), span(1_000, 3_000)];
+        const { container } = render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 1000, textMs: 1000, toolUses })]}
+                taskDurationSeconds={10}
+            />,
+        );
+        const header = screen.getByText("Tool exec").parentElement!.querySelectorAll("div")[1];
+        expect(execOf(container)).toBe(header.textContent);
+    });
+});
+
+describe("MessageTimelineSection — Startup and Teardown cells", () => {
+    function cell(label: string): HTMLElement {
+        const parent = screen.getByText(label).parentElement as HTMLElement;
+        return parent.children[1] as HTMLElement;
+    }
+
+    // Same 4s generation + 1s tool exec fixture the Unaccounted block uses, so
+    // the two blocks' numbers are directly comparable.
+    function renderStrip(props: {
+        taskDurationSeconds?: number | null;
+        harnessStartupMs?: number | null;
+        harnessTeardownMs?: number | null;
+        storedToolMs?: number | null;
+    }) {
+        const m = makeMessage({
+            generationMs: 4000,
+            textMs: 4000,
+            toolUses: [
+                {
+                    toolName: "Bash",
+                    toolUseId: "tu_1",
+                    summary: "ls",
+                    argText: "ls",
+                    description: null,
+                    genMs: null,
+                    durationMs: 1000,
+                    isError: false,
+                    resultPreview: null,
+                    outputTokens: null,
+                    resultTokens: null,
+                    // BOUNDED. `toolExecutionMs` unions bounded intervals and
+                    // drops a bare duration, matching the Python selector, so
+                    // a durationMs-only tool would contribute 0 here.
+                    execStartMs: 0,
+                    execEndMs: 1000,
+                },
+            ],
+        });
+        return render(<MessageTimelineSection messages={[m]} {...props} />);
+    }
+
+    test("both buckets render their measured value", () => {
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(cell("Startup").textContent).toBe("3.0s");
+        expect(cell("Teardown").textContent).toBe("1.5s");
+    });
+
+    test("a measured zero renders as 0ms, not as an em-dash", () => {
+        // A head of 0 stays representable: a turn can reach its first model
+        // output with nothing measurable in front of it, and a clamped
+        // inversion is still a measurement because both ends were observed.
+        // "—" would report that as a missing one.
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 0,
+            harnessTeardownMs: 834.7,
+        });
+        expect(cell("Startup").textContent).toBe("0ms");
+        expect(cell("Teardown").textContent).toBe("835ms");
+    });
+
+    test("Unaccounted shrinks by exactly startup + teardown", () => {
+        // 10s − 4s gen − 1s tool = 5s before; minus 3s + 1.5s = 500ms after.
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(cell("Unaccounted").textContent).toBe("500ms (5%)");
+    });
+
+    test("a corrected residual still above 25% stays red", () => {
+        // The other direction: naming the buckets must not disable the tint,
+        // only move the number it reads. 20s − 4s gen − 1s tool − 3s − 1s
+        // = 11s, still 55% unexplained.
+        renderStrip({
+            taskDurationSeconds: 20,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1000,
+        });
+        expect(cell("Unaccounted").textContent).toBe("11.0s (55%)");
+        expect(cell("Unaccounted").className).toContain("text-red-700");
+    });
+
+    test("a residual that was red goes grey once the buckets are named", () => {
+        // The 25% threshold applies to the CORRECTED residual: 50% before,
+        // 5% after, so the red tint must follow the correction.
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(cell("Unaccounted").className).not.toContain("text-red-700");
+    });
+
+    test("an older run with neither field renders — and today's residual", () => {
+        const { container } = renderStrip({ taskDurationSeconds: 10 });
+        expect(cell("Startup").textContent).toBe("—");
+        expect(cell("Teardown").textContent).toBe("—");
+        // Byte-identical to the pre-existing Unaccounted expectation.
+        expect(cell("Unaccounted").textContent).toBe("5.0s (50%)");
+        expect(cell("Unaccounted").className).toContain("text-red-700");
+        expect(container.textContent).not.toContain("NaN");
+    });
+
+    test("only the present bucket is subtracted", () => {
+        renderStrip({ taskDurationSeconds: 10, harnessStartupMs: 3000 });
+        expect(cell("Startup").textContent).toBe("3.0s");
+        expect(cell("Teardown").textContent).toBe("—");
+        expect(cell("Unaccounted").textContent).toBe("2.0s (20%)");
+    });
+
+    test("the residual still goes negative and stays amber", () => {
+        // Naming the buckets does not clamp the overlap signal.
+        renderStrip({
+            taskDurationSeconds: 5,
+            harnessStartupMs: 1000,
+            harnessTeardownMs: 500,
+        });
+        expect(cell("Unaccounted").textContent).toBe("-1.5s (-30%)");
+        expect(cell("Unaccounted").className).toContain("text-amber-700");
+    });
+
+    test("the stored tool bucket is preferred over recomputing it", () => {
+        // The collector wrote `tool_union_ms` from the same span set it
+        // measured the head and the tail against, so reading it is how this
+        // cell and the harness are guaranteed to agree. The fixture's own
+        // messages would compute 1.0s, so a number that is not 2.5s proves the
+        // stored value was ignored.
+        renderStrip({ taskDurationSeconds: 10, storedToolMs: 2500 });
+        expect(cell("Tool exec").textContent).toBe("2.5s");
+    });
+
+    test("a stored measured zero wins over the fallback", () => {
+        // `0` is a measurement: spans were recorded and occupied no measurable
+        // time. Coalescing it away would silently replace it with the 1.0s the
+        // messages compute.
+        renderStrip({ taskDurationSeconds: 10, storedToolMs: 0 });
+        expect(cell("Tool exec").textContent).toBe("0ms");
+    });
+
+    test("a run predating the field falls back to the message stream", () => {
+        renderStrip({ taskDurationSeconds: 10 });
+        expect(cell("Tool exec").textContent).toBe("1.0s");
+    });
+
+    test("the fallback renders a dash, not 0ms, when nothing was bounded", () => {
+        // Both halves of the None-vs-0.0 contract have to survive the fallback,
+        // or a modern run that simply ran no tools reads as "measured, and
+        // instant" on this surface and as a dash on every Python one.
+        render(
+            <MessageTimelineSection
+                messages={[makeMessage({ generationMs: 4000, textMs: 4000, toolUses: [] })]}
+                taskDurationSeconds={10}
+            />,
+        );
+        expect(cell("Tool exec").textContent).toBe("—");
+    });
+
+    test("each bucket says what it measures and that it is not decomposed", () => {
+        renderStrip({
+            taskDurationSeconds: 10,
+            harnessStartupMs: 3000,
+            harnessTeardownMs: 1500,
+        });
+        expect(screen.getByText("Startup").parentElement).toHaveAttribute(
+            "title",
+            expect.stringContaining("time-to-first-token"),
+        );
+        expect(screen.getByText("Teardown").parentElement).toHaveAttribute(
+            "title",
+            expect.stringContaining("teardown"),
+        );
     });
 });
 

@@ -31,7 +31,6 @@ from typing import Any, ClassVar
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
-from coder_eval.agents._timing import busy_ms
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
@@ -68,6 +67,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import TurnClock, close_window
 from coder_eval.utils import expand_env_vars
 
 
@@ -554,8 +554,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         assert self.config.type is not None, "AntigravityAgent requires AgentConfig.type before communicate()"
 
         self._begin_turn()
+        # Raw monotonic, and deliberately not the turn clock: this seeds the
+        # poll deadline below and `duration_seconds`, neither of which may move
+        # when the wall clock steps. `TurnClock` is for the RECORDED stamps.
         turn_start_time = time.monotonic()
-        turn_start_wall = datetime.now()
+        # ONE clock per turn. This is the (monotonic, wall) pair the reducer
+        # already captured here and then failed to use for its later stamps —
+        # which is why its window span was monotonic while its tool intervals
+        # were wall, and why the two could disagree.
+        clock = TurnClock()
         task_id = str(self.config.type)
         model = self._effective_model()
         collector = EventCollector()
@@ -572,12 +579,29 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             iteration=self._iteration,
             model=model,
             turn_start_time=turn_start_time,
-            turn_start_wall=turn_start_wall,
+            clock=clock,
             max_turns=max_turns,
         )
 
         try:
-            emit.on_event(AgentStartEvent(task_id=task_id, prompt=user_input, iteration=self._iteration, model=model))
+            # `timestamp` from the TURN CLOCK, not the event model's raw
+            # `datetime.now()` default: this bound is subtracted against window
+            # bounds the same clock produced (`decompose_turn`), and two bases
+            # in one subtraction is what `TurnClock` exists to remove. Measured
+            # HERE: this harness's tail came out at -0.017 ms — an end stamped
+            # 17 us before its own last message finished — which clamped to the
+            # `0.0` that means "measured, and instant" (CE058). It holds its
+            # process across turns, so its true tail is ~0.1 ms, which is the
+            # only scale at which the drift between two clocks can flip a sign.
+            emit.on_event(
+                AgentStartEvent(
+                    task_id=task_id,
+                    prompt=user_input,
+                    iteration=self._iteration,
+                    model=model,
+                    timestamp=clock.now(),
+                )
+            )
 
             def _on_turn_timeout() -> None:
                 state.timeout_hit = True
@@ -806,7 +830,7 @@ class _AntigravityTurnState:
         iteration: int,
         model: str,
         turn_start_time: float,
-        turn_start_wall: datetime,
+        clock: TurnClock,
         max_turns: int | None = None,
     ) -> None:
         self._agent = agent
@@ -818,6 +842,11 @@ class _AntigravityTurnState:
         self.iteration = iteration
         self.model = model
         self.turn_start_time = turn_start_time
+        # Every wall stamp below derives from this, so the tool spans and the
+        # window bounds they are subtracted from share one basis. Injected, not
+        # read from a module global, so a test supplies a fake instead of
+        # monkeypatching `datetime` out from under the reducer.
+        self.clock = clock
 
         self.max_turns = max_turns
         self.timeout_hit = False
@@ -853,15 +882,10 @@ class _AntigravityTurnState:
         # come from the SAME instant, captured by communicate(), so the
         # recorded bounds and the measured duration describe one span.
         # Advanced only by a flush that actually emitted a message.
-        self._gen_mark_monotonic: float = turn_start_time
-        self._gen_mark_wall: datetime = turn_start_wall
-        # Execution intervals of tools that CLOSED since the mark. This harness
-        # interleaves tool calls into one generation — the Step for the tool
-        # arrives and only a later usage_metadata Step cuts the message — so a
-        # window legitimately contains tool time that is not model time. Kept
-        # as intervals, not a running total, because they overlap (see
-        # busy_ms).
-        self._tool_spans_since_mark: list[tuple[datetime, datetime]] = []
+        self._gen_mark_wall: datetime = clock.now()
+        # Re-seeded ONCE, at the first observed Step. See
+        # `_seed_first_generation_window`.
+        self._first_output_seen: bool = False
 
     @property
     def ended_cleanly(self) -> bool:
@@ -883,11 +907,65 @@ class _AntigravityTurnState:
         """
         return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
 
+    def _seed_first_generation_window(self, source: Any) -> None:
+        """Move the first window's mark to the first observed MODEL output.
+
+        ``harness_startup_ms`` is defined as the wall clock from the turn
+        starting until the harness first observed model output, and that instant
+        is also where the first generation window opens — which is what keeps
+        the head and the generation disjoint so the four-bucket identity still
+        closes.
+
+        Without this ``_gen_mark_wall`` is stamped when the turn state is built,
+        BEFORE ``AgentStartEvent`` is emitted, so the head is a small negative
+        that ``decompose_turn`` clamps to ``0.0`` — a clamped inversion
+        published as "measured, and instant", which is the exact confusion CE058
+        exists to prevent everywhere else. Everything before the first ``Step``
+        — dispatch and time to first token — was booked as the first
+        generation instead: ~4.7 s per turn on this harness, measured against a
+        later-window median of 3.3 s.
+
+        What differs from claude-code is not in-process versus subprocess —
+        this harness spawns a ``localharness`` binary too. It is spawned ONCE,
+        in ``start()``, and held across every ``communicate()``, so there is no
+        boot inside a turn for the head to contain: it is dispatch plus time to
+        first token. claude-code spawns a fresh CLI per turn and so fuses that
+        boot in. The head means the same thing on both; only its COMPOSITION
+        differs, which is a real property of the harness rather than a
+        measurement artifact.
+
+        GATED ON ``source``, because the field is defined as model output and
+        the SDK streams Steps that are not. ``StepSource`` carries ``SYSTEM``
+        and ``USER`` besides ``MODEL``, and ``StepType`` carries
+        ``SYSTEM_MESSAGE`` / ``COMPACTION`` / ``FINISH``; the SDK's event
+        processor queues every ``step_update`` verbatim, so a turn can
+        legitimately open with one. Seeding on such a Step would put the mark
+        BEFORE the model spoke and hand the remainder back to msg0's
+        generation, which is the defect this method exists to remove. The same
+        gate guards text streaming a few lines below, for the same reason.
+
+        ONCE PER TURN, and that is the whole contract. ``process_step`` runs for
+        every Step in the turn; re-seeding on each would stop the windows tiling
+        and drop the gap before the next emission into no bucket at all, which
+        is the defect pi shipped with. The flag needs no reset: a fresh turn
+        state (and a fresh ``TurnClock``) is built per ``communicate()``, so it
+        is per-attempt by construction.
+
+        A turn that streams no MODEL Step at all never latches, keeps the
+        turn-entry mark and clamps to ``0.0`` exactly as before — the same
+        fail-safe degradation as an unrecognized source.
+        """
+        if self._first_output_seen or _enum_value(source) != _SOURCE_MODEL:
+            return
+        self._first_output_seen = True
+        self._gen_mark_wall = self.clock.now()
+
     def process_step(self, step: Any) -> None:
         """Route one streamed ``Step`` to events + transcript reconstruction."""
         stype = _enum_value(step.type)
         sstatus = _enum_value(step.status)
         ssource = _enum_value(step.source)
+        self._seed_first_generation_window(ssource)
         starget = _enum_value(step.target)
         done = sstatus in (_STATUS_DONE, _STATUS_ERROR)
 
@@ -939,7 +1017,7 @@ class _AntigravityTurnState:
             self._next_seq += 1
             tool_name = _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.get(raw_name, str(raw_name))
             self._tool_input_keys[cid] = set(call.args)
-            now = datetime.now()
+            now = self.clock.now()
             tel = CommandTelemetry(
                 tool_name=tool_name,
                 tool_id=cid,
@@ -965,7 +1043,7 @@ class _AntigravityTurnState:
                 or step.content
                 or None
             )
-            completed = datetime.now()
+            completed = self.clock.now()
             started = start_tel.execution_started_at or completed
             tool_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
             end_tel = start_tel.model_copy(
@@ -978,12 +1056,6 @@ class _AntigravityTurnState:
                     "duration_ms": tool_ms,
                 }
             )
-            # This tool closed inside the open generation window, so its time is
-            # not model time. The INTERVAL is recorded, not the duration: tool
-            # calls overlap here, and only their union may be subtracted (see
-            # busy_ms). Only the DONE path records one — a tool force-closed at
-            # finalize has duration_ms None and was never timed.
-            self._tool_spans_since_mark.append((started, completed))
             self.commands.append(end_tel)
             self.emit.on_event(
                 ToolEndEvent(
@@ -1024,61 +1096,38 @@ class _AntigravityTurnState:
         """
         if not self._blocks and gen.is_empty():
             return
-        now_monotonic = time.monotonic()
-        now_wall = datetime.now()
-        # Model-generation time = the whole window MINUS the tool execution
-        # that happened inside it.
-        #
+        now_wall = self.clock.now()
         # Do NOT "simplify" this to resetting the mark when a tool ends. That
         # loses real model time: measured on run 2026-09-09_04-18-50, task
         # skill-rpa-uia-google-search, a harness-local Read closed 8 ms after
         # it opened while 6.4 s of model time separated the two flushes around
         # it — a reset would have reported 8 ms and dropped the 6.4 s.
-        # Subtracting closed tool time handles that case AND its opposite (a
-        # 43 s Bash, where the model time really is the flush-to-DONE
-        # remainder).
+        # Publishing the RAW window and letting the collector subtract the tool
+        # union handles that case AND its opposite (a 43 s Bash, where the
+        # model time really is the flush-to-DONE remainder).
         #
-        # A tool that is still OPEN at flush time counts too, bounded at
-        # `now_wall`. Subtracting only CLOSED intervals published the portion
-        # of a straddling call that ran before the boundary as generation,
-        # while the call's own duration_ms counted it again — the one
-        # double-count that this harness's contiguous windows have no slack to
-        # absorb. Measured on tasks/hello_date: a Bash opening 1.7 ms before
-        # the flush drove Sum(generation) + Sum(command) 0.26 ms PAST the turn
-        # wall, on a turn whose whole headroom was 1.4 ms. The four sibling
-        # runs passed by 1.2-8.7 ms out of ~12 s, so this was a coin flip, not
-        # a rounding artifact.
+        # This harness interleaves a tool INTO a window rather than tiling
+        # around it, so the window legitimately contains time that is not model
+        # time. `timing.subtract_tool_time` clips the union to these
+        # bounds and takes it out. Measured here before any of that existed: a
+        # Bash opening 1.7 ms before the flush drove Sum(generation) +
+        # Sum(command) 0.26 ms PAST the turn wall, on a turn whose whole
+        # headroom was 1.4 ms.
         #
-        # No double subtraction: when the call later closes, the DONE path
-        # appends its full interval to the NEXT window's list, where busy_ms
-        # clips it to the post-flush remainder.
-        span_ms = (now_monotonic - self._gen_mark_monotonic) * 1000.0
-        still_open = [
-            (tel.execution_started_at, now_wall)
-            for cid, tel in self._open_tools.items()
-            if cid not in self._closed_tools and tel.execution_started_at is not None
-        ]
-        tool_ms = busy_ms(self._tool_spans_since_mark + still_open, self._gen_mark_wall, now_wall)
-        generation_ms = span_ms - tool_ms
-        if generation_ms < 0:
-            # busy_ms clips to this window and unions overlaps, so it cannot
-            # exceed the window's own wall span. Reaching here means the two
-            # clocks disagree (the span is monotonic, the tool intervals are
-            # wall), i.e. jitter — worth a line in the task log, because the
-            # clamped 0.0 below is otherwise indistinguishable from a real
-            # instant generation. Numbers only: no agent output is logged.
-            self._agent._log.debug(
-                "Generation window went negative (span=%.1fms tool=%.1fms); clamping to 0.",
-                span_ms,
-                tool_ms,
-            )
+        # The span used to be read off `time.monotonic()` while these intervals
+        # were wall, and subtracting one from the other is the only reason this
+        # window could go negative — a clamp that was indistinguishable from a
+        # real instant generation. Both bounds now derive from `self.clock`, so
+        # the disagreement is unrepresentable and the branch that hid it is
+        # gone.
+        _, generation_ms = close_window(mark=self._gen_mark_wall, now=now_wall)
         for i, block in enumerate(self._blocks):
             block.sequence = i
         self.messages.append(
             AssistantMessage(
                 started_at=self._gen_mark_wall,
                 completed_at=now_wall,
-                generation_duration_ms=max(0.0, generation_ms),
+                generation_duration_ms=generation_ms,
                 content_blocks=list(self._blocks),
                 tool_use_ids=[b.tool_use_id for b in self._blocks if b.block_type == "tool_use" and b.tool_use_id],
                 input_tokens=gen.uncached_input_tokens,
@@ -1087,6 +1136,10 @@ class _AntigravityTurnState:
                 cache_read_tokens=gen.cache_read_input_tokens,
                 reasoning_tokens=reasoning_tokens,
                 model=self.model,
+                # The Step stream carries no message id, and the evalboard's
+                # SAME_EMISSION_GAP_MS fallback cannot split this harness's
+                # contiguous windows — see docs/agents/HARNESS_PARITY.md.
+                message_id=f"{self.turn_id}-msg-{self._assistant_turns}",
             )
         )
         self._assistant_turns += 1
@@ -1094,9 +1147,7 @@ class _AntigravityTurnState:
         # Advance the mark ONLY after a message was actually appended. The
         # early return above means a no-op flush leaves the window open, so a
         # later real generation still measures from where it began.
-        self._gen_mark_monotonic = now_monotonic
         self._gen_mark_wall = now_wall
-        self._tool_spans_since_mark = []
 
     def _agent_output(self) -> str:
         if self._output_parts:
@@ -1138,7 +1189,7 @@ class _AntigravityTurnState:
         for cid, tel in self._open_tools.items():
             if cid in self._closed_tools:
                 continue
-            orphan = tel.model_copy(update={"result_status": "unknown", "execution_completed_at": datetime.now()})
+            orphan = tel.model_copy(update={"result_status": "unknown", "execution_completed_at": self.clock.now()})
             self.emit.on_event(
                 ToolEndEvent(
                     task_id=self.task_id,
@@ -1181,6 +1232,9 @@ class _AntigravityTurnState:
                 crash_reason=crash_reason,
                 max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
+                # One basis with the window bounds — see the AgentStartEvent
+                # site in `communicate`.
+                timestamp=self.clock.now(),
             )
         )
 

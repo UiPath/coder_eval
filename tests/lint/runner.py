@@ -37,6 +37,10 @@ from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLitera
 from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 from tests.lint.rules.ce058_no_timing_literal import NoTimingLiteral
 from tests.lint.rules.ce059_generation_window_is_two_reads import GenerationWindowIsTwoReads
+from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
+from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
+from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -53,6 +57,11 @@ from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
 from tests.lint.violation import Violation
 
 
+# CE062 IS DELIBERATELY UNUSED and must stay that way — the ids above jump 061
+# to 063. It was claimed during the turn-timing work and then folded into CE063
+# rather than shipped. An id is a permanent documentation anchor: a suppression
+# comment carrying 062 in an older branch, review or commit message must never
+# start meaning something new. Claim 065 next.
 type RuleClass = type[BaseRule]
 
 ALL_RULES: list[RuleClass] = [
@@ -97,6 +106,10 @@ ALL_RULES: list[RuleClass] = [
     SidecarShimStdlibOnly,
     NoTimingLiteral,
     GenerationWindowIsTwoReads,
+    MessageIdDeclared,
+    WindowViaCloseWindow,
+    NoBusyMsInAgents,
+    TurnBracketOnTheClock,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

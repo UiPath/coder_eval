@@ -5,6 +5,8 @@
   "crash_reason": "Codex turn failed: Turn did not complete (no turn/completed notification received)",
   "crashed": true,
   "duration_seconds": "<scrubbed>",
+  "harness_startup_ms": "<scrubbed>",
+  "harness_teardown_ms": "<scrubbed>",
   "iteration": 1,
   "max_turns_exhausted": false,
   "messages": [
@@ -48,5 +50,6 @@
     "total_cost_usd": "<scrubbed>",
     "uncached_input_tokens": 92
   },
+  "tool_union_ms": null,
   "user_input": "do it"
 }

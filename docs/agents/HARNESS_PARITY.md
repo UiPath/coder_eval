@@ -24,34 +24,350 @@ wall clock its numbers account for.
 
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
-| `generation_duration_ms` source | harness clock: previous SDK event → this message | SDK item stamps, minus tool execution inside the window | harness clock: previous flush → this flush, minus tool execution inside the window | harness clock per CLI step, minus tool execution inside the step | harness clock per CLI turn, minus tool execution inside the turn |
+| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | harness clock: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
+| tool time subtracted from it | centrally | centrally | centrally | centrally | centrally |
+| what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first MODEL-source `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
+| `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
+| `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
 | tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
 | `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
-| `Σ generation + Σ tool ≈ turn duration` | yes | yes | yes | yes | yes |
+| `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
+| `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) |
+| window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
+
+[^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
+something the others cannot.
+
+`tests/test_timing_identity_contract.py` is the committed two-sided one: it
+drives every built-in reducer off a scripted clock, through a real
+`EventCollector`, and asserts the four buckets tile the turn to the
+MILLISECOND. Magnitudes are only real where a scripted clock makes them real,
+which is why it is not in the golden corpus.
+
+`tests/_fixtures/golden_streams/_scrub.py` replays recorded streams but asserts
+only `overshoot <= …` — it catches a bucket claiming MORE time than the turn
+contains and says nothing about one claiming less. It cannot be made two-sided
+either: those replays run in ~0.3 ms of synthetic wall clock, where a relative
+bound is vacuous. Nor can it see magnitudes at all — `SCRUB_KEYS` masks
+`generation_duration_ms` and both bounds to a placeholder, so a snapshot records
+that a window was measured, never what it measured. That is not a gap to close;
+it is why the contract test exists.
+
+`scripts/timing/decompose_run.py --max-residual-pct N` is the two-sided check on
+LIVE runs, gating each turn's `|residual|` as a share of its own wall clock.
+`.github/workflows/pr-checks.yml` runs it over the `smoke-pass` bucket's real
+`task.json` files, which covers claude-code only (`experiments/default.yaml`
+sets that type); run it by hand for the others.
 
 **`generation_duration_ms` is model-generation time, not `completed_at − started_at`.**
-Four of the five harnesses interleave tool execution into a single generation
-window. Antigravity reports a `Step` for the tool and only a later
+All five harnesses can have tool execution inside a generation window, and it is
+subtracted out of every one of them — **once, centrally**, by
+`timing.py::subtract_tool_time`. No reducer does it itself; each
+publishes the raw window (see the two sections below). Every harness has the
+problem: Antigravity reports a `Step` for the tool and only a later
 `usage_metadata` `Step` cuts the message; Codex's message window is seeded from
-the first item's start and extended to the last item's completion; OpenCode
-opens its window at `step_start` and closes it at `step_finish`, and Pi at
-`turn_start` / `turn_end`, with every tool call running inside. In all four the
+the first item's start and extended to the last item's completion; OpenCode, Pi
+and claude-code tile, each window opening where the previous one closed and
+running to the next, with every tool call in between running inside. In each the
 span between the recorded bounds legitimately CONTAINS tool time that the model
-did not spend generating, so all four subtract it — the **union** of the closed tool intervals
-clipped to the window (`agents/_timing.py::busy_ms`), never the sum, because
-tool calls overlap: Antigravity resolves several from one `Step` and backgrounds
-anything over ten seconds, and Codex spawns collab agents concurrently. Summing
-them over-subtracts by exactly the overlap and, with enough concurrency, drives
-the result to a clamped zero.
+did not spend generating. What comes out is the **union** of the resolved
+main-thread tool intervals clipped to the window
+(`coder_eval/timing.py::busy_ms`), never the sum, because tool calls overlap:
+Antigravity resolves several from one `Step` and backgrounds anything over ten
+seconds, and Codex spawns collab agents concurrently. Summing them
+over-subtracts by exactly the overlap and, with enough concurrency, drives the
+result to a clamped zero.
 
 The consequence worth knowing: on an emission that carries *only* a tool call,
 the whole measured window was that tool running, so the recorded generation
 time is legitimately `0.0`. That is a measurement, not a placeholder — `None`
-is what "never measured" looks like. Only `claude-code` does not need the
-subtraction: it marks the end of the previous SDK event and reads again when
-the next message arrives, so a tool's execution falls between two windows
-rather than inside one.
+is what "never measured" looks like.
+
+**One helper opens all five windows, and the subtraction is not in it.** Every
+reducer calls `coder_eval/timing.py::close_window`, which is now only the
+window's own geometry: tile from the mark, keep a stamp that went backwards
+from inverting the span, clamp at zero. It had been copy-pasted four times, and
+Pi shipped a variant that measured from its own turn start — so every
+inter-turn gap fell into no bucket, and nothing failed, because the identity
+above is asserted on one side only. **CE061** requires any module in `agents/`
+publishing a measured `generation_duration_ms` to import the helper, and is now
+**exemption-free**: claude-code was its one permanent `# noqa` and no longer
+needs it.
+
+**Tool execution comes out of the windows ONCE, at the collector.**
+`timing.py::subtract_tool_time` takes the union of the main-thread
+tool intervals, clipped to each window, out of the raw spans the reducers
+publish. Before, that happened five times in five places — four inside
+`close_window` as the reducer flushed, claude-code once at finalization — while
+the head and the tail were already computed centrally at the same seam. That
+asymmetry was the complexity, and every timing defect on this branch lived in
+the per-reducer bookkeeping around the subtraction rather than in the
+subtraction: when to reset a span list (clearing it at `step_start` wiped a span
+before the flush could subtract it — a 100% overstatement of that window), when
+to clear a spent start stamp (a second flush with no intervening start
+republished the previous span — 3000 ms of generation for a 2000 ms turn), when
+to advance the mark. Those three lists, their reset rules, and the bounding of
+still-open calls are all deleted. **CE063** stops a sixth harness rebuilding
+them: no module in `agents/` may import `busy_ms`.
+
+Two consequences worth stating, because both are behaviour changes:
+
+- **A call still open when a window closes is no longer subtracted at that
+  boundary.** The reducer used to bound it at the window's end and take that
+  slice. The collector sees every span at once, so the call is subtracted from
+  the windows its REAL interval overlaps, once it resolves — no approximation.
+  A call that never resolves has no `execution_completed_at`, contributes
+  nothing, and says so.
+- **Codex's two sub-messages are one group.** They share a pair of bounds and
+  divide the window by output-token share; the collector groups on the bounds
+  (not on `message_id`, which OpenCode and Pi can legitimately leave `None`),
+  subtracts the overlap once, and re-apportions so the parts still sum.
+
+**Two clock bases remain, and the row above says which.** Antigravity, Pi and
+claude-code derive every recorded wall stamp from one `TurnClock` per turn, so
+a turn's bounds and the tool spans subtracted from them cannot disagree, and
+neither can be moved by a DST transition or an NTP step inside the turn.
+Antigravity needed it first: its span was monotonic while its tool intervals
+were wall, which is the only reason its window could go negative, and the clamp
+that caught it was indistinguishable from a real instant generation. Pi and
+claude-code needed it for the other reason — their stamps were naive-local, and
+nightly runs start at 04:18 and last hours, so an hour-long jump landing in a
+millisecond field is reachable rather than theoretical.
+
+**The turn BRACKET is on that clock too, and was the last seam that was not.**
+`timing.decompose_turn` produces `harness_startup_ms` / `harness_teardown_ms` by
+subtracting a generation-window bound from an `AgentStartEvent` /
+`AgentEndEvent` timestamp, so those two stamps have to share a basis. All three
+clocked harnesses derived their window bounds from the `TurnClock` and let the
+bracket fall back to `StreamEvent.timestamp`'s `default_factory=datetime.now` —
+a monotonic-derived stamp and a raw wall stamp meeting inside one subtraction.
+Measured on a live antigravity turn:
+
+```
+PROBE tail: elapsed=-0.017000ms busy=0.000000ms raw=-0.017000ms
+            last_completed = 09:05:22.033099
+            agent_end      = 09:05:22.033082
+```
+
+an `AgentEndEvent` stamped 17 us BEFORE its own last message finished, which
+cannot happen — the event is constructed strictly after the final flush.
+`decompose_turn` clamped the negative and published `0.0`, "measured, and
+instant", for a harness whose real tail is ~0.1 ms; the same task now records
+0.035 ms. It surfaced only here because the drift between the two clocks is
+tens of microseconds and antigravity holds its process across turns, so nothing
+happens between its last flush and its end event; every other harness books a
+tail of 7-543 ms, where the drift is invisible rather than absent. **CE064**
+keeps a sixth harness from reintroducing it: a module under `agents/` that
+imports `TurnClock` must pass an explicit `timestamp=` on both brackets. Codex
+and OpenCode have no `TurnClock`, so the rule does not see them and their raw
+`datetime.now()` bracket stays — which is *consistent* with their own CLI-epoch
+bounds rather than a gap.
+
+claude-code has exactly one raw `datetime.now()` left, on the synthesized
+sub-agent terminal message. Those bounds are an admitted placeholder for a
+generation that arrives as a tool result and is never streamed
+(`generation_duration_ms is None`, `parent_tool_use_id` set), which is what
+excludes the message from `subtract_tool_time` and from the head/tail bracket.
+A stamp no bucket reads has no basis to share.
+
+Codex and OpenCode are **not** converted, and their reasons are DIFFERENT — they
+were stated as one, and that reading described a state OpenCode is already in.
+
+**Codex** is genuinely single-basis: both its window bounds and its tool spans
+come from `_ms_to_dt` over the CLI's own epoch milliseconds, which cannot be
+re-derived host-side. Converting only the window bounds would put two bases
+inside one `busy_ms` subtraction — relocating the defect instead of removing it —
+so it stays whole, and keeps the naive-local exposure.
+
+**OpenCode is already mixed, today.** Its window bounds are host
+`datetime.now()` (`opencode_agent.py:362` at `step_start`, `:696` at
+`step_finish`) while its tool spans are CLI epoch ms (`:406`, assigned to
+`execution_started_at` at `:420`, and `:462`), so the two bases already meet
+inside one subtraction. The argument for leaving it is therefore not the Codex
+one: it is that a monotonic-derived anchor would trade a narrow NTP exposure on
+the window bounds for intra-turn drift against the CLI's own tool stamps, which
+is the larger of the two. The mixed basis is recorded here rather than defended
+as uniform.
+
+Deadlines on every harness stay on raw `time.monotonic()` and must — a deadline
+may not move when the wall clock steps.
+
+**HISTORY — why claude-code needed a special case at all.** It was once exempt
+from subtracting entirely, on the premise that because it marks the end of the
+previous SDK event and reads again when the next message arrives, a tool's
+execution falls *between* two windows rather than inside one. Measured, that
+premise does not hold: a tool's timer starts at the **emission** carrying its
+`tool_use` block, and one assistant turn spans several emissions, so a later
+emission's window runs concurrently with a tool already timing. On a task
+issuing five parallel writes, five reads and two concurrent `Bash` calls the
+overlap was 482 ms and 340 ms on two ~18-25 s turns, and the four-bucket
+residual came out at exactly `-481 ms` and `-339 ms`. (That run is pinned at
+`scripts/timing/corpus/claude-code.json`, which still reconciles at
+-481 ms — it is a RECORD of the defect, not of current behaviour; see the README
+there.)
+
+It could not subtract while flushing, because a tool issued by an earlier
+emission is still running when the next window closes and its interval does not
+exist yet — so it subtracted once at finalization instead, in a method of its
+own. Central subtraction dissolves the special case: the collector is *already*
+the place where every span is known, so claude-code needs no separate pass and
+no exemption.
+
+Its window is also now measured on ONE clock, and that clock is a `TurnClock`.
+The duration used to be a monotonic delta while the bounds were wall stamps,
+which is exactly the split `TurnClock` exists to eliminate — and it became
+load-bearing with central subtraction, which clips WALL tool spans against
+those WALL bounds. A monotonic-measured duration would have had the two
+disagreeing inside one subtraction, which is the defect that let Antigravity's
+window go negative. Sharing raw `datetime.now()` fixed the disagreement and
+left both sides naive-local; deriving both from the turn's monotonic anchor
+removes that too. The clock is INJECTED into `_ClaudeTurnState` rather than
+read from a module global, because a derived stamp escapes a monkeypatched
+`datetime` — a test that patched one would quietly measure the real clock and
+pass. `_resolve_pending_command` takes the reading as an argument for the same
+reason: it stamps the tool span that is clipped against those bounds, so a
+second basis at that one call site would put two clocks inside one subtraction.
+`turn_start_time` stays raw monotonic and is untouched: `duration_seconds` and
+the turn deadline read it, and a deadline must not move when the wall clock
+steps.
+
+**The head and tail are measured, not normalized.** Generation and tool are
+only two of the four buckets. The turn's **head** (turn start → first
+generation window) and **tail** (last window → turn end) are booked as
+`TurnRecord.harness_startup_ms` / `harness_teardown_ms`, computed once at the
+`EventCollector` seam by `coder_eval/timing.py::decompose_turn`. The tool term
+is the **union** of the command intervals, for the same reason the subtraction
+above is — Pi resolved a `Write` and a `Bash` overlapping by 18.4 ms in one
+measured turn, and summing their durations books that overlap twice — and it is
+the THIRD stored bucket, `TurnRecord.tool_union_ms`, written at the same seam
+from the same span set the head and the tail are measured against. Generation is
+deliberately not stored: it is a one-line sum over the message stream, and the
+reconciliation entry exists so a consumer sums that stream rather than reading a
+separate aggregate. The tool union is the opposite case — union arithmetic plus
+a sub-agent filter — which is what a dict consumer cannot cheaply reproduce. The head
+and tail exclude tool execution by that same rule and that same helper, which
+is what keeps the four buckets disjoint: a tool is not confined to a
+generation window (Antigravity force-closes an orphan at finalization, inside
+the tail, and backgrounds anything over ten seconds), so a span that escapes
+one would otherwise be counted both as tool and as head or tail. With all
+four buckets and the union, six live turns per harness reconcile to within
+1.7 ms of `duration_seconds` (worst case 0.014% of wall clock; the residual is
+clock skew, since head and tail are measured between wall-clock event stamps
+while `duration_seconds` is the agent's own monotonic span, and its sign flips
+between harnesses). `scripts/timing/decompose_run.py` reproduces the table. The head and tail
+figures in the table above are means of six live `tasks/hello_date` turns per
+harness and move with CLI cache warmth, so read their ORDER OF MAGNITUDE, not
+the digits.
+
+**Four turn buckets, two task buckets — and they are different scopes.** The
+four above tile ONE TURN and their identity (`head + Σgeneration + UNION(tool)
++ tail == the turn's span`) is asserted to the millisecond by
+`tests/test_timing_identity_contract.py`. A task's wall clock is longer than
+its turns, and the difference is the orchestrator's own work: criterion
+discovery, sandbox provisioning, `agent.start()` and `pre_run` before the first
+turn; criteria checking, `post_run` and cleanup after the last. Those are
+booked as `EvaluationResult.setup_ms` and `EvaluationResult.grading_ms` —
+TASK-scoped, deliberately NOT a fifth and sixth member of the turn's four.
+
+Folding setup into the first turn's `harness_startup_ms` was considered and is
+wrong three times over: it would break the turn identity by construction; a
+dialog-mode task runs N turns against ONE setup, so turn 1 would stop being
+comparable with turns 2..N; and it is not harness time at all — measured at
+~1.86 s for claude-code and pi alike on the same machine, which is the tell.
+
+Naming them is what makes the evalboard's **Unaccounted** cell a residual
+rather than a label. It used to hold a ~1.9 s constant on every row, which
+reads as 10% of a 19 s task and would read 60% of a 3 s one.
+
+`setup_ms` is marked from the top of `run()` and not from `_setup()`, which
+matters more than it sounds: instrumenting the seams showed **733 of the
+remaining 758 ms was one call**, `utils.get_version_info()`, which shells out
+for the git commit and every CLI's `--version` while `EvaluationResult` is
+being constructed — before `_setup()` is reached. Marking from `_setup()` left
+it outside every named bucket. The rest of that 758 ms was `post_run` (32 ms),
+`_cleanup()` (1.4 ms), `task.json` persistence (1.9 ms) and ~5 ms of loop
+preamble.
+
+Measured after the move: **42 ms, 0.26%** of task wall clock on a 16 s
+claude-code task. What remains is that tail — `post_run`, sandbox preservation,
+persistence and post-`AgentEnd` reaping — with no single nameable phase left in
+it, which is what "unaccounted" should mean.
+
+NOTE `setup_ms` therefore carries a ~733 ms constant that is instrumentation
+overhead rather than work the task needed. Naming it is not the same as making
+it cheap; caching `get_version_info()` across a batch run is the obvious
+follow-up and would take ~0.7 s off every task in a suite.
+
+**The head means one thing on all five.** It is the wall clock from the turn
+starting until the harness first observed **model output**, and that instant is
+also where the harness opens its first generation window — which is what keeps
+the head and the generation disjoint so the four-bucket identity still closes.
+The per-harness first-output signal:
+
+| harness | first observed model output |
+|---|---|
+| claude-code | the first `message_start` stream event |
+| codex | the first SDK item's own start |
+| antigravity | the first MODEL-source `Step` (a SYSTEM/USER Step does not seed) |
+| opencode | the first `step_start` |
+| pi | the first `turn_start` |
+
+What the head CONTAINS still differs, and that part is deliberately **not**
+decomposed. **All five spawn a process** — the distinction is WHEN. claude-code,
+codex, opencode and pi spawn theirs per turn, so their head fuses that boot with
+provider resolution, dispatch and TTFT, and the stream carries no marker between
+them (measured on OpenCode: the process spawns in ~3 ms and its first
+`step_start` lands at ~3.9 s). Antigravity spawns its bundled `localharness`
+binary ONCE, in `start()`, and holds it across every `communicate()` — so there
+is no boot inside the turn for its head to contain, and its head is dispatch plus
+TTFT. That is a real property of the harness rather than a measurement artifact,
+which is as far as unification can honestly go.
+
+So the fields are named for the **interval they measure**, never for what they
+contain. Do not rename them `cli_boot_ms` or `ttft_ms` — that would claim a
+split nobody performed. A measured `0.0` head is an answer; `None` is what
+"never measured" looks like (a turn that produced no assistant message).
+
+**The table's head figures are SINGLE-TURN.** They are means of six live
+`tasks/hello_date` turns. A simulation (dialog) task runs each turn as its own
+`communicate()`, so on the per-turn-spawn harnesses turns 2..N book a full
+process boot *plus* session-transcript replay into `harness_startup_ms`, and
+will read well above these numbers. That is correct under the definition and is
+an improvement — the same time was previously hidden inside the first
+generation — but do not read a dialog run's larger head as a regression against
+this table.
+
+**HISTORY — why claude-code and antigravity used to report `0.0`.** Both
+stamped their first window's mark when the turn state was built, *before*
+`AgentStartEvent` was emitted, so the head was a small negative that
+`decompose_turn` clamped. The `0.0` was therefore a clamped inversion published
+as "measured, and instant" — the exact confusion CE058 exists to prevent
+everywhere else — and everything those harnesses spent before their first model
+output was booked as the first generation instead: **~3.6 s per turn on
+claude-code and ~4.7 s on antigravity**, inflating every generation figure, the
+Generation split percentages and the 10 s slow-generation bar on the two
+most-used harnesses.
+
+The re-seed was rejected once, on the premise that claude-code runs the model
+in-process so "the interval from turn entry to the first message is msg0's
+generation". That premise was simply wrong: `claude-agent-sdk` spawns the
+`claude` CLI as a subprocess (`anyio.open_process`) and `_pump_messages` calls
+`query()` once per `communicate()` — a fresh CLI per turn, the same shape as
+codex, opencode and pi. Nor was antigravity ever the in-process counterexample
+it was described as: it spawns `localharness` too, just once at `start()`
+rather than per turn.
+
+Both re-seeds are **once per turn**. `message_start` and `Step` each arrive
+many times; re-seeding on every one would stop the windows tiling and drop the
+gap before the next emission — a tool result landing, then the next request
+going out — into no bucket at all, which is the defect Pi shipped with. Neither
+flag needs a reset: both harnesses build a fresh turn state per
+`communicate()`, so it is per-attempt by construction. A turn that streams no
+`message_start` / no `Step` never re-seeds, keeps the turn-entry mark and
+clamps to `0.0` exactly as before.
 
 **Why Codex leaves `generation_completed_at` as `None`.** It means "when the
 model finished emitting the `tool_use` block". Codex's stream does not carry
@@ -69,12 +385,110 @@ generic tool items now carry a duration where they previously carried none, so
 `avg_command_time_ms` and `total_command_time_ms` for a Codex run describe every
 tool call rather than shell commands alone.
 
+**`message_id` is what splits the timeline.** The evalboard groups assistant
+emissions by `message_id`, and falls back to a wall-clock gap threshold
+(`SAME_EMISSION_GAP_MS`, 100 ms, in `evalboard/lib/runs.ts`) when either side
+lacks one. Antigravity's `Step` stream carries no message id, so the harness
+synthesizes one — and it must, because this harness's generation windows are
+*contiguous* by construction: each opens exactly where the previous one closed,
+so the gap between two of them is always 0 ms and the fallback would fold a
+whole turn's generations into a single row. CE060 makes the kwarg mandatory in
+`src/coder_eval/agents/` for that reason.
+
+The collapse is a *display* defect, not an accounting one — the consumer SUMS a
+group's token buckets and durations, so every total, percentage and cost is
+identical either way, as is the reconciliation residual. But it is not
+cosmetic, and three displayed figures do move when a turn stops collapsing:
+the thinking-cost simulator's per-call cache cascade (`calls` in
+`evalboard/lib/thinkingSim.ts` is the number of grouped emissions, and the
+cascade is quadratic in it — on a single-shot run it was pinned at one call,
+so every coefficient was zero), the `Messages` count and timeline heading, and
+the "slow generation" count, whose 10 s bar was being applied to a whole turn's
+summed generation time. All three move toward the figure they were always
+meant to report, so the fix corrects them rather than breaking them — but a
+trend compared across this change is not comparing like with like.
+
+The two synthetic schemes read differently on purpose: Codex deliberately REPEATS one
+id across the sub-messages of a single generation — that is exactly the "the
+CLI split one API response" signal the field exists to carry — while
+Antigravity's are all distinct, because it emits one message per generation
+with every block inside it. Runs recorded before a harness captured the field
+still carry `null` and still depend on the gap fallback, which is why it stays
+— and so does a current OpenCode or Pi message whose payload omitted the id,
+which is the case CE060 cannot see (it requires the kwarg to be present, not
+non-`None` at runtime). OpenCode tiles its windows contiguously too, so it is
+the other harness where a missing id can still collapse a turn.
+
+### Time to first token is not measured
+
+Nothing records it **as its own field** today — there is no `ttft` or
+`first_token` symbol anywhere in `src/`, `evalboard/`, `docs/` or `tests/`.
+
+But most of its value for the TURN is already delivered: `harness_startup_ms`
+now measures the wall clock up to the harness's first observed model output on
+every harness, which is a time-to-first-output latency for the first generation.
+Two things a separate `first_delta_latency_ms` would still add — and the design
+below is about both, so do not read this paragraph as retiring it:
+
+1. **Per-generation latency**, not just the first. The design measures from
+   EVERY window's mark, so it reports a first-delta latency for each emission;
+   the head covers only the interval before the first one.
+2. **The boot/prefill split** inside the head on the per-turn-spawn harnesses —
+   which is the part that genuinely cannot be derived, because no stream carries
+   a marker between them.
+
+This section is the design, so the next person to want it does not re-derive it.
+Nothing below is implemented.
+
+**The mark is the measure-from point, and every reducer already keeps one.**
+Each one records the moment its current generation window opened — which is
+exactly what a latency is measured from. Read the current attribute off `src/`
+rather than trusting a table here; the last note that transcribed those names
+went stale in precisely that way.
+
+**The first-delta signal already exists in every reducer.** claude-code has raw
+`content_block_delta` (already delivered — `include_partial_messages=True`),
+codex `item/agentMessage/delta`, antigravity `step.content_delta`, OpenCode the
+text part event, Pi `text_delta`.
+
+Four rules, each of which changes what gets built:
+
+- **Name it `first_delta_latency_ms`, never `ttft_ms`.** Four harnesses' windows
+  tile, so the mark is the *previous step's close* and the interval fuses
+  queueing and tool time. That is queue latency, not prefill latency. Only
+  claude-code's `message_start` sits near "the request went out". This is the
+  same rule the head and tail already follow: a field is named for the interval
+  it MEASURES, never for what it contains.
+- **It is never a fifth bucket.** It is a sub-interval of head + first window.
+  Adding it to the four-bucket identity breaks the disjointness the whole
+  design rests on. Report it beside the identity, never inside it.
+- **Take the first delta of ANY kind**, not the first visible-text delta. The
+  codex, OpenCode and Pi handlers ignore thinking deltas, so a reasoning-heavy
+  turn would report its first token late by the entire thinking phase.
+- **Never write `0.0` for "not measured"** (CE058). Use `None` when no delta
+  arrived.
+
+The verification hook is `tests/_fixtures/golden_streams/_scrub.py`'s
+`assert_timing_captured`, where a floor belongs; the five
+`tests/_fixtures/golden_streams/*_fixtures.py` modules already carry the deltas
+needed to drive it.
+
 ### Known divergences
 
 - **Delegate (`delegate-sdk`, out of tree)** records `duration_ms` but no
   execution bounds, so its tool calls cannot be placed on a timeline. Its
   coverage is ~88%. Mirror the Codex change in `coder_eval_uipath`
-  (audit P3-1).
+  (audit P3-1). **The consequence is now the same on both surfaces:** such a
+  call contributes to NO bucket. Python has always dropped it
+  (`timing.main_thread_tool_spans` filters on `is not None`), and
+  `evalboard/lib/timing.ts::toolExecutionMs` no longer folds the bare duration
+  into its union — a duration with no bounds cannot be placed on the timeline,
+  so unioning it double-books whatever it overlapped and can drive the
+  four-bucket residual negative. Its time reads as **Unaccounted**, which is
+  what that cell means: measured, but not placeable. Codex was in the same
+  state until `_item_timing` landed on 2026-09-10 (0% bounded before, 100%
+  after), so on historical codex runs ~8 h in aggregate moves out of Tool exec
+  and into Unaccounted; that population is closed and no new record joins it.
 - **Antigravity books orphan-poll waiting as agent duration.** A task can spend
   `0.8 × turn_timeout` waiting on a tool call that never reaches DONE — 14 tasks
   and 9.6h of one 83h run. Only CLOSED tool intervals are subtracted, so that
@@ -82,7 +496,19 @@ tool call rather than shell commands alone.
   records `execution_completed_at` while leaving `duration_ms` as `None`
   (audit P2-1).
 
-Both are deliberately deferred; see `c/time-bugs-audit.md` for the measurements.
+- **`TurnStartEvent` is emitted at inconsistent points.** Antigravity and Codex
+  fire it at turn entry, before the pump; claude-code, OpenCode and Pi fire it
+  when a generation begins. Nothing in the timing accounting reads it — the
+  head and tail are measured from the first and last `AssistantMessage`
+  instead, which is uniform across all five — so this is recorded rather than
+  fixed. It is NOT a `max_turns` hazard: `EventCollector.visible_turn_count` is
+  `len(self._commands)`, derived from `ToolEndEvent`, and `_turn_starts` feeds
+  only `assistant_turn_count` on the no-`AgentEndEvent` fallback path. The real
+  cost of normalizing it is that the event drives the live renderers, so moving
+  it changes the turn boundaries users watch during a run.
+
+All three are deliberately deferred; see `c/time-bugs-audit.md` for the
+measurements.
 
 ## `max_turns` counts visible turns on Codex and Antigravity
 

@@ -94,6 +94,7 @@ def test_resolve_pending_command_populates_result_data_for_json_object() -> None
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]
@@ -112,6 +113,7 @@ def test_resolve_pending_command_does_not_truncate_long_result_summary() -> None
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]
@@ -130,6 +132,7 @@ def test_resolve_pending_command_populates_result_data_for_json_array() -> None:
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]
@@ -147,6 +150,7 @@ def test_resolve_pending_command_leaves_result_data_none_for_plain_text() -> Non
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]
@@ -168,6 +172,7 @@ def test_resolve_pending_command_populates_result_data_for_flow_debug_fixture() 
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]
@@ -191,6 +196,7 @@ def test_resolve_pending_command_handles_sdk_list_content_shape() -> None:
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]
@@ -211,6 +217,7 @@ def test_resolve_pending_command_concatenates_multiple_text_blocks() -> None:
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]
@@ -229,6 +236,7 @@ def test_resolve_pending_command_list_without_text_blocks_yields_none() -> None:
         content,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     assert pending[tool_id]["telemetry"].result_data is None
@@ -244,6 +252,7 @@ def test_resolve_pending_command_none_content_yields_none() -> None:
         None,
         pending,
         set(),
+        now=datetime.now(),
     )
 
     cmd = pending[tool_id]["telemetry"]

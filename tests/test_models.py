@@ -644,3 +644,46 @@ class TestAssistantMessageGenerationWindow:
             ).generation_duration_ms
             == 1000.0
         )
+
+
+class TestTurnRecordToolUnion:
+    """`tool_union_ms` is the turn's third wall-clock bucket, under the same contract.
+
+    `None` means no bounded tool span was recorded; `0.0` means spans were
+    recorded and occupied no measurable time. It sits flat beside
+    `harness_startup_ms` / `harness_teardown_ms` rather than nested, because
+    those two are already consumed by name by the evalboard and the two timing
+    sensors, and `TurnRecord` is the shape `task.json` publishes.
+    """
+
+    @staticmethod
+    def _record(**overrides):
+        from coder_eval.models import TurnRecord
+
+        return TurnRecord(iteration=1, user_input="go", agent_output="done", **overrides)
+
+    def test_omitting_it_yields_none_not_zero(self):
+        assert self._record().tool_union_ms is None
+
+    def test_a_measured_zero_is_still_legal(self):
+        assert self._record(tool_union_ms=0.0).tool_union_ms == 0.0
+
+    def test_round_trip_preserves_none_and_a_value(self):
+        from coder_eval.models import TurnRecord
+
+        assert TurnRecord.model_validate(self._record().model_dump()).tool_union_ms is None
+        assert TurnRecord.model_validate(self._record(tool_union_ms=250.5).model_dump()).tool_union_ms == 250.5
+
+    def test_a_record_predating_the_field_still_validates(self):
+        """The legacy path: a `task.json` written before the field existed.
+
+        `TurnRecord` declares no `model_config`, so pydantic's default
+        `extra="ignore"` applies and an absent optional validates to `None` —
+        which is what routes the report layer to its derive-from-commands
+        fallback instead of reading a value that is not there.
+        """
+        from coder_eval.models import TurnRecord
+
+        raw = self._record(tool_union_ms=250.5).model_dump()
+        raw.pop("tool_union_ms")
+        assert TurnRecord.model_validate(raw).tool_union_ms is None

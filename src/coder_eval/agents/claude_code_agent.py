@@ -76,6 +76,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import TurnClock, close_window
 from coder_eval.utils import dump_dataclass, process_plugins
 
 
@@ -212,6 +213,7 @@ class _ClaudeTurnState:
         log: PrefixedAdapter,
         turn_start_time: float,
         deadline: float | None,
+        clock: TurnClock | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -243,8 +245,26 @@ class _ClaudeTurnState:
         self.sequence_number = 0
 
         self.last_assistant_message_index: int | None = None
-        self.last_event_monotonic: float = turn_start_time
-        self.last_event_wall: datetime = datetime.now()
+        # ONE clock per turn, and every wall stamp this turn records derives
+        # from it — the window bounds below, the tool spans
+        # `_resolve_pending_command` stamps, the fallback tool timestamp. The
+        # central subtraction clips those WALL tool spans to these WALL window
+        # bounds, so the two sharing one basis is what keeps the arithmetic
+        # meaningful; before `TurnClock` they shared only naive-LOCAL
+        # `datetime.now()`, which a DST transition or an NTP step inside a turn
+        # lands directly in a generation window — an hour-long jump in a
+        # millisecond field, on runs that start at 04:18 and last hours.
+        # Injectable so a test supplies a fake rather than monkeypatching this
+        # module's `datetime` global, which a derived stamp silently escapes —
+        # leaving the test passing against the real clock.
+        # `turn_start_time` stays raw monotonic and is untouched:
+        # `duration_seconds` and the turn deadline read it, and a deadline must
+        # not move when the wall clock steps.
+        self.clock = clock or TurnClock()
+        self.last_event_wall: datetime = self.clock.now()
+        # Re-seeded ONCE, at the first observed model output. See
+        # `_seed_first_generation_window`.
+        self.first_output_seen: bool = False
 
         # SDK ResultMessage capture.
         self.sdk_result_usage: dict[str, Any] | None = None
@@ -311,10 +331,8 @@ class _ClaudeTurnState:
 
     def on_assistant_message(self, message: Message) -> None:
         """Capture ToolUseBlocks + build the AssistantMessage telemetry record."""
-        message_arrival_monotonic = time.monotonic()
-        message_arrival_wall = datetime.now()
+        message_arrival_wall = self.clock.now()
         generation_started_wall = self.last_event_wall
-        generation_duration_ms = (message_arrival_monotonic - self.last_event_monotonic) * 1000
 
         current_turn_index = len(self.sdk_messages)
         self.assistant_turn_count += 1
@@ -424,10 +442,17 @@ class _ClaudeTurnState:
                 out_tok = int(msg_usage.get("output_tokens", 0) or 0)
             self.pending_delta_output_tokens = None
 
+        # The RAW window. Tool execution comes out of it once, centrally, in
+        # `EventCollector.build_turn_record` — so this harness now asks the same
+        # helper as the other four and CE061 no longer needs its one permanent
+        # exception. The mark is the only harness-shaped decision left, and it
+        # stays here: `started` is the mark, since this stream carries no
+        # per-emission item start to pull the window open to.
+        started, raw_generation_ms = close_window(mark=generation_started_wall, now=message_arrival_wall)
         assistant_telemetry = AssistantMessageTelemetry(
-            started_at=generation_started_wall,
+            started_at=started,
             completed_at=message_arrival_wall,
-            generation_duration_ms=max(0.0, generation_duration_ms),
+            generation_duration_ms=raw_generation_ms,
             content_blocks=turn_content_blocks,
             tool_use_ids=turn_tool_use_ids,
             input_tokens=in_tok,
@@ -450,7 +475,6 @@ class _ClaudeTurnState:
             self.emission_proxies_by_id.setdefault(message_id, []).append(emission_content_chars)
         self.last_assistant_message_index = len(self.sdk_messages) - 1
 
-        self.last_event_monotonic = message_arrival_monotonic
         self.last_event_wall = message_arrival_wall
 
     def on_task_notification(self, message: Message) -> None:
@@ -489,12 +513,68 @@ class _ClaudeTurnState:
                 last_msg.cache_read_tokens = int(self.sdk_result_usage.get("cache_read_input_tokens", 0) or 0)
                 last_msg.reasoning_tokens = int(self.sdk_result_usage.get("reasoning_tokens", 0) or 0)
 
+    def _seed_first_generation_window(self) -> None:
+        """Move the first window's mark to the first observed model output.
+
+        ``harness_startup_ms`` is defined as the wall clock from the turn
+        starting until the harness first observed model output, and that instant
+        is also where the first generation window opens — which is what keeps
+        the head and the generation disjoint so the four-bucket identity still
+        closes.
+
+        Without this the mark is stamped in ``__init__``, BEFORE
+        ``AgentStartEvent`` is emitted, so the head comes out negative and
+        ``decompose_turn`` clamps it to ``0.0``. The fault is NOT the clamp —
+        that function's own docstring is right that a measured inversion is a
+        real zero, because both ends were observed. The fault is that the head
+        was measured against the WRONG INSTANT: the mark sat before the turn
+        bracket rather than at the first observed model output, so the interval
+        being measured was not the one the field is defined as. Everything the
+        CLI spent booting, resolving a provider and reaching its first token was
+        booked as msg0's generation instead: ~3.6 s per turn on this harness,
+        inflating every generation figure, the Generation split and the 10 s
+        slow-generation bar.
+
+        The old rejection rested on this harness running the model in-process.
+        It does not: ``claude-agent-sdk`` spawns the ``claude`` CLI over
+        ``anyio.open_process`` and ``_pump_messages`` calls ``query()`` once
+        per ``communicate()`` — a fresh CLI per turn, the same shape as codex,
+        opencode and pi.
+
+        ONCE PER TURN, and that is the whole contract. ``message_start`` arrives
+        for every API call in the turn; re-seeding on each would stop the
+        windows tiling and drop the gap before the next emission — a tool result
+        landing, then the next request going out — into no bucket at all, which
+        is the defect pi shipped with. The flag needs no reset: a fresh
+        ``_ClaudeTurnState`` is built per ``communicate()``, so it is
+        per-attempt by construction. If a future harness reuses a turn state,
+        the reset belongs there and not here.
+
+        A turn with no ``message_start`` — a mocked ``query()``, a crash before
+        the first event — never calls this, keeps the turn-entry mark and clamps
+        to ``0.0`` exactly as before. That is the correct degradation rather
+        than a gap.
+
+        One route to it is OPERATOR-REACHABLE and worth knowing: this harness
+        sets ``include_partial_messages=True`` BEFORE spreading
+        ``**self.config.sdk_options``, so
+        ``-D agent.sdk_options.include_partial_messages=false`` turns the raw
+        stream off, and with it this re-seed — the head silently returns to the
+        clamped ``0.0`` it used to publish. Nothing warns; the degradation is
+        safe but the number changes meaning.
+        """
+        if self.first_output_seen:
+            return
+        self.first_output_seen = True
+        self.last_event_wall = self.clock.now()
+
     def on_stream_event(self, message: Message) -> None:
         """Recover cumulative output_tokens from raw ``message_start`` /
         ``message_delta`` stream events (handles both sub-cases internally)."""
         evt: dict[str, Any] = getattr(message, "event", None) or {}
         evt_type = evt.get("type")
         if evt_type == "message_start":
+            self._seed_first_generation_window()
             mid = (evt.get("message") or {}).get("id")
             self.current_stream_message_id = mid if isinstance(mid, str) else None
         elif evt_type == "message_delta":
@@ -517,8 +597,7 @@ class _ClaudeTurnState:
         """Process tool results (and a sub-agent's terminal generation) from a
         tool-result UserMessage. The sub-agent message is appended BEFORE the
         tool-result loop — its position in ``sdk_messages`` is observable."""
-        self.last_event_monotonic = time.monotonic()
-        self.last_event_wall = datetime.now()
+        self.last_event_wall = self.clock.now()
 
         sub_msg = self._agent._synthesize_subagent_terminal_message(message, self.sdk_model_used)
         if sub_msg is not None:
@@ -537,13 +616,14 @@ class _ClaudeTurnState:
                         block.content,
                         self.pending_commands,
                         self.processed_results,
+                        now=self.clock.now(),
                     )
                     is_error_flag = getattr(block, "is_error", False) or False
                     resolved = self.pending_commands.get(block.tool_use_id, {}).get("telemetry")
                     tool_for_event = resolved or CommandTelemetry(
                         tool_name=tool_name or "unknown",
                         tool_id=block.tool_use_id,
-                        timestamp=datetime.now(),
+                        timestamp=self.clock.now(),
                         result_status="error" if is_error_flag else "success",
                         result_summary=format_payload(block.content),
                     )
@@ -647,6 +727,9 @@ class _ClaudeTurnState:
                 crashed=crashed,
                 crash_reason=crash_reason,
                 duration_seconds=time.monotonic() - self.turn_start_time,
+                # One basis with the window bounds — see the AgentStartEvent
+                # site in `communicate`.
+                timestamp=self.clock.now(),
             )
         )
 
@@ -1008,6 +1091,20 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     prompt=user_input,
                     iteration=self._iteration,
                     model=effective_model,
+                    # Stamped from the TURN CLOCK, not the event model's raw
+                    # `datetime.now()` default. This bound is subtracted against
+                    # window bounds the same clock produced (`decompose_turn`), and
+                    # two bases inside one subtraction is what `TurnClock` exists to
+                    # remove. Measured: antigravity's tail came out at -0.017 ms —
+                    # an `AgentEndEvent` stamped 17 us BEFORE its own last message
+                    # finished, which cannot happen — and `decompose_turn` clamped
+                    # it to the `0.0` that means "measured, and instant" (CE058).
+                    # It only bites where the true interval is smaller than the
+                    # drift between the two clocks, which is the one harness that
+                    # holds its process across turns; the fix belongs at every
+                    # clocked site regardless, since that is what makes the
+                    # subtraction single-basis rather than usually-close.
+                    timestamp=state.clock.now(),
                 )
             )
 
@@ -1758,6 +1855,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         # This generation arrives as a tool result and is never streamed, so no
         # window exists to measure — None (unknown), not 0.0 (instant).
+        #
+        # Deliberately NOT on the turn's `TurnClock`, and the only wall stamp in
+        # this harness that is not. These two bounds are an admitted
+        # PLACEHOLDER, not a measurement: `generation_duration_ms is None` and
+        # `parent_tool_use_id` is set, which is exactly what excludes this
+        # message from `subtract_tool_time` and from `_overhead_ms`'s
+        # head/tail bracket. A stamp no arithmetic reads has no basis to share,
+        # and threading a clock into a `@staticmethod` to produce one would
+        # claim otherwise. Codex's rollout rebuild stamps the same placeholder
+        # the same way, for the same reason.
         now = datetime.now()
         return AssistantMessageTelemetry(
             started_at=now,
@@ -1782,6 +1889,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         content: Any,
         pending_commands: dict[str, dict[str, Any]],
         processed_results: set[str],
+        *,
+        now: datetime,
     ) -> None:
         """Match a tool result back to its pending command and update status/duration.
 
@@ -1791,6 +1900,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             content: The result content (string or structured)
             pending_commands: Map of tool_id -> {telemetry, command_start_time}
             processed_results: Set of already-processed tool IDs (for duplicate detection)
+            now: This turn's ``TurnClock`` reading, passed in rather than read
+                here. The span stamped below is clipped against the window
+                bounds the same clock produced, so a second basis at this one
+                call site would put two clocks inside one subtraction.
         """
         # Normalize content to string for storage
         content_str = str(content) if content is not None else ""
@@ -1810,13 +1923,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             cmd.result_summary = content_str if content_str else None
             cmd.result_data = ClaudeCodeAgent._try_parse_json_value(content)
 
-            # Wall-clock execution bounds. `execution_completed_at` is now;
-            # `execution_started_at` is reconstructed by subtracting the
-            # measured monotonic duration. This avoids storing a separate
-            # wall-clock start (we don't have one without restructuring
-            # pending_commands further) while still giving consumers two
-            # explicit timestamps with the right delta.
-            cmd.execution_completed_at = datetime.now()
+            # Wall-clock execution bounds. `execution_completed_at` is the
+            # turn clock's reading; `execution_started_at` is reconstructed by
+            # subtracting the measured monotonic duration. This avoids storing
+            # a separate wall-clock start (we don't have one without
+            # restructuring pending_commands further) while still giving
+            # consumers two explicit timestamps with the right delta — and the
+            # reconstruction is now exact rather than approximate, since the
+            # turn clock is itself monotonic-derived.
+            cmd.execution_completed_at = now
             cmd.execution_started_at = cmd.execution_completed_at - timedelta(milliseconds=duration_ms)
 
             if is_error:

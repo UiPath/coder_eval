@@ -1,0 +1,148 @@
+{
+  "_comment": "Scrubbed representative run for the timing residual report. Prompts, outputs, tokens and cost are removed; only the wall-clock fields decompose_run.py reads are kept. NOT a before/after instrument \u2014 see the header in this directory.",
+  "agent_type": "antigravity",
+  "iterations": [
+    {
+      "duration_seconds": 11.191662207944319,
+      "iteration": 1,
+      "harness_startup_ms": 0.0,
+      "harness_teardown_ms": 0.116,
+      "crashed": false,
+      "messages": [
+        {
+          "completed_at": "2026-09-11T21:25:56.137300",
+          "started_at": "2026-09-11T21:25:51.666942",
+          "generation_duration_ms": 4454.441,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T21:26:00.773915",
+          "started_at": "2026-09-11T21:25:56.137300",
+          "generation_duration_ms": 4574.724999999999,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        },
+        {
+          "completed_at": "2026-09-11T21:26:02.858513",
+          "started_at": "2026-09-11T21:26:00.773915",
+          "generation_duration_ms": 0.3619999999996253,
+          "role": "assistant",
+          "parent_tool_use_id": null
+        }
+      ],
+      "commands": [
+        {
+          "tool_name": "Edit",
+          "execution_completed_at": "2026-09-11T21:25:55.126590",
+          "execution_started_at": "2026-09-11T21:25:55.122510",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:2",
+          "result_status": "success",
+          "duration_ms": 4.08,
+          "timestamp": "2026-09-11T21:25:55.122510"
+        },
+        {
+          "tool_name": "Edit",
+          "execution_completed_at": "2026-09-11T21:25:55.455388",
+          "execution_started_at": "2026-09-11T21:25:55.452684",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:3",
+          "result_status": "success",
+          "duration_ms": 2.7039999999999997,
+          "timestamp": "2026-09-11T21:25:55.452684"
+        },
+        {
+          "tool_name": "Edit",
+          "execution_completed_at": "2026-09-11T21:25:55.798964",
+          "execution_started_at": "2026-09-11T21:25:55.796438",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:4",
+          "result_status": "success",
+          "duration_ms": 2.5260000000000002,
+          "timestamp": "2026-09-11T21:25:55.796438"
+        },
+        {
+          "tool_name": "Edit",
+          "execution_completed_at": "2026-09-11T21:25:56.101913",
+          "execution_started_at": "2026-09-11T21:25:56.099180",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:5",
+          "result_status": "success",
+          "duration_ms": 2.733,
+          "timestamp": "2026-09-11T21:25:56.099180"
+        },
+        {
+          "tool_name": "Edit",
+          "execution_completed_at": "2026-09-11T21:25:56.140758",
+          "execution_started_at": "2026-09-11T21:25:56.133426",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:6",
+          "result_status": "success",
+          "duration_ms": 7.332,
+          "timestamp": "2026-09-11T21:25:56.133426"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T21:25:59.328201",
+          "execution_started_at": "2026-09-11T21:25:59.323643",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:8",
+          "result_status": "success",
+          "duration_ms": 4.558000000000001,
+          "timestamp": "2026-09-11T21:25:59.323643"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T21:25:59.550767",
+          "execution_started_at": "2026-09-11T21:25:59.549154",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:9",
+          "result_status": "success",
+          "duration_ms": 1.613,
+          "timestamp": "2026-09-11T21:25:59.549154"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T21:25:59.801832",
+          "execution_started_at": "2026-09-11T21:25:59.800660",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:10",
+          "result_status": "success",
+          "duration_ms": 1.1720000000000002,
+          "timestamp": "2026-09-11T21:25:59.800660"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T21:26:00.087008",
+          "execution_started_at": "2026-09-11T21:26:00.086176",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:11",
+          "result_status": "success",
+          "duration_ms": 0.832,
+          "timestamp": "2026-09-11T21:26:00.086176"
+        },
+        {
+          "tool_name": "Read",
+          "execution_completed_at": "2026-09-11T21:26:00.395861",
+          "execution_started_at": "2026-09-11T21:26:00.394123",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:12",
+          "result_status": "success",
+          "duration_ms": 1.738,
+          "timestamp": "2026-09-11T21:26:00.394123"
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T21:26:02.768580",
+          "execution_started_at": "2026-09-11T21:26:00.725396",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:13",
+          "result_status": "success",
+          "duration_ms": 2043.1840000000002,
+          "timestamp": "2026-09-11T21:26:00.725396"
+        },
+        {
+          "tool_name": "Bash",
+          "execution_completed_at": "2026-09-11T21:26:02.858151",
+          "execution_started_at": "2026-09-11T21:26:00.773556",
+          "tool_id": "b7747e76d7fb722e11ea267731099383:14",
+          "result_status": "success",
+          "duration_ms": 2084.5950000000003,
+          "timestamp": "2026-09-11T21:26:00.773556"
+        }
+      ],
+      "user_input": "",
+      "agent_output": ""
+    }
+  ]
+}

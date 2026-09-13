@@ -365,6 +365,11 @@ export default async function TaskPage({
                     tokens={task.tokens}
                     recordedCostUsd={task.totalCostUsd}
                     taskDurationSeconds={task.durationSeconds}
+                    harnessStartupMs={task.harnessStartupMs}
+                    setupMs={task.setupMs}
+                    gradingMs={task.gradingMs}
+                    harnessTeardownMs={task.harnessTeardownMs}
+                    storedToolMs={task.storedToolMs}
                 />
             )}
             <ProviderCallTableSection providerCalls={task.providerCalls} />

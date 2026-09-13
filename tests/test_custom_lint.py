@@ -46,6 +46,57 @@ def test_no_violations(rule_class: type) -> None:
 
 
 @pytest.mark.lint
+class TestNoTestReadsThePinnedTimingCorpus:
+    """`scripts/timing/corpus/` is stale BY DESIGN, so no test may read it.
+
+    Two of its five records deliberately preserve defects the live code no
+    longer has — claude-code reconciling at -481 ms (the pre-subtraction
+    defect) and a `0.0` head on two harnesses (the clamped inversion). Its
+    README says outright that it exists to carry wall-clock MAGNITUDES for
+    `scripts/timing/decompose_run.py`, and that re-recording it after a change
+    would destroy the only thing it is good for.
+
+    A test pointed at it would pin a fixed defect as expected behaviour, and it
+    would look entirely reasonable while doing so — a green assertion over real
+    recorded numbers. Moving it out of `tests/_fixtures/` removes the
+    invitation; this removes the possibility. The rule lived only in the
+    README, which is the shape this repo converts to a check.
+    """
+
+    #: The rule is about `tests/` reading the corpus. `decompose_run.py` is its
+    #: intended reader and the README documents that invocation, so `scripts/`
+    #: and the README itself are out of scope by construction — this only walks
+    #: the test tree.
+    _CORPUS = "scripts/timing/corpus"
+
+    def test_the_corpus_exists_where_the_rule_says_it_does(self):
+        """A rule guarding a directory that has moved guards nothing."""
+        corpus = Path(__file__).parents[1] / self._CORPUS
+        assert corpus.is_dir(), f"{self._CORPUS} is gone; move this rule with it or retire it"
+        assert list(corpus.glob("*.json")), f"{self._CORPUS} holds no records"
+
+    def test_no_test_module_references_it(self):
+        tests_root = Path(__file__).parent
+        offenders = [
+            str(path.relative_to(tests_root))
+            for path in tests_root.rglob("*.py")
+            if path != Path(__file__) and self._CORPUS in path.read_text(encoding="utf-8")
+        ]
+        assert not offenders, (
+            f"{offenders} reads {self._CORPUS}, which is stale by design: two of its records "
+            "preserve defects the live code no longer has, so an assertion over them pins a "
+            "fixed defect as expected behaviour. Point the test at a fixture that moves with "
+            "the code — tests/_fixtures/golden_streams/ for a replay, or "
+            "tests/test_timing_identity_contract.py for a magnitude."
+        )
+
+    def test_the_readme_still_states_the_rule(self):
+        """The prose and the check have to agree, or one of them is wrong."""
+        readme = (Path(__file__).parents[1] / self._CORPUS / "README.md").read_text(encoding="utf-8")
+        assert "NO TEST MAY READ THIS DIRECTORY" in readme
+
+
+@pytest.mark.lint
 class TestCE016NoComputedTokenUsageKwargs:
     """CE016 fires on TokenUsage(input_tokens=/total_tokens=) but not elsewhere."""
 
@@ -3935,6 +3986,130 @@ class TestCE052ProcessLethalMustBeContainerGated:
         assert "_os._exit(137)" in source, "the guarded call must still exist"
 
 
+class TestCE061WindowViaCloseWindow:
+    """CE061 flags a reducer that computes a generation window of its own.
+
+    Every source string carries its own import line: the rule derives its
+    constructor set from the module's own `coder_eval.models` imports (shared
+    with CE060 via `_model_ctor`), so a bare `AssistantMessage(...)` with no
+    import is correctly invisible to it.
+    """
+
+    _IMPORT = "from coder_eval.models import AssistantMessage\n"
+    _HELPER = "from coder_eval.timing import close_window\n"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+
+        return WindowViaCloseWindow(filepath).check(ast.parse(src))
+
+    def test_flags_a_measured_window_without_the_helper(self):
+        assert len(self._run(self._IMPORT + "m = AssistantMessage(generation_duration_ms=x)")) == 1
+
+    def test_allows_a_measured_window_when_the_helper_is_imported(self):
+        assert not self._run(self._IMPORT + self._HELPER + "m = AssistantMessage(generation_duration_ms=x)")
+
+    def test_allows_an_explicit_none(self):
+        # "Never measured" is an honest claim and needs no window arithmetic —
+        # codex's rollout rebuild and claude-code's sub-agent synthesis.
+        assert not self._run(self._IMPORT + "m = AssistantMessage(generation_duration_ms=None)")
+
+    def test_allows_the_kwarg_absent(self):
+        # Defaults to None, which is the same honest claim.
+        assert not self._run(self._IMPORT + "m = AssistantMessage(model=model)")
+
+    def test_flags_an_arbitrary_alias(self):
+        # The gap CE058 concedes: a name list guards the in-tree spelling by
+        # coincidence and misses `as Msg` outright.
+        assert (
+            len(self._run("from coder_eval.models import AssistantMessage as Msg\nm = Msg(generation_duration_ms=x)"))
+            == 1
+        )
+
+    def test_flags_the_module_attribute_spelling(self):
+        assert (
+            len(self._run("import coder_eval.models as models\nm = models.AssistantMessage(generation_duration_ms=x)"))
+            == 1
+        )
+
+    def test_accepts_a_relative_helper_import(self):
+        # `agents/` uses relative imports; matching only the absolute path
+        # would leave the rule blind for a whole file.
+        assert not self._run(
+            self._IMPORT + "from ..timing import close_window\nm = AssistantMessage(generation_duration_ms=x)"
+        )
+
+    def test_accepts_the_module_import_spelling_of_the_helper(self):
+        # `timing.close_window(...)` is a working call site; a rule that saw
+        # only the from-import would tell its author to change it.
+        assert not self._run(
+            self._IMPORT + "from coder_eval import timing\nm = AssistantMessage(generation_duration_ms=x)"
+        )
+
+    def test_an_unrelated_timing_import_does_not_disarm_the_rule(self):
+        # `from somewhere.else import timing` is not this module; accepting any
+        # name spelled `timing` would switch the rule off for a whole file.
+        assert (
+            len(
+                self._run(
+                    self._IMPORT + "from vendor.sdk import timing\nm = AssistantMessage(generation_duration_ms=x)"
+                )
+            )
+            == 1
+        )
+
+    def test_ignores_a_file_outside_agents(self):
+        assert not self._run(
+            self._IMPORT + "m = AssistantMessage(generation_duration_ms=x)",
+            filepath="src/coder_eval/streaming/collector.py",
+        )
+
+    def test_keys_on_the_helper_name_rather_than_a_literal(self):
+        from coder_eval.timing import close_window as _helper
+        from tests.lint.rules import ce061_window_via_close_window as rule_mod
+
+        assert _helper.__name__ == rule_mod._HELPER
+
+    def test_the_real_agents_tree_is_clean(self):
+        # After claude-code's single permanent suppression. Antigravity
+        # carried a temporary one until it moved onto `close_window`.
+        import pathlib
+
+        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+        from tests.lint.runner import check_file
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "coder_eval" / "agents"
+        found = [v for path in sorted(root.glob("*.py")) for v in check_file(path, [WindowViaCloseWindow])]
+        assert not found, found
+
+    def test_the_rule_is_now_exemption_free(self):
+        """No reducer needs a `# noqa: CE061` any more, and the set is PINNED empty.
+
+        A noqa nobody needs is a noqa that outlives its reason, so this asserts
+        the exact set rather than merely that it shrank. It has earned that
+        twice: antigravity carried a TEMPORARY suppression until it moved onto
+        `close_window`, and claude-code carried a permanent one until the tool
+        subtraction moved to `timing.subtract_tool_time` — at which
+        point it could call the same shrunken helper as the other four. This
+        test is what failed each time the reason expired.
+        """
+        import ast
+        import pathlib
+
+        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "coder_eval" / "agents"
+        suppressed = {
+            path.name
+            for path in sorted(root.glob("*.py"))
+            if WindowViaCloseWindow(str(path)).check(ast.parse(path.read_text(encoding="utf-8")))
+        }
+        assert suppressed == set()
+
+
 class TestRuffExternalCoversEveryRule:
     """Every CE rule's documented `# noqa` must be accepted by ruff.
 
@@ -4355,6 +4530,50 @@ class TestCE058NoTimingLiteral:
         # Scoped to `update=` so an unrelated fixture dict cannot fire.
         assert not self._run('row = {"duration_ms": 0.0}')
 
+    # The head/tail family — the turn-level buckets on TurnRecord.
+    def test_flags_a_zero_harness_startup(self):
+        assert self._run("rec = TurnRecord(iteration=0, harness_startup_ms=0.0)")
+
+    def test_flags_a_zero_harness_teardown(self):
+        assert self._run("rec = TurnRecord(iteration=0, harness_teardown_ms=0)")
+
+    def test_allows_an_unmeasured_harness_startup(self):
+        assert not self._run("rec = TurnRecord(iteration=0, harness_startup_ms=None)")
+
+    def test_allows_a_measured_harness_startup(self):
+        assert not self._run("rec = TurnRecord(iteration=0, harness_startup_ms=head_ms)")
+
+    def test_flags_the_head_coalesce(self):
+        assert self._run("x = rec.harness_startup_ms or 0")
+
+    def test_ignores_a_name_that_merely_starts_with_startup(self):
+        # Anchored at both ends, and the family needs a leading segment: a
+        # limit is not a measurement, and a bare `startup_ms` is not ours.
+        assert not self._run("cfg = TurnRecord(startup_ms_limit=0)")
+        assert not self._run("x = startup_ms_limit or 0")
+
+    # The tool-union family — the turn's THIRD wall-clock bucket, on the same
+    # model and under the same contract, and matching no arm of the regex until
+    # it was widened for it.
+    def test_flags_a_zero_tool_union(self):
+        assert self._run("rec = TurnRecord(iteration=0, tool_union_ms=0.0)")
+
+    def test_flags_the_tool_union_coalesce(self):
+        assert self._run("x = rec.tool_union_ms or 0")
+
+    def test_allows_an_unmeasured_tool_union(self):
+        assert not self._run("rec = TurnRecord(iteration=0, tool_union_ms=None)")
+
+    def test_allows_a_measured_tool_union(self):
+        assert not self._run("rec = TurnRecord(iteration=0, tool_union_ms=union_ms(spans))")
+
+    def test_ignores_a_bare_union_ms(self):
+        # `union_ms` is the ARITHMETIC helper, not a published bucket, and it
+        # returns 0.0 for an empty span list by contract. The family needs a
+        # leading segment for the same reason `_startup_ms` does.
+        assert not self._run("x = union_ms(spans) or 0")
+        assert not self._run("cfg = TurnRecord(tool_union_ms_limit=0)")
+
     # Scope + suppression.
     def test_is_out_of_scope_outside_src(self):
         assert not self._run(
@@ -4424,3 +4643,276 @@ class TestCE059GenerationWindowIsTwoReads:
         path = SRC / "coder_eval/agents/antigravity_agent.py"
         assert path.is_file(), "the noqa fixture file must exist or this test passes vacuously"
         assert not [v for v in check_file(path) if v.rule_id == "CE059"]
+
+
+class TestCE060MessageIdDeclared:
+    """CE060 flags an assistant message built without an identity.
+
+    Every source string carries its own import line: the rule derives its
+    constructor set from the module's own `coder_eval.models` imports, so a
+    bare `AssistantMessage(...)` with no import is correctly invisible to it.
+    """
+
+    _IMPORT = "from coder_eval.models import AssistantMessage\n"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/antigravity_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
+
+        return MessageIdDeclared(filepath).check(ast.parse(src))
+
+    def test_flags_an_omitted_message_id(self):
+        assert self._run(self._IMPORT + "m = AssistantMessage(model=model, output_tokens=3)")
+
+    def test_flags_an_explicit_none(self):
+        # Passing None is a claim that no id exists, which is never true for a
+        # harness that can synthesize one.
+        assert self._run(self._IMPORT + "m = AssistantMessage(model=model, message_id=None)")
+
+    def test_flags_the_in_tree_alias_spelling(self):
+        assert self._run(
+            "from coder_eval.models import AssistantMessage as AssistantMessageTelemetry\n"
+            "m = AssistantMessageTelemetry(model=model)"
+        )
+
+    def test_flags_an_arbitrary_alias(self):
+        # The case a hardcoded name list misses entirely — the whole reason
+        # CE060 resolves aliases instead.
+        assert self._run("from coder_eval.models import AssistantMessage as Msg\nm = Msg(model=model)")
+
+    def test_flags_the_module_alias_spelling(self):
+        # The realistic way to write `models.AssistantMessage(...)`: the class
+        # itself is never bound, so only the attribute is left to match on.
+        assert self._run("import coder_eval.models as models\nm = models.AssistantMessage(model=model)")
+
+    def test_flags_the_attribute_spelling_beside_a_direct_import(self):
+        assert self._run(self._IMPORT + "m = models.AssistantMessage(model=model)")
+
+    def test_flags_a_relative_import(self):
+        # `agents/` does use relative imports, and the absolute path test alone
+        # left the rule silently blind for a whole file.
+        assert self._run("from ..models import AssistantMessage\nm = AssistantMessage(model=model)")
+
+    def test_keys_on_the_model_name_rather_than_a_literal(self):
+        # The constant moved into the shared resolver when CE061 was added; it
+        # is still derived from the model, which is the property under test.
+        from coder_eval.models import AssistantMessage as _Model
+        from tests.lint.rules import _model_ctor
+
+        assert _Model.__name__ == _model_ctor.ASSISTANT_MESSAGE
+
+    def test_flags_a_star_expanded_call(self):
+        # `**fields` has not declared the field at the site.
+        assert self._run(self._IMPORT + "m = AssistantMessage(**fields)")
+
+    def test_allows_a_literal_id(self):
+        assert not self._run(self._IMPORT + 'm = AssistantMessage(message_id="x")')
+
+    def test_allows_an_fstring_id(self):
+        assert not self._run(self._IMPORT + 'm = AssistantMessage(message_id=f"{turn_id}-msg-{i}")')
+
+    def test_allows_a_fallback_expression(self):
+        # The runtime-None blind spot, exempted deliberately: passing a
+        # fallback expression IS deciding what the id is.
+        assert not self._run(self._IMPORT + "m = AssistantMessage(message_id=str(x) or None)")
+
+    def test_allows_a_star_expanded_call_that_also_passes_the_field(self):
+        assert not self._run(self._IMPORT + "m = AssistantMessage(**fields, message_id=mid)")
+
+    def test_ignores_an_unrelated_constructor(self):
+        assert not self._run(self._IMPORT + "s = Span(model=model)")
+
+    def test_ignores_a_module_with_no_matching_import(self):
+        # Nothing is bound, so the rule claims nothing here. A construction
+        # site has to import the class to reach it.
+        assert not self._run("m = AssistantMessage(model=model)")
+
+    def test_is_out_of_scope_outside_agents(self):
+        assert not self._run(
+            self._IMPORT + "m = AssistantMessage(model=model)",
+            filepath="src/coder_eval/orchestrator.py",
+        )
+
+    def test_the_real_antigravity_flush_declares_its_id(self):
+        from tests.lint.runner import check_file
+
+        path = SRC / "coder_eval/agents/antigravity_agent.py"
+        assert path.is_file(), "the fixture file must exist or this test passes vacuously"
+        assert not [v for v in check_file(path) if v.rule_id == "CE060"]
+
+
+class TestCE063NoBusyMsInAgents:
+    """CE063 flags a reducer that would subtract tool time itself.
+
+    The subtraction lives once, in
+    `coder_eval.timing.subtract_tool_time`. A reducer that also
+    does it has its tool time taken out TWICE — once by itself, once by the
+    collector — which under-reports generation on that harness alone.
+    """
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
+
+        return NoBusyMsInAgents(filepath).check(ast.parse(src))
+
+    def test_flags_the_bare_name_import(self):
+        assert len(self._run("from coder_eval.timing import busy_ms")) == 1
+
+    def test_flags_it_under_an_alias(self):
+        # The import is what is banned, whatever it is bound to.
+        assert len(self._run("from coder_eval.timing import busy_ms as union")) == 1
+
+    def test_flags_it_alongside_an_allowed_import(self):
+        assert len(self._run("from coder_eval.timing import busy_ms, close_window")) == 1
+
+    def test_flags_a_relative_import(self):
+        # `agents/` uses relative imports; matching only the absolute path
+        # would leave the rule blind for a whole file.
+        assert len(self._run("from ..timing import busy_ms")) == 1
+
+    def test_flags_the_module_attribute_spelling(self):
+        assert len(self._run("from coder_eval import timing\nx = timing.busy_ms(s, lo, hi)")) == 1
+
+    def test_does_not_fire_on_close_window_through_the_module(self):
+        """The exact false positive a naive inversion of CE061's resolver gives.
+
+        `_imports_the_helper` returns True for a bare module import so that
+        `timing.close_window(...)` counts as reaching the helper. Inverted into
+        a ban, that branch flags every reducer importing the module — which
+        after the migration is four of the five.
+        """
+        assert not self._run("from coder_eval import timing\nx = timing.close_window(mark=m, now=n)")
+
+    def test_does_not_fire_on_close_window_by_name(self):
+        assert not self._run("from coder_eval.timing import close_window\nx = close_window(mark=m, now=n)")
+
+    def test_does_not_fire_on_an_unrelated_attribute_named_busy_ms(self):
+        # `self.busy_ms` is not `timing.busy_ms`; only the module spelling counts.
+        assert not self._run("x = self.busy_ms")
+
+    def test_does_not_fire_outside_agents(self):
+        # The collector is where the subtraction belongs, so it must import it.
+        assert not self._run("from coder_eval.timing import busy_ms", filepath="src/coder_eval/streaming/collector.py")
+
+    def test_is_suppressible(self, tmp_path):
+        from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
+        from tests.lint.runner import check_file
+
+        agents = tmp_path / "src" / "coder_eval" / "agents"
+        agents.mkdir(parents=True)
+        target = agents / "pi_agent.py"
+        target.write_text("from coder_eval.timing import busy_ms  # noqa: CE063\n", encoding="utf-8")
+        assert not check_file(target, [NoBusyMsInAgents])
+
+
+class TestCE064TurnBracketOnTheClock:
+    """CE064 flags a clocked reducer that lets its turn BRACKET default.
+
+    `decompose_turn` subtracts a generation-window bound from an
+    AgentStart/AgentEnd timestamp. A harness that derives the first from a
+    `TurnClock` and lets the second fall back to `StreamEvent.timestamp`'s
+    `default_factory=datetime.now` puts two bases inside one subtraction.
+    Measured on antigravity: a tail of -0.017 ms, an agent end stamped 17 us
+    before its own last message finished, clamped to the `0.0` that means
+    "measured, and instant".
+    """
+
+    CLOCKED = "from coder_eval.timing import TurnClock\n"
+    START = "from coder_eval.streaming.events import AgentStartEvent\n"
+    END = "from coder_eval.streaming.events import AgentEndEvent\n"
+
+    @staticmethod
+    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
+        import ast
+
+        from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
+
+        return TurnBracketOnTheClock(filepath).check(ast.parse(src))
+
+    def test_flags_a_defaulted_agent_start(self):
+        assert len(self._run(self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t', prompt='p')")) == 1
+
+    def test_flags_a_defaulted_agent_end(self):
+        assert len(self._run(self.CLOCKED + self.END + "e = AgentEndEvent(task_id='t', status=s)")) == 1
+
+    def test_flags_both_brackets_in_one_module(self):
+        src = (
+            self.CLOCKED + self.START + self.END + "a = AgentStartEvent(task_id='t')\nb = AgentEndEvent(task_id='t')\n"
+        )
+        assert len(self._run(src)) == 2
+
+    def test_accepts_an_explicit_timestamp(self):
+        src = self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t', timestamp=state.clock.now())"
+        assert not self._run(src)
+
+    def test_accepts_it_through_any_clock_expression(self):
+        """Presence, not spelling — see the rule's BLIND SPOT note.
+
+        Three harnesses reach their clock three ways (a `communicate` local,
+        `state.clock`, `self.clock`); pinning a spelling would make the rule a
+        syntax check on their internal structure.
+        """
+        for expr in ("clock.now()", "self.clock.now()", "state.clock.now()"):
+            src = self.CLOCKED + self.END + f"e = AgentEndEvent(task_id='t', timestamp={expr})"
+            assert not self._run(src), expr
+
+    def test_does_not_fire_on_an_unclocked_harness(self):
+        """Codex and OpenCode take their spans from the CLI's epoch stamps.
+
+        They deliberately have no `TurnClock`, so a raw `datetime.now()`
+        bracket is CONSISTENT with their bounds. Firing here would push them
+        toward the mixed basis the rule exists to prevent.
+        """
+        assert not self._run(self.START + "e = AgentStartEvent(task_id='t', prompt='p')")
+
+    def test_starts_applying_the_day_an_unclocked_harness_adopts_one(self):
+        # Scope is derived from the import, never a hardcoded harness list.
+        src = self.START + "e = AgentStartEvent(task_id='t')"
+        assert not self._run(src, filepath="src/coder_eval/agents/codex_agent.py")
+        assert len(self._run(self.CLOCKED + src, filepath="src/coder_eval/agents/codex_agent.py")) == 1
+
+    def test_resolves_an_aliased_import(self):
+        src = self.CLOCKED + "from coder_eval.streaming.events import AgentEndEvent as Done\n" + "e = Done(task_id='t')"
+        assert len(self._run(src)) == 1
+
+    def test_resolves_an_aliased_clock_import(self):
+        """The scope side of the same question: `TurnClock as Clock` still clocks the module.
+
+        A harness reaching its clock through an alias is still a clocked
+        harness; missing the binding would put it silently out of scope, which
+        is the half a hardcoded harness list would also get wrong.
+        """
+        src = "from coder_eval.timing import TurnClock as Clock\n" + self.START + "e = AgentStartEvent(task_id='t')"
+        assert len(self._run(src)) == 1
+
+    def test_resolves_a_relative_import(self):
+        src = (
+            "from ..timing import TurnClock\nfrom ..streaming.events import AgentStartEvent\ne = AgentStartEvent(t='t')"
+        )
+        assert len(self._run(src)) == 1
+
+    def test_does_not_fire_outside_agents(self):
+        src = self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t')"
+        assert not self._run(src, filepath="src/coder_eval/streaming/collector.py")
+
+    def test_does_not_fire_on_an_unrelated_event(self):
+        src = self.CLOCKED + "from coder_eval.streaming.events import ToolEndEvent\ne = ToolEndEvent(task_id='t')"
+        assert not self._run(src)
+
+    def test_is_suppressible(self, tmp_path):
+        from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
+        from tests.lint.runner import check_file
+
+        agents = tmp_path / "src" / "coder_eval" / "agents"
+        agents.mkdir(parents=True)
+        target = agents / "pi_agent.py"
+        target.write_text(
+            self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t')  # noqa: CE064\n",
+            encoding="utf-8",
+        )
+        assert not check_file(target, [TurnBracketOnTheClock])

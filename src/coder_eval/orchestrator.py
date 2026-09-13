@@ -319,6 +319,23 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
     # An absent dimension drops out of the average instead.
     if result.weighted_score is not None:
         props["Score"] = float(result.weighted_score)
+    # The four wall-clock buckets, from the ONE canonical summation — this
+    # function does not add anything up itself. Each is OMITTED rather than
+    # coalesced to 0, for the same reason as `Score` above: a dashboard
+    # averaging `StartupMs` with no filter would read a laundered zero as a
+    # harness that booted instantly, which is indistinguishable from a run that
+    # predates the capture. An absent dimension drops out of the average.
+    from .reports_stats import turn_time_buckets
+
+    buckets = turn_time_buckets(result)
+    for name, value in (
+        ("StartupMs", buckets.startup_ms),
+        ("GenerationMs", buckets.generation_ms),
+        ("ToolExecMs", buckets.tool_ms),
+        ("TeardownMs", buckets.teardown_ms),
+    ):
+        if value is not None:
+            props[name] = float(value)
     return "CoderEval.Task.End", props
 
 
@@ -624,6 +641,15 @@ class Orchestrator:
         agent_type = self.task.agent.type
 
         start_time = time.time()
+        # The monotonic twin of `start_time`, and the mark `setup_ms` measures
+        # from. It sits HERE rather than at `_setup()` because the phase is
+        # defined as everything before the agent runs, and the single largest
+        # item is already behind us by then: `get_version_info()` shells out for
+        # the git commit and every CLI's `--version` and costs 733 ms measured.
+        # Starting the mark at `_setup()` put that outside every named bucket,
+        # so it landed in the report's residual — 733 of the 758 ms that made
+        # "Unaccounted" look like a real unknown when it was one nameable call.
+        setup_started = time.monotonic()
         started_at = datetime.now()
 
         # Initialize result
@@ -658,6 +684,16 @@ class Orchestrator:
                 # the run as FinalStatus.ERROR; _run_post_run_commands and
                 # _cleanup still execute via the finally block.
                 await self._run_pre_run_commands()
+                # Everything before the agent phase, booked as ONE task-level
+                # bucket: the environment capture, criterion discovery, sandbox
+                # provisioning, agent start() and pre_run. Roughly harness-
+                # independent — measured within ~10 ms of each other for
+                # claude-code and pi on the same machine — which is the tell
+                # that it is the orchestrator's own cost rather than any
+                # harness's. It used to land in the report's residual, where a
+                # known constant reads as unexplained time: 10% of a 19s task,
+                # and it would read 60% of a 3s one.
+                self.result.setup_ms = (time.monotonic() - setup_started) * 1000.0
 
                 # Enforce task-level timeout via an OS-thread watchdog that
                 # SIGKILLs the in-flight CLI subprocess AND cancels this
@@ -856,6 +892,14 @@ class Orchestrator:
         self.result.agent_config = prior.agent_config
         self.result.expected_commands = prior.expected_commands
         self.result.simulation = prior.simulation
+        # The run's own setup cost, for the reason `duration_seconds` is
+        # restored: it is a fact about the run, not about this pass. A detached
+        # grade ADOPTS the workspace rather than building one
+        # (`Sandbox.adopt`), so its own setup is a different activity — writing
+        # it here would report the re-grade's cheap adoption as the run's
+        # provisioning. `grading_ms` goes the other way and is deliberately NOT
+        # carried: the verdict this row now holds came from THIS pass's grading.
+        self.result.setup_ms = prior.setup_ms
 
         # pre_run belongs to the execute phase and is NOT re-run against an
         # adopted workspace (see _skip_pre_run_for_adopted), so its recorded
@@ -1147,6 +1191,12 @@ class Orchestrator:
 
         self.result.completed_at = datetime.now()
         self.result.duration_seconds = time.time() - start_time
+        # Read off the checker, which accumulated it across every call site it
+        # served. Stays None when nothing was graded (`coder-eval execute`),
+        # which is the distinction CE058 is about: no criteria ran, so no
+        # measurement exists — as opposed to one that came back instant.
+        if self.success_checker is not None:
+            self.result.grading_ms = self.success_checker.grading_ms
 
         # Re-grade: the row keeps the agent run's duration (see
         # _seed_from_prior_result). The grading pass's own cost is preserved

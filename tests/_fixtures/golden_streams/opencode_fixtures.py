@@ -25,21 +25,59 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from unittest.mock import patch
 
 from coder_eval.agents.opencode_agent import OpenCodeAgent
+from coder_eval.errors import AgentCrashError
 from coder_eval.models import OpenCodeAgentConfig
 
 
 SESSION = "ses_test123"
 
 
+# Base epoch milliseconds for the recorded stream. A BASE, not a wall-clock
+# claim: `_rebase_lines` shifts the whole timeline onto the replay's own clock
+# before the scenario runs, so these stamps and the agent's own `datetime.now()`
+# event stamps are commensurable. Left absolute they sit a month away from the
+# replay, which puts the recorded tool interval outside every measured window.
+_T0_MS = 1_786_663_016_802
+
+# How far after the replay's start the rebased timeline begins — small, but
+# non-zero so the first window opens after the AgentStartEvent.
+_REPLAY_LEAD_MS = 2
+
+
 def _evt(event_type: str, part: dict[str, Any]) -> str:
     """One CLI event line: payload under ``part``, sessionID on the envelope."""
     return json.dumps(
-        {"type": event_type, "timestamp": 1786663016802, "sessionID": SESSION, "part": {"sessionID": SESSION, **part}}
+        {"type": event_type, "timestamp": _T0_MS, "sessionID": SESSION, "part": {"sessionID": SESSION, **part}}
     )
+
+
+def _rebase_lines(lines: list[str]) -> list[str]:
+    """Shift every recorded stamp from ``_T0_MS`` onto the replay's own clock.
+
+    Keeps every DERIVED duration exact (a 17 ms tool stays 17 ms) and fixes
+    only the era, so the head and tail the collector records against the
+    agent's `datetime.now()` stamps are meaningful rather than a month wide.
+    """
+    offset = int(datetime.now().timestamp() * 1000) - _T0_MS + _REPLAY_LEAD_MS
+
+    def shift(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: (v + offset if k in _STAMP_KEYS and isinstance(v, int) else shift(v)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [shift(v) for v in node]
+        return node
+
+    return [json.dumps(shift(json.loads(line))) for line in lines]
+
+
+# Millisecond-epoch keys anywhere in an event payload: the envelope's own
+# stamp, and a tool's `state.time` bounds.
+_STAMP_KEYS = frozenset({"timestamp", "start", "end"})
 
 
 def _tokens(inp: int, out: int, *, write: int = 0, read: int = 0, reasoning: int = 0) -> dict[str, Any]:
@@ -164,18 +202,23 @@ def _agent() -> OpenCodeAgent:
 class OpenCodeScenario:
     """One recorded CLI event stream.
 
-    No ``expects`` knob: every scenario here replays cleanly. The crash and
-    timeout paths live in the agent's own test module, which asserts on the
-    exception rather than on a snapshot.
+    ``expects`` names the exception a scenario is supposed to raise, and the
+    runner then snapshots ``pending_turn`` instead of the returned record —
+    the same knob ``ClaudeScenario`` carries, for the same reason: the partial
+    a crash preserves is a real capture path, and one nobody was comparing
+    against a snapshot on this harness.
     """
 
     name: str
     lines: list[str]
+    expects: type[BaseException] | None = None
 
 
 async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) -> dict[str, Any]:
     """Replay one scenario and return the resulting record as a plain dump."""
-    proc = _FakeProcess(scenario.lines)
+    import pytest
+
+    proc = _FakeProcess(_rebase_lines(scenario.lines))
 
     async def fake_exec(*_argv: str, **_kwargs: Any) -> _FakeProcess:
         proc.stderr = proc  # type: ignore[assignment]
@@ -188,7 +231,13 @@ async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) ->
         patch.object(os, "killpg", lambda _pgid, _sig: None, create=True),
     ):
         await agent.start(working_dir)
-        record = await agent.communicate("do it")
+        if scenario.expects is not None:
+            with pytest.raises(scenario.expects):
+                await agent.communicate("do it")
+            record = agent.pending_turn
+            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
+        else:
+            record = await agent.communicate("do it")
     return record.model_dump(mode="json")
 
 
@@ -219,6 +268,105 @@ def _build_catalogue() -> list[OpenCodeScenario]:
     # (b) a resolved tool call inside a step.
     scenarios.append(
         OpenCodeScenario(name="b_tool_call_resolved", lines=list(HAPPY_STREAM)),
+    )
+
+    # (c) two generations with a tool resolving between them. The TILING case:
+    # the second window opens at the first `step_finish`, not at its own
+    # `step_start`, so the wall clock between the two steps — the model time
+    # that produced the second one — lands inside a window rather than in no
+    # bucket at all. That is the defect this harness shipped with, and it had
+    # a unit test but no golden.
+    scenarios.append(
+        OpenCodeScenario(
+            name="c_multi_step_tiling",
+            lines=[
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt(
+                    "tool_use",
+                    {
+                        "id": "prt_2",
+                        "messageID": "msg_1",
+                        "tool": "bash",
+                        "callID": "call_1",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "ls"},
+                            "output": "main.py",
+                            "time": {"start": _T0_MS, "end": _T0_MS + 5},
+                        },
+                    },
+                ),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_3", "messageID": "msg_1", "reason": "tool-calls", "tokens": _tokens(100, 20)},
+                ),
+                _evt("step_start", {"id": "prt_4", "messageID": "msg_2"}),
+                _evt("text", {"id": "prt_5", "messageID": "msg_2", "text": "Listed it."}),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_6", "messageID": "msg_2", "reason": "stop", "tokens": _tokens(50, 30)},
+                ),
+            ],
+        )
+    )
+
+    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved`
+    # by the orphan sweep at finalization. It carries NO `state.time`, which is
+    # the honest shape for a call that never returned: with no
+    # `execution_started_at` there is no `duration_ms` and no span.
+    #
+    # READ THE SNAPSHOT: the sweep still stamps `execution_completed_at`, which
+    # it does on every close path, so the record holds an end with no
+    # beginning. Compare `pi_d_orphaned_tool`, where the start IS stamped and a
+    # manufactured duration follows from it.
+    scenarios.append(
+        OpenCodeScenario(
+            name="d_orphaned_tool",
+            lines=[
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt(
+                    "tool_use",
+                    {
+                        "id": "prt_2",
+                        "messageID": "msg_1",
+                        "tool": "bash",
+                        "callID": "call_1",
+                        "state": {"status": "pending", "input": {"command": "sleep 600"}},
+                    },
+                ),
+                _evt("text", {"id": "prt_3", "messageID": "msg_1", "text": "Waiting."}),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_4", "messageID": "msg_1", "reason": "stop", "tokens": _tokens(100, 20)},
+                ),
+            ],
+        )
+    )
+
+    # (e) the CLI's own structured error AFTER a complete generation. `_settle_turn`
+    # crashes on it, and the partial `pending_turn` must still carry that
+    # generation and its head/tail — a crash does not un-measure what was
+    # measured before it.
+    scenarios.append(
+        OpenCodeScenario(
+            name="e_error_after_generation",
+            lines=[
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt("text", {"id": "prt_2", "messageID": "msg_1", "text": "Starting."}),
+                _evt(
+                    "step_finish",
+                    {"id": "prt_3", "messageID": "msg_1", "reason": "stop", "tokens": _tokens(100, 20)},
+                ),
+                json.dumps(
+                    {
+                        "type": "error",
+                        "sessionID": SESSION,
+                        "error": {"name": "ProviderAuthError", "data": {"message": "401 from the provider"}},
+                    }
+                ),
+            ],
+            expects=AgentCrashError,
+        )
     )
 
     return scenarios

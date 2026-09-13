@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
-from coder_eval.agents._timing import busy_ms
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import ThreadedWatchdog
 from coder_eval.config import settings
@@ -54,6 +53,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import close_window
 from coder_eval.utils import expand_env_vars
 
 
@@ -473,47 +473,22 @@ class _CodexTurnState:
         # attributed to nothing. Across that turn only 15.8% of the 17 s wall
         # clock was accounted for. Tiling matches Antigravity and claude-code,
         # and is what lets Sum(generation) + Sum(tool) reconcile to the turn.
-        #
-        # min() is defensive: a stamp that goes backwards must never push the
-        # window start PAST the first item and invert the span.
-        window_start_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
-        if window_start_ms is not None and self.open_start_ms is not None:
-            window_start_ms = min(window_start_ms, self.open_start_ms)
+        mark_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
         window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
-        started = _ms_to_dt(window_start_ms)
+        mark = _ms_to_dt(mark_ms)
         completed = _ms_to_dt(window_end_ms)
-        # The window is extended to the LAST item's completion, so any
+        # The RAW window. It is extended to the LAST item's completion, so a
         # generation containing a tool call already CONTAINS that tool's
-        # execution. Publishing the raw span as generation time double-counts
-        # it against the tool's own duration_ms: a tool-only emission reported
-        # 250ms of "generation" for a 250ms `echo hi`, and the task page's
-        # Generation + Tool exec then exceeded the wall clock they must
-        # reconcile to.
-        #
-        # Same treatment, and the same shared helper, as Antigravity: subtract
-        # the UNION of the tool intervals clipped to this window. A sum would
-        # over-subtract wherever they overlap, which Codex produces natively
-        # via concurrent collab agents.
-        #
-        # Closed intervals, plus any call still OPEN at this flush bounded at
-        # the window end. Excluding the open ones publishes the part of a
-        # straddling call that ran inside this window as generation while the
-        # call's own duration_ms counts it again — harmless while the windows
-        # were too narrow to overlap a tool, and a live double-count now that
-        # they tile. Antigravity hit exactly that and broke the invariant by
-        # 0.26 ms; the fix travels with the tiling that makes it reachable.
-        tool_spans = [
-            (c.execution_started_at, c.execution_completed_at)
-            for c in self.commands
-            if c.execution_started_at is not None and c.execution_completed_at is not None
-        ]
-        tool_spans += [
-            (t.execution_started_at, completed)
-            for t in self.open_tools.values()
-            if t.execution_started_at is not None and t.execution_started_at < completed
-        ]
-        span_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
-        gen_ms = max(0.0, span_ms - busy_ms(tool_spans, started, completed))
+        # execution — but taking it back out is no longer this reducer's job.
+        # `timing.subtract_tool_time` does it for all five, which is
+        # also what makes the sub-message split below safe: the two specs share
+        # these bounds, so the collector groups them and subtracts the overlap
+        # ONCE rather than once per part.
+        started, gen_ms = close_window(
+            mark=mark,
+            now=completed,
+            item_start=_ms_to_dt(self.open_start_ms) if self.open_start_ms is not None else None,
+        )
         message_id = f"{self.turn_id}-msg-{self.gen_index}"
 
         # Output split: reasoning portion to the thinking row, the remainder to

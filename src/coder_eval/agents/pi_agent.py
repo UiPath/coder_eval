@@ -77,7 +77,6 @@ from uuid import uuid4
 
 from coder_eval.agent import Agent
 from coder_eval.agents._skills import _plugin_skill_dirs  # shared plugin->skills resolver
-from coder_eval.agents._timing import busy_ms
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -110,6 +109,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.timing import TurnClock, close_window
 
 from .registry import AgentRegistry
 
@@ -262,12 +262,27 @@ class _PiTurnState:
     to force-close orphans when a turn dies mid-flight.
     """
 
-    def __init__(self, *, task_id: str, iteration: int, user_input: str, model: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        iteration: int,
+        user_input: str,
+        model: str | None,
+        clock: TurnClock | None = None,
+    ) -> None:
         self.task_id = task_id
         self.iteration = iteration
         self.user_input = user_input
         self.model = model
 
+        # ONE clock per turn, and every wall stamp below derives from it, so
+        # the tool spans and the window bounds they are subtracted from cannot
+        # end up on different bases. Injectable so a test can supply a fake
+        # rather than monkeypatching this module's `datetime` global — which a
+        # derived stamp would silently escape, leaving the test passing against
+        # the real clock instead of failing.
+        self.clock = clock or TurnClock()
         self.started_at = time.monotonic()
         self.thread_id: str | None = None
 
@@ -288,14 +303,16 @@ class _PiTurnState:
         self.turn_started_at: datetime | None = None
         self.turn_text_parts: list[str] = []
         self.turn_tool_ids: list[str] = []
-        # Execution intervals of tools that CLOSED inside the open
-        # generation window. Every tool call runs INSIDE the window, so
-        # publishing the raw span as generation time counts the same
-        # milliseconds twice — once here and once as the tool's own
-        # duration_ms. Intervals, not a running total: they overlap
-        # whenever the harness runs tools concurrently, and only their
-        # union may be subtracted (agents/_timing.py::busy_ms).
-        self.turn_tool_spans: list[tuple[datetime, datetime]] = []
+        # Where the NEXT generation window starts: the previous turn's end.
+        # Pi was the only harness measuring from its own `turn_start`, so the
+        # wall clock between one `turn_end` and the next `turn_start` — the
+        # model time that PRODUCED that turn — fell into no bucket at all.
+        #
+        # None until the first turn finishes, and deliberately so: the first
+        # window keeps its own `turn_start`, because everything before it is
+        # CLI process spawn, not model time. Same shape as OpenCode's
+        # `gen_mark` and Codex's `gen_mark_ms`.
+        self.gen_mark: datetime | None = None
 
         # toolCallId -> telemetry for tools awaiting a result.
         self.open_tools: dict[str, CommandTelemetry] = {}
@@ -353,10 +370,13 @@ class _PiTurnState:
         self.turn_count += 1
         self.turn_open = True
         self.turn_id = f"turn_{self.turn_count}"
-        self.turn_started_at = datetime.now()
+        self.turn_started_at = self.clock.now()
         self.turn_text_parts = []
         self.turn_tool_ids = []
-        self.turn_tool_spans = []
+        # No per-turn span list to reset here any more — see the identical note
+        # in `opencode_agent.on_step_start`. The collector subtracts from final
+        # bounds with every span known, so nothing has to remember a call that
+        # closed in the gap before this `turn_start`.
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -387,7 +407,7 @@ class _PiTurnState:
         tool_name = _TOOL_NAME_MAP.get(raw_tool.lower(), raw_tool)
         args = obj.get("args")
         params = args if isinstance(args, dict) else {}
-        started = datetime.now()
+        started = self.clock.now()
         telemetry = CommandTelemetry(
             tool_name=tool_name,
             tool_id=call_id,
@@ -434,17 +454,28 @@ class _PiTurnState:
                 tool_name="unknown",
                 tool_id=call_id,
                 assistant_turn_index=self.turn_count,
-                timestamp=datetime.now(),
+                timestamp=self.clock.now(),
                 sequence_number=self.sequence,
             )
-        completed = datetime.now()
-        telemetry.execution_completed_at = completed
-        if telemetry.execution_started_at is not None:
-            telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
-            # This tool ran inside the open generation window, so its time is
-            # not model time. Only a RESOLVED tool contributes: one force-closed
-            # without a result was never timed.
-            self.turn_tool_spans.append((telemetry.execution_started_at, completed))
+        # Only a RESOLVED tool is timed. An orphan force-closed by
+        # `close_open_tools` was never observed finishing, so the instant the
+        # sweep runs is not a completion — stamping it manufactures both an
+        # `execution_completed_at` and the `duration_ms` derived from it, and
+        # the pair then reads as a measured span that
+        # `timing.subtract_tool_time` takes back out of a generation
+        # window it never actually occupied. `execution_started_at` IS kept:
+        # the CLI really did emit that start, and one bound alone forms no
+        # span (`main_thread_tool_spans` requires both). This is the guard the
+        # old comment here claimed and the code did not have — it tested
+        # `execution_started_at is not None`, which an orphan passes.
+        # claude-code's `_finalize_commands` leaves the same field `None` for
+        # the same reason: unknown status and unknown duration are one fact
+        # (CE058).
+        if status is not ToolEndStatus.UNRESOLVED:
+            completed = self.clock.now()
+            telemetry.execution_completed_at = completed
+            if telemetry.execution_started_at is not None:
+                telemetry.duration_ms = (completed - telemetry.execution_started_at).total_seconds() * 1000
         telemetry.result_status = _RESULT_STATUS[status]
         # Stored untruncated by design (sub-agent returns must survive whole).
         telemetry.result_summary = summary
@@ -573,8 +604,7 @@ class _PiTurnState:
         else:
             self.error_message = None
 
-        started = self.turn_started_at or datetime.now()
-        completed = datetime.now()
+        completed = self.clock.now()
         blocks: list[ContentBlock] = []
         turn_text = "".join(self.turn_text_parts)
         if turn_text:
@@ -582,23 +612,20 @@ class _PiTurnState:
         for i, tool_id in enumerate(self.turn_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
-        # A call still OPEN at this boundary counts too, bounded at `completed`.
-        # Subtracting only CLOSED intervals publishes the part of a straddling
-        # call that ran inside this window as generation, while the call's own
-        # duration_ms counts it again. No double subtraction: when the call later
-        # closes, `_finish_tool` appends its full interval to the NEXT turn's
-        # list, where busy_ms clips it to the post-boundary remainder.
-        spans = self.turn_tool_spans + [
-            (t.execution_started_at, completed) for t in self.open_tools.values() if t.execution_started_at is not None
-        ]
+        # Tile from the previous turn's end. The RAW window only —
+        # `timing.subtract_tool_time` takes the tool union back out of
+        # it, once, for every harness.
+        turn_start = self.turn_started_at if self.turn_started_at is not None else completed
+        started, generation_ms = close_window(
+            mark=self.gen_mark if self.gen_mark is not None else turn_start,
+            now=completed,
+            item_start=turn_start,
+        )
         self.messages.append(
             AssistantMessage(
                 started_at=started,
                 completed_at=completed,
-                generation_duration_ms=max(
-                    0.0,
-                    (completed - started).total_seconds() * 1000 - busy_ms(spans, started, completed),
-                ),
+                generation_duration_ms=generation_ms,
                 content_blocks=blocks,
                 tool_use_ids=list(self.turn_tool_ids),
                 input_tokens=step_in,
@@ -611,6 +638,28 @@ class _PiTurnState:
                 message_id=str(message.get("responseId") or "") or None,
             )
         )
+        # A message was appended, so the next window starts where this one
+        # ended. Only a finished turn advances the mark: one that never
+        # finished published nothing, so tiling past it would attribute its
+        # time to whichever turn finishes next. There is no span list to clear
+        # alongside it any more — see `on_turn_start`.
+        self.gen_mark = completed
+        # And so is this turn's own start stamp, because it has now been SPENT.
+        # It is passed to `close_window` as `item_start`, whose `min()` pulls
+        # the window open to cover it; left in place, a second `turn_end` with
+        # no intervening `turn_start` — a duplicate or replayed line, which
+        # this reducer promises to survive — would reopen the next window back
+        # at the previous turn's start and publish that whole span a second
+        # time. Reproduced: 3000 ms of generation for a 2000 ms turn.
+        self.turn_started_at = None
+        # The CONTENT half of the same reset, and the same argument: both
+        # lists have now been SPENT into the message appended above.
+        # Cleared only in `on_turn_start`, a second `turn_end` with no
+        # intervening start re-emitted the previous turn's text as its own
+        # assistant message and re-listed the same `tool_use_ids`, so one
+        # tool call appeared to belong to two generations.
+        self.turn_text_parts = []
+        self.turn_tool_ids = []
         self.emit(
             TurnEndEvent(
                 task_id=self.task_id,
@@ -719,6 +768,9 @@ class _PiTurnState:
                 crashed=crashed,
                 crash_reason=crash_reason,
                 duration_seconds=time.monotonic() - self.started_at,
+                # One basis with the window bounds — see the AgentStartEvent
+                # site in `communicate`.
+                timestamp=self.clock.now(),
             )
         )
 
@@ -988,9 +1040,19 @@ class PiAgent(Agent[PiAgentConfig]):
                 prompt=user_input,
                 iteration=self._iteration,
                 model=self.config.model,
+                # One basis with the window bounds this is subtracted
+                # against — see `timing.TurnClock`. The event model's raw
+                # `datetime.now()` default put two clocks inside one
+                # `decompose_turn` subtraction, which clamped a -0.017 ms tail
+                # to the `0.0` that means "measured, and instant" (CE058).
+                timestamp=state.clock.now(),
             )
         )
 
+        # Deadlines stay on `time.monotonic()` and are deliberately NOT routed
+        # through the turn clock: a deadline must not move when the wall clock
+        # steps. `TurnClock` exists to give the RECORDED stamps one basis; this
+        # is the one place a raw monotonic reading is the right answer.
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         stderr_drain: asyncio.Future[bytes] | None = None

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from coder_eval.models import TurnRecord
+from coder_eval.timing import main_thread_tool_spans, union_ms
+
 
 SCRUB_PLACEHOLDER = "<scrubbed>"
 
@@ -24,6 +27,14 @@ SCRUB_KEYS = frozenset(
         "duration_ms",
         "duration_seconds",
         "generation_duration_ms",
+        # Measured wall intervals like the two above, so they vary run to run;
+        # masking keeps None-vs-set (the meaningful distinction) visible while
+        # the value itself stays out of the snapshot.
+        "harness_startup_ms",
+        "harness_teardown_ms",
+        # The turn's third wall-clock bucket, and measured the same way, so it
+        # varies run to run for the same reason.
+        "tool_union_ms",
         # Cost is a rate-card-dependent float (and is backfilled from the rate
         # card on timeout/kill), so it is masked too — keeping the snapshot
         # rate-card-independent. The integer TOKEN buckets stay EXACT; those are
@@ -99,7 +110,45 @@ def assert_reconciliation(record: dict[str, Any]) -> None:
     assert cr_sum == usage["cache_read_input_tokens"], "cache_read bucket does not reconcile"
 
 
-def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: bool) -> None:
+# The four buckets are disjoint by construction, so their sum cannot exceed the
+# turn's own wall clock. Flag only an overshoot past BOTH bounds: the relative
+# one is what catches the defect (an orphaned tool double-booked into the tail
+# read +55% of wall on ``antigravity_d_orphaned_tool``), and the absolute floor
+# keeps a replay whose whole turn is 40 microseconds from failing on scheduler
+# jitter. Healthy fixtures overshoot by at most 0.003 ms / 2%.
+_IDENTITY_FLOOR_MS = 0.1
+_IDENTITY_SHARE = 0.20
+
+
+def _tool_union_ms(record: dict[str, Any]) -> float:
+    """Wall ms this turn's MAIN-THREAD tools occupied — the union, never the sum.
+
+    Validates the raw dump into a ``TurnRecord`` and calls the SAME typed
+    selector the collector uses, rather than reimplementing the selection rule
+    (the sub-agent-id derivation, the stamp parse, the ``end >= start`` filter)
+    over dicts. Three copies of that rule existed and agreed only because
+    someone kept checking; the collector's own version once passed every command
+    while filtering only its generations, and the two agreed by luck.
+
+    What is shared with production is the SELECTION and ``union_ms``. What is
+    NOT shared is the bookkeeping around them — this still builds its own span
+    set and computes its own union, which is where every timing defect on this
+    branch actually lived (see CE063's docstring). Do not "simplify" it into
+    reading ``tool_union_ms``: that would make the sensor a restatement of the
+    producer's answer, and the cross-check below is what verifies that field.
+    """
+    turn = TurnRecord.model_validate(record)
+    return union_ms(main_thread_tool_spans(turn.messages, turn.commands))
+
+
+# The stored bucket and the union recomputed here should be the same number;
+# a JSON round-trip is the only slack.
+_UNION_TOLERANCE_MS = 1e-6
+
+
+def assert_timing_captured(
+    record: dict[str, Any], *, expect_generation_window: bool, check_identity: bool = True
+) -> None:
     """Assert a TurnRecord dump actually recorded the timing it could measure.
 
     Run on the UNSCRUBBED dump. ``scrub()`` masks values but preserves ``None``
@@ -130,6 +179,50 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
     bounds are the same ``ast.Name``; when they are two different names
     holding the same value it cannot, and this is the check that does.
 
+    **Unconditional, and keyed on the messages rather than on the flag.** A
+    turn's head and tail (``harness_startup_ms`` / ``harness_teardown_ms``) are
+    set exactly when the turn produced an assistant message with a MEASURABLE
+    window, because that is what the collector measures them against — so both
+    are non-``None`` when one exists and both are ``None`` when none does.
+
+    Both halves of that key are load-bearing. The flag is the wrong one:
+    ``codex_e_orphan_tool`` streams a generation whose window subtracts to
+    zero, so it clears the flag while still having a head and a tail to report.
+    And "any assistant message" is too weak: ``codex_g_items_rebuild`` rebuilds
+    its transcript from the rollout after the turn ended, with
+    ``generation_duration_ms=None`` and placeholder ``now()`` bounds, so there
+    is nothing there to measure an end against and the honest answer is
+    ``None`` for both.
+
+    PRESENCE is all the fixtures can support, and it is the thing worth
+    asserting: the replays run in ~0.3 ms of synthetic wall clock, so their
+    head and tail are microseconds and any bound or ordering check would be
+    noise. A ``>= 0`` check would be worse than noise — ``decompose_turn``
+    clamps with ``max(..., 0.0)``, so it would restate the implementation and
+    could never fail.
+
+    **The four-bucket identity**, when ``check_identity``. Generation plus the
+    UNION of the tool intervals plus the head plus the tail cannot exceed the
+    turn's ``duration_seconds``, because the four are disjoint: the windows are
+    tool-subtracted and so are the head and tail. This is the one assertion
+    that catches a DOUBLE-COUNT rather than an absence — it is how an orphaned
+    tool force-closed inside the tail, booked both as tool and as teardown, was
+    found reconciling at -86% of wall clock while all 72 golden tests passed.
+
+    The check is ONE-SIDED on purpose and stays that way. A symmetric bound
+    would be a sensor in name only here: the replays run in ~0.3 ms of
+    synthetic wall clock, so ``abs(residual) <= max(0.1 ms, 20% x wall)``
+    passes essentially any magnitude. The two-sided, millisecond-exact check
+    lives in ``tests/test_timing_identity_contract.py``, where a scripted clock
+    makes the magnitudes real, and the live two-sided gate is
+    ``scripts/timing/decompose_run.py --max-residual-pct``.
+
+    ``check_identity`` is off for the scenarios that inject their own SDK
+    timestamps (see ``FICTIONAL_DURATIONS``): those declare integer-millisecond
+    item durations of 17-900 ms while the replay itself takes ~0.3 ms of real
+    wall clock, so no rebasing can make the two commensurable — the SDK's
+    stamps are milliseconds and the replay is faster than one.
+
     Why a scenario-level floor rather than a per-entry rule: no per-entry form
     works against the real snapshots. ``claude_d_subagent_terminal`` holds two
     content-bearing assistant messages of which exactly one is legitimately
@@ -149,9 +242,72 @@ def assert_timing_captured(record: dict[str, Any], *, expect_generation_window: 
                 "returned was timed, so the record must say when and for how long"
             )
 
+    assistant = [m for m in record.get("messages") or [] if m.get("role") == "assistant"]
+    measurable = [m for m in assistant if m.get("generation_duration_ms") is not None]
+    for field in ("harness_startup_ms", "harness_teardown_ms"):
+        value = record.get(field)
+        if measurable:
+            assert value is not None, (
+                f"{field} is None on a turn carrying {len(measurable)} measurable generation "
+                "window(s): the collector measures the head and tail against the earliest and "
+                "latest of those, so a turn that generated has both — None says never measured"
+            )
+        else:
+            assert value is None, (
+                f"{field} is {value!r} on a turn with no measurable generation window "
+                f"({len(assistant)} assistant message(s), none reporting a duration): there is "
+                "nothing to measure an end against, and a number here claims a measurement "
+                "nobody could have taken"
+            )
+
+    if check_identity:
+        wall_ms = (record.get("duration_seconds") or 0.0) * 1000.0
+        # Main thread only: a sub-agent's generations bubble into the same
+        # stream, and the spawning Agent call's own interval already spans them.
+        generation_ms = sum(
+            m.get("generation_duration_ms") or 0.0
+            for m in record.get("messages") or []
+            if m.get("role") == "assistant" and m.get("parent_tool_use_id") is None
+        )
+        tool_ms = _tool_union_ms(record)
+        # CROSS-CHECK, before the identity assertion: the producer's stored
+        # bucket must agree with the one just computed independently. This is
+        # what keeps the sensor a sensor — it verifies the producer's
+        # BOOKKEEPING (which spans reached the union) rather than reading the
+        # producer's answer. Skipped when the field is absent, which is a record
+        # written before it existed rather than a disagreement.
+        stored_union = record.get("tool_union_ms")
+        if isinstance(stored_union, (int, float)):
+            assert abs(stored_union - tool_ms) <= _UNION_TOLERANCE_MS, (
+                f"tool_union_ms is {stored_union!r}, but this turn's main-thread command spans "
+                f"union to {tool_ms:.6f} ms (off by {stored_union - tool_ms:+.6f} ms). The "
+                "collector writes that field from the same span set it measures the head and the "
+                "tail against, so a disagreement means a span reached one and not the other — "
+                "most likely a sub-agent command counted on one side, or a command whose bounds "
+                "moved after the field was written."
+            )
+        bucket_sum = (
+            generation_ms
+            + tool_ms
+            + (record.get("harness_startup_ms") or 0.0)
+            + (record.get("harness_teardown_ms") or 0.0)
+        )
+        overshoot = bucket_sum - wall_ms
+        assert overshoot <= max(_IDENTITY_FLOOR_MS, _IDENTITY_SHARE * wall_ms), (
+            f"the four buckets sum to {bucket_sum:.4f} ms against a {wall_ms:.4f} ms turn "
+            f"(over by {overshoot:.4f} ms): generation={generation_ms:.4f}, tool_union={tool_ms:.4f}, "
+            f"startup={record.get('harness_startup_ms')!r}, teardown={record.get('harness_teardown_ms')!r}. "
+            "They are meant to be DISJOINT, so a sum this far over the turn means something is "
+            "booked twice — most likely a tool that ran outside every generation window and was "
+            "left in the head or tail as well as in the tool union, or a generation window that "
+            "kept tool time it should have subtracted (see docs/agents/HARNESS_PARITY.md — the "
+            "subtraction happens once, in timing.py::subtract_tool_time, so a "
+            "double-count is a span the collector saw twice or a reducer publishing a window it "
+            "already narrowed)"
+        )
+
     if not expect_generation_window:
         return
-    assistant = [m for m in record.get("messages") or [] if m.get("role") == "assistant"]
     windows = [(m.get("generation_duration_ms"), m.get("started_at"), m.get("completed_at")) for m in assistant]
     assert any(
         duration is not None and duration > 0 and started is not None and completed is not None and completed > started

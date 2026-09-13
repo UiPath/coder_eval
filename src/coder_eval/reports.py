@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
+from .formatting import format_ms
 from .models import (
     CriterionAggregate,
     CriterionStats,
@@ -295,7 +296,12 @@ class ReportGenerator:
                 pct = count / total * 100 if total > 0 else 0
                 lines.append(f"| {tool} | {count} | {pct:.1f}% |")
 
-        if stats.avg_command_time_ms and stats.avg_command_time_ms > 0:
+        # `is not None`, not truthiness. `analysis.py` returns `None` when
+        # nothing was timed and a float otherwise, so a genuine measured `0.0`
+        # average — every command resolving faster than the clock's resolution —
+        # used to suppress the whole section. The distinction the producer makes
+        # has to survive to the surface that renders it.
+        if stats.avg_command_time_ms is not None:
             lines.extend(
                 [
                     "",
@@ -340,8 +346,10 @@ class ReportGenerator:
         lines = [
             "## Generation Metrics",
             "",
-            "| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency |",
-            "|---------|---------------|-------|------------|------------------|",
+            "| Task ID | Total Latency | Turns | Asst Turns | Avg Turn Latency "
+            + "| Startup | Generation | Tool exec | Teardown |",
+            "|---------|---------------|-------|------------|------------------"
+            + "|---------|------------|-----------|----------|",
         ]
 
         for task in task_results:
@@ -358,7 +366,17 @@ class ReportGenerator:
             else:
                 avg_turn_str = "N/A"
 
-            lines.append(f"| {task_id} | {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} |")
+            # READ, never summed here. The four values are computed once by
+            # `reports_stats.turn_time_buckets` and carried on the row by
+            # `reports_experiment.eval_result_to_task_dict`; `iterations` above
+            # is a 6-key projection that cannot support the arithmetic anyway.
+            # `.get()` because a `run.json` written before this phase has none
+            # of the four — which then renders as a dash, not as `0ms`.
+            buckets = " | ".join(
+                format_ms(task.get(key)) for key in ("startup_ms", "generation_ms", "tool_ms", "teardown_ms")
+            )
+
+            lines.append(f"| {task_id} | {total_latency} | {num_turns} | {asst_turns} | {avg_turn_str} | {buckets} |")
 
         return lines
 

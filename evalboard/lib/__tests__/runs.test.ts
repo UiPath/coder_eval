@@ -24,6 +24,7 @@ import {
     parseCriterionResults,
     type RawTaskResult,
     sortArtifacts,
+    sumTurnBuckets,
     toTaskRow,
     visibleTurnsFromRaw,
     walkArtifacts,
@@ -243,6 +244,74 @@ describe("aggregateSubAgentUsage", () => {
         expect(aggregateSubAgentUsage([])).toEqual({});
         expect(aggregateSubAgentUsage([msg({ parentToolUseId: null })])).toEqual({});
         expect(aggregateSubAgentUsage([msg({ parentToolUseId: undefined })])).toEqual({});
+    });
+});
+
+describe("sumTurnBuckets", () => {
+    test("sums all three buckets across iterations", () => {
+        expect(
+            sumTurnBuckets([
+                { harness_startup_ms: 3000, harness_teardown_ms: 800, tool_union_ms: 200 },
+                { harness_startup_ms: 120, harness_teardown_ms: 40, tool_union_ms: 50 },
+            ]),
+        ).toEqual({ startupMs: 3120, teardownMs: 840, toolMs: 250 });
+    });
+
+    test("a measured zero is a measurement and still sums", () => {
+        // A harness that reached its first model output with nothing
+        // measurable in front of it legitimately reports 0.0 — a clamped
+        // inversion where both ends were still observed. The same holds for a
+        // tool union: spans were recorded and occupied no measurable time.
+        expect(
+            sumTurnBuckets([
+                { harness_startup_ms: 0, harness_teardown_ms: 3.5, tool_union_ms: 0 },
+            ]),
+        ).toEqual({ startupMs: 0, teardownMs: 3.5, toolMs: 0 });
+    });
+
+    test("is null when EVERY iteration is null — never 0", () => {
+        // 0 would claim the harness started instantly; null says nobody looked.
+        expect(
+            sumTurnBuckets([
+                { harness_startup_ms: null, harness_teardown_ms: null, tool_union_ms: null },
+                {},
+            ]),
+        ).toEqual({ startupMs: null, teardownMs: null, toolMs: null });
+    });
+
+    test("a run predating tool_union_ms reports null for it and real numbers beside it", () => {
+        // The legacy shape, and the one that routes the task page to computing
+        // the union from the message stream instead.
+        expect(
+            sumTurnBuckets([{ harness_startup_ms: 500, harness_teardown_ms: 90 }]),
+        ).toEqual({ startupMs: 500, teardownMs: 90, toolMs: null });
+    });
+
+    test("sums the measured iterations and ignores the unmeasured ones", () => {
+        expect(
+            sumTurnBuckets([
+                { harness_startup_ms: 500 },
+                { harness_teardown_ms: 90 },
+                { tool_union_ms: 12 },
+            ]),
+        ).toEqual({ startupMs: 500, teardownMs: 90, toolMs: 12 });
+    });
+
+    test("is null on an empty turn list", () => {
+        expect(sumTurnBuckets([])).toEqual({
+            startupMs: null,
+            teardownMs: null,
+            toolMs: null,
+        });
+    });
+
+    test("a non-finite value is dropped rather than poisoning the sum", () => {
+        expect(
+            sumTurnBuckets([
+                { harness_startup_ms: NaN, harness_teardown_ms: 10, tool_union_ms: Infinity },
+                { harness_startup_ms: 25, tool_union_ms: 7 },
+            ]),
+        ).toEqual({ startupMs: 25, teardownMs: 10, toolMs: 7 });
     });
 });
 

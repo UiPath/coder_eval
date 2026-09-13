@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from coder_eval.models import (
     AgentKind,
+    AssistantMessage,
     CommandStatistics,
     CommandTelemetry,
     CriterionResult,
@@ -1337,3 +1338,316 @@ class TestUngradedRenderingInHtml:
         html = HTMLReportGenerator.generate_experiment_html(self._all_ungraded(["v1"]), None)
         assert "n/a" in html
         assert "0.0%" not in html
+
+
+class TestGenerationMetricsBuckets:
+    """The offline report carries the same four buckets as the evalboard.
+
+    `reports_html` is described in CLAUDE.md as the evalboard's static twin, and
+    it rendered only Total Latency / Turns / Avg Turn Latency — so anyone
+    reading the artifact rather than the dashboard got none of the wall-clock
+    accounting. The arithmetic lives in `reports_stats.turn_time_buckets`; this
+    asserts the rendering AND, through it, that arithmetic.
+    """
+
+    BASE = datetime(2026, 1, 1, 12, 0, 0)
+
+    @classmethod
+    def _at(cls, ms: float) -> datetime:
+        return cls.BASE + timedelta(milliseconds=ms)
+
+    @staticmethod
+    def _stat(html: str, label: str) -> str:
+        """The rendered VALUE of one stat card, by its label."""
+        import re
+
+        match = re.search(rf'<div class="label">{re.escape(label)}[^<]*</div>\s*<div class="value">([^<]*)</div>', html)
+        assert match is not None, f"no stat card labelled {label!r}"
+        return match.group(1)
+
+    @classmethod
+    def _turn(
+        cls,
+        *,
+        startup: float | None,
+        teardown: float | None,
+        generations: list[tuple[float, float, float | None]],
+        tools: tuple[float, float] | None = None,
+        sub_agent: tuple[float, float, float] | None = None,
+        tool_union_ms: float | None = None,
+    ) -> TurnRecord:
+        messages: list = [
+            AssistantMessage(started_at=cls._at(lo), completed_at=cls._at(hi), generation_duration_ms=gen)
+            for lo, hi, gen in generations
+        ]
+        commands: list[CommandTelemetry] = []
+        if tools is not None:
+            lo, hi = tools
+            commands.append(
+                CommandTelemetry(
+                    tool_name="Bash",
+                    tool_id="main-1",
+                    timestamp=cls._at(lo),
+                    execution_started_at=cls._at(lo),
+                    execution_completed_at=cls._at(hi),
+                    result_status="success",
+                )
+            )
+        if sub_agent is not None:
+            lo, hi, gen = sub_agent
+            messages.append(
+                AssistantMessage(
+                    started_at=cls._at(lo),
+                    completed_at=cls._at(hi),
+                    generation_duration_ms=gen,
+                    parent_tool_use_id="agent-call",
+                    tool_use_ids=["child-1"],
+                )
+            )
+            commands.append(
+                CommandTelemetry(
+                    tool_name="Bash",
+                    tool_id="child-1",
+                    timestamp=cls._at(lo),
+                    execution_started_at=cls._at(lo),
+                    execution_completed_at=cls._at(hi),
+                    result_status="success",
+                )
+            )
+        return TurnRecord(
+            iteration=1,
+            user_input="go",
+            agent_output="done",
+            commands=commands,
+            messages=messages,
+            harness_startup_ms=startup,
+            harness_teardown_ms=teardown,
+            # Left UNSET by default, which is the LEGACY shape: every test in
+            # this class that does not pass it exercises the derive-from-commands
+            # fallback, and the parity test below pins the two paths together.
+            tool_union_ms=tool_union_ms,
+        )
+
+    def test_each_bucket_is_summed_across_turns(self):
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(
+            iterations=[
+                self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)], tools=(600, 800)),
+                self._turn(startup=300.0, teardown=50.0, generations=[(2000, 3000, 1000.0)], tools=(2100, 2400)),
+            ]
+        )
+        buckets = turn_time_buckets(result)
+        assert buckets.startup_ms == pytest.approx(800.0)
+        assert buckets.teardown_ms == pytest.approx(150.0)
+        assert buckets.generation_ms == pytest.approx(1800.0)
+        assert buckets.tool_ms == pytest.approx(500.0), "200ms + 300ms, each turn's own union"
+
+    def test_each_label_renders_its_own_value(self):
+        """Pins the label-to-value WIRING, not just that five cards exist.
+
+        Asserting presence alone would pass if `Startup` rendered
+        `buckets.teardown_ms` — and the unmeasured-bucket test below compares
+        two `None`s, so a swap is invisible there too. These are five distinct
+        numbers precisely so a mix-up cannot hide.
+        """
+        result = _make_result(
+            iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)], tools=(600, 800))]
+        )
+        html = HTMLReportGenerator().generate_task_html(result)
+        assert self._stat(html, "Startup") == "500ms"
+        assert self._stat(html, "Generation") == "800ms"
+        assert self._stat(html, "Tool exec") == "200ms"
+        assert self._stat(html, "Teardown") == "100ms"
+        # 90s task minus 1.6s of measured buckets.
+        assert self._stat(html, "Unaccounted") == "88.40s"
+
+    def test_an_unmeasured_bucket_renders_a_dash_not_zero(self):
+        """A run recorded before the head/tail existed measured nothing.
+
+        `0ms` would claim a measurement nobody took — the same distinction
+        CE058 enforces in `src/`, and the reason the evalboard's `sumMeasured`
+        returns null.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(iterations=[self._turn(startup=None, teardown=None, generations=[(500, 1500, 800.0)])])
+        buckets = turn_time_buckets(result)
+        assert buckets.startup_ms is None
+        assert buckets.teardown_ms is None
+
+        html = HTMLReportGenerator().generate_task_html(result)
+        assert self._stat(html, "Startup") == "—"
+        assert self._stat(html, "Teardown") == "—"
+
+    def test_a_measured_zero_still_renders_as_zero(self):
+        """The control for the dash: `None` and `0.0` must stay distinguishable.
+
+        Asserted through the RENDERER, not just the arithmetic — the dash is a
+        rendering decision, so its counterexample has to be one too.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(iterations=[self._turn(startup=0.0, teardown=0.0, generations=[(500, 1500, 800.0)])])
+        assert turn_time_buckets(result).startup_ms == 0.0
+
+        html = HTMLReportGenerator().generate_task_html(result)
+        assert self._stat(html, "Startup") == "0ms"
+        assert self._stat(html, "Teardown") == "0ms"
+
+    def test_an_unmeasured_bucket_still_counts_as_zero_in_the_residual(self):
+        """Display and arithmetic differ on purpose.
+
+        A bucket nobody measured shows as a dash but sums as 0.0, so the
+        missing time surfaces in Unaccounted rather than vanishing. That is the
+        rule `scripts/timing/decompose_run.py::_turn_buckets` already applies.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(iterations=[self._turn(startup=None, teardown=None, generations=[(500, 1500, 800.0)])])
+        # 90s task, 800ms of generation, nothing else measured.
+        assert turn_time_buckets(result).unaccounted_ms == pytest.approx(90_000.0 - 800.0)
+
+    def test_a_negative_residual_is_rendered_signed_not_clamped(self):
+        """Real, and it means generation and tool execution OVERLAPPED.
+
+        The fixture has to PRODUCE the overlap rather than manufacture the sign
+        some other way, or it tests the formatter and not the condition the
+        message names: a 60 s generation and a 60 s tool inside a 90 s task sum
+        past the task's own wall clock, which is what overlapping looks like in
+        the buckets.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(
+            iterations=[self._turn(startup=0.0, teardown=0.0, generations=[(0, 60_000, 60_000.0)], tools=(0, 60_000))]
+        )
+        buckets = turn_time_buckets(result)
+        assert buckets.generation_ms == pytest.approx(60_000.0)
+        assert buckets.tool_ms == pytest.approx(60_000.0), "the two overlap in wall clock"
+        assert buckets.unaccounted_ms is not None and buckets.unaccounted_ms < 0
+
+        html = HTMLReportGenerator().generate_task_html(result)
+        assert self._stat(html, "Unaccounted").startswith("-"), "a negative residual must keep its sign"
+
+    def test_sub_agent_generations_and_their_tools_are_excluded(self):
+        """The same main-thread filter the collector and the evalboard apply.
+
+        The spawning Agent call's own interval already spans the child's run,
+        so counting either books it twice.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(
+            iterations=[
+                self._turn(
+                    startup=500.0,
+                    teardown=100.0,
+                    generations=[(500, 1500, 800.0)],
+                    tools=(600, 800),
+                    sub_agent=(3000, 3400, 400.0),
+                )
+            ]
+        )
+        buckets = turn_time_buckets(result)
+        assert buckets.generation_ms == pytest.approx(800.0), "the child's 400ms is not main-thread generation"
+        assert buckets.tool_ms == pytest.approx(200.0), "and its tool is not a main-thread span"
+
+    def test_a_stored_tool_union_renders_the_same_grid_as_a_derived_one(self):
+        """The two paths must be indistinguishable, or a legacy run reads differently.
+
+        Everything else in this class leaves `tool_union_ms` unset, so the
+        suite already covers the fallback; this is the control that the STORED
+        path — which every run recorded from now on takes — reaches the same
+        cell.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        kwargs = {"startup": 500.0, "teardown": 100.0, "generations": [(500, 1500, 800.0)], "tools": (600, 800)}
+        legacy = _make_result(iterations=[self._turn(**kwargs)])
+        stored = _make_result(iterations=[self._turn(**kwargs, tool_union_ms=200.0)])
+
+        assert turn_time_buckets(legacy) == turn_time_buckets(stored)
+        assert self._stat(HTMLReportGenerator().generate_task_html(legacy), "Tool exec") == self._stat(
+            HTMLReportGenerator().generate_task_html(stored), "Tool exec"
+        )
+
+    def test_a_stored_measured_zero_is_not_re_derived(self):
+        """`0.0` is a measurement and must not fall through to the fallback.
+
+        The fallback would find this turn's bounded command and report 200ms,
+        so reading the stored value with truthiness instead of `is not None`
+        would silently replace a measurement with a re-derivation.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(
+            iterations=[
+                self._turn(
+                    startup=500.0,
+                    teardown=100.0,
+                    generations=[(500, 1500, 800.0)],
+                    tools=(600, 800),
+                    tool_union_ms=0.0,
+                )
+            ]
+        )
+        assert turn_time_buckets(result).tool_ms == 0.0
+
+    def test_a_legacy_record_missing_the_field_entirely_still_validates(self):
+        """A `task.json` written before the field existed must stay renderable.
+
+        `TurnRecord` declares no `model_config`, so pydantic's default
+        `extra="ignore"` applies and an absent optional validates to `None` —
+        which is what routes it to the fallback.
+        """
+        turn = self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)], tools=(600, 800))
+        raw = turn.model_dump()
+        raw.pop("tool_union_ms")
+        restored = TurnRecord.model_validate(raw)
+        assert restored.tool_union_ms is None
+
+        from coder_eval.reports_stats import turn_time_buckets
+
+        assert turn_time_buckets(_make_result(iterations=[restored])).tool_ms == pytest.approx(200.0)
+
+    def test_the_existing_four_stats_are_unchanged(self):
+        result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])
+        html = HTMLReportGenerator().generate_task_html(result)
+        for label in ("Total Latency", "Turns", "Assistant Turns", "Avg Turn Latency"):
+            assert self._stat(html, label), f"missing or empty {label} stat"
+
+    def test_a_turn_that_recorded_no_tool_span_has_no_tool_total(self):
+        """`0ms` would claim the tools were measured and took no time.
+
+        A turn that ran tools none of which were timed is indistinguishable
+        from one that ran none, so the presence of a SPAN decides — the same
+        None-vs-0 distinction CE058 enforces in `src/`.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])
+        assert turn_time_buckets(result).tool_ms is None
+        assert self._stat(HTMLReportGenerator().generate_task_html(result), "Tool exec") == "—"
+
+    def test_a_run_with_no_duration_has_no_residual(self):
+        """Subtracting real buckets from an untimed run fabricates a negative.
+
+        `duration_seconds` defaults to 0.0 rather than None, so the guard has to
+        be on the value. The evalboard keeps its own residual null for exactly
+        this case.
+        """
+        from coder_eval.reports_stats import turn_time_buckets
+
+        result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])
+        result.duration_seconds = 0.0
+        assert turn_time_buckets(result).unaccounted_ms is None
+        assert self._stat(HTMLReportGenerator().generate_task_html(result), "Unaccounted") == "—"
+
+    def test_a_run_with_no_turns_does_not_raise(self):
+        from coder_eval.reports_stats import turn_time_buckets
+
+        buckets = turn_time_buckets(_make_result(iterations=[]))
+        assert buckets.generation_ms is None
+        assert buckets.tool_ms is None
+        HTMLReportGenerator().generate_task_html(_make_result(iterations=[]))

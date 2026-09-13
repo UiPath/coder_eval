@@ -1,0 +1,77 @@
+{
+  "agent_output": "Starting.",
+  "assistant_turn_count": 2,
+  "commands": [],
+  "crash_reason": "Pi error: provider returned 529 after 5 retries",
+  "crashed": true,
+  "duration_seconds": "<scrubbed>",
+  "harness_startup_ms": "<scrubbed>",
+  "harness_teardown_ms": "<scrubbed>",
+  "iteration": 1,
+  "max_turns_exhausted": false,
+  "messages": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [
+        {
+          "block_type": "text",
+          "is_error": false,
+          "sequence": 0,
+          "signature": null,
+          "text": "Starting.",
+          "thinking": null,
+          "tool_use_id": null
+        }
+      ],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 100,
+      "message_id": null,
+      "model": "openrouter/moonshotai/kimi-k3",
+      "output_tokens": 20,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": "stop",
+      "tool_use_ids": []
+    },
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "completed_at": "<scrubbed>",
+      "content_blocks": [],
+      "generation_duration_ms": "<scrubbed>",
+      "input_tokens": 0,
+      "message_id": null,
+      "model": "openrouter/moonshotai/kimi-k3",
+      "output_tokens": 0,
+      "parent_tool_use_id": null,
+      "reasoning_tokens": 0,
+      "role": "assistant",
+      "started_at": "<scrubbed>",
+      "stop_reason": "error",
+      "tool_use_ids": []
+    }
+  ],
+  "model_used": "openrouter/moonshotai/kimi-k3",
+  "num_turns": 2,
+  "result_summary": {
+    "is_error": true,
+    "result": "Pi error: provider returned 529 after 5 retries",
+    "stop_reason": "error",
+    "subtype": "crashed"
+  },
+  "timestamp": "<scrubbed>",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 100,
+    "output_tokens": 20,
+    "total_cost_usd": "<scrubbed>",
+    "uncached_input_tokens": 100
+  },
+  "tool_union_ms": null,
+  "user_input": "do it"
+}
