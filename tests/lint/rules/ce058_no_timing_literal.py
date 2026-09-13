@@ -25,7 +25,7 @@ zero. A measured ``0.0`` remains a legitimate answer — a window subtracted
 down to nothing by the tool execution inside it, or a clamped inversion where
 both ends really were observed — so the two values must stay distinguishable.
 
-Five syntactic forms, one invariant, one id — the shapes the codebase actually
+Six syntactic forms, one invariant, one id — the shapes the codebase actually
 produced:
 
 1. a ``0`` / ``0.0`` constructor keyword on one of the telemetry constructors
@@ -39,12 +39,43 @@ produced:
 5. ``model_copy(update={"duration_ms": 0.0})`` — a keyword rule is blind to a
    dict, and the dict is how ``CommandTelemetry.duration_ms`` is actually
    written on the Antigravity DONE path, so forms 1-4 alone would have left
-   the next author's ``"duration_ms": 0.0`` in that idiom unguarded.
+   the next author's ``"duration_ms": 0.0`` in that idiom unguarded;
+6. ``cmd.duration_ms = 0.0`` as a PLAIN assignment — form 4 without the
+   ``is None`` guard, or under a guard that tests something else.
 
-BLIND SPOT worth knowing: form 1 keys on the callee's spelling, so
+Form 6 exists because form 4 was passing the live defect by coincidence. Form 4
+keys on the ``if`` test naming a timing attribute, and the shipped
+``_finalize_commands`` bug happened to spell it that way
+(``if cmd.duration_ms is None:``) — but the assignment sat inside an outer
+``if cmd.result_status is None:`` block, and rewriting it to set the literal
+under THAT guard instead, which reads just as naturally and books the identical
+lie, was invisible to all five earlier forms. The rule was one plausible
+refactor away from silent. A guard is only evidence about the value when the
+guard names the value; without one there is no evidence at all, which is
+strictly worse and must not be the case the rule misses.
+
+It uses ``_zero_literal``, not form 4's broader ``_numeric_literal``, and the
+asymmetry is the point. Under ``if x is None`` the guard PROVES the value was
+never measured, so any invented number is a defect. A bare assignment proves
+nothing: ``cmd.duration_ms = elapsed_ms`` is how a measured value is written,
+and a literal ``1234.0`` is a legitimate test factory or replay. Only the
+placeholder zero is the tell — the same narrowing form 1 already makes, and for
+the same reason.
+
+Forms 4 and 6 overlap on the zero case, so form 4 records the statements it
+flags and form 6 skips them. The visit order makes that sound rather than
+lucky: ``visit_If`` runs its own check BEFORE ``generic_visit`` descends into
+the body, so the assignment is always registered before ``visit_Assign`` sees
+it. Form 4 keeps its wider literal set, so a guarded ``= 1234.0`` still fires
+exactly once, from form 4.
+
+BLIND SPOTS worth knowing. Form 1 keys on the callee's spelling, so
 ``AssistantMessageTelemetry`` (an import alias for ``AssistantMessage`` in
-``claude_code_agent``) is matched by name only. Renaming that alias silently
-disarms form 1 for that module.
+``claude_code_agent``) is matched by name only; renaming that alias silently
+disarms form 1 for that module. And form 6 keys on the TARGET's spelling, so it
+sees ``cmd.duration_ms = 0.0`` but not a write through a rebound local or
+``setattr(cmd, field, 0.0)`` — the same limit every AST rule here has without
+type inference.
 
 ``# noqa: CE058`` for a genuinely aggregate-internal use where a missing value
 really is a zero, with a comment saying so.
@@ -160,6 +191,10 @@ class NoTimingLiteral(BaseRule):
     def __init__(self, filepath: str) -> None:
         super().__init__(filepath)
         self._in_scope = bool(_SRC_ROOT.search(filepath))
+        #: Assignments form 4 has already flagged, so form 6 does not report
+        #: the same statement a second time. Populated in `visit_If` before
+        #: `generic_visit` reaches the body — see the module docstring.
+        self._flagged_assigns: set[ast.Assign] = set()
 
     def visit_Call(self, node: ast.Call) -> None:
         # Form 1: `AssistantMessage(generation_duration_ms=0.0, ...)`
@@ -223,5 +258,20 @@ class NoTimingLiteral(BaseRule):
                         and _numeric_literal(stmt.value)
                         and _same_target(stmt.targets[0], operand)
                     ):
+                        self._flagged_assigns.add(stmt)
                         self.violation(stmt, _MESSAGE)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        # Form 6: `cmd.duration_ms = 0.0` with no `is None` guard on the value
+        # itself — see the module docstring for why this is narrower than
+        # form 4 and why the dedupe below is ordering-safe rather than lucky.
+        if (
+            self._in_scope
+            and node not in self._flagged_assigns
+            and len(node.targets) == 1
+            and _timing_name(node.targets[0]) is not None
+            and _zero_literal(node.value)
+        ):
+            self.violation(node, _MESSAGE)
         self.generic_visit(node)

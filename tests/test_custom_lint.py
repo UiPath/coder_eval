@@ -4507,8 +4507,21 @@ class TestCE058NoTimingLiteral:
         assert not self._run(src)
 
     def test_allows_a_guard_on_a_different_receiver(self):
-        src = "if a.duration_ms is None:\n    b.duration_ms = 0.0\n"
+        # Form 4 keys on the RECEIVER, not just the field name: a guard about
+        # `a` says nothing about `b`, so form 4 must not claim it did. A
+        # non-zero literal keeps this a form-4 test — the zero spelling is now
+        # form 6's, which is the case below.
+        src = "if a.duration_ms is None:\n    b.duration_ms = 1234.0\n"
         assert not self._run(src)
+
+    def test_a_zero_on_a_different_receiver_is_form_sixs(self):
+        # The same shape with a ZERO does fire, and from form 6 rather than
+        # form 4. That is the correct reading: a guard naming `a` is no
+        # evidence at all about `b`, so `b.duration_ms = 0.0` is an ungrounded
+        # zero — exactly what form 6 is for. Pinned so the hand-off between
+        # the two forms is a stated property and not an accident of ordering.
+        src = "if a.duration_ms is None:\n    b.duration_ms = 0.0\n"
+        assert len(self._run(src)) == 1
 
     def test_allows_a_guard_that_assigns_a_measured_value(self):
         src = "if cmd.duration_ms is None:\n    cmd.duration_ms = measured\n"
@@ -4574,12 +4587,63 @@ class TestCE058NoTimingLiteral:
         assert not self._run("x = union_ms(spans) or 0")
         assert not self._run("cfg = TurnRecord(tool_union_ms_limit=0)")
 
+    # Form 6 — the PLAIN assignment. Form 4 without the `is None` guard, or
+    # under a guard that tests something else. The live `_finalize_commands`
+    # defect was caught by form 4 only because it happened to spell its guard
+    # `if cmd.duration_ms is None:`; written under the enclosing
+    # `if cmd.result_status is None:` instead — which reads just as naturally
+    # and books the identical lie — it was invisible to forms 1-5.
+    def test_flags_a_bare_zero_assignment(self):
+        assert self._run("cmd.duration_ms = 0.0")
+
+    def test_flags_a_zero_assignment_under_a_non_timing_guard(self):
+        # The shape that made form 4's coverage a coincidence.
+        src = "if cmd.result_status is None:\n    cmd.duration_ms = 0.0\n"
+        assert self._run(src)
+
+    def test_flags_a_bare_zero_assignment_to_a_head_or_tail(self):
+        assert self._run("rec.harness_startup_ms = 0")
+        assert self._run("rec.harness_teardown_ms = 0.0")
+        assert self._run("rec.tool_union_ms = 0.0")
+
+    def test_form_six_flags_only_a_zero(self):
+        # A bare assignment proves NOTHING about whether the value was
+        # measured — `cmd.duration_ms = elapsed_ms` is how a real one is
+        # written, and a literal 1234.0 is a plausible factory or replay. Only
+        # the placeholder zero is the tell, so form 6 narrows the way form 1
+        # does rather than the way form 4 does.
+        assert not self._run("cmd.duration_ms = 1234.0")
+        assert not self._run("cmd.duration_ms = measured")
+        assert not self._run("cmd.duration_ms = None")
+
+    def test_form_six_ignores_a_non_timing_target(self):
+        assert not self._run("cmd.result_status = 0")
+        assert not self._run("cfg.duration_ms_limit = 0")
+
+    def test_a_guarded_zero_is_reported_exactly_once(self):
+        # Forms 4 and 6 overlap on the zero case. `visit_If` registers the
+        # statement before `generic_visit` descends into the body, so the
+        # dedupe is ordering-safe rather than lucky — and one defect must
+        # produce one violation, or a noqa silences half of it.
+        src = "if cmd.duration_ms is None:\n    cmd.duration_ms = 0.0\n"
+        assert len(self._run(src)) == 1
+
+    def test_form_four_still_owns_the_guarded_non_zero(self):
+        # Form 6 narrowed to zero, so a guarded `= 1234.0` must still fire —
+        # from form 4, which keeps the wider literal set because the guard
+        # PROVES the value was never measured.
+        src = "if cmd.duration_ms is None:\n    cmd.duration_ms = 1234.0\n"
+        assert len(self._run(src)) == 1
+
     # Scope + suppression.
     def test_is_out_of_scope_outside_src(self):
         assert not self._run(
             "m = AssistantMessage(generation_duration_ms=0.0)",
             filepath="tests/test_codex_agent.py",
         )
+
+    def test_form_six_is_out_of_scope_outside_src(self):
+        assert not self._run("cmd.duration_ms = 0.0", filepath="tests/test_codex_agent.py")
 
     def test_noqa_suppresses(self):
         from tests.lint.runner import check_file
