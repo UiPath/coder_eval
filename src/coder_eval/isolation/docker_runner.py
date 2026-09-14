@@ -734,9 +734,16 @@ class DockerRunner:
             await asyncio.to_thread(self._prepare_task_dir_mount, staging)
             # AFTER staging, BEFORE the container starts: the DAC caps are
             # dropped, so every framework-owned mount must be reachable through
-            # its `other` bits. Read-only for the inputs the container merely
-            # consumes; writable only for the run dir it must produce into.
-            await asyncio.to_thread(grant_container_access, input_dir, writable=False)
+            # its `other` bits. The input dir is writable, not merely consumed:
+            # ANTI-CHEAT, the in-container entry point DELETES the staged
+            # task.yaml (the post-override TaskDefinition, success_criteria
+            # included) right after loading it, so the agent -- which runs in this
+            # same container -- can never read its own grading answer key back.
+            # `unlink` needs `other`-write on the input DIRECTORY through the
+            # dropped DAC caps, so grant it writable like the run dir it produces
+            # into. The whole staging tree is destroyed host-side in run()'s
+            # finally regardless, so a writable input dir strands nothing.
+            await asyncio.to_thread(grant_container_access, input_dir, writable=True)
             await asyncio.to_thread(grant_container_access, output_dir, writable=True)
             if self.grade_workspace is not None:
                 # The graded workspace is a framework-owned mount like any other,
@@ -1647,7 +1654,12 @@ class DockerRunner:
         # Explicit value (not name-only) so it overrides any inherited/baked value.
         argv += ["--env", "TELEMETRY_ENABLED=false"]
 
-        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}:ro"]
+        # Read-WRITE, not `:ro`: the in-container entry point deletes the staged
+        # task.yaml right after loading it (ANTI-CHEAT -- see the grant above and
+        # run_task_internal_command._scrub_staged_task_yaml), and both `rm` and
+        # `chmod` fail with EROFS on a `:ro` bind mount. The host destroys the
+        # whole staging tree in run()'s finally, so nothing is stranded.
+        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}"]
         # Mount the host run_dir to the container's standard output location
         # so the in-container Orchestrator writes task.json/task.log/etc.
         # directly to the host filesystem via bind-mount.

@@ -35,7 +35,13 @@ from coder_eval.isolation.docker_runner import (
     _validate_extra_mount,
     grant_container_access,
 )
-from coder_eval.models import FileExistsCriterion, ReferenceSource, SandboxConfig, TaskDefinition
+from coder_eval.models import (
+    CONTAINER_INPUT_DIR,
+    FileExistsCriterion,
+    ReferenceSource,
+    SandboxConfig,
+    TaskDefinition,
+)
 
 
 # DockerRunner targets Linux containers from POSIX hosts. On Windows the test
@@ -1053,6 +1059,55 @@ class TestOutputMountWidenedBeforeLaunch:
             "and DAC_OVERRIDE is dropped"
         )
 
+    async def test_run_grants_input_dir_writable(self, tmp_path: Path, monkeypatch):
+        """ANTI-CHEAT: the in-container entry point DELETES the staged task.yaml.
+
+        `unlink` needs `other`-write on the input DIRECTORY through the dropped
+        DAC caps, so run() must grant the input dir writable (like the run dir),
+        not read-only. A read-only grant leaves the delete failing EACCES and the
+        agent able to `cat` its own grading criteria.
+        """
+        monkeypatch.setenv("CODER_EVAL_NO_CLAUDE_MOUNT", "1")
+        run_dir = tmp_path / "run"
+        run_dir.mkdir(mode=0o755)
+        task = TaskDefinition(
+            task_id="grant-input",
+            description="test task",
+            initial_prompt="test",
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="t.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = run_dir
+        rt.replicate_index = 0
+        rt.variant_id = "default"
+        rt.config_lineage = {}
+        rt.source_yaml = "# task"
+        rt.task_file = tmp_path / "task.yaml"
+        rt.task_file.write_text("# task", encoding="utf-8")
+        runner = DockerRunner(rt)
+
+        seen: dict[str, list] = {"grants": []}
+
+        def fake_grant(root, *, writable):
+            seen["grants"].append((Path(root).name, writable))
+            return []
+
+        async def fake_exec(*argv, **kwargs):
+            raise FileNotFoundError("docker not present in this test")
+
+        monkeypatch.setattr("coder_eval.isolation.docker_runner.grant_container_access", fake_grant)
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        with pytest.raises(Exception):  # noqa: B017 - the launch failure itself is not under test
+            await runner.run()
+
+        # The input dir (a mkdtemp under staging; basename is "input") must be
+        # granted writable=True so the in-container delete of task.yaml succeeds.
+        input_grants = [w for name, w in seen["grants"] if name == "input"]
+        assert input_grants, "run() must grant the input dir container access"
+        assert all(input_grants), "the input dir must be granted writable (the container deletes task.yaml from it)"
+
 
 class TestTaskDirCopyMount:
     """$TASK_DIR is a shielded copy at a fixed container path, not the host tree.
@@ -1177,3 +1232,17 @@ class TestTaskDirCopyMount:
         runner._prepare_task_dir_mount(staging)
 
         assert runner._task_dir_mount_src is None
+
+    def test_input_mount_is_read_write(self, tmp_path: Path):
+        """ANTI-CHEAT (Fix A): the container deletes the staged task.yaml.
+
+        A `:ro` input mount rejects `rm` with EROFS, so the mount must be
+        read-write. The output mount is already writable for symmetry.
+        """
+        argv, _ = self._prepared_argv(tmp_path)
+
+        input_specs = [m for m in self._mounts(argv) if m.endswith(CONTAINER_INPUT_DIR)]
+        assert len(input_specs) == 1
+        assert not input_specs[0].endswith(":ro"), "the input mount must be writable so task.yaml can be deleted"
+        output_specs = [m for m in self._mounts(argv) if m.endswith(CONTAINER_OUTPUT_DIR)]
+        assert output_specs and not output_specs[0].endswith(":ro")
