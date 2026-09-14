@@ -337,6 +337,39 @@ If the task declares a `reference:` block, a throwaway **copy** of its directory
 
 See [Reference Solutions](TASK_DEFINITION_GUIDE.md#reference-solutions).
 
+### Two more passive-read anti-cheat blocks
+
+These are `driver: docker` only. `driver: tempdir` shares the host uid and has no
+filesystem isolation, so neither applies there (nor can — there is nothing to
+mask). Both are defense-in-depth passive-read blocks, consistent with the
+reference window's posture above; neither contains an adversarial agent.
+
+- **The staged task definition is deleted after load.** The host stages the
+  post-override `TaskDefinition` (with `success_criteria`) at `/work/input/task.yaml`
+  for the in-container orchestrator to load once at startup. The agent runs in the
+  same container, so leaving that file readable would hand it the grading answer
+  key. The in-container entry point deletes it immediately after `load_task`
+  (gated on `CODER_EVAL_IN_CONTAINER`). It is read exactly once — grading reads
+  criteria from the in-memory task, never from disk. The `/work/input` mount is
+  therefore read-write (a `:ro` mount rejects `rm` with EROFS). `context.json`
+  and `prior.json` are kept: they carry no criteria and `prior.json` is read
+  later on the regrade path.
+
+- **Auto-mounted plugin trees are default-deny masked.** An `agent.plugins[].path`
+  (or a `TemplateDirSource.path` that is itself a plugin root) is auto-mounted at
+  its host path `:ro` so the plugin loads. Eval material colocated under that tree
+  as siblings of the skills dir — sibling task YAMLs, reference solutions, test
+  fixtures — would otherwise be readable. So the runner keeps the whole root
+  mounted but layers an empty `--tmpfs` over every child dir OUTSIDE the keep-set
+  (`.claude-plugin` + the manifest-declared skill dirs). Everything that is not
+  the plugin surface is masked by default, so an unknown or new eval layout can
+  never leak; `tests/`, `node_modules/`, and reference solutions are masked for
+  free. A root agent cannot `umount` a tmpfs (`CAP_SYS_ADMIN` is not in Docker's
+  default set), so this mask is *stronger* than the mode-000 reference window. The
+  one residual — an eval def or reference COLOCATED inside a skill dir, which
+  cannot be masked without hiding the skill — is caught by lint rule CE065 (keep
+  eval material out of skill dirs; put it under a sibling `tests/`).
+
 Inside the container, the entrypoint invokes `coder-eval _run-task-internal` (hidden subcommand), which loads the staged YAML + context, runs the standard in-process Orchestrator (driver auto-coerced back to `tempdir`), and writes `task.json` to the output mount. Host reads it and feeds the existing aggregation pipeline.
 
 A `result_kind` discriminator on `CriterionResult` ensures `ClassificationCriterionResult` subclasses survive the JSON round-trip — without it, host-side aggregation would silently lose `observed_label`/`expected_label`.

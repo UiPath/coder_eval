@@ -4980,3 +4980,181 @@ class TestCE064TurnBracketOnTheClock:
             encoding="utf-8",
         )
         assert not check_file(target, [TurnBracketOnTheClock])
+
+
+class TestCE065NoEvalMaterialInsideSkillDir:
+    """CE065 — no eval definition / reference dir INSIDE a skill dir.
+
+    The Fix B allowlist auto-masks eval material anywhere under an auto-mounted
+    plugin root EXCEPT inside a kept skill dir — masking those would hide the
+    skill itself. So a `task_id:`-bearing YAML (or a resolved `reference.directory`)
+    colocated INSIDE a skill dir is the one leak the runtime allowlist cannot
+    close: under `driver: docker` the agent reads its own grading answer key
+    straight out of the readable skill surface.
+
+    This static rule flags that layout in-repo so it can never recur silently.
+    It reuses the SAME `manifest_skill_dirs` resolver the runtime allowlist uses
+    (one SSOT for "what is a skill dir"). The fix is to move the eval def /
+    reference OUT of the skill dir (e.g. to a sibling `tests/`), where the
+    allowlist masks it without hiding the skill.
+    """
+
+    ROOT = Path(__file__).parent.parent
+
+    @staticmethod
+    def _skill_dirs_for_task(task, task_file: Path) -> list[Path]:
+        """In-repo skill dirs reachable from a task's plugin / template roots.
+
+        Plugin roots (`agent.plugins[].path`) and `TemplateDirSource.path` roots
+        are resolved relative to the task file's dir (mirroring
+        `resolve_host_reference_dir`), then each plugin root's skill dirs come
+        from the shared `manifest_skill_dirs` resolver.
+        """
+        import os
+
+        from coder_eval.agents._skills import manifest_skill_dirs
+        from coder_eval.models import TemplateDirSource
+
+        roots: list[Path] = []
+        agent = task.agent
+        for plugin in (agent.plugins if agent else None) or []:
+            raw = plugin.get("path") if isinstance(plugin, dict) else None
+            if not raw:
+                continue
+            expanded = Path(os.path.expandvars(os.path.expanduser(str(raw))))
+            root = expanded if expanded.is_absolute() else (task_file.parent / expanded)
+            roots.append(root.resolve())
+        sandbox = task.sandbox
+        for source in (sandbox.template_sources if sandbox else None) or []:
+            if not isinstance(source, TemplateDirSource):
+                continue
+            expanded = Path(os.path.expandvars(os.path.expanduser(str(source.path))))
+            root = expanded if expanded.is_absolute() else (task_file.parent / expanded)
+            roots.append(root.resolve())
+
+        skill_dirs: list[Path] = []
+        for root in roots:
+            # Only a real plugin root declares skills; a plain template dir has none.
+            if not (root / ".claude-plugin" / "plugin.json").is_file():
+                continue
+            skill_dirs.extend(manifest_skill_dirs(root))
+        return skill_dirs
+
+    @classmethod
+    def _offenders(cls, task, task_file: Path) -> list[str]:
+        from coder_eval.orchestration.evaluation import resolve_host_reference_dir
+
+        skill_dirs = cls._skill_dirs_for_task(task, task_file)
+        if not skill_dirs:
+            return []
+
+        offenders: list[str] = []
+
+        # A resolved reference dir colocated inside a skill dir.
+        ref_dir = resolve_host_reference_dir(task, task_file)
+        if ref_dir is not None:
+            for skill in skill_dirs:
+                if ref_dir == skill or skill in ref_dir.parents:
+                    offenders.append(f"reference.directory -> {ref_dir}")
+                    break
+
+        # A `task_id:`-bearing YAML inside a skill dir.
+        for skill in skill_dirs:
+            if not skill.is_dir():
+                continue
+            for yaml_file in skill.rglob("*.yaml"):
+                if yaml_file.name == "metadata.yaml":
+                    continue
+                try:
+                    text = yaml_file.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                # Cheap key test: a task definition declares a top-level task_id.
+                if re.search(r"(?m)^task_id\s*:", text):
+                    offenders.append(f"task def inside skill dir -> {yaml_file}")
+        return offenders
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_tasks_keep_eval_material_out_of_skill_dirs(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        offenders = self._offenders(task, path)
+        assert not offenders, (
+            f"{path}: {offenders} live inside a skill dir under an auto-mounted plugin/template root. "
+            "The Fix B allowlist keeps skill dirs readable, so it cannot mask eval material there — the "
+            "agent under `driver: docker` reads its own grading answer key. Move the eval def / reference "
+            "OUT of the skill dir (e.g. to a sibling `tests/`), where the allowlist masks it."
+        )
+
+    def _synthetic_plugin_task(self, tmp_path: Path, *, place_task_inside_skill: bool):
+        from coder_eval.models import TaskDefinition
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+        skill = plugin_root / "skills" / "demo"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# skill", encoding="utf-8")
+
+        if place_task_inside_skill:
+            (skill / "leak.yaml").write_text("task_id: leaked\n", encoding="utf-8")
+        else:
+            sibling = plugin_root / "tests" / "tasks"
+            sibling.mkdir(parents=True)
+            (sibling / "ok.yaml").write_text("task_id: fine\n", encoding="utf-8")
+
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+        task = TaskDefinition(
+            task_id="host",
+            description="d",
+            initial_prompt="p",
+            agent={"type": "claude-code", "plugins": [{"type": "local", "path": str(plugin_root)}]},
+            success_criteria=[],
+        )
+        return task, task_file
+
+    def test_detects_a_task_def_inside_a_skill_dir(self, tmp_path):
+        """Positive sensor — without it an empty `tasks/` glob would 'pass'."""
+        task, task_file = self._synthetic_plugin_task(tmp_path, place_task_inside_skill=True)
+        offenders = self._offenders(task, task_file)
+        assert offenders and any("skill dir" in o for o in offenders), offenders
+
+    def test_allows_eval_material_outside_skill_dirs(self, tmp_path):
+        """Negative sensor — a task def under a sibling `tests/` is masked at runtime."""
+        task, task_file = self._synthetic_plugin_task(tmp_path, place_task_inside_skill=False)
+        assert self._offenders(task, task_file) == []
+
+    def test_detects_a_reference_dir_inside_a_skill_dir(self, tmp_path):
+        from coder_eval.models import ReferenceSource, TaskDefinition
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+        ref = plugin_root / "skills" / "demo" / "solution"
+        ref.mkdir(parents=True)
+
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+        task = TaskDefinition(
+            task_id="host",
+            description="d",
+            initial_prompt="p",
+            agent={"type": "claude-code", "plugins": [{"type": "local", "path": str(plugin_root)}]},
+            reference=ReferenceSource(directory="plugin/skills/demo/solution"),
+            success_criteria=[],
+        )
+        offenders = self._offenders(task, task_file)
+        assert offenders and any("reference" in o for o in offenders), offenders
+
+    def test_shares_manifest_skill_dirs_with_the_runtime_allowlist(self):
+        """SSOT: CE065 and Fix B (eval_material.mask_dirs) must agree on skill dirs."""
+        from coder_eval.agents._skills import manifest_skill_dirs
+        from coder_eval.isolation import eval_material
+
+        assert eval_material.manifest_skill_dirs is manifest_skill_dirs
