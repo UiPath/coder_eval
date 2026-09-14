@@ -721,6 +721,127 @@ class TestWorkspaceDir:
         assert CONTAINER_OUTPUT_DIR == "/work/output"
 
 
+class TestAutoMountAllowlistMask:
+    """Auto-mounted plugin trees are default-deny masked (Fix B).
+
+    A plugin root is mounted whole (:ro, so it loads), but every child dir that
+    is not the plugin surface (.claude-plugin + declared skill dirs) is masked
+    with an empty tmpfs so colocated eval material (sibling task YAMLs, reference
+    solutions, tests/, node_modules/) can never be read by the agent.
+    """
+
+    import json as _json
+
+    @staticmethod
+    def _mounts(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+
+    @staticmethod
+    def _tmpfs(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "--tmpfs"]
+
+    def _plugin_root(self, root: Path, *, skills=None) -> Path:
+        (root / ".claude-plugin").mkdir(parents=True)
+        payload = {"name": "demo"}
+        if skills is not None:
+            payload["skills"] = skills
+        (root / ".claude-plugin" / "plugin.json").write_text(self._json.dumps(payload), encoding="utf-8")
+        return root
+
+    def _runner(self, tmp_path: Path, *, plugins=None, template_sources=None) -> DockerRunner:
+        from coder_eval.models import DockerDriverConfig
+
+        agent_kwargs: dict = {"type": "claude-code"}
+        if plugins is not None:
+            agent_kwargs["plugins"] = plugins
+        sandbox_kwargs: dict = {"driver": "docker", "docker": DockerDriverConfig()}
+        if template_sources is not None:
+            sandbox_kwargs["template_sources"] = template_sources
+
+        task = TaskDefinition(
+            task_id="test",
+            description="test task",
+            initial_prompt="test",
+            agent=agent_kwargs,  # dict -> validated into the AgentConfig union
+            sandbox=SandboxConfig(**sandbox_kwargs),
+            success_criteria=[FileExistsCriterion(description="c", path="t.txt")],
+        )
+        rt = MagicMock()
+        rt.task = task
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = None
+        return DockerRunner(rt)
+
+    def _argv(self, runner: DockerRunner, tmp_path: Path) -> list[str]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir(exist_ok=True)
+        output_dir.mkdir(exist_ok=True)
+        return runner._build_argv(input_dir, output_dir, container_name="c", image="img")
+
+    def test_plugin_root_masks_non_skill_children(self, tmp_path: Path):
+        root = self._plugin_root(tmp_path / "plugin")
+        (root / "skills" / "demo").mkdir(parents=True)
+        (root / "tests").mkdir()
+        (root / "reference").mkdir()
+        (root / "node_modules").mkdir()
+
+        runner = self._runner(tmp_path, plugins=[{"type": "local", "path": str(root)}])
+        argv = self._argv(runner, tmp_path)
+
+        tmpfs = self._tmpfs(argv)
+        # The whole root is :ro-mounted so the plugin loads.
+        assert f"{root.resolve()}:{root.resolve()}:ro" in self._mounts(argv)
+        # Non-skill children masked; skill surface + manifest not.
+        assert str((root / "tests").resolve()) in tmpfs
+        assert str((root / "reference").resolve()) in tmpfs
+        assert str((root / "node_modules").resolve()) in tmpfs
+        assert str((root / "skills").resolve()) not in tmpfs
+        assert str((root / ".claude-plugin").resolve()) not in tmpfs
+
+    def test_tmpfs_targets_are_under_mounted_host_root(self, tmp_path: Path):
+        # Codex symlinks / Antigravity search paths dereference the ORIGINAL
+        # mounted host path, so the mask must sit on that path, not a copy.
+        root = self._plugin_root(tmp_path / "plugin")
+        (root / "skills" / "demo").mkdir(parents=True)
+        (root / "tests").mkdir()
+
+        runner = self._runner(tmp_path, plugins=[{"type": "local", "path": str(root)}])
+        argv = self._argv(runner, tmp_path)
+
+        for masked in self._tmpfs(argv):
+            assert Path(masked).is_relative_to(root.resolve())
+
+    def test_template_source_plugin_root_is_masked(self, tmp_path: Path):
+        from coder_eval.models import TemplateDirSource
+
+        root = self._plugin_root(tmp_path / "tpl")
+        (root / "skills" / "demo").mkdir(parents=True)
+        (root / "tests").mkdir()
+
+        runner = self._runner(tmp_path, template_sources=[TemplateDirSource(path=str(root))])
+        argv = self._argv(runner, tmp_path)
+
+        assert str((root / "tests").resolve()) in self._tmpfs(argv)
+
+    def test_non_plugin_template_dir_emits_no_mask(self, tmp_path: Path):
+        from coder_eval.models import TemplateDirSource
+
+        plain = tmp_path / "plain_tpl"
+        (plain / "some_files").mkdir(parents=True)
+
+        runner = self._runner(tmp_path, template_sources=[TemplateDirSource(path=str(plain))])
+        argv = self._argv(runner, tmp_path)
+
+        assert self._tmpfs(argv) == []
+
+    def test_no_plugins_no_mask(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+        argv = self._argv(runner, tmp_path)
+
+        assert self._tmpfs(argv) == []
+
+
 class TestReferenceMountAntiCheat:
     """The reference must reach the harness but never the agent under evaluation."""
 

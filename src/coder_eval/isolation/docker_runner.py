@@ -162,6 +162,9 @@ HEARTBEAT_STALE_SECONDS = 20
 # the same guard on the orchestrator's post-run subprocesses.
 STDOUT_LINE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
 
+# Logged once per masked child of an auto-mounted plugin root (Fix B allowlist).
+_MASK_WARNING = "Masking non-skill path %s under plugin root %s (anti-cheat: only skills stay readable)."
+
 
 async def _heartbeat_loop(heartbeat_path: Path) -> None:
     """Write a monotonic counter to ``heartbeat_path`` every interval until cancelled.
@@ -1731,6 +1734,11 @@ class DockerRunner:
         # `~/.aws/config`). The warning surfaces the surprise.
         sensitive_sources = self._sensitive_source_paths()
 
+        # Lazy import: eval_material -> agents._skills triggers agents/__init__,
+        # which imports back into this module (opencode_agent). Importing it here,
+        # after this module is fully initialised, breaks that cycle.
+        from coder_eval.isolation.eval_material import mask_dirs
+
         def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
             if not raw_path:
                 return
@@ -1749,6 +1757,19 @@ class DockerRunner:
                     break
             mounted.add(target)
             argv.extend(["-v", f"{target}:{target}:ro"])
+            # ANTI-CHEAT (allowlist / default-deny): if `target` is a Claude-plugin
+            # root, the plugin stays mounted whole (:ro, above) so it still loads,
+            # but every child dir that is NOT the plugin surface (.claude-plugin +
+            # the manifest-declared skill dirs) is masked with an empty tmpfs. This
+            # closes the whole-suite channel: sibling task YAMLs, reference
+            # solutions, and test fixtures colocated under the tree are masked by
+            # default. `mask_dirs` returns [] for a non-plugin root, so a plain
+            # template dir / system_prompt_file parent is untouched. Docker applies
+            # mounts by target-path depth, so the deeper --tmpfs wins over the :ro
+            # bind regardless of argv order.
+            for masked_dir in mask_dirs(target):
+                argv.extend(["--tmpfs", str(masked_dir)])
+                logger.warning(_MASK_WARNING, masked_dir, target)
 
         plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
         for plugin in plugins:
