@@ -1658,8 +1658,9 @@ class DockerRunner:
         argv += ["--env", "TELEMETRY_ENABLED=false"]
 
         # Read-WRITE, not `:ro`: the in-container entry point deletes the staged
-        # task.yaml right after loading it (ANTI-CHEAT -- see the grant above and
-        # run_task_internal_command._scrub_staged_task_yaml), and both `rm` and
+        # task.yaml AND context.json right after loading them (ANTI-CHEAT -- both
+        # carry success_criteria; see the grant above and
+        # run_task_internal_command._scrub_staged_inputs), and both `rm` and
         # `chmod` fail with EROFS on a `:ro` bind mount. The host destroys the
         # whole staging tree in run()'s finally, so nothing is stranded.
         argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}"]

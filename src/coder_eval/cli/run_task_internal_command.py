@@ -47,24 +47,35 @@ from coder_eval.path_utils import PRIOR_RESULT_FILENAME
 logger = logging.getLogger(__name__)
 
 
-def _scrub_staged_task_yaml(task_yaml: Path) -> None:
-    """Delete the staged ``task.yaml`` after it has been loaded (anti-cheat).
+def _scrub_staged_inputs(task_yaml: Path, context_json: Path) -> None:
+    """Delete the staged grading inputs after they are loaded (anti-cheat).
 
-    The post-override :class:`TaskDefinition` (``success_criteria`` included) was
-    staged at ``/work/input`` for THIS load only. The agent runs in this same
-    container; leaving the file readable hands it the grading answer key. It is
-    read exactly once (by ``load_task``) -- grading reads criteria from the
-    in-memory task, never from disk -- so delete it now.
+    ``/work/input`` holds BOTH copies of the grading answer key:
+
+    * ``task.yaml`` -- the post-override :class:`TaskDefinition`, ``success_criteria``
+      included.
+    * ``context.json`` -- whose ``source_yaml`` is the RAW task YAML *text*
+      (``success_criteria`` verbatim), present at the top level AND inside every
+      ``config_lineage`` entry (``ConfigLineageEntry.source_yaml``). Deleting only
+      ``task.yaml`` would leave the identical criteria one file over -- and this
+      driver makes ``/work/input`` readable+writable, so the agent in this same
+      container could ``cat /work/input/context.json`` to recover them.
+
+    Both are read exactly once at startup (``context.json`` into memory in the
+    command body before this call; ``task.yaml`` by ``load_task``) and never again
+    during the agent turn or grading -- grading reads criteria from the in-memory
+    task, never from disk -- so delete both now.
 
     Gated on ``IN_CONTAINER_ENV``: docker-only by construction (a host/tempdir
-    invocation shares our uid and has no filesystem isolation, so there is
-    nothing to protect and nothing to delete). ``missing_ok`` so a re-entrant or
-    host call never crashes on an absent file. ``context.json``/``prior.json``
-    are deliberately NOT deleted -- they carry no criteria answer key and
-    ``prior.json`` is read after this point on the regrade path.
+    invocation shares our uid and has no filesystem isolation, so there is nothing
+    to protect and nothing to delete). ``missing_ok`` so a re-entrant or host call
+    never crashes on an absent file. ``prior.json`` is deliberately left in place:
+    it is read after this point on the regrade path, and a regrade runs no agent,
+    so it is not a leak.
     """
     if os.environ.get(IN_CONTAINER_ENV) == "1":
         task_yaml.unlink(missing_ok=True)
+        context_json.unlink(missing_ok=True)
 
 
 def heartbeat_is_alive(current: str, last_counter: str, current_mtime: float, last_mtime: float) -> bool:
@@ -269,11 +280,14 @@ def run_task_internal_command(
     # `TASK_DIR` env exposed to `run_command` criteria -- resolves to the
     # original host task directory rather than `/work/input/`.
     task, source_yaml = load_task(task_yaml)
-    # ANTI-CHEAT: load_task is task.yaml's sole reader (both the normal and the
-    # regrade paths run it before their dispatch, and prior.json is read INSIDE
-    # _grade_recorded_run, strictly after this point). Delete it now so the agent
-    # in this same container cannot read its own grading criteria back.
-    _scrub_staged_task_yaml(task_yaml)
+    # ANTI-CHEAT: both task.yaml and context.json have been fully consumed by this
+    # point -- context.json was parsed into memory above (source_yaml/config_lineage
+    # already extracted into `context`), and load_task is task.yaml's sole reader.
+    # Both the normal and the regrade paths reach here before their dispatch, and
+    # prior.json is read INSIDE _grade_recorded_run (strictly after this). Delete
+    # both staged files now so the agent in this same container cannot read its own
+    # grading criteria back -- from task.yaml OR from context.json's source_yaml.
+    _scrub_staged_inputs(task_yaml, context_json)
     if host_source_yaml is not None:
         source_yaml = host_source_yaml
     # The path below is never re-read; it only seeds Orchestrator's TASK_DIR.

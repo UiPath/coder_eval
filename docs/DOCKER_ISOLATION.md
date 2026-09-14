@@ -344,16 +344,20 @@ filesystem isolation, so neither applies there (nor can — there is nothing to
 mask). Both are defense-in-depth passive-read blocks, consistent with the
 reference window's posture above; neither contains an adversarial agent.
 
-- **The staged task definition is deleted after load.** The host stages the
+- **The staged grading inputs are deleted after load.** The host stages the
   post-override `TaskDefinition` (with `success_criteria`) at `/work/input/task.yaml`
-  for the in-container orchestrator to load once at startup. The agent runs in the
-  same container, so leaving that file readable would hand it the grading answer
-  key. The in-container entry point deletes it immediately after `load_task`
-  (gated on `CODER_EVAL_IN_CONTAINER`). It is read exactly once — grading reads
-  criteria from the in-memory task, never from disk. The `/work/input` mount is
-  therefore read-write (a `:ro` mount rejects `rm` with EROFS). `context.json`
-  and `prior.json` are kept: they carry no criteria and `prior.json` is read
-  later on the regrade path.
+  **and** a `context.json` whose `source_yaml` is the raw task text — criteria
+  verbatim, both at the top level and inside every `config_lineage` entry — for the
+  in-container orchestrator to load once at startup. The agent runs in the same
+  container, so leaving *either* readable would hand it the grading answer key
+  (deleting only `task.yaml` leaves the identical criteria one file over in
+  `context.json`). The in-container entry point deletes **both** immediately after
+  they are consumed — `context.json` is parsed into memory in the command body and
+  `task.yaml` by `load_task`, both before the delete (gated on
+  `CODER_EVAL_IN_CONTAINER`). They are read exactly once — grading reads criteria
+  from the in-memory task, never from disk. The `/work/input` mount is therefore
+  read-write (a `:ro` mount rejects `rm` with EROFS). `prior.json` is kept: it is
+  read later on the regrade path, and a regrade runs no agent so it is not a leak.
 
 - **Auto-mounted plugin trees are default-deny masked.** An `agent.plugins[].path`
   (or a `TemplateDirSource.path` that is itself a plugin root) is auto-mounted at
