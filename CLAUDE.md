@@ -1,250 +1,270 @@
 # CLAUDE.md - AI Assistant Guide
 
-Project reference for AI assistants working on the `coder_eval` codebase.
+Working reference for AI assistants on the `coder_eval` codebase.
+
+Design *rationale* — why a subsystem is shaped the way it is, and which shipped defect
+shaped it — lives in **`.claude/architecture-notes.md`**, which is not auto-loaded. Read
+it before changing grading, resume, early stop, timing, the reference anti-cheat, or an
+agent adapter.
+
+User-facing documentation lives in [`docs/`](docs/index.md): start with the
+[User Guide](docs/USER_GUIDE.md) for CLI behaviour and the
+[Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) for task YAML. The full docs
+index is generated from the `mkdocs.yml` nav (see **Docs index SSOT** below) and is
+deliberately not copied here.
 
 ## Project Overview
 
-**coder_eval** is a framework for evaluating AI coding agents with sandboxing, reproducibility, and data-driven analysis.
+**coder_eval** evaluates AI coding agents with sandboxing, reproducibility, and
+data-driven analysis.
 
-- **Python**: >=3.13
-- **License**: Apache 2.0
+- **Python**: >=3.13 · **License**: Apache 2.0
 - **Entry point**: `coder_eval.cli:app` (command: `coder-eval`)
 
 ## Directory Structure
 
 ```
 coder_eval/
-├── agent.py                       # Agent ABC (start, communicate, stop, get_state)
-├── config.py                      # Settings via pydantic-settings (.env loading)
-├── sandbox.py                     # Sandbox manager (tempdir, venv, templates)
-├── orchestrator.py                # Main evaluation loop
-├── reports.py                     # Markdown/JSON report generation (run-level + per-suite rollup via write_suite_rollups)
-├── reports_experiment.py          # Experiment/cross-variant report generation
-├── reports_junit.py               # JUnit XML report from a finalized run dir (run.json spine; for CI test-report ingestion)
-├── analysis.py                    # Command statistics aggregation
-├── logging_config.py              # Structured logging setup
-├── path_utils.py                  # Run ID generation, path utilities
-├── fs_permissions.py              # set_permissions: stacked chmod window (via Sandbox.set_permissions)
-├── pricing.py                     # Model pricing / cost calculation (ModelPricing, calculate_cost, register_pricing)
-├── litellm_cost.py                # Join proxy-captured ACTUAL per-call cost/cache onto turns (LiteLLM backend; apply_actual_cost)
-├── reports_html.py                # Single-file HTML report (the evalboard's static twin)
-├── reports_stats.py               # Shared report statistics + the ungraded rendering helpers (format_score, is_env_table_key)
-├── formatting.py                  # Human-readable number/duration formatting shared by the renderers
-├── invocation_log.py              # record_cli recording shim: renders it (emitting a sibling import of the argv_match sidecar), and parse_log reads its JSON Lines back
-├── argv_match.py                  # Structured argv matcher. STDLIB-ONLY (CE057): this file is copied into the recorder dir as a SIDECAR beside every response-serving shim, which imports it as a sibling, so `cli_called` and a `record_cli` response rule dispatch on ONE semantic
-├── telemetry.py                   # App Insights / OpenTelemetry emission (CoderEval.Task.End et al.)
-├── isolation/                     # driver: docker — docker_runner.py builds, runs and reaps one container per task
-├── optimize/                      # Prompt/config optimization helpers
-├── utils.py                       # Version info helpers
+├── agent.py                  # Agent ABC (start, communicate, stop, get_state)
+├── config.py                 # Settings via pydantic-settings (.env loading)
+├── sandbox.py                # Sandbox manager (tempdir, venv, templates, adopt)
+├── orchestrator.py           # Main evaluation loop
+├── reports.py                # Markdown/JSON run reports + per-suite rollups
+├── reports_experiment.py     # Cross-variant experiment reports
+├── reports_junit.py          # JUnit XML from a finalized run dir (CI ingestion)
+├── reports_html.py           # Single-file HTML report (the evalboard's static twin)
+├── reports_stats.py          # Shared report statistics + ungraded rendering helpers
+├── formatting.py             # Number/duration formatting shared by the renderers
+├── analysis.py               # Command statistics aggregation
+├── logging_config.py         # Structured logging setup
+├── path_utils.py             # Run IDs, path utilities, atomic writes, tree digests
+├── fs_permissions.py         # set_permissions: stacked chmod window
+├── pricing.py                # Model pricing (mirrored by evalboard/lib/pricing.ts)
+├── litellm_cost.py           # Join proxy-captured actual per-call cost onto turns
+├── timing.py                 # TurnClock + turn decomposition (single subtraction seam)
+├── invocation_log.py         # record_cli recording shim + JSON Lines reader
+├── argv_match.py             # Structured argv matcher (STDLIB-ONLY sidecar — CE057)
+├── telemetry.py              # App Insights / OpenTelemetry emission
+├── isolation/                # driver: docker — one container per task
+├── harbor/                   # Harbor export + coder-eval as a Harbor agent
+├── optimize/                 # Prompt/config optimization helpers
+├── utils.py                  # Version info helpers
 │
-├── agents/
-│   └── claude_code_agent.py       # Claude Code SDK agent implementation
+├── agents/                   # Agent implementations (claude_code, codex, antigravity,
+│                             #   opencode, pi, noop) + registry, watchdog
 │
-├── models/                        # Pydantic data models (subpackage)
-│   ├── __init__.py                # Unified exports for all models
-│   ├── enums.py                   # AgentKind, AgentState, FinalStatus, ApiBackend
-│   ├── criteria.py                # 15 success criterion types + base + union
-│   ├── experiment.py              # ExperimentDefinition, ExperimentVariant, ResolvedTask, result models
-│   ├── judge_defaults.py          # DEFAULT_JUDGE_MODEL constant (cycle-free leaf)
-│   ├── cli_match.py               # FlagMatch + CliMatch (a `when:` pattern) + the shared verb/flag validators (cycle-free leaf: criteria.py and sandbox.py both import it)
-│   ├── mutations.py               # PromptMutation variants (prefix/suffix/replace/template)
-│   ├── results.py                 # CriterionResult (+ ClassificationCriterionResult), TurnRecord, EvaluationResult, EarlyStopInfo/EarlyStopReason, CriterionAggregate, ThresholdCheck, SuiteRollup
-│   ├── routing.py                 # ApiRoute (DirectRoute/BedrockRoute)
-│   ├── sandbox.py                 # SandboxConfig, ResourceLimits, RecordedCli + CliResponse (per-invocation stub responses)
-│   ├── tasks.py                   # TaskDefinition, AgentConfig, Dataset (dataset fan-out + sample)
-│   ├── telemetry.py               # CommandTelemetry, CommandStatistics, TokenUsage, ProviderCallCost, ReconciliationMessage, TranscriptMessage
-│   └── templates.py               # RepoSource, TemplateDirSource, StarterFilesSource
+├── models/                   # Pure Pydantic data models (see __init__ for exports)
+│   ├── enums.py              # AgentKind, AgentState, FinalStatus, ApiBackend
+│   ├── criteria.py           # 15 success criterion types + base + union
+│   ├── experiment.py         # ExperimentDefinition, ExperimentVariant, ResolvedTask
+│   ├── cli_match.py          # FlagMatch + CliMatch (cycle-free leaf)
+│   ├── container_paths.py    # IN_CONTAINER_ENV + container path constants (CE056)
+│   ├── mutations.py          # PromptMutation variants
+│   ├── results.py            # CriterionResult, TurnRecord, EvaluationResult, rollups
+│   ├── routing.py            # ApiRoute (DirectRoute/BedrockRoute)
+│   ├── sandbox.py            # SandboxConfig, ResourceLimits, RecordedCli, CliResponse
+│   ├── tasks.py              # TaskDefinition, AgentConfig, Dataset, RunLimits
+│   ├── telemetry.py          # CommandTelemetry, TokenUsage, TranscriptMessage
+│   └── templates.py          # RepoSource, TemplateDirSource, StarterFilesSource
 │
-├── criteria/                      # Criterion checker plugins (one file per type)
-│   ├── __init__.py                # CriterionRegistry with auto-discovery
-│   ├── base.py                    # BaseCriterion (async _check_impl_async is primary; sync _check_impl derives from it, or vice versa) + @handle_criterion_errors(_async)
-│   ├── _classification_aggregate.py  # Shared overlay: accuracy / P/R/F1 / confusion matrix
-│   ├── classification_match.py    # File-based label matcher
-│   ├── cli_called.py              # Structured match over the record_cli invocation log (matching engine: argv_match.py)
-│   ├── command_executed.py
-│   ├── commands_efficiency.py
-│   ├── file_check.py
-│   ├── file_contains.py
-│   ├── file_exists.py
-│   ├── file_matches_regex.py
-│   ├── json_check.py
-│   ├── llm_judge.py
-│   ├── reference_comparison.py
-│   ├── run_command.py
-│   ├── skill_triggered.py         # Binary: did the agent engage the target skill (Skill tool / file read)?
-│   └── uipath_eval.py
+├── criteria/                 # Criterion checker plugins (one file per type)
+│   ├── __init__.py           # CriterionRegistry with auto-discovery
+│   └── base.py               # BaseCriterion + @handle_criterion_errors
 │
-├── evaluation/                    # Evaluation orchestration
-│   ├── checker.py                 # SuccessChecker (dispatches to criteria/)
-│   ├── judge_context.py           # JudgeContextBuilder + shared scrub/truncate/format_details for both judges
-│   ├── judge_verdict.py           # parse_judge_verdict + span walker (shared verdict parser)
-│   ├── sub_agent.py               # SubAgentRunner: sandbox-copy + ClaudeCodeAgent lifecycle for judge-style sub-agents
-│   └── summaries.py               # summarize_commands (shared by orchestrator + llm_judge)
-│
-├── errors/                        # Error handling system
-│   ├── agent.py                   # AgentCrashError + format_timeout_reason / truncate_crash_message helpers
-│   ├── categories.py              # Error categorization
-│   ├── categorization.py          # Error classification logic
-│   ├── executor.py                # Execution with error context (+ on_attempt_error hook)
-│   ├── retry.py                   # Retry logic with exponential backoff
-│   └── timeout.py                 # Timeout handling (TurnTimeoutError carries optional partial TurnRecord)
-│
-├── orchestration/                 # Batch execution utilities
-│   ├── batch.py                   # Parallel task execution (run_batch) + partition_for_resume/ResumePartition
-│   ├── config.py                  # Batch run configuration
-│   ├── early_stop.py              # validate_early_stop guardrails + EarlyStopWatcher (armed live-verdict observer)
-│   ├── evaluation.py              # Reference dir resolution + per-run private staging
-│   ├── regrade.py                 # Grade an already-executed run in place — shared by `evaluate <run_dir>` and `run --resume`
-│   ├── experiment.py              # ExperimentRunner, resolve_task_for_variant, load_experiment
-│   └── task_loader.py             # YAML task loading
-│
-├── cli/                           # CLI commands (Typer + Rich)
-│   ├── __init__.py                # Typer app setup (core commands)
-│   ├── run_command.py             # `coder-eval run` + `run_pipeline` (the body BOTH run and execute share)
-│   ├── execute_command.py         # `coder-eval execute` — Typer signature only; delegates to run_pipeline(grade=False)
-│   ├── plan_command.py            # `coder-eval plan`
-│   ├── evaluate_command.py        # `coder-eval evaluate` (grade a dir, or re-grade a run dir) + `run_evaluation`
-│   ├── evaluate_target.py         # PURE shape detection for evaluate's positionals (run dir ⟺ holds task.json)
-│   ├── report_command.py          # `coder-eval report`
-│   ├── aggregate_command.py       # `coder-eval aggregate` — rebuild run.json from the task.json rows on disk (the step right after `execute`)
-│   ├── run_task_internal_command.py  # `_run-task-internal` — the in-container entry point DockerRunner invokes; never called by a user
-│   ├── run_helpers.py             # CLI helper functions
-│   ├── console.py                 # Rich console instance
-│   └── utils.py                   # CLI utilities
-│
-├── scoring/                       # Code similarity scoring
-│   ├── ast_similarity.py          # AST-based comparison
-│   ├── token_similarity.py        # Token-based comparison
-│   ├── signature_similarity.py    # Function signature comparison
-│   ├── complexity.py              # Cyclomatic complexity comparison
-│   ├── quality.py                 # Quality metrics (annotations, docstrings)
-│   └── similarity.py              # Unified similarity interface
-│
-├── streaming/                     # Real-time agent event streaming (agent is sole emitter)
-│   ├── __init__.py                # Unified exports
-│   ├── callbacks.py               # StreamCallback protocol, TaskScopedCallback, CompositeStreamCallback, safe_emit
-│   ├── events.py                  # Event protocol: Agent/Turn/Tool Start+End + status enums (Pydantic)
-│   ├── collector.py               # EventCollector: reduces the event stream into a TurnRecord (task.json capture)
-│   └── renderers.py               # RichStreamRenderer + LoggingStreamRenderer (task.log; both event-driven)
-│
-├── simulation/                    # Multi-turn user simulation (dialog-mode evaluation)
-│   ├── __init__.py                # Unified exports (UserSimulator, DialogStopReason, evaluate_stop)
-│   ├── user_simulator.py          # LLM-driven user simulator (Anthropic + Bedrock backends)
-│   └── termination.py             # Dialog-termination predicate + stop-token handling
-│
-└── resources/                     # Package resources
+├── evaluation/               # checker.py (SuccessChecker), judge_context, judge_verdict,
+│                             #   sub_agent, summaries
+├── orchestration/            # batch, config, config_merge, early_stop, evaluation,
+│                             #   regrade, experiment, overrides, task_loader
+├── cli/                      # Typer commands; each has a plain-Python twin (CE048)
+├── scoring/                  # AST / token / signature / complexity / quality similarity
+├── streaming/                # Event protocol, EventCollector, renderers
+├── simulation/               # Multi-turn user simulation (dialog mode)
+└── resources/                # Package resources
 
-experiments/                        # Experiment definition YAML files
-tasks/                             # Task definition YAML files
-tests/                             # Test suite
-docs/                              # Documentation
-templates/                         # Sandbox template directories
-.claude-plugin/marketplace.json    # Makes this repo a Claude Code plugin marketplace (`/plugin marketplace add UiPath/coder_eval`); lists the one plugin below.
-plugins/coder-eval/                # The published Claude Code plugin: `.claude-plugin/plugin.json` (its `version` is a derived pin of pyproject's, bumped by release.yml, guarded by tests/test_action_version_pin.py), `skills/<name>/SKILL.md` × 6 (`/coder-eval:init`, `/coder-eval:check-skill`, `/coder-eval:task`, `/coder-eval:lint-tasks`, `/coder-eval:analyze`, `/coder-eval:ci`), and `reference/` — everything a skill reads must live here, since an installed plugin is copied to ~/.claude/plugins/cache/ WITHOUT its parent dirs (address it via `${CLAUDE_PLUGIN_ROOT}`). `reference/criteria.md` is generated (`make plugin-reference`, CE033); `reference/run-layout.md` is a verbatim mirror of `.claude/shared/run-layout.md`; `reference/task-rubric.md` is the shared task-quality rubric that `task` and `lint-tasks` both read (plugin-only — no repo-side twin); `reference/repo-layout.md` is the eval-tree DISCOVERY policy every skill reads (`SKILL_NEEDS_EVAL_ROOT_DISCOVERY`, which a new skill must declare a stance in) — glob for `task_id:` files and `run.json`, never assume `tasks/`/`runs/latest` — as distinct from `run-layout.md`, which describes what is inside a run directory. Every skill must appear in all four surfaces in `SKILL_DOC_SURFACES` (derived test), and their combined frontmatter `description` length is capped (`SKILL_LISTING_BUDGET_CHARS`) because the skill listing's budget is shared with every skill the user has installed. **Skill naming is verb-first imperative** — a skill is a command you issue (`/coder-eval:<name>`) and every one of them takes an action, so name it for the action: a bare verb where that is unambiguous (`init`, `analyze` — the object comes from the argument), otherwise `<verb>-<object>` (`lint-tasks`, `check-skill`). Never `<object>-<verb>`: `skill-check` was renamed to `check-skill` precisely because it read backwards next to `lint-tasks`. `task` and `ci` predate the rule and stay — renaming a published skill breaks every user's muscle memory for no functional gain, since activation keys on the `description`, never the name. Distinct from `.claude/commands/`, which stays repo-local contributor tooling.
-action.yml                         # Published composite GitHub Action (coder-eval as a CI gate). release.yml's `release` job maintains its `version:` default; its `promote` job (gated on publish-pypi) moves the `v<major>` tag + cuts the Release, so nothing consumer-visible moves before the wheel is on PyPI. verify-published-action.yml then verifies the published composite (tag/pin/PyPI/Marketplace parity, plus a real consumer run) after each Release and nightly. Runbook: CONTRIBUTING.md § Releasing.
+experiments/   tasks/   tests/   docs/   templates/   evalboard/
+plugins/coder-eval/            # Published Claude Code plugin (six skills)
+action.yml                     # Published composite GitHub Action
+.claude-plugin/marketplace.json
 ```
 
 ## Key Architectural Patterns
 
-- **Discriminated Unions**: Criteria types and template sources use Pydantic discriminated unions
-- **Plugin Registry**: `criteria/` uses auto-discovery via `pkgutil` + `@register_criterion` decorator
-- **Strategy Pattern**: `Agent` ABC with implementations in `agents/`
-- **Separation of Concerns**: Data models (`models/`) are pure Pydantic; logic lives in `criteria/`, `evaluation/`, etc.
-- **Callback Streaming**: `StreamCallback` protocol with `TaskScopedCallback` wrapper for real-time LLM event output
-- **Experiment Layer**: Pre-processing config resolver (`ExperimentRunner`) that resolves task × variant combinations via 5-layer merge (default → experiment defaults → task → variant → CLI) before passing to `run_batch`. For running A/B comparisons (model vs. model, skill on vs. off, prompt vs. prompt), see [docs/AB_EXPERIMENTS.md](docs/AB_EXPERIMENTS.md).
-- **Single declarative merge resolver**: All five config layers merge through ONE engine (`orchestration/config_merge.py::resolve_root`) for the three `-D`-reachable roots (`agent`/`run_limits`/`sandbox`). Each field declares *how it merges* once, on the model, via `MergeField(strategy="deep"|"append"|"replace")` (or a type-aware default: nested `BaseModel`/free-form `dict` → `deep`; `list`/scalar → `replace`). `resolve_task_for_variant` (layers 1–4) and `apply_overrides` (layer 5) build `Layer` lists and call the same `resolve_root`, so a field merges identically regardless of which layer supplied it (the unification invariant, enforced by `tests/test_merge_unification.py`). Lint rule CE014 forces every list field to declare its strategy explicitly.
-- **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`) survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D` targeting the same path is a hard error. `--type` (→ `agent.type`) is a separate, lighter alias that does NOT route through that collision check — `--type` and `-D agent.type=…` last-win rather than hard-error (the `-D` value wins). Tools, plugins, and SDK options are `-D`-only.
-- **All core models importable from `coder_eval.models`** regardless of submodule
-- **Dataset fan-out**: `TaskDefinition.dataset` (inline rows or JSONL path) expands a single task into N row-tasks with `${row.<field>}` substitution in `initial_prompt` and `success_criteria` string fields. Expansion runs in `task_loader.expand_dataset` **before** variant resolution, so variants cannot override the dataset. Row sampling: CLI `--sample N` (fixed-seed uniform-random N over the whole dataset) overrides `--sample-per-stratum N` / `dataset.sample_per_stratum` (stratified random N-per-stratum, keyed on `stratify_field`, default `expected_skill` — for classification suites like activation). Stratified sampling (whether the N-per-stratum count comes from the **CLI** `--sample-per-stratum` flag or **YAML** `dataset.sample_per_stratum`) is **nondeterministic** by default — it re-draws each run (so the nightly activation suite broadens coverage over time). Set `dataset.sample_seed` to pin a reproducible sample; an explicit seed always wins. (Only `--sample N` uses a fixed seed, since a smoke test wants the same N rows each run.)
-- **Per-criterion aggregation**: Each `BaseCriterion` subclass exposes `aggregate(criterion, per_row_results) -> CriterionAggregate | None`. Default emits `count / mean / median / std / min / max` so every criterion is suite-thresholdable for free. Classification-style criteria return `ClassificationCriterionResult` (subclass of `CriterionResult`) and layer accuracy / P/R/F1 / confusion via the shared `overlay_classification_metrics` utility. `BaseSuccessCriterion.suite_thresholds` gates the suite on those metrics; CLI exits non-zero on any gate failure.
-- **Sub-agent token accounting**: There is NO separate per-sub-agent field. Every sub-agent generation is captured as a `parent_tool_use_id`-tagged `AssistantMessage` in the turn transcript, so per-sub-agent usage is derived by grouping those messages on that id (the evalboard's `aggregateSubAgentUsage` does exactly this). Claude bubbles its sub-agent's intermediate generations into the parent stream natively, and the **terminal** generation (delivered as the Agent tool result, never streamed) is synthesized into one via `_synthesize_subagent_terminal_message` from `tool_use_result.usage`. Codex reconstructs all child generations from the child rollout (`_recover_subagent_tool_calls`). The turn total already includes sub-agent cost — Claude via the SDK's cumulative `model_usage`; Codex via `_fold_subagent_tokens`, which folds the child messages (their real per-generation tokens) into the parent total. `CommandTelemetry.result_summary` is stored **untruncated** (no 200-char cap) so sub-agent returns are preserved whole. Set `CODER_EVAL_RAW_SDK_LOG=1` to dump every raw SDK event to the task log for inspection.
-- **Reconciliation message (stream self-reconciles to the turn total)**: The per-message stream consistently under-reports the authoritative turn total — a fixed prompt slice (~512 input tokens on Claude) is billed on no SDK-emitted message, and sub-agent input/cache only partially bubbles up. So `EventCollector.build_turn_record` appends one synthetic `ReconciliationMessage` (`role="reconciliation"`, in the `TranscriptMessage` union) per turn, carrying the per-bucket residual = `token_usage` − Σ(assistant message buckets). The invariant: **summing the four token buckets across `TurnRecord.messages` (assistant + reconciliation) equals `token_usage` exactly**, for both Claude and Codex (Codex's stream is already complete after `_recover_subagent_tool_calls`, so its residual is usually 0 and no entry is emitted). This is what lets the evalboard SUM the message stream as the source of truth instead of reading a separate aggregate ("agent tokens"): `selectTokenTotals` returns the stream sum whenever a reconciliation entry is present, and the timeline renders it as its own row. It is agent-agnostic (booked at the single `EventCollector` seam), carries no cost (cost stays on `token_usage`), and is excluded from generation/turn counts and the cost simulator. The LiteLLM open-weight actual-cost join (`litellm_cost.apply_actual_cost`) deliberately writes cost at the TURN level only (`token_usage.total_cost_usd` = the real OpenRouter bill) plus the per-call `TurnRecord.provider_call_costs` audit record; it does NOT touch the message token buckets, so `EventCollector` stays the single writer and this invariant holds on every backend. The Python `token_usage`/`total_token_usage` aggregate is unchanged and still authoritative for budget/judges/reports.
-- **Reference solutions are directory-only, and shielded (partially) from the agent**: `task.reference` is a single required `directory:` (relative to the task YAML) — the inline `code:` / single-file `file:` forms are gone, because a directory is the only shape that can be permission-gated as a unit; a `model_validator(mode="before")` gives the removed forms a migration error. The orchestrator stages a **per-run private copy** (`orchestration/evaluation.py::stage_reference_dir`, symlinks stripped) into a tempdir, removed in `_cleanup` via `path_utils.rmtree_restrictive` (keyed on `_reference_staging_root`, recorded BEFORE the copy so a failed copy still cleans up; `rmtree(ignore_errors=True)` silently declines on a tree left at 000) and deliberately never preserved into `run_dir/artifacts`. That copy is held at mode `000` for the whole of every `agent.communicate` call via **`Sandbox.set_permissions`**, the driver-aware wrapper over `fs_permissions.py::set_permissions`. Windows **stack**: exiting restores the *enclosing* window's mode, only the outermost exit restores the pre-window mode — that is what makes a mid-turn re-grant (`mode=READ_ONLY_MODE`) expressible, and it covers two windows at the same mode so no refcount is needed. The window is enforced **only inside a docker container** (`Sandbox.enforces_permission_windows`) and is a no-op on the host, where the agent shares our uid. **That gate keys on the `CODER_EVAL_IN_CONTAINER` env var, NOT `sandbox.driver`** — `run_task_internal_command` rewrites `driver: docker` → `tempdir` before building the in-container Orchestrator, so a driver-based gate would silently disable the anti-cheat on exactly the path that needs it (regression-guarded by `TestSandboxDriverGate`); `resolve_reference_dir` gates its `/work/references` branch on the same var for the same reason. The task directory is **not** shielded (`:ro` mount → EROFS, and the same YAML is readable at `/work/input`). Criteria address reference files with the `$REFERENCE_DIR` token (same resolver as `$TASK_DIR`) and the `REFERENCE_DIR` env var for `run_command`; `reference_comparison` names one file via `reference_file`. Docker mounts a throwaway **read-write** copy at `/work/references` (a `:ro` mount cannot be chmod'd — EROFS), masks the in-task-dir original with an empty tmpfs, and drops `DAC_OVERRIDE`/`DAC_READ_SEARCH`. `FOWNER`/`CHOWN` are deliberately **NOT** dropped: the in-container orchestrator that applies the window is the same root process with the same caps, so dropping `FOWNER` breaks *the harness's own* chmod wherever the bind mount preserves a non-root owner (native Linux — verified: `chmod: Operation not permitted`), i.e. exactly where the drop would otherwise bite. A window that cannot be applied is now a hard error, not a warning: `Sandbox.set_permissions` passes `strict=True` whenever it enforces, so an unprotected run fails instead of producing a normal-looking score. **KNOWN GAP — this is defense-in-depth, not a boundary**: (a) `chmod(2)` is gated on owner-or-`CAP_FOWNER` and the container runs as root owning the copy, so a deliberate `chmod 755 /work/references` restores access; (b) the window spans `agent.communicate` only, and nothing reaps agent child processes at turn end, so a backgrounded read loop succeeds once the window closes. The **write** half of (b) is closed — `path_utils.digest_tree` hashes the tree at staging and `Orchestrator._verify_reference_integrity` re-checks before grading, raising `ReferenceTamperedError` (→ `FinalStatus.ERROR`) on a mismatch so an agent cannot overwrite the reference to drive `reference_comparison` to 1.0. Passive reads are blocked; an adversarial agent is not. Full containment requires running the agent as a non-root uid AND holding the window for the agent's whole lifetime — follow-up. `tasks/anti_cheat_reference` probes the passive-read half.
-- **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same thing on every backend, so a divergence is either fixed or documented — never silent. **`run_limits.max_turns` on Codex/Antigravity counts VISIBLE turns** (resolved tool calls, read live off the shared `EventCollector.visible_turn_count`, the same list `TurnRecord.commands` holds) because one `communicate()` is a single SDK turn on both, so a native counter would clamp at 1; claude-code keeps its native SDK cap, whose unit (an agent-loop turn) absorbs arbitrarily many parallel calls — the same number is NOT the same budget across harnesses. OpenCode likewise keeps a native unit — the CLI streams a real multi-step loop per `communicate()` (`step_start`/`step_finish`), so `max_turns: N` allows N complete steps and cuts cleanly when step N+1 begins. **Pi** is the same shape — the CLI (`pi -p --mode json`) streams a real multi-step loop per `communicate()` (`turn_start`/`turn_end`), so `max_turns: N` counts native `turn_start` steps; Pi retries transient/provider errors INTERNALLY (`agent_end.willRetry`), and the reducer finalizes once at `agent_settled`/EOF (not the first `agent_end`), folding the retry cycles into one turn. The cap is enforced on the same loop boundary as the cooperative early stop and finalizes cleanly as `max_turns_exhausted` (no crash, no retry); on Antigravity that boundary lives in `_drain()`, so the background-work poll loop honors it too. Known unfixed divergences: `permission_mode` on Codex, Antigravity, and Pi (all run unconfined — the sandbox driver is the isolation boundary), `disallowed_tools` on Codex (forwarded, not SDK-enforced), `allowed_tools`/`disallowed_tools` on Antigravity (not read at all), `turn_timeout` on Antigravity (bounded by an earlier internal poll deadline at 80% of it), `allowed_tools`/`disallowed_tools`/`system_prompt` on OpenCode (no CLI knob; warned at `start()`, not enforced), `allowed_tools`/`disallowed_tools` on Pi (its built-in tool names are lowercase — `bash`/`read`/… — and cannot map to the Claude-namespaced config default, so forwarding them would strip the agent of ALL tools; warned+ignored like the three agents above) — Pi DOES enforce `system_prompt` (`--append-system-prompt`, a small win over OpenCode) and DOES honor `plugins` for skills (each resolved skills dir → a `--skill <dir>` arg via the shared `_plugin_skill_dirs` resolver, recorded as `pi_skill_paths`, so it CAN run activation suites) but does NOT read `system_prompt_file`, and **`agent.plugins[].path` depth** — claude-code REQUIRES a plugin root holding `skills/` and silently loads NOTHING from a bare skills directory, while Codex and Antigravity scan both depths and accept either. That is the costly direction: the wrong depth produces no error, every positive row of an activation suite scores 0, and the suite reports recall 0.0, which reads exactly like a skill that never triggers. Held to the plugin-root shape (for `SKILL_SOURCE_PATH` only) by lint rule CE045. `plugins` on OpenCode is **honored for skills**: each local plugin root is mapped to the `skills` dir its `.claude-plugin/plugin.json` declares (default `<root>/skills`, never the root itself — `skills.paths` is scanned recursively and a plugin root can hold a self-referential symlink) and injected via `OPENCODE_CONFIG_CONTENT`, which `--pure` does not suppress; a plugin's agents/hooks/commands/MCP servers are still dropped. Full table + rationale: docs/agents/HARNESS_PARITY.md.
-- **sandbox isolation**: Tasks that don't need MCP servers should set `setting_sources: []` in their `agent:` block to isolate the sandbox from the host project's CLAUDE.md and settings. Without this, the host project's CLAUDE.md (often 20 KB+) is injected into every API call, inflating cache-creation tokens and cost significantly.
-- **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run` with grading removed — the agent runs and the full trajectory is captured, but no criterion is checked, `weighted_score` is `None` (never `0.0`, which would be indistinguishable from "graded and scored zero"), and the row finalizes as **`FinalStatus.NOT_GRADED`**, whose `category` is a **fourth** bucket, `"ungraded"`. Ungraded rows leave BOTH sides of every rate: `RunSummary.pass_rate` / `error_share` and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run - tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run` invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it** — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are facts about the *run*, not about grading, and still apply (so `execute` still exits non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)` → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog check, and post-failure diagnostics); it crosses the docker boundary in `context.json` (defaulting to `True` in-container, so a host predating `execute` keeps grading). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because a task YAML must never declare itself ungraded; only the invoking command decides. `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in that flag, so there is no third code path. Three things are refused rather than degraded: `--junit-xml` (a report of verdicts, and there are none — though `reports_junit` still emits `<skipped>` for an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades nothing), and simulation tasks (their turn-continuation logic reads criteria results, so an ungraded dialog would silently change its own stopping behavior). `stop_early:` blocks are inert under `execute` for the same reason the kill switch exists: the full trajectory is the deliverable. Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and grades with its own tests.
-- **Detached grading (`evaluate` over a run dir) + `Sandbox.adopt`**: `coder-eval evaluate` takes two shapes, told apart by a **pure** resolver (`cli/evaluate_target.py`) on one probe — a target holding `task.json` is a run directory. Run-dir mode rebuilds the task from the run's own `task_config.resolved`, **not** by re-loading the YAML: `resolved` is post-merge, so variant overrides / `-D` / dataset expansion are already baked in and re-loading the source would silently grade a *different* task (fallback to `source_file` only when `resolved` no longer validates, and loudly). It seeds the fresh result from the prior one via `Orchestrator(prior_result=...)` → `_seed_from_prior_result`, which carries the trajectory (every derived figure — tokens, cost, `command_stats`, `model_used` — recomputes from `iterations`), `iteration_count`, execution facts, and **`early_stop` — load-bearing, because gate selection is FIRED-ONLY**: dropping it re-grades a truncated trajectory under the full-run strict-AND gate and can flip the verdict. Carrying it is only half the fix — **both** grading paths select the gate through the single `Orchestrator._select_gate()`; the evaluate-only branch a detached grade actually takes originally called `all_criteria_passed` inline, so the seeded field was written and never read. `tests/test_seed_from_prior_result.py` partitions every `EvaluationResult` field as CARRIED or RECOMPUTED and fails closed on a new one, and asserts the two `_select_gate()` call sites. A prior status that `FinalStatus.is_execution_fact` (TIMEOUT / ERROR / BUILD_FAILED / the budget stops) is **preserved**, never overwritten: grading may only move `NOT_GRADED` to SUCCESS/FAILURE, since it neither repeated nor observed the agent phase. **`MAX_TURNS_EXHAUSTED` is deliberately NOT one of them — anywhere**. `_EXECUTION_FACT_STATUSES` maps it to `False`, and the table and the chain that reads it must agree: it shipped as `True` while `_terminal_status`'s own docstring argued the opposite, and the disagreement pinned a re-graded max-turns row at MAX_TURNS_EXHAUSTED *while holding `weighted_score` 1.000* and exit 1 — a combination `run` can never produce for the same trajectory. Under `execute`: `_terminal_status` puts the `grade=False` arm ABOVE it, because on the graded path it is subordinate to the verdict — `run` returns SUCCESS for a max-turns trajectory whose criteria pass — so it is not knowable without grading. Consuming it first made it terminal AND permanent (the `is_execution_fact` arm then pinned it), so identical agent output scored SUCCESS/1.0 under `run` and MAX_TURNS_EXHAUSTED under `execute` → `evaluate`. The fact survives on `result.max_turns_exhausted`, which `_seed_from_prior_result` carries, so the detached grade walks the identical chain. The CLI must also branch on WHERE a status came from, not on its value: a preserved TIMEOUT exited 0 under "All criteria passed" (a CI wrapper reading the exit code went green on a row run.json counts as failed), and a preserved ERROR printed the ORIGINAL run's crash message as though grading had crashed, claimed the row was "left ungraded" (false — the restored record still read ERROR), and discarded a verdict just computed at 1.000. Grader-host `environment_info` is preserved as flat `graded_by_*` scalars rather than overwriting the run's (flat, not a nested sub-dict: `environment_info` is rendered as a flat map by the HTML report and typed as one by the evalboard, so a nested capture prints as a Python dict repr). The route recorder follows the same rule: on a detached grade it writes `graded_by_api_routing` / `graded_by_eval_routing` and leaves the run's `api_routing` alone — writing in place contradicted the "prior wins" contract and left a self-contradictory record (a direct route named beside the run's stale `aws_region`/`bedrock_model`). Two other parity fixes: `command_base_path` is now persisted into `environment_info` by `_sync_sandbox_command_path_with_agent` and restored in the evaluate-only branch (closing the PATH gap that method's docstring already named), and `_join_litellm_actual_cost` **skips** when `prior_result` is set (its join keys on a per-Orchestrator nonce the prior turns never carried, so it would clobber already-correct costs). The verdict is written back into the run's `task.json`, with the pre-grade record kept as `task.execute.json` — that in-place write is what makes plain `coder-eval aggregate <run_dir>` rebuild a graded `run.json` with **zero** new code. **`Sandbox.adopt(workspace)`** is the grade-in-place primitive: it reuses `setup`'s adoption half but skips every *materializing* step (`_setup_template`, `_generate_cli_recorders`, venv/package installs, the destructive `$HOME` remediation), running only non-mutating derivation (mock-dir `+x`, venv *discovery*, plugin-tools pin); `_cleanup_on_exit` stays False so an adopted tree is never moved or deleted, and `Sandbox.was_adopted` is set — the Orchestrator reads it to SKIP the `pre_run` hook (`run()` calls it unconditionally with `cwd = sandbox_dir`, and several in-tree tasks stage fixtures there with `cp -a /app/[!.]* "$PWD/"`, which would overwrite the agent's deliverables before the criteria read them) and to KEEP `sandbox_path` in the `PreservationMode.NONE` cleanup arm (an adopted tree survives cleanup, so the path is not stale). `pre_run`'s recorded results are carried from the prior run instead. **`post_run` is the opposite case and moved phases**: it is defined as running after the verdict and may mutate the workspace the criteria read (`rm -rf node_modules` is the archetype), so running it under `execute` inverted its own contract and broke round-trip equivalence — the criteria had not read the tree yet, so `execute` + `evaluate` graded a workspace `post_run` had already modified and could return a different verdict than a single `run` for the identical trajectory (the in-tree tasks all escaped it only because their `post_run` touches nothing a criterion reads). `execute` now DEFERS it; whichever command grades runs it, exactly once — `_skip_post_run` skips on `grade=False`, and skips again when the prior row already recorded results, since nothing declares these commands idempotent. That makes it a capability of the in-place path, so `embedded_commands` scans it OUTSIDE `include_setup_phase` (which is False in place) — minus `_operator_baseline_post_run()`, the grading host's own `experiments/default.yaml` contribution, which every task carries and the record therefore did not choose; without that exemption the refusal fired on 100% of run directories, and a refusal that always fires is waved through. In-place is **more correct**, not merely faster: `_setup_template` filters the copy through `_should_ignore_template_file`, which drops `node_modules` / `dist` / `build` / `.venv` / `.git`, so on the copy path a criterion like `test -f dist/bundle.js` fails as a *copying artifact* rather than as a verdict (verified: 0.00 "does not exist" on copy vs 1.00 in place). Defaults: in-place for a run dir, copy for a bare work dir (criteria can mutate it and it is the user's own tree); `--in-place`/`--copy` override. `adopt` hard-errors on `driver: docker` (a container workspace is unreachable from the host), and grading a `driver: docker` task is DISPATCHED INTO A CONTAINER of the task's own image (`_should_grade_in_container` -> `_grade_in_container` -> `DockerRunner(prior_result=, grade_workspace=)`), because that is the only place its criteria mean what they meant during the run: `tasks/byod_smoke_test.yaml` asserts `test -f /opt/byod_marker`, baked into its image, and the IDENTICAL row scores SUCCESS 1.000 in a container and FAILURE 0.000 on the host — the host answering a question nobody asked. The grading container gets TWO mounts and their separation is the design: the grading pass's own fresh `run_dir` at `CONTAINER_OUTPUT_DIR` (whose `task.json` the host then folds back into the row, preserving `task.execute.json` exactly as on the host path) and the executed workspace at `CONTAINER_GRADE_WORKSPACE`, read-WRITE and NOT a copy, adopted rather than written over. The container half reuses the same `regrade_in_place` (`run_task_internal_command._grade_recorded_run`, driven by `context.json`'s `regrade` flag plus a staged `prior.json`) rather than restating it. A container-graded row carries NO `graded_on_host` stamp, so it is indistinguishable from a `run` row, which is the parity that makes the split honest. `--allow-host-grading` survives as the ESCAPE HATCH (no docker on this machine; criteria known to be host-portable) and still stamps. **The dispatch is itself inside the trust gate**: the record names the image, and a container of it runs with the default credential allowlist (`ANTHROPIC_API_KEY`, `UIPATH_ACCESS_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK` ...) forwarded in and a copy of `~/.claude` mounted — a strictly WIDER capability than the `run_command` strings the gate already refuses, and it shipped reachable with no flags because `embedded_commands` walked only `success_criteria` and `post_run`. That is the same blind spot the function's own docstring already described for `--copy` provisioning ("a shared run directory whose criteria were all `file_exists` sailed through"), one layer up, so `include_container_dispatch` scans it on the in-place path exactly as `post_run` is — rendering the whole dispatch as ONE command string (the prompt joins with `"; "` and counts `len(commands)`, so an argv fragment appended as its own entry reported one `docker build` as four shell commands), and naming every HOST PATH it exposes: the task DIRECTORY copied from the recorded `source_file`'s parent (a record naming `~/.ssh/config` copies all of `~/.ssh` in), every auto-mounted `agent.plugins[].path` / `TemplateDirSource.path` / `system_prompt_file`, and the writable `~/.claude` copy. Disclosing only `sandbox.docker.*` asked the operator to consent to a strict subset of what happens. Which families the gate discloses is ONE parameter (`grade_in_place`, resolved by `_gate_scope_for_grade`), not two: it shipped beside an `include_setup_phase` every caller passed as its exact complement, and a future caller setting one and forgetting the other would silently drop half of a SECURITY gate. Three further properties are load-bearing and were not free: the grading container gets a **scratch** run dir, never the caller's — `run --resume` passes the executed row's OWN directory, where `_parse_result_or_raise` (which keys on `task.json` existing and discards `returncode`) read a dead container's stale pre-grade record back as a successful grade, and where `docker.log` was truncated; the recorded `source_file` is the HOST's path (`Orchestrator.recorded_task_file`, the path twin of `recorded_task`), because a container run recorded `/work/task_dir/task.yaml`, which exists on no host, so the dispatch guard's `task_file is None` test passed and `_prepare_task_dir_mount`'s `if not source.is_dir(): return` then mounted NOTHING — every `$TASK_DIR` criterion silently resolving against the wrong tree; and `_assert_regrade_honored` refuses a returned row whose `started_at` moved, because an image predating this change ignores the unknown `regrade` key and RUNS THE AGENT, which the host would otherwise fold back as the recorded row's verdict (the exact sibling of `_assert_grade_honored`, one release later). The grading container is a SECOND, fresh container: only the workspace crosses and `pre_run` is not re-run, so a criterion depending on out-of-workspace state (`tasks/samples/skillsbench/3d-scan-calc` symlinks `/root/mass_report.json` in `pre_run` and its verifier asserts that path) scores 0.000 for a trajectory `run` scores 1.000 — warned at dispatch AND stamped onto the row as `environment_info.graded_without_pre_run`, since re-running `pre_run` would trade it for the deliverable-clobbering bug `_skip_pre_run_for_adopted` exists to prevent. The stamp is the load-bearing half: `stamp_host_grading`'s own docstring already says why ("a console warning does not travel with `task.json` into `run.json`, the reports or the evalboard"), and 3 of the 10 in-tree docker tasks match the pattern, reachable with NO flags via `execute` -> `run --resume`. `dockerfile_path` is the second, weaker gap and is stamped the same way (`graded_with_rebuilt_image`): `_build_image` re-runs `docker build` under the deterministic tag `coder-eval-task-<id>:built`, so the grading image REPLACES the run's, and nothing pins image identity on either side — a `reference_digest`-style pin is the real fix and needs the RUN path to record it first, so for now the row says it happened rather than the guide claiming a control that does not exist. The grading container's own logs are folded out of the scratch dir in a `finally`, not only on success: `docker.log` (as `grade.docker.log`, since on the resume path that name is the executed run's) and `grade.log`, which is a documented run-layout artifact holding the per-criterion detail. Folding out only on success deleted exactly the evidence, while DockerRunError's own text said `See {log_path}` — a path already gone by the time it printed. Both copies refuse a symlinked destination, because `shutil.copy2` follows one and the sibling verdict write goes through `write_text_atomic` for precisely that reason; and the verdict write raises `RegradeError`, never a bare `OSError`, since it sits outside the dispatch `try` where `evaluate` (which guards only `RegradeError`) let it escape into Typer AFTER a successful grade while `run --resume` caught it and reported a correct verdict as a grading failure. `grant_container_access` now RETURNS what it widened and `run()` restores it in the same `finally`: the two staging dirs are disposable, but the graded workspace is the caller's tree — an operator-supplied `--workspace` was left world-writable permanently. A container grade also emits its own `CoderEval.Task.End` host-side (`_emit_task_telemetry`), mirroring `batch.py`: every container is launched `TELEMETRY_ENABLED=false` under the invariant "container silent, host emits once", and the grading path had inherited only the silent half. The dispatch is gated on `IN_CONTAINER_ENV`, never on the driver — the in-container entry point rewrites `docker` -> `tempdir` before building its Orchestrator, so a driver-based test would read an already-changed value and a grading container would dispatch a grading container. That env var now has ONE definition (`models/container_paths.py::IN_CONTAINER_ENV`), and **CE056** keeps it that way — the migration converted all four READERS and left the single WRITER (`docker_runner`'s `--env CODER_EVAL_IN_CONTAINER=1`) on the literal, which is the one site that produces the value the gates consume: a rename would have updated every consumer and left the container exporting the old name, disarming the reference anti-cheat window, the reference mount, the grading-container recursion guard and the watchdog together, all silently. CE052 accepts both spellings — a rule that saw only the literal would read a constant-based gate as no gate and tell the author to paste the literal back, arguing against the SSOT it exists to reinforce. The earlier behavior silently rewrote the driver to `tempdir`, which ran a container task's criteria against a host filesystem lacking `/verifier` and the image's toolchain (FAILURE for a trajectory `run` scored 1.0, plus `rm -rf /verifier` unsandboxed on the grading machine) and neutralized `adopt`'s own docker guard; an opted-in row is stamped `graded_on_host` so it is never silently comparable with a container-graded one (lint rule CE051). A re-grade refuses on a `reference_digest` mismatch — the digest is persisted into `environment_info` at staging time by `_stage_reference` (it shipped once as a read with no writer anywhere, so the guard was dead code; then it shipped with a writer whose value was **discarded before it reached disk**, because `_setup` REBOUND the whole `environment_info` dict from `get_version_info()` a hundred lines later, which CE054 cannot see — a write existed in `src/`, it was just dead. `_setup` now `update()`s that dict rather than rebinding it, and `tests/test_detached_grading_boundaries.py` asserts the key survives a real end-to-end run, not just that `_staged_digest` works in isolation), and `verify_reference_unchanged` now takes the task file it resolves against and RAISES on a vanished or unresolvable reference instead of returning silently. That comparison digests a STAGED copy of the source, not the raw tree: the recorded digest is taken over the staged copy, which `stage_reference_dir` filters through `REFERENCE_COPY_IGNORE` (`.git`), so digesting the source directly compared two differently-filtered trees and reported a permanent false mismatch for any reference that is a git checkout — exactly the case the ignore list exists for. **The recorded config is untrusted input**: `evaluate <run_dir>` rebuilds the task from a shareable artifact, so a rebuilt config that carries shell (`run_command` criteria, `agent_judge`, `llm_judge`, `uipath_eval`, and — only on the `--copy` path, since the in-place path skips them — `pre_run`/`post_run` **and the sandbox's own provisioning**) is REFUSED unless `--allow-recorded-commands` is passed. The provisioning half was the one the gate originally missed, and the worst: `grading_sandbox_config` carries the recorded `sandbox` block through untouched and the `--copy` branch calls `Sandbox.setup`, which reaches `uv pip install <recorded packages>` / `npm install` / `git clone <recorded url>` — arbitrary code at install time — so a shared run dir whose criteria were all `file_exists` sailed through a scan that walked only `success_criteria`. `git clone` now passes `--` before the URL (argv position 2, so a value beginning with `-` was parsed as an option). `Sandbox.resolve_files` is containment-checked for the same reason: criterion paths were the one task-authored path skipping `_resolve_within_sandbox`, and `Path(root) / '/etc/passwd'` is `/etc/passwd`. An escaping LITERAL now raises `CheckerMisuseError` rather than resolving to `[]`: returning no match books an eval-CONFIG error as an agent failure — a gating 0.0 reading "file does not exist" for a file that plainly does exist and that no agent behaviour could place inside the sandbox (CE039's exact distinction). `tasks/byod_smoke_test.yaml` was broken that way for several commits, checking `/opt/byod_marker` baked into the BYOD image, with only a task-log warning to show for it; it now asserts on the container with `run_command: test -f …`, which is what a claim about the IMAGE rather than about the agent's workspace should look like. The guard keys on the escaping path EXISTING, so a merely-absent absolute path stays an ordinary failing verdict, and the GLOB branch still warns-and-drops, since filtering some matches out of a search is its normal behaviour. A warning is not a control: it prints as the command is already being prepared. Passing the task file explicitly (`evaluate <task.yaml> <run_dir>`) also bypasses it, since that config came from the operator. The workspace fallback `artifacts / prior.task_id` is containment-checked like its `sandbox_path` sibling (`task_id` is an unvalidated string, and `"../../.."` joins to a real directory `is_dir()` confirms), `_sanitize_restored_path` drops relative entries (they resolve against the grader's cwd) and anything inside the run dir rather than only the workspace, and `write_text_atomic` opens its temp file `O_EXCL|O_NOFOLLOW` — a pre-planted `task.json.tmp` symlink otherwise bypassed the write-back's destination symlink guard entirely. The record must also describe the task as AUTHORED, not as executed: `run_task_internal_command` rewrites `driver: docker` -> `tempdir` before building the in-container Orchestrator (the one legitimate rewrite — we are already inside the container the driver asked for), and recording that rewrite made a docker run's own `task.json` claim `driver: tempdir`. Since `grading_sandbox_config` reads the driver back OUT of the record, `evaluate <run_dir>` on a container row skipped BOTH the `--allow-host-grading` refusal and the `graded_on_host` stamp and graded a container task against the host filesystem silently — the exact outcome that gate exists to prevent. `Orchestrator(recorded_task=...)` is the seam: what is recorded, as distinct from what is run — and `recorded_task_file` is its path twin, which must travel with it through EVERY caller. `regrade_in_place` and `_grade_recorded_run` shipped without it, so every container-graded row re-recorded `/work/task_dir/task.yaml` as its `source_file`, reintroducing the defect one caller down; both seams are now pinned by a test that drives the in-container regrade branch end to end, because deleting either left the whole suite green. NOTE the Typer command is a thin wrapper over `run_evaluation(...)`, which has real Python defaults — calling a Typer command function in-process hands unspecified options an `OptionInfo` sentinel, which silently made `in_place=None` truthy.
-- **`--resume` is command-relative**: `partition_for_resume(tasks, *, grade)` returns a four-way `ResumePartition` (`to_run` / `to_grade` / `prior_results` / `prior_resolved`), because **"finished" is not absolute — it depends on what the resuming command still owes the task**. A `NOT_GRADED` row carries a final status, so the original "has any final status" test called it complete: right for `execute --resume` (it finished executing), and wrong for `run --resume`, which was asked to grade and would instead report "already complete", grade nothing, and **exit 0**. The routing test is the row's **evidence** (`weighted_score is None and not success_criteria_results`), not its category: keying on `category == "ungraded"` missed every `execute` row that ALSO carries an execution fact — a TIMEOUT or budget stop aborts before grading, so it lands unscored with category `error`/`failed`, and resume filed it as complete while `evaluate <run_dir>` graded the identical bytes happily. Under `grade=True` those rows route to `to_grade`, where `_grade_resumed_tasks` runs the criteria against the trajectory and workspace already on disk via `orchestration/regrade.py::regrade_in_place` — reusing the agent spend, which is the entire reason `execute` and `run` are separate. The carve-out is **only** for `NOT_GRADED`: `FAILURE`/`ERROR` stay complete under both commands (resume has never retried failures — delete the task.json), and `clear_rerun_artifacts` deliberately skips `to_grade`, whose artifacts are the very thing being graded. A per-task grading failure is warned, STAMPED onto the folded-back row's `error_message` (the console line alone is not durable), and folded back in with its ORIGINAL ungraded result, so one bad row neither aborts the resume nor vanishes from run.json — and the exit gate counts `tasks_not_graded` **when `grade` is True**, so a `run` that graded nothing exits non-zero instead of telling CI the suite is fine. Under `execute` an ungraded row is the expected outcome and never fails the command. A row is owed a grade only when it was **executed** AND is unscored: evidence of "no verdict" alone routed every dead container and failed image build (`_write_synthetic_task_json` writes those with no verdict either) into grading, where the fold-back replaced the real diagnostic with a wrong-cause grading error and left `task.json` and `run.json` disagreeing about the same row — so the test is `final_status is NOT_GRADED or iteration_count > 0`, and that fold-back now APPENDS to `error_message` instead of replacing it. A re-grade also writes its log to **`grade.log`**, never `task.log`: `task_log_handler` opens `mode="w"`, so grading into the row's own directory truncated the agent trajectory log the run had already paid for — contradicting `_apply_resume`'s own "to_grade is deliberately NOT cleared" contract. `grade` is in `_FINGERPRINT_DIFF_EXEMPT` because `execute` → `run --resume` is a supported flow, not config drift — and the warning's "already-finalized tasks keep their original-config results" text is actively wrong for it. **`orchestration/regrade.py` is the single implementation** shared by that path and `evaluate`'s run-dir mode, which DELEGATES to `regrade_in_place` rather than restating it (it originally hand-built its own Sandbox + Orchestrator and had already drifted — hardcoding `replicate_index=0`, so every replicate but the first was relabelled — which is exactly how two copies become two verdicts for the same run); it raises plain `RegradeError`, which the CLI wraps, since `orchestration/` must not import the CLI layer (CE004). One fidelity rule it enforces: a re-graded row keeps the **agent run's** `started_at`/`duration_seconds`, not the grading pass's — a 10-minute run re-graded in 2s would otherwise report 2s into `average_duration`, the report tables and the evalboard; the grading cost is preserved separately as `environment_info["grading_duration_seconds"]`.
-- **One formula per published rate**: `pass_rate` / `error_share` are published by THREE models (`RunSummary`, `VariantAggregate`, `SuiteRollup`) and all three route through the single `models/results.py::nothing_was_measured(not_graded=, measured=)`. The guard originally shipped on `RunSummary` alone, so the same 10-task `execute` run with one crash rendered "Pass Rate: n/a" in `run.md` and "Pass Rate: 0.0%" in `experiment.md`. `measured` is **counted evidence** (`tasks_measured` / `rows_measured` — rows carrying a `weighted_score`), never a bucket count: the first version tested `tasks_succeeded + tasks_failed == 0`, but `TIMEOUT` and the two budget stops are category `failed` and reachable under `execute` (`_check_run_limits` still runs on the ungraded branch), so ONE timed-out row in a 100-task ungraded night read as "measured" and published `pass_rate: 0.0` — a real 0% point on the evalboard trend for a run that graded nothing. The evalboard mirrors the rule: `TaskTrend.passRate` is `number | null`, and an unmeasured task renders "—" and sorts LAST in the worst-first Trends view rather than to the very top as the worst offender.
-- **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all *task-level* run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block. The one *per-criterion* cap, `stop_early.decide_within`, deliberately lives on `LiveSuccessCriterion` instead (see below) — the watcher must attribute a decision-step timeout to a specific criterion, which `RunLimits` (task-scoped, criterion-agnostic) cannot express.
-- **Early stop on criterion (opt-in, per-criterion arming)**: a `stop_early:` block (`StopEarlyPolicy`) on a criterion ends a single-shot run early once the run's **armed** criteria decide the outcome, so a raised `max_turns` isn't wasted on the smoke flavor. The block's PRESENCE is the arming and alone activates the watcher — there is **no run-level master switch**: `run_limits.stop_early: false` is the run-level KILL SWITCH that force-disarms every block (the one-line experiment-variant/`-D` override for an authoritative full run), and `run_limits.stop_early: true` (the removed master arm) is a hard `EarlyStopConfigError` at resolution. The block exists on `LiveSuccessCriterion` only (currently `skill_triggered`, `command_executed` — so arming an unobservable criterion is unrepresentable, a pydantic extra-forbid error). Arming carries one implicit trigger (a native live-fail may fail-stop the run); its keys refine it: `on_pass: stop` (pass-stop the moment the criterion live-passes; default `continue` just latches) and `decide_within: N` (still undecided after N tool-call steps latches an **effective fail**, fed through the same fail-stop rule, reported as `decision_budget_exceeded` — an ordinary weighted fail, NOT a gate-bypassing force-fail; cumulative across retry attempts of the same turn). A trigger whose polarity the instance can't decide (per the abstract, checker-independent `live_decidable_polarities()`, a pure function of the criterion's own fields, paired with the checker's `live_verdict` override by lint rule CE025, a registry-based whole-tree check) is **inert by design** — one dataset-fanned YAML line serves both positive rows (pass/timeout live) and distractor rows (fail live). Verdicts **latch**: once a criterion decides, its `live_verdict` is never polled again. Stop rule is weighted, not strict-boolean: `run_limits.stop_early_gate_threshold` (default `1.0`, reproducing strict-AND behavior exactly) is the minimum weighted score (`Σ weight·score / Σ weight` over the armed subset) required to pass; a fail-stop fires once the armed set's **ceiling** (best case for everything still undecided) can no longer reach the threshold — so a low-weight fail or timeout that can't doom the gate is absorbed and the run continues — and is **deferred while any pass-capable armed criterion is undecided** (a distractor misfire never truncates a positive row's recall signal); a pass-stop fires once the `on_pass: stop` subset's **floor** (worst case) already meets the threshold, and is symmetrically **deferred while any pass-capable armed criterion outside the `on_pass: stop` subset is undecided** (so an early pass never freezes a sibling `on_pass: continue` criterion's signal out of the trajectory). A fail-stop is therefore verdict-preserving; a pass-stop can miss a *later* distractor misfire, so authoritative P/R/F1 comes from a kill-switched (`stop_early: false`) run. Driven by `orchestration/early_stop.py::EarlyStopWatcher` (built when `early_stop_active(task)`: ≥1 armed criterion, kill switch not thrown) through the agent's cooperative `should_stop` seam (tool-call granularity, no SIGKILL); live verdicts only *trigger* the stop — the standard `check_all_async` on the frozen trajectory is authoritative. Gating is **FIRED-ONLY**: a run the watcher actually cut gates on the **armed subset** via the weighted `EvaluationResult.armed_criteria_passed`; a run that completes naturally — armed or not — gates strict-AND via `all_criteria_passed`, so adding a block never changes the verdict of a run it didn't cut. Note the gate keys on the watcher having FIRED (`result.early_stop is not None`), not on confirmed truncation — an agent that ignores `should_stop`, or a stop firing on the final message, still gates armed-only. Every resolution-time guardrail violation is a hard error at resolution (plan *and* run); the one load-time case — a `stop_early:` block on a non-live criterion — is a pydantic schema error at task load, which the run surface reports as a skipped task like any other malformed task. A runtime verdict bug **fails open** to a full run. Surfaces: `EarlyStopInfo` (incl. `gate_threshold` at stop time), report notes/badges, `stopped_early` run.json rows, `EarlyStopped`/`EarlyStopReason` telemetry dims. Worked rationale: docs/TASK_DEFINITION_GUIDE.md § `stop_early`. No blocks anywhere ⇒ behavior byte-for-byte unchanged.
+Each entry is a pointer. Full rationale: `.claude/architecture-notes.md`.
+
+- **Discriminated unions** for criteria types and template sources.
+- **Plugin registry**: `criteria/` auto-discovers via `pkgutil` + `@register_criterion`.
+- **Strategy pattern**: `Agent` ABC, implementations in `agents/`.
+- **Separation of concerns**: `models/` is pure Pydantic; logic lives in `criteria/`,
+  `evaluation/`, `orchestration/`.
+- **Callback streaming**: the agent is the sole emitter of the event protocol;
+  `EventCollector` reduces the stream into a `TurnRecord`. Never hand-assemble one.
+- **All core models import from `coder_eval.models`** — never from submodules.
+- **Single declarative merge resolver**: all five config layers (default → experiment
+  defaults → task → variant → CLI) merge through `orchestration/config_merge.py`.
+  Fields declare their strategy once via `MergeField`. CE014 enforces it for lists.
+- **Generic CLI overrides (`-D`/`--set`)**: layer 5, schema-validated against the
+  resolved `TaskDefinition`. Only `--model`, `--driver`, `--type` survive as aliases.
+- **Dataset fan-out**: `TaskDefinition.dataset` expands one task into N row-tasks
+  before variant resolution. See [Bring Your Own Dataset](docs/DATASETS.md) and
+  [`dataset`](docs/TASK_DEFINITION_GUIDE.md#dataset).
+- **Per-criterion aggregation**: every criterion is suite-thresholdable via
+  `aggregate()`; classification criteria layer accuracy / P/R/F1.
+- **Reconciliation message**: summing token buckets across `TurnRecord.messages`
+  equals `token_usage` exactly, on every backend. `EventCollector` is the single writer.
+- **Timing has one subtraction seam** (`timing.py`); agents must not do their own
+  (CE063). An unmeasured duration is `None`, never `0.0` (CE058).
+- **Reference solutions are directory-only** and chmod-shielded during `communicate`.
+  Defense-in-depth, not a boundary — the known gaps are documented in the notes.
+  Authoring reference: [Reference Solutions](docs/TASK_DEFINITION_GUIDE.md#reference-solutions).
+- **Harness run-limit parity**: a shared config field must mean the same thing on every
+  backend, or the divergence is documented. Table:
+  [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Caps are authored under
+  [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
+- **Execute vs. run**: `execute` is `run` with grading off — rows finalize as
+  `NOT_GRADED` and leave both sides of every rate. Per-command behaviour:
+  [CLI Commands](docs/USER_GUIDE.md#cli-commands).
+- **Detached grading**: `evaluate <run_dir>` re-grades a finished run from its own
+  recorded config, in place. The recorded config is untrusted input.
+- **`--resume` is command-relative**: "finished" depends on what the resuming command
+  still owes the task.
+- **Early stop on criterion**: an opt-in `stop_early:` block arms a live criterion.
+  Gating is fired-only. See the [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md)
+  § `stop_early`.
+- **Sandbox isolation**: tasks that don't need MCP servers should set
+  `setting_sources: []` in their `agent:` block, to isolate the sandbox from the host
+  project's CLAUDE.md and settings. Without it the host CLAUDE.md is injected into every
+  API call, inflating cache-creation tokens and cost. See
+  [Agent Configuration](docs/TASK_DEFINITION_GUIDE.md#agent-configuration) and
+  [Sandbox Configuration](docs/TASK_DEFINITION_GUIDE.md#sandbox-configuration).
+- **Container isolation**: `driver: docker` runs one container per task — see
+  [Docker Isolation](docs/DOCKER_ISOLATION.md).
+- **Dialog mode**: `simulation/` drives a multi-turn LLM user — see
+  [Dialog Mode](docs/DIALOG_MODE.md).
 
 ## Success Criteria (15 types)
 
 | Type | Scoring | Description |
 |------|---------|-------------|
-| `file_exists` | Binary | File must exist |
-| `file_contains` | Fractional | String presence/absence |
-| `file_check` | Fractional | Unified file existence + content + regex check |
-| `json_check` | Fractional | JSON validation + JSON Schema + JMESPath assertions |
-| `run_command` | Binary / Continuous | Command exit code + optional stdout matching or float scoring |
-| `file_matches_regex` | Binary | Regex match on file |
-| `reference_comparison` | Continuous | AST/token/complexity similarity |
-| `command_executed` | Fractional | Agent tool usage verification |
-| `cli_called` | Binary | Structured match over a JSON Lines invocation log: verb (or `verb_any_of` alternation) / positional / per-flag predicates, with min_count/max_count bounds |
-| `commands_efficiency` | Continuous | Agent tool-call efficiency relative to expected budget |
-| `uipath_eval` | Fractional | UiPath agent evaluation results |
-| `classification_match` | Binary | File-based label match (observed vs expected) with `(none)`/`(other)` sentinels; emits `ClassificationCriterionResult` for suite-level P/R/F1 |
-| `skill_triggered` | Binary | Did the agent engage the target skill? Agent-agnostic — Claude's `Skill` tool call, or (Codex) reading the skill's files off disk. Emits `ClassificationCriterionResult` for suite-level P/R/F1 |
-| `llm_judge` | Continuous | LLM grades artifacts + optional trajectory + optional reference; routes through the run's backend (Bedrock / Anthropic) |
-| `agent_judge` | Continuous | Spawns a Claude Code SDK agent in an isolated sandbox copy; judge uses tools (Bash/Read/Grep/…) to investigate and returns a JSON verdict. Expensive; runs with evaluator credentials — see SECURITY note in the criterion docstring. |
+| [`file_exists`](docs/TASK_DEFINITION_GUIDE.md#file_exists) | Binary | File must exist |
+| [`file_contains`](docs/TASK_DEFINITION_GUIDE.md#file_contains) | Fractional | String presence/absence |
+| [`file_check`](docs/TASK_DEFINITION_GUIDE.md#file_check) | Fractional | Unified file existence + content + regex check |
+| [`json_check`](docs/TASK_DEFINITION_GUIDE.md#json_check) | Fractional | JSON validation + JSON Schema + JMESPath assertions |
+| [`run_command`](docs/TASK_DEFINITION_GUIDE.md#run_command) | Binary / Continuous | Exit code + optional stdout matching or float scoring |
+| [`file_matches_regex`](docs/TASK_DEFINITION_GUIDE.md#file_matches_regex) | Binary | Regex match on file |
+| [`reference_comparison`](docs/TASK_DEFINITION_GUIDE.md#reference_comparison) | Continuous | AST/token/complexity similarity |
+| [`command_executed`](docs/TASK_DEFINITION_GUIDE.md#command_executed) | Fractional | Agent tool usage verification |
+| [`cli_called`](docs/TASK_DEFINITION_GUIDE.md#cli_called) | Binary | Structured match over the `record_cli` invocation log |
+| [`commands_efficiency`](docs/TASK_DEFINITION_GUIDE.md#commands_efficiency) | Continuous | Tool-call efficiency against an expected budget |
+| [`uipath_eval`](docs/TASK_DEFINITION_GUIDE.md#uipath_eval) | Fractional | UiPath agent evaluation results |
+| [`classification_match`](docs/TASK_DEFINITION_GUIDE.md#classification_match) | Binary | File-based label match; emits suite-level P/R/F1 |
+| [`skill_triggered`](docs/TASK_DEFINITION_GUIDE.md#skill_triggered) | Binary | Did the agent engage the target skill? Agent-agnostic |
+| [`llm_judge`](docs/TASK_DEFINITION_GUIDE.md#llm_judge) | Continuous | LLM grades artifacts + optional trajectory/reference |
+| [`agent_judge`](docs/TASK_DEFINITION_GUIDE.md#agent_judge) | Continuous | Sandboxed SDK agent investigates with tools. Expensive |
 
-All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9), plus (on live criteria only) a `stop_early:` block (`on_pass`, `decide_within`) that arms the criterion for early stop by its presence. On dataset-backed tasks, criteria may also set `suite_thresholds: {metric: min_value}` — the suite gate passes iff every listed metric (from the criterion's `aggregate()` output) meets its minimum.
+All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9). Live
+criteria also accept `stop_early:`. Dataset-backed tasks may set `suite_thresholds:`
+(see [Suite-level scoring](docs/DATASETS.md#suite-level-scoring)).
+
+Each type above links to its own section in the
+[Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md#success-criteria), which is the
+authoritative per-field reference. Path and env-var resolution inside a checker is
+[Checker Context](docs/TASK_DEFINITION_GUIDE.md#checker-context). The plugin ships a
+generated copy at `plugins/coder-eval/reference/criteria.md` — regenerate it with
+`make plugin-reference`; never hand-edit it (CE033).
 
 ## Evaluation Flow
 
 ```
-CLI → ExperimentRunner (resolve task × variant) → run_batch → Orchestrator → Sandbox + Agent + SuccessChecker
-
-ExperimentRunner resolves configs via 5-layer merge:
-  1. experiments/default.yaml  (baseline defaults)
-  2. experiment defaults       (experiment-wide defaults)
-  3. tasks/<task>.yaml         (task-specific config, wins over defaults)
-  4. experiment variant        (variant-specific overrides)
-  5. CLI flags                 (always wins)
+CLI → ExperimentRunner (task × variant, 5-layer merge) → run_batch → Orchestrator
+      → Sandbox + Agent + SuccessChecker
 
 Per-task (single iteration; simulation mode runs a multi-turn dialog):
   1. Orchestrator._communicate_with_retry(prompt, iteration) → TurnRecord
-       (shared by single-shot + simulation paths; wraps
-        agent.communicate with execute_with_retry, per-attempt
-        turn_timeout, and on_attempt_error → preserves crashed=True
-        partial TurnRecords on AgentCrashError / TurnTimeoutError)
+     (wraps agent.communicate with retry, per-attempt turn_timeout, and
+      on_attempt_error → preserves crashed=True partial TurnRecords)
   2. SuccessChecker.check_all_async() → List[CriterionResult]
 
-Cleanup: Stop agent, save EvaluationResult, generate reports
+Cleanup: stop agent, save EvaluationResult, generate reports.
 ```
+
+What the run writes on disk — `run.json`, `task.json`, `suite.json` and their fields —
+is specified in [Report Schema](docs/REPORT_SCHEMA.md); the run directory layout itself
+is `.claude/shared/run-layout.md`.
 
 ## Development Commands
 
 ```bash
-# MANDATORY: Run after every implementation phase
+# MANDATORY: run after every implementation phase
 make format      # ruff format
 make check       # ruff check (lint)
 make typecheck   # pyright
-make test        # pytest
-make lint        # custom architectural lint rules (CE001+)
-make verify      # All of the above + coverage check (CI equivalent)
+make test        # pytest (excludes live + lint markers)
+make lint        # custom architectural lint rules (CE000+)
+make verify      # all of the above + coverage check (CI equivalent)
 
-# The JS half (evalboard/). Separate because it needs a Node/pnpm toolchain,
-# but gated in CI by the `evalboard` job just like the Python side.
-make evalboard-verify   # tsc --noEmit + vitest + next build
+make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 
-# Regenerate a generated surface (both are CE-guarded; never hand-edit the output)
+# Regenerate a generated surface — never hand-edit the output
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
-make plugin-reference  # the plugin's bundled criteria reference from the models (CE033)
+make plugin-reference  # the plugin's criteria reference from the models (CE033)
 ```
 
-Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is a hand-copied mirror, and `evalboard/lib/__tests__/pricing-parity.test.ts` fails the build on drift in either direction.
+Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is
+a hand-copied mirror, and `evalboard/lib/__tests__/pricing-parity.test.ts` fails the
+build on drift in either direction.
 
-Recent additions, each traceable to a shipped defect: **CE064** (in `src/coder_eval/agents/`, a module that imports `TurnClock` must pass an explicit `timestamp=` to `AgentStartEvent` and `AgentEndEvent` — the turn's OUTER bounds, which no other rule looks at, since CE058-CE061 all scope to `AssistantMessage` and the bracket is not one. `timing.decompose_turn` produces `harness_startup_ms` / `harness_teardown_ms` by subtracting a generation-window bound from a bracket timestamp, so the two must share a basis; all three clocked harnesses derived their bounds from the `TurnClock` and let the bracket fall back to `StreamEvent.timestamp`'s `default_factory=datetime.now`, putting a monotonic-derived stamp and a raw wall stamp inside one subtraction — the exact split `TurnClock` exists to remove, reintroduced at the one seam the clock did not own. Measured on a live antigravity turn: an `AgentEndEvent` stamped **17 us BEFORE its own last message finished**, which cannot happen (the event is constructed strictly after the final flush), and `decompose_turn` clamped that negative and published `0.0` — "measured, and instant", the CE058 confusion arrived at from the other direction — for a harness whose real tail is ~0.1 ms; it now records 0.035 ms. It surfaced on one harness only because the drift is tens of microseconds and antigravity is the only one that holds its process across turns, so nothing happens between its last flush and its end event; every other harness books a tail of 7-543 ms, where the drift is invisible rather than absent — which is why the fix is at every clocked site rather than at that one. SCOPE IS DERIVED, never a harness list: codex and opencode take their spans from the CLI's own epoch stamps, deliberately have no `TurnClock`, and are correctly invisible to the rule — a raw bracket is CONSISTENT with their bounds — and the day either adopts a clock the rule starts applying with no edit. BLIND SPOT, in the rule's docstring: presence, not correctness. It cannot tell `self.clock.now()` from a `datetime.now()` spelled out at the call site, because the three harnesses legitimately reach their clock three ways; the guard for the SOURCE is behavioural (`tests/_bracket_clock.py` injects a stand-in anchored a year from real time, so a reverted argument fails by a year rather than by the microseconds that separate the two clocks), which is the division of labour CE060 states — a rule removes the SILENT case, a default nobody chose), **CE063** (no module in `src/coder_eval/agents/` may import `busy_ms` — tool execution comes out of a generation window in exactly ONE place, `timing.py::subtract_tool_time`. Five reducers used to do it themselves while the head and tail were already computed centrally at the same seam, and that asymmetry is where every timing defect on this branch lived — none of them in the arithmetic, all of them in the bookkeeping AROUND it: when to reset a per-step span list (clearing it at `step_start` wiped a span before the flush could subtract it, a 100% overstatement of that window), when to clear a spent start stamp (a second flush with no intervening start republished the previous span — 3000 ms of generation for a 2000 ms turn), when to advance the mark. A sixth harness reaching for `busy_ms` rebuilds that, and its tool time is then subtracted TWICE — by the reducer and again by the collector — under-reporting generation on one harness only, which takes a corpus comparison to notice. A separate id from CE061 rather than a rebody: CE061 asks where a window's ARITHMETIC came from and four reducers still call `close_window`, so its property is live and unsuperseded; this asks whether a reducer subtracts at all. It deliberately does NOT reuse CE061's `_imports_the_helper`, whose bare-module-import branch exists so `timing.close_window(...)` counts as reaching the helper — inverted into a ban that branch flags four of the five reducers. CE061 is now **exemption-free**: claude-code was its one permanent `# noqa` and, with the subtraction moved, calls the shrunken `close_window` like the other four), **CE060** (in `src/coder_eval/agents/`, every `AssistantMessage(...)` must pass `message_id` explicitly — an identity invariant, which is why it is its own id rather than a second arm of CE058/CE059, both of which are about timing. Antigravity omitted the kwarg, so the field defaulted to `None` on every message it ever recorded, and the evalboard — which groups assistant emissions by `message_id` and falls back to a `SAME_EMISSION_GAP_MS` wall-clock gap when either side lacks one — collapsed a whole turn's generations into ONE timeline row as soon as the harness's generation windows became contiguous (the gap is then exactly 0 ms, always). Nothing failed: the consumer SUMS the group, so the totals and the reconciliation invariant stayed right, and the golden snapshots had ratified the `null` on the day they were written — a snapshot is regenerated from whatever the code currently does, so it catches a later change and never an initial omission. The damage was not confined to the timeline, which is why "only granularity is lost" was the wrong way to describe it: a grouped emission is one API call to the evalboard's thinking-cost simulator, whose prompt-cache cascade is quadratic in that count, so a single-shot Antigravity run had every cascade coefficient pinned at zero; the `Messages` count and the 10 s slow-generation bar were per-turn too. Unlike its two siblings it **derives its constructor set from each module's own `coder_eval.models` imports** instead of hardcoding the spelling, which closes exactly the blind spot CE058's clause below concedes: `claude_code_agent.py` binds only `AssistantMessage as AssistantMessageTelemetry`, so a name list guards that file's two construction sites purely by coincidence, and an arbitrary `as Msg` is missed outright. Widening CE058/CE059 the same way is recorded in `.claude/harness-candidates.md`. BLIND SPOT, in the rule's docstring: the runtime `None` — the kwarg must be PRESENT, not statically non-`None`, because OpenCode's `messageID` and Pi's `responseId` legitimately evaluate to `None` when the CLI omits them, and passing a fallback expression *is* deciding), **CE058** (in `src/coder_eval/`, an unknown timing value may not become a numeric literal — `duration_ms is None` means *never timed* and `0.0` means *timed and instant*, so writing the literal publishes the second while meaning the first. One invariant, one id, five syntactic forms — a zero constructor keyword, `x or 0`, `x if x is not None else 0.0`, `if x.duration_ms is None: x.duration_ms = 0.0`, and a `model_copy(update={...})` dict (the shape the Antigravity DONE path writes through, which a keyword-only rule cannot see). Antigravity constructed EVERY message with `generation_duration_ms=0.0`, so the task page's Generation cell read `0ms` and its breakdown rendered `0%` for months with nothing failing; Codex published the SDK's `0.0` as a measured command duration, so `avg_command_time_ms` divided real milliseconds by a command count of which 70 of 211 in one nightly had never been timed. The fourth form is the one no existing rule shape covered and is where a live instance was hiding — `claude_code_agent._finalize_commands` set `0.0` on every command force-closed without a tool result, in the one harness a timing audit had called healthy. BLIND SPOT, stated in the rule's docstring: form 1 keys on the callee's spelling, so renaming the `AssistantMessageTelemetry` import alias silently disarms it there), **CE059** (in `src/coder_eval/agents/`, an `AssistantMessage` may not receive the same `ast.Name` for both `started_at` and `completed_at` — the Antigravity reducer read `datetime.now()` once and passed it as both bounds, so `started_at == completed_at` on 368 of 368 sampled messages. A separate id from CE058 because it is a separate invariant, a zero-length window whatever the duration field says, and one invariant per id is what makes a `# noqa` mean one thing. It does NOT fire when the same call passes `generation_duration_ms=None`: a call that says, in the field built to say it, that no window was measurable is not claiming one — that exemption is what keeps the rule pointed at the misleading case instead of accumulating four permanent suppressions on the rollout-rebuild and sub-agent-synthesis sites), **CE056** (no bare `CODER_EVAL_IN_CONTAINER` literal outside `models/container_paths.py` — the CE053 shape again: a rename-safety constant that shipped beside the literal it replaced, and the straggler was the single WRITER, so a rename would have disarmed four security/correctness gates at once with nothing failing; CE052 cannot catch it because that rule inspects `if` guards and the writer is not one), **CE055** (a criterion `path:` in `tasks/` must be sandbox-relative — an absolute path is joined onto the sandbox root, which DISCARDS the root, so containment refuses it and the criterion can never match whatever the agent does; two in-tree tasks were broken this way and the pair is the argument for a static rule on top of the runtime `CheckerMisuseError`: `byod_smoke_test` IS in a CI bucket and produced only `Results: 7/8 succeeded` plus a gating 0.0 reading "file does not exist" for a file that existed, while `dockerfile_build_example` is in NO bucket, so nothing ran it and no runtime guard was ever reached — the fix is never to relax containment but to say what the criterion means, `run_command: test -f /opt/marker`, a claim about the container IMAGE rather than about the agent's workspace), **CE054** (an `environment_info` key that is READ must be WRITTEN somewhere in `src/` — the bag is `dict[str, Any]`, so nothing connects reader to writer, and the `reference_digest` anti-cheat guard shipped as a read with no writer anywhere: `.get()` returned `None`, the guard took its early return, and CLAUDE.md plus the user guide both described it as protection it never provided), **CE048** (never call a Typer command function in process — its parameter defaults are `OptionInfo` sentinels, not values, and the sentinel is TRUTHY, so `in_place=None` silently selected the wrong branch; the fix is the `run_pipeline` / `run_evaluation` / `run_plan` split, and this rule is the one that also scans `tests/`, since that is the only place the defect occurs), **CE049** (never coalesce a possibly-unmeasured score to a numeric literal — `score or 0.0` publishes "measured and scored zero" while meaning "never measured", which is how an ungraded night reached four unfiltered `avg(Score)` dashboards as a real zero), **CE050** (no untyped `getattr` probe for a discriminated-union field — pyright cannot see the string, so a rename degrades the guard to a permanent no-op; scoped to criterion-shaped receivers because `command`/`tool`/`prompt` are far too common to flag on their own), **CE051** (a sandbox driver may not be rewritten silently — the driver IS the isolation boundary, so a downgrade must be an explicit, stamped, operator-visible decision), **CE053** (no bare run-record or run-LOG filename literal outside `path_utils` — widened to `docker.log` / `grade.docker.log` / `task.log` / `grade.log` after the same shape recurred: `docker.log` was produced in `isolation/` and consumed in `orchestration/` as three unrelated literals, and because the consumer guards its copy with `is_file()`, a rename would have silently discarded the only record of why a grading container failed — `TASK_JSON_FILENAME` shipped with a rename-safety rationale while twelve exact literals stayed unmigrated, including all three `rglob("task.json")` sites the constant's own comment cites as its reason to exist, so it created the second source of truth it argues against), **CE052** (an `os._exit` must sit inside a branch testing `CODER_EVAL_IN_CONTAINER` — it is the right primitive only for reaping the container's own disposable main process, and `run_task_internal_command` armed its heartbeat watchdog, a daemon thread whose whole authority is `os._exit(137)`, unconditionally: a test that invoked the command in-process left the pytest worker holding that thread, which exited the worker 40s later inside an unrelated test file, naming a different test on each run and on each platform with no traceback — and the dead worker's lost coverage data then failed the gate as `65.13 < 80.00`, naming neither the test nor the cause), **CE037** (no unreferenced module-level private helper in `src/` — a helper whose docstring documents a bug the live code still has is worse than none), **CE038** (in an `@asynccontextmanager`, the acquire must sit INSIDE the `try` whose `finally` releases it — `asyncio.shield` protects the inner task, NOT the await, so a cancel on `__aenter__` skips the unwind while the work completes), **CE039** (a criterion checker must not return a gating `score=0.0` from an `except OSError` over a path the *task author* named — that books an eval-config error as an agent failure; raise `CheckerMisuseError` instead, and `# noqa: CE039` the cases that really are the agent's), **CE047** (every onboarding/marketing surface — README, `docs/index.md`, `docs/comparison.md`, `docs/llms.txt`, `mkdocs.yml`'s `site_description`, the Pages stub, and pyproject's `description`/`keywords` — must name every built-in `AgentKind`; OpenCode shipped while four of those seven still listed three harnesses, and nothing failed), **CE057** (a module copied into the recorder directory beside a generated sandbox shim — `models.sandbox.SIDECAR_MODULES`, currently `argv_match.py` — may import stdlib only. The failure is silent: the sidecar runs where `coder_eval` and its dependencies are not installed, so one package import makes every shadowed CLI die with an ImportError the agent reads as "the tool is broken", costing a whole run to diagnose. The rule derives its target set from that exported tuple and a test asserts it matches a file that exists — a lint rule guarding zero files must fail, not pass).
+## Custom Lint Rules (CE000+)
 
-When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root cause is a mechanically detectable pattern (e.g., "always import from `coder_eval.models`", "never call blocking IO in async"), add a rule to `tests/lint/rules/` following the CE001+ pattern and wire it up in `tests/lint/runner.py`. This turns a one-time fix into permanent enforcement. See `tests/test_custom_lint.py` for how rules are tested. (Doc-surface / whole-tree rules that reason over Markdown/YAML or the entire `src/` tree rather than one `.py` AST at a time — CE026–CE031, CE033–CE036 — are not `BaseRule`s in the runner; they are wired as dedicated `@pytest.mark.lint` test classes. CE036 enforces the `live_verdict` determinism + monotonicity contract (`criteria/base.py`) that `EarlyStopWatcher`'s latching, deferred fail-stop, and flip-attribution silently depend on: monotonicity over arbitrary Python is undecidable, so instead of a static check it REPLAYS each live criterion against every prefix of recorded trajectories (`tests/lint/live_verdict_contract.py::CASES`) — on the authored ordering AND under seeded shuffles (`permuted_violations`, which catch order-sensitive bugs the authored walk misses) — and asserts the property directly, plus registry-derived coverage — every `LiveSuccessCriterion` in the union must have cases, and every polarity its instances claim via `live_decidable_polarities()` must actually be reached by one (otherwise a single always-`undecided` fixture would "cover" a type while proving nothing). Adding a live criterion therefore means adding `ContractCase`s in the same change. CE035 resolves every `steps.<id>.outputs.<key>` / `needs.<job>.outputs.<key>` reference in `.github/workflows/**` to a writer that actually produces that key — GitHub expands an unwritten output to the empty string, so a typo degrades a gate silently and actionlint models `steps.*.outputs` as an open string map. CE034 scans `tasks/` and forces an armed, live-*passable* `command_executed` to set `require_success` — a crashed invocation would otherwise latch a live PASS, fire `on_pass: stop`, and let FIRED-ONLY armed gating report SUCCESS without ever consulting the unarmed criteria (negative assertions are fail-only and are exempt). CE033 keeps the plugin's bundled `reference/criteria.md` in parity with the `SuccessCriterion` union that generates it (`make plugin-reference` writes it; the rule re-renders and diffs — never hand-edit the file). CE031 guards against dead config: a behavior-driving field on `SimulationConfig`/`RunLimits`/`Dataset` that no code reads by name. CE026 keeps the GitHub Action's onboarding surfaces honest — `README.md`, `docs/CI_GATE.md`, `docs/tutorials/02-ci-pipeline.md`, and the plugin's `ci` skill, whose emitted workflow users copy into their own repos: a page's *first* Action snippet must show the agent-runtime prerequisite steps (pinned to the `action-dogfood` job that proves them in CI), a zero-install absolute next to such a snippet must name the channel it means, every `github.com/marketplace/actions/<slug>` link plus the shields badge label must match `action.yml`'s `name:`, and every `with:` key on a snippet's action step must be a real `action.yml` input (GitHub ignores unknown inputs, so a rename would silently degrade every copied workflow). Renaming an action input or changing its runtime prerequisites therefore means updating the skill too.)
+Rules live in `tests/lint/rules/` and are wired in `tests/lint/runner.py`. Doc-surface
+and whole-tree rules — those reasoning over Markdown/YAML or the entire `src/` tree
+rather than one AST at a time — are instead `@pytest.mark.lint` classes in
+`tests/test_custom_lint.py`.
 
-Adding a user-facing field to one of the models CE030 tracks (`TaskDefinition`, `RunLimits`, `Dataset`, `SimulationConfig`, `RecordedCli`, `CliResponse` — see `tests/lint/doc_schema_parity.py`, which is the SSOT; this list is a convenience copy) means documenting it in its guide (mention the field name as inline code) or adding an `EXEMPT` entry with a reason it is not user-authored. `make lint` fails otherwise.
+**Every rule carries its own rationale in its module docstring**, including the defect
+that motivated it and its known blind spots. That docstring is the authoritative
+explanation; read it before editing, suppressing, or widening a rule. Run `make lint` —
+`make test` deliberately excludes these.
 
-**Docs index SSOT.** `nav:` plus `extra.docs_index` (blurbs) in `mkdocs.yml` are the single source of truth for the flat index surfaces — `README.md`'s Documentation table, `docs/index.md`'s "Where to go next" table, and the `## Docs` / `## Tutorials` sections of `docs/llms.txt`. Regenerate all three with `make docs-indexes`; **CE028** fails the build if any drifts, if a nav page lacks a blurb (or vice-versa), or if a `docs/*.md` page is missing from the nav. The website sidebar derives from the same `nav:`. When adding or renaming a docs page, edit `nav:` + `extra.docs_index` and run `make docs-indexes` — never hand-edit the generated tables (they sit between `<!-- docs-index:start -->` / `<!-- docs-index:end -->` markers).
+When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root
+cause is a mechanically detectable pattern, add a rule following the CE000+ pattern and
+wire it up. See `tests/test_custom_lint.py` for how rules are tested. Prefer removing
+the sharp edge over guarding it: a rule is right when the pattern is genuinely
+unavoidable, not when a shared helper would do. Candidates not yet promoted to rules
+are collected in `.claude/harness-candidates.md`.
 
-**Anchor slugger convention.** The docs are rendered by three sluggers (GitHub, Starlight/github-slugger on coder-eval.com, and python-markdown/mkdocs), which disagree on headings containing `&` or punctuation (`api-routing--benchmarking` vs `api-routing-benchmarking`). Prefer punctuation-free headings so all three agree; if a heading needs `&`, add a GitHub-form `<a id="…"></a>` shim above it and link that form. Verify a new intra-doc anchor link resolves in the built HTML (`mkdocs build`), not by eye.
+A few rules constrain routine edits, so they are worth knowing before you start:
+
+- **CE036** requires a new live criterion to ship `ContractCase`s in the same change
+  (`tests/lint/live_verdict_contract.py`).
+- **CE030** — adding a user-facing field to one of the models CE030 tracks (`TaskDefinition`, `RunLimits`, `Dataset`, `SimulationConfig`, `RecordedCli`, `CliResponse`; `tests/lint/doc_schema_parity.py` is the SSOT) means documenting it in
+  its guide, or adding an `EXEMPT` entry with a reason it is not user-authored. This
+  list is a convenience copy kept honest by a test — it must name every tracked model.
+- **CE026** keeps the GitHub Action's onboarding surfaces honest, including the
+  `/coder-eval:ci` skill whose emitted workflow users copy into their own repos.
+  Renaming an action input means updating that skill too — the user-facing contract is
+  [CI Gate: GitHub Action & JUnit reports](docs/CI_GATE.md).
+- **CE047** requires every onboarding surface to name every built-in `AgentKind`.
+
+**Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
+source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go
+next", and the `## Docs` / `## Tutorials` sections of `docs/llms.txt`. Regenerate with
+`make docs-indexes`; **CE028** fails the build on drift, on a nav page without a blurb,
+or on a `docs/*.md` page missing from the nav. Never hand-edit between the
+`<!-- docs-index:start -->` / `<!-- docs-index:end -->` markers.
+
+**Anchor slugger convention.** Three sluggers render these docs and disagree on
+headings containing `&` or punctuation. Prefer punctuation-free headings; if a heading
+needs `&`, add a GitHub-form `<a id="…"></a>` shim above it and link that form. Verify a
+new intra-doc anchor resolves in the built HTML (`mkdocs build`), not by eye.
+
+**Plugin skills.** The plugin ships six skills (`/coder-eval:init`,
+`/coder-eval:check-skill`, `/coder-eval:task`, `/coder-eval:lint-tasks`,
+`/coder-eval:analyze`, `/coder-eval:ci`). Each must appear in all four surfaces in
+`SKILL_DOC_SURFACES`, and their combined frontmatter `description` length is capped
+(`SKILL_LISTING_BUDGET_CHARS`) because the listing budget is shared with every skill the
+user has installed. Skill names are verb-first imperative (`init`, `analyze`,
+`lint-tasks`, `check-skill`); `task` and `ci` predate the rule and stay. User-facing
+documentation: [Claude Code plugin](docs/PLUGIN.md).
 
 ## Configuration
 
@@ -257,108 +277,90 @@ Adding a user-facing field to one of the models CE030 tracks (`TaskDefinition`, 
 
 ### Adding a New Criterion
 
-1. Define model in `models/criteria.py` inheriting `BaseSuccessCriterion`
-2. Add to `SuccessCriterion` union type
-3. Create checker file in `criteria/` inheriting `BaseCriterion`
-4. Use `@register_criterion` decorator — auto-discovered at runtime
+1. Define the model in `models/criteria.py` inheriting `BaseSuccessCriterion`.
+2. Add it to the `SuccessCriterion` union.
+3. Create the checker in `criteria/` inheriting `BaseCriterion`, decorated with
+   `@register_criterion` — auto-discovered at runtime.
+4. If it is a live criterion, add `ContractCase`s (CE036) and run `make plugin-reference`.
+
+Worked example: [Custom success criteria](docs/EXTENDING.md). Document the new type in
+the [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md#success-criteria).
 
 ### Adding a New Agent
 
-Agents are registered through the **plugin SPI** (entry-point group
-`coder_eval.plugins`) — there is no closed `AgentKind` enum or
-`Orchestrator._create_agent` dispatch to edit. `agent.type` is an open string
-validated against `AgentRegistry`; in-tree and third-party agents register the
-same way. The
-`coder_eval_uipath` Delegate SDK agent is the first real **out-of-tree** worked
-example of this SPI (entry point → `register()` hook → `AgentRegistry.register`
-+ `register_pricing`, with zero base edits).
+Agents register through the plugin SPI (entry-point group `coder_eval.plugins`) — there
+is no closed enum or dispatch to edit. In-tree and third-party agents use the same path.
+Full walkthrough: [Extending Coder Eval](docs/EXTENDING.md). Per-agent setup and
+credentials: [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md),
+[Antigravity](docs/agents/ANTIGRAVITY.md), [OpenCode](docs/agents/OPENCODE.md),
+[Pi](docs/agents/PI.md). A new agent must also be added to every onboarding surface
+CE047 tracks, and its run-limit behaviour recorded in
+[Run-Limit Parity](docs/agents/HARNESS_PARITY.md).
 
 1. Define a `BaseAgentConfig` subclass (its own `type: Literal["your-kind"]`) and
-   implement the `Agent` ABC in `agents/` (or a separate package for a plugin).
+   implement the `Agent` ABC.
 2. Bind them with `registry.register("your-kind", YourConfig)(YourAgent)` inside a
-   `register(registry)` hook, exposed via an entry point in the
-   `coder_eval.plugins` group (built-ins do this via
-   `coder_eval = "coder_eval.agents:register_builtins"`).
-3. Before raising on any mid-turn failure, set `self.pending_turn` to a
-   `crashed=True` `TurnRecord` built from captured telemetry, then raise
-   `AgentCrashError` or `TurnTimeoutError` (bare — no payload on the exception).
-   The orchestrator's `_on_attempt_failure` callback drains the slot into
-   `result.turns` and calls `discard_pending_turn()` to clear it.
-5. The turn lifecycle is shared on the `Agent` base class — do NOT reimplement
-   it: call `self._begin_turn()` at the top of `communicate()` (resets
-   `pending_turn` + bumps the iteration counter), `self._end_turn_ok()` on the
-   success path, and `self._mark_stopped()` in `stop()` (after your own resource
-   teardown). `discard_pending_turn()` and `get_state()` are concrete on the
-   base and need no override.
-6. The agent is the SOLE emitter of the standardized event protocol
-   (`streaming/events.py`): emit one `AgentStartEvent` at the top of
-   `communicate()` and one matching `AgentEndEvent` on EVERY exit path (success,
-   crash, timeout — from `finally`), with `TurnStartEvent`/`TurnEndEvent` per
-   inner turn and `ToolStartEvent`/`ToolEndEvent` per tool call (close orphaned
-   tools with `status=unresolved`). Fan events through an internal
-   `EventCollector` (which builds the returned `TurnRecord` — the single,
-   agent-agnostic capture path, so do NOT assemble a `TurnRecord` by hand) plus
-   the caller's `stream_callback`. The orchestrator is a pure consumer; renderers
-   and the task-log handler consume the same stream.
-7. If the agent shells out / holds OS resources, implement real `stop()` /
-   `kill()` / `kill_sync()` teardown — `kill_sync()` is called from the
-   watchdog's non-asyncio thread, so it must not await.
-
-**Registration pattern:** agents register via the `coder_eval.plugins`
-entry-point group (`coder_eval/plugins.py::load_plugins`). The built-in agents
-travel the same path — `coder_eval/agents/__init__.py::register_builtins` imports
-the agent modules so their `@AgentRegistry.register(...)` decorators fire, and it
-asserts the built-ins actually registered (rot-protection). `load_plugins` is
-called at CLI init; `ensure_plugins_loaded()` is the lazy safety-net for library
-use. A failing third-party plugin is logged and skipped; a failing built-in
-registration is fatal.
+   `register(registry)` hook exposed via a `coder_eval.plugins` entry point.
+3. Use the shared turn lifecycle on the base class — `self._begin_turn()`,
+   `self._end_turn_ok()`, `self._mark_stopped()`. Do not reimplement it.
+4. Before raising on a mid-turn failure, set `self.pending_turn` to a `crashed=True`
+   `TurnRecord`, then raise `AgentCrashError` or `TurnTimeoutError` bare.
+5. Emit the standardized event protocol and fan it through an internal `EventCollector`
+   plus the caller's `stream_callback`. One `AgentStartEvent` and one matching
+   `AgentEndEvent` on *every* exit path, from `finally`.
+6. If the agent shells out or holds OS resources, implement real `stop()` / `kill()` /
+   `kill_sync()`. `kill_sync()` runs on a non-asyncio thread and must not await.
 
 ### Registering Model Pricing (plugins)
 
-Plugins that run their own models contribute USD rates through the
-`register_pricing` seam — there is **no** separate entry-point group; call it
-from the same `register(registry)` hook used for the agent.
-
-1. Define `dict[str, ModelPricing]` rates (import `ModelPricing` from
-   `coder_eval.pricing`); the key is the bare model id as it appears in
-   `agent.model` (vendor/Bedrock prefixes are normalized off at lookup).
-2. Call `register_pricing(YOUR_RATES)` inside the plugin's `register()` hook.
-   `calculate_cost` then consults the registered overlay before the built-in
-   table, so every existing consumer (agents, reports) prices the model
-   transparently.
-3. Registration is **idempotent** for identical rates and **raises** on a
-   conflicting rate for an existing key (anti-shadow rule — mirrors
-   `AgentRegistry`, so plugin load order can never silently reprice a model). An
-   all-zero rate is a valid free-model entry (the lookup uses `is not None`, not
-   truthiness). Base ships **no** plugin rates.
-   `coder_eval_uipath/pricing.py` is the worked example.
+Call `register_pricing(YOUR_RATES)` from the same `register(registry)` hook — there is
+no separate entry-point group. Keys are bare model ids; vendor/Bedrock prefixes are
+normalized off at lookup. Registration is idempotent for identical rates and raises on a
+conflicting rate for an existing key, so plugin load order can never silently reprice a
+model. `coder_eval_uipath/pricing.py` is the worked example; see also
+[Model pricing](docs/EXTENDING.md).
 
 ## Task Definition
 
-Tasks are YAML files. See [docs/TASK_DEFINITION_GUIDE.md](docs/TASK_DEFINITION_GUIDE.md) for the full reference. To compare configuration variants across the same tasks, see [docs/AB_EXPERIMENTS.md](docs/AB_EXPERIMENTS.md).
+Tasks are YAML. Full reference: [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md).
+
+| Topic | Doc |
+|-------|-----|
+| Task YAML, criteria, run limits, sandbox | [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md) |
+| Variants across the same tasks (A/B) | [A/B Experiments](docs/AB_EXPERIMENTS.md) |
+| Dataset fan-out and suite thresholds | [Bring Your Own Dataset](docs/DATASETS.md) |
+| Multi-turn user simulation | [Dialog Mode](docs/DIALOG_MODE.md) |
+| `driver: docker`, custom images | [Docker Isolation](docs/DOCKER_ISOLATION.md) |
+| Run/report JSON consumed downstream | [Report Schema](docs/REPORT_SCHEMA.md) |
 
 ## Dependencies
 
-**Runtime (always)**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic, claude-agent-sdk, anyio, radon, tqdm, jmespath, jsonschema
+**Runtime**: pydantic, pydantic-settings, pyyaml, typer, rich, python-dotenv, anthropic,
+claude-agent-sdk, anyio, radon, tqdm, jmespath, jsonschema
 
-**Runtime (optional, `[uipath]` extra)**: uipath — the in-host `uipath` SDK (handy for local sandbox parity with tasks that invoke `uv run uipath eval ...`). Base installs without this extra still run end-to-end; UiPath-dependent paths fail at dispatch with a clear `pip install 'coder-eval[uipath]'` hint. The LLM judge no longer uses the LLM Gateway client — it routes through the run's backend (Bedrock / Anthropic), so `uipath-llmgw-client` is no longer a dependency.
+**Runtime (optional, `[uipath]` extra)**: uipath — for local sandbox parity with tasks
+that invoke `uv run uipath eval ...`. Base installs run end-to-end without it;
+UiPath-dependent paths fail at dispatch with a clear install hint.
 
-**Dev**: pytest, pytest-asyncio, pytest-mock, pytest-cov, ruff, pyright, pip-audit, bandit, pre-commit, mcp
+**Dev**: pytest, pytest-asyncio, pytest-mock, pytest-cov, ruff, pyright, pip-audit,
+bandit, pre-commit, mcp
 
 ## Design Principles
 
-- **DRY (Don't Repeat Yourself)**: Field descriptions, validation rules, and documentation defined once in Pydantic models
-- **Single Source of Truth**: Schema models are the authoritative source for parameter definitions
-- **Type Safety**: Full type checking with Pydantic and Pyright
-- **YAGNI**: Don't add complexity until actually needed
-- **KISS**: Keep it simple, stupid!
-- **Clean Code**: No dead code, all imports used, all tests passing
-- **Greenfield project**: No worries about backward compatibility
+- **DRY** — field descriptions, validation, and docs defined once in Pydantic models
+- **Single source of truth** — schema models are authoritative for parameter definitions
+- **Type safety** — full checking with Pydantic and Pyright
+- **YAGNI** — don't add complexity until actually needed
+- **KISS** — keep it simple
+- **Clean code** — no dead code, all imports used, all tests passing
+- **Greenfield project** — no backward-compatibility burden
+- **Comments are a last resort** — default to ZERO comments. Names, types and small
+  functions carry the meaning. A comment is allowed ONLY when it records something the
+  code cannot say
 
 ## Notes for AI Assistants
 
-- Communication style: Use ASD-STE-100 when you speak to the user.
-- When doing code review, reach out to gemini-3 and codex through multi mcp server
-- Any temporary files should be created in `tmp/` folder, NOT `/tmp` folder
-- All models are importable from `coder_eval.models` — don't import from submodules directly
-- The `criteria/` package uses auto-discovery; new checkers just need the `@register_criterion` decorator
+- Communication style: use ASD-STE-100 when you speak to the user.
+- Temporary files go in `tmp/`, not `/tmp`.
+- Read `.claude/architecture-notes.md` before changing grading, resume, early stop,
+  timing, the reference anti-cheat, or any significant parts of this code's architecture. 
