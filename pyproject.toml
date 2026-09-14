@@ -1,7 +1,7 @@
 [project]
 name = "coder-eval"
 version = "0.12.1"
-description = "Evaluate, benchmark, and A/B-test AI coding agents (Claude Code, Codex, Gemini/Antigravity, OpenCode, Pi) with sandboxed, reproducible YAML task suites."
+description = "Playwright for coding agents — test that your skills, MCP servers, and CLIs actually work when an agent uses them."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"

@@ -1,10 +1,8 @@
 ---
 title: "Evaluate AI coding agents and their skills — Coder Eval"
 description: >-
-  Coder Eval is Playwright for coding agents: an open-source, agent-agnostic
-  framework to evaluate, benchmark, and A/B-test AI coding agents and their skills
-  in a sandbox — declarative YAML tasks, weighted scoring, cost/token telemetry, and
-  CI gates for Claude Code, Codex, Antigravity (Gemini), OpenCode, and Pi.
+  Playwright for coding agents. Test that your skills, MCP servers, and CLIs
+  actually work when an agent uses them — sandboxed, scored, CI-gated.
 ---
 
 # Evaluate AI coding agents and their skills — Coder Eval

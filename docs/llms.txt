@@ -1,6 +1,8 @@
 # Coder Eval
 
-> Coder Eval (`pip install coder-eval`) is an open-source, agent-agnostic framework
+> Coder Eval (`pip install coder-eval`) is Playwright for coding agents: test that
+> your skills, MCP servers, and CLIs actually work when an agent uses them. It is an
+> open-source, agent-agnostic framework
 > for evaluating, benchmarking, and A/B-testing AI coding agents and their skills
 > (including Claude Code skills) in a sandbox. It uses declarative YAML tasks with
 > weighted, continuous scoring (0.0–1.0), runs real agents (Claude Code, OpenAI
