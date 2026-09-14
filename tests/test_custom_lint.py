@@ -3593,6 +3593,7 @@ class TestCE045PluginPathIsAPluginRoot:
     # true by construction rather than aspirational.
     _GLOBS = (
         "*.md",
+        ".claude/**/*.md",
         "docs/**/*.md",
         "plugins/**/*.md",
         "plugins/**/*.yaml",
