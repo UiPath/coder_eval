@@ -70,9 +70,14 @@ def mask_dirs(root: Path) -> list[Path]:
 
     # Directories to descend into: the root plus every protected ANCESTOR (a
     # protected path that is not itself a kept leaf). We never descend into a
-    # kept skill dir -- everything inside it stays readable, including the
-    # skill's own supporting assets.
-    descend = {root, *(p for p in protected if p not in keep)}
+    # kept path -- everything inside a kept skill dir (or `.claude-plugin`) stays
+    # readable, including the skill's own supporting assets. Excluding kept paths
+    # from `descend` also covers the degenerate manifest `skills: "."`: `root`
+    # then IS a kept leaf, so it is not descended and nothing is masked -- the
+    # whole plugin root is the skill surface, and masking its children would
+    # hide the skill. Fail-safe (no leak vs the plugin, at the cost of no masking
+    # for that unusual layout; CE065 still flags in-repo colocated task defs).
+    descend = {p for p in ({root} | protected) if p not in keep}
 
     masked: set[Path] = set()
     for directory in descend:

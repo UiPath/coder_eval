@@ -1522,6 +1522,21 @@ class DockerRunner:
         # EROFS. See _prepare_reference_mount.
         return ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
 
+    def _resolve_mount_path(self, raw_path: str) -> Path:
+        """Resolve an auto-mount source path to an absolute host path.
+
+        A RELATIVE path resolves against the task-file dir (matching
+        reference / template / CE065 resolution), NOT the process CWD.
+        ``agent.plugins[].path`` is the one auto-mounted field not absolutized at
+        load, so a bare ``.resolve()`` mounted a CWD-relative tree while CE065
+        inspected the task-file-relative one -- they could disagree.
+        (``template_sources[].path`` is already absolute by the time it gets here.)
+        """
+        expanded = Path(os.path.expandvars(os.path.expanduser(raw_path)))
+        if not expanded.is_absolute() and self.rt.task_file is not None:
+            expanded = self.rt.task_file.parent / expanded
+        return expanded.resolve()
+
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
@@ -1743,7 +1758,7 @@ class DockerRunner:
         def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
             if not raw_path:
                 return
-            resolved = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
+            resolved = self._resolve_mount_path(raw_path)
             # File paths get mounted as the parent dir so a single -v covers
             # the file; container-side reads still resolve at the same path.
             target = resolved if (dir_only or resolved.is_dir()) else resolved.parent

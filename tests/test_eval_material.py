@@ -56,6 +56,16 @@ class TestMaskDirs:
         assert (root / "skills").resolve() not in masked
         assert (root / ".claude-plugin").resolve() not in masked
 
+    def test_manifest_skills_at_root_masks_nothing(self, tmp_path: Path):
+        # Degenerate layout: the manifest declares the plugin ROOT as its skills
+        # dir (`skills: "."`). The whole root is then the skill surface, so masking
+        # any child would hide the skill -> mask nothing (fail-safe: denial, not a
+        # leak). Guards against collapsing the keep-set and breaking plugin load.
+        root = _plugin_root(tmp_path, skills=".")
+        (root / "some_dir").mkdir()
+        (root / "tests").mkdir()
+        assert mask_dirs(root) == []
+
     def test_skill_internal_assets_stay_readable(self, tmp_path: Path):
         root = _plugin_root(tmp_path)
         (root / "skills" / "demo" / "assets").mkdir(parents=True)
