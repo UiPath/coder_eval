@@ -164,6 +164,11 @@ STDOUT_LINE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
 
 # Logged once per masked child of an auto-mounted plugin root (Fix B allowlist).
 _MASK_WARNING = "Masking non-skill path %s under plugin root %s (anti-cheat: only skills stay readable)."
+_MASK_STANDDOWN_WARNING = (
+    "Anti-cheat mask stood down for plugin root %s: its whole tree is the declared skill surface "
+    '(e.g. manifest `skills: "."`), so nothing is masked. Any eval material colocated here is READABLE '
+    "to the agent — move it outside the plugin root."
+)
 
 
 async def _heartbeat_loop(heartbeat_path: Path) -> None:
@@ -1537,6 +1542,102 @@ class DockerRunner:
             expanded = self.rt.task_file.parent / expanded
         return expanded.resolve()
 
+    def _append_auto_mounts(self, argv: list[str]) -> None:
+        """Bind-mount the host paths a task references, at their same host path.
+
+        Covers Claude-Code plugin dirs (``agent.plugins[].path``) and
+        ``TemplateDirSource.path`` roots so they resolve inside the container at
+        the same path they have on the host. Each mount is ``:ro``; a plugin root
+        additionally gets an anti-cheat allowlist mask (see below). The reference
+        is deliberately NOT here -- it has its own ``CONTAINER_REFERENCE_DIR``
+        mount and is masked out of the task_dir mount (see ``_reference_mount_args``).
+        """
+        # ``mounted`` dedupes overlapping bind entries.
+        mounted: set[Path] = set()
+        # Sources that look like credential / secret dirs get a loud warning:
+        # `plugin.path` / `template_sources` are user-controlled strings and a typo
+        # (or a hostile suite) can silently expose `~/.ssh`. Warn, not hard-fail --
+        # legitimate uses exist (a task that does want `~/.aws/config`).
+        sensitive_sources = self._sensitive_source_paths()
+
+        # Lazy import: eval_material -> agents._skills triggers agents/__init__,
+        # which imports back into this module (opencode_agent). Importing it here,
+        # after this module is fully initialised, breaks that cycle.
+        from coder_eval.isolation.eval_material import mask_dirs
+
+        # ANTI-CHEAT masks, COLLECTED here and emitted AFTER every bind is known.
+        # Deferred so a nested auto-mounted plugin root (plugin B under plugin A)
+        # is reconciled: A's mask would `--tmpfs <A>/B` while B's own mount does
+        # `-v <A>/B:...:ro` -- an identical Docker mount destination, which the
+        # daemon rejects ("Duplicate mount point"). The bind must win (so B loads
+        # and masks its OWN non-skill children), so a mask whose path is also a
+        # bind is dropped below. Maps masked dir -> its plugin root (for logging).
+        mask_targets: dict[Path, Path] = {}
+
+        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
+            if not raw_path:
+                return
+            resolved = self._resolve_mount_path(raw_path)
+            # File paths get mounted as the parent dir so a single -v covers
+            # the file; container-side reads still resolve at the same path.
+            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
+            if target in mounted or not target.is_dir():
+                return
+            for sensitive in sensitive_sources:
+                if target == sensitive or sensitive in target.parents:
+                    logger.warning(
+                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
+                        target,
+                    )
+                    break
+            mounted.add(target)
+            argv.extend(["-v", f"{target}:{target}:ro"])
+            # ANTI-CHEAT (allowlist / default-deny): if `target` is a Claude-plugin
+            # root, the plugin stays mounted whole (:ro, above) so it still loads,
+            # but every child dir that is NOT the plugin surface (.claude-plugin +
+            # the manifest-declared skill dirs) is masked with an empty tmpfs. This
+            # closes the whole-suite channel: sibling task YAMLs, reference
+            # solutions, and test fixtures colocated under the tree are masked by
+            # default. `mask_dirs` returns [] for a non-plugin root, so a plain
+            # template dir / system_prompt_file parent is untouched.
+            masks = mask_dirs(target)
+            if not masks and (target / ".claude-plugin" / "plugin.json").is_file():
+                # A plugin root whose whole tree is the skill surface (e.g. a
+                # manifest declaring `skills: "."`) stands the mask down. Say so,
+                # or the anti-cheat mask voids with no operator-visible signal.
+                logger.warning(_MASK_STANDDOWN_WARNING, target)
+            for masked_dir in masks:
+                mask_targets.setdefault(masked_dir, target)
+
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        for plugin in plugins:
+            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+
+        from coder_eval.models import TemplateDirSource
+
+        sandbox_cfg = self.rt.task.sandbox
+        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
+            if isinstance(source, TemplateDirSource):
+                _auto_mount(source.path)
+
+        # Defensive: system_prompt_file is normally inlined into system_prompt by
+        # load_task / experiment resolution, but a variant could inject an absolute
+        # path that survives. Cover it so the in-container Orchestrator can read it.
+        agent_cfg = self.rt.task.agent
+        if agent_cfg and agent_cfg.system_prompt_file:
+            _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
+
+        # Emit the anti-cheat masks now that every bind is known. Docker applies
+        # mounts by target-path depth, so a deeper --tmpfs wins over the enclosing
+        # :ro bind regardless of argv order. Skip a mask whose path is ALSO a bind
+        # (a nested auto-mounted plugin root, see mask_targets above): the bind
+        # wins so the nested plugin loads and masks its own non-skill children.
+        for masked_dir, root in sorted(mask_targets.items()):
+            if masked_dir in mounted:
+                continue
+            argv.extend(["--tmpfs", str(masked_dir)])
+            logger.warning(_MASK_WARNING, masked_dir, root)
+
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
@@ -1729,82 +1830,7 @@ class DockerRunner:
             host_claude_dir = Path.home() / ".claude"
             argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
 
-        # Auto-mount host paths the task references so they resolve inside
-        # the container at the *same* path they have on the host.
-        # Includes:
-        #   - Claude Code plugin dirs (`agent.plugins[].path`)
-        #   - Template directories (`sandbox.template_sources[].path` for
-        #     TemplateDirSource entries -- already absolute after
-        #     resolve_template_paths runs on the host).
-        # `run_command` criteria that use `$TASK_DIR/...` are covered by the
-        # symmetric task_dir mount above. The reference is deliberately NOT here:
-        # it gets its own mount at CONTAINER_REFERENCE_DIR and is masked out of
-        # the task_dir mount (see _reference_mount_args). ``mounted`` dedupes overlapping entries.
-        mounted: set[Path] = set()
-        # Auto-mount sources that look like credential / secret dirs get a
-        # loud warning. Task YAMLs typically come from in-house suite authors,
-        # but the `plugin.path` / `reference.directory` / `template_sources`
-        # fields are user-controlled strings, and a typo (or a hostile suite)
-        # can silently expose `~/.ssh` etc. Warning, not hard fail, because
-        # legitimate uses exist (a task that does in fact want to read
-        # `~/.aws/config`). The warning surfaces the surprise.
-        sensitive_sources = self._sensitive_source_paths()
-
-        # Lazy import: eval_material -> agents._skills triggers agents/__init__,
-        # which imports back into this module (opencode_agent). Importing it here,
-        # after this module is fully initialised, breaks that cycle.
-        from coder_eval.isolation.eval_material import mask_dirs
-
-        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
-            if not raw_path:
-                return
-            resolved = self._resolve_mount_path(raw_path)
-            # File paths get mounted as the parent dir so a single -v covers
-            # the file; container-side reads still resolve at the same path.
-            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
-            if target in mounted or not target.is_dir():
-                return
-            for sensitive in sensitive_sources:
-                if target == sensitive or sensitive in target.parents:
-                    logger.warning(
-                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
-                        target,
-                    )
-                    break
-            mounted.add(target)
-            argv.extend(["-v", f"{target}:{target}:ro"])
-            # ANTI-CHEAT (allowlist / default-deny): if `target` is a Claude-plugin
-            # root, the plugin stays mounted whole (:ro, above) so it still loads,
-            # but every child dir that is NOT the plugin surface (.claude-plugin +
-            # the manifest-declared skill dirs) is masked with an empty tmpfs. This
-            # closes the whole-suite channel: sibling task YAMLs, reference
-            # solutions, and test fixtures colocated under the tree are masked by
-            # default. `mask_dirs` returns [] for a non-plugin root, so a plain
-            # template dir / system_prompt_file parent is untouched. Docker applies
-            # mounts by target-path depth, so the deeper --tmpfs wins over the :ro
-            # bind regardless of argv order.
-            for masked_dir in mask_dirs(target):
-                argv.extend(["--tmpfs", str(masked_dir)])
-                logger.warning(_MASK_WARNING, masked_dir, target)
-
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
-
-        from coder_eval.models import TemplateDirSource
-
-        sandbox_cfg = self.rt.task.sandbox
-        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
-            if isinstance(source, TemplateDirSource):
-                _auto_mount(source.path)
-
-        # Defensive: system_prompt_file is normally inlined into
-        # system_prompt by load_task / experiment resolution, but a variant
-        # could conceivably inject an absolute path that survives. Cover
-        # that path so the in-container Orchestrator can read it.
-        agent_cfg = self.rt.task.agent
-        if agent_cfg and agent_cfg.system_prompt_file:
-            _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
+        self._append_auto_mounts(argv)
 
         # NOTE: task.reference.directory is deliberately NOT auto-mounted at its
         # host path here. A copy of it gets a single dedicated read-write mount

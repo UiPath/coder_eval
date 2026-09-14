@@ -874,25 +874,11 @@ re-derive from scratch.
   candidate — a small real bug needing its own change. Caught in: the
   turn-timing consolidation final review (gpt-5.6-sol).
 
-## docker anti-cheat auto-mount allowlist (fix/docker-anti-cheat-leaks) — deferred Low findings
+## docker anti-cheat auto-mount allowlist (fix/docker-anti-cheat-leaks) — RESOLVED in-branch
 
-Surfaced by the code review of the Fix A/B/C branch. All Low; the Critical (context.json
-source_yaml leak) was fixed in-branch (commit dc71add6). These are follow-ups, each
-needing its own review:
-
-- **L1 — loose `task_id:` YAML *file* at a plugin root is unmasked.** `eval_material.mask_dirs`
-  masks child *directories* only (a `--tmpfs` needs a dir mountpoint), and CE065 only scans
-  *inside* skill dirs — so a bare `answers.yaml`/`criteria.yaml` directly under the plugin root
-  falls through both. Narrow (eval material is conventionally directory-shaped; UiPath/skills has
-  no such loose file). Fix options: extend CE065 to also flag a `task_id:` YAML file anywhere
-  under a masked plugin root (catches in-repo layouts), or per-file mask via `-v /dev/null:<file>:ro`.
-- **L2 — CE065 vs runtime resolve plugin paths on divergent bases.** CE065 resolves
-  `agent.plugins[].path` relative to the task-file dir; `docker_runner._auto_mount` resolves the
-  raw path vs CWD. Benign today (in-repo tasks use absolute/env-var plugin paths, and the runtime
-  couples the mask to the very tree it mounts, so no runtime leak escapes). Fix: absolutize
-  `agent.plugins[].path` in `load_task` the way `TemplateDirSource.path` already is, or share one
-  plugin-path resolver between CE065 and `_auto_mount`.
-- **L3 — manifest `skills: "."` collapses the keep-set.** If a manifest declares its skills dir as
-  the root, `mask_dirs` descends `root` and masks every child except `.claude-plugin` — denial, not
-  a leak (consistent with fail-safe default-deny), but it silently breaks such a plugin. Add a guard
-  (don't descend `root` when it is itself a kept leaf) + a test if that layout is supported.
+Surfaced by the code review of the Fix A/B/C branch. The Critical (context.json source_yaml
+leak) was fixed in commit dc71add6; the three Low follow-ups (L1 loose task_id file at plugin
+root, L2 CE065-vs-runtime path-resolution divergence, L3 manifest `skills: "."` collapsing the
+keep-set) and the multi-model review's M1/M2/M3 (test coverage for `_resolve_mount_path`, nested-
+plugin duplicate-mount crash, silent mask stand-down) were all fixed in the same branch. Nothing
+deferred. Left here only as a pointer to the branch history.

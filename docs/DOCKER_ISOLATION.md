@@ -369,10 +369,12 @@ reference window's posture above; neither contains an adversarial agent.
   the plugin surface is masked by default, so an unknown or new eval layout can
   never leak; `tests/`, `node_modules/`, and reference solutions are masked for
   free. A root agent cannot `umount` a tmpfs (`CAP_SYS_ADMIN` is not in Docker's
-  default set), so this mask is *stronger* than the mode-000 reference window. The
-  one residual — an eval def or reference COLOCATED inside a skill dir, which
-  cannot be masked without hiding the skill — is caught by lint rule CE065 (keep
-  eval material out of skill dirs; put it under a sibling `tests/`).
+  default set), so this mask is *stronger* than the mode-000 reference window. Two
+  residuals the mask cannot cover — an eval def or reference COLOCATED inside a
+  skill dir (masking it would hide the skill), and a `task_id:` YAML **file** loose
+  at the plugin root (a tmpfs masks a directory, not a single file) — are caught by
+  lint rule CE065 (keep eval material out of skill dirs and off the plugin root;
+  put it under a sibling `tests/`).
 
 Inside the container, the entrypoint invokes `coder-eval _run-task-internal` (hidden subcommand), which loads the staged YAML + context, runs the standard in-process Orchestrator (driver auto-coerced back to `tempdir`), and writes `task.json` to the output mount. Host reads it and feeds the existing aggregation pipeline.
 

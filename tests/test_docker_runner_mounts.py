@@ -841,6 +841,72 @@ class TestAutoMountAllowlistMask:
 
         assert self._tmpfs(argv) == []
 
+    def test_nested_plugin_root_bind_wins_over_mask(self, tmp_path: Path):
+        # M2: plugin B nested under plugin A. A's mask would `--tmpfs <A>/nested_b`
+        # while B's mount does `-v <A>/nested_b:...:ro` -- an identical Docker mount
+        # destination the daemon rejects. The bind must win (B loads + masks its
+        # own children), so A's mask of B is dropped.
+        a = self._plugin_root(tmp_path / "plugin_a")
+        (a / "skills" / "demo").mkdir(parents=True)
+        (a / "tests").mkdir()
+        b = self._plugin_root(a / "nested_b")
+        (b / "skills" / "demo").mkdir(parents=True)
+        (b / "tests").mkdir()
+
+        runner = self._runner(
+            tmp_path,
+            plugins=[{"type": "local", "path": str(a)}, {"type": "local", "path": str(b)}],
+        )
+        argv = self._argv(runner, tmp_path)
+        mounts, tmpfs = self._mounts(argv), self._tmpfs(argv)
+
+        # B is bind-mounted (so it loads) and NOT tmpfs-masked (no duplicate dest).
+        assert f"{b.resolve()}:{b.resolve()}:ro" in mounts
+        assert str(b.resolve()) not in tmpfs
+        # A's own non-skill child is still masked; B masks its own.
+        assert str((a / "tests").resolve()) in tmpfs
+        assert str((b / "tests").resolve()) in tmpfs
+        # No --tmpfs target collides with a bind destination (the M2 crash).
+        bind_dests = {m.split(":")[1] for m in mounts if m.count(":") >= 2}
+        assert not (set(tmpfs) & bind_dests)
+
+    def test_skills_at_root_logs_mask_standdown(self, tmp_path: Path, caplog):
+        # M3: a plugin root whose whole tree is the skill surface (manifest
+        # `skills: "."`) voids the mask -- warn so it isn't silent.
+        root = self._plugin_root(tmp_path / "plugin", skills=".")
+        (root / "tests").mkdir()
+
+        runner = self._runner(tmp_path, plugins=[{"type": "local", "path": str(root)}])
+        with caplog.at_level("WARNING"):
+            argv = self._argv(runner, tmp_path)
+
+        assert self._tmpfs(argv) == []  # nothing masked
+        assert any("stood down" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+    # --- M1: _resolve_mount_path (the L2 relative-vs-CWD resolution) ---
+
+    def test_resolve_mount_path_relative_uses_task_file_dir(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+        runner.rt.task_file = tmp_path / "suite" / "task.yaml"
+        (tmp_path / "suite" / "plugin").mkdir(parents=True)
+        assert runner._resolve_mount_path("plugin") == (tmp_path / "suite" / "plugin").resolve()
+
+    def test_resolve_mount_path_absolute_is_unchanged(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+        runner.rt.task_file = tmp_path / "suite" / "task.yaml"
+        abs_path = tmp_path / "elsewhere"
+        assert runner._resolve_mount_path(str(abs_path)) == abs_path.resolve()
+
+    def test_resolve_mount_path_none_task_file_falls_back_to_cwd(self, tmp_path: Path):
+        runner = self._runner(tmp_path)
+        runner.rt.task_file = None
+        assert runner._resolve_mount_path("rel") == (Path.cwd() / "rel").resolve()
+
+    def test_resolve_mount_path_expands_env_vars(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("MY_PLUGIN_DIR", str(tmp_path / "pdir"))
+        runner = self._runner(tmp_path)
+        assert runner._resolve_mount_path("$MY_PLUGIN_DIR") == (tmp_path / "pdir").resolve()
+
 
 class TestReferenceMountAntiCheat:
     """The reference must reach the harness but never the agent under evaluation."""

@@ -19,7 +19,10 @@ without touching the user's checked-out ``tasks/`` tree. See the call site in
 
 This shields grading MATERIAL that happens to live in the task directory (a
 ``reference/`` subdirectory, fixtures), not the task DEFINITION: ``task.yaml``
-is separately staged at ``/work/input``, which the agent can still read.
+(and ``context.json``'s ``source_yaml``) are separately staged at ``/work/input``
+and DELETED after load by the in-container entry point
+(``run_task_internal_command._scrub_staged_inputs``), so the agent cannot read
+the criteria from there.
 
 Windows **stack**, which is what makes a mid-turn re-grant expressible: code
 that runs inside the turn but is not the agent can open a narrower window to
