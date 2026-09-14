@@ -263,6 +263,11 @@ async def _invoke_tool_channel(
             # Handled by the unconfigured-arm guard in _check_impl_async before
             # dispatch; defensive only.
             return None, "llm_judge: no usable API route", "(no route)", None
+        case _:
+            # ApiRoute covers exactly Bedrock/Direct/LiteLLM above; this arm is
+            # unreachable but makes the match exhaustive (CodeQL: py/uninitialized-local-variable
+            # on verdict/err/response_usage below) — mirrors models/routing.py::resolve_route.
+            raise AssertionError(f"unhandled ApiRoute: {route!r}")
 
     if verdict is not None:
         return verdict, None, verdict.model_dump_json(), response_usage

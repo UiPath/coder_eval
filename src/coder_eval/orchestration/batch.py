@@ -21,6 +21,7 @@ from ..models import (
     AgentKind,
     EvaluationResult,
     FinalStatus,
+    LLMJudgeCriterion,
     PreservationMode,
     ResolvedTask,
     RunSummary,
@@ -28,7 +29,7 @@ from ..models import (
     TaskDefinition,
     TaskResult,
 )
-from ..path_utils import TASK_JSON_FILENAME, format_task_log_id
+from ..path_utils import TASK_JSON_FILENAME, format_task_log_id, is_within
 from ..pricing import unpriced_models
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
@@ -49,7 +50,7 @@ def _run_models(resolved_tasks: list[ResolvedTask]) -> Iterator[str | None]:
     for rt in resolved_tasks:
         yield rt.task.agent.model if rt.task.agent else None
         for criterion in rt.task.success_criteria:
-            yield getattr(criterion, "model", None)
+            yield criterion.model if isinstance(criterion, LLMJudgeCriterion) else None
 
 
 def check_pricing_coverage(resolved_tasks: list[ResolvedTask]) -> list[str]:
@@ -452,7 +453,11 @@ def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
     cleared = 0
     for rt in to_run:
         artifacts = rt.run_dir / "artifacts" / rt.task.task_id
-        if artifacts.exists():
+        # task_id is an unvalidated string (dataset rows are "<suite>/<row>"), so
+        # a crafted value like "../../../home/victim" joins to a real directory
+        # exists() happily confirms — mirror regrade.py's containment check
+        # before ever deleting anything derived from it.
+        if artifacts.exists() and is_within(artifacts, rt.run_dir):
             shutil.rmtree(artifacts, ignore_errors=True)
             cleared += 1
     return cleared

@@ -850,7 +850,13 @@ def _attach_row_accounting(agg: CriterionAggregate, rows_total: int, rows_aggreg
     """
     excluded = rows_total - rows_aggregated
     metrics = dict(agg.metrics)
-    metrics["completion_rate"] = (rows_aggregated / rows_total) if rows_total else 0.0
+    # Omit rather than publish 0.0 when there is no denominator: a suite_thresholds
+    # gate on this metric then fails closed with actual_value=None (see
+    # _evaluate_thresholds), distinguishable from "measured and completely failed" —
+    # the same nondescript-zero shape pass_rate/error_share guard against via
+    # nothing_was_measured.
+    if rows_total:
+        metrics["completion_rate"] = rows_aggregated / rows_total
     return agg.model_copy(update={"rows_total": rows_total, "rows_excluded": excluded, "metrics": metrics})
 
 

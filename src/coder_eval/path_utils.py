@@ -158,6 +158,21 @@ def rmtree_restrictive(root: Path) -> None:
         logger.warning("Directory %s could not be fully removed", root)
 
 
+def is_within(candidate: Path, root: Path) -> bool:
+    """True when ``candidate`` resolves inside ``root``.
+
+    Shared containment check for any path joined from an untrusted, task- or
+    record-authored field (a ``task_id``, a recorded ``sandbox_path``) before
+    it is read, written, or deleted — ``"../../etc"`` joins to a real path
+    that ``is_dir()``/``exists()`` happily confirms.
+    """
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def ignore_patterns_and_symlinks(patterns: list[str]) -> Callable[[str, list[str]], set[str]]:
     """``copytree`` ``ignore`` callable that drops pattern matches AND every symlink.
 

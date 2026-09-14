@@ -589,7 +589,10 @@ class TestRowAccounting:
         out = _attach_row_accounting(agg, rows_total=0, rows_aggregated=0)
         assert out.rows_total == 0
         assert out.rows_excluded == 0
-        assert out.metrics["completion_rate"] == 0.0
+        # No denominator: completion_rate is omitted rather than published as
+        # 0.0 (indistinguishable from "measured and completely failed") — a
+        # suite_thresholds gate on it then fails closed via actual_value=None.
+        assert "completion_rate" not in out.metrics
 
     def test_render_includes_denominator_line_when_excluded(self) -> None:
         agg = CriterionAggregate(

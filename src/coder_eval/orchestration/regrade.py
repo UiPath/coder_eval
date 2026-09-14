@@ -41,6 +41,7 @@ from coder_eval.path_utils import (
     GRADE_LOG_FILENAME,
     PRE_GRADE_JSON_FILENAME,
     TASK_JSON_FILENAME,
+    is_within,
     write_text_atomic,
 )
 from coder_eval.sandbox import Sandbox
@@ -498,7 +499,7 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
     def _contained(candidate: Path, description: str) -> Path:
         # One chokepoint, one root. `run_dir` is the operator-supplied path; a
         # candidate is only ever derived from the untrusted record.
-        if not _is_within(candidate, run_dir):
+        if not is_within(candidate, run_dir):
             raise RegradeError(
                 f"{description} resolves outside the run directory ({run_dir}). "
                 + "Pass --workspace explicitly to grade a directory outside the run."
@@ -548,15 +549,6 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
         + f"child, and {len(children)} candidates ({', '.join(p.name for p in children)}). "
         + "Pass --workspace explicitly."
     )
-
-
-def _is_within(candidate: Path, root: Path) -> bool:
-    """True when ``candidate`` resolves inside ``root``."""
-    try:
-        candidate.resolve().relative_to(root.resolve())
-    except ValueError:
-        return False
-    return True
 
 
 def verify_reference_unchanged(prior: EvaluationResult, task: TaskDefinition, task_file: Path | None) -> None:

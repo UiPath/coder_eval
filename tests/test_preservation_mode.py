@@ -141,6 +141,46 @@ def test_clear_rerun_artifacts_removes_only_existing(tmp_path):
     assert not (stale.run_dir / "artifacts" / "stale").exists()
 
 
+def test_clear_rerun_artifacts_refuses_path_traversal(tmp_path):
+    """A crafted task_id ('../../escape') must not delete outside the run dir.
+
+    task_id is an unvalidated string (dataset rows are "<suite>/<row>"), so
+    "../../../../victim" joins to a real directory `exists()` happily confirms.
+    Mirrors the containment check orchestration/regrade.py applies to the same
+    recorded-task_id shape.
+    """
+    from coder_eval.models import ResolvedTask, TaskDefinition
+    from coder_eval.orchestration.batch import clear_rerun_artifacts
+
+    task_id = "../../escaped"
+    task = TaskDefinition(
+        task_id=task_id,
+        description="d",
+        initial_prompt="p",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "docker"},
+        success_criteria=[{"type": "file_exists", "path": "x.txt", "description": "x"}],
+    )
+    run_dir = tmp_path / "run" / "default" / "victim" / "00"
+    run_dir.mkdir(parents=True)
+    victim = tmp_path / "run" / "default" / "escaped"
+    victim.mkdir(parents=True)
+    (victim / "do-not-delete.txt").write_text("real data outside the run dir")
+
+    rt = ResolvedTask(
+        task=task,
+        task_file=tmp_path / "t.yaml",
+        run_dir=run_dir,
+        variant_id="default",
+        original_task_id=task_id,
+    )
+
+    cleared = clear_rerun_artifacts([rt])
+
+    assert cleared == 0
+    assert (victim / "do-not-delete.txt").exists()
+
+
 @pytest.mark.asyncio
 async def test_run_batch_dispatches_resolved_mode_for_tempdir(tmp_path):
     """run_batch must hand the driver-derived mode (tempdir→MOVE_ON_WRITE) to the Orchestrator."""

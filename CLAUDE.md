@@ -34,7 +34,6 @@ coder_eval/
 ├── argv_match.py                  # Structured argv matcher. STDLIB-ONLY (CE057): this file is copied into the recorder dir as a SIDECAR beside every response-serving shim, which imports it as a sibling, so `cli_called` and a `record_cli` response rule dispatch on ONE semantic
 ├── telemetry.py                   # App Insights / OpenTelemetry emission (CoderEval.Task.End et al.)
 ├── isolation/                     # driver: docker — docker_runner.py builds, runs and reaps one container per task
-├── optimize/                      # Prompt/config optimization helpers
 ├── utils.py                       # Version info helpers
 │
 ├── agents/
