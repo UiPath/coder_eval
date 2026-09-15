@@ -188,9 +188,17 @@ default when unset, so the precedence (explicit per-criterion model, then the ro
 the default judge model) survives a `model_dump(mode="json")` and reload, which a
 `model_fields_set` check would not.
 
-Route resolution raises rather than asserts, because it is reached on the evaluate-only path
-with no preceding key validation and must survive `-O`. The exhaustive final arm of each
-match is unreachable but present, so every path returns explicitly.
+An EXPLICIT backend override that cannot be honored RAISES, naming the missing env var,
+rather than falling back to a different backend. That is the load-bearing rule of
+`_resolve_backend_route`: the override exists because a task author named a backend, and
+quietly grading on another one publishes a verdict from a route nobody asked for. The
+tempting edit is a fallback (`or settings.bedrock_model`); it is the regression this rule
+forbids.
+
+It raises rather than asserts for a second, independent reason: the path is reached on the
+evaluate-only flow with no preceding key validation, so the check must survive `-O`. The
+exhaustive final arm of each match is unreachable but present, so every path returns
+explicitly.
 
 Under `DirectRoute` the judge transport is resolved at startup: `anthropic` when a key is
 present, `None` otherwise, in which case an enabled `llm_judge` fails at dispatch. The

@@ -2184,9 +2184,8 @@ class Orchestrator:
             # simulator produces the opening utterance itself.
             return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
 
-        # Guaranteed for real agents by check_prompt_fields; a no-op task runs
-        # with no prompt, which NoOpAgent
-        # ignores it and returns an empty turn.
+        # Guaranteed for real agents by check_prompt_fields; a no-op task runs with
+        # no prompt, which NoOpAgent ignores, returning an empty turn.
         current_prompt = self.task.initial_prompt or ""
 
         iteration = 1

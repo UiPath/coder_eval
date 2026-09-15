@@ -131,7 +131,9 @@ HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_SECONDS = 20
 
 # asyncio's StreamReader caps a line at 64 KiB by default, which a single stream
-# event can exceed. Mirrors Orchestrator._POST_RUN_STREAM_LIMIT.
+# event can exceed. The same KIND of guard as Orchestrator._POST_RUN_STREAM_LIMIT,
+# but deliberately far larger (64 MiB vs 256 KiB) — do not unify them downward: a
+# whole-file tool input on this stream tore the container down before task.json.
 # Rationale: .claude/notes/isolation.md § The stdout line limit
 STDOUT_LINE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
 

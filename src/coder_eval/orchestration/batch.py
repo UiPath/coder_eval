@@ -356,10 +356,11 @@ def _owes_a_grade(result: EvaluationResult) -> bool:
     verdict at all. A row with a criteria vector or a score HAS been graded,
     whatever its status.
 
-    "Executed" is a required half, not decoration — a synthetic ERROR /
-    BUILD_FAILED row for a container that died before producing task.json carries
-    no verdict either, and routing those into grading replaced the real diagnostic
-    with a wrong-cause grading error.
+    The test is NOT_GRADED **or** executed, and the second half is what excludes
+    the synthetic rows: an ERROR / BUILD_FAILED record for a container that died
+    before producing task.json carries no verdict either, and routing those into
+    grading replaced the real diagnostic with a wrong-cause grading error. A
+    NOT_GRADED row qualifies on the first half alone, however few iterations it ran.
 
     Rationale: .claude/notes/orchestration.md § `--resume` is command-relative
     """

@@ -58,8 +58,9 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
 
         # HAZARD: confined to the reference dir, unlike a judge's author-written
         # `files:` entry -- this names one file OF the solution, so traversal out of
-        # the staged copy is always a mistake. Every failure below is a
-        # TASK-DEFINITION error and raises rather than scoring a gating 0.0.
+        # the staged copy is always a mistake. Every REFERENCE_FILE failure is a
+        # TASK-DEFINITION error and raises rather than scoring a gating 0.0 — the
+        # agent-side failures further down deliberately do the opposite.
         # Rationale: .claude/notes/contracts.md § What escalates instead of scoring 0.0
         ref_path = (reference_dir / criterion.reference_file).resolve()
         if not ref_path.is_relative_to(reference_dir.resolve()):

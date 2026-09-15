@@ -1164,10 +1164,12 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
             self._crash_turn(state, collector, f"OpenCode exited non-zero: {detail}")
 
-        # A clean exit that captured NO token telemetry must not score. The
-        # condition is the TELEMETRY, not the event vocabulary: both arms below
-        # reach the same silent-empty-success outcome. Intentional cuts are exempt
-        # — either can land before the first event, or mid-step.
+        # A clean exit that captured NO token telemetry must not score. Keying on
+        # the token counts ALONE is what misses the second arm: an exit that
+        # recognized no events at all reaches the same silent-empty-success
+        # outcome. Intentional cuts are exempt — either can land before the first
+        # event, or mid-step. (The two arms are NOT interchangeable downstream;
+        # see the require_token_telemetry escape hatch below.)
         # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
         nothing_recognized = state.recognized_events == 0
         finished_without_tokens = state.steps_finished > 0 and state.usage.is_empty()

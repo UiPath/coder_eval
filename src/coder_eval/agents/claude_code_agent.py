@@ -160,7 +160,8 @@ def _is_task_notification(message: Any) -> bool:
     """Check if message is a TaskNotificationMessage (sub-agent terminal event).
 
     It carries ``session_id`` + ``usage``, so it would otherwise be misread as
-    the final ResultMessage — hence this guard, checked FIRST. Identified by the
+    the final ResultMessage — hence this guard, checked BEFORE
+    ``_is_sdk_result_message``. Identified by the
     SDK type or ``subtype`` rather than attribute-presence sniffing, so it cannot
     misfire on a mock; the ``subtype`` fallback is what lets a duck-typed mock be
     recognized.
