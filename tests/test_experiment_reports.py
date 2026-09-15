@@ -728,7 +728,7 @@ class TestStatisticalHelpers:
 
     def test_welch_t_test_identical_groups(self):
         """Identical groups should produce p-value of 1.0."""
-        from coder_eval.reports_stats import welch_t_test
+        from coder_eval.stats import welch_t_test
 
         p = welch_t_test([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
         assert p is not None
@@ -736,7 +736,7 @@ class TestStatisticalHelpers:
 
     def test_welch_t_test_different_groups(self):
         """Very different groups should produce low p-value."""
-        from coder_eval.reports_stats import welch_t_test
+        from coder_eval.stats import welch_t_test
 
         p = welch_t_test([1.0, 1.1, 0.9, 1.0, 1.05], [5.0, 5.1, 4.9, 5.0, 5.05])
         assert p is not None
@@ -744,13 +744,13 @@ class TestStatisticalHelpers:
 
     def test_welch_t_test_insufficient_data(self):
         """Single observation per group should return None."""
-        from coder_eval.reports_stats import welch_t_test
+        from coder_eval.stats import welch_t_test
 
         assert welch_t_test([1.0], [2.0]) is None
 
     def test_welch_t_test_exact_reference_value(self):
         """Exact Student-t p-value, cross-checked against scipy ttest_ind(equal_var=False)."""
-        from coder_eval.reports_stats import welch_t_test
+        from coder_eval.stats import welch_t_test
 
         # Equal variances 2.5, n=5 each ⇒ t=1.0, Welch-Satterthwaite df=8.
         p = welch_t_test([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0])
@@ -759,14 +759,14 @@ class TestStatisticalHelpers:
 
     def test_welch_t_test_zero_variance_different_means(self):
         """Zero variance in both groups: deterministic difference ⇒ 0.0, identical ⇒ 1.0."""
-        from coder_eval.reports_stats import welch_t_test
+        from coder_eval.stats import welch_t_test
 
         assert welch_t_test([1.0, 1.0], [2.0, 2.0]) == 0.0
         assert welch_t_test([1.0, 1.0], [1.0, 1.0]) == 1.0
 
     def test_student_t_two_tailed_p_small_df_not_normal(self):
         """Small df must use t tails, not normal ones — the regression sensor for the old bug."""
-        from coder_eval.reports_stats import student_t_two_tailed_p
+        from coder_eval.stats import student_t_two_tailed_p
 
         p = student_t_two_tailed_p(2.5, 4.0)
         assert abs(p - 0.06677) < 5e-4
@@ -775,7 +775,7 @@ class TestStatisticalHelpers:
 
     def test_student_t_two_tailed_p_critical_values(self):
         """Round-trip the standard t-table critical values."""
-        from coder_eval.reports_stats import student_t_two_tailed_p
+        from coder_eval.stats import student_t_two_tailed_p
 
         assert abs(student_t_two_tailed_p(2.776, 4.0) - 0.05) < 1e-3
         assert abs(student_t_two_tailed_p(2.228, 10.0) - 0.05) < 1e-3
@@ -787,14 +787,14 @@ class TestStatisticalHelpers:
         """At huge df the t distribution converges to the normal."""
         import statistics
 
-        from coder_eval.reports_stats import student_t_two_tailed_p
+        from coder_eval.stats import student_t_two_tailed_p
 
         normal_p = 2.0 * statistics.NormalDist().cdf(-1.96)
         assert abs(student_t_two_tailed_p(1.96, 1e6) - normal_p) < 1e-5
 
     def test_regularized_incomplete_beta_closed_forms(self):
         """I_x(a,b) against the closed forms it has for b=1, a=1, and the symmetric point."""
-        from coder_eval.reports_stats import regularized_incomplete_beta
+        from coder_eval.stats import regularized_incomplete_beta
 
         assert abs(regularized_incomplete_beta(2.0, 1.0, 0.3) - 0.3**2) < 1e-10
         assert abs(regularized_incomplete_beta(1.0, 3.0, 0.4) - (1.0 - 0.6**3)) < 1e-10
@@ -804,7 +804,7 @@ class TestStatisticalHelpers:
 
     def test_paired_t_test_exact_reference_value(self):
         """Exact paired-t p-value, cross-checked against scipy ttest_rel."""
-        from coder_eval.reports_stats import paired_t_test, welch_t_test
+        from coder_eval.stats import paired_t_test, welch_t_test
 
         a = [0.9, 0.5, 0.8, 0.7, 0.95]
         b = [0.7, 0.55, 0.6, 0.72, 0.8]
@@ -819,21 +819,22 @@ class TestStatisticalHelpers:
 
     def test_paired_t_test_constant_shift_and_identical(self):
         """Zero-sd differences: deterministic shift ⇒ 0.0, identical lists ⇒ 1.0."""
-        from coder_eval.reports_stats import paired_t_test
+        from coder_eval.stats import paired_t_test
 
         assert paired_t_test([1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0]) == 0.0
         assert paired_t_test([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == 1.0
 
     def test_paired_t_test_invalid_input(self):
         """Length mismatch or fewer than 2 pairs returns None."""
-        from coder_eval.reports_stats import paired_t_test
+        from coder_eval.stats import paired_t_test
 
         assert paired_t_test([1.0, 2.0], [1.0]) is None
         assert paired_t_test([1.0], [2.0]) is None
 
     def test_non_finite_inputs_never_report_significance(self):
         """NaN/inf must not produce a fabricated p-value — fail closed, never significant."""
-        from coder_eval.reports_stats import fmt_p, paired_t_test, student_t_two_tailed_p, welch_t_test
+        from coder_eval.reports_stats import fmt_p
+        from coder_eval.stats import paired_t_test, student_t_two_tailed_p, welch_t_test
 
         nan, inf = float("nan"), float("inf")
         assert student_t_two_tailed_p(nan, 4.0) == 1.0
@@ -846,7 +847,7 @@ class TestStatisticalHelpers:
 
     def test_mean_and_stddev(self):
         """Basic mean and stddev calculations."""
-        from coder_eval.reports_stats import mean, stddev
+        from coder_eval.stats import mean, stddev
 
         assert mean([1.0, 2.0, 3.0]) == 2.0
         assert abs(stddev([1.0, 2.0, 3.0]) - 1.0) < 1e-10
@@ -1479,7 +1480,7 @@ class TestPairedComparisonSection:
 class TestExperimentReportSnapshots:
     """Byte-identical characterization snapshots for generate_experiment_report — the
     safety net for its decomposition. Output is deterministic: bootstrap_mean_ci in
-    reports_stats uses a fixed default seed, so no scrubbing is needed (do not pass a
+    coder_eval.stats uses a fixed default seed, so no scrubbing is needed (do not pass a
     varying seed); the paired section is closed-form Student-t with no randomness."""
 
     def test_experiment_report_snapshot_2variant(self):
@@ -1716,7 +1717,7 @@ class TestUngradedRenderingInMarkdown:
     Five ungraded edits landed on `reports_html.py` with tests and the identical
     five on `reports_experiment.py` with none, so the two renderers could drift
     apart while the suite stayed green. These also cover the four new public
-    `reports_stats` helpers, which no test called at all — including
+    `coder_eval.stats` helpers, which no test called at all — including
     `is_env_table_key`, a behaviour change (three key families newly hidden from
     BOTH Environment tables) that shipped unasserted in either direction.
     """

@@ -201,7 +201,7 @@ def main_thread_tool_spans(
 
     The span set the generation subtraction, the head and the tail are all
     measured against, so they cannot disagree about which calls exist. Shared
-    with ``reports_stats.turn_time_buckets``;
+    with ``result_metrics.turn_time_buckets``;
     ``tests/test_timing_close_window.py::TestTheThreeToolUnionsAgree`` pins this,
     that, and ``scripts/timing/decompose_run.py`` together.
 

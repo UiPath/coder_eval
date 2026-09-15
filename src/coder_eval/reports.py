@@ -364,9 +364,9 @@ class ReportGenerator:
             else:
                 avg_turn_str = "N/A"
 
-            # READ, never summed here -- computed once by `turn_time_buckets`.
-            # `.get()` because an older `run.json` has none of the four, which then
-            # renders as a dash, not as `0ms`.
+            # READ, never summed here -- computed once by
+            # `result_metrics.turn_time_buckets`. `.get()` because an older
+            # `run.json` has none of the four, which then renders as a dash, not `0ms`.
             # Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
             buckets = " | ".join(
                 format_ms(task.get(key)) for key in ("startup_ms", "generation_ms", "tool_ms", "teardown_ms")

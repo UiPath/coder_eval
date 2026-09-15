@@ -22,7 +22,7 @@ def format_ms(ms: float | None) -> str:
     """A duration in ms, or an em dash when it was never measured.
 
     SHARED by the HTML report and the markdown one. They render the same four
-    wall-clock buckets from the same `reports_stats.turn_time_buckets` call, so
+    wall-clock buckets from the same `result_metrics.turn_time_buckets` call, so
     formatting them twice is how one surface comes to print `0ms` where the
     other prints a dash — the `None`-vs-`0.0` distinction CE058 enforces on the
     producing side, thrown away at the last step.

@@ -30,7 +30,7 @@ from ..models import (
 )
 from ..path_utils import TASK_JSON_FILENAME, format_task_log_id
 from ..pricing import unpriced_models
-from ..reports_experiment import eval_result_to_task_dict
+from ..run_record import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
 from ..utils import get_version_info, looks_like_version
 from .config import BatchRunConfig, resolve_preservation_mode

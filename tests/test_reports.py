@@ -1387,8 +1387,8 @@ class TestTheGenerationMetricsBuckets:
     """The markdown table's four bucket columns, READ off the row projection.
 
     `reports.py` neither sums nor validates anything here: the numbers are
-    computed once by `reports_stats.turn_time_buckets` and carried as
-    task-level keys by `reports_experiment.eval_result_to_task_dict`. The rows
+    computed once by `result_metrics.turn_time_buckets` and carried as
+    task-level keys by `run_record.eval_result_to_task_dict`. The rows
     below are that projection's shape, not a `TurnRecord`.
     """
 

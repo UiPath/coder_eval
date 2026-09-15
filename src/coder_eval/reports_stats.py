@@ -1,152 +1,42 @@
-"""Shared statistical + prompt-config helpers for the markdown and HTML reporters.
+"""Report-shaped helpers over variant and experiment results.
 
-Kept in a standalone module so ``reports_html`` can consume them without
-importing ``reports_experiment`` (which in turn imports ``reports_html``
-for its HTML-write helpers, and would otherwise form a cycle).
+What is left here after the split is presentation and report assembly: the
+variant/experiment series collectors, the paired-comparison summary, and the
+formatters that turn a number into a cell (``fmt_mean_sd``, ``fmt_p``,
+``format_score``). The numeric core moved to ``coder_eval.stats`` and the
+``EvaluationResult`` metrics to ``coder_eval.result_metrics``.
+
+**The cycle rationale is live, not historical.** These helpers stay in a module
+of their own so ``reports_html`` can consume them without importing
+``reports_experiment`` — which imports ``reports_html`` for its HTML-write
+helpers. Folding this module into the experiment reporter would close
+``experiment -> html -> helpers`` into a cycle.
 """
 
 from __future__ import annotations
 
 import logging
-import math
-import random
-import statistics as _stats
-from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
 from coder_eval.models import (
-    AssistantMessage,
     EvaluationResult,
     ExperimentResult,
     ExperimentVariant,
     TaskExperimentSummary,
-    TurnRecord,
 )
-from coder_eval.timing import main_thread_tool_spans, union_ms
 
 from .path_utils import TASK_JSON_FILENAME
+from .stats import cohens_d, mean, paired_t_ci, paired_t_test, stddev
 
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Statistical helpers (stdlib statistics module)
+# Display formatters (presentation, not computation — the statistics are in
+# coder_eval.stats)
 # ---------------------------------------------------------------------------
-
-
-def mean(values: list[float]) -> float:
-    return _stats.mean(values) if values else 0.0
-
-
-def stddev(values: list[float]) -> float:
-    """Sample standard deviation (Bessel-corrected). Returns 0.0 for n < 2."""
-    return _stats.stdev(values) if len(values) >= 2 else 0.0
-
-
-def _betacf(a: float, b: float, x: float) -> float:
-    """Continued fraction for the regularized incomplete beta (Lentz's method)."""
-    max_iterations = 200
-    eps = 3e-12
-    fpmin = 1e-300
-
-    qab, qap, qam = a + b, a + 1.0, a - 1.0
-    c = 1.0
-    d = 1.0 - qab * x / qap
-    if abs(d) < fpmin:
-        d = fpmin
-    d = 1.0 / d
-    h = d
-    for m in range(1, max_iterations + 1):
-        m2 = 2 * m
-        # Even step of the recurrence.
-        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
-        d = 1.0 + aa * d
-        if abs(d) < fpmin:
-            d = fpmin
-        c = 1.0 + aa / c
-        if abs(c) < fpmin:
-            c = fpmin
-        d = 1.0 / d
-        h *= d * c
-        # Odd step.
-        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
-        d = 1.0 + aa * d
-        if abs(d) < fpmin:
-            d = fpmin
-        c = 1.0 + aa / c
-        if abs(c) < fpmin:
-            c = fpmin
-        d = 1.0 / d
-        delta = d * c
-        h *= delta
-        if abs(delta - 1.0) < eps:
-            return h
-    logger.warning("Incomplete beta continued fraction did not converge for a=%r, b=%r, x=%r", a, b, x)
-    return h
-
-
-def regularized_incomplete_beta(a: float, b: float, x: float) -> float:
-    """Regularized incomplete beta function I_x(a, b), for a, b > 0 and x in [0, 1].
-
-    Raises ValueError outside that domain — returning NaN would let a bad input
-    render as a real-looking statistic downstream.
-    """
-    if not (math.isfinite(a) and math.isfinite(b) and math.isfinite(x)):
-        raise ValueError(f"a, b and x must be finite, got a={a!r}, b={b!r}, x={x!r}")
-    if a <= 0.0 or b <= 0.0:
-        raise ValueError(f"a and b must be positive, got a={a!r}, b={b!r}")
-    if x <= 0.0:
-        return 0.0
-    if x >= 1.0:
-        return 1.0
-    ln_front = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
-    front = math.exp(ln_front)
-    # Use the continued fraction directly where it converges fast, else via symmetry.
-    if x < (a + 1.0) / (a + b + 2.0):
-        return front * _betacf(a, b, x) / a
-    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
-
-
-def student_t_two_tailed_p(t_stat: float, df: float) -> float:
-    """Exact two-tailed p-value for Student's t: P(|T| >= |t|) = I_x(df/2, 1/2), x = df/(df + t^2).
-
-    Non-finite inputs fail closed to 1.0 — garbage must never read as significant.
-    """
-    if not math.isfinite(t_stat) or not math.isfinite(df) or df <= 0:
-        return 1.0
-    x = df / (df + t_stat * t_stat)
-    return regularized_incomplete_beta(df / 2.0, 0.5, x)
-
-
-def welch_t_test(a: list[float], b: list[float]) -> float | None:
-    """Two-tailed p-value from Welch's unequal-variances t-test (exact t distribution).
-
-    Degrees of freedom via Welch-Satterthwaite; the t CDF is evaluated exactly
-    through the regularized incomplete beta (stdlib only, no scipy). Returns
-    None if either group has fewer than 2 observations, or holds a non-finite
-    value (rendered as "—" rather than a fabricated p-value).
-    """
-    n_a, n_b = len(a), len(b)
-    if n_a < 2 or n_b < 2:
-        return None
-    if not all(math.isfinite(v) for v in (*a, *b)):
-        return None
-
-    mean_a, mean_b = _stats.mean(a), _stats.mean(b)
-    var_a = _stats.variance(a)
-    var_b = _stats.variance(b)
-
-    se_sq = var_a / n_a + var_b / n_b
-    if se_sq == 0:
-        # Zero variance in both groups: identical constants (p=1) or a
-        # deterministic difference (p=0).
-        return 1.0 if mean_a == mean_b else 0.0
-
-    t_stat = abs(mean_a - mean_b) / math.sqrt(se_sq)
-    df = se_sq**2 / ((var_a / n_a) ** 2 / (n_a - 1) + (var_b / n_b) ** 2 / (n_b - 1))
-    return student_t_two_tailed_p(t_stat, df)
 
 
 def fmt_mean_sd(values: list[float], fmt: str = ".3f") -> str:
@@ -170,143 +60,6 @@ def fmt_p(p: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Replicate statistics helpers (stdlib random + statistics)
-# ---------------------------------------------------------------------------
-
-
-def bootstrap_mean_ci(
-    values: list[float],
-    n_resamples: int = 1000,
-    confidence: float = 0.95,
-    seed: int = 0,
-) -> tuple[float, float, float]:
-    """Percentile-bootstrap confidence interval for the mean.
-
-    Returns (mean, ci_low, ci_high). When ``len(values) < 2``, returns
-    (values[0], values[0], values[0]) or (0, 0, 0) for empty input.
-    Uses ``random.Random(seed)`` for determinism.
-
-    Raises ValueError for a ``confidence`` outside (0, 1) or a non-positive
-    ``n_resamples`` — clamping those would quietly return an interval of the
-    wrong width, which is worse than refusing.
-    """
-    if not 0.0 < confidence < 1.0:
-        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}")
-    if n_resamples < 1:
-        raise ValueError(f"n_resamples must be >= 1, got {n_resamples!r}")
-    if not values:
-        return (0.0, 0.0, 0.0)
-    m = sum(values) / len(values)
-    if len(values) < 2:
-        return (m, m, m)
-    rng = random.Random(seed)
-    n = len(values)
-    resampled_means = sorted(sum(rng.choice(values) for _ in range(n)) / n for _ in range(n_resamples))
-    alpha = (1.0 - confidence) / 2.0
-    lo = resampled_means[int(alpha * n_resamples)]
-    hi = resampled_means[int((1.0 - alpha) * n_resamples) - 1]
-    return (m, lo, hi)
-
-
-def wilson_interval(successes: int, n: int, confidence: float = 0.95) -> tuple[float, float]:
-    """Wilson score interval for a binomial proportion. Returns (low, high).
-
-    More reliable than the normal approximation at small N and near 0/1.
-    """
-    if n <= 0:
-        return (0.0, 0.0)
-    z = _stats.NormalDist().inv_cdf((1.0 + confidence) / 2.0)
-    p_hat = successes / n
-    denom = 1.0 + z * z / n
-    center = (p_hat + z * z / (2.0 * n)) / denom
-    half = (z * math.sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n))) / denom
-    return (max(0.0, center - half), min(1.0, center + half))
-
-
-def cohens_d(a: list[float], b: list[float]) -> float | None:
-    """Paired Cohen's d = mean(a_i - b_i) / stddev(a_i - b_i)."""
-    if len(a) != len(b) or len(a) < 2:
-        return None
-    diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
-    s = stddev(diffs)
-    return (sum(diffs) / len(diffs)) / s if s > 0 else None
-
-
-def student_t_critical(confidence: float, df: float) -> float:
-    """Two-tailed critical value t* with P(|T| >= t*) = 1 - confidence.
-
-    Inverts :func:`student_t_two_tailed_p` by bisection — that p is continuous and
-    strictly decreasing in |t|, so a plain bracket-and-halve is exact to ~1e-12 and
-    needs no separate quantile expansion.
-    """
-    if not 0.0 < confidence < 1.0:
-        raise ValueError(f"confidence must be in (0, 1), got {confidence!r}")
-    if df <= 0 or not math.isfinite(df):
-        return math.inf
-    alpha = 1.0 - confidence
-    lo, hi = 0.0, 1.0
-    while student_t_two_tailed_p(hi, df) > alpha:
-        lo = hi
-        hi *= 2.0
-        if hi > 1e12:
-            # Only reachable for a confidence so close to 1 that t* overflows the
-            # bracket. Warn rather than return a silently wrong-width interval.
-            logger.warning(
-                "student_t_critical failed to bracket t* for confidence=%r, df=%r; returning a degraded upper bound",
-                confidence,
-                df,
-            )
-            return hi
-    for _ in range(200):
-        mid = (lo + hi) / 2.0
-        if mid in (lo, hi):
-            break
-        if student_t_two_tailed_p(mid, df) > alpha:
-            lo = mid
-        else:
-            hi = mid
-    return (lo + hi) / 2.0
-
-
-def paired_t_ci(a: list[float], b: list[float], confidence: float = 0.95) -> tuple[float, float, float] | None:
-    """Student-t confidence interval for mean(a_i - b_i): mean ± t* · sd/√n.
-
-    Returns (mean_diff, ci_low, ci_high), or None if lengths differ, n < 2, or any
-    value is non-finite. Shares its distribution with :func:`paired_t_test`, so the
-    interval and the p-value always agree about whether 0 is excluded.
-    """
-    if len(a) != len(b) or len(a) < 2:
-        return None
-    if not all(math.isfinite(v) for v in (*a, *b)):
-        return None
-    diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
-    n = len(diffs)
-    mean_diff = sum(diffs) / n
-    half_width = student_t_critical(confidence, n - 1) * stddev(diffs) / math.sqrt(n)
-    return (mean_diff, mean_diff - half_width, mean_diff + half_width)
-
-
-def paired_t_test(a: list[float], b: list[float]) -> float | None:
-    """Two-tailed p-value from a paired t-test on (a_i - b_i), exact t distribution.
-
-    Equivalent to a one-sample t-test of the differences against 0, df = n - 1.
-    Returns None if lengths differ, n < 2, or any value is non-finite.
-    """
-    if len(a) != len(b) or len(a) < 2:
-        return None
-    if not all(math.isfinite(v) for v in (*a, *b)):
-        return None
-    diffs = [ai - bi for ai, bi in zip(a, b, strict=True)]
-    sd = stddev(diffs)
-    mean_diff = sum(diffs) / len(diffs)
-    if sd == 0:
-        # All diffs identical: no difference (p=1) or a deterministic shift (p=0).
-        return 1.0 if mean_diff == 0 else 0.0
-    t_stat = abs(mean_diff) / (sd / math.sqrt(len(diffs)))
-    return student_t_two_tailed_p(t_stat, len(diffs) - 1)
-
-
-# ---------------------------------------------------------------------------
 # Aggregate-metric series
 # ---------------------------------------------------------------------------
 
@@ -321,9 +74,11 @@ class VariantSeries(NamedTuple):
     asst_turns: list[float]
 
 
-# Keys the Environment table must NOT render as ordinary rows: `installed_tools` has
-# its own section, `command_base_path` is a full PATH string, and the graded_by_*
-# keys appear only on a re-graded row, where they would read as facts about the run.
+# environment_info keys the Environment table must NOT render as ordinary rows.
+# `installed_tools` has its own dedicated section; the rest are harness
+# bookkeeping the reader did not ask for — `command_base_path` is a full PATH
+# string on every row, and the graded_by_* provenance keys only appear on a
+# re-graded row where they would read as facts about the run itself.
 ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest"})
 
 
@@ -332,116 +87,15 @@ def is_env_table_key(key: str) -> bool:
     return key not in ENV_TABLE_EXCLUDE and not key.startswith("graded_by_")
 
 
-# Deliberately not "0.000": a zero is indistinguishable from a task that WAS
-# measured and scored nothing.
-# Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
+# What an ungraded row shows where a score would go. Deliberately not "0.000":
+# an ungraded task was never measured, and a zero is indistinguishable from a
+# task that was measured and scored nothing.
 UNGRADED_SCORE_TEXT = "n/a"
 
 
 def format_score(score: float | None) -> str:
     """Render a weighted score for a report table, or ``n/a`` when ungraded."""
     return UNGRADED_SCORE_TEXT if score is None else f"{score:.3f}"
-
-
-class TurnTimeBuckets(NamedTuple):
-    """The four wall-clock buckets of a whole run, plus what they leave over.
-
-    Each is ``None`` when NOTHING in the run measured it — a run recorded before
-    the head and tail were captured has no startup at all, a run that recorded
-    no bounded tool span has no tool total, and a run with no duration has no
-    residual. Rendering any of those as ``0ms`` claims a measurement nobody
-    took (CE058, and the reason the evalboard's ``sumMeasured`` returns
-    ``null``). A MEASURED zero stays ``0.0`` and renders as ``0ms``.
-
-    DISPLAY AND ARITHMETIC DIFFER HERE, on purpose. An unmeasured bucket renders
-    as a dash and counts as ``0.0`` toward ``unaccounted``, so the missing time
-    surfaces as residual rather than vanishing. That is the rule
-    ``scripts/timing/decompose_run.py::_turn_buckets`` already applies, and
-    keeping the two the same is what lets a reader compare them.
-    """
-
-    startup_ms: float | None
-    generation_ms: float | None
-    tool_ms: float | None
-    teardown_ms: float | None
-    unaccounted_ms: float | None
-
-
-def turn_time_buckets(result: EvaluationResult) -> TurnTimeBuckets:
-    """Sum the four timing buckets across a run's turns, and the residual.
-
-    The arithmetic lives HERE rather than in the renderer because this module is
-    the designated home for shared report statistics: the evalboard, the
-    markdown report and the HTML report must not each grow their own version.
-    ``reports_html`` formats what this returns and decides nothing.
-
-    ``unaccounted`` is measured against ``EvaluationResult.duration_seconds`` —
-    the TASK's wall clock, which is what the card's existing Total Latency uses
-    and what the evalboard's own Unaccounted cell uses. It therefore legitimately
-    contains sandbox setup and grading, and is LARGER than the per-turn residual
-    ``decompose_run.py`` reports. The two are not comparable and the label says
-    so.
-    """
-    turns = result.iterations or []
-    startup = _sum_measured(t.harness_startup_ms for t in turns)
-    teardown = _sum_measured(t.harness_teardown_ms for t in turns)
-    # MAIN THREAD ONLY, the same filter the collector and the evalboard apply: a
-    # sub-agent's generations bubble into the same stream, and the spawning call's
-    # own interval already spans them.
-    generation = _sum_measured(
-        m.generation_duration_ms
-        for t in turns
-        for m in t.messages
-        if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None
-    )
-    # `None` only when NO turn recorded a bounded span: the presence of a SPAN, not
-    # of a turn, is what decides measured-versus-not.
-    # Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
-    per_turn = [_turn_tool_union_ms(t) for t in turns]
-    tool = _sum_measured(per_turn) if any(ms is not None for ms in per_turn) else None
-
-    # `duration_seconds` defaults to 0.0 with no None arm to write, but a 0.0
-    # duration is a run that was never timed, and subtracting real buckets from it
-    # renders a fabricated negative residual. The evalboard keeps that null too.
-    unaccounted = (
-        result.duration_seconds * 1000.0 - (startup or 0.0) - (generation or 0.0) - (tool or 0.0) - (teardown or 0.0)
-        if result.duration_seconds > 0.0
-        else None
-    )
-    return TurnTimeBuckets(startup, generation, tool, teardown, unaccounted)
-
-
-def _sum_measured(values: Iterable[float | None]) -> float | None:
-    """Sum what was measured, or ``None`` when nothing was.
-
-    The Python twin of the evalboard's ``sumMeasured``: a run with no measured
-    value anywhere returns ``None`` (never measured), while a run that measured
-    a genuine zero returns ``0.0``.
-    """
-    total: float | None = None
-    for value in values:
-        if isinstance(value, (int, float)) and math.isfinite(value):
-            total = (total or 0.0) + value
-    return total
-
-
-def _turn_tool_union_ms(turn: TurnRecord) -> float | None:
-    """One turn's tool execution — the UNION of its main-thread command spans.
-
-    PREFERS THE STORED ``TurnRecord.tool_union_ms``, which the collector writes from
-    the single span set it measures all four buckets against, so this surface and the
-    collector are guaranteed to agree rather than merely observed to. The derivation
-    is the LEGACY path for a ``task.json`` written before that field existed.
-
-    The stored value is checked with ``is not None``, never truthiness: a stored
-    ``0.0`` is a MEASUREMENT and must not fall through to a re-derivation.
-
-    Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
-    """
-    if turn.tool_union_ms is not None:
-        return turn.tool_union_ms
-    spans = main_thread_tool_spans(turn.messages, turn.commands)
-    return union_ms(spans) if spans else None
 
 
 def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]:
@@ -458,12 +112,20 @@ def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]
             s = series.get(vr.variant_id)
             if s is None:  # a task result for a variant not in variant_ids
                 continue
-            # Only the SCORE is dropped when there is none, never the row. The
-            # series are consumed independently, so they need not be index-aligned;
-            # `paired_comparison` pairs across VARIANTS by task id. Mixed
-            # graded/ungraded experiments are real -- `run --resume` grades rows
-            # independently and folds a failed one back ungraded.
-            # Rationale: .claude/notes/reporting.md § The ungraded row in every surface
+            # Only the SCORE is dropped when there is none — never the row.
+            # Duration, tokens and assistant turns are facts about the run that
+            # grading has nothing to do with, and `execute`'s stated contract is
+            # that only the verdict is withheld. Skipping the row whole made an
+            # all-ungraded experiment render `Avg Duration | N/A | N/A` with the
+            # Tokens and Assistant Turns rows absent entirely.
+            #
+            # The series are consumed independently (each statistic reads one
+            # list), so they need not be index-aligned with each other;
+            # `paired_comparison` pairs across VARIANTS by task id, not by index
+            # into these lists. An earlier note here claimed an experiment is
+            # either entirely graded or entirely ungraded because `grade` is
+            # run-level — `run --resume` grades rows independently and folds a
+            # failed one back ungraded, so mixed experiments are real.
             if vr.weighted_score is not None:
                 s.scores.append(vr.weighted_score)
             s.durations.append(vr.duration_seconds / vr.replicate_count)
@@ -544,55 +206,6 @@ def paired_comparison(result: ExperimentResult, confidence: float = 0.95) -> Pai
 # ---------------------------------------------------------------------------
 # Prompt config + variant-result loaders
 # ---------------------------------------------------------------------------
-
-
-def has_final_reply(result: EvaluationResult) -> bool:
-    """True iff any iteration emitted a non-empty ResultMessage.result.
-
-    Mirrors the evalboard rendering: a "final reply" is a text answer the
-    agent produced that becomes the trailing entry in the Turn timeline.
-    """
-    for t in result.iterations:
-        if t.result_summary is not None:
-            r = t.result_summary.result
-            if isinstance(r, str) and r.strip():
-                return True
-    return False
-
-
-def visible_turn_count(result: EvaluationResult) -> int:
-    """Count of agent actions visible in the timeline so far.
-
-    A "turn" here is one entry rendered in the Turn timeline: each tool
-    invocation contributes 1, plus 1 for the final assistant reply when
-    present. This is the canonical metric — distinct from the SDK's
-    ``num_turns`` which counts assistant *messages* and can bundle tool
-    use with trailing text into a single turn.
-    """
-    commands = sum(len(t.commands) for t in result.iterations)
-    return commands + (1 if has_final_reply(result) else 0)
-
-
-def expected_turns_overage(result: EvaluationResult) -> tuple[int, int] | None:
-    """Return ``(visible_turns, expected)`` when the visible-events turn
-    count strictly exceeds ``run_limits.expected_turns``; else ``None``.
-
-    Safe against missing ``task_config``, missing ``run_limits``, and
-    non-int ``expected_turns`` values.
-    """
-    task_cfg = result.task_config
-    if task_cfg is None:
-        return None
-    run_limits = (task_cfg.resolved or {}).get("run_limits") or {}
-    if not isinstance(run_limits, dict):
-        return None
-    expected = run_limits.get("expected_turns")
-    if not isinstance(expected, int) or expected < 1:
-        return None
-    actual = visible_turn_count(result)
-    if actual > expected:
-        return actual, expected
-    return None
 
 
 def describe_prompt_config(variant: ExperimentVariant) -> str:

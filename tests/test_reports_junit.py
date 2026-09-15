@@ -724,7 +724,7 @@ def test_parity_real_producer_output_through_writer(write_run_json: Callable[...
 
     Every other test builds rows via the synthetic ``_row`` helper, which
     hand-copies the keys the writer reads. This one runs the actual producer
-    (``reports_experiment.eval_result_to_task_dict``, the batch.py path) so a
+    (``run_record.eval_result_to_task_dict``, the batch.py path) so a
     producer-side rename of ``status`` / ``task_path`` / ``total_cost_usd`` /
     ``model_used`` / ``total_tokens`` / ``visible_turns`` / ``weighted_score``
     (RunSummary.task_results is an untyped ``list[dict[str, Any]]``) can no longer
@@ -734,7 +734,7 @@ def test_parity_real_producer_output_through_writer(write_run_json: Callable[...
     from datetime import datetime
 
     from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TokenUsage
-    from coder_eval.reports_experiment import eval_result_to_task_dict
+    from coder_eval.run_record import eval_result_to_task_dict
 
     result = EvaluationResult(
         task_id="mytask",

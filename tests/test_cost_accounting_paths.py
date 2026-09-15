@@ -26,7 +26,7 @@ from coder_eval.models import (
     TurnRecord,
 )
 from coder_eval.orchestration.batch import check_pricing_coverage
-from coder_eval.reports_experiment import eval_result_to_task_dict
+from coder_eval.run_record import eval_result_to_task_dict
 
 
 def _resolved(model: str | None, tmp_path: Path, criteria: list[dict[str, Any]] | None = None) -> ResolvedTask:
