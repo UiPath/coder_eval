@@ -2293,9 +2293,28 @@ class TestCoreLayerMembership:
         assert is_core_path("/Users/x/src/coder_eval/conftest.py")
         assert is_core_path("/Users/x/src/coder_eval/tests/test_a.py")
 
+    def test_neither_consumer_is_ever_handed_a_path_outside_src(self):
+        """The residual above is harmless only because both rules scan `SRC` alone.
+
+        Adding CE004 or CE066 to `_ALSO_SCAN_TESTS` would hand them the whole
+        `tests/` tree, and on a clone at `~/src/coder_eval` — an ordinary layout —
+        that tree matches `_PKG`. The reachability argument lives in
+        `_layers.py`'s docstring as prose; this is the line that enforces it.
+        """
+        assert {"CE004", "CE066"}.isdisjoint(_ALSO_SCAN_TESTS)
+
     @pytest.mark.parametrize(
         ("relative", "expected"),
-        [("src/coder_eval/orchestrator.py", True), ("src/coder_eval/reports/markdown.py", False)],
+        [
+            ("src/coder_eval/orchestrator.py", True),
+            ("src/coder_eval/reports/markdown.py", False),
+            # Only the PACKAGES are non-core: `_NON_CORE` requires a trailing
+            # separator, so a top-level module whose name merely starts with
+            # `reports` or `cli` stays core. Nothing in the tree has that shape
+            # today, so this is the only thing pinning the boundary.
+            ("src/coder_eval/reports_legacy.py", True),
+            ("src/coder_eval/cli_helpers.py", True),
+        ],
     )
     def test_the_relative_and_absolute_spelling_agree(self, relative, expected):
         assert is_core_path(relative) is expected

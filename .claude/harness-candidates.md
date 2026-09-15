@@ -893,7 +893,8 @@ re-derive from scratch.
   rule modules, to which `_layers.py` now adds two more compiles of its own, with the
   `agents/`-suffixed variant of the same idiom in
   `_model_ctor.py:28` and `ce059_generation_window_is_two_reads.py:45`, plus a near-variant
-  in `ce037_no_dead_private_helper.py:61`. `_layers.py` is the designated shared rule-helper
+  in `ce037_no_dead_private_helper.py:61` and a `cli/`-suffixed one in
+  `ce048_no_in_process_typer_command_call.py:68`. `_layers.py` is the designated shared rule-helper
   module, though `_model_ctor.py` is an equal peer and a generic src-path regex arguably
   belongs in a neutrally named helper rather than one named `_layers`. Not hoisted here
   because retargeting seven unrelated rules needs a per-rule verification that its scope

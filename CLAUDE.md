@@ -26,6 +26,7 @@ data-driven analysis.
 ```
 coder_eval/
 ├── agent.py                  # Agent ABC (start, communicate, stop, get_state)
+├── plugins.py                # Agent/pricing plugin SPI (entry-point group coder_eval.plugins)
 ├── config.py                 # Settings via pydantic-settings (.env loading)
 ├── sandbox.py                # Sandbox manager (tempdir, venv, templates, adopt)
 ├── orchestrator.py           # Main evaluation loop
@@ -48,6 +49,7 @@ coder_eval/
 ├── telemetry.py              # App Insights / OpenTelemetry emission
 ├── isolation/                # driver: docker — one container per task
 ├── harbor/                   # Harbor export + coder-eval as a Harbor agent
+├── errors/                   # Error categorization, retry logic, error context capture
 ├── utils.py                  # Version info helpers
 │
 ├── agents/                   # Agent implementations (claude_code, codex, antigravity,
