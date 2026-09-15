@@ -4368,6 +4368,7 @@ class TestCE061WindowViaCloseWindow:
         assert suppressed == set()
 
 
+@pytest.mark.lint
 class TestRuffExternalCoversEveryRule:
     """Every CE rule's documented `# noqa` must be accepted by ruff.
 
@@ -4377,21 +4378,47 @@ class TestRuffExternalCoversEveryRule:
     advertise `# noqa: CE054` / `# noqa: CE048` as the supported escape hatch. So
     the first person to use the documented exemption got a red `make check`
     instead, for doing exactly what the rule told them to.
+
+    The list then drifted a SECOND time, and this class is why it drifted
+    quietly: it read `ALL_RULES` alone, so it could not see a rule that is a
+    `@pytest.mark.lint` class here rather than a `BaseRule`. CE044 and CE065 are
+    both such rules, both were missing, and only CE065 was noticed — by a human
+    reading a diff. `_known()` now unions both registries.
+
+    Both directions are asserted. A declared id for a deleted rule is the
+    exemption-set rot that the generated pricing table exists to remove.
+
+    Blind spot: the `@pytest.mark.lint` half of `_known()` discovers ids by the
+    `class TestCE\\d{3}` naming convention, which every such class follows today
+    but nothing enforces. A class named otherwise is invisible here, and its id
+    can go undeclared exactly as CE044 did.
+
+    Nothing is red today for want of these two entries — no `# noqa: CE044` or
+    `# noqa: CE065` exists in the tree — so this is pre-emptive rather than the
+    fix for a broken build.
     """
 
     @staticmethod
     def _external() -> set[str]:
         import tomllib
-        from pathlib import Path
 
-        data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        data = tomllib.loads((SRC.parent / "pyproject.toml").read_text(encoding="utf-8"))
         return set(data["tool"]["ruff"]["lint"]["external"])
 
-    def test_every_registered_rule_is_listed(self):
-        from tests.lint.runner import ALL_RULES
+    @staticmethod
+    def _known() -> set[str]:
+        own_source = Path(__file__).read_text(encoding="utf-8")
+        return {r.id for r in ALL_RULES} | set(re.findall(r"^class Test(CE\d{3})", own_source, re.M))
 
-        missing = sorted({r.id for r in ALL_RULES} - self._external())
+    def test_every_registered_rule_is_listed(self):
+        missing = sorted(self._known() - self._external())
         assert not missing, f"add to [tool.ruff.lint] external in pyproject.toml: {missing}"
+
+    def test_no_dead_entry_survives(self):
+        """A declared id for a rule that no longer exists silences RUF102 for a
+        code nothing defines — the exemption-set rot the pricing mirror removed."""
+        dead = sorted(self._external() - self._known())
+        assert not dead, f"pyproject.toml [tool.ruff.lint] external declares ids with no such rule: {dead}"
 
     def test_every_listed_id_is_well_formed(self):
         """Cheap guard against a typo silently widening the allowlist."""
