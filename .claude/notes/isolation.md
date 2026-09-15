@@ -418,22 +418,32 @@ routinely be lost, making a genuine stale-heartbeat exit indistinguishable from 
 SIGKILL in the archived logs. Flush best-effort first; never let a flush failure stop the
 exit.
 
-### The context payload is untrusted input
+### The container contract
 
-`context.json` is the host→container boundary, and every value crossing it is COERCED, not
-merely annotated. `json.loads` returns `Any`, so pyright accepts `variant_id: str =
-context["variant_id"]` for a value that may be anything at all — the annotation reads like a
-guarantee and enforces nothing, and a `"replicate_index": "00"` reached `build_task_run_dir`
-typed as `int`. `grade` was once the only value coerced: a hand-edited or older-format
-`"grade": "false"` arrives as a truthy `str` typed as `bool` and silently grades a run that
-asked not to be graded. `regrade` is coerced for the same reason, and getting that one wrong
-re-RUNS the agent against a workspace the operator asked only to grade, destroying the
-trajectory being graded.
+`context.json` is the host→container boundary, and it is parsed as one `ContainerContext`
+rather than read key by key. `json.loads` returns `Any`, so pyright accepts `variant_id: str
+= context["variant_id"]` for a value that may be anything at all — the annotation reads like
+a guarantee and enforces nothing, and a `"replicate_index": "00"` reached
+`build_task_run_dir` typed as `int`. `grade` and `regrade` are `StrictBool` because lax
+coercion is itself the defect: a hand-edited `"grade": "false"` is a truthy string that
+silently grades a run that asked not to be graded, and the same mistake on `regrade` re-RUNS
+the agent against a workspace the operator asked only to grade, destroying the trajectory
+being graded. `replicate_index` is `StrictInt` because a bool is an int, and `True` files the
+row under `01/`.
 
-Keys absent on an older host fall back to the pre-existing behaviour rather than failing:
-`grade` defaults to True, `preservation_mode` to the docker default (a deliberate default,
-not back-compat — this command only ever runs under the docker driver), `host_task_file` and
-`workspace_dir` to None, and `source_yaml` to the staged post-override YAML.
+Every field is required and unknown top-level keys are refused. A default on any key is reachable only
+when host and image DISAGREE — `grade: True` for a host that predates `execute`,
+`host_task_file: None` for one that predates the record seam — so a default does not
+preserve behaviour, it hides a skew. With `extra="forbid"` and no defaults, that disagreement
+is a parse failure naming the field, in both directions: an older host omits a key, a newer
+host sends a key the image does not know. `host_task_file` and `workspace_dir` are required
+keys with nullable values, because `null` is a real answer (no task file; the standard
+workspace) and absence is not. `tests/test_container_context.py` derives its checks from
+`model_fields`, so a field added with a default fails there.
+
+No explicit contract-version field exists. It would answer the question the image's
+`org.coder-eval.version` label and this parse already answer, with no bump policy: an image
+older than the field ignores it, and one newer always agrees.
 
 The host always serialises the POST-override `TaskDefinition` into the staged `task.yaml`,
 never `source_yaml`, because the raw on-disk text predates `--model` and `-D` mutations the

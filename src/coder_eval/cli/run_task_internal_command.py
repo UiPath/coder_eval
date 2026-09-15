@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 
 from coder_eval.config import settings
 from coder_eval.isolation.docker_runner import (
@@ -33,9 +33,8 @@ from coder_eval.models import (
     CONTAINER_OUTPUT_DIR,
     CONTAINER_TASK_DIR,
     IN_CONTAINER_ENV,
-    ConfigLineageEntry,
+    ContainerContext,
     EvaluationResult,
-    PreservationMode,
     SandboxConfig,
     TaskDefinition,
 )
@@ -162,56 +161,21 @@ def run_task_internal_command(
         typer.echo(f"FATAL: missing {context_json}", err=True)
         raise typer.Exit(2)
 
-    context = json.loads(context_json.read_text(encoding="utf-8"))
-    # CHECKED, not just annotated: `json.loads` returns `Any`, so an annotation
-    # here reads like a guarantee and enforces nothing.
-    # Rationale: .claude/notes/isolation.md § The context payload is untrusted input
-    variant_id = context["variant_id"]
-    if not isinstance(variant_id, str):
-        typer.echo(f"FATAL: context.json 'variant_id' must be a string, got {variant_id!r}", err=True)
-        raise typer.Exit(2)
-    replicate_index = context.get("replicate_index", 0)
-    if not isinstance(replicate_index, int) or isinstance(replicate_index, bool):
-        typer.echo(f"FATAL: context.json 'replicate_index' must be an integer, got {replicate_index!r}", err=True)
-        raise typer.Exit(2)
-    # The host resolves the driver-derived default; the container obeys it. A
-    # missing key falls back to the docker default -- deliberate, not back-compat.
-    preservation_mode = PreservationMode(context.get("preservation_mode", PreservationMode.DIRECT_WRITE.value))
-    # `run` vs `execute`, decided host-side. Defaults to True so a host predating
-    # `execute` keeps its behaviour. COERCED, like every value crossing this
-    # boundary: a `"grade": "false"` is a truthy str typed as bool.
-    grade_raw = context.get("grade", True)
-    if not isinstance(grade_raw, bool):
-        typer.echo(f"FATAL: context.json 'grade' must be a boolean, got {grade_raw!r}", err=True)
-        raise typer.Exit(2)
-    grade: bool = grade_raw
-    # A DETACHED GRADE, not a run: seed from the staged prior.json and adopt the
-    # already-executed workspace. Getting this one wrong re-RUNS the agent against
-    # the workspace it was asked only to grade.
-    regrade_raw = context.get("regrade", False)
-    if not isinstance(regrade_raw, bool):
-        typer.echo(f"FATAL: context.json 'regrade' must be a boolean, got {regrade_raw!r}", err=True)
-        raise typer.Exit(2)
-    regrade: bool = regrade_raw
-    # What task.json RECORDS, as distinct from the path this process resolves
-    # TASK_DIR against. Absent on an older host -> the container path is recorded.
+    try:
+        ctx = ContainerContext.model_validate_json(context_json.read_text(encoding="utf-8"))
+    except ValidationError as e:
+        # Exit 2, a setup failure: a host/image skew must not read as a task failure.
+        # Rationale: .claude/notes/isolation.md § The container contract
+        typer.echo(f"FATAL: {context_json} is not a valid container contract: {e}", err=True)
+        raise typer.Exit(2) from e
+    # What task.json RECORDS, as distinct from the path this process resolves TASK_DIR against.
     # Rationale: .claude/notes/orchestration.md § Recording the task as authored
-    host_task_file_raw = context.get("host_task_file")
-    recorded_task_file = Path(host_task_file_raw) if host_task_file_raw else None
-    # Docker WORKDIR alignment, resolved host-side. Absent -> the standard
-    # run_dir/artifacts workspace.
-    workspace_dir_raw = context.get("workspace_dir")
-    workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
-    config_lineage = {k: ConfigLineageEntry.model_validate(v) for k, v in (context.get("config_lineage") or {}).items()}
-    # The host's RAW source_yaml, so task.json's audit trail matches the in-process
-    # driver. Falls back to the staged post-override YAML on an older host.
-    host_source_yaml: str | None = context.get("source_yaml")
+    recorded_task_file = Path(ctx.host_task_file) if ctx.host_task_file else None
+    workspace_dir = Path(ctx.workspace_dir) if ctx.workspace_dir else None
 
     # `task_file` is then pointed under the task_dir mount, so the `TASK_DIR` the
     # Orchestrator exposes to `run_command` criteria resolves there, not /work/input.
-    task, source_yaml = load_task(task_yaml)
-    if host_source_yaml is not None:
-        source_yaml = host_source_yaml
+    task, _ = load_task(task_yaml)
     # The path below is never re-read; it only seeds Orchestrator's TASK_DIR.
     runtime_task_file = task_dir / "task.yaml" if task_dir.is_dir() else task_yaml
 
@@ -231,7 +195,7 @@ def run_task_internal_command(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if regrade:
+    if ctx.regrade:
         _grade_recorded_run(
             task=task,
             authored_task=authored_task,
@@ -239,9 +203,9 @@ def run_task_internal_command(
             input_dir=input_dir,
             output_dir=output_dir,
             runtime_task_file=runtime_task_file,
-            source_yaml=source_yaml,
-            variant_id=variant_id,
-            replicate_index=replicate_index,
+            source_yaml=ctx.source_yaml,
+            variant_id=ctx.variant_id,
+            replicate_index=ctx.replicate_index,
         )
         return
 
@@ -252,15 +216,15 @@ def run_task_internal_command(
     orchestrator = Orchestrator(
         task=task,
         run_dir=output_dir,
-        preservation_mode=preservation_mode,
+        preservation_mode=ctx.preservation_mode,
         task_file=runtime_task_file,
         recorded_task_file=recorded_task_file,
-        variant_id=variant_id,
-        source_yaml=source_yaml,
-        config_lineage=config_lineage,
-        replicate_index=replicate_index,
+        variant_id=ctx.variant_id,
+        source_yaml=ctx.source_yaml,
+        config_lineage=ctx.config_lineage,
+        replicate_index=ctx.replicate_index,
         workspace_dir=workspace_dir,
-        grade=grade,
+        grade=ctx.grade,
         recorded_task=authored_task,
     )
 
