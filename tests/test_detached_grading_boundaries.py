@@ -43,6 +43,7 @@ from coder_eval.orchestration.regrade import (
     stamp_host_grading,
 )
 from coder_eval.path_utils import PRE_GRADE_JSON_FILENAME, TASK_JSON_FILENAME
+from tests._container_contract import contract_payload
 
 
 runner = CliRunner()
@@ -203,7 +204,7 @@ class TestInContainerGradeCoercion:
     """The container side of the same boundary."""
 
     # Valid enough to survive `load_task`, which the regrade branch reaches. The
-    # `grade` / `regrade` coercions refuse before it, so those tests do not
+    # contract parse refuses before it, so the `grade` / `regrade` tests do not
     # depend on this; the prior.json ones do.
     _VALID_TASK_YAML = (
         "task_id: t\ndescription: d\nagent:\n  type: none\n"
@@ -214,10 +215,7 @@ class TestInContainerGradeCoercion:
     def _run_with_context(tmp_path: Path, grade: object = True, **extra: object):
         input_dir = tmp_path / "input"
         input_dir.mkdir(exist_ok=True)
-        # Only the keys read BEFORE the coercions need real values; the command
-        # must refuse before it ever builds an Orchestrator.
-        context: dict[str, object] = {"variant_id": "default", "source_yaml": "task_id: t\n", "grade": grade}
-        context.update(extra)
+        context = contract_payload(grade=grade, **extra)
         (input_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
         (input_dir / "task.yaml").write_text(TestInContainerGradeCoercion._VALID_TASK_YAML, encoding="utf-8")
         return runner.invoke(
@@ -247,7 +245,8 @@ class TestInContainerGradeCoercion:
         as bool, which would silently grade a run that asked not to be."""
         result = self._run_with_context(tmp_path, "false")
         assert result.exit_code == 2
-        assert "must be a boolean" in result.output
+        assert "is not a valid container contract" in result.output
+        assert "\ngrade\n" in result.output
 
     def test_a_non_boolean_regrade_is_a_hard_error(self, tmp_path: Path) -> None:
         """The destructive twin of the test above, and the worse direction: a
@@ -256,7 +255,8 @@ class TestInContainerGradeCoercion:
         the trajectory being graded."""
         result = self._run_with_context(tmp_path, regrade="false")
         assert result.exit_code == 2
-        assert "'regrade' must be a boolean" in result.output
+        assert "is not a valid container contract" in result.output
+        assert "\nregrade\n" in result.output
 
     def test_a_regrade_without_a_staged_prior_names_the_missing_file(self, tmp_path: Path) -> None:
         """The host stages prior.json beside task.yaml. Without it there is no row
@@ -279,11 +279,6 @@ class TestInContainerGradeCoercion:
         assert "not a readable EvaluationResult" in result.output
         assert "Traceback" not in result.output
 
-    # The in-container default is asserted BEHAVIOURALLY by
-    # `TestGradePlumbedIntoTheContainerOrchestrator::test_an_absent_key_still_grades`.
-    # A `assert 'context.get("grade", True)' in source` grep is no substitute: it
-    # passes while the line it describes is never executed.
-
 
 class TestInContainerRegradeBranch:
     """The container half of `evaluate <run_dir>` / `run --resume`, driven end to end.
@@ -303,7 +298,15 @@ class TestInContainerRegradeBranch:
         "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: d\n"
     )
 
-    def _invoke(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mount_workspace: bool = True, **extra):
+    def _invoke(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        mount_workspace: bool = True,
+        omit: tuple[str, ...] = (),
+        **extra,
+    ):
         from coder_eval import models
         from coder_eval.orchestration import regrade as rg
 
@@ -311,13 +314,12 @@ class TestInContainerRegradeBranch:
         input_dir.mkdir(exist_ok=True)
         (input_dir / "task.yaml").write_text(self._DOCKER_TASK_YAML, encoding="utf-8")
         (input_dir / "prior.json").write_text(_result().model_dump_json(), encoding="utf-8")
-        context: dict[str, object] = {
-            "variant_id": "default",
+        defaults = {
             "source_yaml": self._DOCKER_TASK_YAML,
             "regrade": True,
             "host_task_file": str(tmp_path / "host" / "task.yaml"),
         }
-        context.update(extra)
+        context = contract_payload(omit=omit, **(defaults | extra))
         (input_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
 
         workspace = tmp_path / "graded-workspace"
@@ -357,12 +359,19 @@ class TestInContainerRegradeBranch:
         assert captured["recorded_task"].sandbox.driver == "docker"  # type: ignore[union-attr]
         assert captured["recorded_task_file"] == tmp_path / "host" / "task.yaml"
 
-    def test_an_older_host_forwards_no_task_file_and_that_is_not_fatal(
+    def test_an_older_host_that_omits_host_task_file_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`host_task_file` is absent on a host predating the key. The row then
-        records the container path, which is the pre-existing behaviour — a
-        degraded record, not a refusal."""
+        """An absent key is host/image skew. Accepting it recorded the container
+        path, `/work/task_dir/task.yaml`, which exists on no host."""
+        result, captured = self._invoke(tmp_path, monkeypatch, omit=("host_task_file",))
+
+        assert result.exit_code == 2
+        assert "host_task_file" in result.output
+        assert not captured, "a refused contract must never reach the grade"
+
+    def test_a_null_host_task_file_is_a_real_answer(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Required key, nullable value: `null` means the task has no file."""
         result, captured = self._invoke(tmp_path, monkeypatch, host_task_file=None)
 
         assert result.exit_code == 0, result.output
@@ -787,7 +796,7 @@ class TestGradePlumbedIntoTheContainerOrchestrator:
     describes is never executed — deleting `grade=grade` left every test green."""
 
     @staticmethod
-    def _invoke(tmp_path: Path, context: dict) -> object:
+    def _invoke(tmp_path: Path, *, omit: tuple[str, ...] = (), **overrides: object):
         captured: dict[str, object] = {}
 
         class _FakeOrchestrator:
@@ -805,22 +814,30 @@ class TestGradePlumbedIntoTheContainerOrchestrator:
         )
         (input_dir / "task.yaml").write_text(task_yaml, encoding="utf-8")
         (input_dir / "context.json").write_text(
-            json.dumps({"variant_id": "default", "source_yaml": task_yaml, **context}), encoding="utf-8"
+            json.dumps(contract_payload(omit=omit, source_yaml=task_yaml, **overrides)), encoding="utf-8"
         )
         with patch("coder_eval.orchestrator.Orchestrator", _FakeOrchestrator):
-            runner.invoke(
+            result = runner.invoke(
                 app,
                 ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")],
             )
-        return captured.get("grade")
+        return result, captured
 
     def test_execute_forwards_grade_false(self, tmp_path: Path) -> None:
-        assert self._invoke(tmp_path, {"grade": False}) is False
+        _, captured = self._invoke(tmp_path, grade=False)
+        assert captured.get("grade") is False
 
-    def test_an_absent_key_still_grades(self, tmp_path: Path) -> None:
-        """A host predating `execute` writes no key; the container must keep its
-        original behaviour rather than silently withholding verdicts."""
-        assert self._invoke(tmp_path, {}) is True
+    def test_run_forwards_grade_true(self, tmp_path: Path) -> None:
+        _, captured = self._invoke(tmp_path, grade=True)
+        assert captured.get("grade") is True
+
+    def test_an_absent_key_is_refused(self, tmp_path: Path) -> None:
+        """A host that writes no `grade` key is host/image skew. Defaulting it to
+        True would publish verdicts a skewed `execute` asked to withhold."""
+        result, captured = self._invoke(tmp_path, omit=("grade",))
+        assert result.exit_code == 2
+        assert "\ngrade\n" in result.output
+        assert not captured, "a refused contract must never build an Orchestrator"
 
 
 class TestContainerContextIsValidated:
@@ -828,23 +845,36 @@ class TestContainerContextIsValidated:
     guarantee and enforces nothing."""
 
     @staticmethod
-    def _run(tmp_path: Path, context: dict):
+    def _run(tmp_path: Path, **overrides: object):
         input_dir = tmp_path / "input"
         input_dir.mkdir()
         (input_dir / "task.yaml").write_text("task_id: t\n", encoding="utf-8")
-        (input_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+        (input_dir / "context.json").write_text(json.dumps(contract_payload(**overrides)), encoding="utf-8")
         return runner.invoke(app, ["_run-task-internal", "--input", str(input_dir), "--output", str(tmp_path / "out")])
 
     def test_a_non_string_variant_id_is_refused(self, tmp_path: Path) -> None:
-        result = self._run(tmp_path, {"variant_id": 7, "source_yaml": "task_id: t\n"})
+        result = self._run(tmp_path, variant_id=7)
         assert result.exit_code == 2
-        assert "variant_id" in result.output
+        assert "\nvariant_id\n" in result.output
 
     def test_a_string_replicate_index_is_refused(self, tmp_path: Path) -> None:
         """`"00"` would reach build_task_run_dir typed as int."""
-        result = self._run(tmp_path, {"variant_id": "default", "replicate_index": "00", "source_yaml": "task_id: t\n"})
+        result = self._run(tmp_path, replicate_index="00")
         assert result.exit_code == 2
-        assert "replicate_index" in result.output
+        assert "\nreplicate_index\n" in result.output
+
+    def test_an_unknown_key_is_refused_naming_it(self, tmp_path: Path) -> None:
+        """A host newer than the image: a named refusal, never a silent ignore."""
+        result = self._run(tmp_path, sent_by_a_newer_host=True)
+        assert result.exit_code == 2
+        assert "sent_by_a_newer_host" in result.output
+
+    def test_an_invalid_lineage_entry_is_a_clean_refusal(self, tmp_path: Path) -> None:
+        """Previously an unhandled ValidationError mid-command; now the one parse arm."""
+        result = self._run(tmp_path, config_lineage={"agent.model": {"value": "m", "source": "nowhere"}})
+        assert result.exit_code == 2
+        assert "config_lineage" in result.output
+        assert "Traceback" not in result.output
 
 
 class TestCriterionPathsCannotEscapeTheSandbox:

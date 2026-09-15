@@ -42,8 +42,8 @@
   non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)`
   → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog
   check, and post-failure diagnostics); it crosses the docker boundary in `context.json`
-  (defaulting to `True` in-container, so a host predating `execute` keeps grading). It
-  is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because
+  (a required contract field with no default, so a host and image that disagree about
+  it fail at parse time). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because
   a task YAML must never declare itself ungraded; only the invoking command decides.
   `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in
   that flag, so there is no third code path. Three things are refused rather than

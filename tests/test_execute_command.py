@@ -25,7 +25,7 @@ import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
-from coder_eval.models import FinalStatus, RunSummary
+from coder_eval.models import ContainerContext, FinalStatus, RunSummary
 
 
 runner = CliRunner()
@@ -251,8 +251,8 @@ def test_execute_exposes_run_flags_minus_the_refused_one() -> None:
 # --------------------------------------------------------------------------
 
 
-async def _staged_context(tmp_path: Path, *, grade: bool) -> dict[str, Any]:
-    """Stage a docker task's inputs and read back the context.json the container sees."""
+async def _staged_context(tmp_path: Path, *, grade: bool) -> ContainerContext:
+    """Stage a docker task's inputs and parse back the contract the container sees."""
     from coder_eval.isolation.docker_runner import DockerRunner
     from coder_eval.models import ResolvedTask, TaskDefinition
 
@@ -274,7 +274,7 @@ async def _staged_context(tmp_path: Path, *, grade: bool) -> dict[str, Any]:
     staged = tmp_path / "input"
     staged.mkdir()
     await DockerRunner(rt, grade=grade)._stage_inputs(staged)
-    return json.loads((staged / "context.json").read_text(encoding="utf-8"))
+    return ContainerContext.model_validate_json((staged / "context.json").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("grade", [True, False])
@@ -282,7 +282,7 @@ async def test_docker_forwards_grade_to_the_container(tmp_path: Path, grade: boo
     """`grade` is a run-level CLI decision, so it is NOT recoverable from the staged
     task.yaml on the container side — it has to cross the boundary in context.json.
     Without this, `execute --driver docker` would silently grade after all."""
-    assert (await _staged_context(tmp_path, grade=grade))["grade"] is grade
+    assert (await _staged_context(tmp_path, grade=grade)).grade is grade
 
 
 # The in-container grading default is asserted behaviourally in

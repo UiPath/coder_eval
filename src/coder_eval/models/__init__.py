@@ -27,6 +27,9 @@ from coder_eval.models.cli_match import (
     FlagMatch,
 )
 
+# Host→container contract (staged as context.json under driver: docker)
+from coder_eval.models.container_context import ContainerContext
+
 # Container paths (leaf constants; re-exported so consumers obey CE001)
 from coder_eval.models.container_paths import (
     CONTAINER_GRADE_WORKSPACE,
@@ -296,6 +299,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "TemplateSource",
     # Sandbox
     "DockerBuildConfig",
+    "ContainerContext",
     "CONTAINER_INPUT_DIR",
     "CONTAINER_OUTPUT_DIR",
     "CONTAINER_GRADE_WORKSPACE",

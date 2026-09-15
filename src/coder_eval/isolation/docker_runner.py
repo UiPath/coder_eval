@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import re
@@ -35,6 +34,7 @@ from coder_eval.models import (
     IN_CONTAINER_ENV,
     RESERVED_CONTAINER_DIRS,
     AgentKind,
+    ContainerContext,
     DockerDriverConfig,
     EvaluationResult,
     FinalStatus,
@@ -578,6 +578,8 @@ class DockerRunner:
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
+        # What _stage_inputs told the container to do. None until staged.
+        self._staged_context: ContainerContext | None = None
 
     @property
     def _docker_config(self) -> DockerDriverConfig:
@@ -691,13 +693,13 @@ class DockerRunner:
             await asyncio.to_thread(restore_modes, widened_workspace)
 
     async def _stage_inputs(self, input_dir: Path) -> None:
-        """Serialise the post-override TaskDefinition + lineage/variant context into the
-        staging ``input_dir`` (``task.yaml`` + ``context.json``). Pure I/O off the event
-        loop; no control-flow change.
+        """Serialise the post-override TaskDefinition and the ``ContainerContext`` into the
+        staging ``input_dir`` (``task.yaml`` + ``context.json``), keeping the contract on
+        ``self._staged_context``. Pure I/O off the event loop.
         """
         # POST-override, not rt.source_yaml: _apply_cli_overrides has since mutated
         # rt.task in-memory and the container must see those mutations.
-        # Rationale: .claude/notes/isolation.md § The context payload is untrusted input
+        # Rationale: .claude/notes/isolation.md § The container contract
         task_yaml_in = input_dir / "task.yaml"
 
         def _dump_task_yaml() -> str:
@@ -705,31 +707,22 @@ class DockerRunner:
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
-        # Lineage + variant metadata so the in-container Orchestrator reconstructs
-        # the same context (variant_id is load-bearing for report grouping).
-        context_payload = json.dumps(
-            {
-                "variant_id": self.rt.variant_id,
-                "replicate_index": self.rt.replicate_index,
-                "config_lineage": {k: v.model_dump(mode="json") for k, v in self.rt.config_lineage.items()},
-                "preservation_mode": self.preservation_mode.value,
-                # `coder-eval run` vs `coder-eval execute`. Not derivable from
-                # task.yaml on the container side (deliberately not a task field).
-                "grade": self.grade,
-                # A detached grade: seed from prior.json and adopt
-                # CONTAINER_GRADE_WORKSPACE instead of running an agent.
-                "regrade": self.prior_result is not None,
-                "source_yaml": self.rt.source_yaml,
-                # The HOST's path, recorded verbatim into task.json's audit trail --
-                # distinct from the container path TASK_DIR resolves against.
-                # Rationale: .claude/notes/orchestration.md § Recording the task as authored
-                "host_task_file": str(self.rt.task_file) if self.rt.task_file else None,
-                # Docker WORKDIR alignment: concrete path the in-container
-                # orchestrator runs at + captures out (None = standard workspace).
-                "workspace_dir": self._workspace_dir,
-            }
+        self._staged_context = ContainerContext(
+            variant_id=self.rt.variant_id,
+            replicate_index=self.rt.replicate_index,
+            config_lineage=self.rt.config_lineage,
+            preservation_mode=self.preservation_mode,
+            grade=self.grade,
+            regrade=self.prior_result is not None,
+            source_yaml=self.rt.source_yaml,
+            host_task_file=str(self.rt.task_file) if self.rt.task_file else None,
+            workspace_dir=self._workspace_dir,
         )
-        await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
+        await asyncio.to_thread(
+            (input_dir / "context.json").write_text,
+            self._staged_context.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
         if self.prior_result is not None:
             # Carried in whole, so the trajectory an `llm_judge` or
             # `command_executed` criterion reads is the ORIGINAL run's.
