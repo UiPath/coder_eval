@@ -17,16 +17,11 @@ function of its test suite.
 
 from .experiment import ExperimentReportGenerator
 from .helpers import (
-    ENV_TABLE_EXCLUDE,
     UNGRADED_SCORE_TEXT,
-    PairedComparison,
-    VariantSeries,
     collect_variant_series,
     describe_prompt_config,
     format_score,
     is_env_table_key,
-    load_variant_eval_results,
-    paired_comparison,
 )
 from .html import (
     HTMLReportGenerator,
@@ -39,34 +34,21 @@ from .junit import generate_junit_xml, write_junit_xml
 from .markdown import (
     ReportGenerator,
     collect_agent_settings_rows,
-    count_partials_by_outcome,
-    early_stop_gate_note,
-    group_consecutive_by_iteration,
-    resolve_agent_settings,
     write_suite_rollups,
 )
 
 
 __all__ = [
-    "ENV_TABLE_EXCLUDE",
     "UNGRADED_SCORE_TEXT",
     "ExperimentReportGenerator",
     "HTMLReportGenerator",
-    "PairedComparison",
     "ReportGenerator",
-    "VariantSeries",
     "collect_agent_settings_rows",
     "collect_variant_series",
-    "count_partials_by_outcome",
     "describe_prompt_config",
-    "early_stop_gate_note",
     "format_score",
     "generate_junit_xml",
-    "group_consecutive_by_iteration",
     "is_env_table_key",
-    "load_variant_eval_results",
-    "paired_comparison",
-    "resolve_agent_settings",
     "safe_write",
     "write_experiment_html",
     "write_junit_xml",

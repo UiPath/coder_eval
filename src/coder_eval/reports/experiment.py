@@ -429,7 +429,6 @@ class ExperimentReportGenerator:
         Returns:
             Markdown string.
         """
-
         agg = result.variant_aggregates[variant_id]
         pass_rate_str = f"{agg.pass_rate * 100:.1f}%" if agg.pass_rate is not None else "n/a"
         tokens_str = f"{agg.total_tokens:,}" if agg.total_tokens is not None else "N/A"

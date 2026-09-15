@@ -42,8 +42,9 @@ def imports_package(node: ast.ImportFrom, package: str) -> bool:
     while its tests pass. CE066 shipped that way for one review cycle; CE004 had
     carried it since it was written.
 
-    ``from . import cli`` is NOT matched here — it binds the package itself rather
-    than a name out of it, so each rule reports it as its own wholesale case.
+    ``from . import cli`` and ``from coder_eval import cli`` are NOT matched here —
+    they bind the package itself rather than a name out of it, so each rule reports
+    them through ``is_bare_package_import`` as its own wholesale case.
     """
     if not node.module:
         return False
@@ -54,5 +55,16 @@ def imports_package(node: ast.ImportFrom, package: str) -> bool:
 
 
 def is_bare_package_import(node: ast.ImportFrom, package: str) -> bool:
-    """Whether this is ``from . import <package>`` / ``from .. import <package>``."""
-    return bool(node.level) and node.module is None and any(a.name == package for a in node.names)
+    """Whether this binds the package itself rather than a name out of it.
+
+    Three spellings do that: ``from . import reports``, ``from .. import reports``
+    and ``from coder_eval import reports``. The last is the one both rules missed
+    longest — it is neither relative nor a dotted path, so `node.module` is the
+    bare ``"coder_eval"`` and the package arrives as an alias.
+
+    Worth catching because the binding is the dangerous half: once `reports` is a
+    local name, every attribute read through it is invisible to an import check.
+    """
+    if node.level:
+        return node.module is None and any(a.name == package for a in node.names)
+    return node.module == "coder_eval" and any(a.name == package for a in node.names)

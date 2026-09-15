@@ -12,7 +12,7 @@ import { statusCategory, type StatusCategory } from "../status";
 //
 // status.test.ts covers the mapping, but it iterates a HAND-MAINTAINED record —
 // so it can never fail when Python adds a tenth member. This file parses the
-// Python table instead, following the lib/__tests__/pricing-parity.test.ts
+// Python table instead, following the precedent of the pricing table, now generated
 // precedent, so the next status added upstream breaks the build here rather
 // than silently rendering as grey "unknown" and inflating a denominator.
 

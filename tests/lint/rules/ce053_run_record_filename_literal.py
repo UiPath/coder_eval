@@ -8,7 +8,7 @@ rename becomes a silent no-op on the sites it missed."
 The constant shipped with that rationale and the twelve pre-existing literals
 were not converted, so it created exactly the second source of truth it argues
 against and delivered zero rename safety: the new modules used the constant, and
-``orchestrator.py``, ``batch.py``, ``docker_runner.py``, ``reports.py``,
+``orchestrator.py``, ``batch.py``, ``docker_runner.py``, ``reports/markdown.py``,
 ``reports/junit.py``, ``reports/helpers.py`` and ``report_command.py`` kept the
 string — the three ``rglob("task.json")`` calls the comment specifically cites
 among them.

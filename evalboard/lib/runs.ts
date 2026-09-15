@@ -118,7 +118,7 @@ export interface TaskResultSummary {
     // Per-task token totals from run.json. Null on legacy runs that
     // don't record per-task token counts. `inputTokens` is the disjoint
     // uncached slice (run.json `input_tokens` is serialized from
-    // TokenUsage.uncached_input_tokens — see reports_experiment.py), so it
+    // TokenUsage.uncached_input_tokens — see run_record.py), so it
     // sits alongside the cache columns without overlap.
     inputTokens: number | null;
     outputTokens: number | null;
@@ -493,7 +493,7 @@ export function aggregateSubAgentUsage(
 export interface RawTaskResult {
     task_id?: string;
     // Experiment arm that produced this row (the <variant> sub-dir). Written by
-    // reports_experiment.py on every run; absent on runs that predate it, which
+    // run_record.py on every run; absent on runs that predate it, which
     // read as DEFAULT_VARIANT_ID.
     variant_id?: string | null;
     // Replicate index of this row (the <variant>/<task>/<NN> sub-dir). Repeated
