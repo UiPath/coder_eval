@@ -37,17 +37,39 @@ _EXPECTED_DIR = _FIXTURE_ROOT / "expected"
 _REGEN = os.environ.get("GOLDEN_REGEN", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _relative_files(root: Path) -> dict[str, str]:
-    """Every file under root, as {posix-relative-path: text-content}."""
+_OUT_DIR_PLACEHOLDER = "<OUT_DIR>"
+
+
+def _relative_files(root: Path, *, out_dir: Path) -> dict[str, str]:
+    """Every file under root, as {posix-relative-path: text-content}.
+
+    ``environment/docker-compose.yaml`` embeds an absolute bind-mount source path
+    for ``environment/task.yaml`` (``_write_docker_compose_mounts`` always mounts
+    it read-only rather than ``COPY``ing it in) -- that path is ``out_dir``, which
+    is a fresh ``tmp_path`` on every test run and would never match a committed
+    golden file byte-for-byte. Normalize it to a stable placeholder before
+    comparing (and before writing the golden fixture itself under
+    ``GOLDEN_REGEN=1``), same as any other run-specific value this test would
+    otherwise have to special-case.
+
+    Compose volume specs are always POSIX-style (``_write_docker_compose_mounts``
+    emits ``as_posix()``, since docker-compose volume specs are POSIX regardless
+    of the exporter's host OS) -- so the placeholder substitution must match on
+    the POSIX form of ``out_dir`` too, not the OS-native (backslash, on Windows)
+    form ``str()``/``resolve()`` would give.
+    """
+    out_dir_str = out_dir.resolve().as_posix()
     return {
-        p.relative_to(root).as_posix(): p.read_text(encoding="utf-8") for p in sorted(root.rglob("*")) if p.is_file()
+        p.relative_to(root).as_posix(): p.read_text(encoding="utf-8").replace(out_dir_str, _OUT_DIR_PLACEHOLDER)
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
     }
 
 
 def test_export_matches_the_committed_golden_tree(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     export_task(_SOURCE_TASK, out_dir)
-    actual = _relative_files(out_dir)
+    actual = _relative_files(out_dir, out_dir=out_dir)
 
     if _REGEN:
         for rel_path, content in actual.items():
@@ -61,7 +83,9 @@ def test_export_matches_the_committed_golden_tree(tmp_path: Path) -> None:
         return
 
     assert _EXPECTED_DIR.is_dir(), "no committed golden tree yet -- run with GOLDEN_REGEN=1 first"
-    expected = _relative_files(_EXPECTED_DIR)
+    # out_dir=_EXPECTED_DIR here is a no-op substitution -- the committed golden content
+    # already holds the literal _OUT_DIR_PLACEHOLDER, never a real absolute path.
+    expected = _relative_files(_EXPECTED_DIR, out_dir=_EXPECTED_DIR)
 
     assert set(actual) == set(expected), (
         f"emitted file set drifted from the golden tree.\n"
