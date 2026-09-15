@@ -64,7 +64,7 @@ from tests.lint.violation import Violation
 # comment carrying 062 in an older branch, review or commit message must never
 # start meaning something new.
 #
-# Claim 067 next. NOTE 065 IS TAKEN and is not in ALL_RULES: doc-surface and
+# Claim 068 next. NOTE 065 IS TAKEN and is not in ALL_RULES: doc-surface and
 # whole-tree rules are `@pytest.mark.lint` classes in tests/test_custom_lint.py
 # rather than BaseRules, so the `_rule_ids` uniqueness assert below cannot see
 # them. Enumerating them here is how this note fell behind CE044, so grep
