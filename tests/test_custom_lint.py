@@ -4482,7 +4482,7 @@ class TestCE053NoRunRecordFilenameLiteral:
     """CE053 flags a `task.json` literal outside path_utils."""
 
     @staticmethod
-    def _run(src: str, filepath: str = "src/coder_eval/reports.py"):
+    def _run(src: str, filepath: str = "src/coder_eval/reports/markdown.py"):
         import ast
 
         from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral

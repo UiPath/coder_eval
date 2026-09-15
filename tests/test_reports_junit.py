@@ -1,4 +1,4 @@
-"""Unit tests for the disk-driven JUnit XML writer (``reports_junit``).
+"""Unit tests for the disk-driven JUnit XML writer (``reports/junit.py``).
 
 All tests are hermetic: the run directory is built by hand under ``tmp_path``
 (no agents, no API). Test-side XML parsing uses ``defusedxml`` as
@@ -672,7 +672,7 @@ def test_nested_task_id_with_dotdot_still_cannot_escape(write_run_json: Callable
 def test_informational_criterion_not_rendered_as_failure(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
     """A non-gating (informational) criterion below its threshold must render as
     [INFO], never [FAIL] — it is excluded from the score/gate, so it cannot be
-    the failure cause (mirrors reports.py's `if not cr.gating`)."""
+    the failure cause (mirrors reports/markdown.py's `if not cr.gating`)."""
     run_dir = tmp_path / "run"
     rows = [_row("t_fail", "FAILURE", variant_id="v1", replicate_index=0)]
     write_run_json(run_dir, rows)

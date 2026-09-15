@@ -62,7 +62,7 @@ class TestSyntheticTaskJson:
         asyncio.run(runner._write_synthetic_task_json(target, error))
 
         # Round-trips through the SAME parse every downstream consumer uses
-        # (batch.py / reports.py / result_metrics.py) — not just a raw key check —
+        # (batch.py / reports/markdown.py / result_metrics.py) — not just a raw key check —
         # so a schema change that broke validation on the synthetic record fails here.
         parsed = EvaluationResult.model_validate_json(target.read_text(encoding="utf-8"))
         assert parsed.final_status == FinalStatus.ERROR

@@ -1179,7 +1179,7 @@ def test_aggregate_command_statistics_nested_layout(tmp_path):
 
 
 def test_report_generator_private_methods_used_by_experiment_reports():
-    """Verify all private methods called by reports_experiment.py exist on ReportGenerator."""
+    """Verify all private methods called by reports/experiment.py exist on ReportGenerator."""
     required_methods = [
         "_generate_generation_metrics_section",
         "_generate_token_usage_section",
@@ -1386,7 +1386,7 @@ class TestAnUnmeasuredRunPublishesNoRate:
 class TestTheGenerationMetricsBuckets:
     """The markdown table's four bucket columns, READ off the row projection.
 
-    `reports.py` neither sums nor validates anything here: the numbers are
+    `reports/markdown.py` neither sums nor validates anything here: the numbers are
     computed once by `result_metrics.turn_time_buckets` and carried as
     task-level keys by `run_record.eval_result_to_task_dict`. The rows
     below are that projection's shape, not a `TurnRecord`.
@@ -1482,8 +1482,8 @@ class TestSlowestCommandsTruncation:
     """The markdown renderer truncates `parameters` at SLOW_PARAMS_PREVIEW_CHARS.
 
     Asserted against the CONSTANT, not the literal 50 it used to hardcode, so the
-    test still pins the behaviour if the constant moves. reports_html.py already
-    read the constant; reports.py — the module that DEFINES it — did not.
+    test still pins the behaviour if the constant moves. reports/html.py already
+    read the constant; reports/markdown.py — the module that DEFINES it — did not.
     """
 
     @staticmethod
@@ -1520,7 +1520,7 @@ class TestSlowestCommandsTruncation:
 
 
 class TestReportsDoesNotImportCriteria:
-    """`reports.py`'s `criteria` import must stay function-local.
+    """`reports/markdown.py`'s `criteria` import must stay function-local.
 
     `coder_eval/criteria/__init__.py` runs pkgutil auto-discovery with registry
     side effects; hoisting it would put full criterion discovery on the import

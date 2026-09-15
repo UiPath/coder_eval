@@ -48,7 +48,6 @@ coder_eval/
 ├── telemetry.py              # App Insights / OpenTelemetry emission
 ├── isolation/                # driver: docker — one container per task
 ├── harbor/                   # Harbor export + coder-eval as a Harbor agent
-├── optimize/                 # Prompt/config optimization helpers
 ├── utils.py                  # Version info helpers
 │
 ├── agents/                   # Agent implementations (claude_code, codex, antigravity,
