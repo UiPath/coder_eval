@@ -56,19 +56,11 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
                 error="No reference directory provided (task.reference not set)",
             )
 
-        # Confined to the reference dir on purpose: unlike a judge's `files:`
-        # entry (author-written, trusted, and deliberately allowed to escape via
-        # `$REFERENCE_DIR/../shared/...`), this field names one file *of the
-        # solution being compared against*, so traversal out of the staged copy
-        # is always a mistake.
-        # Every failure below is a TASK-DEFINITION error, not an agent failure, so
-        # they raise CheckerMisuseError (-> FinalStatus.ERROR) instead of returning
-        # a gating score=0.0 (-> FinalStatus.FAILURE). A typo in `reference_file`
-        # scored as 0.0 is counted against the agent's pass rate, and on a
-        # dataset-fanned suite it silently zeroes every row and drags down the
-        # CriterionAggregate mean, the suite_thresholds gate, the JUnit report and
-        # the evalboard alike. The pre-directory-only equivalent raised out of
-        # `load_reference`, so this restores the loud behaviour.
+        # HAZARD: confined to the reference dir, unlike a judge's author-written
+        # `files:` entry -- this names one file OF the solution, so traversal out of
+        # the staged copy is always a mistake. Every failure below is a
+        # TASK-DEFINITION error and raises rather than scoring a gating 0.0.
+        # Rationale: .claude/notes/contracts.md § What escalates instead of scoring 0.0
         ref_path = (reference_dir / criterion.reference_file).resolve()
         if not ref_path.is_relative_to(reference_dir.resolve()):
             raise CheckerMisuseError(
@@ -93,15 +85,13 @@ class ReferenceComparisonChecker(BaseCriterion[ReferenceComparisonCriterion]):
                 error="Sandbox not initialized",
             )
 
-        # Load agent code through the shared path seam, so `agent_file` resolves
-        # (glob expansion, ignore filtering, exactly-one) like every other
+        # Through the shared path seam, so `agent_file` resolves like every other
         # sandbox-relative criterion path.
         try:
             agent_code = sandbox.get_file_content(criterion.agent_file)
         except FileNotFoundError:
             # CE039 exemption: genuinely the AGENT's failure, unlike reference_file
-            # above: the task asked for this file and the agent did not produce
-            # it, which is exactly what a gating 0.0 means.
+            # above -- the task asked for this file and the agent did not produce it.
             return CriterionResult(  # noqa: CE039
                 criterion_type="reference_comparison",
                 description=criterion.description,

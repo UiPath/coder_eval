@@ -13,12 +13,11 @@ Also mirrored as a comment in ``docker/coder_eval_entrypoint.sh``.
 from __future__ import annotations
 
 
-# Tokens task YAMLs use to address host directories from a criterion's path
-# fields (``llm_judge.files``, ``agent_judge.files``). They resolve against the
-# task YAML's own directory and the staged reference copy respectively, and are
-# mirrored as the TASK_DIR / REFERENCE_DIR env vars exposed to ``run_command``.
-# Defined here (a dependency-free leaf) so both the models layer and
-# ``evaluation.judge_context`` share one definition without an import cycle.
+# Tokens a task YAML uses to address host directories from a criterion's path
+# fields, mirroring the TASK_DIR / REFERENCE_DIR env vars ``run_command`` exposes.
+# Defined in this dependency-free leaf so the models layer and judge_context share
+# one definition without an import cycle.
+# Rationale: .claude/notes/contracts.md § Judge context and untrusted text
 TASK_DIR_TOKEN = "$TASK_DIR"
 REFERENCE_DIR_TOKEN = "$REFERENCE_DIR"
 
@@ -70,15 +69,10 @@ def command_uses_token(command: str, token: str) -> bool:
     return False
 
 
-# The one reliable "am I inside a task container?" signal, set by DockerRunner
-# on every container it starts.
-#
-# Every gate that means "in a container" MUST key on this and never on
-# `sandbox.driver`: the in-container entry point rewrites `docker` -> `tempdir`
-# before building its Orchestrator, so a driver-based test reads a value that has
-# already been changed — which would silently disable the reference-permission
-# window on exactly the path that needs it (regression-guarded by
-# TestSandboxDriverGate).
+# HAZARD: the one reliable "am I inside a task container?" signal. Every gate that
+# means "in a container" MUST key on this and never on `sandbox.driver`, which the
+# in-container entry point has already rewritten to `tempdir`.
+# Rationale: .claude/notes/isolation.md § Capability drops and the anti-cheat window
 IN_CONTAINER_ENV = "CODER_EVAL_IN_CONTAINER"
 
 CONTAINER_WORK_DIR = "/work"
@@ -86,27 +80,18 @@ CONTAINER_INPUT_DIR = "/work/input"
 CONTAINER_OUTPUT_DIR = "/work/output"
 CONTAINER_TASK_DIR = "/work/task_dir"
 
-# Where the per-run private copy of ``task.reference.directory`` is mounted.
-# Exposed to criteria as the ``REFERENCE_DIR`` env var and as the
-# ``$REFERENCE_DIR`` token in judge ``files:`` entries. Kept at mode 000 for the
-# duration of every ``agent.communicate`` call so the agent under evaluation
-# cannot read the solution (see ``fs_permissions.py``).
+# The per-run private copy of ``task.reference.directory``, exposed to criteria as
+# ``REFERENCE_DIR``. Kept at mode 000 for the duration of every
+# ``agent.communicate`` call (see ``fs_permissions.py``).
 CONTAINER_REFERENCE_DIR = "/work/references"
 
-# Where a DETACHED GRADE mounts the already-executed workspace it is grading.
-# Only ever present on a grading container (`evaluate` / `run --resume` over a
-# `driver: docker` row); a normal run never mounts it.
-#
-# It is a separate mount from CONTAINER_OUTPUT_DIR because the two belong to
-# different runs: the grading pass writes its own `task.json` into its own fresh
-# run directory (which the host then folds back into the row, preserving
-# `task.execute.json`), while the workspace under evaluation belongs to the
-# ORIGINAL run and must be adopted, never written over.
+# Where a DETACHED GRADE mounts the already-executed workspace. Separate from
+# CONTAINER_OUTPUT_DIR because the two belong to different runs.
+# Rationale: .claude/notes/isolation.md § Why the grading container gets a private scratch directory
 CONTAINER_GRADE_WORKSPACE = "/work/workspace"
 
-# Paths a task's WORKDIR must never collide with: the container root and every
-# framework-owned mount under /work. Consumed by SandboxConfig's working_dir
-# validator (models/sandbox.py) and re-asserted host-side in docker_runner.
+# Paths a task's WORKDIR must never collide with. Consumed by SandboxConfig's
+# working_dir validator and re-asserted host-side in docker_runner.
 RESERVED_CONTAINER_DIRS = frozenset(
     {
         "/",

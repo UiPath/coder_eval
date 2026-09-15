@@ -137,23 +137,8 @@ class RunLimits(BaseModel):
         ),
     )
 
-    # NOTE: stop_early_gate_threshold <= 0.0 on an ARMED task is a degenerate,
-    # gate-neutralizing config (a threshold of 0 trivially passes the armed
-    # gate regardless of whether anything decided) and is rejected — but NOT
-    # here, and neither is stop_early: True (the removed master arm). Whether a
-    # task is armed lives on the criteria, which RunLimits cannot see, and
-    # RunLimits is field-merged across 5 layers, so a model-level validator has
-    # no visibility into which layer produced the merged value and cannot
-    # distinguish a real mistake from a value merged forward from a sibling
-    # layer (e.g. a task-level threshold inherited by a variant that only
-    # toggles the kill switch). Both checks live in
-    # orchestration/early_stop.py::validate_early_stop instead, where they
-    # raise EarlyStopConfigError and get the same hard-stop CLI treatment
-    # (flips the plan exit code, aborts run) as every other early-stop
-    # guardrail — a plain pydantic ValueError here would instead land in
-    # plan_command's generic per-variant "resolution failed" branch, which
-    # prints red text but does NOT flip the exit code by design (unlike
-    # EarlyStopConfigError), so a model-level raise would silently pass CI.
-    # Other cross-field semantics that are warnings rather than errors live in
-    # orchestration/run_limits.py::validate_run_limits for the same post-merge
-    # visibility without rejecting or mutating the resolved values.
+    # A degenerate gate threshold on an ARMED task, and the removed master arm, are
+    # both rejected -- but in orchestration/early_stop.py::validate_early_stop, NOT
+    # here. Whether a task is armed lives on the criteria, which RunLimits cannot
+    # see, and post-merge is the only place with enough visibility.
+    # Rationale: .claude/notes/orchestration.md § Why the guardrails are not model validators

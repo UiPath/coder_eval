@@ -42,8 +42,9 @@ has to be able to read it exactly then, while the agent still cannot. That is wh
 
 Only the REFERENCE is shielded, never the sandbox. A live criterion reading the agent's
 own output files needs no window change at all — and should not get one. Reading the
-static reference mid-turn cannot break the `LiveVerdict` monotonicity contract; reading
-the half-written sandbox can, and is the "end-state peeking" `live_verdict` rules out.
+static reference mid-turn cannot break the `LiveVerdict` monotonicity contract
+(contracts.md § The live_verdict contract); reading the half-written sandbox can, and is
+the "end-state peeking" `live_verdict` rules out.
 
 ### Not wired up yet
 

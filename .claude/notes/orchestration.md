@@ -57,6 +57,38 @@ VERDICT, never the facts — the seeding cannot restore a fact the execute phase
 captured. The budget gate runs AFTER the criteria on the graded path purely for
 partial-credit visibility, and there is no partial credit under `execute`.
 
+### Rates need verdict evidence, not bucket counts
+
+A published rate divides by rows that actually carry a verdict, not by a bucket count. The
+four category buckets cannot tell a graded FAILURE from a TIMEOUT no criterion ever saw, so
+`tasks_measured` is counted evidence and sits beside them without being part of the
+sum-to-`tasks_run` invariant.
+
+`nothing_was_measured` is the ONE definition of "this rate has no numerator to be a fraction
+of", shared by the run summary, the variant aggregate and the suite rollup — three copies of
+a published rate is how one surface reports `n/a` and another reports `0.0%` for the same
+run, which already happened when the guard shipped on only one of them. Its first version
+tested `succeeded + failed == 0` and was wrong for the same reason the bug it fixed was
+wrong: TIMEOUT and the budget stops are category `failed` and reachable under `execute`, so
+ONE timed-out row in a 100-task ungraded night read as "something was measured" and published
+a real 0% point on the evalboard trend for a run that graded nothing.
+
+An ungraded score stays `None` everywhere it is published. A plain float would launder it
+into 0.000, which renders as — and is picked as a best variant against — a real score of
+zero.
+
+Every status maps to exactly one reporting category EXPLICITLY, with no catch-all, so a new
+status fails the classification assert until someone decides where it belongs rather than
+silently collapsing into `failed` and skewing both the reports and the telemetry dimension.
+A failed image build is grouped with ERROR, being an environment fault rather than a task
+outcome the agent could have avoided. The ungraded bucket is a FOURTH category, not a fold:
+folding into `failed` would depress every pass rate, into `succeeded` would invent verdicts,
+and into `error` would report a healthy run as broken.
+
+`is_execution_fact` is explicit for the same reason — each status is either "the agent phase
+ended this way" (preserved by a detached grade) or "grading decided this" (replaced).
+Defaulting either way silently is how an ERROR row becomes a SUCCESS.
+
 ### Refusing a criteria-free task under grade
 
 `TaskDefinition.success_criteria` accepts an empty list at the model level, because the
@@ -210,6 +242,24 @@ At the default threshold both bounds collapse exactly to "any single armed crite
 effective fail stops the run" and "every `on_pass: stop` criterion has live-passed".
 Lowering it lets a low-weight armed criterion's failure be absorbed without truncation.
 
+### The armed gate is not the watcher's bounds
+
+The ceiling and floor above decide WHETHER to stop. `armed_criteria_passed` is the
+separate, post-hoc question of how a run that was cut gets graded, and it runs over the
+ARMED subset only — an unarmed criterion took no part in the decision to truncate, so
+gating on it would judge the run against evidence the truncation guaranteed would be
+missing.
+
+Each armed criterion is BINARISED against its own `pass_threshold` before weighting, so
+the gate asks "did this criterion pass?" rather than averaging raw scores — which is what
+makes `gate_threshold=1.0` an EXACT equivalence with the strict-AND rule, not an
+approximation of it. That exactness is what the fired-only rule above rests on.
+
+It raises rather than returning False on a criteria/results length mismatch or an empty
+armed set. Neither is a verdict — the first is a caller bug, and the second means the
+caller reached a fired-only gate for a run the watcher never fired on, which
+`early_stop is not None` is there to rule out.
+
 ### Precision is traded, recall is not
 
 A pass-stop cuts the run the instant the floor locks in, so a fail-armed criterion (a
@@ -250,6 +300,21 @@ trajectory.
 **Fail-open:** a `live_verdict` that raises disarms the watcher, logs loudly, and degrades
 to a full run. Because live verdicts are triggers and not truth, this can never produce a
 FALSE early stop — it only ever errs toward running more.
+
+### Why the guardrails are not model validators
+
+A degenerate gate threshold on an ARMED task, and the removed master arm, are both rejected —
+but in `orchestration/early_stop.py`, not on the model. Whether a task is armed lives on the
+CRITERIA, which the run-limits model cannot see, and that model is field-merged across five
+layers, so a model-level validator cannot tell a real mistake from a value merged forward
+from a sibling layer.
+
+The placement also decides what the failure DOES. A dedicated error gets the same hard-stop
+CLI treatment as every other early-stop guardrail — it flips the plan exit code and aborts
+the run — whereas a plain pydantic error would land in the plan command's generic per-variant
+"resolution failed" branch, which prints red text but deliberately does not flip the exit
+code, so a model-level raise would silently pass CI. Cross-field semantics that are warnings
+rather than errors live in the run-limits validator for the same post-merge visibility.
 
 ## Recording the task as authored
 

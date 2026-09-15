@@ -67,8 +67,7 @@ async def invoke_anthropic_judge_async(
             # by default) — do not add another retry loop here.
             raise JudgeInfrastructureError(f"Anthropic judge API error: {e}") from e
         except Exception as e:
-            # A signature/contract break (e.g. a removed or renamed kwarg after an
-            # SDK bump) must not be scored as an agent failure — see CLAUDE.md's
-            # CE039 rationale: an eval-infra fault is not the agent's fault.
+            # A signature break after an SDK bump is an eval-infra fault, not the
+            # agent's (CE039).
             raise JudgeInfrastructureError(f"Anthropic judge call failed: {e}") from e
     return response.model_dump()
