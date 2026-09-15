@@ -4981,3 +4981,200 @@ class TestCE064TurnBracketOnTheClock:
             encoding="utf-8",
         )
         assert not check_file(target, [TurnBracketOnTheClock])
+
+
+class TestCE065EvalMaterialReadableUnderPluginRoot:
+    """CE065 — no eval material left READABLE under an auto-mounted plugin root.
+
+    Under `driver: docker` the Fix B allowlist keeps `.claude-plugin` + the
+    manifest-declared skill dirs readable and `--tmpfs`-masks every other child
+    dir (`eval_material.mask_dirs`). Two spots the mask cannot cover, where the
+    agent under evaluation would read its own grading answer key straight off the
+    readable surface:
+
+    * a `task_id:`-bearing YAML (or a resolved `reference.directory`) INSIDE a
+      kept skill dir — masking it would hide the skill;
+    * a `task_id:` YAML FILE loose at the plugin root (or any other unmasked
+      spot) — a `--tmpfs` masks a directory, not a single file.
+
+    This static rule flags both in-repo so the layout can never recur silently.
+    It reuses the SAME resolver AND the SAME `mask_dirs` the runtime allowlist
+    uses (one SSOT): anything the runtime does NOT mask must not be eval material.
+    The fix is to move the eval def / reference under a sibling `tests/` (or any
+    non-kept dir), where the allowlist masks it.
+    """
+
+    ROOT = Path(__file__).parent.parent
+
+    @staticmethod
+    def _plugin_roots_for_task(task, task_file: Path) -> list[Path]:
+        """Real plugin roots reachable from a task's plugin / template paths.
+
+        `agent.plugins[].path` and `TemplateDirSource.path` are resolved relative
+        to the task-file dir — matching the runtime auto-mount (`docker_runner`
+        resolves a relative `plugins[].path` against `task_file.parent`) and
+        reference/template resolution. Only real plugin roots
+        (`.claude-plugin/plugin.json`) are kept; a plain template dir declares no
+        skills and is not masked, so it is out of scope.
+        """
+        import os
+
+        from coder_eval.models import TemplateDirSource
+
+        raws: list[str] = []
+        agent = task.agent
+        for plugin in (agent.plugins if agent else None) or []:
+            raw = plugin.get("path") if isinstance(plugin, dict) else None
+            if raw:
+                raws.append(str(raw))
+        sandbox = task.sandbox
+        for source in (sandbox.template_sources if sandbox else None) or []:
+            if isinstance(source, TemplateDirSource):
+                raws.append(str(source.path))
+
+        roots: list[Path] = []
+        for raw in raws:
+            expanded = Path(os.path.expandvars(os.path.expanduser(raw)))
+            root = (expanded if expanded.is_absolute() else task_file.parent / expanded).resolve()
+            if (root / ".claude-plugin" / "plugin.json").is_file():
+                roots.append(root)
+        return roots
+
+    @classmethod
+    def _offenders(cls, task, task_file: Path) -> list[str]:
+        import os
+
+        from coder_eval.isolation.eval_material import mask_dirs
+        from coder_eval.orchestration.evaluation import resolve_host_reference_dir
+
+        offenders: list[str] = []
+        ref_dir = resolve_host_reference_dir(task, task_file)
+
+        for root in cls._plugin_roots_for_task(task, task_file):
+            # The exact set the runtime tmpfs-masks. Anything NOT under one of
+            # these stays readable to the agent -- so if it is eval material, it
+            # leaks.
+            masked = {Path(m).resolve() for m in mask_dirs(root)}
+
+            def _is_masked(p: Path, _masked: set[Path] = masked) -> bool:
+                rp = p.resolve()
+                return any(m == rp or m in rp.parents for m in _masked)
+
+            # Walk the readable surface only: prune masked subtrees so we neither
+            # waste time nor false-flag a task def the runtime already hides.
+            for dirpath, dirnames, filenames in os.walk(root):
+                here = Path(dirpath)
+                dirnames[:] = [d for d in dirnames if not _is_masked(here / d)]
+                for fn in filenames:
+                    if not (fn.endswith(".yaml") or fn.endswith(".yml")) or fn == "metadata.yaml":
+                        continue
+                    yaml_file = here / fn
+                    try:
+                        text = yaml_file.read_text(encoding="utf-8")
+                    except OSError:
+                        continue
+                    # Cheap key test: a task definition declares a top-level task_id.
+                    if re.search(r"(?m)^task_id\s*:", text):
+                        offenders.append(f"readable task def under plugin root -> {yaml_file}")
+
+            # A resolved reference dir under this root that the runtime leaves readable.
+            if ref_dir is not None and (ref_dir == root or root in ref_dir.parents) and not _is_masked(ref_dir):
+                offenders.append(f"readable reference.directory -> {ref_dir}")
+
+        return offenders
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(p for p in (Path(__file__).parent.parent / "tasks").rglob("*.yaml") if p.name != "metadata.yaml"),
+        ids=lambda p: p.relative_to(Path(__file__).parent.parent).as_posix(),
+    )
+    def test_repo_tasks_keep_eval_material_masked(self, path: Path):
+        from coder_eval.orchestration.task_loader import load_task
+
+        task, _ = load_task(path)
+        offenders = self._offenders(task, path)
+        assert not offenders, (
+            f"{path}: {offenders} stay READABLE under an auto-mounted plugin root. The Fix B allowlist "
+            "masks non-skill child dirs, but cannot mask eval material inside a skill dir (would hide the "
+            "skill) or a loose YAML file at the root (a tmpfs masks a dir, not a file) — so the agent under "
+            "`driver: docker` reads its own grading answer key. Move the eval def / reference under a sibling "
+            "`tests/` (or any non-kept dir), where the allowlist masks it."
+        )
+
+    def _synthetic_plugin_task(self, tmp_path: Path, *, place_task_inside_skill: bool):
+        from coder_eval.models import TaskDefinition
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+        skill = plugin_root / "skills" / "demo"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# skill", encoding="utf-8")
+
+        if place_task_inside_skill:
+            (skill / "leak.yaml").write_text("task_id: leaked\n", encoding="utf-8")
+        else:
+            sibling = plugin_root / "tests" / "tasks"
+            sibling.mkdir(parents=True)
+            (sibling / "ok.yaml").write_text("task_id: fine\n", encoding="utf-8")
+
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+        task = TaskDefinition(
+            task_id="host",
+            description="d",
+            initial_prompt="p",
+            agent={"type": "claude-code", "plugins": [{"type": "local", "path": str(plugin_root)}]},
+            success_criteria=[],
+        )
+        return task, task_file
+
+    def test_detects_a_task_def_inside_a_skill_dir(self, tmp_path):
+        """Positive sensor — a task def inside a kept skill dir stays readable."""
+        task, task_file = self._synthetic_plugin_task(tmp_path, place_task_inside_skill=True)
+        offenders = self._offenders(task, task_file)
+        assert offenders and any("readable task def" in o for o in offenders), offenders
+
+    def test_detects_a_loose_task_def_file_at_plugin_root(self, tmp_path):
+        """Positive sensor (L1) — a `task_id:` YAML FILE loose at the plugin root
+        is unmasked (a tmpfs masks a dir, not a single file) and must be flagged."""
+        task, task_file = self._synthetic_plugin_task(tmp_path, place_task_inside_skill=False)
+        # add a loose criteria file directly at the plugin root (not in any masked dir)
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / "answers.yaml").write_text("task_id: loose_leak\nsuccess_criteria: []\n", encoding="utf-8")
+        offenders = self._offenders(task, task_file)
+        assert offenders and any("answers.yaml" in o for o in offenders), offenders
+
+    def test_allows_eval_material_outside_skill_dirs(self, tmp_path):
+        """Negative sensor — a task def under a sibling `tests/` is masked at runtime."""
+        task, task_file = self._synthetic_plugin_task(tmp_path, place_task_inside_skill=False)
+        assert self._offenders(task, task_file) == []
+
+    def test_detects_a_reference_dir_inside_a_skill_dir(self, tmp_path):
+        from coder_eval.models import ReferenceSource, TaskDefinition
+
+        plugin_root = tmp_path / "plugin"
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+        ref = plugin_root / "skills" / "demo" / "solution"
+        ref.mkdir(parents=True)
+
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text("# task", encoding="utf-8")
+        task = TaskDefinition(
+            task_id="host",
+            description="d",
+            initial_prompt="p",
+            agent={"type": "claude-code", "plugins": [{"type": "local", "path": str(plugin_root)}]},
+            reference=ReferenceSource(directory="plugin/skills/demo/solution"),
+            success_criteria=[],
+        )
+        offenders = self._offenders(task, task_file)
+        assert offenders and any("reference" in o for o in offenders), offenders
+
+    def test_shares_manifest_skill_dirs_with_the_runtime_allowlist(self):
+        """SSOT: CE065 and Fix B (eval_material.mask_dirs) must agree on skill dirs."""
+        from coder_eval.agents._skills import manifest_skill_dirs
+        from coder_eval.isolation import eval_material
+
+        assert eval_material.manifest_skill_dirs is manifest_skill_dirs

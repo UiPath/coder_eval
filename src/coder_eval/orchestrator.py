@@ -2244,10 +2244,12 @@ class Orchestrator:
         # and -- for a task laid out flat, whose parent is the whole `tasks/`
         # tree -- every SIBLING task's reference solution.
         #
-        # What this does NOT do is hide the task DEFINITION. `task.yaml` is also
-        # staged at /work/input for the in-container orchestrator to read, and
-        # that mount is untouched by this window. Hiding the criteria from the
-        # agent remains a separate, unsolved problem.
+        # This window shields grading MATERIAL in the task dir (reference/,
+        # fixtures). The task DEFINITION itself -- `task.yaml` plus `context.json`'s
+        # `source_yaml`, both carrying `success_criteria` -- is staged at
+        # /work/input, not covered by this window, but DELETED after load by the
+        # in-container entry point (`run_task_internal_command._scrub_staged_inputs`),
+        # so the agent cannot read its own criteria from there either.
         assert self.sandbox is not None
         async with self.sandbox.set_permissions([self._reference_dir, self.sandbox.task_dir]):
             turn_record = await execute_with_retry(

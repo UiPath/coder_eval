@@ -162,6 +162,14 @@ HEARTBEAT_STALE_SECONDS = 20
 # the same guard on the orchestrator's post-run subprocesses.
 STDOUT_LINE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
 
+# Logged once per masked child of an auto-mounted plugin root (Fix B allowlist).
+_MASK_WARNING = "Masking non-skill path %s under plugin root %s (anti-cheat: only skills stay readable)."
+_MASK_STANDDOWN_WARNING = (
+    "Anti-cheat mask stood down for plugin root %s: its whole tree is the declared skill surface "
+    '(e.g. manifest `skills: "."`), so nothing is masked. Any eval material colocated here is READABLE '
+    "to the agent — move it outside the plugin root."
+)
+
 
 async def _heartbeat_loop(heartbeat_path: Path) -> None:
     """Write a monotonic counter to ``heartbeat_path`` every interval until cancelled.
@@ -734,9 +742,16 @@ class DockerRunner:
             await asyncio.to_thread(self._prepare_task_dir_mount, staging)
             # AFTER staging, BEFORE the container starts: the DAC caps are
             # dropped, so every framework-owned mount must be reachable through
-            # its `other` bits. Read-only for the inputs the container merely
-            # consumes; writable only for the run dir it must produce into.
-            await asyncio.to_thread(grant_container_access, input_dir, writable=False)
+            # its `other` bits. The input dir is writable, not merely consumed:
+            # ANTI-CHEAT, the in-container entry point DELETES the staged
+            # task.yaml (the post-override TaskDefinition, success_criteria
+            # included) right after loading it, so the agent -- which runs in this
+            # same container -- can never read its own grading answer key back.
+            # `unlink` needs `other`-write on the input DIRECTORY through the
+            # dropped DAC caps, so grant it writable like the run dir it produces
+            # into. The whole staging tree is destroyed host-side in run()'s
+            # finally regardless, so a writable input dir strands nothing.
+            await asyncio.to_thread(grant_container_access, input_dir, writable=True)
             await asyncio.to_thread(grant_container_access, output_dir, writable=True)
             if self.grade_workspace is not None:
                 # The graded workspace is a framework-owned mount like any other,
@@ -1512,6 +1527,117 @@ class DockerRunner:
         # EROFS. See _prepare_reference_mount.
         return ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
 
+    def _resolve_mount_path(self, raw_path: str) -> Path:
+        """Resolve an auto-mount source path to an absolute host path.
+
+        A RELATIVE path resolves against the task-file dir (matching
+        reference / template / CE065 resolution), NOT the process CWD.
+        ``agent.plugins[].path`` is the one auto-mounted field not absolutized at
+        load, so a bare ``.resolve()`` mounted a CWD-relative tree while CE065
+        inspected the task-file-relative one -- they could disagree.
+        (``template_sources[].path`` is already absolute by the time it gets here.)
+        """
+        expanded = Path(os.path.expandvars(os.path.expanduser(raw_path)))
+        if not expanded.is_absolute() and self.rt.task_file is not None:
+            expanded = self.rt.task_file.parent / expanded
+        return expanded.resolve()
+
+    def _append_auto_mounts(self, argv: list[str]) -> None:
+        """Bind-mount the host paths a task references, at their same host path.
+
+        Covers Claude-Code plugin dirs (``agent.plugins[].path``) and
+        ``TemplateDirSource.path`` roots so they resolve inside the container at
+        the same path they have on the host. Each mount is ``:ro``; a plugin root
+        additionally gets an anti-cheat allowlist mask (see below). The reference
+        is deliberately NOT here -- it has its own ``CONTAINER_REFERENCE_DIR``
+        mount and is masked out of the task_dir mount (see ``_reference_mount_args``).
+        """
+        # ``mounted`` dedupes overlapping bind entries.
+        mounted: set[Path] = set()
+        # Sources that look like credential / secret dirs get a loud warning:
+        # `plugin.path` / `template_sources` are user-controlled strings and a typo
+        # (or a hostile suite) can silently expose `~/.ssh`. Warn, not hard-fail --
+        # legitimate uses exist (a task that does want `~/.aws/config`).
+        sensitive_sources = self._sensitive_source_paths()
+
+        # Lazy import: eval_material -> agents._skills triggers agents/__init__,
+        # which imports back into this module (opencode_agent). Importing it here,
+        # after this module is fully initialised, breaks that cycle.
+        from coder_eval.isolation.eval_material import mask_dirs
+
+        # ANTI-CHEAT masks, COLLECTED here and emitted AFTER every bind is known.
+        # Deferred so a nested auto-mounted plugin root (plugin B under plugin A)
+        # is reconciled: A's mask would `--tmpfs <A>/B` while B's own mount does
+        # `-v <A>/B:...:ro` -- an identical Docker mount destination, which the
+        # daemon rejects ("Duplicate mount point"). The bind must win (so B loads
+        # and masks its OWN non-skill children), so a mask whose path is also a
+        # bind is dropped below. Maps masked dir -> its plugin root (for logging).
+        mask_targets: dict[Path, Path] = {}
+
+        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
+            if not raw_path:
+                return
+            resolved = self._resolve_mount_path(raw_path)
+            # File paths get mounted as the parent dir so a single -v covers
+            # the file; container-side reads still resolve at the same path.
+            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
+            if target in mounted or not target.is_dir():
+                return
+            for sensitive in sensitive_sources:
+                if target == sensitive or sensitive in target.parents:
+                    logger.warning(
+                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
+                        target,
+                    )
+                    break
+            mounted.add(target)
+            argv.extend(["-v", f"{target}:{target}:ro"])
+            # ANTI-CHEAT (allowlist / default-deny): if `target` is a Claude-plugin
+            # root, the plugin stays mounted whole (:ro, above) so it still loads,
+            # but every child dir that is NOT the plugin surface (.claude-plugin +
+            # the manifest-declared skill dirs) is masked with an empty tmpfs. This
+            # closes the whole-suite channel: sibling task YAMLs, reference
+            # solutions, and test fixtures colocated under the tree are masked by
+            # default. `mask_dirs` returns [] for a non-plugin root, so a plain
+            # template dir / system_prompt_file parent is untouched.
+            masks = mask_dirs(target)
+            if not masks and (target / ".claude-plugin" / "plugin.json").is_file():
+                # A plugin root whose whole tree is the skill surface (e.g. a
+                # manifest declaring `skills: "."`) stands the mask down. Say so,
+                # or the anti-cheat mask voids with no operator-visible signal.
+                logger.warning(_MASK_STANDDOWN_WARNING, target)
+            for masked_dir in masks:
+                mask_targets.setdefault(masked_dir, target)
+
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        for plugin in plugins:
+            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+
+        from coder_eval.models import TemplateDirSource
+
+        sandbox_cfg = self.rt.task.sandbox
+        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
+            if isinstance(source, TemplateDirSource):
+                _auto_mount(source.path)
+
+        # Defensive: system_prompt_file is normally inlined into system_prompt by
+        # load_task / experiment resolution, but a variant could inject an absolute
+        # path that survives. Cover it so the in-container Orchestrator can read it.
+        agent_cfg = self.rt.task.agent
+        if agent_cfg and agent_cfg.system_prompt_file:
+            _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
+
+        # Emit the anti-cheat masks now that every bind is known. Docker applies
+        # mounts by target-path depth, so a deeper --tmpfs wins over the enclosing
+        # :ro bind regardless of argv order. Skip a mask whose path is ALSO a bind
+        # (a nested auto-mounted plugin root, see mask_targets above): the bind
+        # wins so the nested plugin loads and masks its own non-skill children.
+        for masked_dir, root in sorted(mask_targets.items()):
+            if masked_dir in mounted:
+                continue
+            argv.extend(["--tmpfs", str(masked_dir)])
+            logger.warning(_MASK_WARNING, masked_dir, root)
+
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
@@ -1647,7 +1773,13 @@ class DockerRunner:
         # Explicit value (not name-only) so it overrides any inherited/baked value.
         argv += ["--env", "TELEMETRY_ENABLED=false"]
 
-        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}:ro"]
+        # Read-WRITE, not `:ro`: the in-container entry point deletes the staged
+        # task.yaml AND context.json right after loading them (ANTI-CHEAT -- both
+        # carry success_criteria; see the grant above and
+        # run_task_internal_command._scrub_staged_inputs), and both `rm` and
+        # `chmod` fail with EROFS on a `:ro` bind mount. The host destroys the
+        # whole staging tree in run()'s finally, so nothing is stranded.
+        argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}"]
         # Mount the host run_dir to the container's standard output location
         # so the in-container Orchestrator writes task.json/task.log/etc.
         # directly to the host filesystem via bind-mount.
@@ -1698,64 +1830,7 @@ class DockerRunner:
             host_claude_dir = Path.home() / ".claude"
             argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
 
-        # Auto-mount host paths the task references so they resolve inside
-        # the container at the *same* path they have on the host.
-        # Includes:
-        #   - Claude Code plugin dirs (`agent.plugins[].path`)
-        #   - Template directories (`sandbox.template_sources[].path` for
-        #     TemplateDirSource entries -- already absolute after
-        #     resolve_template_paths runs on the host).
-        # `run_command` criteria that use `$TASK_DIR/...` are covered by the
-        # symmetric task_dir mount above. The reference is deliberately NOT here:
-        # it gets its own mount at CONTAINER_REFERENCE_DIR and is masked out of
-        # the task_dir mount (see _reference_mount_args). ``mounted`` dedupes overlapping entries.
-        mounted: set[Path] = set()
-        # Auto-mount sources that look like credential / secret dirs get a
-        # loud warning. Task YAMLs typically come from in-house suite authors,
-        # but the `plugin.path` / `reference.directory` / `template_sources`
-        # fields are user-controlled strings, and a typo (or a hostile suite)
-        # can silently expose `~/.ssh` etc. Warning, not hard fail, because
-        # legitimate uses exist (a task that does in fact want to read
-        # `~/.aws/config`). The warning surfaces the surprise.
-        sensitive_sources = self._sensitive_source_paths()
-
-        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
-            if not raw_path:
-                return
-            resolved = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
-            # File paths get mounted as the parent dir so a single -v covers
-            # the file; container-side reads still resolve at the same path.
-            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
-            if target in mounted or not target.is_dir():
-                return
-            for sensitive in sensitive_sources:
-                if target == sensitive or sensitive in target.parents:
-                    logger.warning(
-                        "Auto-mounting sensitive host path %s into container; fix task YAML if unintended.",
-                        target,
-                    )
-                    break
-            mounted.add(target)
-            argv.extend(["-v", f"{target}:{target}:ro"])
-
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
-
-        from coder_eval.models import TemplateDirSource
-
-        sandbox_cfg = self.rt.task.sandbox
-        for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
-            if isinstance(source, TemplateDirSource):
-                _auto_mount(source.path)
-
-        # Defensive: system_prompt_file is normally inlined into
-        # system_prompt by load_task / experiment resolution, but a variant
-        # could conceivably inject an absolute path that survives. Cover
-        # that path so the in-container Orchestrator can read it.
-        agent_cfg = self.rt.task.agent
-        if agent_cfg and agent_cfg.system_prompt_file:
-            _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
+        self._append_auto_mounts(argv)
 
         # NOTE: task.reference.directory is deliberately NOT auto-mounted at its
         # host path here. A copy of it gets a single dedicated read-write mount

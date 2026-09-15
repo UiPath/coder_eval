@@ -873,3 +873,12 @@ re-derive from scratch.
   timing work (the function is zero lines of its diff) and not a guardrail
   candidate — a small real bug needing its own change. Caught in: the
   turn-timing consolidation final review (gpt-5.6-sol).
+
+## docker anti-cheat auto-mount allowlist (fix/docker-anti-cheat-leaks) — RESOLVED in-branch
+
+Surfaced by the code review of the Fix A/B/C branch. The Critical (context.json source_yaml
+leak) was fixed in commit dc71add6; the three Low follow-ups (L1 loose task_id file at plugin
+root, L2 CE065-vs-runtime path-resolution divergence, L3 manifest `skills: "."` collapsing the
+keep-set) and the multi-model review's M1/M2/M3 (test coverage for `_resolve_mount_path`, nested-
+plugin duplicate-mount crash, silent mask stand-down) were all fixed in the same branch. Nothing
+deferred. Left here only as a pointer to the branch history.
