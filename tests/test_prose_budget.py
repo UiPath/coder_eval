@@ -7,6 +7,7 @@ so asserting on them here would make this file a second, drifting baseline.
 
 from __future__ import annotations
 
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -19,12 +20,36 @@ def _words(count: int) -> str:
     return " ".join(f"w{index}" for index in range(count))
 
 
-def _tree(tmp_path: Path, files: dict[str, str]) -> Path:
+def _write(tmp_path: Path, files: dict[str, str]) -> Path:
     for rel, text in files.items():
-        path = tmp_path / "src" / "coder_eval" / rel
+        path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(text), encoding="utf-8")
     return tmp_path
+
+
+def _tree(tmp_path: Path, files: dict[str, str]) -> Path:
+    return _write(tmp_path, {f"src/coder_eval/{rel}": text for rel, text in files.items()})
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            *args,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
 
 
 class TestDocstringMeasurement:
@@ -54,7 +79,7 @@ class TestDocstringMeasurement:
 class TestTyperExemption:
     def test_module_level_typer_command_is_exempt(self) -> None:
         source = f'def run_command():\n    """{_words(400)}"""\n'
-        prose = prose_budget.measure_source(source, "cli/run_command.py")
+        prose = prose_budget.measure_source(source, "src/coder_eval/cli/run_command.py")
         assert prose is not None
         assert prose.docstring_words == 0
 
@@ -67,7 +92,7 @@ class TestTyperExemption:
 
     def test_same_name_nested_inside_the_exempt_module_is_counted(self) -> None:
         source = f'class Helper:\n    def run_command(self):\n        """{_words(400)}"""\n'
-        prose = prose_budget.measure_source(source, "cli/run_command.py")
+        prose = prose_budget.measure_source(source, "src/coder_eval/cli/run_command.py")
         assert prose is not None
         assert prose.docstring_words == 400
 
@@ -130,8 +155,8 @@ class TestMeasureTree:
             },
         )
         measurement = prose_budget.measure(root)
-        assert measurement.skipped == [Path("broken.py")]
-        assert measurement.files[Path("good.py")].docstring_words == 200
+        assert measurement.skipped == [Path("src/coder_eval/broken.py")]
+        assert measurement.files[Path("src/coder_eval/good.py")].docstring_words == 200
 
     def test_total_words_sums_docstrings_and_comments(self, tmp_path: Path) -> None:
         root = _tree(
@@ -337,7 +362,8 @@ class TestRenderReport:
         )
         report = prose_budget.render_report(prose_budget.measure(root))
         assert "a.py" in report
-        assert "top-level" in report and "agents" in report
+        assert "src/coder_eval/agents\n" in report
+        assert "src/coder_eval\n" in report
         assert "subtotal" in report
         assert "TOTAL 206" in report
         assert "ESSAYS" in report
@@ -404,3 +430,103 @@ class TestPointerPlacement:
 
     def test_a_syntax_error_is_skipped_not_fatal(self, tmp_path: Path) -> None:
         assert prose_budget.check_pointer_placement(self._root(tmp_path, "def f(:\n")) == []
+
+
+_ESSAY = f'def f():\n    """{_words(200)}"""\n'
+_DENSE = "\n".join(["# pad"] * 40) + "\nx = 1\n"
+_UNRESOLVED = '"""Rationale: .claude/notes/absent.md § nowhere"""\n'
+
+
+class TestRoots:
+    def test_a_missing_root_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("nope"),))
+        with pytest.raises(FileNotFoundError, match="nope"):
+            prose_budget.measure(tmp_path)
+
+    def test_two_roots_are_both_measured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = _write(tmp_path, {"src/coder_eval/a.py": _ESSAY, "tests/b.py": _ESSAY})
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("src/coder_eval"), Path("tests")))
+        assert set(prose_budget.measure(root).files) == {Path("src/coder_eval/a.py"), Path("tests/b.py")}
+
+    def test_default_roots_do_not_include_tests(self, tmp_path: Path) -> None:
+        root = _write(tmp_path, {"src/coder_eval/a.py": _ESSAY, "tests/b.py": _ESSAY})
+        assert set(prose_budget.measure(root).files) == {Path("src/coder_eval/a.py")}
+
+    def test_density_and_essays_follow_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = _write(tmp_path, {"src/coder_eval/a.py": "x = 1\n", "tests/c.py": _DENSE, "tests/e.py": _ESSAY})
+        assert prose_budget.check_comment_density(root) == []
+        assert prose_budget.check_essays(root) == []
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("tests"),))
+        density = prose_budget.check_comment_density(root)
+        assert len(density) == 1
+        assert density[0].startswith("tests/c.py: ")
+        essays = prose_budget.check_essays(root)
+        assert len(essays) == 1
+        assert essays[0].startswith("tests/e.py::f: ")
+
+    def test_pointer_checks_follow_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        severed = "# One.\n# Rationale: .claude/notes/timing.md § close_window\n# severed tail.\nx = 1\n"
+        root = _write(
+            tmp_path,
+            {
+                "src/coder_eval/a.py": "x = 1\n",
+                "tests/d.py": _UNRESOLVED,
+                "tests/s.py": severed,
+                ".claude/notes/timing.md": "# Timing\n\n## close_window\n",
+            },
+        )
+        assert prose_budget.check_pointers(root) == []
+        assert prose_budget.check_pointer_placement(root) == []
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("tests"),))
+        pointers = prose_budget.check_pointers(root)
+        assert len(pointers) == 1
+        assert pointers[0].startswith("tests/d.py: ")
+        placement = prose_budget.check_pointer_placement(root)
+        assert len(placement) == 1
+        assert placement[0].startswith("tests/s.py:")
+
+    def test_subsystem_names_the_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = _write(tmp_path, {"tests/x.py": _ESSAY, "tests/lint/y.py": _ESSAY})
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("tests"),))
+        report = prose_budget.render_report(prose_budget.measure(root))
+        assert "\ntests/lint\n" in report
+        assert "\ntests\n" in report
+
+
+class TestCollectFailures:
+    def test_every_check_is_prefixed(self, tmp_path: Path) -> None:
+        misplaced = f"def g():\n    {Q}Do it.\n\n    Rationale: .claude/notes/absent.md § x\n    tail.\n    {Q}\n"
+        root = _tree(tmp_path, {"essay.py": _ESSAY, "dense.py": _DENSE, "misplaced.py": misplaced})
+        prefixes = {failure.split(": ", 1)[0] for failure in prose_budget.collect_failures(root)}
+        assert prefixes == {"unresolved pointer", "misplaced pointer", "comment budget", "docstring essay"}
+
+    def test_a_clean_tree_has_no_failures(self, tmp_path: Path) -> None:
+        assert prose_budget.collect_failures(_tree(tmp_path, {"a.py": "x = 1\n"})) == []
+
+
+class TestAssertCodeUnchanged:
+    def _repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        root = _write(tmp_path, {"tests/x.py": 'def f():\n    """One."""\n    return 1\n'})
+        _git(root, "init", "-q")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "init")
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("tests"),))
+        return root
+
+    def test_a_test_file_code_change_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = self._repo(tmp_path, monkeypatch)
+        _write(root, {"tests/x.py": 'def f():\n    """One."""\n    return 2\n'})
+        findings = prose_budget.assert_code_unchanged(root, "HEAD")
+        assert len(findings) == 1
+        assert findings[0].startswith("tests/x.py: code changed")
+
+    def test_a_missing_root_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = self._repo(tmp_path, monkeypatch)
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("nope"),))
+        with pytest.raises(FileNotFoundError, match="nope"):
+            prose_budget.assert_code_unchanged(root, "HEAD")
+
+    def test_a_docstring_only_change_is_not_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = self._repo(tmp_path, monkeypatch)
+        _write(root, {"tests/x.py": 'def f():\n    """Two, longer."""\n    return 1\n'})
+        assert prose_budget.assert_code_unchanged(root, "HEAD") == []

@@ -1,4 +1,4 @@
-"""Measure and ratchet the essay-shaped prose in ``src/coder_eval``.
+"""Measure and ratchet the essay-shaped prose in the configured roots (``_ROOTS``).
 
 One gated number: ``essay_words`` — words in docstrings over 150 words (Typer command
 docstrings exempt, they render as ``--help``) plus words in comment runs of three or
@@ -51,22 +51,22 @@ _DOCSTRING_SECTIONS = (
     "Examples:",
 )
 
-_SRC = Path("src/coder_eval")
+_ROOTS: tuple[Path, ...] = (Path("src/coder_eval"),)
 
-# Exempt by (path relative to src/coder_eval, function name) pair, and only for a
-# function at module level: `Sandbox.run_command` is a method and a bare-name exemption
-# would silently excuse it. Registered in src/coder_eval/cli/__init__.py.
+# Exempt by (repo-relative path, function name) pair, and only for a function at module
+# level: `Sandbox.run_command` is a method and a bare-name exemption would silently
+# excuse it. Registered in src/coder_eval/cli/__init__.py.
 _TYPER_COMMANDS = frozenset(
     {
-        ("cli/run_command.py", "run_command"),
-        ("cli/execute_command.py", "execute_command"),
-        ("cli/plan_command.py", "plan_command"),
-        ("cli/evaluate_command.py", "evaluate_command"),
-        ("cli/report_command.py", "report_command"),
-        ("cli/aggregate_command.py", "aggregate_command"),
-        ("cli/export_command.py", "export_command"),
-        ("cli/harbor_command.py", "reward_command"),
-        ("cli/run_task_internal_command.py", "run_task_internal_command"),
+        ("src/coder_eval/cli/run_command.py", "run_command"),
+        ("src/coder_eval/cli/execute_command.py", "execute_command"),
+        ("src/coder_eval/cli/plan_command.py", "plan_command"),
+        ("src/coder_eval/cli/evaluate_command.py", "evaluate_command"),
+        ("src/coder_eval/cli/report_command.py", "report_command"),
+        ("src/coder_eval/cli/aggregate_command.py", "aggregate_command"),
+        ("src/coder_eval/cli/export_command.py", "export_command"),
+        ("src/coder_eval/cli/harbor_command.py", "reward_command"),
+        ("src/coder_eval/cli/run_task_internal_command.py", "run_task_internal_command"),
     }
 )
 
@@ -202,12 +202,31 @@ def measure_source(source: str, rel: str) -> FileProse | None:
     )
 
 
+def _roots(repo_root: Path) -> tuple[Path, ...]:
+    """``_ROOTS``, after checking each one exists.
+
+    Raises:
+        FileNotFoundError: a root is not a directory — a renamed root must fail the gate,
+            never measure zero files.
+    """
+    for root in _ROOTS:
+        if not (repo_root / root).is_dir():
+            raise FileNotFoundError(f"prose budget root does not exist: {root}")
+    return _ROOTS
+
+
+def _python_files(repo_root: Path) -> list[tuple[Path, Path]]:
+    """``(absolute, repo-relative)`` for every ``*.py`` under each root, sorted."""
+    return sorted(
+        (path, path.relative_to(repo_root)) for root in _roots(repo_root) for path in (repo_root / root).rglob("*.py")
+    )
+
+
 def measure(repo_root: Path) -> Measurement:
-    """Scan ``src/coder_eval``. Files that do not parse are skipped, never fatal."""
+    """Scan the configured roots. Files that do not parse are skipped, never fatal."""
     files: dict[Path, FileProse] = {}
     skipped: list[Path] = []
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
-        rel = path.relative_to(repo_root / _SRC)
+    for path, rel in _python_files(repo_root):
         prose = measure_source(path.read_text(encoding="utf-8"), rel.as_posix())
         if prose is None:
             skipped.append(rel)
@@ -222,7 +241,9 @@ def total_words(files: dict[Path, FileProse]) -> int:
 
 
 def _subsystem(rel: Path) -> str:
-    return rel.parts[0] if len(rel.parts) > 1 else "top-level"
+    root = next(root for root in _ROOTS if rel.is_relative_to(root))
+    below = rel.relative_to(root)
+    return f"{root.as_posix()}/{below.parts[0]}" if len(below.parts) > 1 else root.as_posix()
 
 
 def render_report(measurement: Measurement) -> str:
@@ -236,9 +257,9 @@ def render_report(measurement: Measurement) -> str:
         lines.append(subsystem)
         for rel, prose in rows:
             lines.append(
-                f"  {rel.as_posix():<48}{prose.docstring_words:>7} doc{prose.comment_words:>7} cmt{prose.total:>8}"
+                f"  {rel.as_posix():<64}{prose.docstring_words:>7} doc{prose.comment_words:>7} cmt{prose.total:>8}"
             )
-        lines.append(f"  {'subtotal':<48}{'':>7}    {'':>7}    {sum(p.total for _, p in rows):>8}")
+        lines.append(f"  {'subtotal':<64}{'':>7}    {'':>7}    {sum(p.total for _, p in rows):>8}")
         lines.append("")
 
     files = measurement.files
@@ -260,7 +281,7 @@ def render_report(measurement: Measurement) -> str:
         key=lambda row: (-row[2], row[0].as_posix(), row[1]),
     )
     lines += ["", f"ESSAYS ({len(roster)} docstrings over {_DOCSTRING_ESSAY_WORDS} words)"]
-    lines += [f"  {f'{rel.as_posix()}::{name}':<68}{words:>6}" for rel, name, words in roster]
+    lines += [f"  {f'{rel.as_posix()}::{name}':<84}{words:>6}" for rel, name, words in roster]
     return "\n".join(lines) + "\n"
 
 
@@ -290,8 +311,7 @@ def check_pointers(repo_root: Path) -> list[str]:
     """Every ``Rationale: <path> § <heading>`` must resolve. Returns the failures."""
     failures: list[str] = []
     headings: dict[Path, set[str]] = {}
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
-        rel = path.relative_to(repo_root / _SRC)
+    for path, rel in _python_files(repo_root):
         for line in _prose_lines(path.read_text(encoding="utf-8")):
             match = _POINTER.search(line.strip())
             if not match:
@@ -323,8 +343,8 @@ def check_pointer_placement(repo_root: Path) -> list[str]:
     file unparseable, which the measurement silently reports as zero words.
     """
     failures: list[str] = []
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
-        rel = path.relative_to(repo_root / _SRC).as_posix()
+    for path, rel_path in _python_files(repo_root):
+        rel = rel_path.as_posix()
         source = path.read_text(encoding="utf-8")
         lines = source.split("\n")
 
@@ -383,7 +403,7 @@ def check_comment_density(repo_root: Path) -> list[str]:
     either would push against documenting them.
     """
     failures: list[str] = []
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
+    for path, rel in _python_files(repo_root):
         source = path.read_text(encoding="utf-8")
         try:
             tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
@@ -397,9 +417,8 @@ def check_comment_density(repo_root: Path) -> list[str]:
         }
         budget = comment_line_budget(len(lines))
         if len(own) > budget:
-            rel = path.relative_to(repo_root / _SRC).as_posix()
             failures.append(
-                f"{rel}: {len(own)} own-line comments against a budget of {budget} "
+                f"{rel.as_posix()}: {len(own)} own-line comments against a budget of {budget} "
                 f"({len(lines)} lines). Move rationale to .claude/notes/."
             )
     return failures
@@ -418,6 +437,16 @@ def check_essays(repo_root: Path) -> list[str]:
         for rel, prose in sorted(measure(repo_root).files.items())
         for name, words in prose.essays
     ]
+
+
+def collect_failures(repo_root: Path) -> list[str]:
+    """Every check's failures, each prefixed with the check that raised it."""
+    return (
+        [f"unresolved pointer: {failure}" for failure in check_pointers(repo_root)]
+        + [f"misplaced pointer: {failure}" for failure in check_pointer_placement(repo_root)]
+        + [f"comment budget: {failure}" for failure in check_comment_density(repo_root)]
+        + [f"docstring essay: {failure}" for failure in check_essays(repo_root)]
+    )
 
 
 def code_shape(source: str) -> str:
@@ -463,8 +492,8 @@ def _git(repo_root: Path, *args: str) -> tuple[int, str]:
 
 
 def assert_code_unchanged(repo_root: Path, ref: str) -> list[str]:
-    """Report every ``src/coder_eval`` file whose code — not prose — differs from ``ref``."""
-    code, listing = _git(repo_root, "diff", "--name-only", ref, "--", _SRC.as_posix())
+    """Report every file under the configured roots whose code — not prose — differs from ``ref``."""
+    code, listing = _git(repo_root, "diff", "--name-only", ref, "--", *(root.as_posix() for root in _roots(repo_root)))
     if code != 0:
         return [f"git diff against {ref!r} failed"]
 
@@ -503,20 +532,10 @@ def main(argv: list[str]) -> int:
 
     print(render_report(measure(repo_root)), end="")
 
-    failed = False
-    for failure in check_pointers(repo_root):
-        print(f"unresolved pointer: {failure}", file=sys.stderr)
-        failed = True
-    for failure in check_pointer_placement(repo_root):
-        print(f"misplaced pointer: {failure}", file=sys.stderr)
-        failed = True
-    for failure in check_comment_density(repo_root):
-        print(f"comment budget: {failure}", file=sys.stderr)
-        failed = True
-    for failure in check_essays(repo_root):
-        print(f"docstring essay: {failure}", file=sys.stderr)
-        failed = True
-    return 1 if failed else 0
+    failures = collect_failures(repo_root)
+    for failure in failures:
+        print(failure, file=sys.stderr)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
