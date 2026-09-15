@@ -28,7 +28,7 @@ from ..models import (
     TaskDefinition,
     TaskResult,
 )
-from ..path_utils import TASK_JSON_FILENAME, format_task_log_id
+from ..path_utils import TASK_JSON_FILENAME, format_task_log_id, write_text_atomic
 from ..pricing import unpriced_models
 from ..reports_experiment import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
@@ -748,11 +748,13 @@ def write_run_summary(summary: RunSummary, run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # run.json — run-level summary (distinct from experiment.json from ExperimentReportGenerator)
-    (run_dir / "run.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    # Atomic: an interrupted write would leave a torn run.json, and the next rebuild
+    # silently loses the tags, paths and window it carries forward from it.
+    write_text_atomic(run_dir / "run.json", summary.model_dump_json(indent=2))
 
     # run.md — command statistics
     report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
-    (run_dir / "run.md").write_text(report_md, encoding="utf-8")
+    write_text_atomic(run_dir / "run.md", report_md)
 
 
 def filter_tasks_by_tags(

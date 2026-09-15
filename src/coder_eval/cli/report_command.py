@@ -4,6 +4,7 @@ from pathlib import Path
 
 import typer
 from rich.markdown import Markdown
+from rich.markup import escape
 
 from ..models import EvaluationResult
 from ..path_utils import TASK_JSON_FILENAME
@@ -120,15 +121,20 @@ def _rebuild_run_summary(run_dir: Path) -> None:
     if enclosing is not None:
         raise typer.BadParameter(f"{run_dir} is inside the run at {enclosing}; rebuild that directory instead.")
 
-    summary = rebuild_run_summary(run_dir)
+    try:
+        summary = rebuild_run_summary(run_dir)
+    except (OSError, ValueError) as e:
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
     if summary is None:
-        console.print(f"[red]Error: no finalized task.json files found under {run_dir}[/red]")
+        console.print(f"[red]Error: no finalized task.json files found under {escape(str(run_dir))}[/red]")
         console.print("\n[dim]Hint: --rebuild aggregates a finished run — use 'coder-eval run' to create one.[/dim]")
         raise typer.Exit(1)
     counts = f"{summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err"
     if summary.tasks_not_graded:
         counts += f" / {summary.tasks_not_graded} not graded"
-    console.print(f"[green][OK][/green] Aggregated {summary.tasks_run} task(s) ({counts}) → {run_dir / 'run.json'}")
+    run_json = escape(str(run_dir / "run.json"))
+    console.print(f"[green][OK][/green] Aggregated {summary.tasks_run} task(s) ({counts}) → {run_json}")
     console.print(
         "[dim]Note: run-level summary only — per-suite (suite.json/suite.md) and "
         + "experiment (experiment.json/experiment.md) rollups are not rebuilt.[/dim]"

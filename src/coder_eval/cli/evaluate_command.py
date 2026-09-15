@@ -587,7 +587,7 @@ def _report_and_exit(
             f"[dim]Re-graded {prior.final_status.value} → {result.final_status.value} "
             + f"over {len(result.iterations)} recorded turn(s).[/dim]"
         )
-        _write_back(target.target, result)
+        _write_back(target.target, result, prepared_run_dir)
 
     if result.final_status.is_execution_fact:
         # The criteria tally is real -- it is why the table above still renders --
@@ -606,12 +606,12 @@ def _report_and_exit(
         raise typer.Exit(1)
 
 
-def _write_back(run_dir: Path, result: EvaluationResult) -> None:
+def _write_back(run_dir: Path, result: EvaluationResult, grading_run_dir: Path) -> None:
     """Replace the graded run's ``task.json`` with the verdict, keeping a copy of the original.
 
-    Updating in place is what makes the rest of the toolchain free:
-    ``coder-eval report <run> --rebuild`` then rebuilds ``run.json`` from these rows
-    with no grading-specific code, and every report and evalboard view reads the graded row.
+    Updating in place is what makes the rest of the toolchain free: the owning run's
+    ``run.json`` is then rebuilt from these rows (``_refresh_run_summary``), and every
+    report and evalboard view reads the graded row.
 
     The pre-grade original is kept alongside as ``task.execute.json`` so the
     ungraded record is auditable — the write is not a silent overwrite of the
@@ -633,7 +633,43 @@ def _write_back(run_dir: Path, result: EvaluationResult) -> None:
         # already printed, and the fresh run dir holds its own task.json.
         console.print(f"[yellow]⚠[/] Could not update {target}: {e}")
         return
-    console.print(
-        f"[dim]Updated {target} (original kept as {backup.name}); "
-        + "run `coder-eval report <run_dir> --rebuild` to refresh run.json.[/dim]"
-    )
+    console.print(f"[dim]Updated {escape(str(target))} (original kept as {backup.name}).[/dim]")
+    _refresh_run_summary(run_dir, grading_run_dir)
+
+
+def _refresh_run_summary(row_dir: Path, grading_run_dir: Path) -> None:
+    """Rebuild the run-level ``run.json`` of the run that owns ``row_dir``, best-effort.
+
+    Never raises and never changes the exit code: the verdict is already computed and
+    printed. A row with no ``run.json`` above it gets none. Skipped when this grade wrote
+    its own ``task.json`` inside the owning run (``grading_run_dir`` under it and not the
+    row itself), because that record would be counted as a second row.
+
+    Rationale: .claude/notes/isolation.md § Detached grading from the CLI
+    """
+    from ..orchestration import run_summary_rebuild
+
+    try:
+        root = run_summary_rebuild.find_run_root(row_dir)
+        if root is None:
+            console.print(
+                f"[dim]{escape(str(row_dir))} is not inside a run directory; "
+                + "no run-level run.json was refreshed.[/dim]"
+            )
+            return
+        grading = grading_run_dir.resolve()
+        if grading != row_dir.resolve() and grading.is_relative_to(root):
+            console.print(
+                f"[yellow]⚠[/] The grading run dir {escape(str(grading_run_dir))} is inside the run at "
+                + f"{escape(str(root))}; its task.json would count as a second row, so run.json was not "
+                + "refreshed. Grade with a --run-dir outside the run."
+            )
+            return
+        summary = run_summary_rebuild.rebuild_run_summary(root)
+    except Exception as e:
+        console.print(f"[yellow]⚠[/] Could not refresh the run-level run.json: {escape(str(e))}")
+        return
+    if summary is None:
+        console.print(f"[yellow]⚠[/] No finalized task.json under {escape(str(root))}; its run.json was not refreshed.")
+        return
+    console.print(f"[dim]Refreshed {escape(str(root / 'run.json'))}[/dim]")

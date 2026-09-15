@@ -21,7 +21,7 @@ read). Times are ISO-8601.
 
 | File | Model | When |
 | --- | --- | --- |
-| `run.json` / `run.md` | `RunSummary` | Every run (and rebuildable via `coder-eval report <run_dir> --rebuild`) |
+| `run.json` / `run.md` | `RunSummary` | Every run; refreshed by `coder-eval evaluate <run_dir>` and rebuildable via `coder-eval report <run_dir> --rebuild` |
 | `<variant>/<task_id>/<NN>/task.json` | `EvaluationResult` | One per replicate |
 | `<variant>/<task_id>/<NN>/task.execute.json` | `EvaluationResult` | Pre-grade snapshot, written once by a detached grade (`evaluate <run_dir>` / `run --resume`). Deliberately **not** matched by `rglob("task.json")`, so it never enters an aggregation. |
 | `<variant>/<suite_id>/suite.json` / `.md` | `SuiteRollup` | Dataset-backed suites only |

@@ -28,7 +28,14 @@ def rebuild_run_summary(run_dir: Path) -> RunSummary | None:
 
     Returns:
         The written summary, or ``None`` when ``run_dir`` holds no finalized ``task.json``.
+
+    Raises:
+        ValueError: ``run.json`` or ``run.md`` in ``run_dir`` is a symlink. A run directory is
+            a shareable artifact, so writing through a link would overwrite an arbitrary file.
     """
+    for name in ("run.json", "run.md"):
+        if (run_dir / name).is_symlink():
+            raise ValueError(f"{run_dir / name} is a symlink; refusing to write through it.")
     results = recover_task_results(run_dir)
     if not results:
         return None
@@ -49,16 +56,29 @@ def rebuild_run_summary(run_dir: Path) -> RunSummary | None:
 
 
 def find_run_root(path: Path) -> Path | None:
-    """The nearest directory at or above ``path`` holding a ``run.json``, or ``None``.
+    """The nearest directory at or above ``path`` holding coder-eval's ``run.json``, or ``None``.
 
-    ``path`` is resolved first, so a relative path walks past the working directory. The
-    inverse of ``recover_task_results``' rule that the nearest ``run.json`` owns a row.
+    ``path`` is resolved first, so a relative path walks past the working directory. A
+    ``run.json`` that is not a JSON object with ``run_id`` and ``task_results`` belongs to
+    another tool and is walked past, so a row copied into an unrelated tree never
+    overwrites that file. A symlinked ``run.json`` is returned as found, for
+    ``rebuild_run_summary`` to refuse. The inverse of ``recover_task_results``' rule that
+    the nearest ``run.json`` owns a row.
     """
     resolved = path.resolve()
     for candidate in (resolved, *resolved.parents):
-        if (candidate / "run.json").is_file():
+        run_json = candidate / "run.json"
+        if run_json.is_symlink() or _is_run_summary_file(run_json):
             return candidate
     return None
+
+
+def _is_run_summary_file(run_json: Path) -> bool:
+    try:
+        data = json.loads(run_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "run_id" in data and "task_results" in data
 
 
 def _read_prior_metadata(run_dir: Path) -> tuple[dict[str, list[str]], dict[str, str], dict[str, Any]]:
