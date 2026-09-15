@@ -1,4 +1,8 @@
-"""Single-file HTML report — the evalboard's STATIC TWIN.
+"""HTML report generation — the evalboard's STATIC TWIN.
+
+Produces SELF-CONTAINED files (inline CSS/JS, no external fonts or images) for
+offline viewing and CI artifact upload, covering a single task's conversation trace
+and criteria plus cross-variant experiment summaries.
 
 This renderer and ``evalboard/`` show the same run and must agree, so a rule
 implemented on one side belongs on the other. The arithmetic itself lives in
