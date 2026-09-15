@@ -173,9 +173,15 @@ class Sandbox:
     def enforces_permission_windows(self) -> bool:
         """Whether a chmod window is a real, safe control in this sandbox.
 
-        True only inside a ``driver: docker`` container, where the filesystem is
-        private to this one task. On the host (``driver: tempdir``) it is a
-        deliberate no-op.
+        True only inside a ``driver: docker`` container. SAFE because the
+        filesystem is private to this one task; REAL because that container drops
+        ``DAC_OVERRIDE`` / ``DAC_READ_SEARCH``, without which a mode-000 directory
+        is still readable by container root and the window is a silent no-op.
+        COUNTERPART to ``docker_runner._build_argv``'s cap drops.
+
+        On the host (``driver: tempdir``) it is a deliberate no-op: parallel tasks
+        share the checked-out ``tasks/<name>/`` tree, so enforcing would chmod the
+        user's own working copy across tasks.
 
         NOTE the predicate is the ``CODER_EVAL_IN_CONTAINER`` env var, NOT
         ``config.driver``: the in-container entry point rewrites ``driver: docker``
@@ -272,7 +278,9 @@ class Sandbox:
         criteria need to resolve the same shimmed binaries the agent did.
 
         The caller keeps ownership: ``_cleanup_on_exit`` stays False, so
-        ``cleanup()`` never deletes an adopted directory.
+        ``cleanup()`` never deletes an adopted directory. Criteria CAN still
+        mutate the tree (a ``run_command`` that writes), which is why the copy
+        path stays the default for a bare user-supplied work dir.
 
         Rationale: .claude/notes/isolation.md § Detached grading and `Sandbox.adopt`
 
@@ -1072,11 +1080,12 @@ class Sandbox:
     def _build_run_command_env(self) -> dict[str, str]:
         """Build the environment for ``run_command``.
 
-        Eight layers, each independent -- none breaks if another is absent: the
-        parent env, the agent's captured SDK PATH (PREPENDED, so system binaries
-        stay reachable), the sandbox venv, ``<sandbox>/node_modules/.bin``,
+        Each layer is independent -- none breaks if another is absent: the parent
+        env, the agent's captured SDK PATH (PREPENDED, so system binaries stay
+        reachable), the sandbox venv, ``<sandbox>/node_modules/.bin``,
         ``NODE_PATH=""``, a sandbox-scoped ``NPM_CONFIG_PREFIX``, ``TASK_DIR``,
-        and ``REFERENCE_DIR``.
+        ``REFERENCE_DIR``, and ``PLUGIN_TOOLS_DIR`` (which defers to an inherited
+        value).
 
         Rationale: .claude/notes/isolation.md § The criterion environment, layer by layer
         """
@@ -1212,9 +1221,11 @@ class Sandbox:
             logger.warning(error_msg)
             return -1, "", error_msg
 
-    # NOTE: get_file_content, file_exists and list_files intentionally do NOT
-    # validate path traversal -- the agent legitimately reads installed packages and
-    # system headers. That protection lives at the agent permission level.
+    # HAZARD: only ``list_files`` skips containment -- it joins and rglobs directly.
+    # ``get_file_content`` and ``file_exists`` go through ``resolve_files``, hence
+    # ``_within_sandbox`` and ``_reject_escaped``. Do not read this as "containment
+    # lives elsewhere": for a criterion path it lives HERE.
+    # Rationale: .claude/notes/isolation.md § Criterion paths are contained, quietly
 
     def _within_sandbox(self, candidate: Path) -> bool:
         """Whether a resolved criterion path stays inside the sandbox.
@@ -1483,6 +1494,10 @@ class Sandbox:
         the orchestrator's own cwd may sit under it. Excludes the credential and
         noise entries in :data:`_WORKSPACE_CAPTURE_IGNORE`, because the WORKDIR can
         BE ``$HOME``.
+
+        HAZARD: ``symlinks=True`` + ``ignore_dangling_symlinks=True`` are both
+        required -- without the second, one dangling link raises ``shutil.Error``
+        and fails artifact capture for the whole task.
 
         Returns the destination path; unlike preserve_to it does NOT repoint
         ``self.sandbox_dir``.

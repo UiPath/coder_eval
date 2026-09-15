@@ -780,10 +780,12 @@ class EvaluationResult(BaseModel):
     def armed_criteria_passed(
         self, criteria: list[SuccessCriterion], gate_threshold: float = DEFAULT_STOP_EARLY_GATE_THRESHOLD
     ) -> bool:
-        """True iff the ARMED subset's weighted score meets ``gate_threshold``.
+        """True iff the ARMED subset meets ``gate_threshold``.
 
-        The gate a run the watcher actually CUT is judged by, as opposed to the
-        strict-AND ``all_criteria_passed`` a naturally-completed run gets.
+        NOT ``calculate_weighted_score``'s quantity: each armed criterion is
+        BINARISED against its own ``pass_threshold`` first, then weighted. That is
+        what makes ``gate_threshold=1.0`` an EXACT equivalence with the strict-AND
+        ``all_criteria_passed``, rather than an approximation of it.
 
         Raises:
             ValueError: ``criteria`` does not correspond 1:1 with

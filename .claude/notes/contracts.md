@@ -180,9 +180,10 @@ measured" rather than an instant 0.0 (CE058).
 ## Route resolution
 
 The agent's route and the evaluation side's route are resolved separately.
-`resolve_evaluation_route` decides the `llm_judge` / `agent_judge` transport, and a
-`model` lands on `checker_context.api_route.model` ONLY when a real override was given —
-never the agent's own model. `criterion.model` is `None` rather than a materialized
+`resolve_evaluation_route` decides the `llm_judge` / `agent_judge` transport. The
+override travels one way: `checker_context.api_route.model` is the task-authored INPUT,
+and it lands on the RESOLVED route's `model` — set only when a real override was given,
+never from the agent's own model. `criterion.model` is `None` rather than a materialized
 default when unset, so the precedence (explicit per-criterion model, then the route's, then
 the default judge model) survives a `model_dump(mode="json")` and reload, which a
 `model_fields_set` check would not.

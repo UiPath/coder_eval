@@ -28,8 +28,9 @@ from coder_eval.models import (
 )
 
 
-# Paths beginning with one of these tokens resolve against a HOST directory rather
-# than the sandbox, mirroring the same-named env vars `run_command` exposes.
+# ``$TASK_DIR`` (the task YAML's own directory) and ``$REFERENCE_DIR`` (the per-run
+# staged reference copy) resolve against a HOST directory rather than the sandbox,
+# mirroring the same-named env vars `run_command` exposes.
 # `$REFERENCE_DIR` is readable here only because judges run outside the agent's
 # turn -- the directory sits at mode 000 for all of `agent.communicate`.
 # Rationale: .claude/notes/contracts.md § Judge context and untrusted text

@@ -215,10 +215,21 @@ def _resolve_backend_route(
 ) -> ApiRoute:
     """Build the ``ApiRoute`` for an EXPLICITLY-requested backend.
 
-    Raises rather than asserts on a missing credential: this is reached on the
-    evaluate-only path with no preceding key validation, so it must survive ``-O``.
+    Used only by the ``checker_context.api_route`` override path. It RAISES,
+    naming the missing env var, when the requested backend is not configured,
+    rather than silently falling back to a different one: an explicit override
+    that cannot be honored must fail loudly, not degrade to a backend the task
+    author never asked for. Raise rather than assert, because this is reached on
+    the evaluate-only path with no preceding key validation and must survive
+    ``-O``.
 
-    Rationale: .claude/notes/contracts.md § Route resolution
+    ``ApiBackend.LITELLM`` is the exception to "credentials come from the
+    environment": a checker-side litellm route is built ENTIRELY from
+    ``params_override`` / ``env_params_override``, never from
+    ``settings.litellm_*``, and raises when ``model_override`` is absent — there
+    is no default gateway model to fall back to.
+
+    Rationale: .claude/notes/contracts.md § LiteLLM params and env_params
     """
     match backend:
         case ApiBackend.BEDROCK:
@@ -268,8 +279,9 @@ def resolve_evaluation_route(
     NOT: evaluation is pinned to a constant Claude backend instead — Bedrock when
     the credentials are present, else Direct.
 
-    ``model_override`` lands on ``checker_context.api_route.model`` only when a
-    real override was given, never the agent's own model.
+    ``model_override`` comes FROM ``checker_context.api_route.model`` (the
+    task-authored input) and lands on the RESOLVED route's ``model``. It is set
+    only when a real override was given, never from the agent's own model.
 
     Rationale: .claude/notes/contracts.md § Route resolution
     """

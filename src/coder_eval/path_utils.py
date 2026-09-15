@@ -31,9 +31,13 @@ PRE_GRADE_JSON_FILENAME = "task.execute.json"
 PRIOR_RESULT_FILENAME = "prior.json"
 
 # The container's own stdout+stderr transcript, and the name it is folded back
-# under after a GRADING container. Constants, not literals (CE053): the
-# fold-back is guarded by ``is_file()``, so a rename on the producing side
-# would degrade the copy to a silent no-op.
+# under after a GRADING container. Named for the PHASE because on the
+# ``run --resume`` path ``docker.log`` is already taken by the executed
+# container's log -- folding a grading log back under it repeats the
+# task.log/grade.log truncation bug one layer down. Constants, not literals
+# (CE053): the fold-back is guarded by ``is_file()``, so a rename on the
+# producing side would degrade the copy to a silent no-op.
+# Rationale: .claude/notes/persistence.md § Run-directory filename constants
 DOCKER_LOG_FILENAME = "docker.log"
 GRADE_DOCKER_LOG_FILENAME = "grade.docker.log"
 
@@ -61,8 +65,10 @@ def write_text_atomic(path: Path, text: str) -> None:
     is UNIQUE per call. ``O_NOFOLLOW`` closes a symlink-plant overwrite
     primitive; the unique name keeps ``O_EXCL``'s guarantee while making a
     leftover from a SIGKILLed predecessor inert instead of a permanent refusal
-    to write the record. Mode is ``0o644`` — do not narrow it; the docker driver
-    reads this file back as a different uid.
+    to write the record. Mode is ``0o644``, the widest that is never group- or
+    world-WRITABLE; do not narrow it, because the docker driver reads this file
+    back as a different uid. It is a CEILING, not a guarantee — the umask still
+    narrows it (0o077 yields 0600).
 
     Rationale: .claude/notes/persistence.md § write_text_atomic
     """
