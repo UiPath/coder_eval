@@ -52,6 +52,9 @@ _DOCSTRING_OWNERS = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Clas
 
 _POINTER = re.compile(r"Rationale:\s*(\S+\.md)\s*§\s*(.+?)\s*$")
 
+# The docstring delimiter, as a value: this module's own prose cannot spell it inline.
+QUOTES = chr(34) * 3
+
 # ``##`` or ``###``: a pointer may target a SUBSECTION, so appending to an existing
 # section (the single-home rule) does not force the pointer up to the parent heading.
 _HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$")
@@ -241,6 +244,70 @@ def check_pointers(repo_root: Path) -> list[str]:
     return failures
 
 
+_TRAILING_SECTIONS = ("Args:", "Returns:", "Raises:", "Yields:", "Example:", "Examples:")
+
+
+def check_pointer_placement(repo_root: Path) -> list[str]:
+    """A ``Rationale:`` pointer must be the LAST prose line of its block.
+
+    Not style. A block replacement that anchors on the wrong line leaves the tail of the
+    replaced prose stranded AFTER the pointer, where the ``$``-anchored ``_POINTER``
+    regex cannot see it -- so the pointer still resolves and the file still parses while
+    carrying a severed half-sentence.
+
+    A docstring may follow its pointer with an ``Args:``/``Returns:``/``Raises:`` block,
+    which is the house shape; anything else is the defect. An orphaned docstring
+    terminator is reported too: a rewrite that leaves the original one behind makes the
+    file unparseable, which the measurement silently reports as zero words.
+    """
+    failures: list[str] = []
+    for path in sorted((repo_root / _SRC).rglob("*.py")):
+        rel = path.relative_to(repo_root / _SRC).as_posix()
+        source = path.read_text(encoding="utf-8")
+        lines = source.split("\n")
+
+        for index in range(1, len(lines)):
+            if lines[index].strip() == QUOTES and lines[index - 1].strip().endswith(QUOTES):
+                failures.append(f"{rel}:{index + 1}: orphaned docstring terminator")
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, _DOCSTRING_OWNERS):
+                continue
+            docstring = ast.get_docstring(node, clean=False)
+            if docstring is None:
+                continue
+            body = [line for line in docstring.split("\n") if line.strip()]
+            pointers = [i for i, line in enumerate(body) if _POINTER.search(line.strip())]
+            if pointers:
+                tail = body[pointers[-1] + 1 :]
+                if tail and not tail[0].strip().startswith(_TRAILING_SECTIONS):
+                    name = getattr(node, "name", "<module>")
+                    failures.append(f"{rel}::{name}: prose after the Rationale pointer: {tail[0].strip()!r}")
+
+        index = 0
+        while index < len(lines):
+            if not lines[index].strip().startswith("#"):
+                index += 1
+                continue
+            end = index
+            while end < len(lines) and lines[end].strip().startswith("#"):
+                end += 1
+            run = lines[index:end]
+            for offset, line in enumerate(run):
+                if _POINTER.search(line.strip()) and offset != len(run) - 1:
+                    failures.append(
+                        f"{rel}:{index + offset + 1}: comment continues after the Rationale pointer: "
+                        f"{run[offset + 1].strip()!r}"
+                    )
+            index = end
+    return failures
+
+
 def check(repo_root: Path) -> str | None:
     """``None`` when the tree is at or under the baseline, else the failure message."""
     total = total_words(measure(repo_root).files)
@@ -339,6 +406,9 @@ def main(argv: list[str]) -> int:
     failed = False
     for failure in check_pointers(repo_root):
         print(f"unresolved pointer: {failure}", file=sys.stderr)
+        failed = True
+    for failure in check_pointer_placement(repo_root):
+        print(f"misplaced pointer: {failure}", file=sys.stderr)
         failed = True
     if (message := check(repo_root)) is not None:
         print(message, file=sys.stderr)

@@ -264,3 +264,64 @@ class TestRenderReport:
         assert "ESSAYS" in report
         assert "a.py::essay_fn" in report
         assert "200" in report
+
+
+# The docstring delimiter as a value, so a fixture can embed one without ending this file's
+# own strings.
+Q = chr(34) * 3
+
+
+class TestPointerPlacement:
+    """The guard promoted after three phases shipped this defect shape to review."""
+
+    def _root(self, tmp_path: Path, source: str) -> Path:
+        root = _tree(tmp_path, {"a.py": source})
+        target = root / ".claude" / "notes" / "timing.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# Timing\n\n## close_window\n\nWhy.\n", encoding="utf-8")
+        return root
+
+    def test_a_pointer_at_the_end_of_a_comment_run_passes(self, tmp_path: Path) -> None:
+        source = "# One.\n# Two.\n# Rationale: .claude/notes/timing.md \u00a7 close_window\nx = 1\n"
+        assert prose_budget.check_pointer_placement(self._root(tmp_path, source)) == []
+
+    def test_a_comment_run_that_continues_after_its_pointer_fails(self, tmp_path: Path) -> None:
+        source = "# One.\n# Rationale: .claude/notes/timing.md \u00a7 close_window\n# severed tail.\nx = 1\n"
+        failures = prose_budget.check_pointer_placement(self._root(tmp_path, source))
+        assert len(failures) == 1
+        assert "severed tail" in failures[0]
+
+    def test_a_docstring_pointer_followed_by_args_passes(self, tmp_path: Path) -> None:
+        source = (
+            "def f(a):\n"
+            f"    {Q}Do it.\n\n"
+            "    Rationale: .claude/notes/timing.md \u00a7 close_window\n\n"
+            "    Args:\n"
+            "        a: thing\n"
+            f"    {Q}\n"
+        )
+        assert prose_budget.check_pointer_placement(self._root(tmp_path, source)) == []
+
+    def test_a_docstring_with_prose_after_its_pointer_fails(self, tmp_path: Path) -> None:
+        source = (
+            "def f():\n"
+            f"    {Q}Do it.\n\n"
+            "    Rationale: .claude/notes/timing.md \u00a7 close_window\n"
+            "    and the stranded half of a sentence.\n"
+            f"    {Q}\n"
+        )
+        failures = prose_budget.check_pointer_placement(self._root(tmp_path, source))
+        assert len(failures) == 1
+        assert "stranded half" in failures[0]
+
+    def test_an_orphaned_docstring_terminator_is_reported(self, tmp_path: Path) -> None:
+        source = f"def f():\n    {Q}Do it.{Q}\n    {Q}\n    return 1\n"
+        failures = prose_budget.check_pointer_placement(self._root(tmp_path, source))
+        assert any("orphaned docstring terminator" in failure for failure in failures)
+
+    def test_a_file_with_no_pointer_is_not_flagged(self, tmp_path: Path) -> None:
+        source = "# One.\n# Two.\n# Three.\nx = 1\n"
+        assert prose_budget.check_pointer_placement(self._root(tmp_path, source)) == []
+
+    def test_a_syntax_error_is_skipped_not_fatal(self, tmp_path: Path) -> None:
+        assert prose_budget.check_pointer_placement(self._root(tmp_path, "def f(:\n")) == []
