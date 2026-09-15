@@ -113,7 +113,7 @@ class TestMalformedTaskJson:
     """A present-but-malformed task.json degrades to a synthetic ERROR record.
 
     Mirrors the missing-file branch: a stale ``:latest`` image producing a
-    schema-skewed task.json (the version checks only warn), or a truncated/torn
+    schema-skewed task.json the image preflight did not catch, or a truncated/torn
     write, must not surface as an uncaught ``ValidationError``/``JSONDecodeError``.
     Instead the runner preserves the original aside (``task.json.malformed``),
     persists a parseable synthetic ERROR task.json, and returns a ``DockerRunError``

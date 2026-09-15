@@ -313,7 +313,9 @@ whole run directories — a copied run keeps its own `run.json`, so its rows bel
 are left out. It rebuilds the **run-level summary only**; per-suite rollups
 (`suite.json`/`suite.md`) and experiment reports (`experiment.json`/`experiment.md`) are
 *not* rebuilt, because the per-row suite/variant grouping they need is not recoverable
-from `task.json` alone. It exits 1 when no finalized `task.json` is found.
+from `task.json` alone. It exits 1 when no finalized `task.json` is found. A rebuild —
+including the one `coder-eval evaluate <run_dir>` runs — records the rebuilding host's
+coder-eval version and environment in `run.json`.
 
 ### Claude Code slash commands
 

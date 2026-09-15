@@ -527,7 +527,7 @@ def restore_modes(widened: list[tuple[Path, int]]) -> None:
             logger.warning("Could not restore mode on %s: %s", path, exc)
 
 
-def _quarantine_record(task_json: Path | None, suffix: str, label: str) -> None:
+def _quarantine_record(task_json: Path, suffix: str, label: str) -> None:
     """Move a refused container record aside, best-effort.
 
     Call it before raising a refusal. The run dir is bind-mounted, so a record left
@@ -537,8 +537,6 @@ def _quarantine_record(task_json: Path | None, suffix: str, label: str) -> None:
 
     Never masks the caller's raise: a failed move is logged and swallowed.
     """
-    if task_json is None:
-        return
     sidecar = task_json.with_suffix(task_json.suffix + suffix)
     try:
         os.replace(task_json, sidecar)  # atomic; overwrites any stale prior sidecar
@@ -609,9 +607,10 @@ class DockerRunner:
         """Run the task in a container and return the parsed EvaluationResult.
 
         The container is responsible for producing ``task.json`` in
-        ``CONTAINER_OUTPUT_DIR``. On any path where the container exits
-        without producing it, this raises ``DockerRunError`` and the batch
-        dispatcher converts that to an ERROR-status EvaluationResult.
+        ``CONTAINER_OUTPUT_DIR``. This raises ``DockerRunError`` when the image is
+        refused before the container starts, when the container produces no usable
+        ``task.json``, or when its result does not echo the staged contract; the
+        batch dispatcher converts that to an ERROR-status EvaluationResult.
         """
         _preflight()
         # Side-effecting, so it runs in a worker thread like the other docker calls.
@@ -743,11 +742,14 @@ class DockerRunner:
             encoding="utf-8",
         )
         if self.prior_result is not None:
-            # Carried in whole, so the trajectory an `llm_judge` or
-            # `command_executed` criterion reads is the ORIGINAL run's.
+            # Carried whole (the trajectory criteria read is the ORIGINAL run's) minus its echo,
+            # which an image that predates the echo would otherwise hand back as its own.
+            staged_prior = self.prior_result.model_copy(deep=True)
+            if staged_prior.environment_info:
+                staged_prior.environment_info.pop("container_contract", None)
             await asyncio.to_thread(
                 (input_dir / PRIOR_RESULT_FILENAME).write_text,
-                self.prior_result.model_dump_json(indent=2),
+                staged_prior.model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
@@ -843,8 +845,9 @@ class DockerRunner:
     async def _parse_result_or_raise(self, output_dir: Path, returncode: int, log_path: Path) -> EvaluationResult:
         """Read back ``task.json`` (the only artifact crossing the boundary) and parse it.
 
-        If the container exited without producing it, persist a synthetic ERROR
-        task.json and raise ``DockerRunError`` so the batch dispatcher records the
+        If the container produced no ``task.json``, an unparseable one, or a result
+        that fails the contract echo, persist a synthetic ERROR ``task.json`` and raise
+        ``DockerRunError`` so the row stays visible and the batch dispatcher records the
         failure as an ERROR-status result.
         """
         task_json = output_dir / TASK_JSON_FILENAME
@@ -867,7 +870,11 @@ class DockerRunner:
             # Present but unparseable (schema skew from a stale image, a torn
             # write): degrade like the missing-file branch.
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
-        self._assert_contract_echoed(result, task_json)
+        try:
+            self._assert_contract_echoed(result, task_json)
+        except DockerRunError as refusal:
+            await self._write_synthetic_task_json(task_json, refusal)
+            raise
         return result
 
     def _assert_contract_echoed(self, result: EvaluationResult, task_json: Path) -> None:
@@ -875,7 +882,8 @@ class DockerRunner:
 
         Compares ``environment_info["container_contract"]`` with what ``_stage_inputs``
         sent, in JSON mode on both sides. ``settings.allow_image_skew`` never reaches
-        this check. ``task_json`` is quarantined to ``task.json.unhonored`` before every raise.
+        this check. ``task_json`` is quarantined to ``task.json.unhonored`` before every raise;
+        the caller writes a synthetic ERROR record in its place.
 
         Raises:
             DockerRunError: The echo is absent, or any field differs from what was sent.
