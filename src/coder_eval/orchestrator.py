@@ -1315,7 +1315,7 @@ class Orchestrator:
         # Also emit an HTML trace/report alongside task.json. HTML failure must
         # never mask the underlying run outcome — write_task_html logs and
         # returns None on failure.
-        from .reports_html import write_task_html
+        from .reports import write_task_html
 
         write_task_html(self.result, self.html_report_path)
 

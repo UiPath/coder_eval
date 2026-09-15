@@ -7,8 +7,8 @@ formatters that turn a number into a cell (``fmt_mean_sd``, ``fmt_p``,
 ``EvaluationResult`` metrics to ``coder_eval.result_metrics``.
 
 **The cycle rationale is live, not historical.** These helpers stay in a module
-of their own so ``reports_html`` can consume them without importing
-``reports_experiment`` — which imports ``reports_html`` for its HTML-write
+of their own so ``reports.html`` can consume them without importing
+``reports.experiment`` — which imports ``reports.html`` for its HTML-write
 helpers. Folding this module into the experiment reporter would close
 ``experiment -> html -> helpers`` into a cycle.
 """
@@ -19,15 +19,14 @@ import logging
 from pathlib import Path
 from typing import NamedTuple
 
-from coder_eval.models import (
+from ..models import (
     EvaluationResult,
     ExperimentResult,
     ExperimentVariant,
     TaskExperimentSummary,
 )
-
-from .path_utils import TASK_JSON_FILENAME
-from .stats import cohens_d, mean, paired_t_ci, paired_t_test, stddev
+from ..path_utils import TASK_JSON_FILENAME
+from ..stats import cohens_d, mean, paired_t_ci, paired_t_test, stddev
 
 
 logger = logging.getLogger(__name__)

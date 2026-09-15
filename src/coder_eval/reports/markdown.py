@@ -8,9 +8,9 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
-from .analysis import calculate_command_statistics
-from .formatting import format_ms
-from .models import (
+from ..analysis import calculate_command_statistics
+from ..durations import format_ms
+from ..models import (
     CriterionAggregate,
     CriterionStats,
     EarlyStopReason,
@@ -26,11 +26,11 @@ from .models import (
     row_cost_incomplete,
     sum_costs,
 )
-from .path_utils import TASK_JSON_FILENAME, build_task_run_dir
+from ..path_utils import TASK_JSON_FILENAME, build_task_run_dir
 
 
 if TYPE_CHECKING:
-    from .models import CommandStatistics
+    from ..models import CommandStatistics
 
 logger = logging.getLogger(__name__)
 
@@ -891,7 +891,7 @@ def _compute_suite_rollup(
     """
     # Deferred on purpose: importing coder_eval.criteria runs pkgutil auto-discovery
     # with registry side effects, which would land on every `import coder_eval.reports`.
-    from .criteria import CriterionRegistry, init_criteria
+    from ..criteria import CriterionRegistry, init_criteria
 
     rows_total = len(rows)
     rows_passed = sum(1 for r in rows if r.result.final_status.category == "succeeded")

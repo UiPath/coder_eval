@@ -61,7 +61,7 @@ def _bootstrap(tmp_path, *, final_status, duration=None, score=None, iterations=
 def _finalize_and_capture(orch):
     with (
         patch("coder_eval.telemetry.track_event") as mock_track,
-        patch("coder_eval.reports_html.write_task_html", return_value=None),
+        patch("coder_eval.reports.write_task_html", return_value=None),
     ):
         orch._finalize_result(start_time=time.time() - 1.0)
     return mock_track

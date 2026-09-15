@@ -20,7 +20,7 @@ from coder_eval.models import (
     TaskDefinition,
     TaskResult,
 )
-from coder_eval.reports import _compute_suite_rollup, _render_suite_markdown
+from coder_eval.reports.markdown import _compute_suite_rollup, _render_suite_markdown
 
 
 class _FakeSandbox:
@@ -474,7 +474,7 @@ class TestSuiteRollupWithAggregate:
     def test_missing_aggregator_explicit_none(self, tmp_path: Path) -> None:
         # An override that explicitly returns None still hits the
         # _build_missing_aggregator path — rare but possible.
-        from coder_eval.reports import _build_missing_aggregator
+        from coder_eval.reports.markdown import _build_missing_aggregator
 
         fallback = _build_missing_aggregator("custom", {"accuracy": 0.5})
         assert fallback.error is not None

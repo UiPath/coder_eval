@@ -2,8 +2,10 @@
 
 The "core" layer comprises every package that should be usable without the
 CLI: criteria/, evaluation/, models/, simulation/, scoring/, streaming/,
-errors/, orchestration/, agents/, harbor/. Importing from coder_eval.cli
-creates an upward dependency that breaks testability in isolation.
+errors/, orchestration/, agents/, harbor/, plus top-level orchestrator.py.
+Importing from coder_eval.cli creates an upward dependency that breaks
+testability in isolation. The membership test lives in ``_layers.is_core_path``
+so CE004 and CE066 cannot drift apart about what "core" means.
 
 ``harbor/`` joined this list for the same reason ``orchestration/`` is on it:
 its reward writer wants to raise a plain exception (``RewardWriteSkippedError``,
@@ -19,12 +21,10 @@ that catches the one mistake we have actually seen.
 import ast
 import re
 
+from tests.lint.rules._layers import is_core_path
 from tests.lint.rules.base import BaseRule
 
 
-_CORE_DIRS = re.compile(
-    r"[/\\](criteria|evaluation|models|simulation|scoring|streaming|errors|orchestration|agents|harbor)[/\\]"
-)
 _BANNED = re.compile(r"^coder_eval\.cli")
 
 
@@ -33,7 +33,7 @@ class NoCliImportsInCore(BaseRule):
 
     def __init__(self, filepath: str) -> None:
         super().__init__(filepath)
-        self._in_core = bool(_CORE_DIRS.search(filepath))
+        self._in_core = is_core_path(filepath)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if self._in_core and node.module and _BANNED.match(node.module):

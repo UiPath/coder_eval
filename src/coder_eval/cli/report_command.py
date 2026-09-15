@@ -7,8 +7,7 @@ from rich.markdown import Markdown
 
 from ..models import EvaluationResult
 from ..path_utils import TASK_JSON_FILENAME
-from ..reports import ReportGenerator
-from ..reports_html import write_task_html
+from ..reports import ReportGenerator, write_task_html
 from .console import console
 
 
@@ -62,7 +61,7 @@ def report_command(
         return
 
     if fmt == "junit":
-        from ..reports_junit import write_junit_xml
+        from ..reports import write_junit_xml
 
         target = output_file if output_file is not None else run_dir / "junit.xml"
         try:

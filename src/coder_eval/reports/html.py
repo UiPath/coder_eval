@@ -17,18 +17,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from coder_eval.formatting import format_ms
-from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
-
-from .analysis import calculate_command_statistics
-from .reports import (
-    SLOW_PARAMS_PREVIEW_CHARS,
-    collect_agent_settings_rows,
-    count_partials_by_outcome,
-    early_stop_gate_note,
-    group_consecutive_by_iteration,
-)
-from .reports_stats import (
+from ..analysis import calculate_command_statistics
+from ..durations import format_ms
+from ..models import FinalStatus, eval_result_total_cost, sum_costs
+from ..result_metrics import expected_turns_overage, turn_time_buckets
+from ..stats import stddev, welch_t_test
+from .helpers import (
     collect_variant_series,
     describe_prompt_config,
     fmt_mean_sd,
@@ -38,12 +32,17 @@ from .reports_stats import (
     load_variant_eval_results,
     paired_comparison,
 )
-from .result_metrics import expected_turns_overage, turn_time_buckets
-from .stats import stddev, welch_t_test
+from .markdown import (
+    SLOW_PARAMS_PREVIEW_CHARS,
+    collect_agent_settings_rows,
+    count_partials_by_outcome,
+    early_stop_gate_note,
+    group_consecutive_by_iteration,
+)
 
 
 if TYPE_CHECKING:
-    from coder_eval.models import (
+    from ..models import (
         CommandTelemetry,
         CriterionResult,
         EarlyStopInfo,
@@ -1325,7 +1324,7 @@ def _experiment_prompt_config(experiment: ExperimentDefinition | None, variant_i
 def _experiment_paired_comparison(result: ExperimentResult) -> str:
     """Render the Paired Comparison section — the HTML twin of the markdown one.
 
-    Both render the same ``reports_stats.paired_comparison`` result, so the two
+    Both render the same ``reports.helpers.paired_comparison`` result, so the two
     reports can never disagree about the paired numbers.
     """
 

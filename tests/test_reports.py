@@ -1504,7 +1504,7 @@ class TestSlowestCommandsTruncation:
         return ReportGenerator._generate_command_statistics_section(stats)
 
     def test_longer_than_the_cap_is_truncated_with_an_ellipsis(self):
-        from coder_eval.reports import SLOW_PARAMS_PREVIEW_CHARS
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
 
         row = next(line for line in self._rows(SLOW_PARAMS_PREVIEW_CHARS + 40) if line.startswith("| Bash |"))
         assert "..." in row
@@ -1512,7 +1512,7 @@ class TestSlowestCommandsTruncation:
         assert len(params_cell) == SLOW_PARAMS_PREVIEW_CHARS + len("...")
 
     def test_exactly_the_cap_is_not_truncated(self):
-        from coder_eval.reports import SLOW_PARAMS_PREVIEW_CHARS
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
 
         row = next(line for line in self._rows(SLOW_PARAMS_PREVIEW_CHARS) if line.startswith("| Bash |"))
         assert "..." not in row

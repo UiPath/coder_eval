@@ -5,15 +5,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from coder_eval.models import (
+from ..models import (
     ExperimentDefinition,
     ExperimentResult,
     TaskExperimentSummary,
 )
-from coder_eval.path_utils import replicate_subdir_name
-from coder_eval.reports import ReportGenerator, resolve_agent_settings
-from coder_eval.reports_html import write_experiment_html, write_variant_html
-from coder_eval.reports_stats import (
+from ..path_utils import replicate_subdir_name
+from ..run_record import eval_result_to_task_dict
+from ..stats import bootstrap_mean_ci, stddev, welch_t_test, wilson_interval
+from .helpers import (
     VariantSeries,
     collect_variant_series,
     describe_prompt_config,
@@ -24,8 +24,8 @@ from coder_eval.reports_stats import (
     load_variant_eval_results,
     paired_comparison,
 )
-from coder_eval.run_record import eval_result_to_task_dict
-from coder_eval.stats import bootstrap_mean_ci, stddev, welch_t_test, wilson_interval
+from .html import write_experiment_html, write_variant_html
+from .markdown import ReportGenerator, resolve_agent_settings
 
 
 logger = logging.getLogger(__name__)
@@ -359,7 +359,7 @@ class ExperimentReportGenerator:
     def _paired_comparison_lines(result: ExperimentResult) -> list[str]:
         """The ``## Paired Comparison`` block for 2-variant experiments.
 
-        Renders :func:`coder_eval.reports_stats.paired_comparison`, which the HTML
+        Renders :func:`coder_eval.reports.helpers.paired_comparison`, which the HTML
         reporter renders too. Returns ``[]`` only when the two variants have no
         scored task in common; when they have exactly one, the section explains why
         no paired result is shown.
