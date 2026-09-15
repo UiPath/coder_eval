@@ -8,23 +8,31 @@ https://ai.google.dev/gemini-api/docs/pricing, and OpenRouter's live
 ``/api/v1/models`` (every row re-verified 2026-09-03, except the Bedrock
 open-weight block: AWS publishes no eu-north-1 figures for those three).
 
-HAZARD: this table is a HAND-COPIED MIRROR of ``evalboard/lib/pricing.ts``. Editing
-one means editing the other; ``evalboard/lib/__tests__/pricing-parity.test.ts`` fails
-the build on drift in either direction.
+SSOT for rates on both halves of the repo: ``evalboard/lib/pricing.generated.ts`` is
+generated from it by ``make pricing-mirror`` and guarded by CE065. Never hand-edit the
+generated file.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Pricing for a single model (per million tokens)."""
+    """Pricing for a single model (per million tokens).
+
+    ``per_request_billing`` marks a provider that bills per request, so this
+    static rate is a last-resort estimate retained for the ``max_usd`` pre-flight
+    only. A frontend that can show the actual captured per-call cost must not
+    price such a model statically — an estimate would replace a real figure.
+    """
 
     input_per_mtok: float
     output_per_mtok: float
     cache_write_per_mtok: float  # prompt caching write
     cache_read_per_mtok: float  # prompt caching read
+    per_request_billing: bool = False
 
 
 _PRICING: dict[str, ModelPricing] = {
@@ -109,16 +117,26 @@ _PRICING: dict[str, ModelPricing] = {
     # These providers cache prefixes implicitly, so cache-creation is priced at
     # input (unused). HEADLINE rates only: OpenRouter routes per request, so the
     # real bill depends on the provider a call lands on -- which is why the litellm
-    # path captures actual per-call cost and overrides these. Static fallback.
+    # path captures actual per-call cost and overrides these. Static fallback, and
+    # why these three carry per_request_billing (the mirror omits them).
     # Rationale: .claude/notes/reporting.md § Cost joining
-    "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
-    "z-ai/glm-5.2": ModelPricing(0.966, 3.036, 0.966, 0.1932),
-    "deepseek/deepseek-v4-pro": ModelPricing(1.030776, 2.061552, 1.030776, 0.085898),
+    "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30, per_request_billing=True),
+    "z-ai/glm-5.2": ModelPricing(0.966, 3.036, 0.966, 0.1932, per_request_billing=True),
+    "deepseek/deepseek-v4-pro": ModelPricing(1.030776, 2.061552, 1.030776, 0.085898, per_request_billing=True),
 }
 
 
 # Plugin-contributed rates, merged over the built-in table at lookup time.
 _REGISTERED_PRICING: dict[str, ModelPricing] = {}
+
+
+def builtin_rates() -> Mapping[str, ModelPricing]:
+    """The built-in rate card, read-only.
+
+    Excludes plugin rates (``register_pricing``), which are not resolvable
+    outside a running process and are out-of-tree by design.
+    """
+    return MappingProxyType(_PRICING)
 
 
 def _lookup_rate(key: str) -> ModelPricing | None:

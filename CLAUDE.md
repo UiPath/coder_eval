@@ -39,8 +39,8 @@ data-driven analysis.
 - **`path_utils.py`** owns run ids, atomic writes and tree digests — and every run-record
   filename literal (CE053).
 - **`models/container_paths.py`** owns `IN_CONTAINER_ENV` (CE056).
-- **`pricing.py`** is hand-mirrored by `evalboard/lib/pricing.ts`; a parity test fails on
-  drift either way.
+- **`pricing.py`** is the rate SSOT; `evalboard/lib/pricing.generated.ts` is generated
+  from it by `make pricing-mirror`, and CE065 fails the build on drift.
 - **`reports_html.py`** is the evalboard's static twin.
 - **`isolation/`** is `driver: docker`, one container per task.
 - **`streaming/`** is the event protocol and `EventCollector`.
@@ -154,13 +154,17 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 # Regenerate a generated surface — never hand-edit the output
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
+make pricing-mirror    # the evalboard's rate table from pricing.py (CE065)
 
 make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
 ```
 
-Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is
-a hand-copied mirror, and `evalboard/lib/__tests__/pricing-parity.test.ts` fails the
-build on drift in either direction.
+`src/coder_eval/pricing.py` is the single source of truth for rates on both halves of
+the repo. The evalboard's table (`evalboard/lib/pricing.generated.ts`) is generated from
+it by `make pricing-mirror` — regenerate and commit after a reprice; **CE065** fails the
+build on drift. Never hand-edit the generated file. A rate flagged
+`per_request_billing` is deliberately omitted from the mirror: the provider bills per
+request, so the board shows the captured actual per-call cost instead of a static estimate.
 
 ## Custom Lint Rules (CE000+)
 
