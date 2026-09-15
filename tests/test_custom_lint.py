@@ -1568,8 +1568,6 @@ class TestPluginArtifacts:
         )
 
     def test_activation_rows_have_both_polarities(self):
-        import json
-
         rows = [
             json.loads(line)
             for line in (self.TEMPLATES / "activation-rows.jsonl").read_text(encoding="utf-8").splitlines()
@@ -2402,8 +2400,6 @@ class TestCE065PricingMirrorParity:
         sit in it forever and silence the guard. The only exclusion now is the
         `per_request_billing` product rule, declared on the rate itself.
         """
-        import json
-
         from coder_eval.pricing import builtin_rates
         from tests.lint.pricing_mirror import render_pricing
 
