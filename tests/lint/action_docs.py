@@ -1,37 +1,22 @@
 """CE026 — the GitHub Action's onboarding surfaces must stay truthful and self-sufficient.
 
-Several surfaces introduce the same composite Action — ``README.md``,
-``docs/CI_GATE.md``, ``docs/tutorials/02-ci-pipeline.md``, and now the Claude Code
-plugin's ``ci`` skill, whose emitted workflow users copy verbatim — and each was
-hand-maintained, so they drifted. The motivating bug: ``docs/CI_GATE.md`` claimed "there is nothing to
-install" and offered a copy-pasteable ``uses:`` step with no agent runtime — the action
-is agent-agnostic, so an integrator who copied it got a run that dies on a missing
-``claude`` binary. The correcting paragraph was 11 lines away; the tutorial's snippet
-showed the prerequisite steps; the reference page's did not.
+Scope: ``README.md`` and every ``docs/`` and ``plugins/`` Markdown file (the ``ci``
+skill emits a workflow users copy verbatim). Four clauses:
 
-Four clauses, all mechanical:
+1. **Prerequisite parity.** The FIRST fenced ``yaml`` block on a page that references
+   ``uses: <owner>/coder_eval@…`` must show ``REQUIRED_PREREQ_TOKENS`` (kept in sync
+   with the ``action-dogfood`` CI job). Later blocks are skipped.
+2. **No unqualified zero-install absolute** ("nothing to install") near such a snippet.
+   BLIND SPOT: it matches the phrase, not a contradiction elsewhere on the page.
+3. **Marketplace slug parity.** Marketplace links and the shields badge label match
+   ``action.yml``'s ``name:``.
+4. **Input parity.** Every ``with:`` key on the Action step is a declared
+   ``action.yml`` input.
 
-1. **Prerequisite parity.** The *first* fenced ``yaml`` block on a doc page that
-   references the action (``uses: <owner>/coder_eval@…``) is the page's quickstart, so
-   it must also show the agent-runtime steps. Later blocks on the same page are
-   single-input illustrations and are skipped, which is what keeps the rule quiet.
-2. **No unqualified zero-install absolute** in prose near such a block. This catches
-   the *phrase*, not the *contradiction*: judging whether a paragraph 11 lines later
-   states a real prerequisite is semantic reasoning no static rule should attempt, so
-   the rule instead forces the absolute to be scoped where it is written
-   ("no *Marketplace* install step").
-3. **Marketplace slug parity.** Every ``github.com/marketplace/actions/<slug>`` link and
-   the shields badge label must match ``action.yml``'s ``name:`` — the listing title,
-   which a rename would silently 404 in four places at once.
-4. **Input parity.** Every ``with:`` key on a snippet's ``uses: <owner>/coder_eval@…``
-   step must be a real ``action.yml`` input. GitHub does not fail a workflow on an
-   unknown input, so a renamed input leaves every snippet promising something the step
-   no longer does — silently, and worst of all in the ``ci`` skill, whose output lands
-   in *other people's* repositories where our CI can never see it.
+Opt out with ``PREREQ_SKIP_MARKER`` (above the fence) or ``CLAIM_SKIP_MARKER`` (on the
+line). Wired as ``tests/test_custom_lint.py::TestCE026ActionDocSurfaces``.
 
-Like CE027-CE031 this is deliberately NOT a ``BaseRule`` in ``tests/lint/runner.py``:
-that runner is AST-only over ``.py`` files, whereas this rule reasons over Markdown and
-YAML. It is wired as ``tests/test_custom_lint.py::TestCE026ActionDocSurfaces``.
+Rationale: .claude/notes/lint-rules.md § CE026
 """
 
 from __future__ import annotations

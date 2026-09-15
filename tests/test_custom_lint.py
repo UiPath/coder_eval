@@ -2979,30 +2979,16 @@ class TestCE032CriteriaPathSeam:
 class TestCE034ArmedPositiveRequiresSuccess:
     """CE034 — an armed, live-passable `command_executed` must require success.
 
-    `require_success` defaults to False, so a criterion counts an invocation that
-    CRASHED. On an unarmed criterion that is merely generous. On an armed one it
-    corrupts the run's verdict, because three behaviours compose:
+    `require_success` defaults to False, so a crashed invocation counts. On an armed
+    positive criterion (`min_count > 0`, no `max_count`) that call live-PASSES,
+    `stop_early.on_pass: stop` ends the run, and FIRED-ONLY gating consults only the
+    armed subset — so the run reports SUCCESS past every unarmed criterion.
 
-    1. `live_verdict` and `_check_impl` share `_matching_commands`, so a failed
-       invocation live-PASSES a positive criterion (`min_count > 0`, no
-       `max_count`) the moment it is observed;
-    2. `stop_early.on_pass: stop` ends the run on that pass — and
-       `decide_within` latches it, so the timeout never fires either;
-    3. gating is FIRED-ONLY: a run the watcher cut gates on the ARMED SUBSET
-       (`armed_criteria_passed`), so unarmed criteria are never consulted.
+    Scope: pass-capable instances only, read off the model's own
+    `live_decidable_polarities()`. A fail-only negative (`min_count: 0, max_count: 0`)
+    must NOT set `require_success`: a forbidden call that failed is still a call.
 
-    Net effect on `tasks/early_stop_weighted_low_weight_absorbed.yaml` before this
-    rule existed: an agent that ran `python app.py` BEFORE creating app.py scored a
-    weighted 1.0 over the armed subset and reported SUCCESS — with no app.py and a
-    crashed script — because the unarmed `file_exists` was bypassed. Found by
-    running the plugin's own `lint-tasks` skill against this repository's tasks.
-
-    Only *pass-capable* instances are constrained, read off the model's own
-    `live_decidable_polarities()` rather than re-deriving the shape here. A
-    negative assertion (`min_count: 0, max_count: 0`, i.e. "must NOT call curl")
-    is fail-only and must NOT set `require_success`: a curl that failed is still a
-    curl that was called, and requiring success there would blind the criterion to
-    exactly the calls it exists to forbid.
+    Rationale: .claude/notes/lint-rules.md § CE034
     """
 
     ROOT = Path(__file__).parent.parent
@@ -3166,21 +3152,16 @@ def _record_fields_referenced(block: str) -> set[str]:
 class TestRunRecordFieldVocabulary:
     """Every task.json field the run-analysis surfaces name must exist on the models.
 
-    `jq` returns `null` for a key that does not exist instead of failing, so a wrong
-    field name does not surface as an error — it produces a table of nulls that reads
-    like a run with nothing in it. Both surfaces shipped six such names at once
-    (`turns`, `total_tokens`, `assistant_turn_count`, `max_turns`, `criteria_count`,
-    `all_criteria_perfect`), and the failure is worst exactly where the instruction
-    applies: the >20-task path, where the agent is explicitly told NOT to fall back to
-    reading whole files.
+    `jq` yields `null` for a missing key instead of failing, so a wrong field name
+    ships as a table of nulls, not an error.
 
-    Scoped deliberately: only the fenced blocks that mention `success_criteria_results`
-    (the summary-extraction programs), and only the HEAD of each dotted path. Deeper
-    segments are not checked because `task_config` is a free-form dict, so
-    `.task_config.resolved.run_limits.max_turns` is unverifiable from the schema. The
-    allowed set unions the run-level and criterion-level models rather than tracking
-    which scope each expression sits in — a weakening that still catches every name
-    above, since none of them exists on either model.
+    Scope: only fenced blocks that mention `success_criteria_results`, and only the
+    HEAD of each dotted path — `task_config` is a free-form dict, so deeper segments
+    are unverifiable. The allowed set unions the run-level and criterion-level models
+    instead of tracking each expression's scope, so a name valid on only one of those
+    models passes in any scope.
+
+    Rationale: .claude/notes/lint-rules.md § TestRunRecordFieldVocabulary
     """
 
     @staticmethod
@@ -3884,36 +3865,19 @@ class TestCE044PluginManifestParity:
 class TestCE045PluginPathIsAPluginRoot:
     """CE045 — a claude-code local plugin path must name a plugin ROOT, not a skills dir.
 
-    `agent.plugins: [{type: local, path: X}]` reaches the Claude Code SDK as a plugin
-    directory, so a skill is found at `X/skills/<name>/SKILL.md`. Point X one level
-    deeper — at the directory that holds the skill directories — and NOTHING loads.
-    Probed against the real CLI, from a cwd that is not the skill's own repo (project
-    discovery would otherwise find it regardless of `--plugin-dir`, and the namespace
-    prefix is the real signal):
+    `agent.plugins: [{type: local, path: X}]` reaches the SDK as a plugin directory, so
+    a skill resolves at `X/skills/<name>/SKILL.md`; one level deeper loads nothing and
+    every activation suite reports recall 0.0. The unit under test is the VALUE: a path
+    whose last segment is `skills` cannot be a plugin root. `KNOWN_BAD_LINES` is the
+    incident record.
 
-        claude --plugin-dir <root>/skills  ->  nothing
-        claude --plugin-dir <root>         ->  `root:probe-beta`
+    SCOPE: `SKILL_SOURCE_PATH` assignments, plus literal local `path:` values in
+    `tasks/` and `experiments/`. That is a limit, not a license: `$PLUGIN_PATH` (feeds
+    `experiments/plugin-comparison.yaml`) is unlinted. The guard that reaches users is
+    the runtime warning in `utils.process_plugins`; this rule keeps only this repo's
+    shipped strings honest.
 
-    The cost is invisible and total: every activation suite the plugin generated
-    reported recall 0.0, which the bundled template's own comment calls "reads exactly
-    like a broken skill", and `ci` wrote the same path into users' SCHEDULED workflows,
-    where it renders as a permanent red indistinguishable from the drift the schedule
-    exists to detect.
-
-    INCIDENT RECORD — the corpus below is that record, not this prose. Six wrong-value
-    lines across five files shipped at once: docs/PLUGIN.md, tutorial 07,
-    activation.yaml (comment and example), check-skill, and ci. Nothing held them in
-    agreement, which is why they drifted together.
-
-    The unit under test is the VALUE, not the sentence around it: a path whose last
-    segment is `skills` cannot be a plugin root, whatever the prose claims.
-
-    SCOPE. The rule keys on `SKILL_SOURCE_PATH`, the variable the plugin emits. That is
-    a limit, NOT a statement that other variables may use the deeper form — `$PLUGIN_PATH`
-    feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code, and
-    is unlinted. The guard that reaches every user, including the repos where
-    `/coder-eval:check-skill` actually writes suites, is the runtime warning in
-    `utils.process_plugins`; this rule only keeps THIS repo's shipped strings honest.
+    Rationale: .claude/notes/lint-rules.md § CE045
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -4704,31 +4668,16 @@ class TestCE047AgentRosterParity:
 class TestCE055NoAbsoluteCriterionPath:
     """CE055 — a criterion `path:` in `tasks/` must be sandbox-relative.
 
-    Criterion paths are joined onto the sandbox root, and joining an ABSOLUTE
-    path discards that root: `Path(sandbox) / "/opt/marker"` is `/opt/marker`.
-    Containment then refuses it, so the criterion can never match no matter what
-    the agent does.
+    Joining an ABSOLUTE path onto the sandbox root discards the root
+    (`Path(sandbox) / "/opt/marker"` is `/opt/marker`), so containment refuses it and
+    the criterion can never match. This rule reads the YAML, so it also covers tasks
+    no CI bucket runs, where the runtime guard is never reached.
 
-    Two in-tree tasks were broken this way, and the failure mode is why a static
-    rule earns its place on top of the runtime guard:
+    Never fix a violation by relaxing containment. An absolute path is a claim about
+    the container IMAGE: use `run_command` (`test -f /opt/marker`), which stays inside
+    the trust gate for recorded shell on the detached grading path.
 
-    * `tasks/byod_smoke_test.yaml` checked `/opt/byod_marker`. It IS in a CI
-      bucket, and CI reported `Results: 7/8 succeeded` with a gating 0.0 reading
-      "file does not exist" for a file that plainly existed. The real cause sat
-      in a warning inside a task log.
-    * `tasks/dockerfile_build_example/dockerfile_build_example.yaml` checked
-      `/opt/greeting.txt` and `/opt/secret_check.txt`. It is in NO bucket, so
-      nothing ran it at all — the runtime guard, however loud, is never reached.
-
-    That second case is the argument: a runtime error only fires for tasks
-    somebody runs, and this repo ships example tasks that CI does not. This rule
-    reads the YAML.
-
-    The fix is never "make containment allow it". An absolute path here is a
-    claim about the container IMAGE rather than about anything the agent produced
-    in its workspace, and `run_command` (`test -f /opt/marker`) states that
-    directly — while staying inside the trust gate that governs recorded shell on
-    the detached grading path.
+    Rationale: .claude/notes/lint-rules.md § CE055
     """
 
     ROOT = Path(__file__).parent.parent

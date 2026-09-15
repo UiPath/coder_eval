@@ -1,32 +1,19 @@
 """CE047 — every marketing/onboarding surface must name every built-in agent.
 
-The roster of supported harnesses is restated in prose on a handful of surfaces
-that nothing mechanically ties to the code: the README, the docs home, the
-comparison page, ``llms.txt``, the ``mkdocs.yml`` site description, the Pages
-stub, and the packaging metadata. Adding a harness means remembering all seven —
-which is exactly how **OpenCode shipped while being absent from most of them**:
-the agent worked, but a reader (or a crawler, or an LLM answering "which agents
-does Coder Eval support?") was told it did not exist. There is no error, no test
-failure, and no user report for that; the surface just quietly under-sells the
-framework.
+The expected roster is ``AgentKind`` minus ``NON_ROSTER_KINDS``. Each surface in
+``ROSTER_SURFACES`` must name each agent by one of its ``AGENT_DISPLAY_NAMES``
+spellings. ``AgentKind`` lists the built-ins only; the ``AgentRegistry`` stays
+authoritative for valid ``agent.type`` values. Third-party plugin agents are out of
+scope.
 
-``AgentKind`` is the framework's own list of built-ins (it is deliberately NOT the
-closed set of valid ``agent.type`` values — the ``AgentRegistry`` is authoritative
-and plugins extend it — but every built-in *is* in the enum, and a built-in is
-what these surfaces promise). This rule derives the expected roster from that
-enum and asserts each surface mentions each agent by name.
+Blind spot: this is a presence check over a file, or over one extracted region
+(``mkdocs.yml``'s ``site_description``, ``pyproject.toml``'s ``description`` +
+``keywords``). It cannot tell a good sentence from a bad one.
 
-Scope note: this is a **presence** check over a file (or, where a file is mostly
-unrelated content, over one extracted region — ``mkdocs.yml``'s
-``site_description``, ``pyproject.toml``'s ``description`` + ``keywords``). It
-cannot tell a good sentence from a bad one; it only makes "we forgot this harness
-exists" impossible to ship. Third-party plugin agents are out of scope — they own
-their own docs.
+Not a ``BaseRule``: it reasons over Markdown/YAML/TOML/HTML, and is wired as
+``tests/test_custom_lint.py::TestCE047AgentRosterParity``.
 
-It is intentionally NOT a ``BaseRule`` in ``tests/lint/runner.py``: that runner is
-AST-only over ``.py`` files, whereas this reasons over Markdown/YAML/TOML/HTML
-surfaces. It is wired as a dedicated test in
-``tests/test_custom_lint.py::TestCE047AgentRosterParity`` (precedent: CE026-CE031).
+Rationale: .claude/notes/lint-rules.md § CE047
 """
 
 from __future__ import annotations

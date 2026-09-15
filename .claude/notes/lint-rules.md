@@ -99,6 +99,134 @@ The callable `Discriminator(...)` form is accepted because `CriterionResultUnion
 `models/results.py` uses it. Unions with an imported member are out of scope for the same
 same-file conservatism CE009 documents.
 
+## CE026
+
+Several surfaces introduce the same composite Action — `README.md`, `docs/CI_GATE.md`,
+`docs/tutorials/02-ci-pipeline.md`, and the plugin's `ci` skill, whose emitted workflow
+users copy verbatim — and each was hand-maintained, so they drifted. The motivating bug:
+`docs/CI_GATE.md` claimed "there is nothing to install" and offered a copy-pasteable
+`uses:` step with no agent runtime. The action is agent-agnostic, so an integrator who
+copied it got a run that died on a missing `claude` binary. The correcting paragraph was
+11 lines away; the tutorial's snippet showed the prerequisite steps, the reference
+page's did not.
+
+Prerequisite parity checks only the first Action block on a page because that block is
+the page's quickstart; later blocks are single-input illustrations, and skipping them is
+what keeps the rule quiet.
+
+The zero-install clause catches the phrase, not the contradiction. Judging whether a
+paragraph 11 lines later states a real prerequisite is semantic reasoning no static rule
+should attempt, so the rule forces the absolute to be scoped where it is written
+("no Marketplace install step").
+
+Slug parity exists because `action.yml`'s `name:` is the Marketplace listing title, and a
+rename silently 404s every Marketplace link and leaves every badge naming the old listing.
+
+Input parity exists because GitHub does not fail a workflow on an unknown input: a
+renamed input leaves every snippet promising something the step does not do — silently,
+and worst in the `ci` skill, whose output lands in other people's repositories where
+this repo's CI never sees it.
+
+It is a pytest class because it reasons over Markdown and YAML, which the AST-only runner
+does not read.
+
+## CE027
+
+A documented env var whose name matches no `Settings` field or `AliasChoices` is dropped
+with zero signal. That is the failure behind the `CODER_EVAL_API_BACKEND` doc bug: the real
+field is `API_BACKEND`, so the prefixed spelling selected no backend and the run fell back
+to Direct Anthropic. The framework also reads a handful of vars directly through
+`os.getenv` (for example `CODER_EVAL_SKILLS_DIR`, `CODEX_BASE_URL`,
+`CODER_EVAL_IN_CONTAINER`), and those are legitimately documentable, so a `src/` consumer
+also backs a name.
+
+Only assignments are checked. Prose scanning is too prone to false positives (markdown
+links like `CODEX_AGENT_GUIDE.md`, secret references like `secrets.BEDROCK_TOKEN`,
+regex-pattern examples like `API_KEY = "…"`), and `NAME=value` is the form users copy into
+a workflow, so it carries the real risk. Broad third-party namespaces (`AWS_`,
+`ANTHROPIC_`, `GEMINI_`, `GITHUB_`, `EVALBOARD_`, `PLUGIN_`) are consumed by SDKs and CI,
+not necessarily through `Settings`, so scanning them gives false positives on names that
+are legitimately external.
+
+The `src/` scan recognises a consumer through a named constant because
+`CODER_EVAL_IN_CONTAINER` has one definition (`models/container_paths.py::IN_CONTAINER_ENV`)
+and its consumers spell it `os.environ.get(IN_CONTAINER_ENV)`. A literal-only scanner
+reports the repo's own gate as unbacked and pushes the author to paste the literal back:
+the scanner argues against the SSOT it should reinforce. Resolution is two-step so the scan
+stays strict: a constant that nothing reads is still unbacked.
+
+## CE028
+
+The docs overhaul's root cause was doc/code drift, and the flat index surfaces drift the same
+way: a page is added to the nav and forgotten in the three flat lists, or a page is deleted
+and left dangling in them. Generating them from the nav removes the second source.
+
+There is no `--check` mode and no argument parser because CE028 is the checker; a second
+entry point would be untested duplication. The "every published `docs/*.md` is in the nav"
+check is the one that would have caught the overhaul's whole bug class. The
+`docs/tutorials/README.md` table is checked, not generated: it carries a "you'll learn"
+column the nav does not, so generating it would need a second per-page field and bring back
+a dual source of truth.
+
+## CE029
+
+A published example that does not parse is worse than no example: readers copy it, hit a
+`ValidationError`, and conclude the feature is broken. The rule caught exactly that. The
+`prompt_mutations` recipe in `docs/AB_EXPERIMENTS.md` used `text:` where the field is
+`content:`, and every mutation model declares `extra="forbid"`, so the published snippet
+raised `variants.1.prompt_mutations.0.suffix.content Field required`.
+
+Scope is deliberately narrow. A false positive on an illustrative fragment would make
+`make lint` a nuisance and get the rule deleted, so it validates only blocks it can prove
+are whole documents. A bare `success_criteria:` list is the single most common doc shape,
+and it is a fragment. The task guide's overview block uses the schematic `agent: { ... }`
+form deliberately. A block that is not valid YAML gives the rule no basis to claim it is a
+broken example rather than deliberately invalid illustrative text. The
+`<!-- lint-skip: doc-yaml -->` escape hatch is for an example that is intentionally partial
+in a way the heuristic cannot see.
+
+## CE030
+
+The defects that a docs overhaul fixed were all one failure: a doc claim that does not
+match the code. The two worst (P0 and P1) were "a Pydantic field the user must set,
+documented nowhere." CE030 is the sensor that keeps that class from coming back, for a
+small, explicit registry of user-facing models.
+
+It is an allowlist, not a denylist. A new field on a registered model that is neither
+documented nor exempted fails, so adding a user-facing field forces a doc update or a
+reasoned exemption in the same change.
+
+The registry is explicit and does not recurse. Walking nested models (`AgentConfig`,
+`SandboxConfig`, criteria) would silently expand the documentation commitment to dozens of
+models nobody signed up for. `CliMatch` is absent for that reason: its fields are
+documented in the `cli_called` reference, and registering a third nested model under
+`SandboxConfig` would start exactly that tree-walk.
+
+The inline-code match is deliberately simple. A field counts as documented when its bare
+name appears in backticks anywhere in the doc. The rule exists to catch *entirely
+undocumented* fields; a fuzzier "documented in the right section" rule invites false passes
+that erode trust in the gate.
+
+Shared vocabulary weakens it further. `RecordedCli` and `CliResponse` both declare
+`exit_code` / `stdout` / `stderr`, so registering the second only newly guards `when`, and a
+future field on either that reuses a name the other documents passes without its own doc
+line. Registering both is still net-positive.
+
+## CE031
+
+A config field that users set in a task YAML but that no code reads is dead config: it
+silently does nothing, and the author has no way to know. `SimulationConfig.parallel_trials`
+was that — documented, set in a shipped task YAML, defaulting to `True`, and read nowhere
+(trial concurrency is entirely `--max-parallel`'s job).
+
+"Consumed" means an attribute access by name because that is how a behavior-driving config
+takes effect: the orchestrator and validators must read the field. `TaskDefinition` is
+excluded because its fields are largely round-tripped through `model_dump` in the dataset
+expander, which the attribute definition cannot see.
+
+The name-collision floor is accepted: a sensor with false negatives only never wrongly
+breaks the build.
+
 ## CE032
 
 `Sandbox.resolve_files` is the single place criterion `path` semantics live: literal-first
@@ -111,6 +239,148 @@ A checker that builds its own path with `sandbox.sandbox_dir / <field>` and read
 directly silently opts out of all of that, so path semantics differ per criterion. That is
 how `reference_comparison.agent_file` drifted from every other path field. The rule fires
 on the join, not on reading `sandbox_dir`, because the bare root has legitimate uses.
+
+## CE033
+
+An installed Claude Code plugin is copied to `~/.claude/plugins/cache/` without its
+parent directories, so a skill cannot read `docs/TASK_DEFINITION_GUIDE.md` at runtime —
+every reference a skill needs ships inside `plugins/coder-eval/`. A bundled copy of the
+criterion vocabulary is exactly the kind of file that drifts: a criterion gains a field,
+or a new criterion lands, and the copy keeps teaching the old schema to every plugin
+user. So the copy is generated from the `SuccessCriterion` union, the single source of
+truth. There is no `--check` mode and no argument parser because CE033 is the checker; a
+second entry point would be untested duplication.
+
+The inherited-field set is computed rather than a hardcoded name list, which would be a
+second declaration of the base schema. When `stop_early:` replaced `stop_when` +
+`max_steps_to_decide`, a hardcoded list would have rendered the new field into all 14
+per-criterion sections and leaked two dead names; the computed set absorbed the change
+with no edit.
+
+Every field's description is rendered in full because what a field means is the half of
+the schema an authoring agent gets wrong (that `min_count: 0` lets a criterion pass when
+nothing matched, that `weight: 0` makes a criterion informational). A truncated or
+curated subset would need a hardcoded name list, and so a second declaration of the
+schema. Defaults and types are absent on purpose: rendering defaults means handling
+`default_factory` (whose `FieldInfo.default` is `PydanticUndefined`), and rendering types
+means normalizing `X | None` annotations — two helpers serving the half of the reference
+an authoring agent needs least. `coder-eval plan` and the model docstrings cover the rest.
+
+It is a pytest class because it reasons over Markdown and pydantic metadata, which the
+AST-only runner does not read.
+
+## CE034
+
+`require_success` defaults to False, so a `command_executed` criterion counts an
+invocation that CRASHED. On an unarmed criterion that is merely generous. On an armed one
+it corrupts the run's verdict, because three behaviours compose:
+
+1. `live_verdict` and `_check_impl` share `_matching_commands`, so a failed invocation
+   live-PASSES a positive criterion (`min_count > 0`, no `max_count`) the moment it is
+   observed;
+2. `stop_early.on_pass: stop` ends the run on that pass — and `decide_within` latches
+   it, so the timeout never fires either;
+3. gating is FIRED-ONLY: a run the watcher cut gates on the ARMED SUBSET
+   (`armed_criteria_passed`), so unarmed criteria are never consulted.
+
+The defect this caught was in `tasks/early_stop_weighted_low_weight_absorbed.yaml`: an
+agent that ran `python app.py` BEFORE it created app.py scored a weighted 1.0 over the
+armed subset and reported SUCCESS — with no app.py and a crashed script — because the
+unarmed `file_exists` was bypassed. Running the plugin's own `lint-tasks` skill against
+this repository's tasks found it.
+
+The rule reads pass-capability off the model's `live_decidable_polarities()` instead of
+re-deriving the shape. A negative assertion (`min_count: 0, max_count: 0`, "must NOT call
+curl") is fail-only, and requiring success there blinds the criterion to exactly the calls
+it exists to forbid: a curl that failed is still a curl that was called.
+
+## CE035
+
+The motivating bug shipped in `verify-published-action.yml`: two steps read
+`steps.parity.outputs.version`, but the `parity` step writes only `pin` / `newest` /
+`lagging` (the shell variable was `VERSION`, the output key was `newest`). GitHub expands
+an unwritten output to the empty string, so `TAG_REF: v${{ steps.parity.outputs.version }}`
+became the bare string `v`, `git show "v:action.yml"` exited 128 under
+`set -euo pipefail`, and the preflight job was red on 100% of triggers. Through
+`needs: preflight`, the paid end-to-end tier could never run at all.
+
+Nothing caught it. The workflow is invisible to ruff, pyright, pytest and the AST lint
+runner, and `actionlint` models `steps.*.outputs` as an open string map, so an unwritten
+shell key is untyped and unflagged there too.
+
+Writers are collected by over-approximation because an extra writer can only make the rule
+quieter, never produce a false failure. A body that writes `$GITHUB_OUTPUT` in a way the
+scan cannot read is skipped rather than guessed at. Missing step ids and undeclared `needs`
+outputs are always findings because they are fully enumerable from the file.
+
+## CE036
+
+The contract is documented on `LiveVerdict` / `BaseCriterion.live_verdict`
+(`criteria/base.py`), but nothing enforced it before CE036: a criterion (in-tree or
+plugin) that implements `live_verdict` non-monotonically type-checks, passes CE025, and
+silently corrupts `EarlyStopWatcher`'s deferred fail-stop, verdict latching and
+`_prev_verdicts` flip-attribution — it latches a verdict the run then contradicts. See
+GitHub issue #61 item 2. Why replay is the only sound check is in
+`contracts.md § The live_verdict contract` (subsection "Why replay is the only sound
+check"); it is not repeated here.
+
+### Design choices
+
+Fixtures are mandatory. A property test over random trajectories returns `"undecided"`
+almost always and passes vacuously. So each live type supplies cases in `CASES`, and
+`missing_case_types`, driven by the `SuccessCriterion` union like CE025, fails when a
+new `LiveSuccessCriterion` has none. The author demonstrates the contract in the same
+change that adds the criterion.
+
+Each case declares what it reaches. `ContractCase.reaches` pins the verdict on the FULL
+trajectory, so a fixture that stops exercising its decision path (a renamed tool, a
+changed regex) fails loudly instead of degrading into a vacuous all-`undecided` replay.
+
+Polarity honesty. `live_decidable_polarities` is documented as a subset of what the
+checker's `live_verdict` can emit for that instance. A case that terminally decides a
+polarity the instance does not claim is a real bug: the watcher treats that trigger as
+inert while the checker decides it.
+
+It is a pytest class because it reasons over the criteria registry and executes checkers,
+which an AST-only runner cannot do.
+
+### Honest limits, expanded
+
+A careless implementation with an agreeable fixture still passes. The rule raises the
+cost of the bug and puts the contract in front of the next implementer; it does not
+close the hole, and nothing short of a proof would. This module lives under `tests/`
+and is not shipped in the wheel, so a plugin shipping a live criterion copies the
+pattern — a `ContractCase`-style fixture plus the prefix walk — into its own suite, with
+this module as the reference implementation. The determinism probe catches RNG and
+per-call mutable state, but two calls microseconds apart rarely disagree on a wall-clock
+read; the monotonicity replay is the likelier tripwire for a `datetime.now()`
+dependency, and only if the fixture straddles the flip.
+
+### The prefix walk
+
+A raise is reported as a labeled violation (case and prefix length) instead of crashing
+the walk, and the remaining prefixes still replay, so one bad prefix does not mask
+breaches elsewhere. The watcher runs mid-turn, where a raise takes down the stop logic;
+the shape `command_executed` pins for a malformed regex — degrade to `"undecided"`,
+never raise — is the contract for every implementation. The terminal verdict is `None`
+when the last prefix raised because there is then no verdict to compare against, and the
+previous prefix's stale value would stack a bogus `reaches` breach on the real one.
+
+### Seeded permutations
+
+`contract_violations` walks one ordering, the one the fixture author wrote, but the
+contract quantifies over any trajectory. The orderings an author does not think of are
+where an order-sensitive bug hides — a verdict computed from the latest command instead
+of the accumulated set can look monotone on the authored ordering and flip on a
+reordering. Seeded shuffles probe those orderings for free.
+
+Each shuffle is renumbered because `EarlyStopWatcher._collect_verdicts` keeps its partial
+trajectory sorted by `sequence_number`, so `live_verdict` never sees a list whose order
+contradicts those numbers. Without the renumber the layer reports breaches on inputs the
+watcher cannot construct, and it degrades to a silent no-op for any checker that sorts by
+`sequence_number` itself — the shuffle sorts straight back to the authored ordering.
+`case.reaches` and polarity honesty are not checked on shuffles because pinning either
+makes the layer unsound for exactly the order-sensitive criteria it exists to probe.
 
 ## CE037
 
@@ -170,6 +440,47 @@ Bash results at ~31 tokens and skewed the cost model.
 Storing the output whole is safe because it is already bounded by the harness's own
 exec-output truncation; trimming belongs to display, in the renderers and reports.
 
+## CE044
+
+Eight fields are byte-identical duplicates across `marketplace.json` and `plugin.json`
+(`name`, `displayName`, `description`, `keywords`, `author`, `homepage`, `repository`,
+`license`), and nothing else compares them: the only other test that reads `plugin.json`
+is `tests/test_action_version_pin.py`, and it reads only `version`. A one-sided edit, such
+as retitling the plugin in the marketplace but not in the manifest, ships silently and
+shows two different one-liners in the wild.
+
+The allowlist half is the one that has already bitten. The marketplace schema allows both
+`keywords` ("Tags for plugin discovery and categorization") and `tags` ("Tags for
+searchability and discovery"); the plugin-manifest schema has no `tags` property. Split
+discovery strings drop half of them from the installed copy, and leave a future editor
+with no rule for which list a new term belongs in. So an extra entry key fails unless
+`MARKETPLACE_ONLY` gives a written reason: the allowlist keeps that decision in code, not
+in tribal knowledge.
+
+## CE045
+
+`agent.plugins: [{type: local, path: X}]` reaches the Claude Code SDK as a plugin
+directory, so a skill is found at `X/skills/<name>/SKILL.md`. Point X one level deeper —
+at the directory that holds the skill directories — and NOTHING loads. Probed against the
+real CLI, from a cwd that is not the skill's own repo (project discovery would otherwise
+find the skill regardless of `--plugin-dir`, and the namespace prefix is the real signal):
+
+    claude --plugin-dir <root>/skills  ->  nothing
+    claude --plugin-dir <root>         ->  `root:probe-beta`
+
+The cost is invisible and total: every activation suite the plugin generated reported
+recall 0.0, which the bundled template's own comment calls "reads exactly like a broken
+skill", and `ci` wrote the same path into users' SCHEDULED workflows, where it renders as a
+permanent red indistinguishable from the drift the schedule exists to detect.
+
+Six wrong-value lines across five files shipped at once: `docs/PLUGIN.md`, tutorial 07,
+`activation.yaml` (comment and example), `check-skill`, and `ci`. Nothing held them in
+agreement, which is why they drifted together.
+
+The rule stops at this repo's shipped strings because the runtime warning in
+`utils.process_plugins` already reaches the repos where `/coder-eval:check-skill` writes
+suites.
+
 ## CE046
 
 `Agent.get_environment_info` emits the `system_prompt_semantics` marker from the ClassVar of
@@ -188,6 +499,16 @@ its own source.
 ## CE047
 
 every onboarding/marketing surface — README, `docs/index.md`, `docs/comparison.md`, `docs/llms.txt`, `mkdocs.yml`'s `site_description`, the Pages stub, and pyproject's `description`/`keywords` — must name every built-in `AgentKind`; OpenCode shipped while four of those seven still listed three harnesses, and nothing failed
+
+The roster is restated in prose on surfaces that nothing ties to the code, so adding a
+harness means remembering all seven. A reader, a crawler or an LLM answering "which agents
+does Coder Eval support?" is told the missing agent does not exist, and the surface quietly
+under-sells the framework. The rule only makes "we forgot this harness exists" impossible to
+ship.
+
+`AgentKind` is not the closed set of valid `agent.type` values (plugins extend the
+`AgentRegistry`), but every built-in is in the enum, and a built-in is what these
+surfaces promise.
 
 ## CE048
 
@@ -293,6 +614,11 @@ a bug.
 ## CE055
 
 a criterion `path:` in `tasks/` must be sandbox-relative — an absolute path is joined onto the sandbox root, which DISCARDS the root, so containment refuses it and the criterion can never match whatever the agent does; two in-tree tasks were broken this way and the pair is the argument for a static rule on top of the runtime `CheckerMisuseError`: `byod_smoke_test` IS in a CI bucket and produced only `Results: 7/8 succeeded` plus a gating 0.0 reading "file does not exist" for a file that existed, while `dockerfile_build_example` is in NO bucket, so nothing ran it and no runtime guard was ever reached — the fix is never to relax containment but to say what the criterion means, `run_command: test -f /opt/marker`, a claim about the container IMAGE rather than about the agent's workspace
+
+The two broken tasks: `tasks/byod_smoke_test.yaml` checked `/opt/byod_marker`, and the
+real cause sat in a warning inside a task log;
+`tasks/dockerfile_build_example/dockerfile_build_example.yaml` checked `/opt/greeting.txt`
+and `/opt/secret_check.txt`.
 
 ## CE056
 
@@ -464,6 +790,21 @@ windows at all.
 The three clock expressions are a local `clock` in `communicate`, `state.clock` from the
 caller, and `self.clock` inside the state. Demanding one spelling would make the rule a
 syntax check on three harnesses' internal structure.
+
+## TestRunRecordFieldVocabulary
+
+`jq` returns `null` for a key that does not exist instead of failing, so a wrong field
+name produces a table of nulls that reads like a run with nothing in it. Both run-analysis
+surfaces shipped six such names at once (`turns`, `total_tokens`, `assistant_turn_count`,
+`max_turns`, `criteria_count`, `all_criteria_perfect`), and the failure is worst exactly
+where the instruction applies: the >20-task path, where the agent is told NOT to fall back
+to reading whole files.
+
+Only the head of each dotted path is checked because `task_config` is a free-form dict:
+`.task_config.resolved.run_limits.max_turns` is unverifiable from the schema. Unioning the
+run-level and criterion-level models instead of tracking each expression's scope is a
+weakening that still catches every one of the six shipped names, since none of them exists
+on any of those models.
 
 ## _model_ctor
 
