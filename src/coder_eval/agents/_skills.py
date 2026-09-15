@@ -1,14 +1,9 @@
 """Shared ``agent.plugins`` -> skills-directory resolver for CLI harnesses.
 
-Both OpenCode (maps each skills dir into ``skills.paths`` in
-``OPENCODE_CONFIG_CONTENT``) and Pi (passes each as a ``--skill <dir>`` argument)
-honor only the *skills* half of a Claude plugin. This module holds that one
-resolver so neither agent has to reach into the other's private module for it
-(the alternative — ``pi_agent`` importing ``opencode_agent._plugin_skill_dirs`` —
-coupled the two harnesses through an implementation-private symbol).
+One resolver, so neither OpenCode nor Pi has to reach into the other's private
+module for it.
 
-Only the skills half of a plugin is honored. A plugin's agents, hooks, commands
-and MCP servers have no CLI equivalent and are dropped by both harnesses.
+Rationale: .claude/notes/agents.md § Skills, per harness
 """
 
 from __future__ import annotations
@@ -33,10 +28,8 @@ def _manifest_skill_dirs(root: Path) -> list[Path]:
     """Skill directories a Claude-plugin root declares, in manifest order.
 
     Reads the ``skills`` field of ``<root>/.claude-plugin/plugin.json`` (a string
-    or a list of strings, each relative to the root) and falls back to the
-    convention default ``<root>/skills`` when the manifest is absent, unreadable,
-    or declares none. Honoring the manifest rather than hardcoding ``skills/``
-    keeps a plugin that relocates its skills working on both harnesses.
+    or a list, each relative to the root), falling back to ``<root>/skills`` when
+    the manifest is absent, unreadable, or declares none.
     """
     manifest = root.joinpath(*_PLUGIN_MANIFEST_RELPATH)
     declared: list[str] = []
@@ -64,11 +57,10 @@ def _plugin_skill_dirs(
     """Resolve ``plugins:`` entries to skill-directory paths for a CLI harness.
 
     Returns the skills-parent directories (each holding ``<name>/SKILL.md``) that
-    a ``type: local`` plugin root declares. Shared by OpenCode (``skills.paths``
-    in ``OPENCODE_CONFIG_CONTENT``) and Pi (a ``--skill <dir>`` argument each);
-    ``harness`` only labels the diagnostics. Every way this can come up empty is
-    logged rather than passed over: a plugin whose skills never reach the agent
-    still *looks* like a normal run, which is precisely the failure this closes.
+    a ``type: local`` plugin root declares. ``harness`` only labels the
+    diagnostics. EVERY way this can come up empty is logged rather than passed
+    over, because a plugin whose skills never reach the agent still *looks* like a
+    normal run.
     """
     resolved: list[str] = []
     for plugin in plugins or []:
@@ -90,12 +82,9 @@ def _plugin_skill_dirs(
             )
             continue
         candidates = [directory for directory in _manifest_skill_dirs(root) if directory.is_dir()]
-        # A path that is ALREADY a bare skills directory (<root>/<name>/SKILL.md)
-        # has no `skills/` subdir, so use it as-is. Deliberately not a fallback for
-        # a root that HAS one: `skills.paths` is scanned recursively and a repo
-        # root can contain self-referential symlinks (UiPath/skills has
-        # `plugins/uipath -> ..`), which resolves skills through an arbitrary path
-        # and silently drops duplicate names.
+        # A path that is ALREADY a bare skills directory has no `skills/` subdir,
+        # so use it as-is. Deliberately NOT a fallback for a root that HAS one.
+        # Rationale: .claude/notes/agents.md § Skills, per harness
         if not candidates:
             candidates = [root]
         for directory in candidates:
