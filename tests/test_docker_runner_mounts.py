@@ -587,7 +587,7 @@ def test_docker_isolation_doc_names_only_real_denylist_entries():
 
     Drift-guard for the doc finding: the prose may enumerate a subset, but every
     directory it names in the *drops* clause must be a real denylist member, and the
-    headline ``security/`` (the largest, previously-omitted drop) must be named — so
+    headline ``security/`` (the largest drop) must be named — so
     the user-facing contract can't silently diverge from the source-of-truth constant.
     """
     doc = (Path(__file__).parent.parent / "docs" / "DOCKER_ISOLATION.md").read_text(encoding="utf-8")
@@ -620,7 +620,7 @@ def test_copy_claude_home_tolerates_self_referential_symlink_loop(tmp_path: Path
     (host / "settings.json").write_text('{"ok": true}')
 
     dest = tmp_path / "copy"
-    _copy_claude_home(host, dest)  # must not raise (pre-fix: "too many levels of symbolic links")
+    _copy_claude_home(host, dest)  # must not raise ("too many levels of symbolic links")
 
     assert (dest / "settings.json").read_text() == '{"ok": true}'
     looped = dest / "plugins" / "marketplaces" / "uipath-marketplace" / "plugins" / "uipath"
@@ -779,17 +779,12 @@ class TestReferenceMountAntiCheat:
     def test_fowner_and_chown_are_deliberately_kept(self, tmp_path):
         """Dropping FOWNER would disable the harness's OWN chmod.
 
-        chmod(2) is gated on owner-or-CAP_FOWNER, and the in-container
-        orchestrator that applies the mode-000 window is the same root process
-        with the same capability set as the agent. On native Linux the bind
-        mount preserves the host uid that ran coder-eval, so with FOWNER dropped
-        `chmod 000 /work/references` fails with EPERM and the run completes
-        UNPROTECTED while still looking protected. Verified in a container:
-        root + uid-1000-owned dir + FOWNER dropped -> "Operation not permitted".
+        Pins: `--cap-drop` names neither FOWNER nor CHOWN. The orchestrator that
+        applies the mode-000 window has the agent's capability set, so on native
+        Linux a dropped FOWNER makes `chmod 000 /work/references` fail with EPERM
+        and the run completes UNPROTECTED -- see docs/DOCKER_ISOLATION.md.
 
-        So the drop only ever bites on the hosts where it also disables the
-        control. Closing the re-chmod hole needs a different uid, not a smaller
-        capability set -- see docs/DOCKER_ISOLATION.md.
+        Rationale: .claude/notes/isolation.md § Capability drops and the anti-cheat window
         """
         argv = self._argv(self._make_runner(tmp_path, reference=None), tmp_path)
 

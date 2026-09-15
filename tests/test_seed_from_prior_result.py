@@ -229,11 +229,14 @@ def test_grader_environment_is_kept_beside_the_run_s_not_over_it(tmp_path: Path)
 
 
 def test_the_evaluate_only_path_selects_the_same_gate_as_the_agent_path(tmp_path: Path) -> None:
-    """C1: gate selection is FIRED-ONLY, and a detached grade reaches the verdict
-    through the evaluate-only branch. That branch used to call
-    ``all_criteria_passed`` unconditionally, so re-grading an early-stopped run
-    applied the full-run strict-AND gate to a truncated trajectory and could flip
-    SUCCESS into FAILURE. Both paths must go through ``_select_gate``."""
+    """C1: the evaluate-only and agent branches select the gate the same way.
+
+    Pins: both call ``_select_gate`` and neither calls ``all_criteria_passed``
+    inline, so re-grading an early-stopped run gates on the armed subset instead
+    of applying the full-run strict-AND gate to a truncated trajectory.
+
+    Rationale: .claude/notes/orchestration.md § Gate selection is fired-only
+    """
     import inspect
 
     source = inspect.getsource(Orchestrator._evaluation_loop)
@@ -294,17 +297,13 @@ def test_grading_cannot_overturn_an_execution_fact() -> None:
 def test_max_turns_exhausted_is_not_an_execution_fact() -> None:
     """The one status that reads like an execution fact and is not one.
 
-    It is SUBORDINATE to the verdict: `run` returns SUCCESS for a max-turns
-    trajectory whose criteria pass and only falls through to this status when
-    they do not — which is why `_terminal_status` puts the `grade=False` arm
-    above it. The table said True while that method's docstring argued the
-    opposite, so a prior max-turns row re-graded through `evaluate` was written
-    back as MAX_TURNS_EXHAUSTED *holding weighted_score 1.000* and exited 1 — a
-    combination `run` can never produce for the same trajectory.
+    Pins: `FinalStatus.MAX_TURNS_EXHAUSTED.is_execution_fact` is False, so a
+    detached grade decides it, and the fact survives on the
+    `EvaluationResult.max_turns_exhausted` field. Keep it out of the loop above:
+    "grading may not launder a crash into a pass" and "grading decides this one"
+    are different contracts.
 
-    Its own test, not a line in the loop above, because the two statements
-    ("grading may not launder a crash into a pass" and "grading decides this
-    one") are different contracts that happened to share a fixture.
+    Rationale: .claude/notes/orchestration.md § The terminal-status chain
     """
     assert not FinalStatus.MAX_TURNS_EXHAUSTED.is_execution_fact
     # The fact is not lost; it just lives somewhere a verdict cannot contradict.

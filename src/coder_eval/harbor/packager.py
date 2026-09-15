@@ -381,11 +381,14 @@ def _find_workdir(dockerfile: Path) -> str | None:
 
 
 def _write_verifier_task_yaml(task: TaskDefinition, out_dir: Path) -> None:
-    """``tests/task.yaml`` — the criteria, as authored. See the module docstring for the agent-type caveat."""
+    """``tests/task.yaml`` — the criteria, as authored. It must not set a ``none`` agent type.
+
+    Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
+    """
     payload: dict[str, object] = {
         "task_id": task.task_id,
         "description": task.description,
-        "agent": {"type": "claude-code"},  # placeholder; never instantiated (see module docstring)
+        "agent": {"type": "claude-code"},  # placeholder; never instantiated (see this function's docstring)
         "initial_prompt": _VERIFIER_PLACEHOLDER_PROMPT,
         "success_criteria": [c.model_dump(mode="json", exclude_none=True) for c in task.success_criteria],
     }

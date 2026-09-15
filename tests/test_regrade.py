@@ -875,13 +875,11 @@ class TestOperatorBaselineFailsClosed:
 
 
 class TestEvaluateDispatchesADockerRow:
-    """The reordering in `evaluate_command` is the fix; nothing pinned it.
+    """A docker row reaches the container dispatch from `evaluate`.
 
-    `delegates_to_regrade` exists solely because `grading_sandbox_config` --
-    whose job is to REFUSE `driver: docker` -- was being called BEFORE the branch
-    that no longer needs it, so no docker row could ever reach the container
-    dispatch. Revert the hoist and every docker detached grade becomes a hard
-    refusal again, with the suite still green.
+    Hazard: `grading_sandbox_config` REFUSES `driver: docker`, so `evaluate_command`
+    must take the in-place `regrade_in_place` branch BEFORE building a sandbox
+    config. Build it first and every docker detached grade becomes a hard refusal.
     """
 
     @staticmethod
@@ -953,9 +951,8 @@ class TestContainerFailureKeepsItsEvidence:
     `_grade_in_container` runs the whole dispatch inside a `TemporaryDirectory`,
     and every DockerRunner diagnostic — the container's merged stdout+stderr, the
     captured build log, the in-container FATAL guards — is written into it.
-    Folding out only on SUCCESS destroyed precisely the evidence, while
-    DockerRunError's own text says `See {log_path} for container output`, naming
-    a path that no longer existed by the time it was printed.
+    Pins: the log is folded out of it on failure as well as on success, and the
+    error names the rescued path, which still exists when it is printed.
     """
 
     async def test_the_container_log_survives_a_failed_grade(

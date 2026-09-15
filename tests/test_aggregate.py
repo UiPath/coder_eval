@@ -85,7 +85,7 @@ def test_build_run_summary_buckets_every_status_by_category() -> None:
     assert summary.tasks_succeeded == sum(1 for s in statuses if s.category == "succeeded")
     assert summary.tasks_error == sum(1 for s in statuses if s.category == "error")
     assert summary.tasks_failed == sum(1 for s in statuses if s.category == "failed")
-    # Budget sub-counters are a subset of "failed" — both previously unexercised.
+    # Budget sub-counters are a subset of "failed".
     assert summary.tasks_token_budget_exceeded == 1
     assert summary.tasks_cost_budget_exceeded == 1
     # The two the hand-picked test omitted both classify as "failed".

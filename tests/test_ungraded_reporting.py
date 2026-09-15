@@ -276,8 +276,10 @@ def test_summary_points_at_the_grading_form_that_keeps_the_trajectory(tmp_path: 
 
 
 def test_summary_still_reports_a_ratio_for_an_empty_run(tmp_path: Path) -> None:
-    """Both counters are falsy for tasks_run == 0; independent `if`s would print
-    no Results line at all, where it previously printed 0/0."""
+    """An empty run still prints a `0/0 succeeded` Results line.
+
+    Both counters are falsy for tasks_run == 0, so independent `if`s would print
+    no Results line at all."""
     empty = _summary(tasks_run=0, tasks_succeeded=0, tasks_not_graded=0)
     assert "0/0 succeeded" in _summary_output(empty, tmp_path)
 

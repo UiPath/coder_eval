@@ -86,9 +86,9 @@ async def test_discard_pending_turn_rolls_back_when_partial_build_failed():
     """If _set_pending swallowed an exception and left pending_turn=None, discard
     must still roll back the iteration counter.
 
-    Regression: previously the rollback gated on (pending_turn is not None), so
-    a swallowed partial-build exception caused _iteration to drift permanently
-    higher on every double-failure.
+    Pins: the rollback fires on ``_iteration_was_incremented`` even when
+    ``pending_turn`` is None (the two signals are OR'd), so a swallowed
+    partial-build exception cannot drift ``_iteration`` higher on every double-failure.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -781,8 +781,8 @@ def test_claude_agent_message_formatting_edge_cases():
     assert "[TOOL USE] Read" in formatted
 
     # Test 5: Non-tool_use event of the same shape — falls through to the
-    # unknown-tag branch (was previously filtered; now we surface "an
-    # unknown message type appeared" via its class name).
+    # unknown-tag branch, which surfaces "an unknown message type appeared"
+    # via its class name.
     class _ThinkingEvent:
         type = "thinking"
 
@@ -937,8 +937,8 @@ def test_format_messages_system_message_subclasses_are_filtered():
     assert formatted.count("{") == formatted.count("}")
 
     # Formatter contract: verdict JSON survives intact in the textual transcript
-    # used for log auditing. The judge no longer parses this output — it's
-    # purely a human-readable artifact now — but a regression that drops or
+    # used for log auditing. The judge does not parse this output — it is
+    # purely a human-readable artifact — but a regression that drops or
     # truncates the verdict text would still mask debugging signal.
     assert verdict_json in formatted
 

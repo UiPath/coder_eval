@@ -84,7 +84,7 @@ def local_bindings(tree: ast.AST, class_name: str) -> set[str]:
 
 
 def constructor_name(func: ast.expr, names: set[str], class_name: str) -> str | None:
-    """The spelling this call used to name the model, or None if it did not.
+    """The spelling this call names the model with, or None if it does not name it.
 
     A bare name has to be bound in this module to be ours; the attribute
     spelling is matched on the attribute alone, since the module binding it

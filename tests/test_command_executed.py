@@ -124,11 +124,10 @@ class TestCommandExecutedCriterion:
     def test_empty_commands(self):
         """Turns exist but have no commands ⇒ score by the same ``min_count`` math.
 
-        Used to short-circuit on a separate ``"No commands found"`` branch, but
-        that branch returned ``0.0`` even when ``min_count=0`` (the negative-
-        assertion pattern), which was wrong. Now the empty case falls through
-        to the normal scoring math: with ``min_count=1`` and zero matches, the
-        score is ``0/1 = 0.0`` and the details mirror the positive shape.
+        The empty case has no separate branch, so ``min_count=0`` (the
+        negative-assertion pattern) still passes. With ``min_count=1`` and zero
+        matches, the score is ``0/1 = 0.0`` and the details mirror the positive
+        shape.
         """
         sandbox = MockSandbox()
         turn_records = [_make_turn(commands=[])]
@@ -842,10 +841,9 @@ class TestNormalizeShell:
     def test_every_wrapper_form_is_unwrapped(self):
         """One case per shell/flag shape the agents emit — the allowlist can't rot.
 
-        The predicate replaced an enumerated allowlist that omitted ``zsh``
-        (Codex's shell on macOS, codex_agent.py) and ``-ic`` while listing the
-        exotic ``-lic``; on those hosts the normalization silently reverted to
-        the pre-fix false-negative behaviour. Each entry must strip the wrapper.
+        Covers ``zsh`` (Codex's shell on macOS, codex_agent.py) and ``-ic``; a
+        shape the predicate misses silently turns normalization into a false
+        negative. Each entry must strip the wrapper.
         """
         cases = {
             # zsh — Codex's default login shell on macOS
@@ -1077,11 +1075,10 @@ class TestShellQuotingNormalization:
     def test_normalized_haystack_shares_the_raw_truncation_window(self):
         """Both haystacks describe the same <=2000-char window (no past-cap leak).
 
-        Previously the raw haystack was truncated at 2000 chars but normalization
-        ran over the FULL command, so quote-stripping could slide content from
-        past the cap into the normalized haystack — a task relying on the
-        2000-char bound changed verdict. Normalization now runs over the
-        already-truncated window.
+        Normalization runs over the already-truncated window. Normalizing the
+        FULL command would let quote-stripping slide content from past the cap
+        into the normalized haystack and change the verdict of a task relying on
+        the 2000-char bound.
         """
         cmd = "bash -lc " + ("word " * 600) + "TARGET"  # TARGET sits well past 2000 chars
         haystacks = _match_haystacks(cmd, is_shell=True)

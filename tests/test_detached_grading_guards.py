@@ -247,8 +247,7 @@ def test_a_restored_path_drops_entries_inside_the_graded_run(tmp_path: Path) -> 
     run's own task.json — a shareable artifact. Every entry an attacker could
     have placed there must be dropped; only the run's real toolchain survives.
 
-    The run-directory SIBLING case is the one this test used to pin the wrong way
-    round: it asserted such an entry was kept. The workspace is only part of the
+    A run-directory SIBLING is dropped too: the workspace is only part of the
     run dir, and ``artifacts/`` and the run root travel in the same archive.
     """
     run_dir = tmp_path / "run"
@@ -329,19 +328,12 @@ def test_the_actual_cost_join_is_skipped_on_a_re_grade(tmp_path: Path) -> None:
 async def test_a_container_run_records_the_driver_it_was_authored_with(tmp_path: Path, monkeypatch) -> None:
     """`task_config.resolved` must describe the task as AUTHORED, not as rewritten.
 
-    `run_task_internal_command` rewrites `driver: docker` -> `tempdir` before
-    building the in-container Orchestrator — the one legitimate rewrite, since we
-    are already inside the container the driver asked for. But the Orchestrator
-    then recorded the REWRITTEN copy, so a docker run's own `task.json` claimed
-    `driver: tempdir`.
+    Pins: an Orchestrator built with `recorded_task` records that task's
+    `driver: docker`, not the in-container `tempdir` rewrite it runs. A recorded
+    `tempdir` lets `evaluate <run_dir>` skip the host-grading refusal and the
+    `graded_on_host` stamp. `recorded_task` is the seam, exercised without docker.
 
-    That fed straight into the gate that reads the driver back out of the record:
-    `evaluate <run_dir>` on a container row skipped the host-grading refusal AND
-    the `graded_on_host` stamp, and graded a container task against the host
-    filesystem silently. Verified against a real docker run before the fix: a
-    `driver: docker` task re-graded on the host, unprompted and unstamped.
-
-    `recorded_task` is the seam, exercised here without needing docker.
+    Rationale: .claude/notes/orchestration.md § Recording the task as authored
     """
     from coder_eval.config import settings
     from coder_eval.models import (

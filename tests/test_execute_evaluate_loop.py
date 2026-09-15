@@ -422,12 +422,11 @@ def test_grading_the_same_run_twice_reaches_the_same_verdict(tmp_path: Path) -> 
 def test_execute_records_max_turns_exhausted_exactly_as_run_does(tmp_path: Path) -> None:
     """`max_turns_exhausted` is a fact about the RUN, not a verdict.
 
-    It used to be captured AFTER the grading switch's early return, so under
-    `execute` it was never recorded at all: the row finalized NOT_GRADED and the
-    command exited 0 where `run` reported MAX_TURNS_EXHAUSTED and exited 1 — for
-    identical agent output. `_seed_from_prior_result` cannot restore a fact the
-    execute phase never captured, so a later `evaluate` inherited the wrong
-    terminal status too.
+    Pins: `execute` records it before the grading switch's early return, so a
+    later `evaluate` inherits it. `_seed_from_prior_result` cannot restore a fact
+    the execute phase never captured.
+
+    Rationale: .claude/notes/isolation.md § Detached grading and `Sandbox.adopt`
     """
     from coder_eval.streaming.collector import EventCollector
 
@@ -748,15 +747,12 @@ def test_an_in_place_grade_refuses_a_recorded_post_run_without_consent(tmp_path:
 def test_the_baseline_post_run_alone_does_not_prompt(tmp_path: Path) -> None:
     """The whole point of the exemption, on the shape that is 100% of real runs.
 
-    `experiments/default.yaml` appends `rm -rf node_modules .npm-prefix` to every
-    task, so once post_run began running on the in-place path, scanning it
-    naively made EVERY `evaluate <run_dir>` demand --allow-recorded-commands.
-    A refusal that always fires is read as a formality and waved through, which
-    is how the gate would have stopped protecting the authored commands that DO
-    represent a choice by whoever wrote the run directory.
+    Pins: a run directory whose recorded post_run holds only the grader's own
+    `experiments/default.yaml` baseline grades in place without
+    --allow-recorded-commands, and the baseline command still runs. The agentless
+    task authors no post_run of its own.
 
-    The agentless task authors no post_run of its own, so the recorded list holds
-    only the grader's own baseline — nothing the record chose.
+    Rationale: .claude/notes/orchestration.md § What the gate covers, and why each part is in scope
     """
     run_dir = tmp_path / "r"
     _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])

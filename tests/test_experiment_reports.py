@@ -540,7 +540,7 @@ class TestReportFileWriting:
         # Every per-task link in the variant HTML must traverse the replicate dir.
         assert 'href="task-a/00/task.html"' in html
         assert 'href="task-b/00/task.html"' in html
-        # Guard against the pre-fix flat shape slipping back in.
+        # The flat (replicate-less) link shape must not appear.
         assert 'href="task-a/task.html"' not in html
         assert 'href="task-b/task.html"' not in html
 
@@ -1174,7 +1174,7 @@ class TestReplicateStatistics:
         assert "Cohen's d" in md
 
     def test_paired_diff_needs_two_common_tasks(self):
-        # Unequal replicate counts no longer exclude a task, but one task is still
+        # Unequal replicate counts do not exclude a task, but one task is still
         # a single pair — too few for a paired comparison.
         per_rep = {
             "a": {"task-1": [0.9, 0.85, 0.95]},

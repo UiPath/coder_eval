@@ -1,7 +1,7 @@
 """``coder_eval.harbor.agent.CoderEvalAgent`` — the Harbor-agent extension point.
 
 ``harbor`` is not a project dependency (it only needs to be present INSIDE a
-Harbor trial container, see ``harbor/agent.py``'s module docstring), so this
+Harbor trial container, see the ``ImportError`` that ``harbor/agent.py`` raises), so this
 module cannot simply be imported in a normal test run. Rather than skip it
 entirely (leaving `run()`'s command construction and
 `populate_context_post_run()`'s trajectory parsing with zero coverage), stub

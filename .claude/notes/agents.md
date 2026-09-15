@@ -237,6 +237,24 @@ step that opened it. That is why the measured corpus shows 0.00% for this case, 
 `TestToolSpansSurviveTheStepBoundary` drives `_OpenCodeTurnState` directly instead of a
 recorded stream.
 
+The Pi inter-turn gap is small in practice: measured across 25 real window pairs, the
+median was 0.25 ms and the maximum 0.75 ms. No test failed while the gap was lost,
+because at the time the four-bucket identity was asserted only as an upper bound;
+`tests/test_timing_identity_contract.py::test_the_sensor_sees_a_window_that_stops_tiling` now
+catches it exactly. The fix is worth
+keeping mainly because the tool spans must keep working once the gap closes, which
+`tests/test_pi_agent.py::TestToolSpansSurviveTheTurnBoundary` pins.
+
+An Antigravity call that is still running when a flush cuts the window must have its
+already-elapsed part taken out of that window. Subtracting only CLOSED intervals published
+that part as model time while the call's own `duration_ms` counted it again, and because
+the windows cover the turn end to end, there is no slack to absorb it. Measured on `tasks/hello_date`
+with a live gemini-3.1-pro-preview: a `Bash` opening 1.7 ms before the flush drove
+Σ generation + Σ command 0.26 ms PAST the turn's own `duration_seconds`, on a turn whose
+entire headroom was 1.4 ms. Four sibling runs passed by 1.2-8.7 ms out of ~12 s, so the
+defect was a coin flip per run. `tests/test_antigravity_agent.py::test_a_tool_still_open_at_the_flush_is_not_generation_time`
+pins it.
+
 ## Why a clean exit can still be a crash
 
 An exit code of 0 with no telemetry is indistinguishable from a real pass in every

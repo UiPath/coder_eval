@@ -235,8 +235,8 @@ class TestBuildImage:
     def test_rejects_image_without_version_label(self, tmp_path: Path, mocker) -> None:
         """A non-framework image (no org.coder-eval.version label) -> actionable DockerRunError.
 
-        The host pins --entrypoint, so the build is no longer gated on the baked
-        ENTRYPOINT; the runtime-image check uses the version label instead.
+        The host pins --entrypoint, so the build is not gated on the baked
+        ENTRYPOINT; the runtime-image check uses the version label.
         """
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM ubuntu:24.04\n")

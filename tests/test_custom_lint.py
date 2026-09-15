@@ -1404,10 +1404,10 @@ RUBRIC_READERS = {"task", "lint-tasks", "init"}
 # All six currently must, and each for its own reason: `analyze` needs the run store,
 # `init` and `check-skill` must know where tasks already live before writing beside
 # them, `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob
-# into the workflow it emits. Every one of them used to carry its own hardcoded guess
-# (`runs/latest`, `tasks/`), which is wrong in any repository that names the tree
-# something else or nests it — so the policy is declared once in
-# reference/repo-layout.md and a reader that stops pointing at it has forked it.
+# into the workflow it emits. A per-skill hardcoded guess (`runs/latest`, `tasks/`)
+# is wrong in any repository that names the tree something else or nests it — so the
+# policy is declared once in reference/repo-layout.md and a reader that stops pointing
+# at it has forked it.
 #
 # A mapping rather than a set, mirroring SKILL_DISABLE_MODEL_INVOCATION: a SEVENTH skill
 # then has to state whether it needs discovery instead of silently defaulting to "no"
@@ -2014,9 +2014,9 @@ class TestPluginArtifacts:
         )
 
     def test_cli_setup_conditions_the_upgrade_suggestion_on_a_pin(self):
-        # "Version skew" used to terminate in "suggest upgrading", full stop. Against a
-        # pinned repository that is the single most destructive thing these skills could
-        # recommend, so the upgrade advice must now sit BEHIND the pin question.
+        # An unconditional "suggest upgrading" is, against a pinned repository, the single
+        # most destructive thing these skills could recommend, so the upgrade advice in
+        # "Version skew" must sit BEHIND the pin question.
         section = (
             (PLUGIN_ROOT / "reference" / "cli-setup.md").read_text(encoding="utf-8").partition("## Version skew")[2]
         )
@@ -3239,11 +3239,11 @@ class TestRunRecordFieldVocabulary:
         )
 
     def test_analyze_does_not_deny_the_legacy_key_absolutely(self):
-        # The skill used to say flatly "There is no top-level `turns`", which is true of
-        # current runs and false of anything written before the rename — so an agent
-        # reading a real older run was told its correct extraction was wrong. The four
-        # OTHER names in that sentence were never top-level in any generation and were
-        # denied on purpose; rewriting the sentence must not take them with it.
+        # A flat "There is no top-level `turns`" is true of current runs and false of
+        # anything written before the rename — it tells an agent reading a real older run
+        # that its correct extraction is wrong. The four OTHER names in that sentence were
+        # never top-level in any generation and are denied on purpose; rewriting the
+        # sentence must not take them with it.
         text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
         assert "There is no top-level `turns`" not in text, (
             "analyze denies the legacy `turns` key absolutely again — it is what runs "
@@ -3475,10 +3475,10 @@ class TestCE035WorkflowOutputParity:
         assert "['promote', 'release']" in findings[0].message
 
     def test_a_dynamic_printf_writer_is_unreadable_not_a_bogus_key(self, tmp_path: Path):
-        """Regression: the writer scan used to capture the conversion letter out of a
-        format string (`printf "%s=%s\\n"` -> the key `s`). That non-empty-but-wrong set
-        defeats the "no readable key => skip" contract and false-FAILS a correct workflow,
-        which is the one direction the docstring promises the rule can never take."""
+        """The writer scan reads no key from a format string, never its conversion letter.
+
+        `printf "%s=%s\\n"` must not yield the key `s`: a wrong non-empty set defeats "no readable key => skip"
+        and false-FAILS a correct workflow, the one direction the docstring promises the rule never takes."""
         from tests.lint.workflow_outputs import _written_keys, find_unresolved_output_refs
 
         assert _written_keys({"run": 'printf "%s=%s\\n" "$K" "$V" >> "$GITHUB_OUTPUT"'}) is None
@@ -3663,7 +3663,7 @@ class TestCE036LiveVerdictContract:
         assert "RAISED" in violations[0] and "prefix length 2" in violations[0], violations
 
     def test_detects_a_fixture_that_stopped_exercising_its_decision_path(self):
-        """Fixture rot: the case claims a decision the trajectory no longer reaches."""
+        """Fixture rot: the case claims a decision the trajectory does not reach."""
         from tests.lint.live_verdict_contract import contract_violations
 
         checker = self._checker(lambda _records: "undecided")
@@ -3882,11 +3882,10 @@ class TestCE045PluginPathIsAPluginRoot:
 
     REPO_ROOT = Path(__file__).parent.parent
 
-    # Verbatim pre-fix lines, one per surface that shipped the wrong value. The mutation
-    # guard replays these through the FULL extract-then-predicate pipeline. An earlier
-    # revision asserted the predicate against hand-written strings the matcher could
-    # never produce, which is how the Actions form below stayed unreachable while the
-    # rule looked covered.
+    # Verbatim lines that shipped the wrong value, one per surface. The mutation guard
+    # replays these through the FULL extract-then-predicate pipeline: a predicate checked
+    # against hand-written strings the matcher can never produce leaves a form (like the
+    # Actions one below) unreachable while the rule looks covered.
     KNOWN_BAD_LINES = (
         'export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"',
         "#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills",

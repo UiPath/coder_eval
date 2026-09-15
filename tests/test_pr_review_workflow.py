@@ -109,18 +109,15 @@ def test_checkout_does_not_persist_credentials() -> None:
 def test_git_fetch_auth_is_env_only() -> None:
     """The action's internal ``git fetch`` must authenticate via an env-only helper.
 
-    ``persist-credentials: false`` (above) removes the on-disk token that the
-    claude-code-action's ``git fetch origin <branch>`` relies on, so a step must
-    reconfigure git auth. This locks in the full linkage so a rename or reorder
-    can't silently re-break the "could not read Username" regression:
+    Pins the full linkage, so a rename or reorder fails here:
 
-    * a run-step configures a git credential helper (host-scoped ``credential.<url>.helper``);
-    * the helper reads the token from an env var, never a baked-in ``secrets.*``
-      literal (which would re-persist it to ~/.gitconfig and reopen the exfil surface);
-    * the action step supplies *that exact* env var, sourced from
-      ``secrets.GITHUB_TOKEN`` (not only the ``with.github_token`` input, which
-      octokit uses but the raw ``git fetch`` does not);
-    * the helper step runs *before* the action step (else the fetch precedes the config).
+    * a run-step configures a host-scoped ``credential.<url>.helper``;
+    * the helper reads the token from an env var, never a ``secrets.*`` literal;
+    * the action step supplies *that exact* env var from ``secrets.GITHUB_TOKEN``
+      (the ``with.github_token`` input alone does not reach the raw ``git fetch``);
+    * the helper step runs *before* the action step.
+
+    Rationale: .claude/notes/reporting.md § The claude-pr-review hardening invariants
     """
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     steps = workflow["jobs"]["claude-review"]["steps"]

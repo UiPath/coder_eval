@@ -1771,7 +1771,7 @@ class TestEarlyStopWatcher:
         # (no stop_on_pass). The skill engages on call 1 — well within the
         # budget of 3 — so the verdict latches pass and the run continues
         # untouched: no pass-stop (not armed for one), and the timeout can
-        # never fire again (the verdict is no longer undecided). Extra calls
+        # never fire again (the verdict is already decided). Extra calls
         # beyond the budget prove the latch holds.
         watcher = _watcher([_skill_crit("date-teller", "date-teller", max_steps_to_decide=3)])
         _feed(watcher, _skill_events("date-teller"))
@@ -2654,11 +2654,9 @@ class TestEarlyStopReportSurfaces:
     def test_runtime_note_omits_the_turns_avoided_claim(self) -> None:
         """The note states the reason and the gate, and claims no turn saving.
 
-        It used to render ``<= N turn(s) avoided`` from ``max_turns - sdk_turn_index``.
-        On Codex and Antigravity one ``communicate()`` is a single SDK turn, so that
-        subtraction advertised the entire max_turns budget as saved when all that was
-        actually cut was a tool-call tail. ``turns_remaining_at_stop`` is still
-        persisted on ``EarlyStopInfo``, where its docstring calls it an upper bound.
+        ``turns_remaining_at_stop`` stays persisted on ``EarlyStopInfo`` as an upper bound.
+
+        Rationale: .claude/notes/reporting.md § The claims the reports do NOT make
         """
         lines = ReportGenerator._runtime_notes_lines(_run_summary([eval_result_to_task_dict(_stopped_result())]))
         blob = "\n".join(lines)

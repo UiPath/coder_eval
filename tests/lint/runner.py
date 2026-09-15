@@ -142,8 +142,8 @@ def _is_suppressed(source_lines: list[str], v: Violation) -> bool:
     """Honor `# noqa` placed on any line spanned by the offending AST node.
 
     AST nodes for multi-line statements report `lineno` at the start, so a
-    `# noqa: CE002` placed on a closing paren or inner argument line was
-    previously missed. We scan every physical line from `line` through
+    `# noqa: CE002` may sit on a closing paren or inner argument line.
+    We scan every physical line from `line` through
     `end_line` (inclusive) for a matching suppression marker.
     """
     if v.line == 0 or v.line > len(source_lines):

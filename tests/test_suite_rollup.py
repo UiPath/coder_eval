@@ -518,10 +518,11 @@ class TestReplicateIndexInSuiteRollup:
 
 
 class TestStackedSameTypeAggregation:
-    """A task can stack multiple criteria of the SAME type (e.g. activation's
-    per-skill skill_triggered) and each gets its OWN across-row aggregate, sliced
-    by position and keyed by description — not one type-pooled number repeated per
-    instance (the pre-fix behavior). This is what makes per-skill recall real."""
+    """Stacked criteria of the SAME type each get their OWN across-row aggregate.
+
+    A task can stack them (e.g. activation's per-skill skill_triggered). Each
+    aggregate is sliced by position and keyed by description, not one type-pooled
+    number repeated per instance. This is what makes per-skill recall real."""
 
     @staticmethod
     def _row(row_id: str, scores: tuple[float, float]) -> TaskResult:

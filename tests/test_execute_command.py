@@ -288,9 +288,8 @@ async def test_docker_forwards_grade_to_the_container(tmp_path: Path, grade: boo
 # The in-container grading default is asserted behaviourally in
 # tests/test_detached_grading_boundaries.py
 # (`TestGradePlumbedIntoTheContainerOrchestrator`), which drives the real command
-# with `Orchestrator` patched and reads the captured `grade` kwarg. The source-text
-# grep that used to live here was duplicated verbatim in that file and proved
-# nothing: deleting `grade=grade` at the call site left both greps green.
+# with `Orchestrator` patched and reads the captured `grade` kwarg. A source-text
+# grep proves nothing: deleting `grade=grade` at the call site leaves it green.
 
 
 def test_execute_help_explains_the_refused_flags() -> None:

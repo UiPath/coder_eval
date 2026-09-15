@@ -962,3 +962,16 @@ re-derive from scratch.
   leaves them stale with nothing failing. Needs a backtick-path extractor scoped to
   one section, which is the narrow case of the prose-path candidate above. — caught
   during the reports consolidation rebase.
+
+- [ ] **A prose "see X's docstring" citation whose target no longer holds the
+  claim.** Moving rationale out of a docstring leaves every citation of that
+  docstring pointing at text that is gone, and `check_pointers` cannot see it
+  because the citation is prose, not a `Rationale:` pointer. Not mechanised: the
+  match is heuristic ("see the module docstring", "see CE063's docstring",
+  "see that class's docstring" all read differently), and most citations are
+  in-file and still valid, so a rule would need per-site triage rather than a
+  regex. Instances found (line numbers at 946ca968):
+  `src/coder_eval/harbor/packager.py:382` and `:386`,
+  `tests/test_harbor_packager.py:163` and `:187`,
+  `tests/lint/rules/ce064_turn_bracket_on_the_clock.py:40`. Caught in: tests
+  prose slimming, Phases 3 and 7.

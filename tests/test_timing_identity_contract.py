@@ -162,7 +162,7 @@ class _InjectedClock:
 
     Injected rather than monkeypatched: pi and antigravity derive every wall
     stamp from their per-turn clock, so patching the module's ``datetime``
-    would no longer reach them and the case would quietly measure the real
+    would not reach them and the case would quietly measure the real
     clock and pass by accident.
     """
 
@@ -621,15 +621,14 @@ def test_every_built_in_harness_has_a_case():
 def test_the_sensor_sees_a_window_that_stops_tiling():
     """The gating mutation check, as a committed test rather than an attestation.
 
-    A window seeded from its own turn start instead of from the previous
-    flush's close is the defect pi shipped with, and the whole point of this
-    module is that the SUITE notices it rather than a reviewer reproducing it
-    by hand. The golden corpus cannot: it masks every value involved.
+    Pins: a pi window seeded from its own turn start, not from the previous
+    flush's close, fails ``assert_identity_closes`` and loses exactly the 600 ms
+    scripted between one ``turn_end`` and the next ``turn_start``.
 
-    Asserted on the MAGNITUDE as well as on the failure, because "it raised"
-    would also pass if the mutation broke the case in some unrelated way. The
-    600 ms is the scripted gap between one ``turn_end`` and the next
-    ``turn_start`` — real model time, which untiling books to nothing.
+    Assert the MAGNITUDE as well as the failure: "it raised" alone would also
+    pass if the mutation broke the case in some unrelated way.
+
+    Rationale: .claude/notes/timing.md § Why the ms-exact identity contract exists
     """
     healthy = _pi_turn()
     mutated = _pi_turn(untile=True)

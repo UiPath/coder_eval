@@ -169,8 +169,8 @@ def test_workspace_only_permits_skill_reads_with_resolved_workspaces(tmp_path):
         tc = ag_types.ToolCall(name="read_file", canonical_path=str(skill_md))
         return any(p.when(tc) for p in policies if p.when is not None)
 
-    assert read_denied([workdir]) is True  # pre-fix: out-of-workspace → denied
-    assert read_denied(agent._resolve_workspaces(skills_paths)) is False  # fix permits it
+    assert read_denied([workdir]) is True  # workdir only: out-of-workspace → denied
+    assert read_denied(agent._resolve_workspaces(skills_paths)) is False  # resolved workspaces permit it
 
 
 def test_to_token_usage_maps_gemini_buckets():
@@ -837,20 +837,14 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
 
 
 async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(monkeypatch):
-    """A never-resolving orphan under a REALISTIC configured timeout (300s, the
-    framework's own experiments/default.yaml turn_timeout) must finalize through
-    the poll loop's own graceful path -- force-close the orphan, grade normally
-    -- instead of the ThreadedWatchdog cutting the whole turn at `timeout` first.
+    """A never-resolving orphan under a realistic 300s timeout finalizes gracefully.
 
-    Pre-fix, `_MAX_BACKGROUND_POLLS * _BACKGROUND_POLL_INTERVAL_SECONDS` (120 *
-    5s = 600s) was DOUBLE the 300s default, so the watchdog always won that race
-    and this exact scenario -- a tool call spuriously left ACTIVE with no real
-    background job behind it, confirmed live in the final validation run -- burned
-    the full turn timeout and crashed as TurnTimeoutError with zero criteria
-    graded, a strict regression versus the pre-fix immediate finalize. Deriving
-    the poll deadline from a FRACTION of the real `timeout` (not a disconnected
-    cycle count) fixes it: the loop now exits through its own graceful path with
-    room to spare before the watchdog's harder cutoff would ever fire."""
+    Pins: the poll deadline is a FRACTION of the configured `timeout` (300s is
+    experiments/default.yaml's own turn_timeout), so the poll loop force-closes
+    the orphan and grades normally before the ThreadedWatchdog cuts the turn.
+
+    Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
+    """
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
@@ -1484,11 +1478,9 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
 # ---------------------------------------------------------------------------
 # Generation window
 #
-# Antigravity used to read datetime.now() ONCE per flush and pass it as both
-# bounds with generation_duration_ms=0.0, so every task page reported 0ms of
-# generation. The reducer now measures a real window and subtracts the tool
-# executions that closed inside it — this harness interleaves tool calls into
-# one generation, so a window legitimately contains time that is not model time.
+# Each flush publishes a real window. This harness interleaves tool calls into
+# one generation, so a window legitimately contains tool time, which the
+# central `subtract_tool_time` takes back out.
 # ---------------------------------------------------------------------------
 
 _CLOCK_BASE = datetime(2026, 1, 1, 12, 0, 0)
@@ -1714,12 +1706,9 @@ async def test_tool_execution_is_subtracted_from_the_window(monkeypatch):
     assert second.generation_duration_ms == pytest.approx(span_ms - bash.duration_ms)
 
     # The absolute figures are artifacts of `_Clock`, which charges one TICK_MS
-    # per clock READ. They moved from 400/300 to 300/200 when the reducer
-    # stopped taking a monotonic reading it no longer needs: a flush now reads
-    # the turn clock once where it used to read two clocks, so each window is
-    # one tick shorter on this fixture's read-driven timeline. Nothing about
-    # real elapsed time changed — the 100ms tool, which is still two reads
-    # apart, is unmoved.
+    # per clock READ: a flush reads the turn clock once, so on this fixture's
+    # read-driven timeline the window is 300 and the 100ms tool, two reads
+    # apart, leaves 200.
     assert span_ms == pytest.approx(300.0)
     assert second.generation_duration_ms == pytest.approx(200.0)
 
@@ -1781,14 +1770,12 @@ async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypa
 async def test_a_tool_still_open_at_the_flush_is_not_generation_time(monkeypatch):
     """The sibling of the straddle test above, for the window the tool opened IN.
 
-    Subtracting only CLOSED intervals published the part of a still-running
-    call that had already elapsed as model time, while the call's own
-    `duration_ms` counted it again. These windows tile the turn, so there is no
-    slack to absorb that: measured on tasks/hello_date with a live
-    gemini-3.1-pro-preview, a Bash opening 1.7 ms before the flush drove
-    Sum(generation) + Sum(command) 0.26 ms PAST the turn's own
-    `duration_seconds`, on a turn whose entire headroom was 1.4 ms. Four
-    sibling runs passed by 1.2-8.7 ms out of ~12 s, so it was a coin flip.
+    Pins: the part of a still-running call that has already elapsed at the flush
+    is subtracted from that window, so generation plus that part equals the
+    span. Counting it as model time books it twice (its own `duration_ms` counts
+    it too), and the windows cover the turn end to end with no slack to absorb that.
+
+    Rationale: .claude/notes/agents.md § Per-harness generation marks
     """
     _install_clock(monkeypatch, _Clock())
     steps = [
@@ -1854,14 +1841,11 @@ async def test_generation_and_tool_time_account_for_the_turn():
     """Σ generation + Σ tool + head + tail lands inside the turn's own duration.
 
     Bounds, not equality: the fake conversation's own overhead sits in the
-    residual. Before the window existed the generation half was identically 0.
+    residual. The HEAD is part of the sum because the first window opens at the
+    first observed `Step`, not at turn entry, so the dispatch before it is a
+    measured bucket rather than time inside msg0's generation.
 
-    The HEAD is part of the sum, and has to be: the first window now opens at
-    the first observed `Step` rather than at turn entry, so the dispatch before
-    it is a measured bucket instead of time hidden inside msg0's generation.
-    Asserting `generation + tool` alone against a share of the turn was an
-    assertion that the head stays empty — which is what this phase deliberately
-    stopped being true.
+    Rationale: .claude/notes/agents.md § First-generation window seeding
     """
     steps = [
         _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
@@ -1897,16 +1881,13 @@ async def test_generation_and_tool_time_account_for_the_turn():
     # conversation's own overhead is the residual — under parallel load the
     # denominator (`duration_seconds`, the agent's monotonic span) inflates
     # while the measured buckets do not, so any `>= share * turn_ms` assertion
-    # is a scheduler-noise detector. It was one: a `>= 0.5 *` bound survived
-    # here only while the sum excluded the head, and failed under `-n auto`
-    # once the head joined it.
+    # is a scheduler-noise detector.
     #
-    # The share this test was reaching for IS asserted, exactly, in
-    # tests/test_timing_identity_contract.py — on a scripted clock, where the
-    # magnitudes are real and the identity closes to the millisecond. What is
-    # left here is what an end-to-end run can honestly claim: the buckets are
-    # measured, the head is no longer the clamped 0.0, and nothing overflows
-    # the turn.
+    # The exact share is asserted in tests/test_timing_identity_contract.py, on
+    # a scripted clock where the identity closes to the millisecond. What an
+    # end-to-end run can honestly claim is left here: the buckets are measured,
+    # the head is a measured value rather than the clamped 0.0, and nothing
+    # overflows the turn.
 
 
 async def test_timing_change_moves_no_token_bucket():
@@ -1990,12 +1971,11 @@ async def test_the_published_window_reconciles_to_its_own_bounds(monkeypatch):
 async def test_the_window_is_measured_without_relying_on_the_negative_clamp(monkeypatch):
     """A positive window, and no clamp underneath it.
 
-    The span used to be read off `time.monotonic()` while the tool intervals
-    were wall, so the two could disagree and drive the result negative; the
-    clamp that caught it published a `0.0` indistinguishable from a real
-    instant generation, and a debug line was the only trace. One basis makes
-    that unrepresentable: `busy_ms` clips to the window and unions overlaps, so
-    it cannot exceed a span derived from the same clock.
+    Pins: the span and the tool intervals share one clock basis, so `busy_ms`
+    (which clips to the window and unions overlaps) cannot exceed the span, and
+    no clamp publishes a `0.0` indistinguishable from a real instant generation.
+
+    Rationale: .claude/notes/timing.md § TurnClock
     """
     _install_clock(monkeypatch, _Clock())
     steps = [

@@ -276,8 +276,8 @@ def _build_catalogue() -> list[PiScenario]:
     # READ THE SNAPSHOT: the command carries `execution_started_at` (the CLI
     # really did emit that start) and NEITHER `execution_completed_at` NOR
     # `duration_ms`. Nothing observed this call finishing, so the instant the
-    # sweep runs is not a completion; stamping it used to manufacture both, and
-    # the pair then read as a measured span that the collector subtracted from
+    # sweep runs is not a completion; stamping it would manufacture both, and
+    # the pair would read as a measured span that the collector subtracts from
     # a generation window the tool never occupied. One bound alone forms no
     # span (`main_thread_tool_spans` requires both), so the window is left
     # whole. Same rule as claude-code's `_finalize_commands`: unknown status
@@ -317,15 +317,14 @@ def _build_catalogue() -> list[PiScenario]:
     # hiccup this reducer explicitly promises to survive, since pi retries
     # internally. A spent `turn_started_at` left in place reopens the next
     # window at the PREVIOUS turn's start and republishes that whole span:
-    # reproduced as 3000 ms of generation for a 2000 ms turn. It had a unit test
-    # and no golden.
+    # reproduced as 3000 ms of generation for a 2000 ms turn.
     #
-    # READ THE SNAPSHOT: both halves of that reset are now in `on_turn_end`.
+    # READ THE SNAPSHOT: both halves of that reset are in `on_turn_end`.
     # The second assistant message carries NO content block and an empty
     # `tool_use_ids` — it booked the duplicate's own usage and nothing else.
-    # `turn_text_parts` / `turn_tool_ids` used to be cleared in `on_turn_start`
-    # only, so the replayed line published the first turn's text a second time
-    # as its own message; the argument `on_turn_end`'s comment makes for
+    # Clearing `turn_text_parts` / `turn_tool_ids` in `on_turn_start` only
+    # would publish the first turn's text a second time as the replayed line's
+    # own message; the argument `on_turn_end`'s comment makes for
     # `turn_started_at` applies to those two lists unchanged.
     scenarios.append(
         PiScenario(

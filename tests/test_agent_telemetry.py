@@ -1134,8 +1134,10 @@ class TestPerMessageTokenCapture:
 
     @pytest.mark.asyncio
     async def test_result_fallback_backfills_when_no_message_id(self, tmp_path):
-        """Legacy SDK / mock-stream path: AssistantMessages without message_id carry zeros,
-        and the ResultMessage usage backfills the last AssistantMessage (pre-fix behavior)."""
+        """With no message_id, the ResultMessage usage backfills the last AssistantMessage.
+
+        Legacy SDK / mock-stream path: AssistantMessages without message_id carry zeros.
+        """
         _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
             create_mock_sdk_messages()
         )

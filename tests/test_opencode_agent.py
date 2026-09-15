@@ -9,8 +9,10 @@ The fixtures below mirror event lines CAPTURED FROM A LIVE ``opencode run
 --format json`` — the CLI's own compact vocabulary (``step_start`` /
 ``step_finish`` / ``text`` / ``tool_use``, payload under ``part``). Do NOT
 "correct" them toward the ``session.next.*`` names in the server's OpenAPI
-schema: those describe `opencode serve`'s SSE surface, and an earlier version of
-this harness parsed them and silently captured zero telemetry on a real run.
+schema: those describe `opencode serve`'s SSE surface, and parsing them captures
+zero telemetry on a real run.
+
+Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
 """
 
 from __future__ import annotations
@@ -1079,10 +1081,10 @@ class TestFailurePaths:
 class TestZeroTelemetryIsLoud:
     """A clean exit that captured no token telemetry must crash, not score.
 
-    An earlier version of this harness parsed the `session.next.*` server
-    vocabulary instead of the CLI's and reported SUCCESS 1.0 with zero turns,
-    zero tokens and zero cost — indistinguishable from a real pass in every
-    aggregate. Drift must be an ERROR, not a quiet empty success.
+    A harness parsing the `session.next.*` server vocabulary instead of the
+    CLI's would report SUCCESS 1.0 with zero turns, zero tokens and zero cost —
+    indistinguishable from a real pass in every aggregate. Drift must be an
+    ERROR, not a quiet empty success.
 
     The guard keys on the TELEMETRY, not the event vocabulary: recognizing the
     event names is not the property worth protecting, and checking them alone
@@ -1817,13 +1819,12 @@ class TestToolFailureCapture:
 
 
 class TestGenerationWindowExcludesToolExecution:
-    """A tool running inside a step is not model time — asserted where it is now DECIDED.
+    """A tool running inside a step is not model time — asserted where it is DECIDED.
 
-    The reducer no longer subtracts anything. It publishes the RAW window, and
-    `timing.subtract_tool_time` takes the tool union back out of it
-    once, for all five harnesses. So these cases drive the reducer and then a
-    real collector, and assert the PUBLISHED number — the one that reaches
-    `task.json` — rather than an intermediate the reducer used to own.
+    The reducer publishes the RAW window, and `timing.subtract_tool_time` takes
+    the tool union back out of it once, for all five harnesses. So these cases
+    drive the reducer and then a real collector, and assert the PUBLISHED
+    number — the one that reaches `task.json`.
 
     They are not duplicates of
     `tests/test_event_collector.py::TestSubtractToolTime`: those pin the
@@ -1838,12 +1839,10 @@ class TestGenerationWindowExcludesToolExecution:
         """Drive the reducer, then publish through a real collector.
 
         `spans` are RESOLVED calls (both bounds); `open_starts` are calls that
-        never returned. An unresolved call now contributes NO span — it has no
+        never returned. An unresolved call contributes NO span — it has no
         `execution_completed_at`, and inventing one is what `None` exists to
-        prevent — where the reducer used to bound it at the window's end. That
-        is a real change and a better one: the collector sees every span at
-        once, so a call straddling a boundary is clipped to each window it
-        actually overlapped instead of approximated at the boundary.
+        prevent. The collector sees every span at once, so a call straddling a
+        boundary is clipped to each window it actually overlapped.
         """
 
         class _Clock(datetime):
@@ -1920,12 +1919,11 @@ class TestGenerationWindowExcludesToolExecution:
         assert message.generation_duration_ms == 0.0
 
     def test_a_tool_still_open_at_the_boundary_contributes_no_span(self, monkeypatch):
-        """The behaviour that CHANGED with the move, stated rather than implied.
+        """A call still open at the step boundary subtracts nothing from that window.
 
-        The reducer used to bound a still-open call at the window's end and
-        subtract that slice. The collector cannot: a call with no
-        `execution_completed_at` was never timed. Its time is subtracted when it
-        RESOLVES, from whichever windows its real interval overlaps.
+        A call with no `execution_completed_at` was never timed, so nothing
+        bounds it at the window's end. Its time is subtracted when it RESOLVES,
+        from whichever windows its real interval overlaps.
         """
         message = self._finish_step(monkeypatch, [], open_starts=[self.WINDOW_START + timedelta(milliseconds=600)])
         assert message.generation_duration_ms == pytest.approx(1000.0)
@@ -2167,14 +2165,13 @@ class TestToolSpansSurviveTheStepBoundary:
     def test_a_duplicate_step_finish_does_not_republish_the_previous_window(self, monkeypatch):
         """A spent `step_started_at` must not seed the next window.
 
-        `close_window`'s `min(mark, item_start)` pulls the window open to cover
-        the item's own start. That is the backwards-clock defence — which this
-        reducer genuinely needs, since its stamps are raw `datetime.now()` and
-        not on a `TurnClock`. But a start stamp left in place after its step was
-        published is not a backwards clock: it is a stale value BEFORE the mark,
-        so the guard reopens the next window at the previous step's start and
-        publishes that whole span again. Reproduced on Pi's identical twin
-        before the fix: 3000 ms of generation for a 2000 ms turn.
+        Pins: a flush clears its spent start stamp, so a duplicate `step_finish`
+        with no intervening `step_start` does not reopen the next window at the
+        previous step's start through `close_window`'s `min(mark, item_start)`.
+        Keep that `min()`: this reducer's stamps are raw `datetime.now()`, not on
+        a `TurnClock`, so it needs the backwards-clock defence.
+
+        Rationale: .claude/notes/agents.md § Per-harness generation marks
         """
         monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
         state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")

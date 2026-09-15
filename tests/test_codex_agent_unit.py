@@ -225,8 +225,8 @@ class TestExecutionBoundsFromSdkStamps:
 
     @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
     def test_timestamp_is_the_tools_own_start(self, factory, root_type):
-        # It used to be datetime.now() at COMPLETION, which places the call
-        # after its own execution.
+        # datetime.now() at COMPLETION would place the call after its own
+        # execution.
         tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=_EPOCH_MS + 250)
         assert tel.timestamp == datetime.fromtimestamp(_EPOCH_MS / 1000)
 

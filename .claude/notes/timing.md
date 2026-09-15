@@ -216,6 +216,15 @@ the tool span a monotonic duration subtracted off a scripted reading. Codex take
 stamps from SDK epoch milliseconds rather than any host clock, so its case scripts those
 stamps directly.
 
+End-to-end tests that run on the REAL clock assert no RELATIVE lower bound on the four
+buckets — only that each is measured and that their sum does not exceed the turn.
+A relative lower bound (`>= share * turn_ms`) is a scheduler-noise detector: under parallel
+load the turn's `duration_seconds` inflates while the measured buckets do not. It was one —
+a `>= 0.5 *` bound in `tests/test_antigravity_agent.py::test_generation_and_tool_time_account_for_the_turn`
+survived only while the sum excluded the head, and failed under `-n auto` once the head
+joined it. The exact share belongs in `tests/test_timing_identity_contract.py`, on a
+scripted clock.
+
 ## main_thread_tool_spans
 
 The span set the generation subtraction, the head and the tail are all measured against,

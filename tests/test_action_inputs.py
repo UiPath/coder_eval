@@ -374,7 +374,7 @@ class TestOutputs:
         assert proc.returncode == 3, "the step must exit with coder-eval's own code"
         assert _outputs(tmp_path)["run-dir"] == "runs/ci"
 
-    # The action no longer appends run.md to the job summary: a consumer that has
+    # The action does not append run.md to the job summary: a consumer that has
     # to redact the report first cannot undo a write that already happened.
     def test_nothing_is_written_to_the_job_summary(self, run_script, tmp_path):
         (tmp_path / "runs" / "ci").mkdir(parents=True)
@@ -428,13 +428,9 @@ class TestEnvPassthrough:
         assert "s3cr3t-token-value" not in out
         assert "entry #1" in out
 
-    # An `env` value carrying a newline splits into a second entry, because the
-    # loop is line-based. That used to be an argv-rewrite: the pairs were
-    # `export`ed into the step's own shell, which is where CE_ARGS and
-    # CE_RUN_DIR are read from AFTER the loop. They are collected and handed to
-    # `env` now, so the injected entry reaches the child as data and nothing
-    # else. Reachable without a hostile author: any interpolated value or a
-    # rotated multi-line secret.
+    # A newline in an `env` value splits into a second entry; it must reach the child
+    # as data only, never rewrite the step.
+    # Rationale: .claude/notes/reporting.md § Why the action argv tests run the shipped script
     @pytest.mark.parametrize("hijack", ["CE_ARGS", "CE_RUN_DIR", "GITHUB_OUTPUT"])
     def test_a_newline_in_a_value_cannot_rewrite_the_step(self, run_script, tmp_path, hijack):
         rc, argv, out = _coder_eval(

@@ -2,8 +2,8 @@
 
 ``TaskDefinition`` deliberately does NOT declare ``extra='forbid'`` (see the
 class docstring) because the downstream skills task repo carries a long tail
-of stale top-level fields (``max_iterations``, ``llm_reviewer``, ``skip``, …)
-that used to be silently dropped. Instead, ``_warn_on_unknown_fields`` logs a
+of stale top-level fields (``max_iterations``, ``llm_reviewer``, …).
+Instead of rejecting or silently dropping them, ``_warn_on_unknown_fields`` logs a
 ``DeprecationWarning`` per unknown key so authors see the typo at load time
 without blocking the run.
 """

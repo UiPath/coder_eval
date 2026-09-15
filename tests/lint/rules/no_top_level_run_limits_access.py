@@ -1,9 +1,8 @@
-"""CE007: ``.max_turns`` / ``.task_timeout`` / ``.turn_timeout`` are no longer top-level fields.
+"""CE007: ``.max_turns`` / ``.task_timeout`` / ``.turn_timeout`` are not top-level; they live under ``run_limits``.
 
-Phase 1 of the unify-run-limits refactor (2026-05-12) removed these from
-``TaskDefinition``, ``ExperimentDefaults``, and ``ExperimentVariant``. They
-live under ``run_limits`` now. This rule blocks reintroduction by flagging
-``<task-like>.<banned>`` attribute access in core code.
+This holds for ``TaskDefinition``, ``ExperimentDefaults``, and
+``ExperimentVariant``. The rule flags ``<task-like>.<banned>`` attribute access
+in core code.
 
 Pattern matched: an ``Attribute`` read or write whose attribute name is one of
 the three banned names AND whose immediate prefix matches a known task-config
