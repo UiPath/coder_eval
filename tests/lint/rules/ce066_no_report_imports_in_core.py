@@ -71,8 +71,9 @@ class NoReportImportsInCore(BaseRule):
         if not self._in_core:
             self.generic_visit(node)
             return
-        # `from . import reports` / `from .. import reports`: no module, the
-        # package arrives as an alias — the relative twin of `import coder_eval.reports`.
+        # `from . import reports`, `from .. import reports`, `from coder_eval import
+        # reports`: the package arrives as an alias, so there is no imported NAME to
+        # check and every attribute read through it is invisible.
         if is_bare_package_import(node, "reports"):
             for alias in node.names:
                 if alias.name == "reports":

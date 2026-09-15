@@ -1343,7 +1343,8 @@ class TestUngradedRenderingInHtml:
 class TestGenerationMetricsBuckets:
     """The offline report carries the same four buckets as the evalboard.
 
-    `reports_html` is described in CLAUDE.md as the evalboard's static twin, and
+    `reports/html.py` is a self-contained offline snapshot of a run — no parity
+    guarantee against the evalboard, and
     it rendered only Total Latency / Turns / Avg Turn Latency — so anyone
     reading the artifact rather than the dashboard got none of the wall-clock
     accounting. The arithmetic lives in `result_metrics.turn_time_buckets`; this
