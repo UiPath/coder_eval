@@ -1,44 +1,19 @@
 """User telemetry via OpenTelemetry → Azure Application Insights ``customEvents``.
 
-A self-contained, opt-out usage-telemetry side-channel. It emits discrete
-lifecycle events (run-start, task-end, per-command) to the App Insights
-``customEvents`` table and is **never** part of the eval data path.
+A self-contained, opt-out usage-telemetry side-channel emitting discrete lifecycle
+events. It is **never** part of the eval data path.
 
-How customEvents routing works
-------------------------------
-The Azure Monitor exporter routes an OpenTelemetry *log record* to the
-``customEvents`` table (instead of the default ``traces`` table) **iff** the
-record carries the attribute ``microsoft.custom_event.name``. The event name is
-that attribute's value; every other record attribute becomes a
-``customDimensions`` entry. We reach that attribute through plain stdlib
-logging: an OTel ``LoggingHandler`` is attached to a dedicated logger, and
-``track_event`` calls ``logger.info(name, extra={...})``. So the only OTel/Azure
-imports live inside ``init_telemetry`` — ``track_event`` is pure stdlib and a
-cheap no-op when telemetry is off.
+Telemetry is **on by default** via a baked-in ingestion-only connection string; an
+explicitly-set one takes precedence, and ``TELEMETRY_ENABLED`` is the single
+canonical disable gate. No prompts, file contents or repo paths are captured — only
+enums, counts, durations, an anonymous per-install id and non-PII platform identity.
+The first run that initializes it prints a one-time stderr notice.
 
-Posture
--------
-Telemetry is **on by default**: an ingestion-only Application Insights connection
-string is baked into the app (``config._DEFAULT_TELEMETRY_CONNECTION_STRING``) so a
-fresh install reports usage to the shared coder-eval resource. An explicitly-set
-``APPLICATIONINSIGHTS_CONNECTION_STRING`` / ``UIPATH_AI_CONNECTION_STRING`` /
-``TELEMETRY_CONNECTION_STRING`` (env or ``.env``) takes precedence, routing
-telemetry elsewhere. Telemetry is **off** only when ``TELEMETRY_ENABLED`` is set
-false (the single canonical disable gate) or the connection string is cleared.
-No prompts, file contents, or repo paths are ever captured — only enums, counts,
-durations, an anonymous per-install id (a random UUID persisted in the user
-config file — identifies an install, not a person), and non-PII platform
-identity (OS / arch / Python version). Because telemetry is default-on, the first
-run that initializes it prints a one-time stderr notice disclosing what is
-collected and how to disable it (``_maybe_show_first_run_notice``).
+**Non-fatal contract:** every public function wraps its body in
+``try/except Exception`` and logs a warning rather than raising — telemetry must
+never break a run. Enforced by lint rule CE019.
 
-Non-fatal contract
--------------------
-Every public function wraps its body in ``try/except Exception`` and logs a
-warning rather than raising — telemetry must never break a run. This invariant
-is enforced by the CE019 custom lint rule. Persisting the anonymous install id
-is best-effort too: if its config file can't be written, telemetry still emits
-events, just without the ``InstallId`` dimension.
+Rationale: .claude/notes/reporting.md § Telemetry emission
 """
 
 import atexit
@@ -65,9 +40,8 @@ _events_logger: logging.Logger | None = None
 # The OTel LoggerProvider (typed Any: OTel/Azure are largely untyped and we keep
 # their symbols confined to init_telemetry to avoid leaking Unknown elsewhere).
 _provider: Any = None
-# The OTel handler attached to the dedicated events logger; tracked so
-# shutdown_telemetry can detach it (the logger is a process-wide singleton that
-# outlives a shutdown, so leaving it attached would double-emit on a re-init).
+# Tracked so shutdown_telemetry can detach it: the logger is a process-wide
+# singleton, so leaving it attached would double-emit on a re-init.
 _handler: logging.Handler | None = None
 # Enrichment merged into every event — all scalar, no user content. The
 # per-process session id lives here under "SessionId" (no separate global).
@@ -78,20 +52,17 @@ _initialized: bool = False
 # of these makes logging raise KeyError on emit, so the coercer drops them.
 _RESERVED_LOGRECORD_ATTRS: frozenset[str] = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
 
-# The attribute the Azure Monitor exporter looks for to route a log record to
-# the customEvents table. Hard-coded (matches the exporter's internal
-# _MICROSOFT_CUSTOM_EVENT_NAME constant) so track_event needs no OTel import.
+# What the Azure Monitor exporter looks for to route a record to customEvents.
+# Hard-coded, matching the exporter's own constant, so track_event needs no OTel
+# import. Rationale: .claude/notes/reporting.md § Telemetry emission
 _CUSTOM_EVENT_NAME_ATTR = "microsoft.custom_event.name"
 
-# Version of the event property contract. Stamped as the `SchemaVersion`
-# dimension on every event so the dashboard's Kusto queries (a cross-system
-# contract) can detect a schema change instead of silently breaking. Bump on any
-# breaking property rename/removal.
+# Stamped on every event so the dashboard's queries (a cross-system contract) can
+# detect a schema change instead of silently breaking. Bump on any breaking rename.
 _TELEMETRY_SCHEMA_VERSION = "1"
 
-# One-time stderr notice shown on the first run that telemetry is on (default-on
-# tooling must disclose collection). Persisted-once via a flag in the user config
-# file; see _maybe_show_first_run_notice.
+# Default-on tooling must disclose collection. Persisted-once via a flag in the
+# user config file.
 _FIRST_RUN_NOTICE = (
     "coder-eval collects anonymous usage telemetry (command names, outcomes, counts, durations, "
     "an anonymous per-install id, and platform info — never prompts, file contents, or repo paths) "
@@ -99,9 +70,8 @@ _FIRST_RUN_NOTICE = (
     "It is on by default. Disable it any time with TELEMETRY_ENABLED=false."
 )
 
-# The scalar contract for event properties. Public so producers (e.g.
-# orchestrator.build_task_event) can annotate their event dicts with it and have
-# pyright reject a non-scalar at the producing call site, not just at runtime.
+# Public so a producer can annotate its event dict and have pyright reject a
+# non-scalar at the producing call site rather than at runtime.
 Scalar = str | int | float | bool
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -180,9 +150,8 @@ def _get_or_create_install_id() -> str | None:
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return install_id
     except Exception as exc:
-        # Never propagate: a missing HOME (Path.home() → RuntimeError), an
-        # unwritable dir (OSError), etc. must degrade to no InstallId, NOT disable
-        # telemetry. Keeping telemetry live without InstallId is the agreed behavior.
+        # Never propagate: a missing HOME or unwritable dir degrades to no
+        # InstallId, NOT to disabled telemetry.
         logger.debug("could not persist install id (%s); telemetry will omit InstallId", exc)
         return None
 
@@ -237,9 +206,8 @@ def init_telemetry(version: str) -> None:
         if _initialized:
             return
 
-        # Single-init contract: settings is read once per process here. A
-        # shutdown → re-init cycle re-reads the same module-global settings
-        # singleton (only tests, which monkeypatch settings, exercise re-init).
+        # Single-init contract: settings is read once per process. Only tests,
+        # which monkeypatch it, exercise a re-init.
         from coder_eval.config import settings
 
         if not settings.telemetry_enabled or not settings.telemetry_connection_string:
@@ -256,10 +224,9 @@ def init_telemetry(version: str) -> None:
             logger.debug("telemetry SDK unavailable; disabled")
             return
 
-        # Construct the exporter in its own guard: it parses the connection
-        # string (a credential — InstrumentationKey + IngestionEndpoint) and a
-        # parse error can echo it back, so on failure log a generic message
-        # WITHOUT interpolating the exception, never leaking the credential.
+        # HAZARD: its own guard. The exporter parses the connection string -- a
+        # credential -- and a parse error can echo it back, so log a generic
+        # message WITHOUT interpolating the exception.
         try:
             exporter = AzureMonitorLogExporter(connection_string=settings.telemetry_connection_string)
         except Exception:
@@ -269,10 +236,9 @@ def init_telemetry(version: str) -> None:
         provider = LoggerProvider(resource=Resource.create({"service.name": "coder-eval"}))
         provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
 
-        # The SDK's LoggingHandler is deprecated in favor of a separate
-        # instrumentation package we don't depend on; the documented attribute
-        # bridge still works. Suppress the one-time warning so enabling
-        # telemetry doesn't print noise to a user's stderr.
+        # Deprecated in favour of a package we don't depend on; the documented
+        # attribute bridge still works. Suppressed so enabling telemetry prints
+        # no noise to a user's stderr.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             handler = LoggingHandler(level=logging.INFO, logger_provider=provider)
@@ -280,8 +246,7 @@ def init_telemetry(version: str) -> None:
         events_logger = logging.getLogger("coder_eval.telemetry.events")
         events_logger.setLevel(logging.INFO)
         events_logger.propagate = False  # never reach console/file handlers
-        # The logger is a process-wide singleton; drop any stale handler from a
-        # prior init/shutdown cycle before attaching this one.
+        # Process-wide singleton: drop any stale handler before attaching.
         for stale in list(events_logger.handlers):
             events_logger.removeHandler(stale)
         events_logger.addHandler(handler)
@@ -311,9 +276,7 @@ def init_telemetry(version: str) -> None:
         # Telemetry is now live — disclose it once (default-on tooling must say so).
         _maybe_show_first_run_notice()
     except Exception as exc:
-        # Fully non-fatal — telemetry must never break a run. (An unpersistable
-        # install id is handled earlier as best-effort: telemetry stays on and
-        # just omits InstallId, so it doesn't reach here.)
+        # Fully non-fatal -- telemetry must never break a run (CE019).
         logger.warning("telemetry init failed: %s", exc)
 
 
@@ -355,9 +318,9 @@ def track_command(name: str) -> Callable[[F], F]:
                     status, error_type = "Failed", "Exit"
                 raise
             except (KeyboardInterrupt, SystemExit) as exc:
-                # These derive from BaseException, not Exception, so without this
-                # branch a Ctrl-C / sys.exit would skip both handlers and the
-                # finally would mis-record the aborted command as "Succeeded".
+                # HAZARD: these derive from BaseException, so without this branch
+                # a Ctrl-C would skip both handlers and the `finally` would record
+                # the aborted command as "Succeeded".
                 status, error_type = "Failed", type(exc).__name__
                 raise
             except Exception as exc:
@@ -369,9 +332,8 @@ def track_command(name: str) -> Callable[[F], F]:
                     {"Status": status, "DurationMs": int((time.monotonic() - start) * 1000), "ErrorType": error_type},
                 )
 
-        # functools.wraps copies func's signature onto wrapper for Typer/click,
-        # but the inferred type is Callable[..., Any], not the TypeVar F — the
-        # cast restores F so callers see the original command's type.
+        # functools.wraps copies the signature for Typer, but the inferred type
+        # is Callable[..., Any]; the cast restores F for callers.
         return wrapper  # type: ignore[return-value]
 
     return deco

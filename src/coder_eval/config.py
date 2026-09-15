@@ -16,20 +16,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from coder_eval.models import AgentKind, ApiBackend
 
 
-# Application Insights connection string baked into the application so a fresh
-# install reports usage telemetry to the shared coder-eval resource with no
-# configuration. An explicitly-set connection string (env or .env, via any of the
-# field's aliases below) takes precedence — pydantic-settings always prefers an
-# env value over a field default.
-#
-# This is an INGESTION-ONLY connection string (InstrumentationKey + IngestionEndpoint):
-# it can only WRITE telemetry to the resource, never read/query/manage it — the same
-# class of value embedded in every distributed telemetry client (VS Code, Azure CLI,
-# gh, the UiPath CLI). Approved by security for embedding. It is base64-wrapped ONLY
-# to avoid tripping naive secret scanners / push-protection and to mark it as an
-# intentional, reviewed default — NOT for secrecy (base64 is trivially reversible).
-# Residual risk is telemetry spoofing / ingestion-cost abuse, bounded by the resource
-# being dedicated to coder-eval usage telemetry.
+# HAZARD: an INGESTION-ONLY connection string, baked in so a fresh install reports
+# usage telemetry with no configuration. It can only WRITE to the resource, never
+# read, query or manage it, and it is base64-wrapped to avoid tripping naive secret
+# scanners -- NOT for secrecy. An explicitly-set one takes precedence.
+# Rationale: .claude/notes/reporting.md § On by default, and what that obliges
 _DEFAULT_TELEMETRY_CONNECTION_STRING = base64.b64decode(
     "SW5zdHJ1bWVudGF0aW9uS2V5PTgxZDBkOGI1LTg1ZjktNDMxNS1iYjJlLTg4ODg0Y2ZkYTVhNztJbmdlc3Rpb25FbmRwb2ludD1odHRwczovL3dlc3R1czItMi5pbi5hcHBsaWNhdGlvbmluc2lnaHRzLmF6dXJlLmNvbS87TGl2ZUVuZHBvaW50PWh0dHBzOi8vd2VzdHVzMi5saXZlZGlhZ25vc3RpY3MubW9uaXRvci5henVyZS5jb20vO0FwcGxpY2F0aW9uSWQ9MDRjN2U3ZjItYjg0OC00ZjhlLTkxNzMtZjI3NmE1YTAwMzk0"
 ).decode("utf-8")
@@ -49,9 +40,8 @@ for key in [
         os.environ[key] = value
 
 
-# Removed layer-5 `.env` knobs → their `-D` override paths. pydantic-settings
-# silently ignores unknown env vars, so without an explicit guard a stale knob
-# would silently stop having any effect — fail loud with a migration hint instead.
+# pydantic-settings silently ignores unknown env vars, so without this guard a
+# stale knob would quietly stop having any effect. Fail loud with a migration hint.
 _REMOVED_DEFAULT_KNOBS = {
     "DEFAULT_AGENT_MODEL": "agent.model",
     "DEFAULT_PERMISSION_MODE": "agent.permission_mode",
@@ -104,36 +94,25 @@ class Settings(BaseSettings):
     bedrock_model: str | None = None  # Cross-region model ID
     bedrock_small_model: str | None = None  # Cross-region small model ID
 
-    # LiteLLM (Anthropic-compatible) endpoint settings (used when api_backend == "litellm").
-    # These map to ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL /
-    # ANTHROPIC_SMALL_FAST_MODEL, but ONLY inside the SDK subprocess env (see
-    # ClaudeCodeAgent._build_sdk_env). They are deliberately NOT named anthropic_*
-    # so the os.environ export loop below can't leak ANTHROPIC_BASE_URL process-wide
-    # (which would silently redirect the judge's in-process Anthropic() client).
+    # HAZARD: these map to the ANTHROPIC_* vars, but ONLY inside the SDK subprocess
+    # env. Deliberately NOT named anthropic_*, so the export loop below cannot leak
+    # ANTHROPIC_BASE_URL process-wide and redirect the judge's own client.
     litellm_base_url: str | None = None
     litellm_auth_token: str | None = None
     litellm_model: str | None = None
     litellm_small_model: str | None = None
-    # Path to the per-call cost/cache JSONL the LiteLLM proxy's cost_logger writes
-    # (LITELLM_COST_LOG). Must point at the SAME file the proxy uses (see
-    # litellm/start-litellm.sh). When set and the file exists, the harness joins each
-    # call's ACTUAL OpenRouter cost + cache onto the turn (litellm_cost.apply_actual_cost),
-    # overriding the static rate-card estimate; unset/missing => static pricing (fallback).
+    # Must point at the SAME file the proxy writes. When set and present, the harness
+    # joins each call's ACTUAL cost onto the turn; unset or missing => static pricing.
+    # Rationale: .claude/notes/reporting.md § Cost joining
     litellm_cost_log: str | None = None
 
-    # Codex settings (CodexAgent). CODEX_MODEL is the fallback model/deployment
-    # used when a task doesn't pin agent.model; CODEX_BASE_URL routes to a custom
-    # OpenAI-/responses-compatible endpoint (incl. Azure OpenAI). For Azure also
-    # set CODEX_API_VERSION (the required ``api-version`` query param) and use the
-    # deployment name as the model. CODEX_BASE_URL / CODEX_API_VERSION /
-    # CODEX_API_KEY are read directly via os.getenv in the agent, not mirrored here.
+    # CODEX_MODEL is the fallback when a task doesn't pin agent.model. For Azure set
+    # CODEX_API_VERSION too and use the deployment name as the model. CODEX_BASE_URL
+    # / CODEX_API_VERSION / CODEX_API_KEY are read via os.getenv in the agent.
     codex_model: str | None = None
 
-    # Antigravity settings (AntigravityAgent — Google's Gemini coding harness).
-    # GEMINI_API_KEY authenticates the local harness (read from .env here so the
-    # export loop below re-publishes it to os.environ, where the google-antigravity
-    # SDK looks for it). ANTIGRAVITY_MODEL is the fallback Gemini model used when a
-    # task doesn't pin agent.model.
+    # GEMINI_API_KEY is read from .env here so the export loop re-publishes it to
+    # os.environ, where the SDK looks for it. ANTIGRAVITY_MODEL is the fallback.
     gemini_api_key: str | None = None
     antigravity_model: str | None = None
 
@@ -141,9 +120,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging
 
-    # Usage telemetry (OpenTelemetry → Azure Application Insights customEvents).
-    # On by default via the baked-in connection string; see coder_eval/telemetry.py.
-    # telemetry_enabled (TELEMETRY_ENABLED) is the single canonical disable gate.
+    # On by default via the baked-in connection string. TELEMETRY_ENABLED is the
+    # single canonical disable gate.
     telemetry_enabled: bool = True
     # Defaults to the embedded coder-eval resource; any set value (env or .env, via
     # the aliases below) overrides it — pydantic-settings prefers env over default.
@@ -155,11 +133,8 @@ class Settings(BaseSettings):
             "uipath_ai_connection_string",
         ),
     )
-    # Caller-settable origin stamp (TELEMETRY_SOURCE), emitted as the `Source`
-    # dimension on every event. Lets downstream pipelines tag themselves (e.g.
-    # `nightly-vm` / `skill-eval`) so internal runs are distinguishable from
-    # anonymous local ones — `IsCI` alone can't, and the framework's own CI is
-    # muted. Defaults to "coder-eval" for a plain local install.
+    # Emitted as the `Source` dimension so a downstream pipeline can tag itself and
+    # be told apart from an anonymous local run -- `IsCI` alone cannot.
     telemetry_source: str = "coder-eval"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
@@ -175,10 +150,8 @@ class Settings(BaseSettings):
             missing.append("AWS_BEARER_TOKEN_BEDROCK")
         if not self.aws_region:
             missing.append("AWS_REGION")
-        # BEDROCK_MODEL is the route-level model source. Without it, an
-        # invocation that doesn't override via --model / task.agent.model
-        # would send model=None to the SDK and Bedrock would return an
-        # opaque 400. Fail fast at startup with a clear error.
+        # Without it an invocation that overrides nothing sends model=None and
+        # Bedrock returns an opaque 400. Fail fast with a clear error.
         if not self.bedrock_model:
             missing.append("BEDROCK_MODEL")
         if missing:
@@ -207,9 +180,8 @@ class Settings(BaseSettings):
                 f"LiteLLM-endpoint routing is enabled but missing required settings: {', '.join(missing)}."
                 + " Please set them in your .env file."
             )
-        # base_url is present (not in `missing`); reject a malformed one so the
-        # downstream preflight (urlopen) and environment_info (urlparse hostname)
-        # get a well-formed absolute URL instead of a raw ValueError / empty host.
+        # Reject a malformed base_url here so the downstream preflight and
+        # environment_info get a well-formed absolute URL.
         parts = urlsplit(self.litellm_base_url or "")
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError(
@@ -237,10 +209,8 @@ class Settings(BaseSettings):
         if self.api_backend == ApiBackend.LITELLM:
             self._validate_litellm_settings()
 
-        # Claude Code agent can use either:
-        # 1. ANTHROPIC_API_KEY environment variable
-        # 2. Cached CLI authentication from 'claude-code login' (subscription account)
-        # We don't validate the API key here because the SDK handles auth and fails clearly if missing.
+        # Either ANTHROPIC_API_KEY or cached CLI auth works, and the SDK fails
+        # clearly when neither does -- so no key validation here.
         if agent_type == AgentKind.CLAUDE_CODE.value:
             return
 
@@ -248,9 +218,8 @@ class Settings(BaseSettings):
 # Global settings instance
 settings = Settings()
 
-# Export settings to environment variables for external libraries (the Anthropic SDK,
-# boto3/Bedrock) that use os.getenv() instead of reading from the Settings object.
-# Only export non-None values and convert non-string types to strings.
+# For external libraries that read os.getenv() rather than the Settings object.
+# Non-None values only, stringified.
 for key, value in settings.model_dump().items():
     if value is not None:
         env_key = key.upper()

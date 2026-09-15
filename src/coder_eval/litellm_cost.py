@@ -1,44 +1,19 @@
 """Join proxy-captured ACTUAL per-call cost/cache onto a run's turns.
 
-For the open-weight (LiteLLM) backend the Claude binary's Anthropic transport
-drops OpenRouter's real ``usage.cost`` + per-call cache before Python can see it,
-so a proxy-side callback (``litellm/cost_logger.py``) writes one JSONL record per
-call to ``LITELLM_COST_LOG``. This module reads those records back and joins them
-onto the matching turns at the TURN level:
+For the open-weight (LiteLLM) backend the real ``usage.cost`` never reaches Python,
+so a proxy-side callback writes one JSONL record per call to ``LITELLM_COST_LOG``.
+This module joins those records onto the matching turns at the TURN level: the
+turn's ``token_usage.total_cost_usd`` is overridden with the SUM of its calls' real
+cost, and the per-call breakdown is attached as ``TurnRecord.provider_call_costs``.
 
-* the turn's ``token_usage.total_cost_usd`` is overridden with the SUM of its
-  calls' real cost (the bill), replacing the static rate-card estimate;
-* the per-call breakdown is attached as ``TurnRecord.provider_call_costs`` — a
-  deterministic audit record (one row per real proxy call, with its real cost +
-  cache buckets) that the evalboard renders as a per-call table.
+Token buckets are LEFT UNTOUCHED (SDK-authoritative), so ``EventCollector`` remains
+the single writer of the message token-bucket invariant. There is deliberately NO
+per-generation distribution.
 
-Token buckets are LEFT UNTOUCHED (SDK-authoritative): the join only writes cost,
-so the ``EventCollector`` remains the single writer of the message token-bucket
-invariant. There is deliberately NO per-generation distribution — matching a proxy
-call to a transcript generation has no deterministic key (only positional /
-output-token heuristics), so that view lives in the per-call table off
-``provider_call_costs`` instead of being guessed onto the message stream.
+A turn keeps its static estimate whenever the join cannot be trusted: a call that
+reported usage but no cost, or no matching record at all.
 
-Coverage. A turn's cost is overridden only when every call that reported usage is
-priced. Degenerate calls that report NO usage at all (no cost AND no tokens — seen
-occasionally on some providers) are ignored, so one of them can't revert a whole
-turn to the static estimate. A call that reports usage but no cost is a genuine
-gap: the turn keeps its static estimate (overriding would bill it at $0), no
-breakdown is attached, and a warning names the unpriced ids. A turn with no
-matching record keeps its static estimate too.
-
-Retry safety: multiple ``TurnRecord``s can share an ``iteration`` (a crashed
-attempt + its retry), and both attempts' proxy calls carry that iteration tag. An
-iteration's calls are credited to a single survivor turn (the last with that
-iteration THAT HAS GENERATIONS); earlier siblings are zeroed. Crucially the
-credit/zero decision is made TOGETHER: a sibling is only zeroed when the survivor
-is actually credited with real cost — if the survivor falls back to static, the
-sibling keeps its static estimate too, so the iteration's spend is never dropped.
-
-Transactional: the full plan is computed before any turn is mutated, so a
-malformed record (which raises while building the per-call breakdown) aborts the
-whole join with the run left untouched — matching the caller's "keeping static
-pricing" contract.
+Rationale: .claude/notes/reporting.md § Cost joining
 """
 
 from __future__ import annotations

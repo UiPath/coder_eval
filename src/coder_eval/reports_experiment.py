@@ -41,9 +41,8 @@ logger = logging.getLogger(__name__)
 # Default pass_threshold from BaseSuccessCriterion — used for Wilson pass-rate in replicate stats.
 _REPLICATE_PASS_THRESHOLD = 0.9
 
-# Cap on the ``error_message`` carried into each run.json row: enough to identify
-# a failure without fetching the task artifact, short enough that a wholly-errored
-# run doesn't bloat run.json. The untruncated message stays on task.json.
+# Enough to identify a failure without fetching the task artifact, short enough that
+# a wholly-errored run doesn't bloat run.json. The full message stays on task.json.
 _ROW_ERROR_MESSAGE_MAX_CHARS = 400
 
 
@@ -72,9 +71,7 @@ def _cost_complete(result: EvaluationResult) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
-# Helper: build task_result dict from EvaluationResult (for variant reports)
-# ---------------------------------------------------------------------------
+# Build a task_result dict from an EvaluationResult, for the variant reports.
 
 
 def eval_result_to_task_dict(
@@ -115,10 +112,8 @@ def eval_result_to_task_dict(
 
     total_turns = sum((t.num_turns or 0) for t in result.iterations)
 
-    # Whether the agent emitted a text reply (becomes the trailing entry
-    # in the Turn timeline). Carried as a row-level boolean so evalboard
-    # grid/trends can compute the visible turn count without re-reading
-    # per-task content.
+    # Carried as a row-level boolean so the evalboard can compute the visible turn
+    # count without re-reading per-task content.
     has_reply = _has_final_reply(result)
 
     agent_cost = result.total_token_usage.total_cost_usd if result.total_token_usage else None
@@ -156,13 +151,10 @@ def eval_result_to_task_dict(
             }
             for t in result.iterations
         ],
-        # The four wall-clock buckets, computed ONCE here through the canonical
-        # `turn_time_buckets` and carried as TASK-level keys. `iterations` below
-        # is a deliberate 6-key projection with no `messages`, no `commands` and
-        # no `harness_*_ms`, so the markdown report cannot re-derive them from
-        # it — and a second implementation of the summation is exactly what that
-        # function exists to prevent. Each stays `float | None`: an unmeasured
-        # bucket renders as a dash, never as `0ms` (CE049).
+        # Computed ONCE through `turn_time_buckets` and carried as TASK-level keys.
+        # `iterations` below is a deliberate 6-key projection, so no renderer can
+        # re-derive them. Each stays `float | None` (CE049).
+        # Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
         "startup_ms": _buckets.startup_ms,
         "generation_ms": _buckets.generation_ms,
         "tool_ms": _buckets.tool_ms,
@@ -178,14 +170,11 @@ def eval_result_to_task_dict(
             result.total_token_usage.cache_read_input_tokens if result.total_token_usage else None
         ),
         "total_tokens": (result.total_token_usage.total_tokens if result.total_token_usage else None),
-        # What the task cost: agent + judge + simulator. `total_cost_usd` means the
-        # whole bill on every surface, so a consumer that reads it gets the real
-        # number without adding anything up. None when nothing was priced at all.
+        # agent + judge + simulator. `total_cost_usd` means the whole bill on every
+        # surface. None when nothing was priced at all.
         "total_cost_usd": row_total_cost,
-        # Subject-agent spend alone, broken out for harness-vs-harness comparison:
-        # judge cost is a property of the suite's criteria and identical across
-        # harnesses, so leaving it in would make two harnesses look closer than they
-        # are. Rolled up as RunSummary.agent_cost_usd.
+        # Subject-agent spend alone: judge cost is identical across harnesses, so
+        # leaving it in would make two look closer than they are.
         "agent_cost_usd": agent_cost,
         # False when the agent spend above is missing money, so it is a floor.
         # Rolled up as RunSummary.tasks_cost_incomplete / cost_complete.
@@ -211,23 +200,20 @@ def eval_result_to_task_dict(
         "max_turns_exhausted": result.max_turns_exhausted,
         "expected_turns_overage": list(overage) if overage is not None else None,
         "total_turns": total_turns,
-        # Documented "visible turns" (tool calls + final reply) — the canonical
-        # turn count the run-level "within expected turns" metric compares against
-        # expected_turns. Distinct from total_turns (SDK num_turns).
+        # "Visible turns" (tool calls + final reply) -- what the "within expected
+        # turns" metric compares against. Distinct from total_turns (SDK num_turns).
         "visible_turns": visible_turn_count(result),
         "expected_turns": expected_turns_value,
         "has_final_reply": has_reply,
-        # Early-stop surfaces (opt-in per-criterion stop_early: blocks). None/False on the
-        # default path so downstream analysis never confuses a truncated run
-        # with a full one.
+        # None/False on the default path, so downstream analysis never confuses a
+        # truncated run with a full one.
         "stopped_early": result.early_stop is not None,
         "early_stop_reason": (result.early_stop.reason.value if result.early_stop is not None else None),
         "turns_remaining_at_stop": (
             result.early_stop.turns_remaining_at_stop if result.early_stop is not None else None
         ),
-        # The threshold in effect for this stop, so a downstream consumer
-        # comparing early-stopped runs across an experiment sweep that varies
-        # it can tell which weighted-gate value produced a given verdict.
+        # The threshold in effect for this stop, so a sweep that varies it can tell
+        # which weighted-gate value produced a given verdict.
         "gate_threshold": (result.early_stop.gate_threshold if result.early_stop is not None else None),
     }
     d["variant_id"] = variant_id
@@ -359,9 +345,8 @@ class ExperimentReportGenerator:
             row += " | —"
         lines.append(row + " |")
 
-        # Row: Not Graded — conditional, like the budget sub-rows above. Without
-        # it Tasks Run / Succeeded / Failed / Errors stop summing to tasks_run on
-        # an ungraded run, with nothing in the table to say where the rest went.
+        # Conditional, like the budget sub-rows above.
+        # Rationale: .claude/notes/reporting.md § The ungraded row in every surface
         if any(result.variant_aggregates[vid].tasks_not_graded > 0 for vid in result.variant_ids):
             row = "| Not Graded"
             for vid in result.variant_ids:
@@ -799,10 +784,8 @@ class ExperimentReportGenerator:
         # bug in one report cannot mask the run outcome.
         from .reports_html import write_experiment_html, write_variant_html
 
-        # Build per-variant task link tables from task_summaries. Every
-        # variant_id in task_summaries is guaranteed to appear in
-        # ``result.variant_ids`` (the aggregator constructs them from the same
-        # source), so we pre-seed the dict with all known variants and extend.
+        # Every variant_id in task_summaries is guaranteed to appear in
+        # ``result.variant_ids``, so pre-seed with all known variants and extend.
         task_links_by_variant: dict[str, list[tuple[str, str, float | None, str]]] = {
             vid: [] for vid in result.variant_ids
         }

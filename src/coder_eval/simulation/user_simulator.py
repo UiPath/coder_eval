@@ -114,9 +114,8 @@ For context, the task the agent has been given was described (internally, to the
 _OPENER_NUDGE = "Begin the conversation now: send your opening message as the user to the coding agent."
 
 
-# Belt-and-suspenders deny list for the simulator agent. ``allowed_tools=[]``
-# is the primary safeguard; this list pins the security property against any
-# future SDK change that might reinterpret an empty allow-list.
+# SECURITY: ``allowed_tools=[]`` is the primary safeguard; this list pins the
+# property against a future SDK change that reinterprets an empty allow-list.
 _SIMULATOR_DISALLOWED_TOOLS: list[str] = [
     "Bash",
     "Read",
@@ -189,20 +188,12 @@ class UserSimulator:
         self._agent: Agent[Any] | None = None
         self._scratch_dir: Path | None = None
 
-        # The simulator's model is PINNED from config, not inherited from the route.
-        # Leaving it None meant BEDROCK_MODEL decided who the simulated user was, so
-        # an A/B that varied the subject model silently varied the interlocutor too —
-        # and `_simulator_cost_usd` had to price from environment_info["bedrock_model"]
-        # to compensate. `_resolve_model` translates the vendor-prefixed id into
-        # whatever the run's backend accepts, the same way the LLM judge does.
+        # PINNED from config, not inherited from the route: leaving it None let
+        # BEDROCK_MODEL decide who the simulated user was, so an A/B varying the
+        # subject model silently varied the interlocutor too.
         self._model = self._resolve_model(config.model, route)
-        #
-        # allowed_tools=[] is the primary guarantee that the simulator cannot
-        # touch files or run commands. The disallowed_tools list below is
-        # belt-and-suspenders against a future SDK change where an empty
-        # allow-list silently means "allow everything" — every common tool is
-        # named explicitly so a regression surfaces as a deny rather than as
-        # a security failure.
+        # SECURITY: allowed_tools=[] is the primary guarantee that the simulator
+        # cannot touch files or run commands; the deny list is the backstop.
         from coder_eval.models import ClaudeCodeAgentConfig
 
         agent_config = parse_agent_config(
@@ -214,11 +205,9 @@ class UserSimulator:
             setting_sources=[],
             permission_mode="default",
             system_prompt=self._system_prompt,
-            # The roleplay persona IS the simulator's entire identity: 'replace'
-            # keeps the claude_code coding-agent preset from prefixing it (which
-            # would contradict the persona's own "stay in character" instruction
-            # and change every dialog-mode evaluation). Mirrors the judge seam
-            # in criteria/agent_judge.py.
+            # The persona IS the simulator's entire identity, so the coding-agent
+            # preset must not prefix it.
+            # Rationale: .claude/notes/contracts.md § The judge's identity is its system prompt
             system_prompt_mode="replace",
         )
         # parse_agent_config returns a union, but type=CLAUDE_CODE guarantees ClaudeCodeAgentConfig
@@ -302,14 +291,9 @@ class UserSimulator:
                 self._agent = ClaudeCodeAgent(self._agent_config, route=self._route, instance_name="simulator")
             await self._agent.start(str(self._scratch_dir))
         except BaseException:
-            # Agent construction or _agent.start() failed (SDK/transport
-            # startup, missing CLI, bad config, or cancellation). The dialog
-            # loop's finally (its only caller of stop()) is never entered on
-            # this path, so clean up our own scratch dir here to avoid a sim-*
-            # tempdir leak that compounds across a batch of simulation tasks.
-            # Wrapping construction too (not just start) closes the leak for
-            # every failure after mkdtemp. Re-raise to preserve the original
-            # failure (incl. cancellation/interrupt) semantics.
+            # The dialog loop's `finally` is never entered on this path, so clean up
+            # the scratch dir here or a sim-* tempdir leaks per failed task. Wrapping
+            # construction too closes the leak for every failure after mkdtemp.
             await self._remove_scratch_dir()
             self._agent = None
             raise
@@ -356,9 +340,8 @@ class UserSimulator:
         stop_requested = self.config.stop_token in raw
         cleaned = strip_stop_token(raw, self.config.stop_token) if stop_requested else raw.strip()
 
-        # Guard against empty cleaned text after stripping the stop token —
-        # the agent still needs *something* to react to, and the dialog
-        # terminates on this turn anyway.
+        # The agent still needs SOMETHING to react to after the stop token is
+        # stripped, and the dialog terminates on this turn anyway.
         if stop_requested and not cleaned:
             cleaned = "(the user indicated the task is complete)"
 

@@ -4,12 +4,373 @@
 
 ## Published rates and run-time caps
 
-- **One formula per published rate**: `pass_rate` / `error_share` are published by THREE models (`RunSummary`, `VariantAggregate`, `SuiteRollup`) and all three route through the single `models/results.py::nothing_was_measured(not_graded=, measured=)`. The guard originally shipped on `RunSummary` alone, so the same 10-task `execute` run with one crash rendered "Pass Rate: n/a" in `run.md` and "Pass Rate: 0.0%" in `experiment.md`. `measured` is **counted evidence** (`tasks_measured` / `rows_measured` — rows carrying a `weighted_score`), never a bucket count: the first version tested `tasks_succeeded + tasks_failed == 0`, but `TIMEOUT` and the two budget stops are category `failed` and reachable under `execute` (`_check_run_limits` still runs on the ungraded branch), so ONE timed-out row in a 100-task ungraded night read as "measured" and published `pass_rate: 0.0` — a real 0% point on the evalboard trend for a run that graded nothing. The evalboard mirrors the rule: `TaskTrend.passRate` is `number | null`, and an unmeasured task renders "—" and sorts LAST in the worst-first Trends view rather than to the very top as the worst offender.
+- **One formula per published rate**: `pass_rate` / `error_share` are published by THREE models (`RunSummary`, `VariantAggregate`, `SuiteRollup`) and all three route through the single `models/results.py::nothing_was_measured(not_graded=, measured=)` — see [orchestration.md](orchestration.md) § Rates need verdict evidence, not bucket counts for why, and why `measured` is counted evidence rather than a bucket count. The evalboard mirrors the rule: `TaskTrend.passRate` is `number | null`, and an unmeasured task renders "—" and sorts LAST in the worst-first Trends view rather than to the very top as the worst offender.
 
-- **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all *task-level* run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block. The one *per-criterion* cap, `stop_early.decide_within`, deliberately lives on `LiveSuccessCriterion` instead (see below) — the watcher must attribute a decision-step timeout to a specific criterion, which `RunLimits` (task-scoped, criterion-agnostic) cannot express.
+- **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits` (`RunLimits` model) is the single namespace for all *task-level* run-time caps — `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` / `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED` (both `category == "failed"`). Structural caps are set from the CLI via `-D run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block overrides individual keys without replacing the task's block. The one *per-criterion* cap, `stop_early.decide_within`, deliberately lives on `LiveSuccessCriterion` instead (see [orchestration.md](orchestration.md) § Early stop on criterion) — the watcher must attribute a decision-step timeout to a specific criterion, which `RunLimits` (task-scoped, criterion-agnostic) cannot express.
 
 ## Plugin and GitHub Action layout
 
 plugins/coder-eval/                # The published Claude Code plugin: `.claude-plugin/plugin.json` (its `version` is a derived pin of pyproject's, bumped by release.yml, guarded by tests/test_action_version_pin.py), `skills/<name>/SKILL.md` × 6 (`/coder-eval:init`, `/coder-eval:check-skill`, `/coder-eval:task`, `/coder-eval:lint-tasks`, `/coder-eval:analyze`, `/coder-eval:ci`), and `reference/` — everything a skill reads must live here, since an installed plugin is copied to ~/.claude/plugins/cache/ WITHOUT its parent dirs (address it via `${CLAUDE_PLUGIN_ROOT}`). `reference/criteria.md` is generated (`make plugin-reference`, CE033); `reference/run-layout.md` is a verbatim mirror of `.claude/shared/run-layout.md`; `reference/task-rubric.md` is the shared task-quality rubric that `task` and `lint-tasks` both read (plugin-only — no repo-side twin); `reference/repo-layout.md` is the eval-tree DISCOVERY policy every skill reads (`SKILL_NEEDS_EVAL_ROOT_DISCOVERY`, which a new skill must declare a stance in) — glob for `task_id:` files and `run.json`, never assume `tasks/`/`runs/latest` — as distinct from `run-layout.md`, which describes what is inside a run directory. Every skill must appear in all four surfaces in `SKILL_DOC_SURFACES` (derived test), and their combined frontmatter `description` length is capped (`SKILL_LISTING_BUDGET_CHARS`) because the skill listing's budget is shared with every skill the user has installed. **Skill naming is verb-first imperative** — a skill is a command you issue (`/coder-eval:<name>`) and every one of them takes an action, so name it for the action: a bare verb where that is unambiguous (`init`, `analyze` — the object comes from the argument), otherwise `<verb>-<object>` (`lint-tasks`, `check-skill`). Never `<object>-<verb>`: `skill-check` was renamed to `check-skill` precisely because it read backwards next to `lint-tasks`. `task` and `ci` predate the rule and stay — renaming a published skill breaks every user's muscle memory for no functional gain, since activation keys on the `description`, never the name. Distinct from `.claude/commands/`, which stays repo-local contributor tooling.
 
 action.yml                         # Published composite GitHub Action (coder-eval as a CI gate). release.yml's `release` job maintains its `version:` default; its `promote` job (gated on publish-pypi) moves the `v<major>` tag + cuts the Release, so nothing consumer-visible moves before the wheel is on PyPI. verify-published-action.yml then verifies the published composite (tag/pin/PyPI/Marketplace parity, plus a real consumer run) after each Release and nightly. Runbook: CONTRIBUTING.md § Releasing.
+
+## The Agent ABC contract
+
+`agent.py` is the plugin SPI: everything a third-party agent author must satisfy. The
+authoring walkthrough is [docs/EXTENDING.md](../../docs/EXTENDING.md) and the five
+numbered lifecycle requirements are in CLAUDE.md § Adding a New Agent; what follows is
+why the seams are shaped the way they are.
+
+The turn-lifecycle bookkeeping lives on the BASE class as class-level defaults, so a
+subclass gets the behaviour without re-declaring it. `_iteration_was_incremented` is set
+right after the counter bump at the top of `communicate()` and consumed by
+`discard_pending_turn()`, which rolls the counter back exactly once per failed turn — even
+when partial-record assembly leaves `pending_turn` at None. That is why rollback is the
+caller's move, not the agent's: only the caller knows a turn failed.
+
+Capability flags are declared rather than probed. `supports_cooperative_stop` gates
+arming early-stop, so arming it on an agent that ignores `should_stop` is rejected at
+resolution rather than silently never firing. `supports_cost_log_tags` and
+`system_prompt_semantics` are declared for reasons of their own — see
+[agents.md](agents.md) § Why the constructors declare every kwarg and § The
+system_prompt_semantics marker.
+
+The shared mid-turn failure kernels are byte-identical fragments that recur across and
+within the agent turn-loops. Each agent keeps its OWN outer try/except/finally bracket,
+because the brackets genuinely differ (flat versus nested, `finally` or not), and calls
+these from inside its existing branches. They take the agent's own per-turn `finalize`
+callable, so the helper never needs to know how each agent assembles its end event.
+
+## Telemetry emission
+
+Telemetry is a self-contained, opt-out usage side-channel and is **never** part of the eval
+data path.
+
+The Azure Monitor exporter routes an OpenTelemetry log record to the `customEvents` table
+instead of the default `traces` table if and only if the record carries a particular
+attribute; the event name is that attribute's value and every other attribute becomes a
+custom dimension. That attribute is reachable through plain stdlib logging — an OTel
+handler attached to a dedicated logger, and `track_event` calling `logger.info(name,
+extra={...})`. So every OTel and Azure import lives inside `init_telemetry`, and
+`track_event` is pure stdlib and a cheap no-op when telemetry is off. The attribute name is
+hard-coded to match the exporter's internal constant for the same reason.
+
+### On by default, and what that obliges
+
+An ingestion-only connection string is baked into the app, so a fresh install reports usage
+to the shared resource; an explicitly-set one takes precedence, and `TELEMETRY_ENABLED` is
+the single canonical disable gate. It is INGESTION-ONLY — it can write telemetry to the
+resource, never read, query or manage it — which is the same class of value embedded in
+every distributed telemetry client, and it was approved for embedding. It is base64-wrapped
+only to avoid tripping naive secret scanners and to mark it as an intentional, reviewed
+default; base64 is trivially reversible and this is not secrecy. The residual risk is
+telemetry spoofing and ingestion-cost abuse, bounded by the resource being dedicated to
+coder-eval usage telemetry.
+
+No prompts, file contents or repo paths are ever captured — only enums, counts, durations,
+an anonymous per-install id (a random UUID in the user config file: it identifies an
+install, not a person) and non-PII platform identity. Because it is default-on, the first
+run that initializes it prints a one-time stderr notice disclosing what is collected and
+how to disable it.
+
+### Non-fatal, and what that costs
+
+Every public function wraps its body in `try/except Exception` and logs a warning rather
+than raising: telemetry must never break a run. CE019 enforces it. Persisting the install
+id is best-effort too — a missing HOME or an unwritable directory degrades to no
+`InstallId`, never to disabled telemetry.
+
+Two guards are narrower than they look. The exporter is constructed in its own `try`,
+because it parses the connection string — a credential — and a parse error can echo it
+back, so the failure is logged WITHOUT interpolating the exception. And the command
+decorator catches `BaseException` as well as `Exception`, because `KeyboardInterrupt` and
+`SystemExit` derive from the former: without that branch a Ctrl-C would skip both handlers
+and the `finally` would record the aborted command as "Succeeded".
+
+The events logger is a process-wide singleton that outlives a shutdown, so the handler is
+tracked and detached on shutdown and any stale one is dropped before attaching — otherwise
+a re-init double-emits. `SchemaVersion` is stamped on every event so the dashboard's
+queries, a cross-system contract, can detect a schema change instead of silently breaking.
+
+## Cost joining
+
+For the open-weight backend the Claude binary's transport drops the provider's real cost
+and per-call cache before Python can see it, so a proxy-side callback writes one JSONL
+record per call and this module joins them back on at the TURN level: the turn's total cost
+is overridden with the SUM of its calls' real cost, and the per-call breakdown is attached
+as a deterministic audit record.
+
+Token buckets are LEFT UNTOUCHED, so the `EventCollector` remains the single writer of the
+token-bucket invariant ([agents.md](agents.md) § Token accounting and the reconciliation
+message). There is deliberately NO per-generation distribution:
+matching a proxy call to a transcript generation has no deterministic key — only positional
+or output-token heuristics — so that view lives in the per-call table rather than being
+guessed onto the message stream.
+
+### Coverage, and why a gap keeps the estimate
+
+A turn's cost is overridden only when every call that reported usage is priced. A
+degenerate call that reports NO usage at all — no cost and no tokens, seen occasionally on
+some providers — is ignored, so one of them cannot revert a whole turn to the static
+estimate. A call that reports usage but no cost is a genuine gap: the turn keeps its static
+estimate, because overriding would bill it at $0, no breakdown is attached, and a warning
+names the unpriced ids. A turn with no matching record keeps its estimate too.
+
+### Retry safety and the two phases
+
+Several turns can share an `iteration` — a crashed attempt and its retry — and both
+attempts' proxy calls carry that tag. An iteration's calls are credited to a single
+survivor (the last turn with that iteration THAT HAS GENERATIONS) and earlier siblings are
+zeroed. The credit and the zero are decided TOGETHER: a sibling is zeroed only when the
+survivor is actually credited, so if the survivor falls back to static the sibling keeps its
+estimate and the iteration's spend is never dropped.
+
+The join is transactional. The whole plan is computed before any turn is mutated, so a
+malformed record — which raises while building the per-call breakdown — aborts the join
+with the run untouched, matching the caller's "keeping static pricing" contract. Spend
+tagged with an iteration no turn has is surfaced rather than silently dropped.
+
+## Report rollups and the HTML twin
+
+`reports_html.py` is the evalboard's STATIC TWIN: the two render the same run and must
+agree, so a rule implemented on one side belongs on the other. The arithmetic itself lives
+in `reports_stats.py` and the renderers only format it.
+
+### An unmeasured value is never zero
+
+This is the rule the reporting surfaces exist to hold, and every violation of it has been
+the same bug: a value that was never measured rendered as a confident zero.
+
+`analysis.py` returns `None` when nothing was timed, so a `0` there published "measured,
+and instant" for a turn whose only tool call was force-closed and never timed. The renderer
+must therefore test `is not None` rather than truthiness — a genuine measured `0.0` average
+is a real measurement and must survive to the surface. The same reasoning governs the four
+wall-clock buckets (an unmeasured one renders as an em dash, never `0ms` — CE058), the
+ungraded score placeholder (deliberately not `0.000`), and a suite that graded nothing.
+
+`duration_seconds` is the awkward case: it is a non-optional float defaulting to `0.0`, so
+there is no `None` arm to write — but a `0.0` duration is a run that was never timed, and
+subtracting real buckets from it renders a fabricated negative residual. The evalboard
+keeps that null; so does the report.
+
+### Read the stored value, do not re-derive it
+
+The four wall-clock buckets are computed ONCE by `turn_time_buckets` and carried on the row.
+The `iterations` projection is deliberately 6-key, with no messages, no commands and no
+harness timings, so a renderer CANNOT re-derive them from it — a second implementation of
+that summation is exactly what the shared function exists to prevent.
+
+`_turn_tool_union_ms` shows the shape. It PREFERS the stored value, because the collector
+writes it from the single span set it measures all four buckets against, so the two surfaces
+are guaranteed to agree rather than merely observed to. The derivation is the LEGACY path
+for a record written before the field existed, which must stay renderable. The two paths
+cannot be told apart by value — both return `None` for a turn with no bounded span — which
+is why the stored one is checked with `is not None`: a stored `0.0` is a measurement and
+must not fall through to a re-derivation. The span SELECTION is the shared rule, not a copy
+of it, for the same reason.
+
+### The ungraded row in every surface
+
+An ungraded run gets the explanatory line; an ordinary EMPTY run keeps its "n/a (0/0)"
+rendering, because the two are different facts. The test is `pass_rate is None`, not
+`not tasks_graded` — an execute night with a crashed row has `tasks_graded > 0` while still
+having measured nothing, and that rendered `0.0%` beside `Error Share: 100.0%`, exactly the
+total-failure reading the guard exists to prevent.
+
+Only the SCORE is dropped when there is none, never the row: duration, tokens and assistant
+turns are facts about the run that grading has nothing to do with, and `execute`'s contract
+withholds only the verdict. Skipping the row whole made an all-ungraded experiment render
+every statistic as N/A. An experiment can be MIXED — `run --resume` grades rows
+independently and folds a failed one back ungraded — so the series are consumed
+independently and need not be index-aligned; pairing across variants is by task id.
+
+A fourth `Not Graded` row is rendered conditionally in every table that breaks down the
+count, because without it Tasks Run / Succeeded / Failed / Errors stop summing to
+`tasks_run` with nothing on the page to say where the rest went. The same reasoning drives
+the JUnit `<skipped>` element: it is JUnit's only "no verdict" shape, and reporting an
+ungraded row as a failure would turn a healthy run red in CI while reporting it as a pass
+would invent a verdict. An ungraded row is also excluded from the failure-reason list,
+which is documented as failed and errored rows.
+
+### Per-instance aggregation, and what it buys
+
+Per-row results are sliced per criterion INSTANCE by position, because the checker appends
+one result per criterion in declared order. Aggregating per-instance rather than pooling by
+type is what lets a task stack many criteria of the SAME type — an activation suite's
+per-skill `skill_triggered` criteria — and get a distinct aggregate for each, instead of
+one type-pooled number repeated once per instance. The aggregate carries the criterion's
+description so the stacked instances stay distinguishable downstream.
+
+The agent's own spend is broken out from the total only when there is overhead to
+distinguish it from: judge spend is a property of the suite's criteria and identical across
+harnesses, so comparing harnesses means comparing the agent line. **Total Cost** always
+means the whole bill.
+
+### The claims the reports do NOT make
+
+An early-stopped row does not advertise "N turns avoided". That derived from
+`max_turns - sdk_turn_index`, and on harnesses where one `communicate()` is a single SDK
+turn it advertised dozens of avoided turns when all that was cut was a tool-call tail. The
+upper bound is still persisted, labelled as the bound it is.
+
+Missing spend is worded cause-agnostically, because an unpriced turn and a hard kill reach
+the same conclusion and the report cannot always tell which applied.
+
+## Harbor export
+
+Harbor is an outer harness with its own runtime contract: a fixed reward-file convention,
+a fixed log layout, a trajectory format. `coder_eval.harbor` is deliberately narrow — it
+translates coder-eval's artifacts into that contract and does not know how a task is
+DEFINED. It is a core layer like `orchestration/`, so it must not import the CLI (CE004);
+it raises plain exceptions and lets the CLI wrap them.
+
+Both directions exist. The packager exports a coder-eval task to run under Harbor with
+coder-eval as the grader; `CoderEvalAgent` is the mirror image, making coder-eval Harbor's
+AGENT against a fixed-path agent-phase task.yaml the packager bakes in.
+
+### Write the reward file, or do not
+
+Harbor's verifier reads a reward file and does NOT inspect the verifier script's exit code
+— only whether the file exists, is non-empty and parses. A missing or malformed one raises
+inside Harbor's own verify step, which its trial runner catches, records, and leaves at its
+default rather than coalescing to a zero-reward object. That is Harbor's own
+infra-versus-policy split, already built.
+
+So the whole job is: write the file, or do not. The "do not" case is the load-bearing one.
+An unmeasured row must not become `reward=0.0` — that would train "the agent's behaviour
+was bad" from a measurement that never happened. Not writing lets Harbor's own
+missing-reward path mask the trial instead. It is CE049's principle (never coalesce a
+possibly-unmeasured score to a numeric literal) one level up, at the artifact-writing
+boundary rather than the in-process one.
+
+A grading-time INFRASTRUCTURE failure is the same case in disguise. The weighted-score
+calculation short-circuits an empty criteria list to a hard `0.0` rather than `None`, so a
+checker raising an escalating exception finalizes the row as ERROR with a score of `0.0`,
+not `None`. That is not a measurement either, so it gets the same treatment via the row's
+category.
+
+### Not every criterion can grade inside someone else's container
+
+A portability audit classifies each criterion type so the packager can refuse an
+unsupported task AT EXPORT TIME, where the operator sees why, rather than at verify time,
+where it is an unexplained low reward with no obvious cause.
+
+Filesystem and exit-code checks are portable — nothing about the verifier container changes
+what they need. `reference_comparison` needs the reference tree, which the export always
+places verifier-side when the task declares one, so that class never actually blocks.
+Trajectory-reading criteria cannot work in the export direction at all: the verifier is a
+separate process from the agent phase, and the agent may not even BE coder-eval, so there is
+no iterations list to read without ATIF ingestion. `cli_called` reads a log written by a
+recorder shim coder-eval's own sandbox installs, which the exported Dockerfile does not
+provision. Credential-needing criteria need a model reachable from inside the verifier
+container and a judge that does not follow the agent's route; they are refused with an
+explicit opt-in escape hatch for an operator who has provisioned that themselves.
+
+Coverage is registry-derived, so a new criterion type added to the union without a
+classification fails CLOSED rather than silently exporting as if it were portable.
+
+### The non-obvious constraint in the emitted task.yaml
+
+The verifier-side `tests/task.yaml` must NOT set a `none` agent type, even though the
+verifier phase is conceptually exactly that. The `check_none_agent` validator rejects any
+criterion with `requires_agent=True` — which includes `reference_comparison`, a criterion
+the export treats as portable — the moment the type is literally `none`, regardless of
+whether an agent actually runs. The bare-task path never instantiates an agent whatever the
+type says, so a placeholder real type plus a placeholder prompt satisfies the validators
+without changing behaviour. Verified directly rather than inferred.
+
+`--workspace-dir "$(pwd)"` on the agent side is the real fix, not a workaround: without it
+the tempdir sandbox writes the agent's workspace to a throwaway directory elsewhere in the
+container, never where the verifier looks. Confirmed live — the agent's output was real and
+every criterion scored 0 as "file does not exist". `$(pwd)` is resolved by the container's
+shell at exec time and equals the WORKDIR because the exec is given no explicit cwd.
+
+### What the export carries, and what it refuses to carry
+
+No Dockerfile is written unless the task sets `sandbox.docker.dockerfile_path` — only
+real build steps (`RUN`) need one. Harbor's own `should_use_prebuilt_docker_image`
+(`harbor/environments/definition.py`) pulls `task.toml`'s `[environment].docker_image`
+and skips the build, confirmed against a real `harbor` install; `WORKDIR` needs no
+Dockerfile line either, because `[environment].workdir` is what Harbor passes as the
+`cwd` / `-w` at `docker exec` time, whether the image was built or pulled. So the
+Dockerfile-less shape is a real choice rather than a null-vs-set distinction:
+`docker_cfg.image` always has a value (`default_factory=get_default_docker_image_tag`).
+
+Nothing is `COPY`'d into the image any more. `environment/task.yaml`, each `type: local`
+plugin, each `TemplateDirSource` and each `extra_mounts` entry are bind-mounted at their
+own host path, mirroring `docker_runner.py`'s auto-mount — which is why the export warns
+that it is NOT portable to a machine without those paths.
+
+The agentless case was found live: `coder-eval`'s schema forbids a `type: none` agent
+from setting `initial_prompt`, and a `harbor run` against a real install surfaced that
+`TaskDefinition` validation error before the guard existed.
+
+Run limits and the judge-route override are carried through, because grading has no agent
+loop to cap but the task timeout still bounds the verifier invocation, and dropping the
+route silently replaces a pinned backend with the verifier environment's default.
+
+`HOME` is in the default passthrough ONLY because the docker driver also bind-mounts the
+host's `~/.claude` into the container at that path, so the value still resolves to a real
+directory there. Harbor builds its own container with no such mount, so forwarding the
+host's literal `HOME` would point the container at a directory that does not exist in it — a
+real regression, not a no-op.
+
+A missing template is a hard failure, not a warning: the agent-phase task.yaml still
+references it, so a silently-skipped copy ships an export whose agent has no starter code,
+and every criterion then reads "file does not exist" indistinguishably from a real agent
+failure — the CE039 anti-pattern one layer up, at the export boundary. A raw dataset-backed
+task is refused for a similar reason: fan-out happens later in the pipeline, so exporting
+one would emit a single Harbor task whose prompt and criteria still contain literal
+placeholders — never expressible, but scored anyway.
+
+Symlinks are DROPPED rather than dereferenced in every task-authored tree the export
+copies, because dereferencing writes a symlink target's content into a distributable
+artifact. The reference copy wraps its failure in the export's own error type rather than
+letting a bare `OSError` escape, because the CLI catches only the export errors and an
+unreadable tree would otherwise abort a whole experiment export the docstring promises it
+will not abort.
+
+The generated shell script quotes the workdir before interpolating it: that value comes
+from a task-YAML field whose only validator checks for a leading slash, so it does not
+reject quotes, substitutions, backticks or newlines.
+
+## The ATIF trajectory bridge
+
+ATIF models are VENDORED so coder-eval can emit and parse trajectories with zero runtime
+dependency on the harbor package; fidelity is guarded by a frozen fixture validated once
+against the real models. Three deviations are deliberate: the schema version is
+pattern-validated rather than a closed literal, so a trajectory written by a FUTURE minor
+version still parses (major bumps are still rejected) where harbor itself would refuse it;
+harbor's `Agent` is renamed to avoid clashing with coder-eval's own; and an image payload is
+an untyped dict, because coder-eval emits text only and merely needs to TOLERATE one on
+read. These live outside `coder_eval.models` on purpose — they are interchange models for
+Harbor interop, not evaluation models.
+
+### Emitting
+
+The converter is a PURE function of the models: no I/O, no agent-type branching, no mutation
+of its input. Sub-agent generations are NESTED into embedded sub-trajectories rather than
+flattened into the main thread, because flattening corrupts SFT data derived from the
+trajectory. Reconciliation entries never become steps — their residuals are recorded in an
+extra field and are already inside the authoritative totals. A turn with no message stream
+degrades to one synthetic user step plus one agent step carrying all the turn's commands;
+note that a stream with user or reconciliation entries but no generations takes the NORMAL
+path, so those entries survive.
+
+Every user message is a genuine user utterance today. If a tool-result variant ever gains a
+producing code path, the converter must learn to SKIP those — tool results already live in
+step observations.
+
+### Hydrating
+
+The reverse direction reconstructs only what the trajectory-shaped criteria actually read:
+the commands and the message stream. It is deliberately NOT a lossless round trip.
+Per-generation token buckets are not recovered, so cost and token reporting for a hydrated
+result is incomplete. Sub-agent nesting is flattened. Turn boundaries are recovered by
+splitting on user steps, mirroring the emit side's convention, because ATIF carries no
+explicit iteration marker.
+
+The one asymmetry that bites: a tool call's status rides on the call's own extra field and
+its duration on the matching observation's, so both must be read back — otherwise
+`command_executed` with `require_success` silently scores a successful command 0.0 on every
+hydrated trajectory, because the status defaults to None rather than "success".
