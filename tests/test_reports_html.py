@@ -1708,3 +1708,51 @@ class TestVariantTokenUsageTotal:
         from coder_eval.reports.html import _render_variant_token_usage
 
         assert _render_variant_token_usage([]) == ""
+
+
+class TestSlowestCommandsTruncationHtml:
+    """The HTML renderer truncates `parameters` at SLOW_PARAMS_PREVIEW_CHARS.
+
+    The markdown twin got both a truncation and a boundary test when the
+    constant was introduced; the HTML side got neither, so the `+= "..."`
+    branch was the one uncovered line in the renderer.
+    """
+
+    @staticmethod
+    def _params_cell(param_len: int) -> str:
+        import re
+        from html import unescape
+
+        from coder_eval.reports.html import _render_command_stats
+
+        # `parameters` renders via str(dict), so pad the VALUE until the rendered
+        # string reaches the wanted length rather than guessing the dict overhead.
+        overhead = len(str({"cmd": ""}))
+        stats = CommandStatistics(
+            total_commands=1,
+            successful_commands=1,
+            slowest_commands=[
+                SlowestCommandInfo(tool="Bash", duration_ms=1234.0, parameters={"cmd": "x" * (param_len - overhead)})
+            ],
+        )
+        cell = re.search(r"<td class='mono dim'>(.*?)</td>", _render_command_stats(stats))
+        assert cell is not None, "the slowest-commands row did not render"
+        # `str(dict)` emits single quotes, which _esc renders as &#x27; — so the
+        # raw cell is longer than the preview. Measure the unescaped text.
+        return unescape(cell.group(1))
+
+    def test_longer_than_the_cap_is_truncated_with_an_ellipsis(self):
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
+
+        cell = self._params_cell(SLOW_PARAMS_PREVIEW_CHARS + 40)
+        assert cell.endswith("...")
+        assert len(cell) == SLOW_PARAMS_PREVIEW_CHARS + len("...")
+
+    def test_exactly_the_cap_is_not_truncated(self):
+        """The predicate is `>`, so the boundary must NOT gain an ellipsis —
+        this is the case that catches a `>=` typo."""
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
+
+        cell = self._params_cell(SLOW_PARAMS_PREVIEW_CHARS)
+        assert "..." not in cell
+        assert len(cell) == SLOW_PARAMS_PREVIEW_CHARS
