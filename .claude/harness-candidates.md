@@ -916,3 +916,15 @@ re-derive from scratch.
   (AST-comparing every `ClassDef` first line against a base ref) was written
   and used throughout Phase 6 and is the thing to promote if that access
   appears. Caught in: prose mass reduction, Phase 6.
+
+- [ ] A generated surface (`*.generated.*`) has no mechanical guard against being hand-edited
+  — CE065/CE033/CE028 all catch *drift* (source changed, output not regenerated) but an edit
+  to BOTH passes cleanly. Guarding it needs a checksum or a git-attribute gate, not a diff,
+  so it is a different shape of sensor. — caught during the reports consolidation (CE065).
+- [ ] No rule resolves file paths named in PROSE (comments, docstrings, Markdown) across
+  `src/`, `evalboard/`, `litellm/` and `.github/`. That consolidation hand-fixed ~25 stale
+  module references across five phases, and two reviewers each found more the greps missed.
+  The plan's Open Questions measured and declined the CLAUDE.md-only variant (its stale refs
+  live in an ASCII tree, not backticks); a wider variant has the same parsing problem plus
+  legitimate non-resolving refs (container paths, plugin-relative paths). Recorded because
+  the recurrence is now the argument, not the idea. — caught during the reports consolidation.
