@@ -47,12 +47,17 @@ Path relative to the repo root, then `§`, then the target `##` heading text ver
 There is no other accepted form: `tests/lint/prose_budget.py` parses this one and fails
 `make docs-budget` when the file or the heading does not exist.
 
-## The prose budget is one number, not a lint rule
+## The prose budget is not a lint rule
 
-`make docs-budget` reports the standing total and fails when it grows. It is deliberately
-**not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants one AST at a time,
-while this is a single whole-tree total. Making it a rule would mean a rule class, a rule
-test and a catalogue entry to enforce one integer — enlarging the harness the budget
+`make docs-budget` runs `tests/lint/prose_budget.py` over `src/coder_eval` and `tests`.
+It enforces two per-file rules with no baseline to maintain: no docstring over 150 prose
+words (an `@abstractmethod` and the Typer commands are exempt), and own-line comments
+within `MAX(20, 0.15 × lines)`. It also fails when a `Rationale:` pointer does not
+resolve or is not the last prose line of its block.
+
+It is deliberately **not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants
+one AST at a time, while this measures prose across whole trees. Making it a rule would
+mean a rule class, a rule test and a catalogue entry — enlarging the harness the budget
 exists to shrink. Do not "fix" this by promoting it.
 
 Nothing here states how many `CE` rules exist. `tests/lint/rules/` owns that count, and a

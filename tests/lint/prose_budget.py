@@ -1,9 +1,9 @@
-"""Measure and ratchet the essay-shaped prose in the configured roots (``_ROOTS``).
+"""Check the docstring and comment prose rules in ``src/coder_eval`` and ``tests`` (``_ROOTS``).
 
-One gated number: ``essay_words`` — words in docstrings over 150 words (Typer command
-docstrings exempt, they render as ``--help``) plus words in comment runs of three or
-more consecutive lines. Each file's comments are capped as a SHARE OF ITS LENGTH, so the house style
-is *no new essays*, not *no new documentation*.
+Two per-file rules, with no baseline: no docstring over 150 prose words (Typer commands
+and ``@abstractmethod`` exempt), and own-line comments within a SHARE OF THE FILE'S
+LENGTH. The house style is *no new essays*, not *no new documentation*. The report also
+lists words in comment runs of three or more lines, for orientation only.
 
 Also resolves every ``Rationale: <path> § <heading>`` pointer, and — under
 ``--assert-code-unchanged <ref>`` — proves a commit moved prose only, by comparing the
@@ -51,7 +51,7 @@ _DOCSTRING_SECTIONS = (
     "Examples:",
 )
 
-_ROOTS: tuple[Path, ...] = (Path("src/coder_eval"),)
+_ROOTS: tuple[Path, ...] = (Path("src/coder_eval"), Path("tests"))
 
 # Exempt by (repo-relative path, function name) pair, and only for a function at module
 # level: `Sandbox.run_command` is a method and a bare-name exemption would silently

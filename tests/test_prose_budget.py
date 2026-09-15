@@ -1,7 +1,7 @@
 """Unit tests for the prose budget measurement (``tests/lint/prose_budget.py``).
 
 Every case runs against a synthetic tree in ``tmp_path`` or a plain string, never
-against the real ``src/coder_eval`` — its word counts change with every prose commit,
+against the real tree — its word counts change with every prose commit,
 so asserting on them here would make this file a second, drifting baseline.
 """
 
@@ -29,6 +29,7 @@ def _write(tmp_path: Path, files: dict[str, str]) -> Path:
 
 
 def _tree(tmp_path: Path, files: dict[str, str]) -> Path:
+    (tmp_path / "tests").mkdir(exist_ok=True)
     return _write(tmp_path, {f"src/coder_eval/{rel}": text for rel, text in files.items()})
 
 
@@ -448,12 +449,13 @@ class TestRoots:
         monkeypatch.setattr(prose_budget, "_ROOTS", (Path("src/coder_eval"), Path("tests")))
         assert set(prose_budget.measure(root).files) == {Path("src/coder_eval/a.py"), Path("tests/b.py")}
 
-    def test_default_roots_do_not_include_tests(self, tmp_path: Path) -> None:
+    def test_default_roots_include_tests(self, tmp_path: Path) -> None:
         root = _write(tmp_path, {"src/coder_eval/a.py": _ESSAY, "tests/b.py": _ESSAY})
-        assert set(prose_budget.measure(root).files) == {Path("src/coder_eval/a.py")}
+        assert set(prose_budget.measure(root).files) == {Path("src/coder_eval/a.py"), Path("tests/b.py")}
 
     def test_density_and_essays_follow_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         root = _write(tmp_path, {"src/coder_eval/a.py": "x = 1\n", "tests/c.py": _DENSE, "tests/e.py": _ESSAY})
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("src/coder_eval"),))
         assert prose_budget.check_comment_density(root) == []
         assert prose_budget.check_essays(root) == []
         monkeypatch.setattr(prose_budget, "_ROOTS", (Path("tests"),))
@@ -475,6 +477,7 @@ class TestRoots:
                 ".claude/notes/timing.md": "# Timing\n\n## close_window\n",
             },
         )
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("src/coder_eval"),))
         assert prose_budget.check_pointers(root) == []
         assert prose_budget.check_pointer_placement(root) == []
         monkeypatch.setattr(prose_budget, "_ROOTS", (Path("tests"),))

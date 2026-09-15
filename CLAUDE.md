@@ -308,10 +308,11 @@ bandit, pre-commit, mcp
   code cannot say
 - **A docstring states the contract, not the history** — what a caller must know to call
   it correctly. Why the design is this shape belongs in `.claude/notes/`; what it used to
-  be belongs in git. `make docs-budget` enforces two rules, both self-adjusting: a file's
-  own-line comments may not exceed `MAX(20, 0.15 × its length)`, and no docstring may
-  exceed 150 words of PROSE (an `Args:`/`Returns:`/`Raises:` block is structure, not
-  prose; an `@abstractmethod` is exempt because its docstring IS the interface contract).
+  be belongs in git. `make docs-budget` applies two self-adjusting rules to `src/` and
+  `tests/`: a file's own-line comments may not exceed `MAX(20, 0.15 × its length)`, and
+  no docstring may exceed 150 words of PROSE (an `Args:`/`Returns:`/`Raises:` block is
+  structure, not prose; an `@abstractmethod` is exempt because its docstring IS the
+  interface contract).
 
 ## Notes for AI Assistants
 
