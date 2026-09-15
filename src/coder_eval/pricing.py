@@ -27,8 +27,6 @@ class ModelPricing:
     cache_read_per_mtok: float  # prompt caching read
 
 
-# Official vendor rate cards, verified 2026-09-03.
-# Key: CLI model name (before gateway mapping)
 _PRICING: dict[str, ModelPricing] = {
     # Fable 5.1 (and Mythos 5.1) price cache hits at 0.025x input, not the 0.1x
     # every other Claude model uses. Fable 5 pays $1 on the identical $10 base.
@@ -45,8 +43,7 @@ _PRICING: dict[str, ModelPricing] = {
     "claude-opus-4-1": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4": ModelPricing(15.0, 75.0, 18.75, 1.50),
     "claude-opus-4-20250514": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    # $2/$10, NOT the $3/$15 that Sonnet 4.6 and earlier pay. Do not copy the
-    # 4.x row onto it.
+    # $2/$10, NOT the $3/$15 that Sonnet 4.6 and earlier pay. Do not copy the 4.x row onto it.
     "claude-sonnet-5": ModelPricing(2.0, 10.0, 2.50, 0.20),
     "claude-sonnet-4-6": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-sonnet-4-5": ModelPricing(3.0, 15.0, 3.75, 0.30),
@@ -56,19 +53,13 @@ _PRICING: dict[str, ModelPricing] = {
     "claude-haiku-4-5": ModelPricing(1.0, 5.0, 1.25, 0.10),
     "claude-haiku-4-5-20251001": ModelPricing(1.0, 5.0, 1.25, 0.10),
     "claude-haiku-3-5": ModelPricing(0.80, 4.0, 1.0, 0.08),
-    # Claude 3.7 Sonnet
     "claude-3-7-sonnet-20250219": ModelPricing(3.0, 15.0, 3.75, 0.30),
-    # Claude 3.5 Sonnet
     "claude-3-5-sonnet-20241022": ModelPricing(3.0, 15.0, 3.75, 0.30),
     "claude-3-5-sonnet-20240620": ModelPricing(3.0, 15.0, 3.75, 0.30),
-    # Claude 3 Opus
     "claude-3-opus-20240229": ModelPricing(15.0, 75.0, 18.75, 1.50),
-    # Claude 3 Sonnet
     "claude-3-sonnet-20240229": ModelPricing(3.0, 15.0, 3.75, 0.30),
-    # Claude 3 Haiku
     "claude-3-haiku-20240307": ModelPricing(0.25, 1.25, 0.30, 0.03),
-    # OpenAI GPT-5 / Codex (direct or via Azure OpenAI). OpenAI bills no separate
-    # cache-write fee, so cache_write == input on every entry below.
+    # OpenAI GPT-5 / Codex (direct or Azure). No cache-write fee: cache_write == input below.
     "gpt-5-codex": ModelPricing(1.25, 10.0, 1.25, 0.125),
     "gpt-5": ModelPricing(1.25, 10.0, 1.25, 0.125),
     "gpt-5.1-codex-max": ModelPricing(1.25, 10.0, 1.25, 0.125),
@@ -107,8 +98,7 @@ _PRICING: dict[str, ModelPricing] = {
     "gemini-3.1-flash-lite": ModelPricing(0.25, 1.5, 0.25, 0.025),
     "gemini-3.1-flash-lite-preview": ModelPricing(0.25, 1.5, 0.25, 0.025),
     "gemini-3-flash-preview": ModelPricing(0.50, 3.0, 0.50, 0.05),
-    # Off the public card (superseded by 3.1 Pro); last published rate kept so
-    # historical runs still price.
+    # Off the public card; the last published rate keeps historical runs priced.
     "gemini-3-pro-preview": ModelPricing(2.0, 12.0, 2.0, 0.20),
     # HAZARD: eu-north-1 rates, a ~20% premium over us-east-1 -- do NOT "correct"
     # them against the US column. No published prompt-cache rate, so cache-creation
@@ -127,8 +117,7 @@ _PRICING: dict[str, ModelPricing] = {
 }
 
 
-# Plugin-contributed rates (e.g. coder_eval_uipath registers UiPath models).
-# Merged over the built-in table at lookup time.
+# Plugin-contributed rates, merged over the built-in table at lookup time.
 _REGISTERED_PRICING: dict[str, ModelPricing] = {}
 
 

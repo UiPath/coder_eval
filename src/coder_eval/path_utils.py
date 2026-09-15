@@ -56,10 +56,9 @@ def write_text_atomic(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` via a temp file + ``os.replace``.
 
     A plain ``write_text`` truncates first, so a crash mid-write leaves a
-    half-file — and a truncated ``task.json`` parses as *malformed*, which the
-    recovery paths read as "not complete", so ``--resume`` pays for the agent
-    again. One writer, so every producer of that file has the same crash
-    semantics.
+    half-file — and a truncated ``task.json`` parses as *malformed*, which
+    ``--resume`` reads as "not complete" and pays for the agent again. One
+    writer, so every producer has the same crash semantics.
 
     The temp file is opened ``O_CREAT | O_EXCL | O_NOFOLLOW`` under a name that
     is UNIQUE per call. ``O_NOFOLLOW`` closes a symlink-plant overwrite

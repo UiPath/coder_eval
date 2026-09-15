@@ -44,8 +44,7 @@ from coder_eval.models import (
     path_uses_token,
 )
 
-# Not part of the public coder_eval.models surface, but the single source of truth
-# for both files.
+# Not part of the public coder_eval.models surface, but the single source of truth for both files.
 from coder_eval.models.criteria import (  # noqa: CE001
     JUDGE_SECURITY_IGNORE_FLOOR,
     _default_judge_agent_config,

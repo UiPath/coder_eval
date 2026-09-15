@@ -236,7 +236,12 @@ trajectory continues. A `decide_within` timeout participates as an ordinary weig
 so a low-weight criterion's timeout that cannot doom the gate does not stop the run.
 
 A **pass-stop** fires once the `on_pass: stop` subset's FLOOR — worst case, every
-still-undecided member scores 0 — already meets the threshold.
+still-undecided member scores 0 — already meets the threshold. Criteria armed only on the
+FAIL side (distractors) are excluded from both the numerator and the denominator of that
+bound: they can never live-pass and exist only to guard the fail side, so folding them in
+would veto every pass-stop and penalise the bound for a criterion it was never scoped to
+cover. With no `on_pass: stop` criteria at all the bound is vacuous and returns nothing —
+there is no pass-stop to take, and the run continues to the cap.
 
 At the default threshold both bounds collapse exactly to "any single armed criterion's
 effective fail stops the run" and "every `on_pass: stop` criterion has live-passed".

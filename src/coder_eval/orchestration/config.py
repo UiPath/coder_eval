@@ -69,7 +69,6 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Dataset sampling (for cheap smoke runs on dataset-backed tasks)
     max_rows: int | None = Field(
         default=None,
         ge=1,
@@ -85,7 +84,6 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Replicate count override
     repeats: int | None = Field(
         default=None,
         ge=1,
@@ -104,7 +102,6 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Logging
     verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")
 
     # Docker WORKDIR alignment for the NON-docker-driver dispatch path — a host
@@ -121,15 +118,8 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # TODO(container-death-diagnostics): consider a run-level default resource
-    # cap. Containers run uncapped today (sandbox.limits.{max_memory_mb,
-    # max_cpus,max_pids} default to None -> _build_argv emits no --memory/
-    # --cpus/--pids-limit), so at --max-parallel=20 a single runaway task can
-    # pressure the whole host. An opt-in default cap is already expressible
-    # via the EXISTING layered sandbox config -- defaults.sandbox.limits.
-    # max_memory_mb in the experiment YAML, or `-D sandbox.limits.
-    # max_memory_mb=N` on `coder-eval run` -- both flow through
-    # resolve_all_tasks and are overridden by per-task limits. If a dedicated
-    # CLI knob is ever wanted, add it as the FIRST (lowest-priority) layer in
-    # _build_sandbox_layers so per-task limits win, and do NOT default it to
-    # a non-None value (would change behavior for existing configs).
+    # TODO(container-death-diagnostics): containers run uncapped today, so at a
+    # high --max-parallel one runaway task can pressure the host. An opt-in
+    # default is already expressible through the layered sandbox config; a
+    # dedicated CLI knob would go in as the LOWEST-priority layer, never
+    # defaulted to a value (that would change existing configs).

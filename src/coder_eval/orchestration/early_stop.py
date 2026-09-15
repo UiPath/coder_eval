@@ -284,8 +284,6 @@ class EarlyStopWatcher:
         )
         return cls(task.task_id, armed, max_turns=max_turns, gate_threshold=gate_threshold)
 
-    # --- StreamCallback -------------------------------------------------- #
-
     def on_event(self, event: StreamEvent) -> None:
         """Fail-open wrapper around ``_on_event_impl``: any unexpected exception
         anywhere in the round — the collector reduction included, not just the
@@ -360,8 +358,6 @@ class EarlyStopWatcher:
     def disarmed(self) -> bool:
         """True once a ``live_verdict`` raised and the watcher degraded to a full run."""
         return self._disarmed
-
-    # --- Stop rule -------------------------------------------------- #
 
     def _ceiling(self, verdicts: list[LiveVerdict]) -> float:
         """Best-case weighted score over the WHOLE armed set, given current verdicts.
@@ -502,28 +498,12 @@ class EarlyStopWatcher:
                 self._fire(reason, self._armed[candidate_index][0], tool_call_index=tool_call_index)
                 return
 
-        # Pass-stop: the on_pass=stop subset's own floor bound (worst case:
-        # every still-undecided member scores 0, weighted against only that
-        # subset's total weight) already meets ``gate_threshold`` — guaranteed
-        # regardless of what the rest of that subset still decides. Criteria
-        # armed only on the fail side (distractors) are excluded from both the
-        # numerator and the denominator: they can never live-pass and only
-        # guard the fail side above, so folding them in would veto every
-        # pass-stop and penalize this bound for a criterion it was never
-        # scoped to cover. At the default ``gate_threshold=1.0`` this requires
-        # every on_pass=stop criterion to actually be "pass" (any non-pass
-        # drops the floor below 1.0). The vacuous case (no on_pass=stop
-        # criteria at all) returns None — nothing to pass-stop on, the run
-        # continues to the cap.
-        #
-        # Recall deferral, mirrored from the fail-stop: the pass-stop is HELD
-        # while any pass-capable armed criterion OUTSIDE the on_pass=stop
-        # subset is still undecided (members of the subset are already priced
-        # into the floor). Cutting here would freeze a sibling
-        # ``on_pass: continue`` criterion's expected signal out of the
-        # trajectory — an unearned fail on the armed gate that a full run
-        # would not have produced. Once every such criterion decides (pass or
-        # fail), the still-satisfied floor fires the pass-stop on that round.
+        # Pass-stop: the on_pass=stop subset's FLOOR already meets
+        # ``gate_threshold``. Distractors are excluded from both the numerator and
+        # the denominator; no on_pass=stop criteria at all returns None. HELD while
+        # any pass-capable armed criterion OUTSIDE the subset is undecided --
+        # cutting there would freeze a sibling's expected signal out of the run.
+        # Rationale: .claude/notes/orchestration.md § The ceiling and floor bounds
         pass_stop_indices = [i for i, armed_pass in enumerate(self._pass_trigger) if armed_pass]
         outside_pass_capable_undecided = any(
             v == "undecided" and "pass" in pol and not armed_pass

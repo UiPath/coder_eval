@@ -130,18 +130,70 @@ class TestMeasureTree:
         assert prose_budget.total_words(prose_budget.measure(root).files) == 206
 
 
-class TestCheck:
-    def test_at_the_baseline_it_passes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        root = _tree(tmp_path, {"a.py": f'def f():\n    """{_words(200)}"""\n'})
-        monkeypatch.setattr(prose_budget, "_ESSAY_BASELINE_WORDS", 200)
-        assert prose_budget.check(root) is None
+class TestCommentBudget:
+    """The per-file comment budget that replaced the hand-maintained baseline."""
 
-    def test_one_word_above_the_baseline_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        root = _tree(tmp_path, {"a.py": f'def f():\n    """{_words(200)}"""\n'})
-        monkeypatch.setattr(prose_budget, "_ESSAY_BASELINE_WORDS", 199)
-        message = prose_budget.check(root)
-        assert message is not None
-        assert "200" in message and "199" in message
+    def test_the_floor_applies_to_a_small_file(self) -> None:
+        assert prose_budget.comment_line_budget(10) == 20
+        assert prose_budget.comment_line_budget(100) == 20
+
+    def test_the_ratio_applies_once_it_beats_the_floor(self) -> None:
+        assert prose_budget.comment_line_budget(1000) == 150
+
+    def test_a_file_within_its_budget_passes(self, tmp_path: Path) -> None:
+        body = "\n".join(["x = 1"] * 200)
+        root = _tree(tmp_path, {"a.py": "# one\n# two\n" + body})
+        assert prose_budget.check_comment_density(root) == []
+
+    def test_a_file_over_its_budget_fails(self, tmp_path: Path) -> None:
+        root = _tree(tmp_path, {"a.py": "\n".join(["# pad"] * 40) + "\nx = 1\n"})
+        failures = prose_budget.check_comment_density(root)
+        assert len(failures) == 1
+        assert "own-line comments" in failures[0]
+
+    def test_a_trailing_comment_is_a_directive_not_commentary(self, tmp_path: Path) -> None:
+        """40 trailing `# noqa` must not consume the budget; 40 own-line ones would."""
+        root = _tree(tmp_path, {"a.py": "\n".join(["x = 1  # noqa: E501"] * 40) + "\n"})
+        assert prose_budget.check_comment_density(root) == []
+
+    def test_the_budget_shrinks_with_the_file(self) -> None:
+        """The point of a ratio: deleting code takes its comment budget with it."""
+        assert prose_budget.comment_line_budget(2000) > prose_budget.comment_line_budget(1000)
+
+
+class TestProseWords:
+    def test_an_args_block_does_not_count(self) -> None:
+        doc = f"Summary.\n\n{_words(140)}\n\nArgs:\n    a: {_words(100)}\n"
+        assert prose_budget.prose_words(doc) < 150
+        assert prose_budget.docstring_words(doc) > 150
+
+    def test_prose_after_a_section_still_counts(self) -> None:
+        """A trailing contract paragraph is prose, not structure."""
+        doc = f"Summary.\n\nArgs:\n    a: thing\n\n{_words(200)}\n"
+        assert prose_budget.prose_words(doc) > 150
+
+    def test_returns_and_raises_are_structure_too(self) -> None:
+        doc = f"Summary.\n\nReturns:\n    {_words(90)}\n\nRaises:\n    ValueError: {_words(90)}\n"
+        assert prose_budget.prose_words(doc) < 150
+
+
+class TestInterfaceContractExemption:
+    def test_an_abstractmethod_docstring_is_exempt(self) -> None:
+        source = (
+            "from abc import ABC, abstractmethod\n\n"
+            "class A(ABC):\n"
+            "    @abstractmethod\n"
+            f"    def f(self):\n        {Q}{_words(400)}{Q}\n"
+        )
+        prose = prose_budget.measure_source(source, "m.py")
+        assert prose is not None
+        assert prose.essays == []
+
+    def test_a_plain_method_is_not_exempt(self) -> None:
+        source = f"class A:\n    def f(self):\n        {Q}{_words(400)}{Q}\n"
+        prose = prose_budget.measure_source(source, "m.py")
+        assert prose is not None
+        assert prose.essays == [("f", 400)]
 
 
 class TestPointers:

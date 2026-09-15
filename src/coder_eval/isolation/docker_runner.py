@@ -653,8 +653,7 @@ class DockerRunner:
                 widened_workspace = await asyncio.to_thread(grant_container_access, self.grade_workspace, writable=True)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
-            # Prime the heartbeat before the container starts so the
-            # watchdog never sees an initial stale state.
+            # Prime the heartbeat before the container starts so the watchdog never sees an initial stale state.
             heartbeat_path = output_dir / HEARTBEAT_FILENAME
             await asyncio.to_thread(heartbeat_path.touch)
             heartbeat_task = asyncio.create_task(_heartbeat_loop(heartbeat_path))
@@ -673,13 +672,11 @@ class DockerRunner:
                 returncode = await self._stream_container_output(proc, log_fh)
             finally:
                 heartbeat_task.cancel()
-                # Narrowed so a genuine KeyboardInterrupt / SystemExit from a
-                # parallel sibling still propagates.
+                # Narrowed so a genuine KeyboardInterrupt / SystemExit from a parallel sibling still propagates.
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
                 await asyncio.to_thread(log_fh.close)
-                # Cancelled mid-flight: kill the container AND the docker CLI
-                # subprocess, best-effort.
+                # Cancelled mid-flight: kill the container AND the docker CLI subprocess, best-effort.
                 if proc.returncode is None:
                     await self._kill_container(proc, container_name)
 
@@ -906,8 +903,7 @@ class DockerRunner:
         """
         if self.grade:
             return
-        # Keyed on EVIDENCE, not on the label: the question is not "what status is
-        # this" but "did it grade".
+        # Keyed on EVIDENCE, not on the label: the question is not "what status is this" but "did it grade".
         graded_anyway = bool(result.success_criteria_results) or result.weighted_score is not None
         if not graded_anyway and (
             result.final_status.is_execution_fact or result.final_status is FinalStatus.NOT_GRADED
@@ -1108,8 +1104,7 @@ class DockerRunner:
             return
         task_dir_copy = staging / "task_dir"
         shutil.copytree(source, task_dir_copy, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
-        # Read-only like the reference copy: criteria read fixtures here, nothing
-        # legitimately writes them.
+        # Read-only like the reference copy: criteria read fixtures here, nothing legitimately writes them.
         grant_container_access(task_dir_copy, writable=False)
         self._task_dir_mount_src = task_dir_copy
 

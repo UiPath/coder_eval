@@ -2,7 +2,7 @@
 
 One gated number: ``essay_words`` — words in docstrings over 150 words (Typer command
 docstrings exempt, they render as ``--help``) plus words in comment runs of three or
-more consecutive lines. It may not exceed ``_ESSAY_BASELINE_WORDS``, so the house style
+more consecutive lines. Each file's comments are capped as a SHARE OF ITS LENGTH, so the house style
 is *no new essays*, not *no new documentation*.
 
 Also resolves every ``Rationale: <path> § <heading>`` pointer, and — under
@@ -19,6 +19,7 @@ import io
 import re
 import subprocess
 import sys
+import textwrap
 import tokenize
 from collections import Counter
 from pathlib import Path
@@ -27,7 +28,17 @@ from typing import NamedTuple
 
 _DOCSTRING_ESSAY_WORDS = 150
 _COMMENT_BLOCK_LINES = 3
-_ESSAY_BASELINE_WORDS = 18_703
+# Own-line comments a file may carry: a FLOOR for small files, then a share of its
+# length. Proportional on purpose — there is no tree-wide total to hand-maintain, a
+# file that loses code loses budget with it, and a NEW file is governed from its
+# first commit. The tree's natural maximum sits just under this (a constants module
+# at one comment per constant); the floor is what protects those.
+_COMMENT_LINE_FLOOR = 20
+_COMMENT_LINE_RATIO = 0.15
+
+# Docstring sections that are STRUCTURE, not prose: a parameter list is interface
+# documentation and must not count against an essay budget aimed at narrative.
+_DOCSTRING_SECTIONS = ("Args:", "Arguments:", "Returns:", "Yields:", "Raises:", "Attributes:")
 
 _SRC = Path("src/coder_eval")
 
@@ -107,6 +118,44 @@ def _comment_runs(source: str) -> list[list[tokenize.TokenInfo]]:
     return runs
 
 
+def prose_words(text: str) -> int:
+    """``docstring_words`` minus the contents of any ``Args:``/``Returns:``/``Raises:``
+    block.
+
+    The 150-word bar is about NARRATIVE. A function with eight documented parameters
+    is not writing an essay, and counting its parameter list pushed exactly the
+    docstrings that document their contract best over the line.
+    """
+    lines = textwrap.dedent(text).split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() in _DOCSTRING_SECTIONS:
+            base = len(lines[index]) - len(lines[index].lstrip())
+            index += 1
+            while index < len(lines) and (
+                not lines[index].strip() or (len(lines[index]) - len(lines[index].lstrip())) > base
+            ):
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    return docstring_words("\n".join(kept))
+
+
+def _is_interface_contract(node: ast.AST) -> bool:
+    """True for an ``@abstractmethod``: its docstring IS the contract implementers read.
+
+    The plugin SPI is the case. Exempting it by KIND rather than by name keeps the
+    rule principled — a new abstract method is covered, and a long docstring that is
+    not an interface contract still fails.
+    """
+    return isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and any(
+        getattr(decorator, "id", getattr(decorator, "attr", "")) == "abstractmethod"
+        for decorator in node.decorator_list
+    )
+
+
 def measure_source(source: str, rel: str) -> FileProse | None:
     """Measure one module's essay prose. ``None`` when it does not parse."""
     try:
@@ -126,7 +175,9 @@ def measure_source(source: str, rel: str) -> FileProse | None:
         name = "<module>" if isinstance(node, ast.Module) else node.name
         if (rel, name) in _TYPER_COMMANDS and id(node) in top_level:
             continue
-        words = docstring_words(text)
+        if _is_interface_contract(node):
+            continue
+        words = prose_words(text)
         if words > _DOCSTRING_ESSAY_WORDS:
             essays.append((name, words))
     essays.sort(key=lambda essay: (-essay[1], essay[0]))
@@ -308,16 +359,54 @@ def check_pointer_placement(repo_root: Path) -> list[str]:
     return failures
 
 
-def check(repo_root: Path) -> str | None:
-    """``None`` when the tree is at or under the baseline, else the failure message."""
-    total = total_words(measure(repo_root).files)
-    if total <= _ESSAY_BASELINE_WORDS:
-        return None
-    return (
-        f"prose budget exceeded: {total} essay words against a baseline of "
-        f"{_ESSAY_BASELINE_WORDS} (+{total - _ESSAY_BASELINE_WORDS}). "
-        "Move rationale to .claude/notes/, or lower the baseline if you removed prose."
-    )
+def comment_line_budget(total_lines: int) -> int:
+    """A file's own-line comment allowance."""
+    return max(_COMMENT_LINE_FLOOR, round(_COMMENT_LINE_RATIO * total_lines))
+
+
+def check_comment_density(repo_root: Path) -> list[str]:
+    """Every file's own-line comments must fit :func:`comment_line_budget`.
+
+    Own-line only. A trailing ``# noqa`` is a directive, not commentary, and a
+    per-member annotation on an enum is the contract a dispatcher reads — counting
+    either would push against documenting them.
+    """
+    failures: list[str] = []
+    for path in sorted((repo_root / _SRC).rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+        except (SyntaxError, tokenize.TokenError, ValueError):
+            continue
+        lines = source.split("\n")
+        own = {
+            token.start[0]
+            for token in tokens
+            if token.type == tokenize.COMMENT and lines[token.start[0] - 1].strip().startswith("#")
+        }
+        budget = comment_line_budget(len(lines))
+        if len(own) > budget:
+            rel = path.relative_to(repo_root / _SRC).as_posix()
+            failures.append(
+                f"{rel}: {len(own)} own-line comments against a budget of {budget} "
+                f"({len(lines)} lines). Move rationale to .claude/notes/."
+            )
+    return failures
+
+
+def check_essays(repo_root: Path) -> list[str]:
+    """No docstring may exceed the prose bar unless it is an interface contract.
+
+    There is no numeric allowance. ``@abstractmethod`` and the Typer commands are
+    exempt by KIND; everything else that trips the bar is narrative with a home in
+    ``.claude/notes/``.
+    """
+    return [
+        f"{rel.as_posix()}::{name}: {words} prose words in a docstring "
+        f"(bar is {_DOCSTRING_ESSAY_WORDS}). Move the narrative to .claude/notes/."
+        for rel, prose in sorted(measure(repo_root).files.items())
+        for name, words in prose.essays
+    ]
 
 
 def code_shape(source: str) -> str:
@@ -410,8 +499,11 @@ def main(argv: list[str]) -> int:
     for failure in check_pointer_placement(repo_root):
         print(f"misplaced pointer: {failure}", file=sys.stderr)
         failed = True
-    if (message := check(repo_root)) is not None:
-        print(message, file=sys.stderr)
+    for failure in check_comment_density(repo_root):
+        print(f"comment budget: {failure}", file=sys.stderr)
+        failed = True
+    for failure in check_essays(repo_root):
+        print(f"docstring essay: {failure}", file=sys.stderr)
         failed = True
     return 1 if failed else 0
 
