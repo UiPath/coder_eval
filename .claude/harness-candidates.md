@@ -873,3 +873,46 @@ re-derive from scratch.
   timing work (the function is zero lines of its diff) and not a guardrail
   candidate — a small real bug needing its own change. Caught in: the
   turn-timing consolidation final review (gpt-5.6-sol).
+
+- [ ] **A comment line that opens mid-sentence directly after one that ended.**
+  The residue of a block replacement whose anchor matched the wrong line: the
+  tail of the replaced prose survives as a severed fragment. The exact-form half
+  of this — a `Rationale:` pointer that is not the last line of its block — was
+  PROMOTED in the prose-mass-reduction run and now ships as
+  `prose_budget.check_pointer_placement`. What remains is the general case,
+  where no pointer is involved, and it is heuristic: a legitimately wrapped
+  sentence looks identical to a severed one, so it needs an allowlist (a
+  continuation opening with a backtick, a quote, or a list marker is usually
+  fine). ~30 min plus the false-positive triage. Caught in: prose mass
+  reduction, Phases 4-7 review.
+
+- [ ] **Two `.claude/notes/` sections covering ONE topic under different
+  headings.** The single-home rule is the load-bearing invariant of the notes
+  tree and nothing enforces it. `check_pointers` proves a pointer resolves;
+  nothing proves the topic is not also argued three files away. It bit every
+  phase of the prose-mass-reduction run, including once against a file the
+  phase never opened (`reporting.md` vs `orchestration.md` on
+  `nothing_was_measured`). Needs a similarity measure over section bodies —
+  shared rare tokens, or a shared symbol name appearing as the subject of two
+  headings — so it is real work rather than a regex. Deferred on cost, not on
+  value: this is the highest-value unbuilt guard in the notes design. Caught
+  in: prose mass reduction, all phases.
+
+- [ ] **A `Rationale:` pointer that resolves to a heading which does not hold
+  the rationale that left the site.** The weaker sibling of the above and the
+  same shape of miss: the gate goes green while the reader arrives somewhere
+  unhelpful. Five instances in Phase 5 alone, all fixed by hand. Probably not
+  mechanizable without a semantic check, but worth recording as a known blind
+  spot of `check_pointers` so nobody reads its green as "the pointers are
+  good". Caught in: prose mass reduction, Phases 5-6 review.
+
+- [ ] **A criterion-class first docstring line changing without
+  `make plugin-reference` in the same commit.** CE033 already diffs the
+  generated `plugins/coder-eval/reference/criteria.md`, so drift IS caught —
+  but only for classes that reach the generated file, and only as "the
+  generated file is stale" rather than "you edited a generated surface". A
+  commit-scoped guard would name the cause. Deferred because the lint harness
+  has no access to a commit-scoped diff today; the ad-hoc version
+  (AST-comparing every `ClassDef` first line against a base ref) was written
+  and used throughout Phase 6 and is the thing to promote if that access
+  appears. Caught in: prose mass reduction, Phase 6.
