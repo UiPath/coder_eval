@@ -493,12 +493,16 @@ def _git(repo_root: Path, *args: str) -> tuple[int, str]:
 
 def assert_code_unchanged(repo_root: Path, ref: str) -> list[str]:
     """Report every file under the configured roots whose code — not prose — differs from ``ref``."""
-    code, listing = _git(repo_root, "diff", "--name-only", ref, "--", *(root.as_posix() for root in _roots(repo_root)))
+    roots = [root.as_posix() for root in _roots(repo_root)]
+    code, listing = _git(repo_root, "diff", "--name-only", ref, "--", *roots)
     if code != 0:
         return [f"git diff against {ref!r} failed"]
+    code, untracked = _git(repo_root, "ls-files", "--others", "--exclude-standard", "--", *roots)
+    if code != 0:
+        return ["git ls-files for untracked files failed"]
 
     findings: list[str] = []
-    for name in sorted(filter(None, listing.splitlines())):
+    for name in sorted(set(filter(None, (listing + untracked).splitlines()))):
         if not name.endswith(".py"):
             continue
         shown, before = _git(repo_root, "show", f"{ref}:{name}")

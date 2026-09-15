@@ -1,8 +1,8 @@
 """Unit tests for the prose budget measurement (``tests/lint/prose_budget.py``).
 
 Every case runs against a synthetic tree in ``tmp_path`` or a plain string, never
-against the real tree — its word counts change with every prose commit,
-so asserting on them here would make this file a second, drifting baseline.
+against the real tree: its word counts change with every prose commit, so a test
+that asserted on them would fail on unrelated edits.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class TestMeasureTree:
 
 
 class TestCommentBudget:
-    """The per-file comment budget that replaced the hand-maintained baseline."""
+    """The per-file comment budget: a floor, then a share of the file's length."""
 
     def test_the_floor_applies_to_a_small_file(self) -> None:
         assert prose_budget.comment_line_budget(10) == 20
@@ -378,7 +378,7 @@ Q = chr(34) * 3
 
 
 class TestPointerPlacement:
-    """The guard promoted after three phases shipped this defect shape to review."""
+    """A ``Rationale:`` pointer must be the last prose line of its block."""
 
     def _root(self, tmp_path: Path, source: str) -> Path:
         root = _tree(tmp_path, {"a.py": source})
@@ -528,6 +528,12 @@ class TestAssertCodeUnchanged:
         _write(root, {"tests/x.py": 'def f():\n    """One."""\n    return 1  # noqa: E501\n'})
         findings = prose_budget.assert_code_unchanged(root, "HEAD")
         assert findings == ["tests/x.py: added directive comment '# noqa: E501' x1"]
+
+    def test_a_new_untracked_file_with_code_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = self._repo(tmp_path, monkeypatch)
+        _write(root, {"tests/new.py": "x = 1\n"})
+        findings = prose_budget.assert_code_unchanged(root, "HEAD")
+        assert findings == ["tests/new.py: code changed (AST differs after stripping docstrings)"]
 
     def test_a_missing_root_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         root = self._repo(tmp_path, monkeypatch)
