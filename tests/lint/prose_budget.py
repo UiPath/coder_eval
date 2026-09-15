@@ -511,10 +511,14 @@ def assert_code_unchanged(repo_root: Path, ref: str) -> list[str]:
         except SyntaxError:
             findings.append(f"{name}: could not parse both revisions")
             continue
-        dropped = directive_comments(before) - directive_comments(after)
-        findings += [
-            f"{name}: dropped directive comment {comment!r} x{count}" for comment, count in sorted(dropped.items())
-        ]
+        before_directives, after_directives = directive_comments(before), directive_comments(after)
+        for verb, changed in (
+            ("dropped", before_directives - after_directives),
+            ("added", after_directives - before_directives),
+        ):
+            findings += [
+                f"{name}: {verb} directive comment {comment!r} x{count}" for comment, count in sorted(changed.items())
+            ]
     return findings
 
 
@@ -529,6 +533,9 @@ def main(argv: list[str]) -> int:
         for finding in findings:
             print(finding, file=sys.stderr)
         return 1 if findings else 0
+    if argv:
+        print("usage: prose_budget.py [--assert-code-unchanged <git-ref>]", file=sys.stderr)
+        return 2
 
     print(render_report(measure(repo_root)), end="")
 

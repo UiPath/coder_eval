@@ -523,6 +523,12 @@ class TestAssertCodeUnchanged:
         assert len(findings) == 1
         assert findings[0].startswith("tests/x.py: code changed")
 
+    def test_an_added_directive_comment_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = self._repo(tmp_path, monkeypatch)
+        _write(root, {"tests/x.py": 'def f():\n    """One."""\n    return 1  # noqa: E501\n'})
+        findings = prose_budget.assert_code_unchanged(root, "HEAD")
+        assert findings == ["tests/x.py: added directive comment '# noqa: E501' x1"]
+
     def test_a_missing_root_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         root = self._repo(tmp_path, monkeypatch)
         monkeypatch.setattr(prose_budget, "_ROOTS", (Path("nope"),))
@@ -533,3 +539,9 @@ class TestAssertCodeUnchanged:
         root = self._repo(tmp_path, monkeypatch)
         _write(root, {"tests/x.py": 'def f():\n    """Two, longer."""\n    return 1\n'})
         assert prose_budget.assert_code_unchanged(root, "HEAD") == []
+
+
+class TestMain:
+    def test_an_unknown_argument_is_a_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert prose_budget.main(["--assert-code-unchanged-typo", "HEAD"]) == 2
+        assert "usage:" in capsys.readouterr().err
