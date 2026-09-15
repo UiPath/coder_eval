@@ -2033,7 +2033,7 @@ class TestMaxTurnsVisibleTurnCap:
 
     Codex delivers one SDK turn per ``communicate()``, so a native turn counter would
     cap at 1 and mean nothing; the cap therefore counts VISIBLE turns (completed tool
-    calls — the unit ``reports_stats.visible_turn_count`` sums) and is enforced on the
+    calls — the unit ``result_metrics.visible_turn_count`` sums) and is enforced on the
     same pump boundary as the cooperative stop.
     """
 

@@ -431,7 +431,7 @@ function sumMeasured(values: (number | null | undefined)[]): number | null {
 // Three of the task's four wall-clock buckets, summed over its turns. The
 // per-turn values are measured by `coder_eval/timing.py` — head and tail by
 // `decompose_turn`, the tool union at the collector seam — and the summation is
-// evalboard-only, a hand-written mirror of `reports_stats.turn_time_buckets`
+// evalboard-only, a hand-written mirror of `result_metrics.turn_time_buckets`
 // (unlike the rate table, which is generated). The arithmetic that consumes it, the
 // Unaccounted residual in `_sections.tsx`, is the deliberate second
 // implementation `decompose_turn`'s docstring names.

@@ -533,7 +533,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         ``STOPPED_EARLY`` (``crashed=False``).
 
         ``max_turns`` caps VISIBLE turns — tool calls, the unit
-        ``reports_stats.visible_turn_count`` counts — enforced in-stream on the same
+        ``result_metrics.visible_turn_count`` counts — enforced in-stream on the same
         step-loop boundary as the cooperative stop. Claude Code's native SDK cap
         counts assistant messages instead; one ``communicate()`` here is a single SDK
         turn, so a native counter would cap at 1 and mean nothing. See

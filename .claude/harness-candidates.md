@@ -859,7 +859,7 @@ re-derive from scratch.
   an existing form. Caught in: the turn-timing consolidation, Phase 5 review.
 
 - [ ] **Pre-existing, surfaced by the turn-timing final review:
-  `reports_stats.regularized_incomplete_beta` clamps an out-of-domain `x`
+  `stats.regularized_incomplete_beta` clamps an out-of-domain `x`
   instead of raising.** Its docstring says "Raises ValueError outside that
   domain — returning NaN would let a bad input render as a real-looking
   statistic downstream", and it does raise for a non-finite `a`/`b`/`x` and for

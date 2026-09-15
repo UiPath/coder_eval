@@ -340,4 +340,4 @@ class TestTheFourBucketDimensions:
 
         source = inspect.getsource(build_task_event)
         assert "turn_time_buckets(result)" in source
-        assert "harness_startup_ms" not in source, "the summation belongs to reports_stats"
+        assert "harness_startup_ms" not in source, "the summation belongs to result_metrics"

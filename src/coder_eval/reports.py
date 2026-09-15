@@ -372,8 +372,8 @@ class ReportGenerator:
                 avg_turn_str = "N/A"
 
             # READ, never summed here. The four values are computed once by
-            # `reports_stats.turn_time_buckets` and carried on the row by
-            # `reports_experiment.eval_result_to_task_dict`; `iterations` above
+            # `result_metrics.turn_time_buckets` and carried on the row by
+            # `run_record.eval_result_to_task_dict`; `iterations` above
             # is a 6-key projection that cannot support the arithmetic anyway.
             # `.get()` because a `run.json` written before this phase has none
             # of the four — which then renders as a dash, not as `0ms`.

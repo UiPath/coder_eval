@@ -31,17 +31,15 @@ from .reports import (
 from .reports_stats import (
     collect_variant_series,
     describe_prompt_config,
-    expected_turns_overage,
     fmt_mean_sd,
     fmt_p,
     format_score,
     is_env_table_key,
     load_variant_eval_results,
     paired_comparison,
-    stddev,
-    turn_time_buckets,
-    welch_t_test,
 )
+from .result_metrics import expected_turns_overage, turn_time_buckets
+from .stats import stddev, welch_t_test
 
 
 if TYPE_CHECKING:
@@ -971,7 +969,7 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
             f'<div class="stat"><div class="label">Crashed Partials</div>'
             f'<div class="value">{_esc(breakdown)}</div></div>'
         )
-    # The four wall-clock buckets. The arithmetic is in reports_stats; this
+    # The four wall-clock buckets. The arithmetic is in result_metrics; this
     # only formats it. An unmeasured bucket renders as an em dash, never 0ms —
     # a run predating the head/tail capture measured nothing, and a zero would
     # claim it measured instantly (CE058).

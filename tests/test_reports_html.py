@@ -1346,7 +1346,7 @@ class TestGenerationMetricsBuckets:
     `reports_html` is described in CLAUDE.md as the evalboard's static twin, and
     it rendered only Total Latency / Turns / Avg Turn Latency — so anyone
     reading the artifact rather than the dashboard got none of the wall-clock
-    accounting. The arithmetic lives in `reports_stats.turn_time_buckets`; this
+    accounting. The arithmetic lives in `result_metrics.turn_time_buckets`; this
     asserts the rendering AND, through it, that arithmetic.
     """
 
@@ -1429,7 +1429,7 @@ class TestGenerationMetricsBuckets:
         )
 
     def test_each_bucket_is_summed_across_turns(self):
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[
@@ -1469,7 +1469,7 @@ class TestGenerationMetricsBuckets:
         CE058 enforces in `src/`, and the reason the evalboard's `sumMeasured`
         returns null.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=None, teardown=None, generations=[(500, 1500, 800.0)])])
         buckets = turn_time_buckets(result)
@@ -1486,7 +1486,7 @@ class TestGenerationMetricsBuckets:
         Asserted through the RENDERER, not just the arithmetic — the dash is a
         rendering decision, so its counterexample has to be one too.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=0.0, teardown=0.0, generations=[(500, 1500, 800.0)])])
         assert turn_time_buckets(result).startup_ms == 0.0
@@ -1502,7 +1502,7 @@ class TestGenerationMetricsBuckets:
         missing time surfaces in Unaccounted rather than vanishing. That is the
         rule `scripts/timing/decompose_run.py::_turn_buckets` already applies.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=None, teardown=None, generations=[(500, 1500, 800.0)])])
         # 90s task, 800ms of generation, nothing else measured.
@@ -1517,7 +1517,7 @@ class TestGenerationMetricsBuckets:
         past the task's own wall clock, which is what overlapping looks like in
         the buckets.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[self._turn(startup=0.0, teardown=0.0, generations=[(0, 60_000, 60_000.0)], tools=(0, 60_000))]
@@ -1536,7 +1536,7 @@ class TestGenerationMetricsBuckets:
         The spawning Agent call's own interval already spans the child's run,
         so counting either books it twice.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[
@@ -1561,7 +1561,7 @@ class TestGenerationMetricsBuckets:
         path — which every run recorded from now on takes — reaches the same
         cell.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         kwargs = {"startup": 500.0, "teardown": 100.0, "generations": [(500, 1500, 800.0)], "tools": (600, 800)}
         legacy = _make_result(iterations=[self._turn(**kwargs)])
@@ -1579,7 +1579,7 @@ class TestGenerationMetricsBuckets:
         so reading the stored value with truthiness instead of `is not None`
         would silently replace a measurement with a re-derivation.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[
@@ -1607,7 +1607,7 @@ class TestGenerationMetricsBuckets:
         restored = TurnRecord.model_validate(raw)
         assert restored.tool_union_ms is None
 
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         assert turn_time_buckets(_make_result(iterations=[restored])).tool_ms == pytest.approx(200.0)
 
@@ -1624,7 +1624,7 @@ class TestGenerationMetricsBuckets:
         from one that ran none, so the presence of a SPAN decides — the same
         None-vs-0 distinction CE058 enforces in `src/`.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])
         assert turn_time_buckets(result).tool_ms is None
@@ -1637,7 +1637,7 @@ class TestGenerationMetricsBuckets:
         be on the value. The evalboard keeps its own residual null for exactly
         this case.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])
         result.duration_seconds = 0.0
@@ -1645,7 +1645,7 @@ class TestGenerationMetricsBuckets:
         assert self._stat(HTMLReportGenerator().generate_task_html(result), "Unaccounted") == "—"
 
     def test_a_run_with_no_turns_does_not_raise(self):
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         buckets = turn_time_buckets(_make_result(iterations=[]))
         assert buckets.generation_ms is None

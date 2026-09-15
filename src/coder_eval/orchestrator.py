@@ -76,6 +76,7 @@ from .path_utils import (
     task_log_path,
     write_text_atomic,
 )
+from .result_metrics import turn_time_buckets, visible_turn_count
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
@@ -325,8 +326,6 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
     # averaging `StartupMs` with no filter would read a laundered zero as a
     # harness that booted instantly, which is indistinguishable from a run that
     # predates the capture. An absent dimension drops out of the average.
-    from .reports_stats import turn_time_buckets
-
     buckets = turn_time_buckets(result)
     for name, value in (
         ("StartupMs", buckets.startup_ms),
@@ -1405,7 +1404,6 @@ class Orchestrator:
             return
         if self._expected_turns_warning_emitted:
             return
-        from .reports_stats import visible_turn_count
 
         total = visible_turn_count(self.result)
         if total > limits.expected_turns:
