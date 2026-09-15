@@ -69,51 +69,28 @@ _CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
     "Glob": "shell",
 }
 
-# Approval mode — the SAME for every permission mode (no per-mode mapping).
-#
-# The Codex SDK exposes exactly two approval modes:
-#   - auto_review → AskForApproval.on_request + a SERVER-SIDE ApprovalsReviewer.
-#     The reviewer (an extra app-server/gateway decision) adjudicates each
-#     apply_patch/shell escalation. Under gateway load it can spuriously return
-#     "declined" — files silently not written. Claude has no analog: its
-#     Write/Edit permissions are decided CLIENT-SIDE with no model/reviewer in
-#     the loop, so it never hits this failure mode.
-#   - deny_all → AskForApproval.never + NO reviewer. Despite the name, this is
-#     the "run autonomously, never prompt, no reviewer" mode: in-sandbox
-#     operations (apply_patch within cwd, shell) execute directly; only
-#     escalations BEYOND the sandbox are refused.
-#
-# An eval harness never wants a reviewer that can flake, so EVERY permission mode
-# uses deny_all. The trust boundary is coder_eval's per-run sandbox — a docker
-# container or an ephemeral tempdir — NOT Codex's in-process OS sandbox, which
-# _build_thread_options always drops to full-access (rationale there).
+# Approval mode — the SAME for every permission mode. Despite the name this is
+# the "run autonomously, never prompt, no reviewer" mode: in-sandbox operations
+# execute directly, and only escalations BEYOND the sandbox are refused. The
+# alternative puts a server-side reviewer in the loop that can flake.
+# Rationale: .claude/notes/agents.md § Codex runs full-access on every permission mode
 _CODEX_APPROVAL_MODE = "deny_all"
 
 # Provider id registered in thread config when CODEX_BASE_URL routes to a
 # custom endpoint.
 _CUSTOM_PROVIDER_ID = "custom"
 
-# Codex apply_patch (Write/Edit) statuses that mean the patch did not apply.
-# PatchApplyStatus enum values are inProgress/completed/failed/declined — never
-# the literal "error" the code used to compare against, so a failed patch was
-# silently recorded as a successful Write. We use this only to classify the
-# Write TELEMETRY honestly (failed → error). We do NOT fail or retry the turn on
-# it: "declined" can only come from an approval reviewer, and every permission
-# mode uses deny_all (no reviewer; see _CODEX_APPROVAL_MODE), so
-# in-sandbox apply_patch is applied directly and "declined" should not occur;
-# "failed" (diff context mismatch) is self-healed by the model within the turn,
-# and grading checks the actual files regardless.
+# apply_patch statuses meaning the patch did not apply. Used ONLY to classify the
+# Write telemetry honestly, never to fail or retry the turn: "declined" needs an
+# approval reviewer, which no permission mode configures, and "failed" (a diff
+# context mismatch) is self-healed by the model within the turn. Grading checks
+# the actual files regardless.
 _FILE_CHANGE_FAILURE_STATUSES = frozenset({"failed", "declined"})
 
-# Codex thread-item types that carry transcript CONTENT or session metadata
-# rather than a tool call. Everything else streamed as item/started+item/completed
-# is treated as a tool call (see _run_turn_with_streaming), so new Codex tool
-# kinds are captured automatically instead of being silently dropped — the old
-# code hard-coded only commandExecution/fileChange.
-#   - reasoning / agentMessage  -> assistant transcript blocks (handled inline)
-#   - userMessage               -> prompt echo (skipped)
-#   - contextCompaction / entered|exitedReviewMode / hookPrompt / plan ->
-#     session lifecycle + planning items, not agent tool calls.
+# Thread-item types carrying transcript CONTENT or session metadata rather than a
+# tool call. Everything ELSE streamed as item/started+item/completed is treated as
+# a tool call, so a new Codex tool kind is captured automatically instead of being
+# silently dropped.
 _CONTENT_ITEM_TYPES = frozenset(
     {
         "reasoning",
@@ -127,8 +104,9 @@ _CONTENT_ITEM_TYPES = frozenset(
     }
 )
 
-# Friendly tool-name labels for known Codex tool item types. Unknown tool types
-# fall back to the raw item type (so they still surface, just un-prettied).
+# Codex item type -> the canonical (Claude) vocabulary every criterion is written
+# against. Unknown types fall back to the raw item type, so they still surface.
+# Rationale: .claude/notes/agents.md § Tool-name and argument normalization
 _TOOL_ITEM_NAMES: dict[str, str] = {
     "commandExecution": "Bash",
     "fileChange": "Write",
@@ -140,17 +118,14 @@ _TOOL_ITEM_NAMES: dict[str, str] = {
     "imageView": "ImageView",
 }
 
-# collabAgentToolCall.tool value that spawns a NEW sub-agent (vs "wait"/messaging
-# operations that act on an already-spawned agent). Only spawns register a new
-# child thread to recover. Lowercased to match _status_value, which normalizes
-# the SDK's "spawnAgent" enum value to lowercase.
+# The collabAgentToolCall.tool value that spawns a NEW sub-agent; "wait" and
+# messaging act on an already-spawned one, so only spawns register a child thread
+# to recover. Lowercased to match _status_value's normalization.
 _COLLAB_SPAWN_TOOL = "spawnagent"
 
-# Friendly tool-name labels for the raw ResponseItem function-call names found in
-# a sub-agent's on-disk rollout (see _recover_subagent_tool_calls). The child
-# thread persists `function_call`/`local_shell_call` ResponseItems unconditionally
-# even though its `commandExecution` events are dropped under Limited persistence,
-# so the rollout is the only place the sub-agent's inner tool calls survive.
+# Tool names for the raw ResponseItem function calls in a sub-agent's on-disk
+# rollout, which is the only place its inner tool calls survive.
+# Rationale: .claude/notes/agents.md § Codex rollout rebuild
 _ROLLOUT_FN_NAMES: dict[str, str] = {
     "exec_command": "Bash",
     "shell": "Bash",
@@ -165,11 +140,9 @@ _ROLLOUT_FN_NAMES: dict[str, str] = {
 _ROLLOUT_TOOL_CALL_TYPES = frozenset({"function_call", "local_shell_call", "custom_tool_call"})
 _ROLLOUT_TOOL_OUTPUT_TYPES = frozenset({"function_call_output", "custom_tool_call_output"})
 
-# Sentinel returned by ``next(stream_iter, _STREAM_DONE)`` at stream end. We pass
-# a default rather than catching StopIteration because a StopIteration raised
-# inside ``asyncio.to_thread`` is converted by asyncio into a TypeError
-# ("StopIteration interacts badly with generators…") that escapes ``except
-# StopIteration`` — masking the real turn-failure reason on the stream-end path.
+# A default rather than catching StopIteration: one raised inside
+# ``asyncio.to_thread`` is converted by asyncio into a TypeError that escapes
+# ``except StopIteration``, masking the real turn-failure reason.
 _STREAM_DONE = object()
 
 
@@ -192,30 +165,21 @@ class _ItemTiming(NamedTuple):
 def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_ms: float | None) -> _ItemTiming:
     """Resolve a tool item's timing from the SDK's millisecond stamps.
 
-    One helper for all three telemetry builders, so a command, a file change
-    and an MCP call cannot disagree about what a missing stamp means.
+    One helper for all three telemetry builders, so a command, a file change and
+    an MCP call cannot disagree about what a missing stamp means.
 
-    BOTH stamps or neither. Pairing a real stamp with ``_ms_to_dt(None)`` —
-    which is ``datetime.now()`` — would fabricate an interval out of one
-    reading and the current time, so the raw ``int | None`` values are checked
-    BEFORE conversion, never after.
+    BOTH stamps or neither: pairing a real stamp with ``_ms_to_dt(None)`` — which
+    is ``datetime.now()`` — fabricates an interval out of one reading and the
+    current time, so the raw values are checked BEFORE conversion.
 
-    With both present, ``timestamp`` becomes the tool's own start. It used to
-    be ``datetime.now()`` at COMPLETION, which places the call after its own
-    execution. Ordering is unaffected either way: ``TurnRecord.commands`` is
-    sorted on ``sequence_number`` (``collector._ordered_commands``).
+    Without them, the SDK item's own ``duration_ms`` is used only when it reports
+    something. A ``0`` there is an UNREPORTED duration, not an instant command (70
+    of 211 commands in one nightly reported ``0`` for calls the message gaps show
+    took seconds), so it becomes ``None`` (CE058).
 
-    Without them, the SDK item's own ``duration_ms`` is used only when it
-    reports something. A ``0`` (or, defensively, a negative) there is an
-    UNREPORTED duration, not an instant command — 70 of 211 commands in one
-    nightly reported ``0`` for calls the message gaps show took seconds — so
-    it becomes ``None`` and leaves both sides of every average instead of
-    dragging them toward zero.
-
-    ``generation_completed_at`` is deliberately absent from this tuple, for
-    all three builders: it means "when the model finished emitting the
-    ``tool_use`` block", which Codex's stream does not carry per tool.
-    Deriving it from the flush time would be a guess.
+    ``generation_completed_at`` is deliberately absent for all three: it means
+    "when the model finished emitting the ``tool_use`` block", which Codex's
+    stream does not carry per tool, and the flush time would be a guess.
     """
     if started_ms is not None and completed_ms is not None:
         started = _ms_to_dt(started_ms)
@@ -227,8 +191,8 @@ def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_
             # anomaly remains visible in the record.
             duration_ms=max(0.0, float(completed_ms - started_ms)),
         )
-    # Explicit `is None or <= 0`, never `sdk_duration_ms or None` — that is
-    # the CE058 coalesce read backwards, and it hides the decision being made.
+    # Explicit `is None or <= 0`, never `sdk_duration_ms or None`: that is the
+    # CE058 coalesce read backwards, and hides the decision being made.
     duration = None if sdk_duration_ms is None or sdk_duration_ms <= 0 else float(sdk_duration_ms)
     return _ItemTiming(
         timestamp=datetime.now(),
@@ -248,8 +212,7 @@ def _fresh_input_tokens(raw_input: int, cached: int) -> int:
     """The fresh (uncached) prompt slice = tokens written to cache this call.
 
     Single definition of the OpenAI cache-write convention, shared by the
-    per-message (`_flush_message`) and per-turn (`_token_usage_from_sdk`) paths so
-    they can't drift if the billing model ever changes.
+    per-message and per-turn paths so they cannot drift.
     """
     return max(raw_input - cached, 0)
 
@@ -257,9 +220,11 @@ def _fresh_input_tokens(raw_input: int, cached: int) -> int:
 class _ThreadTotals(NamedTuple):
     """A snapshot of the Codex SDK's thread-cumulative ``ThreadTokenUsage.total``.
 
-    Held on the agent across turns (the thread outlives the turn) so each turn can
-    report its own slice instead of the running total. ``input`` is the full prompt
-    count, cached prefix included — the SDK's convention, not ours.
+    Held across turns (the thread outlives the turn) so each turn reports its own
+    slice, not the running total. ``input`` is the full prompt count, cached
+    prefix INCLUDED — the SDK's convention, not ours.
+
+    Rationale: .claude/notes/agents.md § Codex rollout rebuild
     """
 
     input: int = 0
@@ -269,9 +234,9 @@ class _ThreadTotals(NamedTuple):
     def since(self, baseline: "_ThreadTotals") -> "_ThreadTotals":
         """This turn's tokens = the cumulative snapshot minus the previous one.
 
-        A total that moved BACKWARDS means the thread restarted under us (a fresh
-        thread counts from zero), so the snapshot is already turn-local: return it
-        whole rather than clamping every bucket to zero and losing the turn.
+        A total that moved BACKWARDS means the thread restarted, so the snapshot
+        is already turn-local: return it whole rather than clamping to zero and
+        losing the turn.
         """
         if self.input < baseline.input or self.output < baseline.output or self.cached < baseline.cached:
             return self
@@ -285,9 +250,8 @@ class _ThreadTotals(NamedTuple):
 def _message_uncached_input(m: AssistantMessage) -> int:
     """A captured generation's fresh (uncached) input.
 
-    Single definition of the per-message convention, shared by the cost and the
-    fold-up paths. Codex children carry 0 ``cache_creation`` (no cache-write fee),
-    but fold both defensively so nothing is dropped if that ever changes.
+    Codex children carry 0 ``cache_creation`` (no cache-write fee), but both are
+    folded defensively so nothing is dropped if that changes.
     """
     return m.input_tokens + m.cache_creation_tokens
 
@@ -297,14 +261,12 @@ def _message_uncached_input(m: AssistantMessage) -> int:
 # supported"), so this is a fixed constant, not an operator knob.
 _CODEX_WIRE_API = "responses"
 
-# Login-shell profile files generated into the per-task HOME (see
-# _setup_login_shell_home). ``.bash_profile`` is what ``bash -l`` reads;
-# ``.profile`` covers ``sh``/``dash`` login shells. The zsh trio covers macOS,
-# where zsh is the default shell: ``.zshenv`` runs in EVERY zsh, ``.zprofile``
-# in login shells (AFTER /etc/zprofile, whose path_helper resets PATH), and
-# ``.zshrc`` in interactive shells - including codex's shell snapshot, which
-# sources it explicitly. zsh selects its dotfiles via $ZDOTDIR (fallback
-# $HOME), so _build_codex_env points ZDOTDIR at the generated home.
+# Login-shell profiles generated into the per-task HOME. ``.bash_profile`` is
+# what ``bash -l`` reads and ``.profile`` covers sh/dash; the zsh trio covers
+# macOS, where ``.zshenv`` runs in EVERY zsh, ``.zprofile`` in login shells
+# (AFTER /etc/zprofile's path_helper) and ``.zshrc`` in interactive ones,
+# including codex's shell snapshot.
+# Rationale: .claude/notes/agents.md § Codex login-shell PATH restoration
 _LOGIN_PROFILE_NAMES = (".bash_profile", ".profile", ".zshenv", ".zprofile", ".zshrc")
 _ZSH_PROFILE_NAMES = frozenset({".zshenv", ".zprofile", ".zshrc"})
 
@@ -326,21 +288,17 @@ def _get_item_root(notification: Any) -> Any:
 class _CodexTurnState:
     """Per-turn mutable scratch state for one ``CodexAgent.communicate`` call.
 
-    Holds the stream-pump locals and the assistant-transcript reconstruction
-    buffers, with one method per notification kind (``on_*``) plus ``dispatch``
-    (returns True on ``turn/completed`` to break the pump), ``_record_block`` /
-    ``_flush_message`` (the per-generation message cutter) and ``finalize`` (the
-    terminal ``AgentEndEvent`` + partial-record build). A plain module-private
-    class (NOT Pydantic, NOT exported) with a back-reference to the agent for its
-    existing helpers (``_tool_name`` / ``_telemetry_for_item`` / … ).
+    Holds the stream-pump locals and the transcript reconstruction buffers, with
+    one method per notification kind plus ``dispatch`` (True on ``turn/completed``
+    to break the pump), ``_flush_message`` and ``finalize``.
 
     ``commands`` and ``messages`` are the SAME list objects ``communicate`` owns,
-    held by identity (no copy) so a mid-turn crash keeps the partial transcript.
-    The finalize inputs (``sdk_token_usage`` / ``result_turn`` / ``result_text``)
-    are COMMITTED by ``communicate`` only after the pump returns cleanly — they
-    default to None/None/"" so a crashed turn finalizes from the captured messages
-    (the live pump scratch ``turn_result`` / ``latest_token_usage`` /
-    ``agent_message_chunks`` is intentionally NOT what finalize reads).
+    held by identity (no copy), so a mid-turn crash keeps the partial transcript.
+
+    The finalize inputs are COMMITTED by ``communicate`` only after the pump
+    returns cleanly, defaulting to None/None/"" — so a crashed turn finalizes from
+    the captured messages, and the live pump scratch is intentionally NOT what
+    finalize reads.
     """
 
     def __init__(
@@ -393,14 +351,11 @@ class _CodexTurnState:
         self.open_blocks: list[ContentBlock] = []
         self.open_start_ms: int | None = None
         self.open_end_ms: int | None = None
-        # Where the NEXT generation window starts: the previous flush's end.
-        # Windows tile the turn contiguously, as they do on Antigravity and
-        # claude-code. None until the first flush, which falls back to its own
-        # first item — the SDK gives no "turn began" stamp, and inventing one
-        # from time.time() would mix our clock with the SDK's inside a single
-        # subtraction. Advanced ONLY by a flush that actually appended a
-        # message, so a no-op flush leaves the window open and a later real
-        # generation still measures from where it began.
+        # Where the NEXT generation window starts: the previous flush's end. None
+        # until the first flush, which falls back to its own first item — the SDK
+        # gives no "turn began" stamp, and inventing one from time.time() would
+        # mix our clock with the SDK's inside one subtraction.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
         self.gen_mark_ms: int | None = None
         self.start_ms_by_id: dict[str, int] = {}
         self.blocks_by_id: dict[str, ContentBlock] = {}
@@ -428,11 +383,11 @@ class _CodexTurnState:
     def _flush_message(self, last: Any) -> None:
         """Cut the open buffer into AssistantMessage(s) for one generation.
 
-        ``last`` is the SDK ``TokenUsageBreakdown`` for the generation that
-        produced these blocks (or None for a safety flush with no usage). Emits
-        ONE sub-message per block kind (thinking vs tool/text), all sharing this
-        generation's ``message_id``; the first carries the gen's input/cache, the
-        rest carry 0 so per-message_id sums don't double-count.
+        ``last`` is the SDK breakdown for the generation that produced these
+        blocks (None for a safety flush). Emits ONE sub-message per block kind,
+        all sharing this generation's ``message_id``.
+
+        Rationale: .claude/notes/agents.md § Why the generation is split into sub-messages
         """
         if not self.open_blocks:
             self.reasoning_placeholders = []
@@ -441,13 +396,12 @@ class _CodexTurnState:
         cached = (getattr(last, "cached_input_tokens", 0) or 0) if last else 0
         raw_input = (getattr(last, "input_tokens", 0) or 0) if last else 0
         total_output = (getattr(last, "output_tokens", 0) or 0) if last else 0
-        # The fresh (uncached) prompt slice is plain input — OpenAI bills no
-        # separate cache-write fee, so Codex carries 0 cache_creation.
+        # OpenAI bills no separate cache-write fee, so cache_creation is 0.
         gen_input = _fresh_input_tokens(raw_input, cached)
         gen_cache_write = 0
         reasoning_tok = (getattr(last, "reasoning_output_tokens", 0) or 0) if last else 0
-        # Resolve text-less reasoning blocks: show a policy placeholder when
-        # reasoning was billed, else drop the block.
+        # A text-less reasoning block becomes a placeholder when reasoning was
+        # billed, and is dropped otherwise.
         if self.reasoning_placeholders:
             if reasoning_tok > 0:
                 for blk in self.reasoning_placeholders:
@@ -463,27 +417,18 @@ class _CodexTurnState:
 
         thinking_blocks = [b for b in self.open_blocks if b.block_type == "thinking"]
         action_blocks = [b for b in self.open_blocks if b.block_type != "thinking"]
-        # The window runs from the PREVIOUS flush's end, not from this
-        # generation's first item. The SDK stamps an item with the moment it
-        # began EXECUTING, so seeding from it discarded the model time that
-        # produced the item — the gap between the last item's completion and
-        # this one's start. Measured on tasks/hello_date: a Write emission
-        # spanning 2 ms (start 20:50:39.063, end .065) reported 98 output
-        # tokens, and the 2694 ms of real generation sat in the preceding gap,
-        # attributed to nothing. Across that turn only 15.8% of the 17 s wall
-        # clock was accounted for. Tiling matches Antigravity and claude-code,
-        # and is what lets Sum(generation) + Sum(tool) reconcile to the turn.
+        # From the PREVIOUS flush's end, not this generation's first item: the
+        # SDK stamps an item with the moment it began EXECUTING, so seeding there
+        # discards the model time that produced it.
         mark_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
         window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
         mark = _ms_to_dt(mark_ms)
         completed = _ms_to_dt(window_end_ms)
-        # The RAW window. It is extended to the LAST item's completion, so a
-        # generation containing a tool call already CONTAINS that tool's
-        # execution — but taking it back out is no longer this reducer's job.
-        # `timing.subtract_tool_time` does it for all five, which is
-        # also what makes the sub-message split below safe: the two specs share
-        # these bounds, so the collector groups them and subtracts the overlap
-        # ONCE rather than once per part.
+        # The RAW window, extended to the LAST item's completion — so a
+        # generation containing a tool call already CONTAINS its execution, and
+        # the collector takes it back out. That is also what makes the sub-message
+        # split safe: the two specs SHARE these bounds, so the overlap is
+        # subtracted once rather than once per part.
         started, gen_ms = close_window(
             mark=mark,
             now=completed,
@@ -496,29 +441,20 @@ class _CodexTurnState:
         think_out = reasoning_tok if action_blocks else total_output
         action_out = max(total_output - reasoning_tok, 0) if thinking_blocks else total_output
 
-        # Sub-message specs in generation order (thinking first). The FIRST
-        # carries the gen's input/cache — those are per-CALL billing figures
-        # and must not be split. Generation TIME is different: it is a
-        # property of the content, so it is apportioned below.
+        # Thinking first. The FIRST carries the gen's input/cache: per-CALL
+        # billing figures that must not be split. Generation TIME is a property
+        # of the content, so it IS apportioned below.
         specs: list[tuple[list[ContentBlock], int, int]] = []
         if thinking_blocks:
             specs.append((thinking_blocks, think_out, reasoning_tok))
         if action_blocks:
             specs.append((action_blocks, action_out, 0))
 
-        # Split gen_ms across the sub-messages by their own OUTPUT-TOKEN
-        # share, giving the last the remainder so the parts reconstruct
-        # gen_ms (to float precision — the shares are rounded to 1e-6 ms, so
-        # do not assert exact equality on an arbitrary measured window).
-        # Concentrating it all on the first reported the thinking row as the
-        # entire generation and the action row as instant. With no output
-        # recorded anywhere, split evenly — there is nothing to weigh by, and
-        # one row taking all of it would be a guess dressed as a measurement.
-        #
-        # NOTE this weighs by output tokens while the evalboard's own
-        # mixed-emission split weighs by CONTENT SIZE. Deliberate, not an
-        # oversight to unify: here the SDK hands us a real per-spec token
-        # count, so there is no need to approximate one from content length.
+        # By OUTPUT-TOKEN share, the last taking the remainder so the parts
+        # reconstruct gen_ms to float precision (shares round to 1e-6 ms, so do
+        # not assert exact equality on a measured window). With no output anywhere,
+        # split evenly. The evalboard's twin weighs by CONTENT SIZE instead, which
+        # is deliberate, not an oversight to unify.
         out_total = sum(out_tok for _, out_tok, _ in specs)
         gen_parts: list[float] = []
         assigned = 0.0
@@ -571,12 +507,11 @@ class _CodexTurnState:
     def max_turns_reached(self) -> bool:
         """True once this turn has produced ``max_turns`` visible turns.
 
-        Delegates the count to the collector (``EventCollector.visible_turn_count``)
-        so Codex and Antigravity cap on one shared definition rather than each
-        agent's own scratch list — ``self.commands`` skips items whose telemetry the
-        SDK does not resolve, while the collector counts every emitted tool end,
-        which is exactly what lands in ``TurnRecord.commands``. Codex delivers one
-        SDK turn per ``communicate()``, so the SDK's own turn counter would cap at 1.
+        Delegates to ``EventCollector.visible_turn_count`` rather than
+        ``self.commands``, which SKIPS items whose telemetry the SDK does not
+        resolve; the collector counts every emitted tool end, which is what lands
+        in ``TurnRecord.commands``. Codex delivers one SDK turn per
+        ``communicate()``, so a native counter would cap at 1.
         """
         return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
 
@@ -619,11 +554,9 @@ class _CodexTurnState:
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
             tool_id = item_id or f"{root_type}_{self.next_sequence}"
             self.seq_by_id[tool_id] = self.next_sequence
-            # The start stamp is known HERE, so record it on the start
-            # telemetry too. close_open_tools publishes this object verbatim
-            # for an orphan, and without it Codex was the only harness whose
-            # unresolved tool calls could not be placed on a timeline at all
-            # (OpenCode, Pi and Antigravity all set it at tool start).
+            # Recorded on the START telemetry too: close_open_tools publishes
+            # this object verbatim for an orphan, and without it an unresolved
+            # call cannot be placed on a timeline at all.
             started_at = _ms_to_dt(started_at_ms) if started_at_ms is not None else None
             start_tel = CommandTelemetry(
                 tool_name=self._agent._tool_name(root_type),
@@ -636,8 +569,8 @@ class _CodexTurnState:
             self.open_tools[tool_id] = start_tel
             self.emit.on_event(ToolStartEvent(task_id=self.task_id, turn_id=self.turn_id, tool=start_tel))
             self.next_sequence += 1
-            # Record the tool_use block now; is_error patched at item/completed,
-            # even after the message is flushed (held by reference in blocks_by_id).
+            # is_error is patched at item/completed even after the message is
+            # flushed, because the block is held by reference.
             block = ContentBlock(block_type="tool_use", sequence=0, tool_use_id=tool_id)
             self.blocks_by_id[tool_id] = block
             self._record_block(block, tool_id, None)
@@ -655,10 +588,8 @@ class _CodexTurnState:
             # This tool is now resolved — drop it from the orphan set.
             self.open_tools.pop(tool_id, None)
 
-            # The SDK reports both ends of the execution; `on_item_started`
-            # banked the start. Passing them in is what lets the builders
-            # record real execution bounds instead of a duration the SDK often
-            # leaves at 0.
+            # `on_item_started` banked the start; passing both in is what lets
+            # the builders record real bounds instead of the SDK's frequent 0.
             telemetry, is_error = self._agent._telemetry_for_item(
                 root,
                 root_type,
@@ -683,8 +614,8 @@ class _CodexTurnState:
                     status=ToolEndStatus.ERROR if is_error else ToolEndStatus.OK,
                 )
             )
-            # Patch the block recorded at item/started (held by reference, so this
-            # lands even post-flush) + extend the still-open message's end time.
+            # Patch the block recorded at item/started, and extend the still-open
+            # message's end time.
             if tool_id in self.blocks_by_id:
                 self.blocks_by_id[tool_id].is_error = is_error
             if (
@@ -706,7 +637,7 @@ class _CodexTurnState:
 
         elif root_type == "reasoning":
             # OpenAI never returns raw CoT, so a text-less item becomes a
-            # placeholder block, resolved with its token count at flush.
+            # placeholder, resolved with its token count at flush.
             reasoning_id = getattr(root, "id", f"reasoning_{self.next_sequence}")
             parts = getattr(root, "content", None) or getattr(root, "summary", None) or []
             text = "\n".join(p for p in parts if p)
@@ -716,8 +647,8 @@ class _CodexTurnState:
                 self.reasoning_placeholders.append(block)
 
         elif root_type == "agentMessage":
-            # Full assistant text — append a text block. The message is cut at the
-            # following tokenUsage event (the generation boundary), not here.
+            # The message is cut at the following tokenUsage event (the
+            # generation boundary), not here.
             message_item_id = getattr(root, "id", f"msg_{self.next_sequence}")
             text = getattr(root, "text", "") or ""
             if text:
@@ -775,19 +706,15 @@ class _CodexTurnState:
             return
         self.finalized = True
 
-        # Prefer the SDK total (deltas off the thread-cumulative figure); on
-        # crash/timeout it stays None, so fall back to the per-generation tokens
-        # already captured on the messages — those are per-turn to begin with, but
-        # the thread baseline still has to move past them or the NEXT turn's delta
-        # re-books this one.
+        # On crash/timeout the SDK total stays None, so fall back to the
+        # per-generation tokens on the messages — but the thread baseline still
+        # has to move past them, or the NEXT turn's delta re-books this one.
         token_usage = self._agent._token_usage_from_sdk(self.sdk_token_usage)
         if token_usage is None:
             token_usage = self._agent._token_usage_from_messages(self.messages)
             self._agent._advance_usage_baseline(token_usage)
-        # Codex bills sub-agents on separate threads, so fold the recovered child
-        # generations into the turn total — matching Claude's bubbled-up totals.
-        # Folded AFTER the baseline advance: the SDK total covers the parent thread
-        # only, so child tokens must not shift the parent's baseline.
+        # AFTER the baseline advance: the SDK total covers the parent thread only,
+        # so child tokens must not shift the parent's baseline.
         token_usage = self._agent._fold_subagent_tokens(token_usage, self.messages)
 
         self.emit.on_event(
@@ -834,13 +761,11 @@ class _CodexTurnState:
 class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
-    # The notification pump has a between-items guard where the cooperative
-    # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
+    # The pump has a between-items guard where `should_stop` runs.
     supports_cooperative_stop: ClassVar[bool] = True
 
-    # Codex appends system_prompt as developer_instructions on top of its base
-    # prompt. Runs from before this marker existed silently DROPPED the field —
-    # dashboards must not pool system_prompt-setting tasks across that boundary.
+    # `system_prompt` maps to developer_instructions, ON TOP of the base prompt.
+    # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
 
     def __init__(
@@ -861,9 +786,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.route = route or DirectRoute()
         self.codex_client: Any = None
         self.thread: Any = None
-        # Thread-cumulative token snapshot as of the END of the last finalized turn.
-        # The thread outlives the turn, so this is what makes each turn's usage its
-        # own delta rather than the running total (see _token_usage_from_sdk).
+        # Thread-cumulative snapshot as of the END of the last finalized turn:
+        # what makes each turn's usage its own delta, not the running total.
         self._thread_usage_baseline = _ThreadTotals()
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
@@ -871,10 +795,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
         # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
-        # Live handle to the in-flight turn, set by _run_turn_with_streaming and
-        # cleared in its finally. kill()/kill_sync() use it to interrupt a stuck
-        # turn — the watchdog's task.cancel() alone can't preempt a blocking SDK
-        # call (it lands only at an await point, which we now create via to_thread).
+        # Live handle to the in-flight turn, so kill()/kill_sync() can interrupt a
+        # stuck one: the watchdog's task.cancel() lands only at an await point,
+        # which the to_thread offload is what creates.
         self._active_turn_handle: Any = None
 
     async def start(
@@ -906,17 +829,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
             env_override = self._build_codex_env()
             config = CodexConfig(env=env_override) if env_override else None
 
-            # Initialize the Codex client (context manager compatible). Close any
-            # prior client first: start() is driven through execute_with_retry, so
-            # a retried start would otherwise orphan the previous app-server
-            # subprocess + reader threads (reaped only at final cleanup).
+            # Close any prior client FIRST: start() runs through
+            # execute_with_retry, so a retried start would otherwise orphan the
+            # previous app-server subprocess and its reader threads.
             self._close_client()
             self.codex_client = Codex(config=config)
             self._log.debug("Codex client initialized")
 
-            # Authenticate with the API key when one is configured. Without this
-            # the app-server falls back to an existing ChatGPT login, so headless
-            # API-key runs (CI) would otherwise fail to authenticate.
+            # Without this the app-server falls back to an existing ChatGPT
+            # login, so headless API-key runs (CI) fail to authenticate.
             api_key = os.getenv("CODEX_API_KEY")
             if api_key:
                 try:
@@ -980,18 +901,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         turn_start_time = time.monotonic()
 
-        # Event emission: the agent is the SOLE emitter; events fan out to an
-        # internal EventCollector (which assembles the TurnRecord — the single,
-        # agent-agnostic capture path) and the caller's stream_callback.
+        # The agent is the SOLE emitter: events fan out to an internal
+        # EventCollector and the caller's stream_callback.
         task_id = str(self.config.type)  # str() so a plugin subclass with a non-enum kind also works
         collector = EventCollector()
         emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
 
         # Codex has no per-API-call boundary: one thread.turn() == one turn_id.
         turn_id = f"codex-{self._iteration}"
-        # All per-turn scratch lives on the state so the stream-pump branches are
-        # methods; the same commands/messages lists flow through the pump and
-        # finalize. timeout_hit is set by the watchdog callback (atomic bool).
+        # The same commands/messages lists flow through the pump and finalize.
+        # `timeout_hit` is written by the watchdog callback (atomic bool).
         state = _CodexTurnState(
             self,
             emit=emit,
@@ -1038,9 +957,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=self._effective_model()))
 
                 try:
-                    # Commit the pump's results onto the state only on a CLEAN
-                    # return; a crash skips this, so finalize reads the crash
-                    # defaults (None/"") and falls back to the captured messages.
+                    # Committed only on a CLEAN return; a crash skips this, so
+                    # finalize reads the defaults and falls back to the messages.
                     state.result_turn, state.sdk_token_usage, state.result_text = await self._run_turn_with_streaming(
                         state, should_stop
                     )
@@ -1052,11 +970,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
                     if state.ended_cleanly:
-                        # The turn already stopped cleanly; escalating to a crash
-                        # would trigger the orchestrator's retry with the watcher's
-                        # decision still latched → immediate stop-at-turn-0 on the
-                        # retry (wasted spend). A cap-break is the same shape: the
-                        # retry would burn the budget again and re-hit the cap.
+                        # Already stopped on purpose — do not escalate.
+                        # Rationale: .claude/notes/agents.md § Why a post-stop exception is not a crash
                         self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
                     else:
                         self._finalize_and_raise_crash(
@@ -1065,32 +980,26 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
             if state.timeout_hit:
                 # Watchdog fired but the pump finished before the cancel landed.
-                # Route through the shared kernel so this path sets _state=ERROR
-                # like every other timeout/crash path (it previously did not — a
-                # latent inconsistency now fixed).
+                # Routed through the shared kernel so this path sets _state=ERROR
+                # like every other timeout path.
                 assert timeout is not None
                 self._finalize_and_raise_timeout(state.finalize, timeout)
         except (AgentCrashError, TurnTimeoutError):
             # Already funneled through finalize by the inner handlers.
             raise
         except asyncio.CancelledError:
-            # Non-timeout cancel (external cancellation, or a cancel during
-            # thread_start before the watchdog block). The timeout path already
-            # finalized above; otherwise close the AgentStart so the event tree
-            # stays balanced and the pending-turn contract holds. finalize is
+            # External, or during thread_start before the watchdog block. Close
+            # the AgentStart so the event tree stays balanced; finalize is
             # idempotent, so the timeout case is a no-op here.
             if not state.finalized:
                 self._finalize_external_cancel(state.finalize)
             raise
         except Exception as e:
-            # Catches failures OUTSIDE the inner turn block — notably thread_start
-            # and _format_turn_result. Without this, such errors escape as a bare
-            # exception: the orchestrator never drains pending_turn and _iteration
-            # stays incremented, violating the pending-turn contract.
+            # Failures OUTSIDE the inner turn block, notably thread_start. Without
+            # this they escape bare: the orchestrator never drains pending_turn
+            # and _iteration stays incremented.
             if state.ended_cleanly and not state.timeout_hit:
-                # Same retry-poisoning guard as the inner handler: the turn already
-                # ended cleanly (cooperative stop or turn cap), so finalize instead
-                # of crashing.
+                # Same retry-poisoning guard as the inner handler.
                 self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
             else:
                 self._finalize_and_raise_crash(
@@ -1100,11 +1009,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._state = AgentState.WORKING
         self._end_turn_ok()
 
-        # The TurnRecord is the EventCollector's reduction of the emitted events.
-        # Precedence matches Claude: timeout (raised above) > stopped_early >
-        # max_turns_exhausted > completed. stopped_early outranks the cap because an
-        # armed criterion deciding the outcome is the more specific reason to have
-        # cut the run, and the pump checks it first.
+        # Precedence: timeout (raised above) > stopped_early > max_turns > done.
+        # Rationale: .claude/notes/agents.md § Shared turn lifecycle
         if state.stopped_early_hit:
             status = AgentEndStatus.STOPPED_EARLY
         elif state.max_turns_hit:
@@ -1118,8 +1024,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Stop the agent and tear down the Codex SDK session.
 
         ``Codex(config=...)`` eagerly spawns an app-server subprocess plus reader
-        threads; ``close()`` reaps them. Skipping it leaks a subprocess + threads
-        per task across a batch run, so close before nulling the reference.
+        threads, so close before nulling the reference or a batch run leaks one
+        set per task.
         """
         self._close_client()
         self.thread = None
@@ -1137,7 +1043,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Synchronous abort for the watchdog thread (cannot await coroutines).
 
         Best-effort: interrupt the in-flight turn so the blocked stream iteration
-        unblocks, then close the client. Safe to call at any time and idempotent.
+        unblocks, then close the client. Idempotent.
         """
         self._interrupt_active_turn()
         self._close_client()
@@ -1163,14 +1069,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Codex routing so runs are auditable/comparable.
 
-        Always emits ``system_prompt_semantics`` (from the base). The routing keys
-        (``codex_base_url_host`` / ``codex_wire_api`` / ``codex_api_version`` /
-        ``codex_model_is_deployment``) are added only when a custom endpoint is
-        configured (CODEX_BASE_URL): on a custom endpoint the model is an
-        operator-chosen alias (a deployment name on Azure), so two operators'
+        The routing keys are added only under a custom endpoint, where the model is
+        an operator-chosen alias (a deployment name on Azure) and two operators'
         ``gpt-5-codex`` deployments are otherwise indistinguishable in run
-        artifacts. The host (not the full URL) is recorded to avoid leaking any
-        embedded credentials; the API key is never recorded.
+        artifacts. The HOST, not the full URL, is recorded, so an embedded
+        credential cannot leak; the API key is never recorded.
         """
         info: dict[str, Any] = dict(super().get_environment_info())
         base_url = self._resolve_base_url()
@@ -1187,15 +1090,11 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _setup_skills(self, plugin_tools_dir: str | None) -> None:
         """Set up .agents/skills directory from plugins or plugin_tools_dir.
 
-        Codex auto-discovers skills in .agents/skills/ directories scanned from
-        the working directory up through parent directories to repo root.
+        Codex auto-discovers skills in ``.agents/skills/``, scanned from the working
+        directory up to the repo root, so each source's skill dirs are symlinked
+        (or copied, on Windows) into it.
 
-        Skills are collected from two sources:
-        1. config.plugins - task-defined plugins with type='local' and path pointing to skills
-        2. plugin_tools_dir parameter - runtime plugin directory
-
-        Supports SKILL.md files following the Agent Skills open standard.
-        Creates .agents/skills/ directory and symlinks/copies skill directories.
+        Rationale: .claude/notes/agents.md § Skills, per harness
         """
         if not self.working_directory:
             return
@@ -1215,9 +1114,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                             skills_sources.append(plugin_path)
                             self._log.debug(f"Found skills from plugin: {plugin_path}")
                         else:
-                            # Loud: an unresolved env var (e.g. unset
-                            # $SKILLS_REPO_PATH) or missing dir silently drops
-                            # the plugin's skills, so the agent runs blind.
+                            # Loud: an unresolved env var or missing dir drops the
+                            # skills silently, so the agent runs blind.
                             hint = "env var likely unset" if "$" in expanded_path else "path does not exist"
                             self._log.warning(
                                 f"Plugin skills path did not resolve: {path_str!r} "
@@ -1239,10 +1137,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
         try:
             agents_skills_dir.mkdir(parents=True, exist_ok=True)
 
-            # Symlink or copy skills from all sources. A source may either
-            # contain skill dirs directly (<source>/<skill>/SKILL.md) or be a
-            # Claude plugin-marketplace root whose skills live one level deeper
-            # (<source>/skills/<skill>/SKILL.md). Scan both layouts.
+            # A source may hold skill dirs directly or be a plugin root whose
+            # skills live one level deeper. Scan both layouts.
             for skills_source in skills_sources:
                 scan_dirs = [skills_source]
                 nested = skills_source / "skills"
@@ -1271,8 +1167,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
             if linked:
                 self._log.debug(f"Linked {len(linked)} skill(s) into {agents_skills_dir}")
             else:
-                # Sources existed but no SKILL.md was found under them or their
-                # skills/ subdir — codex will run without any skill context.
+                # Sources existed but held no SKILL.md, so codex runs with no
+                # skill context at all.
                 self._log.warning(
                     f"0 skills linked into {agents_skills_dir} despite "
                     + f"{len(skills_sources)} plugin source(s): "
@@ -1292,34 +1188,28 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _resolve_api_version() -> str | None:
         """Azure OpenAI ``api-version`` from CODEX_API_VERSION, or None.
 
-        Azure's Responses endpoint requires an ``api-version`` query parameter on
-        every request; when set it is injected as the custom provider's
-        ``query_params``. Plain OpenAI / gateway endpoints leave this unset.
+        Azure's Responses endpoint requires it on every request, injected as the
+        provider's ``query_params``. Other endpoints leave it unset.
         """
         return os.getenv("CODEX_API_VERSION") or None
 
     def _effective_model(self) -> str | None:
         """Resolve the model: task/CLI ``agent.model`` wins, else CODEX_MODEL.
 
-        Mirrors the Claude agent's ``config_model or route_model`` precedence
-        (where the route fallback is BEDROCK_MODEL); here the fallback is the
-        settings-backed CODEX_MODEL.
+        Mirrors the Claude agent's precedence, with CODEX_MODEL as the fallback.
         """
         return self.config.model or settings.codex_model
 
     def _build_codex_env(self) -> dict[str, str] | None:
         """Build the environment passed to the Codex app-server.
 
-        Carries the API key (``CODEX_API_KEY``, read by the codex binary when a
-        model provider's ``env_key`` points at it) and, when the sandbox
-        resolved ``mock_path_dirs``, a PATH with those directories prepended so
-        mock CLIs shadow the real ones for the agent's shell commands. The base
-        URL is NOT an env var the binary honors — it is applied through the
-        model provider config in ``_build_thread_options`` instead.
+        Carries ``CODEX_API_KEY`` and, when the sandbox resolved mock dirs, a PATH
+        with those prepended. The base URL is NOT an env var the binary honors —
+        it goes through the model provider config instead.
 
-        The SDK merges this dict over ``os.environ`` for the app-server process
-        (and normalizes the PATH key case-insensitively), so a full PATH value
-        here safely replaces the inherited one.
+        The SDK merges this PARTIAL dict over ``os.environ`` (normalizing the PATH
+        key case-insensitively), so a full PATH value here safely replaces the
+        inherited one.
         """
         env: dict[str, str] = {}
         api_key = os.getenv("CODEX_API_KEY")
@@ -1331,18 +1221,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
             env[path_key] = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key, "")])
             self._log.debug(f"PATH prepend: {os.pathsep.join(self._env_path_prepend)}")
         if self._login_shell_home is not None:
-            # Point login shells at the generated profile dir (see
-            # _setup_login_shell_home) while pinning codex state (auth, rollout
-            # sessions) to its real location — _codex_home() reads the same
-            # resolution for sub-agent rollout recovery, so both sides agree.
-            # HOME steers bash/sh; ZDOTDIR steers zsh (the macOS default
-            # shell), which ignores HOME for dotfile selection when it is set.
+            # Login shells point at the generated profile dir while codex state
+            # stays pinned to its real location. HOME steers bash/sh; ZDOTDIR
+            # steers zsh, which ignores HOME for dotfile selection when set.
             env["HOME"] = str(self._login_shell_home)
             env["ZDOTDIR"] = str(self._login_shell_home)
             # The binary hard-errors on an explicitly set CODEX_HOME that does
-            # not exist (unset, it materializes the ~/.codex default itself) —
-            # hosts that auth via CODEX_API_KEY never ran `codex login`, so
-            # the dir may not exist yet. Create it before pinning.
+            # not exist, and a host that auths via CODEX_API_KEY never ran
+            # `codex login`. Create it before pinning.
             codex_home = self._codex_home()
             codex_home.mkdir(parents=True, exist_ok=True)
             env["CODEX_HOME"] = str(codex_home)
@@ -1356,47 +1242,32 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _setup_login_shell_home(self) -> None:
         """Create a per-task HOME whose profiles restore the mock PATH prepend.
 
-        Codex issues every shell command through the user's default shell as a
-        login shell: ``bash -lc`` on Linux, ``zsh -lc`` on macOS (its default
-        shell; fish would need the same treatment here if codex ever picks
-        it). A login shell re-sources the system profile chain -
-        ``/etc/profile`` on Linux, ``/etc/zprofile``'s path_helper on macOS -
-        which unconditionally RESETS PATH, silently dropping the mock-CLI
-        prepend passed via the app-server environment, so bare commands
-        resolve to the REAL CLIs (real-tenant contamination). The per-user
-        dotfiles are sourced AFTER that chain, so a generated per-task HOME
-        (wired up in ``_build_codex_env``; codex state stays in CODEX_HOME)
-        gets the last word and re-prepends the mock dirs:
-        ``.bash_profile``/``.profile`` for bash/sh (selected via env HOME) and
-        ``.zshenv``/``.zprofile``/``.zshrc`` for zsh (selected via env
-        ZDOTDIR; ``.zshrc`` also feeds codex's shell snapshot, which sources
-        it explicitly). Per-task rather than the user's real dotfiles so
-        parallel tasks with different mocks cannot collide. No-op without mock
-        dirs or on non-POSIX hosts: Windows codex shells through PowerShell
-        (``-NoProfile``) or ``cmd /c``, neither of which re-sources a profile
-        chain that resets PATH, so the plain env prepend survives there as-is.
+        Codex issues every shell command through a LOGIN shell, which re-sources
+        the system profile chain and unconditionally RESETS PATH — silently
+        dropping the mock-CLI prepend, so bare commands resolve to the REAL CLIs
+        (real-tenant contamination). The per-user dotfiles are sourced AFTER that
+        chain, so a generated per-task HOME gets the last word.
 
-        Bash uses the env HOME only to PICK the profile file; the generated
-        profile's first act is to export the ORIGINAL home back, so the
-        sourced user profile and the command body see the real ``$HOME``
-        (git config, tool caches, ``$HOME``-relative sourcing keep working).
-        Known residual gap: a NESTED bash/sh login shell inside a command
-        re-reads the real profiles and loses the prepend again (nested zsh
-        keeps it - ZDOTDIR stays exported).
+        Per-task rather than the user's real dotfiles, so parallel tasks with
+        different mocks cannot collide. No-op without mock dirs or on non-POSIX
+        hosts, where no profile chain resets PATH.
+
+        **Known residual gap:** a NESTED bash/sh login shell inside a command
+        re-reads the real profiles and loses the prepend again. Nested zsh keeps
+        it, because ZDOTDIR stays exported.
+
+        Rationale: .claude/notes/agents.md § Codex login-shell PATH restoration
         """
         self._cleanup_login_shell_home()
         if not (self._env_path_prepend and self._login_shell_profiles_supported()):
             return
         original_home = os.environ.get("HOME", "")
-        # Where the user's REAL zsh dotfiles live: their own ZDOTDIR when set,
-        # else their home (zsh's fallback).
+        # The user's REAL zsh dotfile dir: their own ZDOTDIR, else their home.
         original_zdotdir = os.environ.get("ZDOTDIR", "") or original_home
-        # The profile only ever executes under a POSIX shell, so the PATH
-        # separator is ':' regardless of the host building it.
+        # Executed only under a POSIX shell, so ':' regardless of the host.
         quoted_prepend = shlex.quote(":".join(self._env_path_prepend))
         export_line = f'export PATH={quoted_prepend}:"$PATH"'
-        # Track the dir BEFORE writing so a failed write can't orphan it —
-        # the except below (and any later cleanup) always sees it.
+        # Tracked BEFORE writing, so a failed write cannot orphan it.
         home = Path(tempfile.mkdtemp(prefix="coder-eval-codex-home-"))
         self._login_shell_home = home
         try:
@@ -1408,8 +1279,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     original_zdotdir=original_zdotdir,
                     generated_home=str(home),
                 )
-                # newline="\n": the profile must stay LF-only no matter which host
-                # builds it, or bash sees literal \r at end of line.
+                # LF-only no matter which host builds it, or bash sees a literal
+                # carriage return at end of line.
                 (home / name).write_text(content, encoding="utf-8", newline="\n")
         except Exception:
             self._cleanup_login_shell_home()
@@ -1425,29 +1296,23 @@ class CodexAgent(Agent[CodexAgentConfig]):
         original_zdotdir: str = "",
         generated_home: str = "",
     ) -> str:
-        """One generated profile file: restore the ORIGINAL ``$HOME``, source
-        the user's own counterpart file (so image/user setup isn't lost), then
-        re-prepend the mock dirs.
+        """One generated profile: restore the ORIGINAL ``$HOME``, source the
+        user's own counterpart, then re-prepend the mock dirs.
 
-        The env HOME pointing at the generated dir exists ONLY so bash selects
-        this file; exporting the original home back on the first line keeps
-        every ``$HOME`` consumer (git, npm, the sourced profile's own
-        ``$HOME/.bashrc`` references) on the real home.
+        The env HOME pointing at the generated dir exists ONLY so bash selects this
+        file; exporting the original back on the first line keeps every ``$HOME``
+        consumer on the real home.
 
-        ``.bash_profile`` mimics bash's first-found chain over the original
-        home; the ``.profile`` twin (read by ``sh``/``dash`` login shells)
-        sources only ``.profile`` — the bash-specific files may contain
-        bashisms a POSIX shell would choke on.
+        ``.bash_profile`` mimics bash's first-found chain; the ``.profile`` twin
+        sources only ``.profile``, since the bash-specific files may contain
+        bashisms a POSIX shell would choke on. The zsh files each source their
+        EXACT counterpart, because zsh reads ALL of its startup files rather than a
+        first-found chain, and ``.zshenv`` re-pins ZDOTDIR after sourcing in case
+        the user's own redefined it. Each zsh file re-prepends: /etc/zprofile
+        resets PATH between ``.zshenv`` and ``.zprofile``, and a duplicate PATH
+        entry is harmless where a lost prepend is contamination.
 
-        The zsh files each source their exact counterpart from the user's real
-        zsh dotfile dir (``original_zdotdir``) - zsh reads ALL of its startup
-        files, not a first-found chain. ``.zshenv`` additionally re-pins
-        ZDOTDIR to the generated home AFTER sourcing: the user's ``.zshenv``
-        may redefine ZDOTDIR, which would steer the rest of the startup chain
-        away from the generated ``.zprofile``/``.zshrc``. Each zsh file
-        re-prepends because /etc/zprofile resets PATH BETWEEN ``.zshenv`` and
-        ``.zprofile``, and a sourced user file may reset it again; a duplicate
-        PATH entry is harmless, a lost prepend is contamination.
+        Rationale: .claude/notes/agents.md § Codex login-shell PATH restoration
         """
         lines = [
             "# Generated by coder_eval (CodexAgent): the system profile chain resets",
@@ -1492,51 +1357,32 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _build_thread_options(self) -> dict[str, Any]:
         """Build thread_start options from agent config.
 
-        Returns a dict with sandbox, approval_mode, and config parameters
-        for thread_start() based on permission_mode, allowed_tools, and disallowed_tools.
+        Rationale: .claude/notes/agents.md § Codex runs full-access on every permission mode
         """
         from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         options: dict[str, Any] = {}
 
-        # Pin the model when one is resolved; otherwise Codex picks its default
-        # and two runs can silently differ.
+        # Pin the model, or Codex picks its default and two runs silently differ.
         effective_model = self._effective_model()
         if effective_model:
             options["model"] = effective_model
             self._log.debug(f"Codex model pinned to {effective_model}")
 
-        # system_prompt maps to developer_instructions: injected ON TOP of Codex's
-        # base prompt, matching the append-only contract of the shared config field
-        # (Claude Code appends via the claude_code preset; Antigravity via
-        # TemplatedSystemInstructions). base_instructions (full replacement of the
-        # base prompt) is deliberately not exposed.
+        # ON TOP of Codex's base prompt, matching the append-only contract of the
+        # shared config field. `base_instructions` (full replacement) is
+        # deliberately not exposed.
         if self.config.system_prompt is not None:
             options["developer_instructions"] = self.config.system_prompt
 
         permission_mode = self.config.permission_mode.value
         approval_mode_str = _CODEX_APPROVAL_MODE
 
-        # Codex always runs full-access. coder_eval owns this run's isolation
-        # boundary either way — a docker container (docker driver) or an ephemeral
-        # per-task tempdir it creates and discards (tempdir driver); those are the
-        # only two drivers — so Codex's own in-process OS sandbox (Landlock/seatbelt)
-        # is always redundant. Worse, it actively breaks on the paths we rely on:
-        # inside the container Landlock is unavailable, on constrained CI agents the
-        # bwrap re-exec is denied ("bwrap: execvp .../codex: Permission denied"), and
-        # on Windows there is no OS sandbox at all — in each case a read-only /
-        # workspace-write run fails its writes/execs silently and scores 0 with no
-        # loud error. Dropping to full-access matches Claude Code and Antigravity,
-        # which run with no in-agent OS sandbox; hard isolation of untrusted actions
-        # is the docker driver's job, and approval_mode stays deny_all regardless.
-        #
-        # Consequence: permission_mode does NOT confine Codex — every mode resolves
-        # to full-access. The docker driver is the only OS-level write boundary here;
-        # the tempdir/host driver is a working directory, not a confinement boundary
-        # (same as Claude Code / Antigravity already run there), so adversarial or
-        # untrusted evals belong on the docker driver. _log_config_enforcement
-        # surfaces this. full-access (danger-full-access) also keeps network on, so
-        # tool installs (the UiPath CLI, npm/pip) work without extra sandbox config.
+        # ALWAYS full-access: permission_mode does NOT confine Codex. The docker
+        # driver is the only OS-level write boundary; the tempdir/host driver is a
+        # working directory, not a confinement boundary, so adversarial or
+        # untrusted evals belong on docker. _log_config_enforcement says so.
+        # Rationale: .claude/notes/agents.md § Codex runs full-access on every permission mode
         options["sandbox"] = Sandbox.full_access
         options["approval_mode"] = ApprovalMode(approval_mode_str)
 
@@ -1564,12 +1410,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 + "do not rely on it as a security boundary."
             )
 
-        # Route through a custom endpoint (e.g. an OpenAI-/responses-compatible
-        # gateway, or Azure OpenAI) when CODEX_BASE_URL is set. The codex binary
-        # has no base-URL env var — a model provider must be defined in config and
-        # selected, with env_key naming the env var that holds the key
-        # (CODEX_API_KEY). For Azure, CODEX_API_VERSION adds the required
-        # ``api-version`` query param and CODEX_MODEL is the deployment name.
+        # The codex binary has no base-URL env var: a model provider must be
+        # defined in config and selected, with env_key naming the key's variable.
+        # For Azure, CODEX_API_VERSION adds the required query param and
+        # CODEX_MODEL is the deployment name.
         base_url = self._resolve_base_url()
         if base_url:
             options["model_provider"] = _CUSTOM_PROVIDER_ID
@@ -1582,15 +1426,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 "name": "Custom",
                 "base_url": base_url,
                 "env_key": "CODEX_API_KEY",
-                # The pinned codex binary only supports the Responses wire API
-                # (it rejects `wire_api = "chat"` as "no longer supported"), so
-                # this is fixed rather than configurable.
+                # Fixed, not configurable: the pinned binary rejects
+                # `wire_api = "chat"` as "no longer supported".
                 "wire_api": _CODEX_WIRE_API,
             }
             api_version = self._resolve_api_version()
             if api_version:
-                # Azure requires ?api-version=… on every request; the codex binary
-                # appends these to the provider's request URL.
+                # Azure requires ?api-version=... on every request.
                 provider["query_params"] = {"api-version": api_version}
             tool_config["model_providers"] = {_CUSTOM_PROVIDER_ID: provider}
             self._log.debug(
@@ -1612,11 +1454,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
             self._log.debug(f"Disallowed tools: {', '.join(self.config.disallowed_tools)}")
 
         self._log.debug(f"Permission mode: {self.config.permission_mode.value}")
-        # Codex always runs full-access regardless of permission_mode (see
-        # _build_thread_options — its in-process OS sandbox is redundant given
-        # coder_eval's docker/tempdir boundary and unusable on our CI hosts). The
-        # notice fires for EVERY mode, not just bypassPermissions, so operators are
-        # not misled that plan/acceptEdits/default confine Codex — none of them do.
+        # Fires for EVERY mode, not just bypassPermissions, so operators are not
+        # misled that plan/acceptEdits/default confine Codex — none of them do.
         self._log.warning(
             "[SECURITY] Codex runs full-access on every permission_mode "
             + f"(configured: {self.config.permission_mode.value}); permission_mode does not confine it. "
@@ -1627,9 +1466,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _format_turn_result(self, turn_result: Any) -> str:
         """Format a Codex Turn to a readable string — fallback when no text streamed.
 
-        The Turn payload has no ``final_response`` field; assistant text arrives as
-        agentMessage deltas during streaming. This only fires when streaming produced
-        nothing, dumping the raw Turn for debugging.
+        The Turn payload has no ``final_response`` field, so this only fires when
+        streaming produced nothing, dumping the raw Turn for debugging.
         """
         try:
             result_dict = turn_result.model_dump() if hasattr(turn_result, "model_dump") else vars(turn_result)
@@ -1644,17 +1482,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Drive ``turn.stream()`` through the per-turn state, emitting the standard
         event protocol; returns ``(turn_result, latest_token_usage, agent_text)``.
 
-        The enclosing ``communicate()`` owns the TurnStart/TurnEnd/AgentEnd
-        boundaries; this drives the inner notification pump. ``state`` accumulates
-        commands, the assistant transcript, sub-agent spawns and per-generation
-        tokens — all mutated in place so a mid-turn crash keeps the partial.
+        ``communicate()`` owns the TurnStart/TurnEnd/AgentEnd boundaries; this
+        drives the inner pump. ``state`` is mutated IN PLACE, so a mid-turn crash
+        keeps the partial.
 
-        The cooperative ``should_stop`` poll runs AFTER ``state.dispatch`` (the
-        emission that lets the watcher latch on the deciding tool call) and BEFORE
-        the next notification is pulled — the deciding item is kept, the next is
-        not. No-op when ``should_stop is None`` (behaviorally identical to before).
+        ``should_stop`` runs AFTER ``state.dispatch`` (the emission the watcher
+        latches on) and BEFORE the next notification is pulled.
         """
-        # Create the turn handle (starts the turn but doesn't block) + event stream.
+        # Starts the turn without blocking, and opens the event stream.
         turn_handle = await self._run_async(self.thread.turn, state.user_input)
         self._active_turn_handle = turn_handle
         stream = await self._run_async(turn_handle.stream)
@@ -1662,9 +1497,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
         stream_iter = iter(stream)
         try:
             while True:
-                # Offload the blocking SDK iteration to a worker thread so the event
-                # loop stays free (parallel agents don't serialize) and the
-                # watchdog's task.cancel() can actually land at this await point.
+                # Offloaded so the event loop stays free (parallel agents do not
+                # serialize) and the watchdog's task.cancel() can land here.
                 notification: Any = await asyncio.to_thread(next, stream_iter, _STREAM_DONE)
                 if notification is _STREAM_DONE:
                     break
@@ -1675,10 +1509,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     self._log.debug("Cooperative stop requested; ending notification pump at this boundary")
                     self._interrupt_active_turn()  # best-effort; stops server-side spend
                     break
-                # The turn cap shares this boundary: the notification that reached the
-                # cap is dispatched whole, the next is never pulled. Checked after the
-                # cooperative stop so an armed early-stop still reports as
-                # STOPPED_EARLY when both would fire on the same notification.
+                # The cap shares this boundary: the notification that reached it is
+                # dispatched whole, the next is never pulled. After the cooperative
+                # stop, so an armed early-stop wins a tie.
                 if state.max_turns_reached():
                     state.max_turns_hit = True
                     self._log.debug("max_turns (%s visible turns) reached; ending notification pump", state.max_turns)
@@ -1686,9 +1519,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     break
         finally:
             self._active_turn_handle = None
-            # Close any orphan tool (item/started without item/completed), flush any
-            # trailing blocks not closed by a tokenUsage event (e.g. a crash
-            # mid-generation), then close the stream. Runs on every exit path.
+            # Close orphan tools, flush trailing blocks no tokenUsage event
+            # closed, then close the stream. Runs on EVERY exit path.
             state.close_open_tools()
             state._flush_message(None)
             with contextlib.suppress(Exception):
@@ -1697,30 +1529,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if state.turn_result is None and not state.ended_cleanly:
             raise RuntimeError("Turn did not complete (no turn/completed notification received)")
 
-        # Belt-and-suspenders: if streaming surfaced no assistant transcript,
-        # rebuild it from the terminal Turn's ordered item list.
+        # If streaming surfaced no transcript, rebuild it from the terminal
+        # Turn's ordered item list.
         if not state.messages:
             state.messages.extend(self._messages_from_items(getattr(state.turn_result, "items", None), state.turn_id))
 
-        # Recover each spawned sub-agent's INNER tool calls from its on-disk rollout
-        # and nest them under the spawning Agent call. The parent stream never
-        # carries the child's commands (Limited persistence drops them), but its
-        # rollout always persists the raw function_call/local_shell_call items.
-        #
-        # Runs on a turn-cap stop. Recovery is also what carries the children's
-        # TOKENS: it is the only writer of the ``parent_tool_use_id``-tagged
-        # messages that ``_fold_subagent_tokens`` sums into the turn total, so
-        # skipping it drops the child threads' spend from the run's cost entirely
-        # (Codex bills children on separate threads the parent total never sees).
-        # A cap is a routine ending, not an exceptional one, so paying ~2s of
-        # rollout polling beats under-reporting spend on every capped run that
-        # spawned a sub-agent. The recovered child calls land in the trajectory
-        # beyond the cap's count, the same way the force-closed orphan does;
-        # the cap bounds what the model was allowed to DO, not what the record is
-        # allowed to explain.
-        #
-        # Still skipped on a cooperative stop: an armed gate has already decided
-        # the run, children may have no rollout yet, and that path predates the cap.
+        # RUNS on a turn-cap stop, because recovery is also the only writer of the
+        # `parent_tool_use_id`-tagged messages `_fold_subagent_tokens` sums — so
+        # skipping it drops the child threads' spend from the run's cost entirely.
+        # Still SKIPPED on a cooperative stop: an armed gate has already decided
+        # the run, and children may have no rollout yet.
+        # Rationale: .claude/notes/agents.md § Codex rollout rebuild
         if state.spawned_children and not state.stopped_early_hit:
             await self._recover_subagent_tool_calls(
                 state.spawned_children,
@@ -1737,10 +1556,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _messages_from_items(self, items: Any, turn_id: str) -> list[AssistantMessage]:
         """Rebuild the assistant transcript from a Turn's ``items`` list (fallback).
 
-        Same item→block mapping as the streaming path, but Turn items carry no
+        Same item->block mapping as the streaming path, but Turn items carry no
         per-item timestamps, so there is no window to measure: the bounds fall back
-        to now() and ``generation_duration_ms`` is None (unknown), never 0.0 (an
-        instant generation). Used only when the stream produced no messages.
+        to now() and ``generation_duration_ms`` is None, never 0.0 (CE058).
         """
         if not items:
             return []
@@ -1773,8 +1591,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             root_type = getattr(root, "type", None)
             item_id = getattr(root, "id", "")
             if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
-                # Any tool-like item (generic, not just command/fileChange) → a
-                # tool_use block, mirroring the streaming path's broad capture.
+                # Any tool-like item, mirroring the streaming path's broad capture.
                 status = _status_value(getattr(root, "status", "completed"))
                 exit_code = getattr(root, "exit_code", None)
                 is_error = (
@@ -1808,8 +1625,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _tool_parameters(self, root: Any, root_type: str | None) -> dict[str, Any]:
         """Best-effort ToolStartEvent parameters for any Codex tool item.
 
-        Per-kind for the items we understand; an empty dict for unknown tool
-        kinds (still emitted, just without parameters).
+        Per-kind for the items we understand; an empty dict for an unknown kind,
+        which is still emitted, just without parameters.
         """
         if root_type == "commandExecution":
             return {"command": getattr(root, "command", "")}
@@ -1852,13 +1669,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
     ) -> tuple[CommandTelemetry | None, bool]:
         """Build (telemetry, is_error) for a completed tool item.
 
-        commandExecution/fileChange keep their dedicated rich extractors; every
-        other tool kind routes through the generic builder so it still produces
-        countable telemetry.
-
-        The SDK's millisecond stamps arrive as arguments rather than being read
-        back out of the reducer, so each builder stays a pure function of what
-        it is given.
+        commandExecution/fileChange keep their rich extractors; every other kind
+        routes through the generic builder so it still produces countable
+        telemetry. The SDK's millisecond stamps arrive as ARGUMENTS rather than
+        being read back out of the reducer, so each builder stays pure.
         """
         if root_type == "commandExecution":
             exit_code = getattr(root, "exit_code", None)
@@ -1884,8 +1698,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
     ) -> tuple[CommandTelemetry | None, bool]:
         """CommandTelemetry for any tool item without a dedicated extractor.
 
-        Reads status / duration / error generically so MCP calls, web searches,
-        collab-agent spawns and future tool kinds all render and count uniformly.
+        Reads status / duration / error generically, so MCP calls, web searches,
+        collab-agent spawns and future kinds all render and count uniformly.
         """
         try:
             status_str = _status_value(getattr(root, "status", "") or "")
@@ -1941,24 +1755,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         Two responsibilities:
 
-        1. SPAWN (``tool == 'spawnAgent'``): remember which Agent call owns each
-           spawned child thread (so the child's result can nest under it) and the
+        1. SPAWN: remember which Agent call owns each spawned child thread, and the
            spawned model. Follow-up ``wait``/messaging calls reuse the same thread
            and are NOT new sub-agents.
+        2. RESULT: stash the child's returned message as a FALLBACK, used only when
+           the child's rollout cannot be found later.
 
-           Codex emits NO per-sub-agent token breakdown in the parent stream —
-           every ``thread/tokenUsage/updated`` reports only the PARENT thread's
-           cumulative usage. The child's real per-generation tokens are recovered
-           AFTER the turn from its on-disk rollout and reconstructed as nested
-           ``parent_tool_use_id`` messages (see ``_recover_subagent_tool_calls``);
-           ``_finalize`` then folds those messages into the turn total.
-
-        2. RESULT: any collab completion may carry the child's returned message in
-           ``agents_states[thread].message``. We stash it in ``collab_results`` as
-           a FALLBACK — used only if the child's rollout can't be found later. When
-           the rollout IS found, ``_recover_subagent_tool_calls`` rebuilds the
-           sub-agent's full generation sequence (tool calls + final text) with real
-           per-generation tokens, so the returned message is just the last of those.
+        Rationale: .claude/notes/agents.md § Codex rollout rebuild
         """
         tool = _status_value(getattr(root, "tool", ""))
         receivers = getattr(root, "receiver_thread_ids", None) or []
@@ -1986,29 +1789,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
     ) -> None:
         """Recover each spawned sub-agent's INNER tool calls AND token usage.
 
-        Codex runs every sub-agent on its own child thread whose events never
-        reach the parent stream, and that child thread persists with *Limited*
-        rollout policy — which drops ``commandExecution`` events. So neither the
-        live stream nor ``thread.read`` surfaces the sub-agent's shell commands,
-        and ``thread/tokenUsage/updated`` only ever reports the PARENT thread, so
-        per-child tokens never appear in the live stream.
+        Per inner call, emits one ``CommandTelemetry`` (so the tool row resolves)
+        plus one nested ``AssistantMessage`` parented to the spawning Agent call
+        (so the evalboard renders it as an expandable child), carrying that
+        generation's real tokens. ``finalize`` folds those into the turn total.
 
-        But the child rollout ALWAYS persists the raw ``function_call`` /
-        ``local_shell_call`` / ``custom_tool_call`` (+ ``*_output``) ResponseItems
-        (``should_persist_response_item`` keeps them regardless of mode) AND a
-        ``token_count`` event with the child thread's cumulative usage. So we
-        locate the child rollout by thread id and:
+        Best-effort: any failure is swallowed, so a recovery hiccup never fails the
+        turn.
 
-        - per inner call, emit one ``CommandTelemetry`` (so the tool row resolves)
-          plus one nested ``AssistantMessage`` parented to the spawning Agent call
-          (so the evalboard renders it as an expandable child), carrying that
-          generation's real per-generation tokens. ``_finalize`` folds these
-          ``parent_tool_use_id`` messages into the turn total so the run cost
-          includes the sub-agent, exactly as Claude's total already includes its
-          bubbled-up sub-agent messages.
-
-        Best-effort: any failure (missing file, parse error) is swallowed so a
-        recovery hiccup never fails the turn.
+        Rationale: .claude/notes/agents.md § Codex rollout rebuild
         """
         home = self._codex_home()
         for thread_id, parent_tool_id, model in spawned_children:
@@ -2057,13 +1846,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
     async def _await_rollout_file(self, home: Path, thread_id: str, *, attempts: int = 20) -> Path | None:
         """Locate a thread's rollout file, polling briefly for the async flush.
 
-        The child turn has finished by the time its ``wait`` returns, but the
-        rollout recorder flushes on a background task, so the file can lag the
-        parent ``turn/completed`` by a beat. Poll up to ~2s before giving up.
-
-        If ``<home>/sessions`` doesn't exist at all, the binary isn't writing
-        rollouts there — bail immediately rather than polling for a flush that
-        can never land (also keeps unit tests with a stub home fast).
+        The recorder flushes on a background task, so the file can lag the parent
+        ``turn/completed`` by a beat. A missing ``<home>/sessions`` bails
+        immediately rather than polling for a flush that can never land.
         """
         if not (home / "sessions").is_dir():
             return None
@@ -2088,17 +1873,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _parse_rollout_generations(cls, path: Path) -> list[dict[str, Any]]:
         """Reconstruct a sub-agent's GENERATIONS from its rollout JSONL.
 
-        A ``token_count`` event marks each generation boundary (same as the
-        parent stream's ``thread/tokenUsage/updated``). We walk the ordered
-        ``response_item`` lines, accumulating tool calls / assistant text into the
-        current generation, and close it on each ``token_count`` with that
-        generation's ``last_token_usage``. Tool CALLS are paired with their OUTPUT
-        (``*_output``, possibly emitted in a later generation) by ``call_id``.
-
-        Returns ordered generation dicts: ``{"tokens": (input, cached, output,
-        reasoning) | None, "items": [ordered specs], "tools": [tool-call dicts]}``.
-        Trailing items with no closing ``token_count`` flush as a final
-        token-less generation. Partial/corrupt lines are skipped.
+        A ``token_count`` event marks each generation boundary. Tool CALLS are
+        paired with their OUTPUT by ``call_id``, since the output can be emitted a
+        generation later. Trailing items with no closing ``token_count`` flush as a
+        final token-less generation; corrupt lines are skipped.
         """
         objs: list[dict[str, Any]] = []
         for raw in path.read_text(encoding="utf-8").splitlines():
@@ -2110,7 +1888,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             except json.JSONDecodeError:
                 continue
 
-        # Pass 1: tool OUTPUTs by call_id (a call's result can land a generation later).
+        # Pass 1: tool OUTPUTs by call_id.
         outputs: dict[str, tuple[str, bool]] = {}
         for obj in objs:
             if obj.get("type") == "response_item":
@@ -2192,9 +1970,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _subagent_parameters(payload: dict[str, Any]) -> dict[str, Any]:
         """Best-effort parameters for a rollout tool-call ResponseItem.
 
-        ``function_call.arguments`` is a JSON string; ``local_shell_call`` carries
-        an ``action``. Shell-style calls are normalized to ``{"command": ...}`` so
-        the transcript renders the command line; everything else is passed through.
+        Shell-style calls are normalized to ``{"command": ...}`` so the transcript
+        renders the command line; everything else passes through.
         """
         args = payload.get("arguments")
         if isinstance(args, str) and args:
@@ -2235,10 +2012,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
     ) -> tuple[list[ContentBlock], list[CommandTelemetry]]:
         """Content blocks + tool telemetry for one recovered sub-agent generation.
 
-        Blocks are emitted in rollout order (tool calls, assistant text). Each
-        tool call gets a ``tool_use`` block whose id (``sub:<thread>:<call_id>``)
-        matches a ``CommandTelemetry`` so the evalboard tool row resolves. Inner
-        tool ids are thread-prefixed to stay unique across the parent's own tools.
+        Each tool call gets a ``tool_use`` block whose id matches a
+        ``CommandTelemetry``, so the evalboard tool row resolves. Inner ids are
+        THREAD-PREFIXED to stay unique across the parent's own tools.
         """
         blocks: list[ContentBlock] = []
         telemetries: list[CommandTelemetry] = []
@@ -2275,9 +2051,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """A nested sub-agent generation as an AssistantMessage with real tokens.
 
         Parented to the spawning Agent call so it nests in the transcript. Tokens
-        come from the child's per-generation ``token_count``: the fresh slice
-        (input - cached) is plain ``input`` and ``cache_creation`` is 0 — Codex
-        has no separate cache-write fee.
+        come from the child's per-generation ``token_count``.
         """
         raw_input, cached, output, reasoning = gen["tokens"] or (0, 0, 0, 0)
         fresh = _fresh_input_tokens(raw_input, cached)
@@ -2303,10 +2077,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
     ) -> AssistantMessage:
         """Fallback nested message: just the sub-agent's returned text, tokenless.
 
-        Used only when the child's rollout can't be found, so the answer still
-        shows under the Agent call even without per-generation detail. ``model``
-        is the spawned sub-agent's model (not the parent's), matching the
-        rollout-found path."""
+        Used only when the child's rollout cannot be found. ``model`` is the
+        SPAWNED sub-agent's model, not the parent's, matching the other path."""
         now = datetime.now()
         return AssistantMessage(
             started_at=now,
@@ -2332,7 +2104,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
     ) -> CommandTelemetry | None:
         """Extract CommandTelemetry from a CommandExecutionThreadItem.
 
-        Maps Codex command execution details to the CommandTelemetry format used by Claude Code.
+        Rationale: .claude/notes/agents.md § Tool-name and argument normalization
         """
 
         try:
@@ -2346,12 +2118,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
             # Determine result status from exit code
             result_status = "success" if exit_code == 0 else "error" if exit_code is not None else "unknown"
 
-            # Build result summary with output if available. Store the output WHOLE:
-            # CommandTelemetry.result_summary is the untruncated tool-result body (its
-            # length drives CommandTelemetry.result_tokens), so truncating here would
-            # under-report tool-output size for every command (see CE043). The output is
-            # already bounded by the Codex harness's own exec-output truncation; any
-            # further trimming for display belongs in the renderers/reports, not capture.
+            # Store the output WHOLE: result_summary is the untruncated tool-result
+            # body and its length drives result_tokens, so trimming here
+            # under-reports tool-output size for every command (CE043). Display
+            # trimming belongs in the renderers, not capture.
             summary_parts = [f"Exit code: {exit_code}" if exit_code is not None else "Command executed"]
             if output and len(output.strip()) > 0:
                 summary_parts.append(f"Output: {output}")
@@ -2396,12 +2166,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
     ) -> CommandTelemetry | None:
         """Build CommandTelemetry for a Codex fileChange item.
 
-        Recorded as a ``Write`` tool call so cross-agent criteria that count or
-        match file edits (``command_executed``, ``commands_efficiency``) see the
-        same signal they get from Claude's Write/Edit tool calls. A failed/declined
-        apply_patch is recorded as an ``error`` (the old ``status != "error"``
-        test never matched the real PatchApplyStatus values, so failed patches
-        were scored as successful writes).
+        Recorded as a ``Write`` so cross-agent criteria see the same signal they
+        get from Claude's Write/Edit calls. A failed or declined apply_patch is an
+        ``error``, never a successful write.
         """
         try:
             paths = [str(c.path) for c in changes if hasattr(c, "path")] if changes else []
@@ -2433,34 +2200,20 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _token_usage_from_sdk(self, sdk_token_usage: Any) -> TokenUsage | None:
         """This turn's own slice of the Codex SDK's thread-cumulative total.
 
-        Single conversion site for both the TurnEndEvent and the AgentEndEvent,
-        so cached-input tokens can't be captured in one path but dropped in the
-        other. The Codex SDK does not surface cost, so we derive it from the
-        pricing table keyed on the effective model (None if the model is unpriced).
+        Single conversion site for both the TurnEndEvent and the AgentEndEvent, so
+        cached-input tokens cannot be captured in one path and dropped in the
+        other. The SDK surfaces no cost, so it is rate-carded.
 
-        ``ThreadTokenUsage.total`` counts the whole THREAD, not the turn — that is
-        the SDK's contract, and ``last`` is the per-generation delta beside it. The
-        Codex thread is created once per task and reused for every turn (see
-        ``communicate``), so by turn N ``total`` still carries turns 1..N-1. The
-        orchestrator sums per-turn usages into the task total, so handing it the
-        cumulative figure books turn 1 again on turn 2, turns 1-2 again on turn 3,
-        and so on: the task total becomes a sum of prefix sums, inflating an
-        N-turn task by roughly (N+1)/2. Subtracting the baseline captured at the
-        end of the previous turn leaves just this turn.
+        ``ThreadTokenUsage.total`` counts the whole THREAD, and the thread is
+        reused for every turn — so the baseline captured at the end of the previous
+        turn is subtracted to leave just this one.
 
-        Cache-bucket convention (Codex/OpenAI): the SDK's ``input_tokens`` is the
-        FULL prompt count, *inclusive* of the cached prefix. The fresh slice
-        (``input_tokens - cached``) is the uncached input (OpenAI bills no separate
-        cache-write fee), so:
+        Cache-bucket convention (Codex/OpenAI): ``input_tokens`` is the FULL prompt
+        count, INCLUSIVE of the cached prefix, and there is no separate
+        cache-write fee. So ``uncached = input - cached``, ``cache_creation = 0``,
+        ``cache_read = cached``.
 
-            uncached_input_tokens       = input - cached
-            cache_creation_input_tokens = 0            (no separate cache-write bucket)
-            cache_read_input_tokens     = cached
-            input_tokens (derived)      = uncached + cache_read == the full prompt
-
-        Cost bills the uncached slice at the input rate — identical to the old
-        "fresh as cache-write" pricing since OpenAI's cache-write rate == input
-        rate, just labeled honestly.
+        Rationale: .claude/notes/agents.md § Codex rollout rebuild
         """
         if not sdk_token_usage:
             return None
@@ -2474,7 +2227,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         )
         turn = cumulative.since(self._thread_usage_baseline)
         self._thread_usage_baseline = cumulative
-        # Fresh (uncached) prompt slice = full prompt minus the cached prefix.
+        # Fresh slice = full prompt minus the cached prefix.
         uncached = _fresh_input_tokens(turn.input, turn.cached)
         cost = calculate_cost(
             self._effective_model() or "",
@@ -2492,17 +2245,16 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _advance_usage_baseline(self, usage: TokenUsage | None) -> None:
         """Move the thread baseline past a turn whose SDK total never arrived.
 
-        The crash/timeout fallback (``_token_usage_from_messages``) reads
-        per-generation tokens straight off the flushed messages, so the crashed
-        turn itself is right — but the thread's cumulative total kept climbing on
-        the SDK side. Without advancing past it here, the next turn's delta would
-        re-book everything the crashed turn already reported.
+        The crash fallback reads per-generation tokens off the flushed messages,
+        so the crashed turn itself is right — but the thread's cumulative total
+        kept climbing, and without advancing past it the NEXT turn's delta re-books
+        everything this one already reported.
         """
         if usage is None:
             return
         base = self._thread_usage_baseline
-        # SDK ``input_tokens`` is the full prompt, cached prefix included, so the
-        # input baseline advances by uncached + cache_read.
+        # SDK ``input_tokens`` is the full prompt, so the input baseline advances
+        # by uncached + cache_read.
         self._thread_usage_baseline = _ThreadTotals(
             input=base.input + usage.uncached_input_tokens + usage.cache_read_input_tokens,
             output=base.output + usage.output_tokens,
@@ -2513,15 +2265,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
         """Add recovered sub-agent (child-thread) tokens to the parent turn total.
 
         Codex bills children on separate threads, so the parent's streamed total
-        (``_token_usage_from_sdk`` / parent-only ``_token_usage_from_messages``)
-        omits them. The child generations were reconstructed as
-        ``parent_tool_use_id``-tagged ``AssistantMessage``s carrying their real
-        per-generation tokens (fresh slice in ``input_tokens``, ``cache_read`` for
-        the cached prefix, no ``cache_creation`` — Codex has no cache-write fee).
-        Sum those here as ``uncached_input``, priced per child model, to make the
-        turn total all-inclusive — the same end state Claude reaches naturally,
-        where sub-agent messages bubble into the parent stream. A no-op when no
-        child generations were recovered.
+        omits them. Summing the recovered ``parent_tool_use_id``-tagged messages
+        here, priced PER CHILD MODEL (sub-agents may run a different one), makes
+        the turn total all-inclusive — the same end state Claude reaches naturally.
+        A no-op when nothing was recovered.
         """
         children = [
             m
@@ -2534,8 +2281,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return parent
         base = parent or TokenUsage()
 
-        # Price each child generation on its own model (sub-agents may run a
-        # different model than the parent), then sum.
+        # Each child generation on its own model, then sum.
         child_cost = 0.0
         for m in children:
             child_cost += (
@@ -2560,16 +2306,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
     def _token_usage_from_messages(self, messages: list[TranscriptMessage]) -> TokenUsage | None:
         """Sum per-generation tokens off the captured assistant messages.
 
-        Crash/timeout fallback for ``_finalize``: when the stream raises before it
-        returns the SDK ``total`` (so ``_token_usage_from_sdk`` has nothing), the
-        per-generation tokens were already recorded on the flushed
-        ``AssistantMessage``s (fresh slice in ``input_tokens``, cached prefix in
-        ``cache_read``). Summing them recovers the tokens/cost a crashed turn
-        actually spent. Returns None when nothing was captured, matching
-        ``_token_usage_from_sdk``'s empty contract.
+        Crash/timeout fallback: when the stream raises before returning the SDK
+        ``total``, the per-generation tokens were already recorded on the flushed
+        messages, so summing them recovers what the crashed turn actually spent.
+        None when nothing was captured, matching the SDK path's empty contract.
         """
-        # PARENT-thread messages only — sub-agent (separate-thread) tokens are
-        # added via _fold_subagent_tokens, not summed here (would double-count).
+        # PARENT-thread messages ONLY: sub-agent tokens are added by
+        # _fold_subagent_tokens, and summing them here would double-count.
         assistant = [m for m in messages if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None]
         if not assistant:
             return None
