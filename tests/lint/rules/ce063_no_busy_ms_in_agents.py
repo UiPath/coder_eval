@@ -9,8 +9,8 @@ clear a spent start stamp, advance the mark. Separately, a reducer that also
 subtracts takes tool time out twice.
 
 HAZARD: do not reuse CE061's ``_imports_the_helper``: inverted into a ban, its
-bare-module-import branch flags any reducer calling ``timing.close_window``. The banned name comes from the function object,
-so a rename moves the rule.
+bare-module-import branch flags any reducer calling ``timing.close_window``. The banned
+name comes from the function object, so a rename moves the rule.
 
 BLIND SPOT: a reducer that re-implements the union inline, or reaches ``busy_ms``
 through a re-export, is invisible. ``tests/test_timing_identity_contract.py`` is the
