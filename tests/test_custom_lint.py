@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from tests.lint.rules._layers import is_core_path
 from tests.lint.runner import ALL_RULES, check_paths
 
 
@@ -2137,6 +2138,14 @@ class TestCE004CatchesBothImportSpellings:
     def test_a_non_core_file_is_exempt(self):
         assert not self._violations("from ..cli import run_command", "/repo/src/coder_eval/cli/report_command.py")
 
+    ISOLATION = "/repo/src/coder_eval/isolation/docker_runner.py"
+
+    def test_the_docker_driver_is_core(self):
+        """`isolation/` was in neither rule's reach: the directory-list predicate
+        named ten packages and `isolation` was not one, so the driver that runs
+        the whole evaluation loop in a container could import anything."""
+        assert self._violations("from ..cli import run_command", self.ISOLATION)
+
 
 @pytest.mark.lint
 class TestCE066NoReportImportsInCore:
@@ -2214,6 +2223,15 @@ class TestCE066NoReportImportsInCore:
     def test_a_non_core_file_is_exempt(self):
         assert not self._violations("from coder_eval.reports import format_score", self.NON_CORE)
 
+    ISOLATION = "/repo/src/coder_eval/isolation/docker_runner.py"
+
+    def test_the_docker_driver_is_core(self):
+        """`isolation/` was in neither rule's reach: the directory-list predicate
+        named ten packages and `isolation` was not one, so the driver that runs
+        the whole evaluation loop in a container could import anything."""
+        assert self._violations("from ..reports import format_score", self.ISOLATION)
+        assert not self._violations("from ..reports import write_task_html", self.ISOLATION)
+
     def test_every_allowlisted_name_resolves_in_the_package(self):
         """Staleness guard: a renamed writer must not leave a dead entry silencing
         the rule. This is the pattern the deleted pricing test used correctly.
@@ -2223,6 +2241,65 @@ class TestCE066NoReportImportsInCore:
 
         missing = sorted(n for n in ALLOWED_WRITERS if not hasattr(pkg, n))
         assert not missing, f"CE066 allowlists names that no longer exist in coder_eval.reports: {missing}"
+
+
+@pytest.mark.lint
+class TestCoreLayerMembership:
+    """`_layers.is_core_path` is the single definition of "core" for CE004 and CE066.
+
+    It is pinned against the real filesystem because its two previous forms were
+    denylists that each left a hole: the first exempted every top-level module but
+    `orchestrator.py`, the second named ten directories and missed `isolation/`.
+    The allowlist form has no per-package list to keep honest — only the two-name
+    exception set, which is what this class pins.
+
+    Deliberately NOT named `TestCE\\d{3}`: that prefix is this file's convention
+    for a class guarding one numbered rule, and this class guards the predicate
+    two rules share. Taking a CE number would claim an id that indexes no rule.
+    """
+
+    NON_CORE = frozenset({"cli", "reports"})
+    PKG = SRC / "coder_eval"
+
+    def test_exactly_two_packages_are_non_core(self):
+        dirs = [d for d in self.PKG.iterdir() if d.is_dir() and d.name != "__pycache__"]
+        found = {d.name for d in dirs if not is_core_path(str(d / "x.py"))}
+        assert found == self.NON_CORE, f"the non-core set moved: {sorted(found)}"
+
+    def test_every_module_is_classified_by_its_top_level_package(self):
+        misclassified = [
+            str(py.relative_to(self.PKG))
+            for py in self.PKG.rglob("*.py")
+            if is_core_path(str(py)) is not (py.relative_to(self.PKG).parts[0] not in self.NON_CORE)
+        ]
+        assert not misclassified, f"is_core_path disagrees with the package layout for: {misclassified}"
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/Users/religa/src/exp/coder_eval/conftest.py", "/home/dev/projects/coder_eval/conftest.py"],
+    )
+    def test_a_repo_root_file_is_not_core(self, path):
+        """The checkout directory is itself named `coder_eval`, so the unanchored
+        regex made every repo-root module core. Anchoring on `src/` is the fix."""
+        assert not is_core_path(path)
+
+    def test_the_src_named_parent_residual_is_unreachable_not_fixed(self):
+        """Blind spot, pinned so the anchoring is not mistaken for a complete fix.
+
+        A clone at `~/src/coder_eval` collides with the anchor itself, and no path
+        substring can separate it from the package. Unreachable: both rules are
+        only ever handed paths under the runner's `SRC`.
+        """
+        assert is_core_path("/Users/x/src/coder_eval/conftest.py")
+        assert is_core_path("/Users/x/src/coder_eval/tests/test_a.py")
+
+    @pytest.mark.parametrize(
+        ("relative", "expected"),
+        [("src/coder_eval/orchestrator.py", True), ("src/coder_eval/reports/markdown.py", False)],
+    )
+    def test_the_relative_and_absolute_spelling_agree(self, relative, expected):
+        assert is_core_path(relative) is expected
+        assert is_core_path(f"/repo/{relative}") is expected
 
 
 @pytest.mark.lint
