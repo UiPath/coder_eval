@@ -58,43 +58,44 @@
   (its join keys on a per-Orchestrator nonce the prior turns never carried, so it would
   clobber already-correct costs). The verdict is written back into the run's
   `task.json`, with the pre-grade record kept as `task.execute.json` — that in-place
-  write is what lets `coder-eval report <run_dir> --rebuild` rebuild a graded `run.json`
-  with no grading-specific code. **`Sandbox.adopt(workspace)`** is the grade-in-place
-  primitive: it reuses `setup`'s adoption half but skips every *materializing* step
-  (`_setup_template`, `_generate_cli_recorders`, venv/package installs, the destructive
-  `$HOME` remediation), running only non-mutating derivation (mock-dir `+x`, venv
-  *discovery*, plugin-tools pin); `_cleanup_on_exit` stays False so an adopted tree is
-  never moved or deleted, and `Sandbox.was_adopted` is set — the Orchestrator reads it
-  to SKIP the `pre_run` hook (`run()` calls it unconditionally with `cwd = sandbox_dir`,
-  and several in-tree tasks stage fixtures there with `cp -a /app/[!.]* "$PWD/"`, which
-  would overwrite the agent's deliverables before the criteria read them) and to KEEP
-  `sandbox_path` in the `PreservationMode.NONE` cleanup arm (an adopted tree survives
-  cleanup, so the path is not stale). `pre_run`'s recorded results are carried from the
-  prior run instead. **`post_run` is the opposite case and moved phases**: it is defined
-  as running after the verdict and may mutate the workspace the criteria read (`rm -rf
-  node_modules` is the archetype), so running it under `execute` inverted its own
-  contract and broke round-trip equivalence — the criteria had not read the tree yet, so
-  `execute` + `evaluate` graded a workspace `post_run` had already modified and could
-  return a different verdict than a single `run` for the identical trajectory (the
-  in-tree tasks all escaped it only because their `post_run` touches nothing a criterion
-  reads). `execute` now DEFERS it; whichever command grades runs it, exactly once —
-  `_skip_post_run` skips on `grade=False`, and skips again when the prior row already
-  recorded results, since nothing declares these commands idempotent. That makes it a
-  capability of the in-place path, so `embedded_commands` scans it OUTSIDE
-  `include_setup_phase` (which is False in place) — minus
-  `_operator_baseline_post_run()`, the grading host's own `experiments/default.yaml`
-  contribution, which every task carries and the record therefore did not choose;
-  without that exemption the refusal fired on 100% of run directories, and a refusal
-  that always fires is waved through. In-place is **more correct**, not merely faster:
-  `_setup_template` filters the copy through `_should_ignore_template_file`, which drops
-  `node_modules` / `dist` / `build` / `.venv` / `.git`, so on the copy path a criterion
-  like `test -f dist/bundle.js` fails as a *copying artifact* rather than as a verdict
-  (verified: 0.00 "does not exist" on copy vs 1.00 in place). Defaults: in-place for a
-  run dir, copy for a bare work dir (criteria can mutate it and it is the user's own
-  tree); `--in-place`/`--copy` override. `adopt` hard-errors on `driver: docker` (a
-  container workspace is unreachable from the host), and grading a `driver: docker` task
-  is DISPATCHED INTO A CONTAINER of the task's own image (`_should_grade_in_container`
-  -> `_grade_in_container` -> `DockerRunner(prior_result=, grade_workspace=)`), because
+  write is what lets `evaluate` refresh the owning run's `run.json` by re-reading its
+  rows, with no grading-specific aggregation code. **`Sandbox.adopt(workspace)`** is the
+  grade-in-place primitive: it reuses `setup`'s adoption half but skips every
+  *materializing* step (`_setup_template`, `_generate_cli_recorders`, venv/package
+  installs, the destructive `$HOME` remediation), running only non-mutating derivation
+  (mock-dir `+x`, venv *discovery*, plugin-tools pin); `_cleanup_on_exit` stays False so
+  an adopted tree is never moved or deleted, and `Sandbox.was_adopted` is set — the
+  Orchestrator reads it to SKIP the `pre_run` hook (`run()` calls it unconditionally
+  with `cwd = sandbox_dir`, and several in-tree tasks stage fixtures there with `cp -a
+  /app/[!.]* "$PWD/"`, which would overwrite the agent's deliverables before the
+  criteria read them) and to KEEP `sandbox_path` in the `PreservationMode.NONE` cleanup
+  arm (an adopted tree survives cleanup, so the path is not stale). `pre_run`'s recorded
+  results are carried from the prior run instead. **`post_run` is the opposite case and
+  moved phases**: it is defined as running after the verdict and may mutate the
+  workspace the criteria read (`rm -rf node_modules` is the archetype), so running it
+  under `execute` inverted its own contract and broke round-trip equivalence — the
+  criteria had not read the tree yet, so `execute` + `evaluate` graded a workspace
+  `post_run` had already modified and could return a different verdict than a single
+  `run` for the identical trajectory (the in-tree tasks all escaped it only because
+  their `post_run` touches nothing a criterion reads). `execute` now DEFERS it;
+  whichever command grades runs it, exactly once — `_skip_post_run` skips on
+  `grade=False`, and skips again when the prior row already recorded results, since
+  nothing declares these commands idempotent. That makes it a capability of the in-place
+  path, so `embedded_commands` scans it OUTSIDE `include_setup_phase` (which is False in
+  place) — minus `_operator_baseline_post_run()`, the grading host's own
+  `experiments/default.yaml` contribution, which every task carries and the record
+  therefore did not choose; without that exemption the refusal fired on 100% of run
+  directories, and a refusal that always fires is waved through. In-place is **more
+  correct**, not merely faster: `_setup_template` filters the copy through
+  `_should_ignore_template_file`, which drops `node_modules` / `dist` / `build` /
+  `.venv` / `.git`, so on the copy path a criterion like `test -f dist/bundle.js` fails
+  as a *copying artifact* rather than as a verdict (verified: 0.00 "does not exist" on
+  copy vs 1.00 in place). Defaults: in-place for a run dir, copy for a bare work dir
+  (criteria can mutate it and it is the user's own tree); `--in-place`/`--copy`
+  override. `adopt` hard-errors on `driver: docker` (a container workspace is
+  unreachable from the host), and grading a `driver: docker` task is DISPATCHED INTO A
+  CONTAINER of the task's own image (`_should_grade_in_container` ->
+  `_grade_in_container` -> `DockerRunner(prior_result=, grade_workspace=)`), because
   that is the only place its criteria mean what they meant during the run:
   `tasks/byod_smoke_test.yaml` asserts `test -f /opt/byod_marker`, baked into its image,
   and the IDENTICAL row scores SUCCESS 1.000 in a container and FAILURE 0.000 on the
@@ -340,6 +341,25 @@ link turns `evaluate <run_dir>` into an arbitrary-file-overwrite primitive on th
 host — and it is atomic, matching the orchestrator's own writer, because a torn write makes
 the row parse as malformed, which a later `--resume` reads as "not complete" and re-pays
 for the agent.
+
+After the write-back, `evaluate` rebuilds the `run.json` of the run that owns the row — the
+nearest ancestor holding one — so a detached grade needs no second command. The rebuild
+re-reads every row on disk, so replicate siblings are summarized at their current state and a
+quarantined `task.json.unhonored` is never folded in. It is best-effort like the write-back:
+the verdict is already printed, so a failed refresh warns and never changes the exit code. It
+refuses to write through a symlinked `run.json` or `run.md` for the same reason the write-back
+refuses a symlinked `task.json`, and the refusal sits in `rebuild_run_summary` itself — the
+one write path `report --rebuild` shares — so neither caller can skip it. A row with no
+`run.json` above it (copied out of its run) gets no summary: creating one would invent a run.
+
+The walk-up accepts only a `run.json` that is a JSON object with `run_id` and `task_results`.
+The name is generic, and a row copied into a project or home directory that holds another
+tool's `run.json` would otherwise have that file silently overwritten by a plain `evaluate`.
+The refresh is also skipped when the grading pass's own `--run-dir` sits inside the owning
+run: the orchestrator writes that pass's `task.json` there, so the rebuild would count the
+same row twice. `run.json` and `run.md` are written through `write_text_atomic`, because
+the refresh now runs on every detached grade, and a torn `run.json` makes the next rebuild
+silently drop the tags, paths and window it carries forward.
 
 The pre-grade snapshot is taken BEFORE anything grades. Taking it inside `_write_back`
 captured an ALREADY-GRADED record whenever `--run-dir` pointed at the target run dir (the

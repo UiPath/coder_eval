@@ -63,7 +63,8 @@ def _write_task_json(run_dir: Path, result: EvaluationResult, *, replicate_index
 def _write_prior(run_dir: Path, **fields: object) -> None:
     """Write a minimal prior run.json carrying the given run-level fields."""
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "run.json").write_text(json.dumps({"task_results": [{"task_id": "a"}], **fields}), encoding="utf-8")
+    prior = {"run_id": run_dir.name, "task_results": [{"task_id": "a"}], **fields}
+    (run_dir / "run.json").write_text(json.dumps(prior), encoding="utf-8")
 
 
 def _run_json(run_dir: Path) -> dict:
@@ -242,6 +243,37 @@ def test_write_run_summary_emits_run_json_and_md(tmp_path: Path) -> None:
 # --- rebuild_run_summary ------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege on Windows")
+@pytest.mark.parametrize("name", ["run.json", "run.md"])
+def test_rebuild_refuses_to_write_through_a_symlink(tmp_path: Path, name: str) -> None:
+    """A run dir is shareable; a planted link would turn the rebuild into an overwrite of any file."""
+    run_dir = tmp_path / "run"
+    _write_task_json(run_dir, _eval("a"))
+    victim = tmp_path / "victim"
+    victim.write_text("keep me", encoding="utf-8")
+    (run_dir / name).symlink_to(victim)
+
+    with pytest.raises(ValueError, match="symlink"):
+        rebuild_run_summary(run_dir)
+
+    assert victim.read_text(encoding="utf-8") == "keep me"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege on Windows")
+def test_report_rebuild_refuses_a_symlinked_run_json(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _write_task_json(run_dir, _eval("a"))
+    victim = tmp_path / "victim.json"
+    victim.write_text("keep me", encoding="utf-8")
+    (run_dir / "run.json").symlink_to(victim)
+
+    result = CliRunner().invoke(app, ["report", str(run_dir), "--rebuild"])
+
+    assert result.exit_code == 1, result.output
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert _shows(result.output, "is a symlink"), result.output
+
+
 def test_rebuild_returns_none_on_an_empty_run_dir(tmp_path: Path) -> None:
     assert rebuild_run_summary(tmp_path) is None
     assert not (tmp_path / "run.json").exists()
@@ -369,6 +401,14 @@ def test_find_run_root_walks_past_the_working_directory_for_a_relative_path(
     monkeypatch.chdir(task_dir)
 
     assert find_run_root(Path(".")) == tmp_path.resolve()
+
+
+def test_find_run_root_walks_past_another_tools_run_json(tmp_path: Path) -> None:
+    """A generic `run.json` from another tool must never be mistaken for a run, and later overwritten."""
+    (tmp_path / "run.json").write_text('{"name": "someone else"}', encoding="utf-8")
+    task_dir = _write_task_json(tmp_path / "project" / "copied", _eval("a")).parent
+
+    assert find_run_root(task_dir) is None
 
 
 def test_find_run_root_returns_none_outside_a_run(tmp_path: Path) -> None:

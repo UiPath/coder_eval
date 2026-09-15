@@ -176,8 +176,7 @@ coder-eval evaluate tasks/hello_date.yaml ./my_solution
 
 # 2. Re-grade a finished run — including one left NOT_GRADED by `execute`
 coder-eval execute  tasks/hello_date.yaml --run-dir ./r
-coder-eval evaluate ./r/default/hello_date/00
-coder-eval report ./r --rebuild               # run.json now reports the verdict
+coder-eval evaluate ./r/default/hello_date/00   # grades the row and refreshes ./r/run.json
 ```
 
 **Run-directory mode** rebuilds the task from the run's own recorded
@@ -189,8 +188,11 @@ criteria that read the agent's tool calls (`command_executed`, `skill_triggered`
 judges with trajectory) score exactly as they would have during the run.
 
 It writes the verdict back into the run's `task.json` and keeps the pre-grade
-record beside it as `task.execute.json`. Writing back in place is what makes
-`report --rebuild` free — no second copy of the results. If grading itself
+record beside it as `task.execute.json`. It then rebuilds the run's
+`run.json` from the rows on disk, so `run.json` reports the verdict with no second command
+and no second copy of the results. A row that is not inside a run directory gets no
+`run.json`, a symlinked `run.json` is refused, and a failed refresh only warns — the exit
+code is always the verdict's. If grading itself
 crashes, the ungraded record is put back: `ERROR` counts as complete for both
 commands, so an errored row could never be graded again.
 
