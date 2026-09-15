@@ -150,9 +150,9 @@ force-closed `"unknown"` orphan is exempt from the command check because it was 
 timed, and saying so is the honest record. A scenario that resolves no command passes that
 check vacuously, which is correct rather than weak.
 
-The bounds half of the generation check is not redundant. Two harnesses derive the
-duration from a MONOTONIC clock and the bounds from the wall clock, so a reducer can report
-a healthy duration beside two stamps that collapsed to one instant. CE059 catches that
+The bounds half of the generation check is not redundant. A reducer computes the duration
+and the two bounds in separate expressions, so it can report a healthy duration beside two
+stamps that collapsed to one instant. CE059 catches that
 statically only when both bounds are the same `ast.Name`; two different names holding the
 same value pass CE059, and this check catches them.
 

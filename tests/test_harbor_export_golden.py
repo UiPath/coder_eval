@@ -11,14 +11,15 @@ deliberately exercises every C2 mapping row at once: ``dockerfile_path`` with
 no ``WORKDIR`` (exercises the append-a-WORKDIR path), ``reference:``,
 ``run_limits.task_timeout``, resource limits, ``network: none``, and both a
 filesystem criterion and a ``reference_comparison`` criterion (proving the
-placeholder-agent design from the packager's own module docstring survives
-end to end, not just in an isolated unit test).
+placeholder-agent design survives end to end, not just in an isolated unit test).
 
 Regenerate after an INTENTIONAL mapping change with::
 
     GOLDEN_REGEN=1 uv run pytest tests/test_harbor_export_golden.py
 
 and review the resulting diff before committing.
+
+Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
 """
 
 from __future__ import annotations

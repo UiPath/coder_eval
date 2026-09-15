@@ -238,10 +238,7 @@ step that opened it. That is why the measured corpus shows 0.00% for this case, 
 recorded stream.
 
 The Pi inter-turn gap is small in practice: measured across 25 real window pairs, the
-median was 0.25 ms and the maximum 0.75 ms. No test failed while the gap was lost,
-because at the time the four-bucket identity was asserted only as an upper bound;
-`tests/test_timing_identity_contract.py::test_the_sensor_sees_a_window_that_stops_tiling` now
-catches it exactly. The fix is worth
+median was 0.25 ms and the maximum 0.75 ms. The fix is worth
 keeping mainly because the tool spans must keep working once the gap closes, which
 `tests/test_pi_agent.py::TestToolSpansSurviveTheTurnBoundary` pins.
 

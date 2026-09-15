@@ -975,10 +975,9 @@ class TestCE027DocEnvVarParity:
 class TestCE029DocYamlExamples:
     """CE029 — self-contained YAML examples in the docs must validate.
 
-    A published snippet that raises when copy-pasted reads as a broken feature.
-    The motivating bug: the `prompt_mutations` recipe used `text:` where the
-    field is `content:`, and every mutation model sets `extra="forbid"`. Scans
-    real Markdown, so it lives here rather than in the AST-only runner.
+    Scans real Markdown, so it lives here rather than in the AST-only runner.
+
+    Rationale: .claude/notes/lint-rules.md § CE029
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -2699,12 +2698,10 @@ class TestCE031DeadConfigFields:
 class TestCE026ActionDocSurfaces:
     """CE026 — the Action's onboarding surfaces must be truthful and self-sufficient.
 
-    The motivating bug: docs/CI_GATE.md said "there is nothing to install" above a
-    copy-pasteable `uses:` step with no agent runtime, while the correcting
-    prerequisite note sat 11 lines below and the tutorial's sibling snippet *did*
-    show the steps. An integrator who copied it got a run that dies on a missing
-    `claude` binary. Reasons over Markdown + YAML, so it lives here rather than in
-    the AST-only runner (precedent: CE027-CE031).
+    Reasons over Markdown + YAML, so it lives here rather than in the AST-only runner
+    (precedent: CE027-CE031).
+
+    Rationale: .claude/notes/lint-rules.md § CE026
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -3319,14 +3316,9 @@ class TestCE035WorkflowOutputParity:
     """CE035 — a `steps.<id>.outputs.<key>` / `needs.<job>.outputs.<key>` reference must
     resolve to a key its writer actually produces.
 
-    The motivating bug: `verify-published-action.yml` read
-    `steps.parity.outputs.version` twice, but that step writes `pin`/`newest`/`lagging`
-    (the shell *variable* was `VERSION`, the output *key* was `newest`). GitHub expands an
-    unwritten output to '', so `TAG_REF: v${{ … }}` became the bare `v`, `git show
-    "v:action.yml"` exited 128 under `set -euo pipefail`, and the preflight job was red on
-    100% of triggers — taking the paid e2e tier (`needs: preflight`) with it. Invisible to
-    ruff/pyright/pytest, and actionlint models `steps.*.outputs` as an open string map.
     Reasons over workflow YAML + embedded shell, so it lives here, not in the AST runner.
+
+    Rationale: .claude/notes/lint-rules.md § CE035
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -3521,14 +3513,11 @@ class TestCE035WorkflowOutputParity:
 @pytest.mark.lint
 class TestCE036LiveVerdictContract:
     """CE036 — every live-observable criterion's `live_verdict` must be deterministic
-    and monotonic (GitHub issue #61 item 2).
+    and monotonic.
 
     `EarlyStopWatcher` latches verdicts, defers the fail-stop, and attributes pass-stop
     flips against the previous round — all correct only while `live_verdict` never
-    contradicts an earlier decision and never varies for identical input. That contract
-    was documented on `LiveVerdict`/`BaseCriterion.live_verdict` but unenforced: a third
-    criterion implementing it non-monotonically would type-check, pass CE025, and
-    silently corrupt the stop logic.
+    contradicts an earlier decision and never varies for identical input.
 
     Monotonicity over arbitrary Python is undecidable, so there is no sound static rule
     to write. This replays each criterion against every prefix of a recorded trajectory
@@ -3538,6 +3527,8 @@ class TestCE036LiveVerdictContract:
 
     Honest limit (documented on the helper module too): this proves the contract on the
     trajectories an author supplied, not in general.
+
+    Rationale: .claude/notes/lint-rules.md § CE036
     """
 
     def test_real_criteria_honor_the_contract(self):
@@ -3789,19 +3780,13 @@ class TestCE036LiveVerdictContract:
 class TestCE044PluginManifestParity:
     """CE044 — the marketplace entry and the plugin manifest it points at are one surface.
 
-    Eight fields are byte-identical duplicates across the two manifests and nothing
-    compared them: the only test that read ``plugin.json`` at all was
-    ``test_action_version_pin.py``, and only its ``version``. A one-sided edit ships
-    two different one-liners — one in the ``/plugin`` browser, one in the installed copy.
-
-    The second half is the motivating defect: the marketplace schema allows both
-    ``keywords`` and a near-synonymous ``tags``, while the plugin-manifest schema has no
-    ``tags`` property at all, so discovery strings parked there are dropped from an
-    installed user's manifest and a future editor has no rule for where a new term goes.
-    An extra key on the entry now fails unless ``MARKETPLACE_ONLY`` records why.
+    Every field the two manifests share must be identical, and an extra key on the
+    marketplace entry fails unless ``MARKETPLACE_ONLY`` records why.
 
     Reasons over JSON files and a ``source`` path, so it is wired here rather than as a
     ``BaseRule`` in the AST runner.
+
+    Rationale: .claude/notes/lint-rules.md § CE044
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -4483,11 +4468,10 @@ class TestRuffExternalCoversEveryRule:
 class TestCE056NoContainerEnvLiteral:
     """CE056 flags a bare `CODER_EVAL_IN_CONTAINER` outside container_paths.
 
-    The motivating miss: every READER of the gate was migrated to
-    `IN_CONTAINER_ENV` and the single WRITER (`docker_runner`'s
-    `--env CODER_EVAL_IN_CONTAINER=1`) was not, so a rename would have disarmed
-    four gates at once, all silently. CE052 cannot see it -- that rule inspects
-    `if` guards, and the writer is not one.
+    Readers and writers alike must use `IN_CONTAINER_ENV`. CE052 does not overlap:
+    that rule inspects `if` guards, and a writer is not one.
+
+    Rationale: .claude/notes/lint-rules.md § CE056
     """
 
     @staticmethod

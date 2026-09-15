@@ -99,7 +99,7 @@ The seds run only on the release path. A hand edit, or a release that skipped th
 ## The Agent ABC contract
 
 `agent.py` is the plugin SPI: everything a third-party agent author must satisfy. The
-authoring walkthrough is [docs/EXTENDING.md](../../docs/EXTENDING.md) and the five
+authoring walkthrough is [docs/EXTENDING.md](../../docs/EXTENDING.md) and the
 numbered lifecycle requirements are in CLAUDE.md § Adding a New Agent; what follows is
 why the seams are shaped the way they are.
 
