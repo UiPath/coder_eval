@@ -137,9 +137,9 @@
   dispatch guard's `task_file is None` test passed and `_prepare_task_dir_mount`'s `if
   not source.is_dir(): return` then mounted NOTHING — every `$TASK_DIR` criterion
   silently resolving against the wrong tree; and the dispatch is guarded against an
-  image that ignores the `regrade` key (see § The two honored-request guards). The
-  grading container is a SECOND, fresh container: only the workspace crosses and
-  `pre_run` is not re-run, so a criterion depending on out-of-workspace state
+  image that ignores the `regrade` key (see § The contract echo). The grading container
+  is a SECOND, fresh container: only the workspace crosses and `pre_run` is not re-run,
+  so a criterion depending on out-of-workspace state
   (`tasks/samples/skillsbench/3d-scan-calc` symlinks `/root/mass_report.json` in
   `pre_run` and its verifier asserts that path) scores 0.000 for a trajectory `run`
   scores 1.000 — warned at dispatch AND stamped onto the row as
@@ -667,7 +667,8 @@ the agent against a workspace the operator asked only to grade, destroying the t
 being graded. `replicate_index` is `StrictInt` because a bool is an int, and `True` files the
 row under `01/`.
 
-Every field is required and unknown top-level keys are refused. A default on any key is reachable only
+Every field is required and unknown top-level keys are refused. A default on any key is
+reachable only
 when host and image DISAGREE — `grade: True` for a host that predates `execute`,
 `host_task_file: None` for one that predates the record seam — so a default does not
 preserve behaviour, it hides a skew. With `extra="forbid"` and no defaults, that disagreement
@@ -734,36 +735,73 @@ Suppression is narrowed to `CancelledError` throughout, so a genuine `KeyboardIn
 the container was already gone (a race with `--rm`) or the daemon refused, so stderr is
 surfaced to keep the ambiguity debuggable.
 
-### The two honored-request guards
+### The image version preflight
 
-`grade` and `regrade` cross the boundary only through `context.json`, and an image that
-predates either key ignores it and falls through to its old behaviour. The image-version
-preflight only warns, so version skew would change what a command MEANS.
+Before a billed container starts, the host reads the image's `org.coder-eval.version` label
+once. A missing label refuses: the image cannot run the in-container orchestrator, and a bare
+`FROM ubuntu` would otherwise build fine and then die at `docker run` with a cryptic
+missing-entrypoint error. A label that differs from the host's installed coder-eval also
+refuses. `dockerfile_path` images are checked the same way, because a task Dockerfile must
+start `FROM coder-eval-agent` and so inherits the label.
 
-For `grade`: a stale image grades anyway, so `execute --driver docker` would silently
-produce SUCCESS/FAILURE rows indistinguishable from a normal graded run. For `regrade`: a
-stale image ignores the staged `prior.json` and the workspace mount and falls through to the
-ordinary orchestrator branch, which **starts an agent** from `initial_prompt` — so the host
-would fold a fabricated trajectory back over the recorded row as its "grade", publishing a
-verdict for work it never looked at and billing the model for it. Nothing else catches that:
-`_assert_grade_honored` early-returns because a grading container is dispatched with
-`grade=True`.
+A mismatch is a legitimate operator choice in one known case — testing an unreleased image
+against a released host wheel, which a downstream CI workflow does on purpose — so
+`ALLOW_IMAGE_SKEW=1` downgrades it to a warning, and the refusal message names the variable
+so the operator can recover from the error text alone. It is a `Settings` field, not a task
+field: image freshness is a property of the operator's machine, not of the evaluation being
+defined. It never excuses a missing label. A label reading `unknown` — what `docker/Dockerfile`
+stamps when built without `make`, which passes no `CODER_EVAL_VERSION` — is a version that
+differs, not a missing label, so the escape hatch applies to it: such an image does carry the
+runtime. A source checkout has no packaged version, so skew
+is not computable there; the preflight warns and continues. An inspect or daemon failure is
+left for `docker run` to report canonically.
 
-Both are keyed on EVIDENCE, not on the label. For `grade`, "did it grade" is
-`success_criteria_results` or a non-None `weighted_score`: exempting every execution-fact
-status let a stale image return a fully graded MAX_TURNS_EXHAUSTED row — criteria vector,
-weighted score and all — unchallenged, because that exemption exists for statuses a *fresh*
-image also produces, and a fresh one produces them with neither. For `regrade`, a container
-that honored the request seeds from `prior` and never runs the agent, so a DIFFERENT
-`started_at` is the tell: `_seed_from_prior_result` restores the agent run's `started_at`
-verbatim, so a fresh run is the only way that field can move.
+The label is ADVISORY. It is a build-time claim every derived image inherits, and an overlay
+that reinstalls or patches coder-eval in the container keeps the base's label while changing
+what runs; a stale image rebuilt under the same version string is the same case. The preflight
+buys an early, cheap failure before a paid run. The contract echo is the authoritative check.
 
-The refusal quarantines the on-disk record before raising. Refusing in memory only left the
-graded `task.json` sitting in the bind-mounted host run dir, where a later `execute --resume`
-read it back as a completed row (its category is `succeeded`, so the resume partition files
-it under prior results) and plain `aggregate` folded it straight into `run.json` — publishing
-exactly the row the guard declined to publish. Refusing in memory while leaving contradictory
-bytes on disk is not a refusal.
+### The contract echo
+
+The container writes the `ContainerContext` it actually parsed back into
+`environment_info["container_contract"]`, and the host refuses a result whose echo is absent
+or differs from what it staged, naming each differing field. One comparison covers every
+field, so a field added to the contract is guarded with no new code. An absent echo means the
+image predates the contract; a different one means the container ran code that read the
+contract differently.
+
+Both directions that matter most are expensive. An image that ignores `grade` makes `execute
+--driver docker` publish SUCCESS/FAILURE rows indistinguishable from a graded run. An image
+that ignores `regrade` falls through to the ordinary orchestrator branch, which **starts an
+agent** from `initial_prompt` — so the host would fold a fabricated trajectory back over the
+recorded row as its "grade", publishing a verdict for work it never looked at and billing the
+model for it. Guards keyed on indirect evidence for each flag (criteria results for `grade`,
+a moved `started_at` for `regrade`) had to be written per field and each had its own blind
+spot; the echo asks the direct question once.
+
+The echo is written LATE, after `_finalize_regrade_timing`. `_seed_from_prior_result` merges
+the prior row's `environment_info` over ours with the prior winning, so an echo written at
+setup is erased on the regrade path, which is the path that most needs it — and a
+previously graded row already carries a stale echo that would win.
+`tests/test_container_context.py` drives that path end to end. Both sides compare
+`model_dump(mode="json")`, since enum and path objects do not equal their JSON forms.
+`ALLOW_IMAGE_SKEW` never reaches this check: it tolerates a version difference, never a
+container that did something other than what it was asked.
+
+The echo detects a skewed image; it is NOT a security boundary. The run dir is bind-mounted
+writable into the agent's own container, so an agent can forge `container_contract` exactly as
+it can forge the verdict beside it in the same `task.json`. It proves the harness code honored
+the contract, not that the agent was honest. A host grade (`--allow-host-grading`) removes a
+prior row's echo, since that echo describes a container that did not produce the new verdict.
+The key is excluded from the rendered Environment table: it is a nested object, and
+`environment_info` is rendered as a flat map.
+
+The refusal quarantines the on-disk record to `task.json.unhonored` before raising. The run
+dir is bind-mounted, so a refused `task.json` left in place is read straight back by a later
+`execute --resume` (its category is `succeeded`, so the resume partition files it under prior
+results) and folded into `run.json` by a run-level rebuild — publishing exactly the row the
+refusal declined. A build failure's synthetic `BUILD_FAILED` record and a container that
+wrote no `task.json` never reach the check: both raise earlier.
 
 ## The sandbox the criteria run in
 

@@ -24,7 +24,7 @@ import shutil
 import tempfile
 from functools import cache
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from coder_eval.models import (
     IN_CONTAINER_ENV,
@@ -903,6 +903,7 @@ async def regrade_in_place(
     allow_host_grading: bool = False,
     recorded_task: TaskDefinition | None = None,
     recorded_task_file: Path | None = None,
+    container_contract: dict[str, Any] | None = None,
 ) -> EvaluationResult:
     """Run ``task``'s criteria against an already-executed ``workspace``.
 
@@ -917,6 +918,9 @@ async def regrade_in_place(
     ``recorded_task`` / ``recorded_task_file`` are two halves of one seam — what
     the row RECORDS, as distinct from what this process runs. Both matter only in
     the container, where the task is rewritten to ``driver: tempdir``.
+
+    ``container_contract`` is the echo the in-container caller forwards to the
+    Orchestrator; the host never passes it.
 
     Rationale: .claude/notes/orchestration.md § Recording the task as authored
     """
@@ -991,6 +995,7 @@ async def regrade_in_place(
         prior_result=prior,
         recorded_task=recorded_task,
         recorded_task_file=recorded_task_file,
+        container_contract=container_contract,
     )
     result = await orchestrator.run()
     stamp_host_grading(result, task)

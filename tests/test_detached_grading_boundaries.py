@@ -2,9 +2,8 @@
 
 Three boundaries, each shipped without a behavioural test:
 
-* the docker ``grade`` boundary — the only thing standing between
-  ``execute --driver docker`` against a stale image and a run that silently
-  publishes real verdicts;
+* the docker contract echo — the only thing standing between a skewed image and
+  a result that silently ignored ``grade`` or ``regrade``;
 * ``grading_sandbox_config`` — which decides whether a container task's criteria
   may run on the grading host at all;
 * the crash-recovery arm — the one a REAL grading failure takes, which is not the
@@ -27,7 +26,6 @@ from coder_eval.cli import app
 from coder_eval.errors.checker_misuse import CheckerMisuseError
 from coder_eval.models import (
     AgentKind,
-    CriterionResult,
     EvaluationResult,
     FileExistsCriterion,
     FinalStatus,
@@ -114,90 +112,125 @@ class TestGradingSandboxConfig:
 
 
 # --------------------------------------------------------------------------
-# The docker `grade` boundary
+# The docker contract echo
 # --------------------------------------------------------------------------
 
 
-def _docker_runner(*, grade: bool, tmp_path: Path):
-    from coder_eval.isolation.docker_runner import DockerRunner
+class TestContractEcho:
+    """The host refuses a container result that does not echo the contract it staged.
 
-    rt = ResolvedTask(
-        task=_task("docker"),
-        task_file=tmp_path / "t.yaml",
-        run_dir=tmp_path / "run",
-        variant_id="default",
-        original_task_id="t",
-    )
-    return DockerRunner(rt, grade=grade)
+    Every refusal must also quarantine `task.json`: a later `--resume` or run-level
+    rebuild reads it straight off the bind-mounted run dir.
+    """
 
+    _RECORD = '{"final_status": "SUCCESS"}'
 
-class TestDockerGradeBoundary:
-    """`grade` crosses the container boundary only through context.json, so an
-    image that predates `execute` ignores the key and grades anyway."""
+    @staticmethod
+    async def _staged(tmp_path: Path, *, grade: bool = True, regrade: bool = False):
+        from coder_eval.isolation.docker_runner import DockerRunner
 
-    def test_a_graded_verdict_from_an_execute_run_is_refused(self, tmp_path: Path) -> None:
-        from coder_eval.isolation.docker_runner import DockerRunError
+        rt = ResolvedTask(
+            task=_task("docker"),
+            task_file=tmp_path / "t.yaml",
+            run_dir=tmp_path / "run",
+            variant_id="default",
+            original_task_id="t",
+        )
+        workspace = None
+        if regrade:
+            workspace = tmp_path / "ws"
+            workspace.mkdir()
+        runner_ = DockerRunner(rt, grade=grade, prior_result=_result() if regrade else None, grade_workspace=workspace)
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        await runner_._stage_inputs(input_dir)
+        return runner_
 
-        runner_ = _docker_runner(grade=False, tmp_path=tmp_path)
-        with pytest.raises(DockerRunError, match="predates `execute`"):
-            runner_._assert_grade_honored(_result(FinalStatus.SUCCESS))
+    @staticmethod
+    def _echoing(runner_, **flips: object) -> EvaluationResult:
+        """A result carrying the staged contract with ``flips`` applied, round-tripped through JSON as on disk."""
+        result = _result(FinalStatus.SUCCESS)
+        result.environment_info["container_contract"] = runner_._staged_context.model_dump(mode="json") | flips
+        return EvaluationResult.model_validate_json(result.model_dump_json())
 
-    def test_an_ungraded_row_is_accepted(self, tmp_path: Path) -> None:
-        _docker_runner(grade=False, tmp_path=tmp_path)._assert_grade_honored(_result())
-
-    def test_an_execution_fact_is_exempt(self, tmp_path: Path) -> None:
-        """TIMEOUT / ERROR describe the agent phase, not grading. `execute`
-        reports them exactly as `run` does, so they are not evidence the image
-        graded anything."""
-        for status in (FinalStatus.TIMEOUT, FinalStatus.ERROR, FinalStatus.BUILD_FAILED):
-            _docker_runner(grade=False, tmp_path=tmp_path)._assert_grade_honored(_result(status))
-
-    def test_a_graded_run_short_circuits(self, tmp_path: Path) -> None:
-        _docker_runner(grade=True, tmp_path=tmp_path)._assert_grade_honored(_result(FinalStatus.SUCCESS))
-
-    def test_an_execution_fact_carrying_a_verdict_is_still_refused(self, tmp_path: Path) -> None:
-        """The guard keys on EVIDENCE, and until now nothing proved it.
-
-        Every fixture above builds a result with neither a criteria vector nor a
-        score, so `graded_anyway` was `False` in all four tests — replacing that
-        whole expression with a literal `False` left the suite fully green, i.e.
-        the defect it exists for could be reintroduced silently. A stale image
-        returning a fully graded MAX_TURNS_EXHAUSTED row is exactly the case the
-        exemption must NOT cover: a fresh image reports that status with no
-        verdict attached.
-        """
-        from coder_eval.isolation.docker_runner import DockerRunError
-
-        graded = _result(FinalStatus.MAX_TURNS_EXHAUSTED)
-        graded.weighted_score = 1.0
-        graded.success_criteria_results = [
-            CriterionResult(criterion_type="file_exists", description="x", score=1.0, weight=1.0)
-        ]
-
-        runner_ = _docker_runner(grade=False, tmp_path=tmp_path)
-        with pytest.raises(DockerRunError, match="predates `execute`"):
-            runner_._assert_grade_honored(graded)
-
-    def test_the_refused_record_is_quarantined_off_task_json(self, tmp_path: Path) -> None:
-        """Refusing in memory is not enough while the graded bytes stay on disk.
-
-        A later `execute --resume` / `aggregate` reads task.json straight off the
-        filesystem, so leaving it in place folds in exactly the row this guard
-        declined to publish. The rename was shipped with 0% coverage — all four
-        tests left `task_json` at its `None` default, so the block never ran.
-        """
-        from coder_eval.isolation.docker_runner import DockerRunError
-
+    def _task_json(self, tmp_path: Path) -> Path:
         task_json = tmp_path / TASK_JSON_FILENAME
-        task_json.write_text('{"final_status": "SUCCESS"}', encoding="utf-8")
+        task_json.write_text(self._RECORD, encoding="utf-8")
+        return task_json
 
-        runner_ = _docker_runner(grade=False, tmp_path=tmp_path)
-        with pytest.raises(DockerRunError):
-            runner_._assert_grade_honored(_result(FinalStatus.SUCCESS), task_json=task_json)
-
+    def _assert_quarantined(self, task_json: Path) -> None:
         assert not task_json.exists(), "the refused record must not stay readable as task.json"
-        sidecar = task_json.with_suffix(task_json.suffix + ".graded")
-        assert sidecar.read_text(encoding="utf-8") == '{"final_status": "SUCCESS"}'
+        assert task_json.with_suffix(".json.unhonored").read_text(encoding="utf-8") == self._RECORD
+
+    async def test_a_missing_echo_is_refused_and_quarantined(self, tmp_path: Path) -> None:
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        runner_ = await self._staged(tmp_path)
+        task_json = self._task_json(tmp_path)
+        with pytest.raises(DockerRunError, match="no container_contract echo"):
+            runner_._assert_contract_echoed(_result(FinalStatus.SUCCESS), task_json)
+        self._assert_quarantined(task_json)
+
+    async def test_an_echo_that_flipped_grade_is_refused(self, tmp_path: Path) -> None:
+        """`execute` asked for no grade; a stale image graded anyway."""
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        runner_ = await self._staged(tmp_path, grade=False)
+        task_json = self._task_json(tmp_path)
+        with pytest.raises(DockerRunError, match="grade: sent False, container used True"):
+            runner_._assert_contract_echoed(self._echoing(runner_, grade=True), task_json)
+        self._assert_quarantined(task_json)
+
+    async def test_an_echo_that_flipped_regrade_is_refused(self, tmp_path: Path) -> None:
+        """A grade came back as a fresh agent run over the recorded row."""
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        runner_ = await self._staged(tmp_path, regrade=True)
+        task_json = self._task_json(tmp_path)
+        with pytest.raises(DockerRunError, match="regrade: sent True, container used False"):
+            runner_._assert_contract_echoed(self._echoing(runner_, regrade=False), task_json)
+        self._assert_quarantined(task_json)
+
+    async def test_an_echo_missing_one_field_names_it(self, tmp_path: Path) -> None:
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        runner_ = await self._staged(tmp_path)
+        result = self._echoing(runner_)
+        del result.environment_info["container_contract"]["workspace_dir"]
+        with pytest.raises(DockerRunError, match="workspace_dir: sent None, container used <absent>"):
+            runner_._assert_contract_echoed(result, self._task_json(tmp_path))
+
+    async def test_a_matching_echo_is_accepted(self, tmp_path: Path) -> None:
+        runner_ = await self._staged(tmp_path, grade=False)
+        task_json = self._task_json(tmp_path)
+        runner_._assert_contract_echoed(self._echoing(runner_), task_json)
+        assert task_json.exists()
+
+    async def test_the_escape_hatch_does_not_excuse_a_bad_echo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ALLOW_IMAGE_SKEW tolerates a version difference, never a container that did something else."""
+        from coder_eval.config import settings
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        monkeypatch.setattr(settings, "allow_image_skew", True)
+        runner_ = await self._staged(tmp_path, grade=False)
+        with pytest.raises(DockerRunError):
+            runner_._assert_contract_echoed(self._echoing(runner_, grade=True), self._task_json(tmp_path))
+
+    async def test_the_parsed_result_path_applies_the_check(self, tmp_path: Path) -> None:
+        """The guard is wired into `_parse_result_or_raise`, not merely defined."""
+        from coder_eval.isolation.docker_runner import DockerRunError
+
+        runner_ = await self._staged(tmp_path)
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        task_json = output_dir / TASK_JSON_FILENAME
+        task_json.write_text(_result(FinalStatus.SUCCESS).model_dump_json(), encoding="utf-8")
+        with pytest.raises(DockerRunError, match="no container_contract echo"):
+            await runner_._parse_result_or_raise(output_dir, returncode=0, log_path=output_dir / "docker.log")
+        assert not task_json.exists()
+        assert task_json.with_suffix(".json.unhonored").is_file()
 
 
 class TestInContainerGradeCoercion:

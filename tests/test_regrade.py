@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -698,64 +697,8 @@ class TestDockerRunnerGradingWiring:
         assert context["host_task_file"] == str(tmp_path / "t.yaml")
 
 
-class TestRegradeSkewGuard:
-    """A stale image must not turn a GRADE into a fresh agent run.
-
-    Exactly the sibling of the `grade` guard one release earlier: `regrade`
-    crosses the boundary only through context.json, so an image that predates
-    container-side grading ignores the key and runs the agent — and the host
-    would fold that fabricated trajectory back as the recorded row's verdict.
-    """
-
-    @staticmethod
-    def _runner(tmp_path: Path, prior):
-        from coder_eval.isolation.docker_runner import DockerRunner
-        from coder_eval.models import ResolvedTask
-
-        task_file = tmp_path / "t.yaml"
-        task_file.write_text("task_id: t\n", encoding="utf-8")
-        rt = ResolvedTask(
-            task=_docker_task(), task_file=task_file, run_dir=tmp_path / "run", variant_id="v", source_yaml=""
-        )
-        ws = tmp_path / "ws"
-        ws.mkdir(exist_ok=True)
-        return DockerRunner(rt, prior_result=prior, grade_workspace=ws)
-
-    def test_a_row_carrying_the_recorded_trajectory_is_accepted(self, tmp_path: Path) -> None:
-        prior = _result()
-        graded = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
-        graded.started_at = prior.started_at
-        self._runner(tmp_path, prior)._assert_regrade_honored(graded)
-
-    def test_a_freshly_run_trajectory_is_refused_and_quarantined(self, tmp_path: Path) -> None:
-        from coder_eval.isolation.docker_runner import DockerRunError
-
-        prior = _result()
-        rerun = _result(final_status=FinalStatus.SUCCESS, weighted_score=1.0)
-        rerun.started_at = prior.started_at + timedelta(hours=1)
-
-        task_json = tmp_path / "task.json"
-        task_json.write_text("{}", encoding="utf-8")
-        with pytest.raises(DockerRunError, match="re-ran the agent"):
-            self._runner(tmp_path, prior)._assert_regrade_honored(rerun, task_json)
-
-        # Refusing in memory while leaving contradictory bytes on disk is not a
-        # refusal: a later `aggregate` would publish exactly this record.
-        assert not task_json.exists()
-        assert task_json.with_suffix(".json.rerun").is_file()
-
-    def test_an_ordinary_run_is_never_checked(self, tmp_path: Path) -> None:
-        """`prior_result is None` means nobody asked for a grade, so a fresh
-        trajectory is the expected outcome, not a skew symptom."""
-        from coder_eval.isolation.docker_runner import DockerRunner
-        from coder_eval.models import ResolvedTask
-
-        task_file = tmp_path / "t.yaml"
-        task_file.write_text("task_id: t\n", encoding="utf-8")
-        rt = ResolvedTask(
-            task=_docker_task(), task_file=task_file, run_dir=tmp_path / "run", variant_id="v", source_yaml=""
-        )
-        DockerRunner(rt)._assert_regrade_honored(_result(final_status=FinalStatus.SUCCESS))
+# A grade that came back as a fresh agent run is refused by the contract echo:
+# tests/test_detached_grading_boundaries.py::TestContractEcho.
 
 
 class TestContainerDispatchIsInsideTheTrustGate:

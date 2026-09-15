@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import logging
 from pathlib import Path
+from typing import Any
 
 import typer
 from pydantic import ValidationError
@@ -206,6 +207,7 @@ def run_task_internal_command(
             source_yaml=ctx.source_yaml,
             variant_id=ctx.variant_id,
             replicate_index=ctx.replicate_index,
+            container_contract=ctx.model_dump(mode="json"),
         )
         return
 
@@ -226,6 +228,7 @@ def run_task_internal_command(
         workspace_dir=workspace_dir,
         grade=ctx.grade,
         recorded_task=authored_task,
+        container_contract=ctx.model_dump(mode="json"),
     )
 
     # Late import keeps the streaming module out of the default --help path.
@@ -248,6 +251,7 @@ def _grade_recorded_run(
     source_yaml: str,
     variant_id: str,
     replicate_index: int,
+    container_contract: dict[str, Any],
 ) -> None:
     """Grade an already-executed row INSIDE the container that produced it.
 
@@ -298,6 +302,7 @@ def _grade_recorded_run(
                 replicate_index=replicate_index,
                 recorded_task=authored_task,
                 recorded_task_file=recorded_task_file,
+                container_contract=container_contract,
             )
         )
     except RegradeError as e:
