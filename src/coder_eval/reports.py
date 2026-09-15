@@ -8,15 +8,19 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
+from .analysis import calculate_command_statistics
 from .formatting import format_ms
 from .models import (
     CriterionAggregate,
     CriterionStats,
     EarlyStopReason,
+    EvaluationResult,
     FailedRowSummary,
+    RunSummary,
     SuiteRollup,
     TaskResult,
     ThresholdCheck,
+    TurnRecord,
     eval_overhead_cost,
     nothing_was_measured,
     row_cost_incomplete,
@@ -26,7 +30,7 @@ from .path_utils import TASK_JSON_FILENAME, build_task_run_dir
 
 
 if TYPE_CHECKING:
-    from .models import CommandStatistics, RunSummary
+    from .models import CommandStatistics
 
 logger = logging.getLogger(__name__)
 
@@ -310,8 +314,9 @@ class ReportGenerator:
                 ["", "### Slowest Commands", "", "| Tool | Duration | Parameters |", "|------|----------|------------|"]
             )
             for cmd in stats.slowest_commands:
-                params_str = str(cmd.parameters)[:50]
-                if len(str(cmd.parameters)) > 50:
+                params_full = str(cmd.parameters)
+                params_str = params_full[:SLOW_PARAMS_PREVIEW_CHARS]
+                if len(params_full) > SLOW_PARAMS_PREVIEW_CHARS:
                     params_str += "..."
                 lines.append(f"| {cmd.tool} | {cmd.duration_ms:.0f}ms | {params_str} |")
 
@@ -742,9 +747,6 @@ class ReportGenerator:
         Returns:
             Aggregated CommandStatistics or None if no stats available
         """
-        from .analysis import calculate_command_statistics
-        from .models import EvaluationResult, TurnRecord
-
         all_turns: list[TurnRecord] = []
 
         # Find all task.json files recursively to handle both flat and nested (experiment) layouts
@@ -791,8 +793,6 @@ class ReportGenerator:
                 return report_md_path.read_text(encoding="utf-8"), report_md_path
 
             if summary_json_path.exists():
-                from .models import RunSummary
-
                 summary = RunSummary.model_validate_json(summary_json_path.read_text(encoding="utf-8"))
                 report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
                 return report_md, summary_json_path
@@ -874,6 +874,8 @@ def _compute_suite_rollup(
     ``suite_thresholds`` evaluation. Pass None when unavailable — per-criterion
     stats still compute but no aggregate/threshold gating happens.
     """
+    # Deferred on purpose: importing coder_eval.criteria runs pkgutil auto-discovery
+    # with registry side effects, which would land on every `import coder_eval.reports`.
     from .criteria import CriterionRegistry, init_criteria
 
     rows_total = len(rows)

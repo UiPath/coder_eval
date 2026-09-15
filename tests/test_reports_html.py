@@ -1651,3 +1651,59 @@ class TestGenerationMetricsBuckets:
         assert buckets.generation_ms is None
         assert buckets.tool_ms is None
         HTMLReportGenerator().generate_task_html(_make_result(iterations=[]))
+
+
+class TestVariantTokenUsageTotal:
+    """The variant Token Usage card's Total is TokenUsage.total_tokens, summed.
+
+    It used to re-derive the formula inline (input + output + cacheWrite +
+    cacheRead) — a fourth home for arithmetic the model already owns. Cache
+    buckets are non-zero here, which is the case where a wrong formula diverges.
+    """
+
+    @staticmethod
+    def _results() -> list:
+        from datetime import datetime
+
+        from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TokenUsage
+
+        usages = [
+            TokenUsage(
+                uncached_input_tokens=100,
+                output_tokens=200,
+                cache_creation_input_tokens=300,
+                cache_read_input_tokens=400,
+            ),
+            TokenUsage(
+                uncached_input_tokens=7,
+                output_tokens=11,
+                cache_creation_input_tokens=13,
+                cache_read_input_tokens=17,
+            ),
+        ]
+        return [
+            EvaluationResult(
+                task_id=f"t{i}",
+                task_description="d",
+                agent_type=AgentKind.NONE,
+                started_at=datetime(2026, 1, 1),
+                final_status=FinalStatus.SUCCESS,
+                iteration_count=1,
+                total_token_usage=u,
+            )
+            for i, u in enumerate(usages)
+        ]
+
+    def test_total_equals_the_sum_of_total_tokens(self):
+        from coder_eval.reports_html import _render_variant_token_usage
+
+        results = self._results()
+        expected = sum(r.total_token_usage.total_tokens for r in results)
+        # 100+200+300+400 + 7+11+13+17 — every bucket contributes.
+        assert expected == 1048
+        assert f'<div class="value">{expected:,}</div>' in _render_variant_token_usage(results)
+
+    def test_no_usages_renders_nothing(self):
+        from coder_eval.reports_html import _render_variant_token_usage
+
+        assert _render_variant_token_usage([]) == ""

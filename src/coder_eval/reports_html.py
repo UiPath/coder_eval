@@ -24,8 +24,28 @@ from typing import TYPE_CHECKING, Any
 from coder_eval.formatting import format_ms
 from coder_eval.models import FinalStatus, eval_result_total_cost, sum_costs
 
-from .reports import early_stop_gate_note
-from .reports_stats import format_score, is_env_table_key, turn_time_buckets
+from .analysis import calculate_command_statistics
+from .reports import (
+    SLOW_PARAMS_PREVIEW_CHARS,
+    collect_agent_settings_rows,
+    count_partials_by_outcome,
+    early_stop_gate_note,
+    group_consecutive_by_iteration,
+)
+from .reports_stats import (
+    collect_variant_series,
+    describe_prompt_config,
+    expected_turns_overage,
+    fmt_mean_sd,
+    fmt_p,
+    format_score,
+    is_env_table_key,
+    load_variant_eval_results,
+    paired_comparison,
+    stddev,
+    turn_time_buckets,
+    welch_t_test,
+)
 
 
 if TYPE_CHECKING:
@@ -321,8 +341,6 @@ def _format_params(params: dict[str, Any]) -> str:
 
 
 def _render_header(result: EvaluationResult) -> str:
-    from .reports_stats import expected_turns_overage
-
     started = result.started_at.isoformat(timespec="seconds") if result.started_at else "—"
     duration = _format_duration(result.duration_seconds)
     score_badge = _score_pill(result.weighted_score) if result.weighted_score is not None else ""
@@ -683,7 +701,6 @@ def _group_turns_by_iteration(
     turns: list[TurnRecord],
 ) -> list[tuple[int, list[TurnRecord]]]:
     """Group consecutive TurnRecords by iteration as ``(iteration, group)`` tuples for the renderer."""
-    from .reports import group_consecutive_by_iteration
 
     groups = group_consecutive_by_iteration(turns, lambda t: t.iteration)
     return [(group[0].iteration, group) for group in groups]
@@ -799,7 +816,6 @@ def _render_command_stats(stats: Any | None) -> str:
     for tool, count in sorted((stats.commands_by_tool or {}).items(), key=lambda x: x[1], reverse=True):
         rows.append(f"<tr><td class='mono'>{_esc(tool)}</td><td>{count}</td></tr>")
     rows_html = "".join(rows) or "<tr><td colspan='2' class='muted'>No commands</td></tr>"
-    from .reports import SLOW_PARAMS_PREVIEW_CHARS
 
     slow_rows_list: list[str] = []
     for c in stats.slowest_commands or []:
@@ -935,7 +951,6 @@ def _format_signed_ms(ms: float | None) -> str:
 
 def _render_generation_metrics(result: EvaluationResult) -> str:
     """Render Generation Metrics — latency, turns, and the four wall-clock buckets."""
-    from .reports import count_partials_by_outcome, group_consecutive_by_iteration
 
     turns = result.iterations or []
     num_turns = len(turns)
@@ -1009,7 +1024,6 @@ def _render_commands_efficiency(result: EvaluationResult) -> str:
 
 def _render_agent_settings(result: EvaluationResult) -> str:
     """Render Agent Settings section. Prefers sdk_options, falls back to agent_config."""
-    from .reports import collect_agent_settings_rows
 
     if result.sdk_options:
         settings: dict[str, Any] = result.sdk_options
@@ -1145,7 +1159,6 @@ def _variant_stddev_lines(variant_id: str, result: ExperimentResult | None) -> s
     """
     if result is None:
         return ""
-    from .reports_stats import stddev
 
     vrs = [vr for ts in result.task_summaries for vr in ts.variant_results if vr.variant_id == variant_id]
     scores = [vr.weighted_score for vr in vrs if vr.weighted_score is not None]
@@ -1170,9 +1183,6 @@ def _variant_rich_sections(variant_id: str, result: ExperimentResult | None, run
     """
     if result is None or run_dir is None:
         return ""
-
-    from .analysis import calculate_command_statistics
-    from .reports_stats import load_variant_eval_results
 
     eval_results = load_variant_eval_results(run_dir, variant_id, result.task_summaries)
     if not eval_results:
@@ -1238,7 +1248,7 @@ def _render_variant_token_usage(eval_results: list[EvaluationResult]) -> str:
     output_tok = sum(u.output_tokens for u in usages)
     cache_write = sum(u.cache_creation_input_tokens for u in usages)
     cache_read = sum(u.cache_read_input_tokens for u in usages)
-    total = input_tok + output_tok + cache_write + cache_read
+    total = sum(u.total_tokens for u in usages)
     variant_cost = sum_costs(*(eval_result_total_cost(r) for r in eval_results))
     cost_str = f"${variant_cost:.4f}" if variant_cost is not None else "N/A"
     return f"""
@@ -1287,7 +1297,6 @@ def _experiment_prompt_config(experiment: ExperimentDefinition | None, variant_i
     actually specifies any mutations or overrides."""
     if experiment is None:
         return ""
-    from .reports_stats import describe_prompt_config
 
     has_config = bool(experiment.defaults and experiment.defaults.prompt_mutations) or any(
         v.prompt_mutations or v.initial_prompt or v.initial_prompt_file for v in experiment.variants
@@ -1314,7 +1323,6 @@ def _experiment_paired_comparison(result: ExperimentResult) -> str:
     Both render the same ``reports_stats.paired_comparison`` result, so the two
     reports can never disagree about the paired numbers.
     """
-    from .reports_stats import fmt_p, paired_comparison
 
     pc = paired_comparison(result)
     if pc is None:
@@ -1353,7 +1361,6 @@ def _experiment_paired_comparison(result: ExperimentResult) -> str:
 
 def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     """Render the Aggregate Metrics table (with p-values when exactly 2 variants)."""
-    from .reports_stats import collect_variant_series, fmt_mean_sd, fmt_p, welch_t_test
 
     show_p = len(result.variant_ids) == 2
     vid_a, vid_b = (result.variant_ids[0], result.variant_ids[1]) if show_p else ("", "")

@@ -18,12 +18,14 @@ from coder_eval.models import (
     sum_costs,
 )
 from coder_eval.path_utils import replicate_subdir_name
-from coder_eval.reports import resolve_agent_settings
+from coder_eval.reports import ReportGenerator, resolve_agent_settings
+from coder_eval.reports_html import write_experiment_html, write_variant_html
 from coder_eval.reports_stats import (
     VariantSeries,
     bootstrap_mean_ci,
     collect_variant_series,
     describe_prompt_config,
+    expected_turns_overage,
     fmt_mean_sd,
     fmt_p,
     format_score,
@@ -31,9 +33,12 @@ from coder_eval.reports_stats import (
     load_variant_eval_results,
     paired_comparison,
     stddev,
+    turn_time_buckets,
+    visible_turn_count,
     welch_t_test,
     wilson_interval,
 )
+from coder_eval.reports_stats import has_final_reply as _has_final_reply
 
 
 logger = logging.getLogger(__name__)
@@ -99,8 +104,6 @@ def eval_result_to_task_dict(
             downstream consumers (evalboard) collapse them to one. ``None`` when
             the caller doesn't track replicates (repeats disabled / legacy).
     """
-    from coder_eval.reports_stats import expected_turns_overage, turn_time_buckets, visible_turn_count
-    from coder_eval.reports_stats import has_final_reply as _has_final_reply
 
     ref_similarity: float | None = None
     for cr in result.success_criteria_results:
@@ -161,6 +164,10 @@ def eval_result_to_task_dict(
         "teardown_ms": _buckets.teardown_ms,
         "model_used": result.model_used,
         "reference_similarity": ref_similarity,
+        # NOT TokenUsage.input_tokens (the derived prompt total, which already
+        # includes both cache buckets). This key carries the UNCACHED slice, and
+        # evalboard/lib/runs.ts depends on that reading. The name is fixed by the
+        # run.json contract — renaming it would break every archived run.
         "input_tokens": (result.total_token_usage.uncached_input_tokens if result.total_token_usage else None),
         "output_tokens": (result.total_token_usage.output_tokens if result.total_token_usage else None),
         "cache_creation_input_tokens": (
@@ -614,7 +621,6 @@ class ExperimentReportGenerator:
         Returns:
             Markdown string.
         """
-        from coder_eval.reports import ReportGenerator
 
         agg = result.variant_aggregates[variant_id]
         pass_rate_str = f"{agg.pass_rate * 100:.1f}%" if agg.pass_rate is not None else "n/a"
@@ -780,10 +786,6 @@ class ExperimentReportGenerator:
                 (variant_dir / "variant.md").write_text(variant_report, encoding="utf-8")
                 (variant_dir / "variant.json").write_text(agg.model_dump_json(indent=2), encoding="utf-8")
 
-        # HTML reports — each write is wrapped by ``safe_write`` so a render
-        # bug in one report cannot mask the run outcome.
-        from .reports_html import write_experiment_html, write_variant_html
-
         # Every variant_id in task_summaries is guaranteed to appear in
         # ``result.variant_ids``, so pre-seed with all known variants and extend.
         task_links_by_variant: dict[str, list[tuple[str, str, float | None, str]]] = {
@@ -796,6 +798,8 @@ class ExperimentReportGenerator:
                     (vr.task_id, rel_link, vr.weighted_score, vr.final_status.value)
                 )
 
+        # HTML reports — each write is wrapped by ``safe_write`` so a render
+        # bug in one report cannot mask the run outcome.
         for vid in result.variant_ids:
             agg = result.variant_aggregates.get(vid)
             if agg is None:
