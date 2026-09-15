@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
@@ -16,9 +17,15 @@ from coder_eval.models import (
     AgentKind,
     ConfigLineageEntry,
     ContainerContext,
+    DockerDriverConfig,
     EvaluationResult,
+    FileExistsCriterion,
     FinalStatus,
     PreservationMode,
+    ResolvedTask,
+    ResourceLimits,
+    SandboxConfig,
+    TaskDefinition,
 )
 from coder_eval.path_utils import PRIOR_RESULT_FILENAME, TASK_JSON_FILENAME
 from tests._container_contract import contract_payload
@@ -80,6 +87,7 @@ def test_round_trip_through_json() -> None:
         source_yaml="task_id: t\n",
         host_task_file="/host/tasks/t.yaml",
         workspace_dir="/root",
+        authored_sandbox=SandboxConfig(driver="docker"),
     )
     parsed = ContainerContext.model_validate_json(ctx.model_dump_json())
     assert parsed == ctx
@@ -105,8 +113,8 @@ _AGENTLESS_TASK_YAML = (
 )
 
 
-def _run_container_entry_point(tmp_path: Path, **overrides: object) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Invoke `_run-task-internal` in process; return (the staged payload, the echo task.json carries)."""
+def _run_container_entry_point(tmp_path: Path, **overrides: object) -> tuple[dict[str, Any], EvaluationResult]:
+    """Invoke `_run-task-internal` in process; return (the staged payload, the task.json it wrote)."""
     input_dir = tmp_path / "input"
     input_dir.mkdir(exist_ok=True)
     (input_dir / "task.yaml").write_text(_AGENTLESS_TASK_YAML, encoding="utf-8")
@@ -118,13 +126,13 @@ def _run_container_entry_point(tmp_path: Path, **overrides: object) -> tuple[dic
 
     record = output_dir / TASK_JSON_FILENAME
     assert record.is_file(), invoked.output
-    written = EvaluationResult.model_validate_json(record.read_text(encoding="utf-8"))
-    return payload, written.environment_info["container_contract"]
+    return payload, EvaluationResult.model_validate_json(record.read_text(encoding="utf-8"))
 
 
 def test_every_contract_field_is_echoed(tmp_path: Path) -> None:
     """Derived from `model_fields`, so a field added to the contract is checked with no new test."""
-    payload, echo = _run_container_entry_point(tmp_path, grade=False)
+    payload, written = _run_container_entry_point(tmp_path, grade=False)
+    echo = written.environment_info["container_contract"]
 
     assert set(echo) == set(ContainerContext.model_fields)
     assert echo == ContainerContext.model_validate(payload).model_dump(mode="json")
@@ -155,9 +163,11 @@ def test_the_echo_survives_a_regrade(tmp_path: Path, monkeypatch: pytest.MonkeyP
     )
     (input_dir / PRIOR_RESULT_FILENAME).write_text(prior.model_dump_json(), encoding="utf-8")
 
-    payload, echo = _run_container_entry_point(tmp_path, regrade=True)
+    payload, written = _run_container_entry_point(tmp_path, regrade=True)
 
-    assert echo == ContainerContext.model_validate(payload).model_dump(mode="json")
+    assert written.environment_info["container_contract"] == ContainerContext.model_validate(payload).model_dump(
+        mode="json"
+    )
 
 
 async def test_a_host_grade_drops_the_prior_echo(tmp_path: Path) -> None:
@@ -197,6 +207,90 @@ async def test_a_host_grade_drops_the_prior_echo(tmp_path: Path) -> None:
 
     assert graded.final_status is FinalStatus.SUCCESS
     assert "container_contract" not in graded.environment_info
+
+
+# --------------------------------------------------------------------------
+# The driver rewrite happens host-side, at staging
+# --------------------------------------------------------------------------
+
+
+def _authored_docker_task() -> TaskDefinition:
+    return TaskDefinition(
+        task_id="staged",
+        description="d",
+        agent={"type": "none"},  # type: ignore[arg-type]
+        sandbox=SandboxConfig(
+            driver="docker",
+            limits=ResourceLimits(max_memory_mb=2048, max_pids=128),
+            docker=DockerDriverConfig(image="img:1", network="none", working_dir="/srv/app"),
+        ),
+        success_criteria=[FileExistsCriterion(path="x.txt", description="x")],
+    )
+
+
+async def _stage(tmp_path: Path) -> tuple[ResolvedTask, Path, ContainerContext]:
+    from coder_eval.isolation.docker_runner import DockerRunner
+
+    rt = ResolvedTask(
+        task=_authored_docker_task(),
+        task_file=tmp_path / "t.yaml",
+        run_dir=tmp_path / "run",
+        variant_id="default",
+        original_task_id="staged",
+    )
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    await DockerRunner(rt)._stage_inputs(input_dir)
+    return rt, input_dir, ContainerContext.model_validate_json((input_dir / "context.json").read_text(encoding="utf-8"))
+
+
+async def test_the_staged_task_yaml_says_tempdir(tmp_path: Path) -> None:
+    from coder_eval.orchestration.task_loader import load_task
+
+    _, input_dir, _ = await _stage(tmp_path)
+
+    staged, _ = load_task(input_dir / "task.yaml")
+    assert staged.sandbox.driver == "tempdir"
+
+
+async def test_the_contract_carries_the_authored_sandbox(tmp_path: Path) -> None:
+    rt, _, ctx = await _stage(tmp_path)
+
+    assert ctx.authored_sandbox.driver == "docker"
+    assert ctx.authored_sandbox == rt.task.sandbox
+
+
+async def test_the_execution_sandbox_preserves_every_other_field(tmp_path: Path) -> None:
+    rt, input_dir, _ = await _stage(tmp_path)
+
+    staged = yaml.safe_load((input_dir / "task.yaml").read_text(encoding="utf-8"))["sandbox"]
+    authored = rt.task.sandbox.model_dump(mode="json")
+    assert {key for key in authored if staged.get(key) != authored[key]} == {"driver"}
+
+
+def test_the_container_records_the_authored_driver(tmp_path: Path) -> None:
+    """The staged task says tempdir; the record must still say docker, or a later
+    `evaluate <run_dir>` reads the driver back out and skips the host-grading refusal."""
+    _, written = _run_container_entry_point(tmp_path)
+
+    assert written.task_config is not None
+    assert written.task_config.resolved["sandbox"]["driver"] == "docker"
+
+
+def test_run_task_internal_contains_no_driver_rewrite() -> None:
+    """CE051 covers the pattern tree-wide; this pins the module that must not hold an exemption again."""
+    import ast
+    import inspect
+
+    from coder_eval.cli import run_task_internal_command
+
+    source = inspect.getsource(run_task_internal_command)
+    driver_keys = [
+        node.lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Dict) and any(isinstance(k, ast.Constant) and k.value == "driver" for k in node.keys)
+    ]
+    assert not driver_keys, f"a `driver` key is built at line(s) {driver_keys}"
 
 
 def test_the_echo_is_not_rendered_in_the_environment_table() -> None:

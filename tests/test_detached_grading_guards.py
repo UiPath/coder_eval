@@ -329,11 +329,10 @@ def test_the_actual_cost_join_is_skipped_on_a_re_grade(tmp_path: Path) -> None:
 async def test_a_container_run_records_the_driver_it_was_authored_with(tmp_path: Path, monkeypatch) -> None:
     """`task_config.resolved` must describe the task as AUTHORED, not as rewritten.
 
-    `run_task_internal_command` rewrites `driver: docker` -> `tempdir` before
-    building the in-container Orchestrator — the one legitimate rewrite, since we
-    are already inside the container the driver asked for. But the Orchestrator
-    then recorded the REWRITTEN copy, so a docker run's own `task.json` claimed
-    `driver: tempdir`.
+    The host stages a container's task with `driver: tempdir` — the container is
+    the isolation the driver asked for. But an Orchestrator that records the task it
+    RUNS would record that execution copy, so a docker run's own `task.json` would
+    claim `driver: tempdir`.
 
     That fed straight into the gate that reads the driver back out of the record:
     `evaluate <run_dir>` on a container row skipped the host-grading refusal AND

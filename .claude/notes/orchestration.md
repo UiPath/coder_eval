@@ -326,9 +326,9 @@ rather than errors live in the run-limits validator for the same post-merge visi
 `task_config.resolved` and `source_file` describe the task as AUTHORED, which is NOT
 always what this process runs.
 
-`run_task_internal_command` rewrites `driver: docker` → `tempdir` before building the
-in-container orchestrator, because it is already inside the container the driver asked
-for. Recording that rewrite made the run's own record deny it ever used docker — and a
+The host stages a `driver: docker` task for its container with `driver: tempdir`, because
+the container is the isolation the driver asked for. Recording that execution copy made
+the run's own record deny it ever used docker — and a
 later `evaluate <run_dir>` reads the driver back out of the record, so the host-grading
 refusal never fired and the `graded_on_host` stamp was never applied. A container task's
 criteria ran against the host filesystem silently, which is the exact outcome that gate
@@ -342,17 +342,29 @@ around it: the docker dispatch guard saw a non-None `Path` and let it through, a
 task-dir mount then silently mounted nothing, so every `$TASK_DIR` criterion resolved
 against the wrong tree and scored a verdict nobody could explain.
 
-### The in-container driver rewrite
+### The host-side driver rewrite
 
-CE051 forbids rewriting `sandbox.driver`, and this is its single exemption: the process is
-already inside the container the docker driver asked for, so the isolation the driver names
-is present rather than bypassed, and a nested docker would be both wrong and impossible (no
-docker CLI in the image). The rewrite goes through `model_validate` rather than
-`model_copy(update=...)`, matching its sibling in `regrade.grading_sandbox_config`: `update`
-skips BOTH pydantic and pyright, so a typo produces a `SandboxConfig` violating its own
-`Literal` and only surfaces far downstream. Two driver-rewrite sites landing in one change
-with two different levels of type safety is how the weaker one becomes the pattern people
-copy.
+CE051 forbids rewriting `sandbox.driver` silently, and `DockerRunner._stage_inputs` is one of
+its two exemptions: the host resolves the driver for the container it is itself about to
+start, so the isolation the driver names is present rather than bypassed, and a nested docker
+inside the image would be both wrong and impossible (no docker CLI in it). The rewrite happens
+where both values are in hand — the staged `task.yaml` carries the execution copy and
+`ContainerContext.authored_sandbox` carries the block as authored, which the container
+records. Doing it inside the container instead took a rewrite plus a "captured BEFORE the
+rewrite" local in the consumer, and a lint exemption for code on the far side of the boundary.
+
+The rewrite goes through `model_validate` rather than `model_copy(update=...)`, matching its
+sibling in `regrade.grading_sandbox_config`: `update` skips BOTH pydantic and pyright, so a
+typo produces a `SandboxConfig` violating its own `Literal` and only surfaces far downstream.
+Two driver-rewrite sites with two different levels of type safety is how the weaker one
+becomes the pattern people copy.
+
+The two sites are deliberately NOT collapsed into a `SandboxConfig.as_tempdir()` helper.
+CE051 exempts `models/sandbox.py` outright ("the model's own construction"), so moving the
+rewrite there would take both call sites out of the rule's view and turn a guarded operation
+into an unguarded one-liner any future caller could reach. Each site carries a different
+reason in its `noqa`, and that reason text is the operator-visible control the rule exists to
+force.
 
 ## Three routes, resolved separately
 

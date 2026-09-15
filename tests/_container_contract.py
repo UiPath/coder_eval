@@ -17,6 +17,7 @@ def contract_payload(*, omit: tuple[str, ...] = (), **overrides: Any) -> dict[st
         "source_yaml": "task_id: t\n",
         "host_task_file": None,
         "workspace_dir": None,
+        "authored_sandbox": {"driver": "docker"},
     }
     payload.update(overrides)
     for key in omit:

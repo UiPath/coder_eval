@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from coder_eval.models.enums import PreservationMode
 from coder_eval.models.results import ConfigLineageEntry
+from coder_eval.models.sandbox import SandboxConfig
 
 
 class ContainerContext(BaseModel):
@@ -54,5 +55,11 @@ class ContainerContext(BaseModel):
         description=(
             "Docker WORKDIR alignment: the concrete path the agent runs at and is captured from. "
             "Null is the standard run_dir/artifacts workspace."
+        )
+    )
+    authored_sandbox: SandboxConfig = Field(
+        description=(
+            "The sandbox block as AUTHORED (driver: docker), which task.json records. The staged "
+            "task.yaml carries the execution copy the host resolved to driver: tempdir."
         )
     )

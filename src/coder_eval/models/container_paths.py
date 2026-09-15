@@ -70,8 +70,9 @@ def command_uses_token(command: str, token: str) -> bool:
 
 
 # HAZARD: the one reliable "am I inside a task container?" signal. Every gate that
-# means "in a container" MUST key on this and never on `sandbox.driver`, which the
-# in-container entry point has already rewritten to `tempdir`.
+# means "in a container" MUST key on this and never on `sandbox.driver`: the host
+# stages a container's task with `driver: tempdir`, so a driver-based test reads a
+# value already resolved host-side.
 # Rationale: .claude/notes/isolation.md § Capability drops and the anti-cheat window
 IN_CONTAINER_ENV = "CODER_EVAL_IN_CONTAINER"
 
