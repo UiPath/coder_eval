@@ -2096,6 +2096,14 @@ class TestPluginArtifacts:
             )
 
 
+# The `driver: docker` evaluation path, and the reason the core-layer predicate
+# became an allowlist: the directory-list form it replaced named ten packages and
+# `isolation` was not one, so the driver that runs the whole evaluation loop in a
+# container was invisible to BOTH layering rules. Shared, so the two pins below
+# cannot drift to different paths.
+CORE_ISOLATION = "/repo/src/coder_eval/isolation/docker_runner.py"
+
+
 @pytest.mark.lint
 class TestCE004CatchesBothImportSpellings:
     """CE004 must fire on the RELATIVE form, not only `coder_eval.cli`.
@@ -2138,13 +2146,8 @@ class TestCE004CatchesBothImportSpellings:
     def test_a_non_core_file_is_exempt(self):
         assert not self._violations("from ..cli import run_command", "/repo/src/coder_eval/cli/report_command.py")
 
-    ISOLATION = "/repo/src/coder_eval/isolation/docker_runner.py"
-
     def test_the_docker_driver_is_core(self):
-        """`isolation/` was in neither rule's reach: the directory-list predicate
-        named ten packages and `isolation` was not one, so the driver that runs
-        the whole evaluation loop in a container could import anything."""
-        assert self._violations("from ..cli import run_command", self.ISOLATION)
+        assert self._violations("from ..cli import run_command", CORE_ISOLATION)
 
 
 @pytest.mark.lint
@@ -2223,14 +2226,9 @@ class TestCE066NoReportImportsInCore:
     def test_a_non_core_file_is_exempt(self):
         assert not self._violations("from coder_eval.reports import format_score", self.NON_CORE)
 
-    ISOLATION = "/repo/src/coder_eval/isolation/docker_runner.py"
-
     def test_the_docker_driver_is_core(self):
-        """`isolation/` was in neither rule's reach: the directory-list predicate
-        named ten packages and `isolation` was not one, so the driver that runs
-        the whole evaluation loop in a container could import anything."""
-        assert self._violations("from ..reports import format_score", self.ISOLATION)
-        assert not self._violations("from ..reports import write_task_html", self.ISOLATION)
+        assert self._violations("from ..reports import format_score", CORE_ISOLATION)
+        assert not self._violations("from ..reports import write_task_html", CORE_ISOLATION)
 
     def test_every_allowlisted_name_resolves_in_the_package(self):
         """Staleness guard: a renamed writer must not leave a dead entry silencing
@@ -2324,7 +2322,11 @@ class TestCoreLayerMembership:
 
     @pytest.mark.parametrize(
         "path",
-        ["/Users/religa/src/exp/coder_eval/conftest.py", "/home/dev/projects/coder_eval/conftest.py"],
+        [
+            # A `src` component that is NOT the package's parent, and none at all.
+            "/home/dev/src/exp/coder_eval/conftest.py",
+            "/home/dev/projects/coder_eval/conftest.py",
+        ],
     )
     def test_a_repo_root_file_is_not_core(self, path):
         """The checkout directory is itself named `coder_eval`, so the unanchored
