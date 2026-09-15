@@ -267,6 +267,14 @@ reports no usage at all — where crashing every turn makes the harness unusable
 merely imprecise. It deliberately does NOT cover vocabulary drift: that arm has silently
 zeroed a whole run before, and no provider quirk explains it.
 
+The OpenCode golden fixtures (`tests/_fixtures/golden_streams/opencode_fixtures.py`) mirror
+events captured from a live `opencode run --format json`, in the CLI's own compact
+vocabulary (`step_start` / `step_finish` / `text` / `tool_use`, payload under `part`). The
+`session.next.*` names in the server's OpenAPI schema describe `opencode serve`'s SSE
+surface, not the CLI stream, so "correcting" a fixture toward them re-creates the
+zero-telemetry vocabulary drift above. The fixtures need no import guard because
+`pyproject.toml` declares `opencode = []`: there is no Python package to skip on.
+
 ## Token accounting, per harness
 
 Keep the buckets straight: `uncached_input_tokens` is the FRESH prompt slice only, because

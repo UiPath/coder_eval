@@ -140,6 +140,58 @@ marker between those parts. Naming these for the interval they MEASURE rather th
 what they contain is the whole point; `docs/agents/HARNESS_PARITY.md` holds the
 per-harness composition.
 
+### The golden-stream timing sensor
+
+`tests/_fixtures/golden_streams/_scrub.py::assert_timing_captured` is a replay-based sensor
+for what an AST rule cannot see, such as an SDK that returned `0.0`. It runs on the
+UNSCRUBBED dump because `scrub()` keeps `None` and masks every other value: a scrubbed
+snapshot shows that a field was set, never that it was set to something meaningful. A
+force-closed `"unknown"` orphan is exempt from the command check because it was never
+timed, and saying so is the honest record. A scenario that resolves no command passes that
+check vacuously, which is correct rather than weak.
+
+The bounds half of the generation check is not redundant. Two harnesses derive the
+duration from a MONOTONIC clock and the bounds from the wall clock, so a reducer can report
+a healthy duration beside two stamps that collapsed to one instant. CE059 catches that
+statically only when both bounds are the same `ast.Name`; two different names holding the
+same value pass CE059, and this check catches them.
+
+The head/tail check is keyed on assistant messages with a MEASURABLE window, because that
+is what the collector measures the head and tail against. Both halves of that key are
+load-bearing. The `expect_generation_window` flag is the wrong key: `codex_e_orphan_tool`
+streams a generation whose window subtracts to zero, so it clears the flag while still
+having a head and a tail to report. "Any assistant message" is too weak:
+`codex_g_items_rebuild` rebuilds its transcript from the rollout after the turn ended, with
+`generation_duration_ms=None` and placeholder `now()` bounds, so there is nothing to measure
+an end against and `None` for both is the honest answer.
+
+The head/tail check asserts PRESENCE only, which is all the fixtures support: the replays
+run in ~0.3 ms of synthetic wall clock, so head and tail are microseconds and any bound or
+ordering check is noise. A `>= 0` check is worse than noise — `decompose_turn` clamps with
+`max(..., 0.0)`, so it would restate the implementation and could never fail.
+
+The four-bucket identity is the one assertion here that catches a DOUBLE-COUNT rather than
+an absence (the orphaned-tool case under § decompose_turn). It is off for the
+`FICTIONAL_DURATIONS` scenarios, which inject integer-millisecond SDK item durations of
+17-900 ms while the replay takes ~0.3 ms of real wall clock, so no rebasing can make the
+two commensurable.
+
+Before the identity, the stored `tool_union_ms` is compared with a union that
+`_tool_union_ms` recomputes. That helper validates the dump into a `TurnRecord` and calls
+the collector's own `main_thread_tool_spans` and `union_ms`, so it cannot drift on the
+selection rule (the sub-agent-id derivation, the stamp parse, the `end >= start` filter).
+It still builds its own span set and union — the bookkeeping where the per-reducer defects
+lived (lint-rules.md § CE063) — so it verifies the producer's bookkeeping instead of
+reading the producer's answer.
+
+It is a scenario-level floor, not a per-entry rule, because no per-entry form works against
+the real snapshots. `claude_d_subagent_terminal` holds two content-bearing assistant
+messages of which exactly one is legitimately `None` (the synthesized sub-agent generation,
+delivered as a tool result and never streamed), so no scenario-level flag can say "this one
+but not that one". "Never exactly 0.0" conflicts with the clamps that legitimately produce a
+measured zero. The per-message contract lives in each agent's own unit tests; this is the
+cross-harness floor.
+
 ## main_thread_tool_spans
 
 The span set the generation subtraction, the head and the tail are all measured against,

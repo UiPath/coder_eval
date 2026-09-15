@@ -791,6 +791,24 @@ The three clock expressions are a local `clock` in `communicate`, `state.clock` 
 caller, and `self.clock` inside the state. Demanding one spelling would make the rule a
 syntax check on three harnesses' internal structure.
 
+`tests/_bracket_clock.py::AnchoredClock` advances on the REAL monotonic clock instead of
+stepping by hand. That is what lets the same fixture also assert the head and tail: with
+the bracket and the window bounds on one basis, `decompose_turn` returns small positive
+measurements instead of the clamped `0.0` the cross-basis subtraction produced (the PROBE
+above).
+
+The two ends of the bracket fail differently, so `assert_overhead_is_measured` needs one
+assertion for each. A defaulted `AgentStartEvent` lands ~365 days before the clock-derived
+first window, so the head blows any sane UPPER bound by the whole offset. A defaulted
+`AgentEndEvent` lands ~365 days BEFORE its own last message, so `decompose_turn` clamps the
+negative to `0.0` — "measured, and instant", which passes an upper bound. Only a strict
+`> 0.0` catches it. It holds on all three clocked harnesses because real work separates a
+turn's last flush from its end event. The margin is smallest on antigravity, which holds
+its process across turns: it measures 0.007-0.03 ms there, 7-30 ticks of the 1 us
+resolution that both `datetime` and `time.monotonic()` have on Linux, macOS and Windows.
+That is the magnitude the clamped defect hid, which is why `>= 0.0` is not an acceptable
+relaxation.
+
 ## TestRunRecordFieldVocabulary
 
 `jq` returns `null` for a key that does not exist instead of failing, so a wrong field
