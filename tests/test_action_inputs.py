@@ -1,25 +1,16 @@
 """Executable contract for the argv ``action.yml`` builds from its inputs.
 
-The composite action's two bash steps assemble two command lines — a ``uv tool
-install`` and a ``coder-eval run`` — out of eight string inputs. Everything that
-can go wrong there goes wrong *silently*: an extra dropped from the requirement
-string installs a working CLI that is missing an agent, and a value mangled by
-word splitting or pathname expansion reaches the CLI as a different value than
-the workflow wrote, so the run measures something else and still exits 0.
+Pins the ``uv tool install`` and ``coder-eval run`` command lines that the
+composite action's two bash steps assemble from its inputs. Each step's ``run:``
+body is read from ``action.yml`` and run under bash with ``uv`` / ``coder-eval``
+replaced by argv-recording stubs, so a rewrite that changes the resulting command
+line fails here.
 
-These tests therefore execute the shipped script rather than reimplementing it.
-Each step's ``run:`` body is pulled straight out of ``action.yml`` and run under
-bash with ``uv`` / ``coder-eval`` replaced by stubs that record their argv, so the
-assertions are about the real text that ships to consumers. A rewrite of the
-script that changes the resulting command line fails here even if it looks
-equivalent.
+The action promotes no ``coder-eval run`` flag to a named input: ``args`` takes one
+argv entry per line, appended verbatim, so a bracketed ``-D key=[A,B,C]`` value
+reaches the CLI unexpanded.
 
-The design these tests pin: the action promotes NONE of ``coder-eval run``'s 21
-flags to a named input. Everything goes through ``args``, one argv entry per
-line, appended verbatim. That is what makes a ``-D`` override whose value is a
-bracketed list (``key=[A,B,C]`` — a bash character class) survive; the earlier
-whitespace-split input silently rewrote it to one name whenever a file in the
-working directory happened to match.
+Rationale: .claude/notes/reporting.md § Why the action argv tests run the shipped script
 """
 
 from __future__ import annotations
@@ -73,21 +64,13 @@ def _step_script(step_name: str) -> str:
 def _stub(dir_: Path, name: str) -> Path:
     """A fake executable recording its argv and its inherited ``CE_PROBE``, exit 0.
 
-    Written in bash rather than Python on purpose. ``shell: bash`` on a Windows
-    runner is Git Bash, which rewrites arguments that look like absolute POSIX
-    paths on the way to a *native* Windows binary: a python-shebang stub gets
-    ``/action-checkout`` as ``C:/Program Files/Git/action-checkout``, and
-    switching that conversion off only moves the failure, because the shebang
-    launcher then cannot hand python its own script path either. A bash stub
-    never crosses that boundary, so argv arrives byte-for-byte everywhere.
+    argv goes NUL-delimited to ``argv.bin`` and ``CE_PROBE`` to ``probe.txt``. Each
+    invocation truncates the record, so a test must invoke the stub at most once.
 
-    argv is recorded NUL-delimited instead of as JSON so a value carrying a
-    quote, a backslash or a space needs no escaping on the way out of bash. Each
-    invocation truncates the file; no test invokes the stub twice.
+    Keep the stub a bash script: Git Bash on a Windows runner rewrites POSIX-path
+    arguments passed to a native binary, such as a Python-shebang stub.
 
-    ``CE_PROBE`` is how the env-passthrough test observes what the child actually
-    received: the passthrough exports into the step's own shell, so only a process
-    the script itself launches can report it.
+    Rationale: .claude/notes/reporting.md § Why the action argv tests run the shipped script
     """
     record = dir_ / "argv.bin"
     # Forward slashes, not the native separator: the consumer is MSYS bash, which

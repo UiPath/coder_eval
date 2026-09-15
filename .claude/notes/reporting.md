@@ -68,6 +68,32 @@ on PyPI. verify-published-action.yml then verifies the published composite
 (tag/pin/PyPI/Marketplace parity, plus a real consumer run) after each Release and
 nightly. Runbook: CONTRIBUTING.md § Releasing.
 
+### Why the action argv tests run the shipped script
+
+`tests/test_action_inputs.py` runs the real `run:` bodies from `action.yml` and does not reimplement them. The two bash steps build a `uv tool install` and a `coder-eval run` command line from string inputs, and every failure there is silent. If an extra drops out of the requirement string, the install gives a working CLI that has no agent. If word splitting or pathname expansion changes a value, the CLI gets a different value than the workflow wrote. In both cases the run measures something else and still exits 0. A test that keeps its own copy of the script tells you nothing about what consumers get.
+
+`args` is one argv entry per line, appended verbatim, so a `-D` value like `key=[A,B,C]` survives. That value is a bash character class. If the input were split on whitespace, bash would silently replace the value with a single name whenever a file in the working directory matched.
+
+The argv-recording stub is a bash script, not a Python one. On a Windows runner, `shell: bash` is Git Bash. Git Bash rewrites arguments that look like absolute POSIX paths when it passes them to a native Windows binary, so a Python-shebang stub receives `/action-checkout` as `C:/Program Files/Git/action-checkout`. Turning that conversion off does not fix it, because then the shebang launcher cannot pass Python its own script path. A bash stub never crosses into a native binary, so argv arrives byte for byte on every platform. The stub writes argv NUL-delimited rather than as JSON, so a value with a quote, a backslash or a space needs no escaping when it leaves bash. `CE_PROBE` is how the env-passthrough test sees what the child received. The passthrough exports into the step's own shell, so only a process the script starts can report the value.
+
+### The claude-pr-review hardening invariants
+
+`claude-pr-review.yml` runs with privileges over attacker-controlled PR content. `tests/test_pr_review_workflow.py` pins its hardening, so an edit that weakens it fails the build instead of passing silently.
+
+`include_comments_by_actor` is a hand-maintained copy of the CODEOWNERS `*` owners. If the two drift, a maintainer's review guidance silently disappears from Claude's context. The tool allowlist bans tools that give secret, re-ingest or network reach. For example, a shell `cat` can read a token persisted in `.git/config`, and `gh pr view` reads every comment verbatim, which bypasses the actor allowlist. `persist-credentials: false` removes the on-disk token that the action's own `git fetch` needs, so an env-only credential helper restores auth. The test checks both halves. If the helper is dropped, fetch fails with "could not read Username". If a literal `secrets.*` goes into the helper instead of an env reference, the token is written to disk again.
+
+### Couplings of verify-published-action.yml
+
+You cannot run `verify-published-action.yml` before merge, so every link it has to another file is a place where a rename passes `make verify` and the gate silently stops working in production. `tests/test_verify_published_workflow.py` gives each link a test that runs before merge.
+
+GitHub does not report an error when `workflow_run: workflows: ["Release"]` names a workflow that does not exist. The trigger never fires, and the gate falls back to the nightly schedule with no signal. The workflow derives the Marketplace slug with a shell pipeline. That is a second slugger next to `marketplace_slug`, the one CE026 uses for doc links. The two agree only because `action.yml`'s `name:` is `coder_eval`, the one input that both leave unchanged. The `# <-- kept in sync` pin anchor has three readers with different whitespace tolerances, so after a reformat one reader can report "parity OK" for a pin that another reader did not bump. The inline consumer task YAML is a full `TaskDefinition` document. CE029 checks that shape in Markdown, but nothing checks it in the workflow, so a field rename or an `extra="forbid"` violation would show up only as an unclear failure in the paid nightly run.
+
+### Why the derived version pins are tested on every commit
+
+`pyproject.toml` is the only source of the version. Two files hold a pin derived from it, and one `release.yml` step bumps both inside the release commit. The first is the `version:` default in `action.yml`. The composite action installs `coder-eval==<that default>`, so a consumer who pins `UiPath/coder_eval@vX.Y.Z` (or the moving `@v0`) must get X.Y.Z. The second is `version` in `plugin.json`. `claude plugin validate --strict` rejects a manifest with no version, and Claude Code keys plugin updates off this value, so a stale pin leaves users on a cached copy.
+
+The seds run only on the release path. A hand edit, or a release that skipped the amend step, drifts with no signal. That is how `action.yml` once shipped pinned to 0.8.6 while main was at 0.8.9. `tests/test_action_version_pin.py` makes the check run on every commit. It also checks the line shape each sed matches: the `# <-- kept in sync` trailing comment in `action.yml`, and a `"version"` line with a trailing comma in `plugin.json`. If a reformat moves `version` to the last key or puts the JSON on one line, the bump becomes a no-op. A `grep -q` guard in `release.yml` catches this, but only after the tag exists.
+
 ## The Agent ABC contract
 
 `agent.py` is the plugin SPI: everything a third-party agent author must satisfy. The

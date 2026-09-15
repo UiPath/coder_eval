@@ -1,25 +1,19 @@
 """``verify-published-action.yml`` couples to things nothing else asserts.
 
-The workflow cannot be exercised before merge — ``workflow_run`` and ``schedule`` only
-fire from the default branch — so every coupling it makes to another file is a place
-where a rename passes ``make verify`` green and the gate silently rots in production.
-Four such couplings, each with an executable binding here:
+``workflow_run`` and ``schedule`` fire only from the default branch, so this module
+pins each of the workflow's cross-file couplings before merge:
 
-1. **``workflow_run: workflows: ["Release"]``** matches ``release.yml``'s ``name:`` by
-   display string. GitHub does not error on an unmatched name; the trigger simply never
-   fires, degrading the gate to schedule-only with no signal.
-2. **The Marketplace slug** is derived by a shell pipeline, a *second* slugger next to
-   the tested ``tests/lint/action_docs.py::marketplace_slug`` that CE026 uses for the doc
-   links. They agree today only because ``action.yml``'s ``name:`` is ``coder_eval`` — the
-   one input for which both are the identity function.
-3. **The ``# <-- kept in sync`` pin anchor** now has three readers with three different
-   whitespace tolerances (``release.yml``'s sed, this workflow's sed, and
-   ``tests/test_action_version_pin.py``). A reformat can leave one reporting "parity OK"
-   on a pin another silently refused to bump.
-4. **The inline consumer task YAML** is a whole ``TaskDefinition`` document that no test
-   validates, while CE029 already validates that exact shape in Markdown. Any field
-   rename (or an ``extra="forbid"`` violation) would surface only as an opaque failure in
-   the paid nightly.
+1. ``workflow_run: workflows: ["Release"]`` names ``release.yml``'s ``name:``.
+2. The workflow's shell slug pipeline agrees with
+   ``tests/lint/action_docs.py::marketplace_slug`` (CE026).
+3. ``release.yml``'s sed, this workflow's sed and ``tests/test_action_version_pin.py``
+   read the same ``# <-- kept in sync`` pin from ``action.yml``.
+4. The inline consumer task YAML loads and declares run limits.
+
+It also runs ``release.yml``'s promote guards and checks that the mechanics gate
+classifies every ``FinalStatus``.
+
+Rationale: .claude/notes/reporting.md § Couplings of verify-published-action.yml
 """
 
 from __future__ import annotations

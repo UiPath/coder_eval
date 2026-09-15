@@ -857,35 +857,15 @@ def test_claude_agent_message_formatting_edge_cases():
 
 
 def test_format_messages_system_message_subclasses_are_filtered():
-    """Regression: SystemMessage SUBCLASSES (TaskStartedMessage, etc.) must
-    be filtered out the same way SystemMessage itself is.
+    """SystemMessage SUBCLASSES (TaskStartedMessage, etc.) are filtered like SystemMessage itself.
 
-    claude-agent-sdk 0.1.x added ``TaskStartedMessage``,
-    ``TaskNotificationMessage``, and ``TaskProgressMessage`` for sub-agent
-    lifecycle reporting. Each is declared as a subclass of
-    ``SystemMessage`` with an explicit drop-in contract:
+    Pins: ``_format_messages`` drops a real SDK ``TaskStartedMessage`` (not a
+    name-collision mock) without emitting a tag, and a verdict-shaped JSON
+    literal in a sibling ``AssistantMessage`` survives intact.
 
-        "Subclass of SystemMessage: existing ``isinstance(msg,
-        SystemMessage)`` and ``case SystemMessage()`` checks continue to
-        match."
-
-    An earlier version of ``_format_messages`` compared the exact
-    ``type(msg).__name__`` string against ``"SystemMessage"``, which
-    defeated the SDK's drop-in design — the subclasses fell through to
-    an "unknown message type" branch that ran ``str(msg)[:100]`` and
-    emitted a truncated Python-repr containing nested ``data={...}``
-    dict literals. Even though the typed verdict tool channel has
-    since obviated the brace-walking verdict parser that originally
-    motivated this fix, the underlying ``isinstance``-vs-name-equality
-    contract is still worth pinning.
-
-    This test exercises the real SDK ``TaskStartedMessage`` instance
-    (not a name-collision mock) and asserts:
-
-      1. The lifecycle message is silently filtered (not emitted as a
-         tag, exactly as ``SystemMessage`` itself would be).
-      2. A verdict-shaped JSON literal in a sibling ``AssistantMessage``
-         survives intact in the formatter output.
+    HAZARD: the SDK declares its task lifecycle messages as drop-in
+    ``SystemMessage`` subclasses, so the filter must use ``isinstance``; a
+    ``type(msg).__name__`` comparison sends them to the unknown-type branch.
     """
     from claude_agent_sdk import (
         AssistantMessage,

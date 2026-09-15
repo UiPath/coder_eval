@@ -2074,20 +2074,14 @@ class _SteppedClock(datetime):
 class TestToolSpansSurviveTheStepBoundary:
     """A tool that closes BETWEEN two steps still belongs to the next window.
 
-    This used to be a bookkeeping problem: a per-step span list, cleared at
-    `step_start` — after the window it feeds had already opened at `gen_mark` —
-    so a call closing in the gap had its span wiped before the next
-    `step_finish` could subtract it. That list is gone.
-    `timing.subtract_tool_time` sees every span at once and clips each
-    to the windows it overlaps, so the property now holds by construction
-    rather than by a reset rule. Kept, and re-pointed at the collector, because
-    the property is what matters: a future reducer change could still break it
-    by moving a mark or failing to emit the ToolEnd the collector reduces.
+    Pins: a non-terminal tool that completes in the gap between `step_finish`
+    and the next `step_start` is subtracted from the next generation window,
+    through the ToolEnd the collector reduces.
 
-    It needs the NON-TERMINAL tool path to reach: the CLI normally emits one
-    already-`completed` event per call, which closes inside the step that
-    opened it. That is why the measured corpus reads 0.00% and a reproduction
-    has to drive the state object.
+    HAZARD: moving a generation mark or dropping that ToolEnd breaks it. The
+    CLI rarely takes this path, so the test drives the state object directly.
+
+    Rationale: .claude/notes/agents.md § Per-harness generation marks
     """
 
     def _run(self, monkeypatch):

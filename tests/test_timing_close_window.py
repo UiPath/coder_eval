@@ -320,23 +320,17 @@ class TestTheThreeToolUnionsAgree:
     """Three readers answer "how long did this turn's tools run". They must agree.
 
     * `timing.main_thread_tool_spans` + `union_ms` — the TYPED selector the
-      collector subtracts from its generation windows and measures the head and
-      tail against, and which now writes `TurnRecord.tool_union_ms`.
+      collector subtracts from its generation windows, measures the head and
+      tail against, and writes `TurnRecord.tool_union_ms` from.
     * `tests/_fixtures/golden_streams/_scrub.py::_tool_union_ms` — the golden
       corpus's identity check, which validates the dump and calls that selector.
     * `scripts/timing/decompose_run.py::_tool_ms` — the LIVE two-sided residual
-      gate, which `.github/workflows/pr-checks.yml` runs against a real run, and
-      which does the same.
+      gate, which does the same.
 
-    The three used to be three COPIES of the selection rule, and they agreed by
-    luck once at a real cost: the collector filtered its GENERATIONS to the main
-    thread and then passed EVERY command as a tool span. A child nests inside
-    the parent Agent call, whose interval the union already covers, so nothing
-    failed — but Codex's recovered child tools carry the CHILD's clock, so the
-    nesting is not guaranteed. Now there is ONE selector and two callers of it,
-    and what remains worth pinning is that neither sensor has grown a second
-    path back, and that each still computes its OWN union rather than reading
-    the producer's stored answer.
+    Pins: all three exclude a sub-agent's own tools, and each sensor computes
+    its OWN union rather than reading the producer's stored answer.
+
+    Rationale: .claude/notes/timing.md § main_thread_tool_spans
     """
 
     @staticmethod

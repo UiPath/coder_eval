@@ -1,21 +1,15 @@
 """Mechanical guards for the untrusted-input ``claude-pr-review`` workflow.
 
-This workflow runs privileged (write-scoped ``GITHUB_TOKEN``, repo secrets) over
-attacker-controlled PR content, so three invariants are locked in here so a
-future edit fails loudly instead of silently regressing the hardening:
+The workflow runs with a write-scoped ``GITHUB_TOKEN`` and repo secrets over
+attacker-controlled PR content. Pins three invariants:
 
-1. ``include_comments_by_actor`` stays in sync with the CODEOWNERS ``*`` owners —
-   the comment-source allowlist is a hand-maintained duplicate of that list, and
-   drift silently drops a maintainer's review guidance from Claude's context.
-2. The ``--allowedTools`` list contains no tool that can read on-disk secrets,
-   re-ingest unfiltered untrusted content, or reach the network — e.g. a shell
-   ``cat`` (reads a persisted ``.git/config`` token) or ``gh pr view`` (reads
-   every comment verbatim, bypassing the actor allowlist).
-3. ``persist-credentials: false`` removes the on-disk token the action's own
-   ``git fetch`` needs, so auth is restored via an env-only credential helper.
-   Both halves are locked in so the fetch path can't be re-broken (helper
-   dropped → "could not read Username") nor the token re-persisted to disk (a
-   literal ``secrets.*`` baked into the helper instead of an env reference).
+1. ``include_comments_by_actor`` equals the CODEOWNERS ``*`` owners.
+2. ``--allowedTools`` holds no tool that can read on-disk secrets, re-ingest
+   unfiltered untrusted content, or reach the network.
+3. Checkout sets ``persist-credentials: false``, and ``git fetch`` authenticates
+   through an env-only credential helper with no literal ``secrets.*`` in it.
+
+Rationale: .claude/notes/reporting.md § The claude-pr-review hardening invariants
 """
 
 from __future__ import annotations

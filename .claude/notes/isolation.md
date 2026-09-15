@@ -781,6 +781,16 @@ shape this host got is logged rather than left to be inferred.
 `setup` is: discovering a venv a task never asked for grades it under a PATH it never ran
 under, and would let an agent shadow binaries by writing `.venv/bin/` into its own workspace.
 
+The unit test in `tests/test_sandbox.py` reads `pyvenv.cfg`. That proves the flag is set,
+not that the result is correct. Every task image installs packages globally: the
+framework image uses `uv pip install --system`, and skillsbench task images use
+`RUN pip install ...`. `tests/test_sandbox_venv_live.py` checks the result in the
+`coder-eval-agent` base image. It mounts this checkout's `src/` over the image's copy, so
+the test runs the code under test and not the version the image was built with. Measured
+on that test's own scenario, `python -c "import pydantic"` exits 1 with an isolated venv
+and exits 0 with `--system-site-packages`. `pydantic` is a coder_eval runtime dependency,
+so the base image already has it globally, and the check needs no build and no network.
+
 ### The criterion environment, layer by layer
 
 Each layer is independent — none breaks if another is absent.

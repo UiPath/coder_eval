@@ -2,44 +2,17 @@
 
     head + Σ generation + UNION(tool) + tail == the turn's own span
 
-This is the committed MAGNITUDE sensor, and it exists because nothing else in
-the suite is one:
+Pins: the identity closes ms-exact on every built-in harness. Each case drives
+the harness's own REDUCER with a hand-moved clock and reduces its output through
+a real ``EventCollector``, so every asserted number is computed by the harness.
 
-* the golden corpus masks ``generation_duration_ms``, both window bounds, both
-  ``execution_*_at`` stamps and both head/tail fields to a placeholder
-  (``_scrub.py::SCRUB_KEYS``), so a snapshot records that a window was measured
-  and never what it measured — a timing value can move by seconds with every
-  golden test still green;
-* ``_scrub.py::assert_timing_captured``'s own identity check is ONE-SIDED
-  (``overshoot <= ...``), so an UNDERCOUNT — a bucket claiming less time than
-  it should, which is the defect class this whole area keeps producing — passes
-  it silently. It cannot be made two-sided either: the replays run in ~0.3 ms of
-  synthetic wall clock, where a relative bound is vacuous;
-* ``scripts/timing/decompose_run.py --max-residual-pct`` IS two-sided, but needs
-  live ``task.json`` files.
+HAZARD: a case must script every clock its reducer reads — an injected
+``TurnClock`` (pi, antigravity, claude-code), a ``datetime`` subclass on the
+module (opencode), ``time.monotonic`` on top of the injected clock
+(claude-code), or SDK epoch-ms stamps (codex). A real clock left in makes the
+case pass by accident.
 
-Magnitudes are only real where a scripted clock makes them real, so each case
-drives the harness's own REDUCER with a clock it moves by hand, then feeds the
-messages and commands it produced through a real ``EventCollector`` — the same
-seam production uses to compute the head and the tail. Every number asserted is
-therefore one the harness computed, against a span the test declared.
-
-Three clock-injection styles are needed, and all three already exist in the
-per-harness suites (this module reuses their idiom rather than inventing a
-fourth):
-
-* an injected ``TurnClock`` — pi, antigravity and claude-code take ``clock=``
-  / build one through a patched ``TurnClock`` factory;
-* a ``datetime`` SUBCLASS monkeypatched onto the module — opencode, which also
-  calls ``datetime.fromtimestamp`` through the same global (see
-  ``tests/test_opencode_agent.py``'s ``_SteppedClock`` for why a stub breaks);
-* ``time.monotonic`` patched ON TOP of an injected clock — claude-code, whose
-  ``turn_start_time``, turn deadline and measured tool durations still read
-  ``time.monotonic()``, so scripting only the clock leaves the reducer
-  straddling a real clock and a scripted one.
-
-Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
-from any host clock, so its case scripts those stamps directly.
+Rationale: .claude/notes/timing.md § Why the ms-exact identity contract exists
 """
 
 from __future__ import annotations
@@ -433,33 +406,15 @@ def _codex_turn() -> Turn:
 def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     """A tool call between two emissions, with a real head and a real tail.
 
-    The clock is INJECTED, like pi's and antigravity's: every wall stamp this
-    reducer records now derives from the turn's ``TurnClock``, and a derived
-    stamp escapes a monkeypatched module ``datetime`` entirely — the case would
-    quietly measure the real clock and pass by accident. ``time.monotonic`` is
-    still patched off the same counter, because ``turn_start_time``, the
-    deadline and the tool call's own measured duration read it; leaving it real
-    leaves the reducer straddling a scripted clock and a live one, and the tool
-    span (a monotonic duration subtracted back off a clock reading) would be
-    nonsense.
+    Pins: the first `message_start` re-seeds the window, so the CLI spawn before
+    it is head. The result lands the instant the tool ends, so this cannot tell
+    a tiled window from one reset at the result; see
+    `test_a_slow_tool_result_round_trip_is_not_lost`.
 
-    The first `message_start` re-seeds the window, so the CLI spawn and the
-    query build before it are head rather than msg0's generation. That a LATER
-    one must not re-seed is asserted directly in
-    `tests/test_agent_telemetry.py`; here it shows up as the windows still
-    tiling.
+    HAZARD: the clock is INJECTED and `time.monotonic` is patched off the same
+    counter; leave either real and the reducer straddles two clocks.
 
-    Its windows TILE across the tool result, and this case only proved that by
-    accident until the reducer was fixed. The mark used to be reset when the
-    result arrived, so the interval between the emission that ISSUED the call
-    and the result landed in no bucket. Here that interval IS the tool's
-    execution exactly — the case scripts the result at the instant the tool
-    ends — so the tool bucket happened to claim the same milliseconds and the
-    identity closed anyway. On a real turn the two differ: a 21.5 ms `Write`
-    can be followed by a 2.5 s round trip, and 21% of the turn goes missing.
-    `test_a_slow_tool_result_round_trip_is_not_lost` is the case that
-    discriminates; this one deliberately keeps the coincident shape so the two
-    read as a pair.
+    Rationale: .claude/notes/timing.md § Why a coincident tool result cannot catch an un-tiled window
     """
     from coder_eval.agents import claude_code_agent as claude_module
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
@@ -524,21 +479,14 @@ def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
 
 
 def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
-    """A FAST tool followed by a SLOW result round trip — the shape that hid a defect.
+    """A FAST tool followed by a SLOW result round trip.
 
-    ``_claude_turn`` above scripts the tool result at the instant the tool
-    finishes, so the un-tiled interval and the tool's own span were the same
-    milliseconds and the identity closed even while the mark was being reset.
-    Every live probe had the same blind spot from the other direction: three
-    concurrent ``sleep 3`` calls make the tool union so large that the round
-    trip rounds away (measured: 0.05% residual).
+    Pins: the window after a tool result tiles from the previous emission and
+    does not open when the result lands. The tool runs for 20 ms and its result
+    takes 2000 ms to come back, the shape traced off
+    `tasks/dataset_example.yaml`; the identity closing is the assertion.
 
-    Here the tool runs for 20 ms and its result takes 2000 ms to come back,
-    which is `tasks/dataset_example.yaml` — the task CI actually runs, where a
-    21.5 ms ``Write`` met a 2511.7 ms round trip and 21% of the turn was
-    accounted to nothing. The identity closing here is the whole point: the
-    window after the result must tile from the previous emission, not open
-    when the result lands.
+    Rationale: .claude/notes/timing.md § Why a coincident tool result cannot catch an un-tiled window
     """
     from coder_eval.agents import claude_code_agent as claude_module
     from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState

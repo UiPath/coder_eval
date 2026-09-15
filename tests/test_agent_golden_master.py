@@ -31,9 +31,8 @@ from tests._fixtures.golden_streams.opencode_fixtures import OPENCODE_SCENARIOS,
 from tests._fixtures.golden_streams.pi_fixtures import PI_SCENARIOS, run_pi_scenario
 
 
-# Codex is an optional extra (mirrors test_codex_agent's guard). Import its
-# fixtures only when present so the Claude golden tests in this module still
-# collect and run in a base (no-codex) environment instead of erroring at import.
+# Codex is an optional extra (mirrors test_codex_agent's guard): import its fixtures only when present, so
+# this module still collects in a base (no-codex) environment instead of erroring at import.
 _HAS_CODEX = importlib.util.find_spec("openai_codex") is not None
 if _HAS_CODEX:
     from tests._fixtures.golden_streams.codex_fixtures import CODEX_SCENARIOS, run_codex_scenario
@@ -42,45 +41,23 @@ else:  # pragma: no cover - only without the optional codex extra
     run_codex_scenario = None
 
 
-# Scenarios that legitimately produce no measurable generation window. Strict
-# is the default: a new scenario is asserted to have one until it is named
-# here, so a harness that silently stops recording windows fails instead of
-# passing. Each entry carries the reason it cannot have one.
+# Scenarios with no measurable generation window. Strict by default: a scenario not named here must have one, so
+# a harness that silently stops recording windows fails. Each entry carries the reason it cannot have one.
 NO_GENERATION_WINDOW: frozenset[str] = frozenset(
     {
         "claude_g_crash_format_placeholder",  # crash partial: 0 assistant messages
         "claude_h1_timeout_process_error",  # timeout partial: 0 assistant messages
         "claude_h2_process_error_crash",  # crash partial: 0 assistant messages
-        # Drives a SCRIPTED monotonic clock (a constant 1000.0 until the
-        # deadline flips) so the deadline break is deterministic. The window
-        # is zero by fixture construction, not by anything the harness did.
+        # A SCRIPTED monotonic clock makes the deadline break deterministic; the window is zero by construction.
         "claude_i_in_loop_deadline_break",
         "codex_g_items_rebuild",  # rollout rebuild: Turn items carry no timestamps
-        # Codex emissions whose ENTIRE measurable window was tool execution.
-        # The window is subtracted down to 0 because that is the honest
-        # answer, not because nothing was recorded — see the generation-window
-        # subtraction in codex_agent._flush_message.
+        # Codex emissions whose ENTIRE measurable window was tool execution, subtracted down to an honest 0.
         "codex_d_cross_flush_is_error",  # flush lands before the tool completes: zero-width window
         "codex_e_orphan_tool",  # the tool never completes, so the window never opens
-        # Same shape, reached from the opposite direction. This scenario injects
-        # a 5 ms CLI tool interval into a replay whose whole turn is well under
-        # one millisecond, so the tool spans BOTH windows entirely and the
-        # central subtraction takes each down to a measured 0.0. It is the tool
-        # interval that is fictional, not the subtraction — which is why the
-        # scenario is in FICTIONAL_DURATIONS too.
-        #
-        # BE HONEST ABOUT WHAT IS LEFT. With both exemptions on, this snapshot
-        # asserts neither the identity nor a positive window, and it does NOT
-        # record the tiling the scenario is named for — `SCRUB_KEYS` masks
-        # `started_at`, `completed_at` and `generation_duration_ms`, so nothing
-        # about where a window opened survives into the JSON. What it still
-        # pins is the STRUCTURE: two assistant messages, their content blocks,
-        # their token buckets, and one resolved command. OpenCode's tiling is
-        # asserted where it can be — `tests/test_timing_identity_contract.py`
-        # (scripted clock, ms-exact) and
-        # `tests/test_opencode_agent.py::TestGenerationWindowsTileTheTurn`.
-        # `pi_c_multi_turn_tiling` is the same scenario shape on a harness whose
-        # stamps come from its own clock, and it needs neither exemption.
+        # An injected 5 ms CLI tool interval spans both sub-millisecond windows, so each subtracts to 0.0. With
+        # FICTIONAL_DURATIONS too, this snapshot pins only STRUCTURE (SCRUB_KEYS masks where a window opened);
+        # its tiling is asserted in tests/test_timing_identity_contract.py and
+        # tests/test_opencode_agent.py::TestGenerationWindowsTileTheTurn.
         "opencode_c_multi_step_tiling",
     }
 )
@@ -90,41 +67,23 @@ def _expect_window(harness: str, scenario_name: str) -> bool:
     return f"{harness}_{scenario_name}" not in NO_GENERATION_WINDOW
 
 
-# Scenarios that inject their own SDK timestamps, so their recorded durations
-# are FICTIONAL and cannot be reconciled against the replay's real wall clock.
-# `_rebase_notifications` / `_rebase_lines` put those stamps on the replay's
-# clock, which fixes the era — but the SDK's stamps are integer MILLISECONDS
-# and these scenarios declare 17-900 ms of item time, while the replay itself
-# runs in well under one. No rebasing closes that; the agent's own clock would
-# have to be faked too. Everything else — every claude, antigravity and pi
-# scenario, and the codex/opencode ones that inject nothing — is checked.
-#
-# The last two entries were ADDED to buy stability, and the trade is worth
-# stating. They previously injected NO stamps at all, so `_flush_message` took
-# `_ms_to_dt(None)` for both window bounds — two adjacent `datetime.now()`
-# reads, which collide at microsecond resolution often enough that
-# `assert_timing_captured`'s `completed_at > started_at` failed roughly one run
-# in twenty under parallel load, naming a different scenario each time. Their
-# identity check was near-vacuous anyway (a window of width zero reconciles
-# trivially), so giving them real bounds trades that for a stable, meaningful
-# bounds-span assertion.
+# Scenarios that inject their own integer-MILLISECOND SDK stamps (17-900 ms of item time) into a replay that runs in
+# well under one, so their durations are FICTIONAL and the identity is not checked; rebasing
+# (`_rebase_notifications` / `_rebase_lines`) fixes the era, not the width. Every other scenario is checked.
+# HAZARD: codex_c_reasoning_placeholder and codex_h_no_turn_completed_crash inject stamps for STABILITY. Without them
+# both window bounds are adjacent `datetime.now()` reads that collide at microsecond resolution and flake
+# `completed_at > started_at`.
 FICTIONAL_DURATIONS: frozenset[str] = frozenset(
     {
         "codex_b_command_execution",  # 250 ms command + 150 ms generation
-        "codex_c_reasoning_placeholder",  # 300 ms of item time — see below
+        "codex_c_reasoning_placeholder",  # 300 ms of item time — see above
         "codex_d_cross_flush_is_error",  # 400 ms command
         "codex_e_orphan_tool",  # command started, never completed
         "codex_f_collab_fallback",  # 900 ms collab wait
-        "codex_h_no_turn_completed_crash",  # 200 ms of item time — see below
+        "codex_h_no_turn_completed_crash",  # 200 ms of item time — see above
         "opencode_b_tool_call_resolved",  # 17 ms tool interval
-        # 5 ms tool interval, injected as CLI epoch stamps. OpenCode takes its
-        # tool bounds from the CLI payload rather than from its own clock, so
-        # every scenario of this harness that resolves a tool injects them —
-        # there is no version of this scenario that stays commensurable with a
-        # sub-millisecond replay. Its TILING property (the second window opens
-        # at the first `step_finish`) is what the scenario is for, and that is
-        # still snapshotted; the identity is asserted for this harness by
-        # tests/test_timing_identity_contract.py, on a scripted clock.
+        # 5 ms tool interval as CLI epoch stamps: OpenCode takes tool bounds from the CLI payload, so no
+        # tool-resolving scenario of it stays commensurable with a sub-millisecond replay.
         "opencode_c_multi_step_tiling",
     }
 )
@@ -162,8 +121,7 @@ def _compare_or_regen(name: str, actual_scrubbed: dict[str, Any]) -> None:
 @pytest.mark.parametrize("scenario", CLAUDE_SCENARIOS, ids=lambda s: s.name)
 async def test_claude_golden(scenario, tmp_path):
     raw = await run_claude_scenario(scenario, str(tmp_path))
-    # Reconciliation is asserted on the UNscrubbed dump (token buckets are never
-    # scrubbed, but cost/timestamps are — assert before masking to be explicit).
+    # Reconciliation is asserted on the UNscrubbed dump, before cost and timestamps are masked.
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -264,9 +222,8 @@ async def test_pi_reconciliation_invariant(scenario, tmp_path):
     assert_reconciliation(await run_pi_scenario(scenario, str(tmp_path)))
 
 
-# The ONE place a harness is listed for golden coverage. Derived from AgentKind
-# rather than from register_builtins, whose built-in list is a hardcoded tuple
-# inside the function body that returns nothing and exposes no set.
+# The ONE place a harness is listed for golden coverage. Keyed on AgentKind, not register_builtins, which
+# exposes no set of built-ins.
 SCENARIOS_BY_AGENT: dict[AgentKind, list[Any]] = {
     AgentKind.CLAUDE_CODE: CLAUDE_SCENARIOS,
     AgentKind.CODEX: CODEX_SCENARIOS,
@@ -275,13 +232,9 @@ SCENARIOS_BY_AGENT: dict[AgentKind, list[Any]] = {
     AgentKind.PI: PI_SCENARIOS,
 }
 
-# An ALLOWLIST of exclusions, not a denylist of inclusions: a new AgentKind
-# member fails the coverage test until someone decides which it is.
+# An ALLOWLIST of exclusions: a new AgentKind member fails the coverage test until someone decides which it is.
 _NO_GOLDEN_COVERAGE: dict[AgentKind, str] = {
-    # The agentless backend (NoOpAgent): it runs no model and streams nothing,
-    # so there is no event stream to record.
     AgentKind.NONE: "agentless backend — runs no model, streams nothing",
-    # A sentinel for "agent type could not be determined". Never registered.
     AgentKind.UNKNOWN: "sentinel for an undeterminable type — never registered",
 }
 
@@ -325,8 +278,7 @@ class TestGoldenCoverage:
     def test_every_covered_harness_has_scenarios(self):
         empty = harnesses_without_scenarios(SCENARIOS_BY_AGENT)
         if not _HAS_CODEX:
-            # The optional extra is absent, so CODEX_SCENARIOS is [] by
-            # construction — not by anyone forgetting to record a stream.
+            # The optional extra is absent, so CODEX_SCENARIOS is [] by construction, not by omission.
             empty -= {AgentKind.CODEX}
         assert not empty, f"listed as covered but has NO scenarios: {sorted(k.value for k in empty)}"
 
@@ -363,9 +315,7 @@ class TestAssertTimingCaptured:
         identity is trivially satisfied, so these cases constrain only what
         each is about; the identity has its own cases below.
         """
-        # MODEL-VALID, not merely shaped like a record. `assert_timing_captured`
-        # validates the dump into a `TurnRecord` so it can call production's own
-        # span selector instead of re-deriving one, and a fixture missing the
+        # MODEL-VALID: `assert_timing_captured` validates the dump into a `TurnRecord`, so a fixture missing
         # required fields would fail there rather than on the thing it is about.
         return {
             "iteration": 1,
@@ -402,11 +352,8 @@ class TestAssertTimingCaptured:
             assert_timing_captured(self._record(windows=[0.0]), expect_generation_window=True)
 
     def test_collapsed_bounds_raise_even_with_a_healthy_duration(self):
-        # Two harnesses take the duration from a MONOTONIC clock and the
-        # bounds from the wall clock, so a reducer can report a real duration
-        # beside two stamps that collapsed to one instant. CE059 sees that
-        # statically only when both bounds are the same ast.Name; this is the
-        # check for when they are two different names holding one value.
+        # A real duration beside two bounds collapsed to one instant. CE059 sees that statically only when both
+        # bounds are the same ast.Name; this catches two different names holding one value.
         with pytest.raises(AssertionError, match="bounds that span it"):
             assert_timing_captured(self._record(windows=[500.0], bounds_collapse=True), expect_generation_window=True)
 
@@ -489,11 +436,8 @@ class TestAssertTimingCaptured:
         assert_timing_captured(self._record(windows=[], overhead=(None, None)), expect_generation_window=False)
 
     def test_an_unmeasurable_window_is_not_something_to_measure_against(self):
-        # codex_g_items_rebuild's shape: an assistant message exists, but it was
-        # rebuilt after the turn ended with placeholder now() bounds and says so
-        # via generation_duration_ms=None. Those stamps are not window bounds, so
-        # the honest head and tail are None — keying on "any assistant message"
-        # would have demanded a number derived from a placeholder.
+        # codex_g_items_rebuild's shape: a rebuilt message with placeholder now() bounds and
+        # generation_duration_ms=None. Those stamps are not window bounds, so the honest head and tail are None.
         with pytest.raises(AssertionError, match=r"harness_startup_ms is 0\.0"):
             assert_timing_captured(self._record(windows=[None], overhead=(0.0, 3.5)), expect_generation_window=False)
 

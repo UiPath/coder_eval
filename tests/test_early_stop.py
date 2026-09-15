@@ -94,13 +94,8 @@ from coder_eval.streaming.events import (
 from tests._fixtures.live_criteria import FROZEN_TS, make_command, make_turn
 
 
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
-# Telemetry/turn primitives are shared with the CE036 contract-replay fixtures
-# (tests/lint/live_verdict_contract.py); the thin wrappers below keep this file's
-# historical call shape (tool-<name> ids, no sequence numbers) at every call site.
+# Primitives shared with the CE036 contract-replay fixtures (tests/lint/live_verdict_contract.py);
+# the wrappers below fix tool-<name> ids and omit sequence numbers.
 _TS = FROZEN_TS
 
 
@@ -153,7 +148,7 @@ class _DummyNoStopAgent:
 
     ``validate_early_stop`` only reads the flag off the registered class, so no
     ``Agent`` machinery is needed. Guardrail 1 must keep rejecting agents that
-    have not opted into the cooperative interrupt (all built-ins now support it).
+    have not opted into the cooperative interrupt.
     """
 
     supports_cooperative_stop = False
@@ -233,9 +228,6 @@ def _cmd_crit(
     )
 
 
-# --- Phase-3 helpers: results / info / events ------------------------------ #
-
-
 def _crit_result(ctype: str, score: float) -> CriterionResult:
     return CriterionResult(criterion_type=ctype, description=f"{ctype} result", score=score)
 
@@ -305,11 +297,6 @@ def _skill_events(skill: str, *, tool_id: str = "sk-1") -> list[Any]:
 def _unresolved_skill_end(skill: str, *, tool_id: str = "orphan-1") -> ToolEndEvent:
     """An orphan-closing ToolEnd (status UNRESOLVED), as finalize() emits."""
     return ToolEndEvent(task_id="t", tool=_skill_cmd(skill, tool_id=tool_id), status=ToolEndStatus.UNRESOLVED)
-
-
-# --------------------------------------------------------------------------- #
-# Config surface
-# --------------------------------------------------------------------------- #
 
 
 class TestConfigSurface:
@@ -447,11 +434,6 @@ class TestConfigSurface:
         assert _cmd_crit(max_steps_to_decide=5).is_stop_armed is True
 
 
-# --------------------------------------------------------------------------- #
-# skill_triggered live verdict
-# --------------------------------------------------------------------------- #
-
-
 class TestEngagedSkillNames:
     def test_claude_skill_tool_namespaced(self) -> None:
         assert _engaged_skill_names(_cmd("Skill", {"skill": "plugin:date-teller"})) == {"date-teller"}
@@ -535,11 +517,6 @@ class TestSkillTriggeredLiveVerdict:
         assert _skill_crit("date-teller", "").live_decidable_polarities() == frozenset({"fail"})
 
 
-# --------------------------------------------------------------------------- #
-# command_executed live verdict
-# --------------------------------------------------------------------------- #
-
-
 class TestCommandExecutedLiveVerdict:
     checker = CommandExecutedChecker()
 
@@ -618,11 +595,6 @@ class TestCommandExecutedLiveVerdict:
             assert crit.live_decidable_polarities() <= frozenset({"pass", "fail"})
 
 
-# --------------------------------------------------------------------------- #
-# Base default: unobservable criteria
-# --------------------------------------------------------------------------- #
-
-
 class TestBaseLiveVerdictDefault:
     def test_unobservable_criterion_is_not_a_live_success_criterion(self) -> None:
         # file_exists is not observable mid-run: its model is plain
@@ -642,11 +614,6 @@ class TestBaseLiveVerdictDefault:
         # subset of the type's universe ({"pass", "fail"}).
         for crit in (_skill_crit("s", "s"), _skill_crit("s", "other"), _skill_crit("s", "")):
             assert crit.live_decidable_polarities() <= frozenset({"pass", "fail"})
-
-
-# --------------------------------------------------------------------------- #
-# Resolution-time guardrails
-# --------------------------------------------------------------------------- #
 
 
 class TestValidateEarlyStop:
@@ -792,8 +759,7 @@ class TestValidateEarlyStop:
             validate_early_stop(task)
 
     def test_guardrail1_non_supporting_agent_rejected(self, dummy_no_stop_kind: str) -> None:
-        # Codex/antigravity now support the cooperative interrupt, so guardrail 1
-        # is exercised with a dummy agent that leaves the flag at False.
+        # Guardrail 1 needs an agent kind that leaves supports_cooperative_stop False, so a dummy kind is registered.
         task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=dummy_no_stop_kind)
         with pytest.raises(EarlyStopConfigError, match="cooperative stopping"):
             validate_early_stop(task)
@@ -826,19 +792,14 @@ class TestValidateEarlyStop:
         validate_early_stop(task)  # no raise
 
     def test_unarmed_task_is_plain_noop(self) -> None:
-        # No blocks -> no watcher, byte-for-byte default behavior. The old
-        # "at least one criterion" guard is gone with the master arm: there is
-        # nothing left to arm a task that has no blocks.
+        # No blocks -> no watcher, byte-for-byte default behavior.
         task = _task(criteria=[_skill_crit("s", "s")])
         validate_early_stop(task)  # no raise
         assert early_stop_active(task) is False
 
     def test_guardrail3_unobservable_criterion_unrepresentable(self) -> None:
-        # The stop_early block exists only on LiveSuccessCriterion, so an armed
-        # unobservable criterion cannot even be constructed (extra='forbid') —
-        # the old runtime "observable" guard is now a schema property. Match on
-        # the field name so the rejection is provably about stop_early, not
-        # some other typo'd kwarg.
+        # The block exists only on LiveSuccessCriterion (extra='forbid'); matching the field name proves
+        # the rejection is about stop_early, not another typo'd kwarg.
         with pytest.raises(ValueError, match="stop_early"):
             FileExistsCriterion(
                 type="file_exists",
@@ -898,13 +859,6 @@ class TestValidateEarlyStop:
         validate_early_stop(task)  # no raise
 
 
-# --------------------------------------------------------------------------- #
-# Guardrail integration: the plan and run resolution surfaces actually invoke
-# validate_early_stop (not just the helper in isolation). Real task YAMLs go
-# through the real load + 5-layer merge; a bad arming must surface as a clean
-# CLI-level error on BOTH surfaces, never a silent no-op.
-# --------------------------------------------------------------------------- #
-
 _UNARMED_CRITERION = """\
   - type: skill_triggered
     description: date-teller activation
@@ -957,12 +911,8 @@ class TestGuardrailResolutionSurfaces:
     """A bad arming is rejected by the real plan/run wiring, not only the helper."""
 
     def test_run_surface_rejects_master_arm(self, tmp_path: Path) -> None:
-        # run_limits.stop_early: true (the removed master arm) propagates out
-        # of resolve_all_tasks as EarlyStopConfigError (a ValueError, so the
-        # run CLI converts it to a clean BadParameter) instead of being
-        # demoted to a skipped task. (An armed UNOBSERVABLE criterion no
-        # longer reaches this validator at all — the block exists only on
-        # LiveSuccessCriterion, so it is a pydantic schema error at load.)
+        # The removed master arm escapes resolve_all_tasks as EarlyStopConfigError (a ValueError, so the
+        # run CLI converts it to a clean BadParameter), not a skipped task.
         task_file = _write_task_yaml(tmp_path, criterion_yaml=_UNARMED_CRITERION, stop_early=True)
         with pytest.raises(EarlyStopConfigError, match="has been removed"):
             _resolve_surface(task_file, tmp_path)
@@ -1101,12 +1051,6 @@ class TestShippedEarlyStopExperiment:
         assert early_stop_active(by_variant["smoke"]) is True  # the task's block alone arms
 
 
-# --------------------------------------------------------------------------- #
-# Cooperative should_stop seam on ClaudeCodeAgent — still UNWIRED: the
-# orchestrator does not pass should_stop yet, so these drive the agent directly.
-# --------------------------------------------------------------------------- #
-
-
 class _DummyMsg:
     """Minimal SDK-message stand-in.
 
@@ -1240,6 +1184,8 @@ class TestNewFixtureTasksResolve:
 
 
 class TestCooperativeStopSeam:
+    """Pins the should_stop seam on ClaudeCodeAgent, driven directly rather than through the orchestrator."""
+
     def test_stopped_early_member_on_both_enums(self) -> None:
         assert AgentEndStatus.STOPPED_EARLY.value == "stopped_early"
         assert TurnEndStatus.STOPPED_EARLY.value == "stopped_early"
@@ -1292,11 +1238,6 @@ class TestCooperativeStopSeam:
         assert agent.pending_turn is not None and agent.pending_turn.crashed is True
         # STOPPED_EARLY must NOT appear — the stop lost the race.
         assert AgentEndStatus.STOPPED_EARLY not in {e.status for e in ends}
-
-
-# --------------------------------------------------------------------------- #
-# Phase 3: EarlyStopReason / EarlyStopInfo / armed_criteria_passed
-# --------------------------------------------------------------------------- #
 
 
 class TestEarlyStopModels:
@@ -1390,9 +1331,8 @@ class TestEarlyStopModels:
         assert result.armed_criteria_passed([crit]) is False
 
     def test_armed_criteria_passed_default_threshold_still_requires_all(self) -> None:
-        # gate_threshold=1.0 (the default) must reproduce the old all()-must-pass
-        # rule exactly: one armed criterion at 0.0 fails the gate regardless of
-        # the other armed criterion's weight.
+        # gate_threshold=1.0 (the default) is strict AND: one armed criterion at 0.0 fails the gate
+        # regardless of the other armed criterion's weight.
         criteria = [
             _skill_crit("date-teller", "date-teller", stop_on_pass=True, weight=0.8),
             _skill_crit("weather-teller", "date-teller", stop_on_fail=True, weight=0.2),
@@ -1473,11 +1413,6 @@ class TestEarlyStopModels:
             criteria_results=[_crit_result("command_executed", 0.0), _crit_result("command_executed", 1.0)]
         )
         assert high_weight_fails.armed_criteria_passed(criteria, gate_threshold=0.7) is False
-
-
-# --------------------------------------------------------------------------- #
-# Phase 3: EarlyStopWatcher
-# --------------------------------------------------------------------------- #
 
 
 def _watcher(criteria: list[Any], *, max_turns: int | None = 20, gate_threshold: float = 1.0) -> EarlyStopWatcher:
@@ -1621,11 +1556,8 @@ class TestEarlyStopWatcher:
         assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_auto_mixed_pass_stops_ignoring_undecided_distractors(self) -> None:
-        # THE mixed-arming fix: one positive + two distractors, all armed `auto`.
-        # Engaging ONLY the expected skill pass-stops on turn 1 even though the two
-        # distractors are still "undecided" — fail-armed criteria are not required
-        # to live-pass. (Under the old "every armed must pass" rule this could never
-        # fire, since a distractor can never live-pass.)
+        # Mixed arming: one positive + two distractors, all with both triggers. Engaging ONLY the expected
+        # skill pass-stops on turn 1 — undecided fail-armed distractors are not required to live-pass.
         watcher = _watcher(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True),  # positive -> pass
@@ -1720,8 +1652,7 @@ class TestEarlyStopWatcher:
         assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
 
     def test_default_gate_threshold_fires_fail_stop_on_any_weight(self) -> None:
-        # At the default gate_threshold=1.0, even the low-weight criterion's
-        # failure alone must still fire — byte-for-byte the pre-weighting rule.
+        # At the default gate_threshold=1.0 even the low-weight criterion's failure alone fires.
         watcher = _watcher(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True, weight=0.8),
@@ -2113,15 +2044,8 @@ class TestEarlyStopWatcher:
         assert watcher.info is None
 
     def test_pass_stop_cuts_undecided_fail_only_sibling_documented_gap(self) -> None:
-        # KNOWN one-sided trade, pinned so a future deferral redesign flips it
-        # consciously: the pass-stop deferral holds only for PASS-CAPABLE
-        # siblings. An armed fail-only-decidable criterion that still needs
-        # evidence (command_executed with min_count>=1 AND max_count set —
-        # polarities == {"fail"} but the frozen score needs the command run)
-        # is NOT deferred on, so an on_pass=stop sibling can cut before its
-        # minimum count is reached and the armed gate scores it 0. Documented
-        # in TASK_DEFINITION_GUIDE.md § stop_early: authoritative scoring for
-        # such combinations belongs on the kill-switched run.
+        # Pinned one-sided trade: the pass-stop defers only on PASS-CAPABLE siblings, so a fail-only
+        # sibling still needing evidence is cut and scores 0 — see TASK_DEFINITION_GUIDE.md § stop_early.
         watcher = _watcher(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),
@@ -2253,11 +2177,6 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
         assert watcher.info.tool_call_index == 2
-
-
-# --------------------------------------------------------------------------- #
-# Phase 3: Orchestrator wiring
-# --------------------------------------------------------------------------- #
 
 
 class _ScriptedAgent:
@@ -2685,11 +2604,6 @@ class TestOrchestratorSetupActivation:
         assert orch._early_stop_watcher is None
 
 
-# --------------------------------------------------------------------------- #
-# Report / telemetry surfaces
-# --------------------------------------------------------------------------- #
-
-
 def _stopped_result(
     *,
     reason: EarlyStopReason = EarlyStopReason.CRITERION_PASSED,
@@ -2814,13 +2728,6 @@ class TestEarlyStopReportSurfaces:
         assert props["EarlyStopReason"] == "decision_budget_exceeded"
 
 
-# --------------------------------------------------------------------------- #
-# Cooperative should_stop seam on CodexAgent — mirrors TestCooperativeStopSeam.
-# SDK-independent: the pump is driven over fake notifications (agentMessage
-# deltas need no openai_codex types) and turn/completed handling is stubbed.
-# --------------------------------------------------------------------------- #
-
-
 class _CodexNotifIter:
     """Counting iterator over fake notifications (the pump pulls via ``next``)."""
 
@@ -2918,6 +2825,9 @@ async def _run_codex_communicate(
 
 
 class TestCodexCooperativeStopSeam:
+    """Pins the should_stop seam on CodexAgent without the SDK: fake agentMessage notifications,
+    turn/completed handling stubbed."""
+
     async def test_stop_after_first_dispatched_notification(self) -> None:
         notifications = [_codex_delta(0), _codex_delta(1), _codex_delta(2), _codex_completed()]
         agent, record, sink, stream, handle = await _run_codex_communicate(notifications=notifications, stop_after=1)
@@ -3058,12 +2968,6 @@ class TestCodexCooperativeStopSeam:
         recover.assert_not_awaited()
 
 
-# --------------------------------------------------------------------------- #
-# Cooperative should_stop seam on AntigravityAgent — same contract, driven over
-# a fake step stream (mirrors tests/test_antigravity_agent.py's conventions).
-# --------------------------------------------------------------------------- #
-
-
 def _ag_step(i: int) -> SimpleNamespace:
     """A minimal streamed text step (plain strings stand in for the SDK enums)."""
     return SimpleNamespace(
@@ -3138,6 +3042,8 @@ async def _run_antigravity_communicate(
 
 
 class TestAntigravityCooperativeStopSeam:
+    """Pins the same should_stop seam on AntigravityAgent, driven over a fake step stream."""
+
     async def test_stop_after_first_processed_step(self) -> None:
         agent, record, sink, conversation = await _run_antigravity_communicate(stop_after=1, n_steps=3)
         # The deciding step is kept; the next is never pulled.
@@ -3250,13 +3156,9 @@ class TestAntigravityCooperativeStopSeam:
         await agent.discard_pending_turn()
 
 
-# --------------------------------------------------------------------------- #
-# Orchestrator-level wiring on a non-Claude agent type: the watcher, gating and
-# report row are agent-agnostic — an armed codex task flows end to end.
-# --------------------------------------------------------------------------- #
-
-
 class TestOrchestratorEarlyStopWiringCodex:
+    """Pins that the watcher, gating and report row are agent-agnostic: an armed codex task runs end to end."""
+
     _SKILL = "date-teller"
 
     def _criteria(self) -> list[Any]:

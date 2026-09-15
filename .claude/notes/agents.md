@@ -231,6 +231,12 @@ overlaps, so a call closing in the gap before a step start needs nobody to remem
 The rule that used to live there was wrong once on OpenCode — clearing at `step_start`
 wiped the span before `step_finish` could subtract it, a 100% overstatement of that window.
 
+The OpenCode gap case is reachable only through the NON-TERMINAL tool path. The CLI
+normally emits one already-`completed` event per call, and that call closes inside the
+step that opened it. That is why the measured corpus shows 0.00% for this case, and why
+`TestToolSpansSurviveTheStepBoundary` drives `_OpenCodeTurnState` directly instead of a
+recorded stream.
+
 ## Why a clean exit can still be a crash
 
 An exit code of 0 with no telemetry is indistinguishable from a real pass in every

@@ -994,24 +994,17 @@ async def test_communicate_respects_should_stop_during_poll(monkeypatch):
 
 
 class _TwoLayerReentrancyGuardedConversation:
-    """Faithfully mirrors the REAL SDK's two-generator-layer shape:
-    ``Conversation.receive_steps()`` (the public method ``_drain()`` calls) is
-    ITSELF an async generator that delegates to
-    ``LocalConnection.receive_steps()`` (``async for step in
-    self._connection.receive_steps(): yield step``, verified against the
-    installed SDK) -- and the ``_is_receiving`` re-entrancy flag lives on that
-    INNER, connection-layer generator, not the outer one. A single-layer fake
-    (putting the flag directly on the generator ``_drain()`` iterates) cannot
-    catch a bug in how the outer/inner boundary is handled, since aclose()-ing
-    a generator always closes ITSELF -- the question this fake exists to probe
-    is whether that also reaches the inner one, and (confirmed live against
-    real asyncio semantics) it does NOT do so synchronously: a `GeneratorExit`
-    thrown into a delegating generator's frame does not immediately run the
-    generator it was mid-iterating -- that's deferred to the event loop's
-    async-gen finalizer, exactly like the original single-layer bug, just one
-    level down. ``_drain()``'s fix is therefore a bounded retry (yielding via
-    ``asyncio.sleep(0)`` for that already-scheduled finalizer to land), not a
-    claim that the inner generator closes synchronously."""
+    """A fake Conversation that reproduces the real SDK's two async-generator layers.
+
+    ``receive_steps()`` (the Conversation layer ``_drain()`` iterates) delegates
+    to a connection-layer generator, and the ``_is_receiving`` re-entrancy flag
+    lives on that INNER generator, cleared only in its own ``finally``.
+
+    HAZARD: do not collapse this to one layer. Closing the outer generator does
+    not synchronously close the inner one, and only the two-layer shape
+    reproduces the transient ``RuntimeError`` that ``_drain()`` retries past.
+
+    Rationale: .claude/notes/agents.md § The receive_steps re-entrancy window"""
 
     last_response = ""
 
@@ -1505,23 +1498,13 @@ class _Clock:
     """Controlled stand-in for the reducer's clocks — a `TurnClock` and `time`.
 
     ONE monotonically advancing counter, read by both: every read — the turn
-    clock's `now()` or `time.monotonic()` — costs TICK_MS. So the fixture's
-    timeline is driven by read ORDER, not by elapsed time, and the two are
-    deliberately coupled rather than independent. That is enough to pin the
-    arithmetic exactly.
+    clock's `now()` or `time.monotonic()` — costs TICK_MS. The timeline is
+    driven by read ORDER, not by elapsed time, which pins the arithmetic exactly.
 
-    Every WALL stamp the reducer records now derives from its per-turn
-    `TurnClock`, so this stands in for that object rather than for the
-    module's `datetime`. That distinction is load-bearing, not cosmetic: a
-    derived stamp does not read `datetime.now()`, so the old patch would no
-    longer reach it and these tests would quietly measure the real clock and
-    pass by accident. `time` is still patched because `duration_seconds` and
-    the poll deadlines read `time.monotonic()` directly, and must — a deadline
-    may not move when the wall clock steps.
-
-    What it still does NOT prove is that the reducer keeps the two in their
-    proper roles; with one basis for every wall stamp there is no longer a
-    second role to confuse it with.
+    HAZARD: every wall stamp the reducer records derives from its `TurnClock`,
+    so patching the module's `datetime` instead reaches nothing and the tests
+    silently measure the real clock. `time` stays patched because
+    `duration_seconds` and the poll deadlines read `time.monotonic()` directly.
     """
 
     TICK_MS = 100.0
