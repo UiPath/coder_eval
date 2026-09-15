@@ -183,10 +183,10 @@ and whole-tree rules — those reasoning over Markdown/YAML or the entire `src/`
 rather than one AST at a time — are instead `@pytest.mark.lint` classes in
 `tests/test_custom_lint.py`.
 
-**Every rule carries its own rationale in its module docstring**, including the defect
-that motivated it and its known blind spots. That docstring is the authoritative
-explanation; read it before editing, suppressing, or widening a rule. Run `make lint` —
-`make test` deliberately excludes these.
+**Each rule's module docstring states its invariant, its scope and its known blind
+spots.** Read it before you edit, suppress or widen a rule. The defect that caused each
+rule is in `.claude/notes/lint-rules.md`. Run `make lint` — `make test` does not run
+these rules.
 
 When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root
 cause is a mechanically detectable pattern, add a rule following the CE000+ pattern and

@@ -15,6 +15,7 @@ rule docstrings in `tests/lint/rules/`, then the guides under `docs/`.
 - [agents.md](agents.md) — agent adapters, the turn lifecycle, token reconciliation, harness parity
 - [contracts.md](contracts.md) — criteria, datasets, aggregation, judging
 - [isolation.md](isolation.md) — the docker driver, the sandbox, detached grading
+- [lint-rules.md](lint-rules.md) — why each CE lint rule exists
 - [orchestration.md](orchestration.md) — config merge, resume, early stop, execute vs. run
 - [permissions.md](permissions.md) — the chmod window and the reference anti-cheat
 - [persistence.md](persistence.md) — atomic writes and judge persistence
@@ -59,8 +60,8 @@ number written down anywhere else is a second declaration that will be wrong.
 
 ## Where a CE rule's rationale lives
 
-Each rule's authoritative rationale is its own module docstring under
-`tests/lint/rules/` — or, for the doc-surface and whole-tree rules, the corresponding
-`@pytest.mark.lint` class in `tests/test_custom_lint.py`. Read that before editing,
-suppressing or widening a rule. No prose summary is kept here: a second copy is a second
-declaration, and it is the one that goes stale.
+A rule's invariant, scope and blind spots live in its rule file under `tests/lint/rules/`
+(or its `@pytest.mark.lint` class in `tests/test_custom_lint.py`). Read that before you
+edit, suppress or widen a rule. The defect that motivated it lives in
+[lint-rules.md](lint-rules.md), under the rule's id. When the two disagree, the rule file
+is correct.
