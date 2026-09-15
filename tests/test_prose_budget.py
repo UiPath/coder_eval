@@ -181,6 +181,17 @@ class TestPointers:
         root = self._root(tmp_path, source, "# Timing\n\n## `--resume` is command-relative\n")
         assert prose_budget.check_pointers(root) == []
 
+    def test_a_subsection_heading_resolves(self, tmp_path: Path) -> None:
+        """A pointer may target a ``###``: the single-home rule appends to a section."""
+        source = '"""Rationale: .claude/notes/timing.md § The clamp"""\n'
+        root = self._root(tmp_path, source, "# Timing\n\n## close_window\n\n### The clamp\n\nWhy.\n")
+        assert prose_budget.check_pointers(root) == []
+
+    def test_a_level_one_heading_does_not_resolve(self, tmp_path: Path) -> None:
+        source = '"""Rationale: .claude/notes/timing.md § Timing"""\n'
+        root = self._root(tmp_path, source, "# Timing\n\n## close_window\n")
+        assert len(prose_budget.check_pointers(root)) == 1
+
     def test_a_heading_with_a_colon_resolves(self, tmp_path: Path) -> None:
         source = '"""Rationale: .claude/notes/timing.md § Execute vs. run: the grading switch"""\n'
         root = self._root(tmp_path, source, "# Timing\n\n## Execute vs. run: the grading switch\n")

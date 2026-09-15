@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 _DOCSTRING_ESSAY_WORDS = 150
 _COMMENT_BLOCK_LINES = 3
-_ESSAY_BASELINE_WORDS = 60_642
+_ESSAY_BASELINE_WORDS = 46_898
 
 _SRC = Path("src/coder_eval")
 
@@ -52,7 +52,9 @@ _DOCSTRING_OWNERS = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Clas
 
 _POINTER = re.compile(r"Rationale:\s*(\S+\.md)\s*§\s*(.+?)\s*$")
 
-_HEADING = re.compile(r"^##\s+(.+?)\s*$")
+# ``##`` or ``###``: a pointer may target a SUBSECTION, so appending to an existing
+# section (the single-home rule) does not force the pointer up to the parent heading.
+_HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$")
 
 # Executable directives that live in comments and therefore never enter the AST.
 _DIRECTIVE = re.compile(r"^#\s*(?:noqa\b|type:\s*ignore\b|pyright:|nosec\b|pragma:|fmt:)")

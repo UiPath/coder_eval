@@ -150,14 +150,13 @@ async def run_batch(
             try:
                 rt.run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
                 sandbox_cfg = rt.task.sandbox
-                # Resolve the driver-derived preservation default HERE, where the
-                # original driver is still visible (the in-container orchestrator
-                # sees it forced to tempdir). Explicit --preservation-mode wins.
+                # HERE, where the original driver is still visible: the
+                # in-container orchestrator sees it forced to tempdir.
                 driver = sandbox_cfg.driver if sandbox_cfg is not None else "tempdir"
                 preservation_mode = resolve_preservation_mode(config.preservation_mode, driver)
-                # Explicit DIRECT_WRITE on a non-docker host runs the sandbox under
-                # run_dir, re-opening the parent-dir node_modules contamination the
-                # host default (MOVE_ON_WRITE) exists to prevent (MST-9795).
+                # DIRECT_WRITE on a non-docker host re-opens the parent-dir
+                # node_modules contamination MOVE_ON_WRITE exists to prevent
+                # (MST-9795).
                 if config.preservation_mode == PreservationMode.DIRECT_WRITE and driver != "docker":
                     logger.warning(
                         "DIRECT_WRITE on driver=%s runs the sandbox under run_dir; parent-dir "
@@ -165,11 +164,9 @@ async def run_batch(
                         driver,
                     )
                 if sandbox_cfg is not None and sandbox_cfg.driver == "docker":
-                    # Docker isolation: spawn one container per task, parse
-                    # its task.json on completion. The in-container CLI
-                    # serializes stream events as NDJSON on stdout; we
-                    # forward them to the host callback so --stream
-                    # renders identically to the in-process path.
+                    # One container per task; its NDJSON stream events are
+                    # forwarded to the host callback so --stream renders
+                    # identically to the in-process path.
                     from ..isolation.docker_runner import DockerRunner
 
                     result = await DockerRunner(
@@ -179,10 +176,9 @@ async def run_batch(
                         verbose=config.verbose,
                         grade=config.grade,
                     ).run()
-                    # The in-container _finalize_result can't emit task telemetry
-                    # (connection-string env vars aren't forwarded into the
-                    # container), so emit the Task.End event host-side here
-                    # — keeping docker runs at parity with the in-process path.
+                    # The in-container finalize cannot emit telemetry (the
+                    # connection-string env vars aren't forwarded), so the host
+                    # emits Task.End here.
                     from ..orchestrator import build_task_event
                     from ..telemetry import track_event
 
@@ -305,10 +301,8 @@ def _create_error_task_result(
         TaskResult with error information.
     """
     error_type = type(error).__name__
-    # A failed image build is an environment/setup failure — record it as
-    # BUILD_FAILED (not generic ERROR) so reports/run.json distinguish it. The
-    # import is lazy + scoped to this except-path use so batch stays import-light
-    # and the non-docker path never imports the docker runner.
+    # An environment/setup failure, recorded as BUILD_FAILED rather than generic
+    # ERROR. The import is lazy so the non-docker path never imports the runner.
     from ..isolation.docker_runner import DockerBuildError
 
     is_build_failure = isinstance(error, DockerBuildError)
@@ -357,24 +351,17 @@ class ResumePartition(NamedTuple):
 def _owes_a_grade(result: EvaluationResult) -> bool:
     """Whether a finalized row was executed but never scored.
 
-    Evidence, not label. ``NOT_GRADED`` is the ordinary shape, but an ``execute``
-    row that also tripped a run limit (TIMEOUT, a budget stop) carries an
-    execution-fact status whose category is ``error``/``failed`` — and no verdict
-    at all. Both are equally owed a grade; only the first announces it.
+    EVIDENCE, not label: ``NOT_GRADED`` is the ordinary shape, but an ``execute``
+    row that also tripped a run limit carries an execution-fact status and no
+    verdict at all. A row with a criteria vector or a score HAS been graded,
+    whatever its status.
 
-    A row that carries a criteria vector or a score has been graded, whatever its
-    status, so a genuine FAILURE/ERROR from ``run`` is untouched.
+    "Executed" is a required half, not decoration — a synthetic ERROR /
+    BUILD_FAILED row for a container that died before producing task.json carries
+    no verdict either, and routing those into grading replaced the real diagnostic
+    with a wrong-cause grading error.
 
-    "Executed" is a required half, not decoration. Evidence of *no verdict* alone
-    was too broad: ``DockerRunner._write_synthetic_task_json`` writes an ERROR /
-    BUILD_FAILED row for a container that died before producing task.json, and
-    those carry no verdict either — so a plain ``run --resume`` routed every
-    dead container and every failed image build into grading, where the fold-back
-    replaced the real diagnostic ("Container exited with code 137 without
-    producing task.json") with a wrong-cause grading error, and left the on-disk
-    record and run.json disagreeing about the same row. ``NOT_GRADED`` announces
-    itself and is always owed; an execution-fact status must also show that an
-    agent phase happened at all.
+    Rationale: .claude/notes/orchestration.md § `--resume` is command-relative
     """
     if result.weighted_score is not None or result.success_criteria_results:
         return False
@@ -385,34 +372,18 @@ def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = Tr
     """Split resolved tasks over what ``--resume`` still owes each one.
 
     A task is already-complete when its task.json exists, parses, and carries a
-    final_status. task.json is written atomically at end-of-run, so any parseable
-    file with a status is a finished task (no partial-write ambiguity). Complete
-    tasks are reloaded into TaskResults (to fold into run.json) and excluded from
-    to_run; everything else — including failed-to-parse — re-runs.
+    final_status — written atomically at end-of-run, so any parseable file with a
+    status is finished. Everything else, including failed-to-parse, re-runs.
 
-    **"Finished" is relative to the resuming command, not absolute.** A
-    ``NOT_GRADED`` row (written by ``coder-eval execute``) has a final status, so
-    the naive test calls it complete. That is right for ``execute --resume``,
-    which owes it nothing — and wrong for ``run --resume``, which was asked to
-    grade: skipping it would report "already complete", grade nothing, and exit
-    0. So under ``grade=True`` those rows go to ``to_grade`` instead, where the
-    caller runs the criteria against the trajectory and workspace already on
-    disk rather than paying for the agent a second time.
+    **"Finished" is relative to the resuming command, not absolute.** Under
+    ``grade=True`` a row that was executed but never scored goes to ``to_grade``
+    instead of being called complete, where the caller runs the criteria against
+    the trajectory already on disk rather than paying for the agent again.
 
-    The test is the row's **evidence**, not its status: a row is owed a grade
-    when it was executed but never scored. Keying on ``category == "ungraded"``
-    alone missed every ``execute`` row that also carries an execution fact — a
-    TIMEOUT or budget stop aborts the run before grading, so under ``execute`` it
-    lands with ``weighted_score is None`` and an empty criteria vector, yet its
-    category is ``error``/``failed`` and resume filed it as complete. It then
-    stayed permanently unscored in run.json, the rollup and the evalboard, while
-    ``evaluate <run_dir>`` graded the identical bytes happily — two entry points
-    into one feature disagreeing about the same record.
+    The asymmetry is only for a row that was NEVER scored: FAILURE and ERROR rows
+    that DO carry a verdict stay complete under both commands.
 
-    Note the asymmetry is only for a row that was never scored. FAILURE and ERROR
-    rows that DO carry a verdict stay complete under both commands — resume has
-    never retried failures (delete a task's task.json to force that), and this
-    does not change it.
+    Rationale: .claude/notes/orchestration.md § `--resume` is command-relative
 
     Args:
         resolved_tasks: Fully-resolved tasks for the whole run.
@@ -487,23 +458,17 @@ def _load_completed_result(rt: ResolvedTask) -> TaskResult | None:
 def recover_task_results(run_dir: Path) -> list[TaskResult]:
     """Reconstruct ``TaskResult``s from every finalized ``task.json`` under ``run_dir``.
 
-    The disk half of the run-summary seam: pairs with ``build_run_summary`` to
-    (re)aggregate a finished run without re-executing it. Each ``task.json`` is the
-    atomically-written ``EvaluationResult`` for one task, so a file that is missing,
-    unparseable, or carries no ``final_status`` is skipped as not-yet-finalized
-    (mirrors ``_load_completed_result``). ``task_id`` and ``variant_id`` come from
-    the result itself; ``replicate_index`` is recovered from the
-    ``<variant_id>/<task_id>/<NN>/`` layout (``build_task_run_dir``). ``suite_id`` /
-    ``row_id`` are not stored in ``task.json`` and are left ``None`` — they feed
-    suite rollups, not ``run.json``.
+    The disk half of the run-summary seam. A file that is missing, unparseable or
+    carries no ``final_status`` is skipped as not-yet-finalized. ``replicate_index``
+    is recovered from the ``<variant_id>/<task_id>/<NN>/`` layout; ``suite_id`` and
+    ``row_id`` are not stored in ``task.json`` and stay ``None``.
 
-    Results are sorted by ``(variant_id, task_id, replicate_index)`` so the rebuilt
-    ``run.json`` ordering is deterministic, independent of filesystem walk order.
+    Sorted by ``(variant_id, task_id, replicate_index)`` so the rebuilt ``run.json``
+    ordering is deterministic rather than filesystem-walk order.
 
-    A ``task.json`` that lives under a *nested* run dir — a subdirectory carrying its
-    own ``run.json`` — belongs to that sub-run, not this one, and is excluded so a
-    parent summary never absorbs a nested suite's tasks. Base runs have no nesting;
-    this only matters for composed layouts that stack sub-runs under one tree.
+    A ``task.json`` under a NESTED run dir — a subdirectory carrying its own
+    ``run.json`` — belongs to that sub-run and is excluded, so a parent summary
+    never absorbs a nested suite's tasks.
     """
     nested_roots = [p.parent for p in run_dir.rglob("run.json") if p.parent != run_dir]
     recovered: list[TaskResult] = []
@@ -513,9 +478,8 @@ def recover_task_results(run_dir: Path) -> list[TaskResult]:
         try:
             result = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            # Unreadable / malformed / schema-mismatched. Skip so one corrupt file can't
-            # abort the rebuild, but warn — silently dropping it would shrink tasks_run
-            # (numerator and denominator) with no signal that a task was lost.
+            # Skip so one corrupt file cannot abort the rebuild, but WARN:
+            # silently dropping it shrinks tasks_run with no signal.
             logger.warning("skipping unreadable/malformed task.json %s: %s", task_json, exc)
             continue
         if not result.final_status:
@@ -539,13 +503,10 @@ def recover_task_results(run_dir: Path) -> list[TaskResult]:
 
 
 # --- resume config fingerprint ------------------------------------------------
-# The per-task path key (variant_id/task_id/NN) does NOT encode result-affecting
-# run config like the model or backend. So --resume, which matches finalized tasks
-# purely by that path, would otherwise fold results produced under a *different*
-# config into the new run (e.g. resuming a Sonnet run with --model opus keeps the
-# Sonnet results for already-finalized tasks). We stamp the config on every run and
-# warn (don't refuse) when a resume's config differs (in _run_with_experiment) so
-# the resulting mixed-config run.json is surfaced rather than silent.
+# The per-task path key does NOT encode result-affecting run config, so --resume
+# would otherwise fold results produced under a DIFFERENT config into the new run.
+# The config is stamped on every run and a differing resume WARNS rather than
+# refuses, so the mixed-config run.json is surfaced rather than silent.
 RESUME_FINGERPRINT_FILE = "resume_fingerprint.json"
 
 
@@ -591,10 +552,8 @@ def read_run_fingerprint(run_dir: Path) -> dict[str, object] | None:
     return data if isinstance(data, dict) else None
 
 
-# `grade` is excluded from the drift warning: `execute` then `run --resume` is a
-# SUPPORTED flow, not a config mistake, and the warning's text ("already-finalized
-# tasks keep their original-config results") is actively wrong for it — those rows
-# are re-graded with the current config, which is the entire point.
+# `grade` is excluded: `execute` then `run --resume` is a SUPPORTED flow, and the
+# warning's text is actively wrong for it — those rows ARE re-graded.
 _FINGERPRINT_DIFF_EXEMPT = frozenset({"grade"})
 
 
@@ -626,10 +585,8 @@ def _override_uip_versions_from_tasks(version_info: dict[str, Any], task_results
     ``"unknown"``, and for ``tool_plugins`` no non-empty plugin entry at all
     (legacy results, or every task errored before env capture).
     """
-    # Defence-in-depth alongside the chokepoint fix in _uip_version: filter to
-    # version-shaped strings so junk already on disk (older runs captured a
-    # CLI that printed a JSON envelope instead of a version) can't leak into
-    # the aggregated chip when those results are re-summarised on --resume.
+    # Defence-in-depth alongside the chokepoint fix: filter to version-shaped
+    # strings so junk already on disk cannot leak in on --resume.
     cli_versions = sorted(
         {
             v
@@ -650,9 +607,8 @@ def _override_uip_versions_from_tasks(version_info: dict[str, Any], task_results
         for name, plugin_version in plugins.items():
             if isinstance(plugin_version, str) and plugin_version:
                 plugin_versions.setdefault(name, set()).add(plugin_version)
-    # Gate on collected entries, not on "some task had a tool_plugins dict":
-    # an all-empty consensus ({} from every task) must not stomp the host
-    # fallback — symmetric with the ""/"unknown" filter on cli_version above.
+    # Gate on COLLECTED entries: an all-empty consensus must not stomp the host
+    # fallback.
     if plugin_versions:
         drifted = {name: sorted(versions) for name, versions in plugin_versions.items() if len(versions) > 1}
         if drifted:
@@ -727,17 +683,14 @@ def build_run_summary(
     statuses = [r.result.final_status for r in task_results]
 
     version_info = get_version_info()
-    # The run-level cli/tool versions must describe what the tasks executed,
-    # not this process's host installs: under --driver docker each task runs
-    # in its own container, which auto-installs the latest alpha tool plugins
-    # at first use — the host's `uip` tree can differ arbitrarily (#366
-    # recorded host values by mistake). Aggregate the per-task (in-container)
-    # captures; host values survive only as a fallback when no task reported.
+    # Must describe what the TASKS executed, not this process's host installs:
+    # under docker each task's container auto-installs the latest alpha plugins,
+    # so the host's tree can differ arbitrarily (#366 recorded host values by
+    # mistake). Host values survive only as a fallback.
     _override_uip_versions_from_tasks(version_info, task_results)
     host_coder_eval = version_info.get("coder_eval", "unknown")
-    # Surface host↔container version drift: under --driver docker the agent
-    # ran against the image's version, not the host's. Without this warning
-    # framework_version silently mis-attributes the runtime.
+    # Without this, framework_version silently mis-attributes the runtime: under
+    # docker the agent ran against the image's version, not the host's.
     container_versions = {
         (r.result.environment_info or {}).get("coder_eval") for r in task_results if r.result.environment_info
     }
@@ -761,9 +714,8 @@ def build_run_summary(
         tasks_not_graded=sum(1 for s in statuses if s.category == "ungraded"),
         tasks_token_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.TOKEN_BUDGET_EXCEEDED),
         tasks_cost_budget_exceeded=sum(1 for s in statuses if s == FinalStatus.COST_BUDGET_EXCEEDED),
-        # Verdict evidence for pass_rate / error_share. A TIMEOUT lands in the
-        # `failed` bucket without any criterion having run, so the buckets alone
-        # cannot answer "was this run measured at all".
+        # Verdict evidence: a TIMEOUT lands in `failed` with no criterion having
+        # run, so the buckets alone cannot answer this.
         tasks_measured=sum(1 for r in task_results if r.result.weighted_score is not None),
         skipped_tasks=skipped_tasks or [],
         max_parallel=max_parallel,
