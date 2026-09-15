@@ -221,10 +221,9 @@ def _option_names(command: str) -> set[str]:
     return {opt for param in cmd.params for opt in getattr(param, "opts", [])}
 
 
-# `execute` restates `run`'s Typer signature because Typer builds its parser from
-# the signature and there is no way to share one. That duplication is the drift
-# risk this test exists to close: a flag added to `run` must be added here too,
-# or consciously listed below as a deliberate omission.
+# `execute` restates `run`'s Typer signature. This test pins that every `run` flag
+# reaches `execute` unless it is listed below as a deliberate omission; the next one
+# pins that each shared flag is declared identically on both commands.
 _DELIBERATELY_ABSENT_FROM_EXECUTE = {
     "--junit-xml",  # a report of verdicts, and there are none
     "--allow-host-grading",  # decides how a GRADE runs; execute never grades
@@ -244,6 +243,77 @@ def test_execute_exposes_run_flags_minus_the_refused_one() -> None:
     assert not execute_opts - run_opts, "`execute` must not grow flags of its own"
     # The omissions must be real, not stale entries masking a genuine gap.
     assert not _DELIBERATELY_ABSENT_FROM_EXECUTE & execute_opts
+
+
+# Declared per command because the help text is deliberately command-specific.
+_COMMAND_SPECIFIC_HELP = {"resume", "format"}
+
+
+def _shared_parameter_names() -> set[str]:
+    import inspect
+
+    from coder_eval.cli.execute_command import execute_command
+    from coder_eval.cli.run_command import run_command
+
+    run_params = set(inspect.signature(run_command).parameters)
+    execute_params = set(inspect.signature(execute_command).parameters)
+    return (run_params & execute_params) - _COMMAND_SPECIFIC_HELP
+
+
+def _declaration(param: Any) -> dict[str, Any]:
+    """Everything a click parameter shows or validates, with type objects reduced to comparable values."""
+    fields = (
+        "opts",
+        "secondary_opts",
+        "help",
+        "default",
+        "show_default",
+        "multiple",
+        "is_flag",
+        "flag_value",
+        "count",
+        "nargs",
+        "required",
+        "metavar",
+        "hidden",
+        "envvar",
+        "show_envvar",
+    )
+    rendered: dict[str, Any] = {field: getattr(param, field, None) for field in fields}
+    kind = param.type
+    type_fields = (
+        "choices",
+        "case_sensitive",
+        "min",
+        "max",
+        "min_open",
+        "max_open",
+        "clamp",
+        "exists",
+        "file_okay",
+        "dir_okay",
+        "readable",
+        "writable",
+        "resolve_path",
+    )
+    rendered["type"] = (type(kind).__name__, *(getattr(kind, field, None) for field in type_fields))
+    return rendered
+
+
+def test_run_and_execute_help_are_identical_for_shared_flags() -> None:
+    """A shared flag must look and validate the same on both commands; only `--resume` and `--format` differ."""
+    import typer.main
+
+    click_app = typer.main.get_command(app)
+    run_params = {p.name: p for p in click_app.commands["run"].params}  # type: ignore[attr-defined]
+    execute_params = {p.name: p for p in click_app.commands["execute"].params}  # type: ignore[attr-defined]
+
+    shared = _shared_parameter_names()
+    assert shared, "no shared parameters found"
+    differing = sorted(n for n in shared if _declaration(run_params[n]) != _declaration(execute_params[n]))
+    assert not differing, f"shared flag(s) {differing} differ between `run` and `execute`"
+    for name in _COMMAND_SPECIFIC_HELP:
+        assert run_params[name].help != execute_params[name].help, f"--{name} is no longer command-specific"
 
 
 # --------------------------------------------------------------------------
