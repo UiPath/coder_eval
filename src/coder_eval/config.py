@@ -26,11 +26,9 @@ _DEFAULT_TELEMETRY_CONNECTION_STRING = base64.b64decode(
 ).decode("utf-8")
 
 
-# Load .env file with override so .env values always win over shell environment
+# override=True so .env always wins over the shell's possibly-stale credentials.
 load_dotenv(override=True)
 
-# For certain keys, we want .env values to take precedence over shell environment
-# because the shell may have outdated/different credentials
 env_values = dotenv_values(".env")
 for key in [
     "ANTHROPIC_API_KEY",
@@ -79,36 +77,30 @@ class Settings(BaseSettings):
         _reject_removed_default_knobs()
         super().__init__(*args, **kwargs)
 
-    # API Keys (for Claude Code agent only)
     anthropic_api_key: str | None = None
 
-    # Paths
     runs_dir: Path = Path("runs")  # Base directory for timestamped runs
 
-    # API Backend routing
     api_backend: ApiBackend = ApiBackend.DIRECT
 
-    # AWS Bedrock settings (used when api_backend == "bedrock")
     aws_bearer_token_bedrock: str | None = None
     aws_region: str | None = None
     bedrock_model: str | None = None  # Cross-region model ID
     bedrock_small_model: str | None = None  # Cross-region small model ID
 
-    # HAZARD: these map to the ANTHROPIC_* vars, but ONLY inside the SDK subprocess
-    # env. Deliberately NOT named anthropic_*, so the export loop below cannot leak
-    # ANTHROPIC_BASE_URL process-wide and redirect the judge's own client.
+    # HAZARD: these map to the ANTHROPIC_* vars ONLY inside the SDK subprocess env.
+    # NOT named anthropic_*, so the export loop cannot leak ANTHROPIC_BASE_URL
+    # process-wide and redirect the judge's own client.
     litellm_base_url: str | None = None
     litellm_auth_token: str | None = None
     litellm_model: str | None = None
     litellm_small_model: str | None = None
-    # Must point at the SAME file the proxy writes. When set and present, the harness
-    # joins each call's ACTUAL cost onto the turn; unset or missing => static pricing.
+    # Must point at the SAME file the proxy writes; unset or missing => static pricing.
     # Rationale: .claude/notes/reporting.md § Cost joining
     litellm_cost_log: str | None = None
 
     # CODEX_MODEL is the fallback when a task doesn't pin agent.model. For Azure set
-    # CODEX_API_VERSION too and use the deployment name as the model. CODEX_BASE_URL
-    # / CODEX_API_VERSION / CODEX_API_KEY are read via os.getenv in the agent.
+    # CODEX_API_VERSION too and use the deployment name as the model.
     codex_model: str | None = None
 
     # GEMINI_API_KEY is read from .env here so the export loop re-publishes it to
@@ -116,15 +108,12 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     antigravity_model: str | None = None
 
-    # Logging
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging
 
-    # On by default via the baked-in connection string. TELEMETRY_ENABLED is the
-    # single canonical disable gate.
+    # On by default via the baked-in connection string, which any set value (env
+    # or .env) overrides. TELEMETRY_ENABLED is the single canonical disable gate.
     telemetry_enabled: bool = True
-    # Defaults to the embedded coder-eval resource; any set value (env or .env, via
-    # the aliases below) overrides it — pydantic-settings prefers env over default.
     telemetry_connection_string: str | None = Field(
         default=_DEFAULT_TELEMETRY_CONNECTION_STRING,
         validation_alias=AliasChoices(
@@ -180,8 +169,7 @@ class Settings(BaseSettings):
                 f"LiteLLM-endpoint routing is enabled but missing required settings: {', '.join(missing)}."
                 + " Please set them in your .env file."
             )
-        # Reject a malformed base_url here so the downstream preflight and
-        # environment_info get a well-formed absolute URL.
+        # Reject a malformed base_url so the preflight and environment_info get a well-formed URL.
         parts = urlsplit(self.litellm_base_url or "")
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError(
@@ -215,15 +203,12 @@ class Settings(BaseSettings):
             return
 
 
-# Global settings instance
 settings = Settings()
 
-# For external libraries that read os.getenv() rather than the Settings object.
-# Non-None values only, stringified.
+# For external libraries that read os.getenv(); non-None values only, stringified.
 for key, value in settings.model_dump().items():
     if value is not None:
         env_key = key.upper()
-        # Convert Path objects and other types to strings
         if isinstance(value, Path):
             os.environ[env_key] = str(value)
         elif isinstance(value, bool):

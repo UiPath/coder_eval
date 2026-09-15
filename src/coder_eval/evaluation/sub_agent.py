@@ -88,8 +88,7 @@ class SubAgentRunner:
         # drop a user's own nested subdir of the same name.
         # Rationale: .claude/notes/contracts.md § The security floor
         self._reference_ignore_patterns = reference_ignore_patterns or []
-        # Runtime-only in-process MCP injection. NOT routed through ``sdk_options``
-        # -- ``mcp_servers`` is framework-owned.
+        # Runtime-only MCP injection, NOT via ``sdk_options`` -- ``mcp_servers`` is framework-owned.
         self._extra_mcp_servers = extra_mcp_servers or {}
         # Public so the criterion can read it after ``run_async()`` returns; absent
         # when the caller passed ``capture=None``.

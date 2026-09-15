@@ -208,7 +208,7 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
 
-make docs-budget       # prose budget report; fails `make verify` if the total grows
+make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
 ```
 
 Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is
@@ -361,8 +361,11 @@ bandit, pre-commit, mcp
   code cannot say
 - **A docstring states the contract, not the history** — what a caller must know to call
   it correctly. Why the design is this shape belongs in `.claude/notes/`; what it used to
-  be belongs in git. `make docs-budget` reports the standing total and fails
-  `make verify` if it grows
+  be belongs in git. `make docs-budget` enforces two rules, both self-adjusting: a file's
+  own-line comments may not exceed `MAX(20, 0.15 × its length)`, and no docstring may
+  exceed 150 words of PROSE (an `Args:`/`Returns:`/`Raises:` block is structure, not
+  prose; an `@abstractmethod` is exempt because its docstring IS the interface contract).
+  There is no tree-wide total to hand-maintain — delete code and the budget shrinks with it
 
 ## Notes for AI Assistants
 
