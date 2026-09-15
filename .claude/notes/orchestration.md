@@ -57,9 +57,79 @@ VERDICT, never the facts — the seeding cannot restore a fact the execute phase
 captured. The budget gate runs AFTER the criteria on the graded path purely for
 partial-credit visibility, and there is no partial credit under `execute`.
 
+### Refusing a criteria-free task under grade
+
+`TaskDefinition.success_criteria` accepts an empty list at the model level, because the
+Harbor agent-phase `task.yaml` is criteria-free by design and must round-trip through
+`coder-eval execute`, which never grades. But scoring is vacuous over an empty list —
+`all_criteria_passed` returns True and `calculate_weighted_score` returns 0.0 — so such a
+task graded under `run` finalizes as SUCCESS at `weighted_score: 0.0`, an internally
+contradictory result for what is actually a typo, a bad merge, or a `-D` override that
+cleared the list. The refusal is therefore scoped to `grade`, exactly as the sibling
+simulation refusal is.
+
+It is checked against the POST-`--resume` set, never the full resolved list: an
+already-finalized row is folded back from `prior_results` and never re-executed or
+re-graded, so its own possibly-empty criteria are moot and must not block a run that is not
+going to grade it. The `to_grade` rows ARE about to be graded, so they get the same check —
+explicitly, rather than relying on `regrade_in_place`'s own per-row guard, so the whole
+batch is refused up front instead of one row at a time turning into a mid-resume warning.
+`evaluate` needs the same guard on its orchestrator-direct branch, which never calls
+`regrade_in_place` at all.
+
+### What the exit code counts
+
+The command exits non-zero when any task failed, errored, or any suite missed its
+thresholds — and, under `run` only, when any row came back ungraded. `run` was asked for a
+verdict and did not produce one (the grade crashed, or `--resume` could not grade the row),
+which is a failure of the command even though the row is neither `failed` nor `error`.
+Under `execute` an ungraded row is the expected outcome for every task and must not fail
+the command.
+
+The JUnit report is written BEFORE that gate, so a failing run still produces one; a write
+error propagates rather than being swallowed. Telemetry is flushed in a `finally` so it runs
+on both the success and the raised path, without catching the `typer.Exit` decided after it.
+
+Per-suite rollups are skipped entirely under `execute`: a rollup aggregates per-criterion
+results and there are none, so running it would gate a suite on an empty aggregate and
+report a threshold failure for a run that was never measured. The ungraded bucket is named
+explicitly in the aggregate line for the same reason — `coder-eval aggregate <run>` is the
+step right after `coder-eval execute`, so an ungraded run is the FIRST thing it renders, and
+without the term it reads "Aggregated 12 task(s) (0 ok / 0 fail / 0 err)": four numbers that
+no longer sum to `tasks_run`, with nothing on screen to say where the rest went. The
+end-of-run summary likewise reports what happened instead of "0/N succeeded", which for a
+clean `execute` reads as a total failure, and points at the run-dir resume form rather than
+`evaluate <task.yaml> <workspace>` — the two-argument shape grades a bare directory with NO
+trajectory, so `command_executed` / `skill_triggered` / trajectory-reading judges score
+differently from what `run` would have produced.
+
 ## `--resume` is command-relative
 
 - **`--resume` is command-relative**: `partition_for_resume(tasks, *, grade)` returns a four-way `ResumePartition` (`to_run` / `to_grade` / `prior_results` / `prior_resolved`), because **"finished" is not absolute — it depends on what the resuming command still owes the task**. A `NOT_GRADED` row carries a final status, so the original "has any final status" test called it complete: right for `execute --resume` (it finished executing), and wrong for `run --resume`, which was asked to grade and would instead report "already complete", grade nothing, and **exit 0**. The routing test is the row's **evidence** (`weighted_score is None and not success_criteria_results`), not its category: keying on `category == "ungraded"` missed every `execute` row that ALSO carries an execution fact — a TIMEOUT or budget stop aborts before grading, so it lands unscored with category `error`/`failed`, and resume filed it as complete while `evaluate <run_dir>` graded the identical bytes happily. Under `grade=True` those rows route to `to_grade`, where `_grade_resumed_tasks` runs the criteria against the trajectory and workspace already on disk via `orchestration/regrade.py::regrade_in_place` — reusing the agent spend, which is the entire reason `execute` and `run` are separate. The carve-out is **only** for `NOT_GRADED`: `FAILURE`/`ERROR` stay complete under both commands (resume has never retried failures — delete the task.json), and `clear_rerun_artifacts` deliberately skips `to_grade`, whose artifacts are the very thing being graded. A per-task grading failure is warned, STAMPED onto the folded-back row's `error_message` (the console line alone is not durable), and folded back in with its ORIGINAL ungraded result, so one bad row neither aborts the resume nor vanishes from run.json — and the exit gate counts `tasks_not_graded` **when `grade` is True**, so a `run` that graded nothing exits non-zero instead of telling CI the suite is fine. Under `execute` an ungraded row is the expected outcome and never fails the command. A row is owed a grade only when it was **executed** AND is unscored: evidence of "no verdict" alone routed every dead container and failed image build (`_write_synthetic_task_json` writes those with no verdict either) into grading, where the fold-back replaced the real diagnostic with a wrong-cause grading error and left `task.json` and `run.json` disagreeing about the same row — so the test is `final_status is NOT_GRADED or iteration_count > 0`, and that fold-back now APPENDS to `error_message` instead of replacing it. A re-grade also writes its log to **`grade.log`**, never `task.log`: `task_log_handler` opens `mode="w"`, so grading into the row's own directory truncated the agent trajectory log the run had already paid for — contradicting `_apply_resume`'s own "to_grade is deliberately NOT cleared" contract. `grade` is in `_FINGERPRINT_DIFF_EXEMPT` because `execute` → `run --resume` is a supported flow, not config drift — and the warning's "already-finalized tasks keep their original-config results" text is actively wrong for it. **`orchestration/regrade.py` is the single implementation** shared by that path and `evaluate`'s run-dir mode, which DELEGATES to `regrade_in_place` rather than restating it (it originally hand-built its own Sandbox + Orchestrator and had already drifted — hardcoding `replicate_index=0`, so every replicate but the first was relabelled — which is exactly how two copies become two verdicts for the same run); it raises plain `RegradeError`, which the CLI wraps, since `orchestration/` must not import the CLI layer (CE004). One fidelity rule it enforces: a re-graded row keeps the **agent run's** `started_at`/`duration_seconds`, not the grading pass's — a 10-minute run re-graded in 2s would otherwise report 2s into `average_duration`, the report tables and the evalboard; the grading cost is preserved separately as `environment_info["grading_duration_seconds"]`.
+
+### When a resumed grade crashes
+
+A row that could not even be READ has no recorded result to fold back, but dropping it
+removes it from `run.json` AND from `tasks_not_graded`, which is what the exit gate counts —
+so a resume whose rows were all unreadable reported success. A minimal ungraded placeholder
+stands in instead, keeping the task visible and the command non-zero. The read happens
+inside the `try`: outside it, one bad `task.json` propagates out of the loop and aborts the
+whole resume before `run_batch`, so none of the `to_run` tasks execute either — the opposite
+of "one bad row never aborts".
+
+An orchestrator-level grading crash is not a verdict about the run, and `Orchestrator.run()`
+converts internal failures into a populated ERROR result rather than raising, so the
+`except` above never sees them and the ERROR row replaced a perfectly re-gradeable
+NOT_GRADED one — ERROR being "complete" for both commands, the row could then never be
+graded again. Fixing the in-memory result is only half of it: `_finalize_result` has already
+written the ERROR `task.json` into that same directory, so `run.json` would say NOT_GRADED
+while the row on disk says ERROR, and the on-disk one is what a later `--resume` reads. The
+pre-grade record is put back.
+
+The `--resume` config-drift warning is best-effort and informational: the per-task path key
+does not encode the run config, so resumed tasks keep their original-config results, and
+surfacing the mismatch makes the resulting mixed-config `run.json` visible instead of
+silent. A missing stamp (a run predating the feature) is tolerated.
 
 ## Early stop on criterion
 
@@ -201,6 +271,18 @@ correct there and meaningless anywhere else. Recording it made a container row's
 around it: the docker dispatch guard saw a non-None `Path` and let it through, and the
 task-dir mount then silently mounted nothing, so every `$TASK_DIR` criterion resolved
 against the wrong tree and scored a verdict nobody could explain.
+
+### The in-container driver rewrite
+
+CE051 forbids rewriting `sandbox.driver`, and this is its single exemption: the process is
+already inside the container the docker driver asked for, so the isolation the driver names
+is present rather than bypassed, and a nested docker would be both wrong and impossible (no
+docker CLI in the image). The rewrite goes through `model_validate` rather than
+`model_copy(update=...)`, matching its sibling in `regrade.grading_sandbox_config`: `update`
+skips BOTH pydantic and pyright, so a typo produces a `SandboxConfig` violating its own
+`Literal` and only surfaces far downstream. Two driver-rewrite sites landing in one change
+with two different levels of type safety is how the weaker one becomes the pattern people
+copy.
 
 ## Three routes, resolved separately
 
@@ -478,6 +560,18 @@ the first two.
 `skip: true` is honored BEFORE dataset expansion, so a quarantined task skips row fan-out,
 variant resolution and any further I/O. It is still reported in `skipped_tasks`, so the
 suite shows which YAMLs were intentionally excluded rather than failed to load.
+
+### How a resolution failure reaches the operator
+
+A GLOBAL failure raises and is surfaced as a clean CLI error instead of a traceback;
+`run_batch`'s own resolution-time guards raise plain `ValueError` and are converted to that
+same error, so every refusal in the pipeline reads alike. Per-task failures never raise --
+see above.
+
+Every task-file pattern the caller wrote is checked for a match, not just their union.
+Accumulating and checking only the total meant one stale entry among several -- a renamed or
+moved suite -- silently ran the surviving subset and exited 0, so a CI gate reported green
+over tasks it never measured.
 
 ### No-op tasks need no special case anywhere
 

@@ -134,10 +134,9 @@ def _resolve_run_dir_or_work_dir(
     prior: EvaluationResult | None = None
     if target.mode is EvaluateMode.RUN_DIR and target.task_file is not None:
         # `is_run_dir` is a filename probe, so a plain work directory holding an
-        # unrelated file called task.json lands here. That would abort the
-        # pre-existing `evaluate <task.yaml> <dir>` form on a pydantic wall the
-        # user can only escape by renaming their own file. The task file is
-        # already in hand, so fall back to the shape they asked for.
+        # unrelated file called task.json lands here. The task file is already in
+        # hand, so fall back to the shape the user asked for.
+        # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
         try:
             load_prior_result(target.target)
         except RegradeError as e:
@@ -155,23 +154,10 @@ def _resolve_run_dir_or_work_dir(
             task, source_yaml = load_task(target.task_file)
             console.print(f"[dim]Grading with {target.task_file} (overrides the run's recorded config).[/dim]")
         else:
-            # ONE lever, passed once, and derived through the SAME function
-            # `run_evaluation` uses rather than restated. It decides which
-            # capability families the recorded-shell gate discloses, so a second
-            # copy of the rule would keep answering the old question the moment
-            # the default moved — and silently stop covering commands that then
-            # do run.
-            #
-            # In place: the grade may dispatch a CONTAINER built from the
-            # recorded sandbox block, a wider capability than any recorded shell
-            # string. On --copy instead: pre_run and the sandbox's own
-            # installers, neither of which an adopted workspace reaches. post_run
-            # is in NEITHER set — it belongs to the grading phase and runs on
-            # both paths, so `embedded_commands` scans it unconditionally.
-            #
-            # Both answers follow from this single boolean, so the gate derives
-            # them itself (`_gate_scope_for_grade`) rather than taking two
-            # arguments a caller could set incoherently.
+            # ONE lever, passed once and derived through the SAME function
+            # `run_evaluation` uses: the gate works out both answers itself rather
+            # than taking two arguments a caller could set incoherently.
+            # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
             task, source_yaml = task_from_prior(
                 prior,
                 target.target,
@@ -196,11 +182,8 @@ def _resolve_run_dir_or_work_dir(
         console.print(f"[red]✗ Work directory is not a directory:[/red] {escape(str(work_dir))}")
         raise typer.Exit(1)
 
-    # Evaluate-only mode bypasses experiment resolution + CLI overrides, so
-    # `agent` may be None or `agent.type` may be unset for tasks that defer
-    # those to the experiment / CLI layers. The orchestrator only uses
-    # `agent.type` for result labeling here (no agent is created), so a
-    # default is safe.
+    # Evaluate-only mode bypasses experiment resolution and CLI overrides, so
+    # `agent.type` may be unset. It is used only for result labeling here.
     if task.agent is None:
         task.agent = parse_agent_config(type=AgentKind.CLAUDE_CODE)
     elif task.agent.type is None:
@@ -208,10 +191,9 @@ def _resolve_run_dir_or_work_dir(
 
     if prior is not None:
         verify_reference_unchanged(prior, task, task_file)
-        # Snapshot the ungraded record BEFORE anything grades. Taking it inside
-        # _write_back instead would capture an ALREADY-GRADED record whenever
-        # --run-dir points at the target run dir (the orchestrator writes there
-        # first), destroying the very evidence the copy exists to preserve.
+        # BEFORE anything grades: taken inside _write_back it would capture an
+        # ALREADY-GRADED record whenever --run-dir points at the target run dir.
+        # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
         back_up_pre_grade_record(target.target)
 
     return _ResolvedInputs(
@@ -239,18 +221,16 @@ def _replicate_index_of(run_dir: Path) -> int:
 def evaluate_command(
     task_or_run_dir: Path = typer.Argument(  # noqa: B008
         ...,
-        # One metavar per positional, so the usage line reads as Click renders
-        # it. A composite metavar on the first ("[TASK_FILE] TARGET") plus an
-        # empty one on the second produced `[TASK_FILE] TARGET []`.
+        # One metavar per positional: a composite on the first plus an empty one
+        # on the second rendered `[TASK_FILE] TARGET []`.
         metavar="TASK_FILE_OR_RUN_DIR",
         help="Task YAML file, or (when it is the only argument) a finished run directory.",
         exists=True,
     ),
     work_dir: Path | None = typer.Argument(  # noqa: B008
         None,
-        # No metavar="" here: an empty one leaks a bare `[]` into both the usage
-        # line and the arguments table. The first positional's metavar already
-        # spells out the two shapes.
+        # No metavar="" here: an empty one leaks a bare `[]` into the usage line
+        # and the arguments table.
         help="Directory containing the code to evaluate. Omit when TASK_FILE is a run directory.",
     ),
     workspace: Path | None = typer.Option(  # noqa: B008
@@ -432,12 +412,10 @@ def run_evaluation(
         )
 
     if not task.success_criteria:
-        # `evaluate` always grades -- unlike `execute`, there is no legal reason
-        # for a zero-criteria task to reach here. `regrade_in_place` guards its
-        # own delegating branch; this guard covers the sibling orchestrator-direct
-        # branch below (fresh work-dir grading, or `--copy`), which never calls
-        # `regrade_in_place` and would otherwise finalize a criteria-free task as
-        # SUCCESS at weighted_score 0.0.
+        # This guard covers the orchestrator-direct branch below, which never
+        # calls `regrade_in_place` and would otherwise finalize a criteria-free
+        # task as SUCCESS at weighted_score 0.0.
+        # Rationale: .claude/notes/orchestration.md § Refusing a criteria-free task under grade
         console.print(
             f"[red]✗ Task {task.task_id!r} has no `success_criteria` and cannot be graded "
             + "(it would silently score SUCCESS at weighted_score 0.0). Add at least one criterion.[/red]"
@@ -452,25 +430,15 @@ def run_evaluation(
         console.print(f"[red]✗ Failed to prepare run directory:[/red] {escape(str(e))}")
         raise typer.Exit(1) from e
 
-    # `regrade_in_place` owns the sandbox on the delegating path — and for a
-    # `driver: docker` row it owns rather more than that, dispatching a grading
-    # CONTAINER of the task's own image. Building a host sandbox_config here
-    # first would call `grading_sandbox_config`, whose whole job is to REFUSE
-    # that driver, so the refusal fired before the branch that no longer needs
-    # it and no docker row could ever be graded properly.
-    #
-    # Branching on ``prior is not None`` directly, and building the sandbox
-    # inside the branch that uses it, so NEITHER value is Optional at its use
-    # site. Both were, briefly, re-narrowed by a bare `assert` plus a comment
-    # asserting an invariant the type checker could hold structurally — and
-    # `assert` is the weakest narrowing available, stripped entirely under -O.
+    # Branching on ``prior is not None`` directly, and building the sandbox inside
+    # the branch that uses it, so NEITHER value is Optional at its use site --
+    # `grading_sandbox_config` REFUSES a docker driver, so building one up front
+    # fired that refusal before the branch that no longer needs it.
+    # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
     async def _setup_and_run() -> EvaluationResult:
         if grade_in_place and prior is not None:
-            # Delegate to the shared re-grade core. Restating its body here is
-            # how this path and `run --resume` came to differ (replicate_index,
-            # error semantics) while CLAUDE.md called regrade.py the single
-            # implementation — two copies of "how to re-grade" drift into two
-            # verdicts for the same run.
+            # Delegate to the shared re-grade core rather than restating it: two
+            # copies of "how to re-grade" drift into two verdicts for one run.
             return await regrade_in_place(
                 task=task,
                 prior=prior,
@@ -510,23 +478,18 @@ def run_evaluation(
             prior_result=prior,
         )
         graded = await orchestrator.run()
-        # Same stamp the delegating branch gets from `regrade_in_place`. The
-        # `grading_sandbox_config` call above accepted the docker->host
-        # downgrade for THIS branch too, and
-        # CLAUDE.md, the user guide and CE051's own noqa all state the stamp as
-        # unconditional — so `evaluate <run_dir> --copy --allow-host-grading`
-        # was writing an unstamped host verdict that nothing downstream could
-        # tell apart from a container-graded one.
+        # HAZARD: the same stamp the delegating branch gets from
+        # `regrade_in_place`. CLAUDE.md, the user guide and CE051's own noqa all
+        # state it as unconditional.
+        # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
         stamp_host_grading(graded, task)
         return graded
 
     try:
         result = asyncio.run(_setup_and_run())
     except RegradeError as e:
-        # The delegating branch raises this for the missing/unresolvable task
-        # file and for a failed grading container, and both messages carry the
-        # operator's next step. Rendered like the three sibling handlers above --
-        # unwrapped, they arrived as the tail of a stack trace.
+        # Rendered like the three sibling handlers above: unwrapped, these
+        # operator-facing messages arrived as the tail of a stack trace.
         console.print(f"[red]✗ {escape(str(e))}[/red]")
         raise typer.Exit(1) from e
     _report_and_exit(result, task=task, prior=prior, target=target, prepared_run_dir=prepared_run_dir)
@@ -548,33 +511,23 @@ def _report_and_exit(
     status handling landed. Always raises ``typer.Exit``.
     """
 
-    # BEFORE the count guard below. A grading crash returns a populated ERROR
-    # result with an EMPTY criteria list (Orchestrator.run() converts internal
-    # failures into a result rather than raising), so the count check fires
-    # first and the user is told only "Result count mismatch: got 0, expected 2"
-    # — the real error is never printed, and the "still re-gradeable" notice is
-    # unreachable on exactly the path it was written for.
-    # Whether the terminal status describes THIS pass or was carried over from
-    # the run being graded. `Orchestrator._terminal_status` preserves a prior
-    # execution fact (TIMEOUT / ERROR / BUILD_FAILED / a budget stop) because
-    # grading may not overturn it — so reading `result.final_status` as this
-    # pass's own outcome misreports both arms below. It made a preserved ERROR
-    # print the ORIGINAL run's crash message as though grading had crashed,
-    # claim the row was "left ungraded" (it was not — the restored record still
-    # reads ERROR), and throw away a verdict that had just been computed at
-    # 1.000; and it made a preserved TIMEOUT exit 0 under "All criteria passed",
-    # so a CI wrapper reading the exit code goes green on a row run.json counts
-    # as failed.
+    # BEFORE the count guard below: a grading crash returns a populated ERROR
+    # result with an EMPTY criteria list, so the count check fired first and the
+    # real error was never printed.
+    #
+    # Whether the terminal status describes THIS pass or was carried over from the
+    # run being graded. `Orchestrator._terminal_status` preserves a prior execution
+    # fact, so reading `result.final_status` as this pass's own outcome misreports
+    # both arms below.
+    # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
     inherited = prior is not None and prior.final_status.is_execution_fact
 
     if result.final_status is FinalStatus.ERROR and not inherited:
         console.print(f"\n[red]✗ Evaluation error: {result.error_message}[/red]")
         if prior is not None:
-            # A grading-time crash (a failing checker, an unreachable judge) is
-            # not a verdict about the run. Leaving ERROR on disk would replace a
-            # perfectly re-gradeable NOT_GRADED row with one BOTH commands treat
-            # as permanently complete, so the run could never be graded again
-            # without hand-restoring task.execute.json.
+            # A grading-time crash is not a verdict about the run. Leaving ERROR
+            # on disk replaces a re-gradeable NOT_GRADED row with one BOTH
+            # commands treat as permanently complete.
             restore_pre_grade_record(target.target)
             console.print(
                 f"[yellow]⚠[/] Grading errored; {target.target / TASK_JSON_FILENAME} is left "
@@ -625,14 +578,10 @@ def _report_and_exit(
     if result.sandbox_path:
         console.print(f"[dim]Artifacts: {result.sandbox_path}[/dim]")
 
-    # `prior is not None` alone is not enough: `--format harbor` seeds a
-    # SYNTHETIC prior on the WORK_DIR shape (from the supplied
-    # `--trajectory`), which is not a run directory and carries no
-    # `task.execute.json` sibling to preserve. `_write_back` is documented as
-    # "replace the graded RUN's task.json" and writes into `target.target`,
-    # which in WORK_DIR mode is the directory being graded, not a run dir --
-    # writing there planted a spurious task.json into the Harbor-synced
-    # workdir and wedged a later `evaluate` on it into RUN_DIR mode.
+    # RUN_DIR mode, not merely `prior is not None`: `--format harbor` seeds a
+    # SYNTHETIC prior on the WORK_DIR shape, which is not a run directory and has
+    # no `task.execute.json` sibling to preserve.
+    # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
     if prior is not None and target.mode is EvaluateMode.RUN_DIR:
         console.print(
             f"[dim]Re-graded {prior.final_status.value} → {result.final_status.value} "
@@ -641,10 +590,9 @@ def _report_and_exit(
         _write_back(target.target, result)
 
     if result.final_status.is_execution_fact:
-        # The criteria tally is real and worth printing — it is why the table
-        # above still renders — but it is not the row's outcome. run.json will
-        # count this row under its preserved status, and the exit code must
-        # agree with run.json rather than with the tally.
+        # The criteria tally is real -- it is why the table above still renders --
+        # but it is not the row's outcome, and the exit code must agree with
+        # run.json rather than with the tally.
         console.print(
             f"\n[red]Criteria: {passed}/{total} passed, but the run itself ended as "
             + f"{result.final_status.value} — grading cannot overturn that.[/red]"
@@ -672,15 +620,13 @@ def _write_back(run_dir: Path, result: EvaluationResult) -> None:
     target = run_dir / TASK_JSON_FILENAME
     backup = run_dir / PRE_GRADE_JSON_FILENAME
     if target.is_symlink():
-        # A run directory is a shareable artifact, so its task.json is untrusted
-        # input. Following a symlink here turns `evaluate <run_dir>` into an
-        # arbitrary-file-overwrite primitive on the grader's host.
+        # HAZARD: a run directory is a shareable artifact, so following a symlink
+        # here is an arbitrary-file-overwrite primitive on the grader's host.
         console.print(f"[yellow]⚠[/] {target} is a symlink; refusing to write through it.")
         return
     try:
-        # Atomic, matching the orchestrator's own task.json writer: a torn write
-        # here makes the row parse as malformed, which a later --resume reads as
-        # "not complete" and re-pays for the agent.
+        # Atomic, matching the orchestrator's own writer: a torn write makes the
+        # row parse as malformed, which a later --resume re-pays for.
         write_text_atomic(target, result.model_dump_json(indent=2, exclude=TASK_JSON_TRANSCRIPT_EXCLUDE))
     except OSError as e:
         # Never fail the grade over the write-back: the verdict was computed and
