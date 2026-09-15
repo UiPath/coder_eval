@@ -64,10 +64,12 @@ from tests.lint.violation import Violation
 # comment carrying 062 in an older branch, review or commit message must never
 # start meaning something new.
 #
-# Claim 067 next. NOTE 065 IS TAKEN and is not in ALL_RULES: doc-surface rules
-# (CE026-CE033, CE065) are `@pytest.mark.lint` classes in tests/test_custom_lint.py
+# Claim 067 next. NOTE 065 IS TAKEN and is not in ALL_RULES: doc-surface and
+# whole-tree rules are `@pytest.mark.lint` classes in tests/test_custom_lint.py
 # rather than BaseRules, so the `_rule_ids` uniqueness assert below cannot see
-# them. Check that file too before claiming an id.
+# them. Grep that file for `^class Test(CE\d{3})` before claiming an id —
+# enumerating them here is how this note fell behind CE044. The whole id space
+# is unioned in one place by TestRuffExternalCoversEveryRule._known().
 type RuleClass = type[BaseRule]
 
 ALL_RULES: list[RuleClass] = [
