@@ -159,13 +159,17 @@ a reporting module. The three pieces now sit where their consumers are:
 **CE066 checks both the absolute and the relative import spelling.** Its first draft matched
 only `node.module`, which for `from ..reports import X` holds `"reports"` with the dots in
 `node.level` — so it fired on neither of the two real edges in the tree, and its own tests
-passed because they used the absolute form. The core-layer predicate lives in
-`tests/lint/rules/_layers.py` so CE004 and CE066 cannot drift about what "core" means, and is
-stated as an allowlist of what is *not* core — *everything under `src/coder_eval/` except the
-`cli/` and `reports/` packages* — so a new subpackage is core by default. Both denylist forms
-leaked: naming only `orchestrator.py` left `result_metrics.py` exempt (the module CE066's own
-fix message points at), and its ten-directory successor never named `isolation/`, leaving the
-`driver: docker` evaluation path invisible to both rules.
+passed because they used the absolute form. The layer predicates live in
+`tests/lint/rules/_layers.py` so CE004 and CE066 cannot drift about where the package or its
+`cli/` boundary is. Each rule's scope is an allowlist of what is *exempt*, so a new subpackage
+is in scope by default: CE066's core is *everything under `src/coder_eval/` except `cli/` and
+`reports/`*, and CE004's scope is *everything except `cli/`*. The two sets differ on purpose —
+the reports package runs without the CLI, so it must not import `cli`, but it may reach into
+itself. CE004 first borrowed CE066's predicate whole and so inherited the `reports/`
+exemption. Both denylist forms before that also leaked: naming only `orchestrator.py` left
+`result_metrics.py` exempt (the module CE066's own fix message points at), and its
+ten-directory successor never named `isolation/`, leaving the `driver: docker` evaluation path
+invisible to both rules.
 
 **`format_ms` lives in `durations.py`, not `formatting.py`.** `formatting.py` imports
 `claude_agent_sdk` for the payload formatters, and the reports package should not reach

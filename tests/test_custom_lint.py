@@ -2147,6 +2147,13 @@ class TestCE004CatchesBothImportSpellings:
     def test_the_docker_driver_is_core(self):
         assert self._violations("from ..cli import run_command", CORE_ISOLATION)
 
+    def test_the_reports_package_is_in_scope(self):
+        """CE004's only exemption is `cli/`. The reports package runs without the
+        CLI — the orchestrator writes a task report mid-run — so a `cli` import
+        there closes a cli -> orchestration -> reports -> cli cycle. It was exempt
+        only because CE004 borrowed CE066's core predicate."""
+        assert self._violations("from ..cli import run_command", "/repo/src/coder_eval/reports/markdown.py")
+
 
 @pytest.mark.lint
 class TestCE066NoReportImportsInCore:
@@ -2228,6 +2235,11 @@ class TestCE066NoReportImportsInCore:
         assert self._violations("from ..reports import format_score", CORE_ISOLATION)
         assert not self._violations("from ..reports import write_task_html", CORE_ISOLATION)
 
+    def test_the_reports_package_itself_stays_exempt(self):
+        """Pins that narrowing CE004's scope did not widen this rule's: a report
+        module reaching a sibling's non-writer is the package's own business."""
+        assert not self._violations("from ..reports.helpers import fmt_p", "/repo/src/coder_eval/reports/markdown.py")
+
     def test_every_allowlisted_name_resolves_in_the_package(self):
         """Staleness guard: a renamed writer must not leave a dead entry silencing
         the rule. This is the pattern the deleted pricing test used correctly.
@@ -2289,16 +2301,17 @@ class TestCE067ClaudeMdTreeParity:
 
 @pytest.mark.lint
 class TestCoreLayerMembership:
-    """`_layers.is_core_path` is the single definition of "core" for CE004 and CE066.
+    """`_layers` is the single definition of where a file sits, for CE004 and CE066.
 
-    It is pinned against the real filesystem because its two previous forms were
-    denylists that each left a hole: the first exempted every top-level module but
-    `orchestrator.py`, the second named ten directories and missed `isolation/`.
-    The allowlist form has no per-package list to keep honest — only the two-name
-    exception set, which is what this class pins.
+    Pinned against the real filesystem because the core predicate's two previous
+    forms were denylists that each left a hole: the first exempted every top-level
+    module but `orchestrator.py`, the second named ten directories and missed
+    `isolation/`. The allowlist form has no per-package list to keep honest — only
+    each rule's exemption set, which is what this class pins: `{cli, reports}` for
+    CE066's core, `{cli}` for CE004's scope.
 
     Deliberately NOT named `TestCE\\d{3}`: that prefix is this file's convention
-    for a class guarding one numbered rule, and this class guards the predicate
+    for a class guarding one numbered rule, and this class guards the predicates
     two rules share. Taking a CE number would claim an id that indexes no rule.
     """
 
@@ -2317,6 +2330,24 @@ class TestCoreLayerMembership:
             if is_core_path(str(py)) is not (py.relative_to(self.PKG).parts[0] not in self.NON_CORE)
         ]
         assert not misclassified, f"is_core_path disagrees with the package layout for: {misclassified}"
+
+    def test_ce004_scope_is_every_module_outside_cli(self):
+        """CE004 exempts only `cli/`. It once inherited CE066's `reports/`
+        exemption by borrowing the core predicate whole.
+
+        Runs the RULE at every real module path rather than recomputing its scope
+        from the helpers, so it fails if the rule stops using them."""
+        import ast
+
+        from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
+
+        cli_import = ast.parse("from ..cli import run_command")
+        misscoped = [
+            str(py.relative_to(self.PKG))
+            for py in self.PKG.rglob("*.py")
+            if bool(list(NoCliImportsInCore(str(py)).check(cli_import))) is (py.relative_to(self.PKG).parts[0] == "cli")
+        ]
+        assert not misscoped, f"CE004's scope disagrees with the package layout for: {misscoped}"
 
     @pytest.mark.parametrize(
         "path",
@@ -2356,8 +2387,8 @@ class TestCoreLayerMembership:
         [
             ("src/coder_eval/orchestrator.py", True),
             ("src/coder_eval/reports/markdown.py", False),
-            # Only the PACKAGES are non-core: `_NON_CORE` requires a trailing
-            # separator, so a top-level module whose name merely starts with
+            # Only the PACKAGES are non-core: each layer pattern requires a
+            # trailing separator, so a top-level module whose name merely starts with
             # `reports` or `cli` stays core. Nothing in the tree has that shape
             # today, so this is the only thing pinning the boundary.
             ("src/coder_eval/reports_legacy.py", True),

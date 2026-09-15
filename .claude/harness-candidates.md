@@ -890,7 +890,7 @@ re-derive from scratch.
   `ce051_no_driver_override.py:60`, `ce052_process_lethal_must_be_container_gated.py:78`,
   `ce053_run_record_filename_literal.py:65`, `ce054_env_info_key_round_trip.py:66`,
   `ce056_no_container_env_literal.py:51` and `ce058_no_timing_literal.py:116` — seven
-  rule modules, to which `_layers.py` now adds two more compiles of its own, with the
+  rule modules, to which `_layers.py` adds one more (its `_CLI` and `_REPORTS` derive from it), with the
   `agents/`-suffixed variant of the same idiom in
   `_model_ctor.py:28` and `ce059_generation_window_is_two_reads.py:45`, plus a near-variant
   in `ce037_no_dead_private_helper.py:61` and a `cli/`-suffixed one in
@@ -900,17 +900,13 @@ re-derive from scratch.
   because retargeting seven unrelated rules needs a per-rule verification that its scope
   did not shift — a second refactor inside a review-fix plan. The new copies were written
   in the established *spelling* deliberately: the defect being fixed was a regex that
-  disagreed with its siblings, so a new variant would be that defect again. `_layers.py`'s
-  own two compiles share a prefix and could be folded into one constant independently of
-  the cross-module hoist. — caught during the reports-consolidation review fixes, Phase 1.
-- [ ] **CE004 inherits CE066's `reports/` exemption because the two rules share one
-  predicate.** `_layers.is_core_path` answers "is this core?" for both, and its non-core set
-  is `{cli, reports}` — but that set is CE066's. CE004's own is just `{cli}`: unlike the CLI,
-  the reports package is legitimately used without the CLI (`orchestrator.py` imports
-  `write_task_html`), so exempting it from CE004 means a `from ..cli import X` added inside
-  `reports/` would close a `cli -> orchestration -> reports -> cli` cycle with CE004 silent.
-  Nothing in `reports/` imports `cli` today and the pre-split predicate had the same hole, so
-  this is latent, not live. Fixing it means giving `is_core_path` a per-rule exemption
-  parameter (or splitting it in two) and re-verifying both rules' scope — a semantics change
-  beyond a review-fix plan, and one that must not re-open the drift the shared predicate
-  exists to prevent. — caught in the reports-consolidation review fixes, Phase 1 quality review.
+  disagreed with its siblings, so a new variant would be that defect again. — caught during the reports-consolidation review fixes, Phase 1.
+- [x] ~~**CE004 inherits CE066's `reports/` exemption because the two rules share one
+  predicate.**~~ **DONE.** `_layers.py` now shares the package anchor and the `cli/`
+  boundary (`is_package_path`, `is_cli_path`) rather than one exemption set. CE066 keeps
+  `is_core_path` (`{cli, reports}` exempt); CE004's scope is the package minus `cli/`.
+  Widening CE004 to `reports/` found 0 violations. `test_the_reports_package_is_in_scope`
+  and `TestCoreLayerMembership.test_ce004_scope_is_every_module_outside_cli` both fail if
+  CE004 goes back to the core predicate; `test_the_reports_package_itself_stays_exempt`
+  pins that CE066's scope did not widen with it. — caught in the reports-consolidation
+  review fixes, Phase 1 quality review.
