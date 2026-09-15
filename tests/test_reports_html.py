@@ -1,4 +1,4 @@
-"""Tests for HTML report generation (coder_eval.reports_html)."""
+"""Tests for HTML report generation (coder_eval.reports.html)."""
 
 from __future__ import annotations
 
