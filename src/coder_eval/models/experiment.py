@@ -289,7 +289,7 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
         used to be a claim rather than a fact — this property said "Mirrors
         RunSummary.pass_rate" while implementing only half of it, so the same
         10-task execute run with one crash gave ``None`` in ``run.json`` and
-        ``0.0`` here, which ``reports_experiment`` rendered as
+        ``0.0`` here, which ``reports.experiment`` rendered as
         "Pass Rate: 0.0% (0/1)". Both now route through
         ``nothing_was_measured``.
         """

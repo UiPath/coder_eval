@@ -1154,7 +1154,7 @@ class Orchestrator:
 
         # HTML failure must never mask the run outcome — write_task_html logs and
         # returns None.
-        from .reports_html import write_task_html
+        from .reports import write_task_html
 
         write_task_html(self.result, self.html_report_path)
 

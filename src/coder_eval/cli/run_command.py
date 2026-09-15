@@ -672,7 +672,7 @@ async def _run_all_tasks(
         # BEFORE the exit-code gate, so a failing run still produces the report.
         # Rationale: .claude/notes/orchestration.md § What the exit code counts
         if junit_xml is not None:
-            from ..reports_junit import write_junit_xml
+            from ..reports import write_junit_xml
 
             written = write_junit_xml(run_dir, junit_xml)
             console.print(f"[green][OK]JUnit report written to {written}[/green]")
@@ -980,7 +980,7 @@ async def _run_with_experiment(
         load_experiment,
         resolve_all_tasks,
     )  # resolve_task_for_variant not needed here
-    from ..reports_experiment import ExperimentReportGenerator
+    from ..reports import ExperimentReportGenerator
 
     # Load experiments (avoid double-loading when using default)
     exp_path = experiment_path or DEFAULT_EXPERIMENT_PATH

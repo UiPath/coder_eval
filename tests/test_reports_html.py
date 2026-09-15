@@ -28,14 +28,14 @@ from coder_eval.models import (
     VariantResult,
     parse_agent_config,
 )
-from coder_eval.reports_html import (
+from coder_eval.reports import (
     HTMLReportGenerator,
-    _status_badge,
     safe_write,
     write_experiment_html,
     write_task_html,
     write_variant_html,
 )
+from coder_eval.reports.html import _status_badge
 
 
 # "ungraded" is the one category whose badge is legitimately neutral: the row
@@ -776,7 +776,7 @@ def test_write_experiment_html_uses_safe_write(tmp_path: Path):
 def test_write_task_html_returns_none_on_render_failure(tmp_path: Path, monkeypatch):
     """When the renderer blows up, write_task_html returns None rather than raising —
     so the orchestrator-side emission path cannot mask the run outcome."""
-    from coder_eval import reports_html
+    from coder_eval.reports import html as reports_html
 
     def _boom(result):
         raise RuntimeError("render failed")
@@ -1695,7 +1695,7 @@ class TestVariantTokenUsageTotal:
         ]
 
     def test_total_equals_the_sum_of_total_tokens(self):
-        from coder_eval.reports_html import _render_variant_token_usage
+        from coder_eval.reports.html import _render_variant_token_usage
 
         results = self._results()
         expected = sum(r.total_token_usage.total_tokens for r in results)
@@ -1704,6 +1704,6 @@ class TestVariantTokenUsageTotal:
         assert f'<div class="value">{expected:,}</div>' in _render_variant_token_usage(results)
 
     def test_no_usages_renders_nothing(self):
-        from coder_eval.reports_html import _render_variant_token_usage
+        from coder_eval.reports.html import _render_variant_token_usage
 
         assert _render_variant_token_usage([]) == ""

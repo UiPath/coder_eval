@@ -17,7 +17,7 @@ import pytest
 from defusedxml.ElementTree import fromstring
 
 from coder_eval.models import SuiteRollup, ThresholdCheck
-from coder_eval.reports_junit import generate_junit_xml, write_junit_xml
+from coder_eval.reports import generate_junit_xml, write_junit_xml
 
 
 def _props(case: Any) -> dict[str, str]:

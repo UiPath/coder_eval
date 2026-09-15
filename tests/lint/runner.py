@@ -41,6 +41,7 @@ from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
 from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
 from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
 from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
+from tests.lint.rules.ce066_no_report_imports_in_core import NoReportImportsInCore
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -61,7 +62,12 @@ from tests.lint.violation import Violation
 # to 063. It was claimed during the turn-timing work and then folded into CE063
 # rather than shipped. An id is a permanent documentation anchor: a suppression
 # comment carrying 062 in an older branch, review or commit message must never
-# start meaning something new. Claim 065 next.
+# start meaning something new.
+#
+# Claim 067 next. NOTE 065 IS TAKEN and is not in ALL_RULES: doc-surface rules
+# (CE026-CE033, CE065) are `@pytest.mark.lint` classes in tests/test_custom_lint.py
+# rather than BaseRules, so the `_rule_ids` uniqueness assert below cannot see
+# them. Check that file too before claiming an id.
 type RuleClass = type[BaseRule]
 
 ALL_RULES: list[RuleClass] = [
@@ -110,6 +116,7 @@ ALL_RULES: list[RuleClass] = [
     WindowViaCloseWindow,
     NoBusyMsInAgents,
     TurnBracketOnTheClock,
+    NoReportImportsInCore,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

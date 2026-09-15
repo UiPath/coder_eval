@@ -131,7 +131,7 @@ class TestCE043NoCommandOutputTruncation:
 
         from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
 
-        path = "src/coder_eval/agents/codex_agent.py" if in_agents else "src/coder_eval/reports_html.py"
+        path = "src/coder_eval/agents/codex_agent.py" if in_agents else "src/coder_eval/reports/html.py"
         return NoCommandOutputTruncation(path).check(ast.parse(src))
 
     @pytest.mark.parametrize(
@@ -2093,6 +2093,93 @@ class TestPluginArtifacts:
             assert pointer in skill.read_text(encoding="utf-8"), (
                 f"{skill} no longer reads {pointer} — it has silently forked the shared rubric"
             )
+
+
+@pytest.mark.lint
+class TestCE066NoReportImportsInCore:
+    """CE066 — core may import only the reports package's public writers.
+
+    Before the split the orchestrator imported `turn_time_buckets` and
+    `visible_turn_count` from `reports_stats`, and `orchestration/batch.py`
+    imported the run.json row serializer from `reports_experiment`. Those names
+    moved to `result_metrics` / `stats` / `run_record`; this rule is what stops
+    the next one drifting back.
+    """
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce066_no_report_imports_in_core import NoReportImportsInCore
+
+        return list(NoReportImportsInCore(filepath).check(ast.parse(source)))
+
+    CORE = "/repo/src/coder_eval/orchestration/batch.py"
+    ORCHESTRATOR = "/repo/src/coder_eval/orchestrator.py"
+    NON_CORE = "/repo/src/coder_eval/cli/report_command.py"
+
+    def test_a_non_writer_imported_into_core_violates(self):
+        found = self._violations("from coder_eval.reports import format_score", self.CORE)
+        assert len(found) == 1
+        assert "format_score" in found[0].message
+        # The message must say what to do, not just that it is wrong.
+        assert "result_metrics" in found[0].message and "stats.py" in found[0].message
+
+    def test_a_writer_imported_into_core_does_not_violate(self):
+        assert not self._violations("from coder_eval.reports import write_task_html", self.CORE)
+
+    def test_top_level_orchestrator_is_core_even_though_it_is_in_no_package(self):
+        """CE004's directory regex cannot see this file, and it held 3 of the 5
+        edges the rule exists to prevent — so it is the rule's main target."""
+        assert self._violations("from coder_eval.reports import turn_time_buckets", self.ORCHESTRATOR)
+        assert not self._violations("from coder_eval.reports import write_task_html", self.ORCHESTRATOR)
+
+    def test_a_submodule_import_is_checked_too(self):
+        assert self._violations("from coder_eval.reports.helpers import fmt_p", self.CORE)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from ..reports import format_score",
+            "from ..reports.helpers import VariantSeries",
+            "from .. import reports",
+        ],
+    )
+    def test_the_relative_spelling_is_caught(self, source):
+        """The relative form is the LOCAL IDIOM — both surviving edges use it.
+
+        A relative import keeps its dots in `node.level` and leaves
+        `node.module == "reports"`, so a rule matching only the absolute
+        `coder_eval.reports` fires on nothing this codebase actually writes.
+        """
+        assert self._violations(source, self.CORE), f"CE066 missed the relative form: {source}"
+
+    def test_a_relative_writer_import_is_still_allowed(self):
+        """orchestrator.py's real `from .reports import write_task_html`."""
+        assert not self._violations("from .reports import write_task_html", self.ORCHESTRATOR)
+
+    def test_a_top_level_core_module_other_than_the_orchestrator_is_core(self):
+        """`result_metrics.py` is where the violation message tells you to move a
+        metric TO — exempting it would be a hole in the middle of the rule."""
+        assert self._violations("from .reports.helpers import fmt_p", "/repo/src/coder_eval/result_metrics.py")
+        assert self._violations("from .reports import format_score", "/repo/src/coder_eval/run_record.py")
+
+    def test_wholesale_module_import_into_core_violates(self):
+        """No name to check, so every attribute access through it is invisible."""
+        assert self._violations("import coder_eval.reports", self.CORE)
+
+    def test_a_non_core_file_is_exempt(self):
+        assert not self._violations("from coder_eval.reports import format_score", self.NON_CORE)
+
+    def test_every_allowlisted_name_resolves_in_the_package(self):
+        """Staleness guard: a renamed writer must not leave a dead entry silencing
+        the rule. This is the pattern the deleted pricing test used correctly.
+        """
+        import coder_eval.reports as pkg
+        from tests.lint.rules.ce066_no_report_imports_in_core import ALLOWED_WRITERS
+
+        missing = sorted(n for n in ALLOWED_WRITERS if not hasattr(pkg, n))
+        assert not missing, f"CE066 allowlists names that no longer exist in coder_eval.reports: {missing}"
 
 
 @pytest.mark.lint

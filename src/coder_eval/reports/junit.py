@@ -27,9 +27,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
-from .evaluation.judge_context import truncate
-from .models import FinalStatus, RunSummary, SuiteRollup
-from .path_utils import TASK_JSON_FILENAME
+from ..evaluation.judge_context import truncate
+from ..models import FinalStatus, RunSummary, SuiteRollup
+from ..path_utils import TASK_JSON_FILENAME
 
 
 logger = logging.getLogger(__name__)

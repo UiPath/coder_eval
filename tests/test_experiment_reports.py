@@ -14,8 +14,7 @@ from coder_eval.models import (
     VariantAggregate,
     VariantResult,
 )
-from coder_eval.reports_experiment import ExperimentReportGenerator
-from coder_eval.reports_stats import describe_prompt_config
+from coder_eval.reports import ExperimentReportGenerator, describe_prompt_config
 from tests._fixtures.report_snapshots import assert_matches_snapshot
 
 
@@ -833,7 +832,7 @@ class TestStatisticalHelpers:
 
     def test_non_finite_inputs_never_report_significance(self):
         """NaN/inf must not produce a fabricated p-value — fail closed, never significant."""
-        from coder_eval.reports_stats import fmt_p
+        from coder_eval.reports.html import fmt_p
         from coder_eval.stats import paired_t_test, student_t_two_tailed_p, welch_t_test
 
         nan, inf = float("nan"), float("inf")
@@ -855,7 +854,7 @@ class TestStatisticalHelpers:
 
     def test_fmt_mean_sd(self):
         """Format mean ± stddev string."""
-        from coder_eval.reports_stats import fmt_mean_sd
+        from coder_eval.reports.html import fmt_mean_sd
 
         result = fmt_mean_sd([1.0, 2.0, 3.0])
         assert "2.000" in result
@@ -1260,14 +1259,14 @@ class TestCollectVariantSeries:
 
     def test_duration_is_per_run_not_replicate_inflated(self):
         """duration_seconds is summed across replicates, so it must be divided out."""
-        from coder_eval.reports_stats import collect_variant_series
+        from coder_eval.reports import collect_variant_series
 
         series = collect_variant_series(self._result_with_replicates())
         assert series["a"].durations == [30.0]
 
     def test_html_and_markdown_report_the_same_duration(self):
         """Regression: the HTML copy of this collector used the raw summed duration."""
-        from coder_eval.reports_html import _experiment_aggregate_metrics
+        from coder_eval.reports.html import _experiment_aggregate_metrics
 
         result = self._result_with_replicates()
         md = ExperimentReportGenerator.generate_experiment_report(result)
@@ -1278,7 +1277,7 @@ class TestCollectVariantSeries:
 
     def test_result_for_unknown_variant_is_ignored(self):
         """A task result naming a variant outside variant_ids must not raise."""
-        from coder_eval.reports_stats import collect_variant_series
+        from coder_eval.reports import collect_variant_series
 
         result = self._result_with_replicates()
         result.task_summaries[0].variant_results.append(
@@ -1428,7 +1427,7 @@ class TestPairedComparisonSection:
 
     def test_html_renders_the_same_paired_numbers_as_markdown(self):
         """Both reporters render one shared computation, so they cannot disagree."""
-        from coder_eval.reports_html import _experiment_paired_comparison
+        from coder_eval.reports.html import _experiment_paired_comparison
 
         result = self._make_result(
             ["a", "b"],
@@ -1443,7 +1442,7 @@ class TestPairedComparisonSection:
         assert "**Paired mean diff (a - b)**: +0.117 [95% CI -0.242, +0.475], Cohen's d = 0.81, p = 0.296" in md
 
     def test_html_paired_section_absent_for_three_variants(self):
-        from coder_eval.reports_html import _experiment_paired_comparison
+        from coder_eval.reports.html import _experiment_paired_comparison
 
         result = self._make_result(
             ["a", "b", "c"],
@@ -1765,7 +1764,7 @@ class TestUngradedRenderingInMarkdown:
         )
 
     def test_the_report_names_the_fourth_bucket_and_publishes_no_zero(self):
-        from coder_eval.reports_experiment import ExperimentReportGenerator
+        from coder_eval.reports import ExperimentReportGenerator
 
         md = ExperimentReportGenerator.generate_experiment_report(self._ungraded_result())
 
@@ -1780,7 +1779,7 @@ class TestUngradedRenderingInMarkdown:
         """Only the SCORE is missing. Dropping the row whole made an all-ungraded
         experiment render `Avg Duration | N/A` with Tokens absent entirely — the
         bug `collect_variant_series`' own comment describes."""
-        from coder_eval.reports_stats import collect_variant_series
+        from coder_eval.reports import collect_variant_series
 
         series = collect_variant_series(self._ungraded_result())["a"]
 
@@ -1789,7 +1788,7 @@ class TestUngradedRenderingInMarkdown:
         assert series.tokens == [900.0]
 
     def test_format_score_distinguishes_unmeasured_from_zero(self):
-        from coder_eval.reports_stats import UNGRADED_SCORE_TEXT, format_score
+        from coder_eval.reports import UNGRADED_SCORE_TEXT, format_score
 
         assert format_score(None) == UNGRADED_SCORE_TEXT
         assert format_score(0.0) == "0.000"
@@ -1799,12 +1798,12 @@ class TestUngradedRenderingInMarkdown:
         "key", ["installed_tools", "command_base_path", "reference_digest", "graded_by_api_routing"]
     )
     def test_env_table_hides_the_noise_keys(self, key):
-        from coder_eval.reports_stats import is_env_table_key
+        from coder_eval.reports import is_env_table_key
 
         assert not is_env_table_key(key)
 
     def test_env_table_keeps_ordinary_keys(self):
-        from coder_eval.reports_stats import is_env_table_key
+        from coder_eval.reports import is_env_table_key
 
         assert is_env_table_key("coder_eval")
         assert is_env_table_key("api_routing")
