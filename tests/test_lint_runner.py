@@ -484,7 +484,7 @@ def test_ce009_allows_subclass_inheriting_forbid_from_same_file(tmp_path: Path) 
     assert violations == []
 
 
-def test_ce008_skips_files_outside_scope(tmp_path: Path) -> None:
+def test_ce009_skips_files_outside_scope(tmp_path: Path) -> None:
     """Files outside tasks.py / criteria.py are not flagged (results.py uses extra='allow')."""
     from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
 
