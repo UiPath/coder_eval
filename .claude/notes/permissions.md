@@ -4,7 +4,50 @@
 
 ## Reference solutions and the anti-cheat window
 
-- **Reference solutions are directory-only, and shielded (partially) from the agent**: `task.reference` is a single required `directory:` (relative to the task YAML) — the inline `code:` / single-file `file:` forms are gone, because a directory is the only shape that can be permission-gated as a unit; a `model_validator(mode="before")` gives the removed forms a migration error. The orchestrator stages a **per-run private copy** (`orchestration/evaluation.py::stage_reference_dir`, symlinks stripped) into a tempdir, removed in `_cleanup` via `path_utils.rmtree_restrictive` (keyed on `_reference_staging_root`, recorded BEFORE the copy so a failed copy still cleans up; `rmtree(ignore_errors=True)` silently declines on a tree left at 000) and deliberately never preserved into `run_dir/artifacts`. That copy is held at mode `000` for the whole of every `agent.communicate` call via **`Sandbox.set_permissions`**, the driver-aware wrapper over `fs_permissions.py::set_permissions`. Windows **stack**: exiting restores the *enclosing* window's mode, only the outermost exit restores the pre-window mode — that is what makes a mid-turn re-grant (`mode=READ_ONLY_MODE`) expressible, and it covers two windows at the same mode so no refcount is needed. The window is enforced **only inside a docker container** (`Sandbox.enforces_permission_windows`) and is a no-op on the host, where the agent shares our uid. **That gate keys on the `CODER_EVAL_IN_CONTAINER` env var, NOT `sandbox.driver`** — `run_task_internal_command` rewrites `driver: docker` → `tempdir` before building the in-container Orchestrator, so a driver-based gate would silently disable the anti-cheat on exactly the path that needs it (regression-guarded by `TestSandboxDriverGate`); `resolve_reference_dir` gates its `/work/references` branch on the same var for the same reason. The task directory **is** shielded alongside it: it previously was not, because under docker it was bind-mounted `:ro` and the chmod returned EROFS, but it is now a read-write throwaway copy (`docker_runner._prepare_task_dir_mount`) so the window applies — which matters because the task dir holds grading material beyond the reference (`run_command` fixtures, expected outputs, and, for a task laid out flat, every SIBLING task's reference). What the window does NOT hide is the task DEFINITION: `task.yaml` is also staged at `/work/input` for the in-container orchestrator, and that mount is untouched. Hiding the criteria from the agent is a separate, unsolved problem. Criteria address reference files with the `$REFERENCE_DIR` token (same resolver as `$TASK_DIR`) and the `REFERENCE_DIR` env var for `run_command`; `reference_comparison` names one file via `reference_file`. Docker mounts a throwaway **read-write** copy at `/work/references` (a `:ro` mount cannot be chmod'd — EROFS), masks the in-task-dir original with an empty tmpfs, and drops `DAC_OVERRIDE`/`DAC_READ_SEARCH`. `FOWNER`/`CHOWN` are deliberately **NOT** dropped: the in-container orchestrator that applies the window is the same root process with the same caps, so dropping `FOWNER` breaks *the harness's own* chmod wherever the bind mount preserves a non-root owner (native Linux — verified: `chmod: Operation not permitted`), i.e. exactly where the drop would otherwise bite. A window that cannot be applied is now a hard error, not a warning: `Sandbox.set_permissions` passes `strict=True` whenever it enforces, so an unprotected run fails instead of producing a normal-looking score. **KNOWN GAP — this is defense-in-depth, not a boundary**: (a) `chmod(2)` is gated on owner-or-`CAP_FOWNER` and the container runs as root owning the copy, so a deliberate `chmod 755 /work/references` restores access; (b) the window spans `agent.communicate` only, and nothing reaps agent child processes at turn end, so a backgrounded read loop succeeds once the window closes. The **write** half of (b) is closed — `path_utils.digest_tree` hashes the tree at staging and `Orchestrator._verify_reference_integrity` re-checks before grading, raising `ReferenceTamperedError` (→ `FinalStatus.ERROR`) on a mismatch so an agent cannot overwrite the reference to drive `reference_comparison` to 1.0. Passive reads are blocked; an adversarial agent is not. Full containment requires running the agent as a non-root uid AND holding the window for the agent's whole lifetime — follow-up. `tasks/anti_cheat_reference` probes the passive-read half.
+`task.reference` is a single required `directory:`, relative to the task YAML. The inline
+`code:` and single-file `file:` forms are gone because a directory is the only shape that
+can be permission-gated as a UNIT; a `model_validator(mode="before")` gives the removed
+forms a migration error.
+
+The orchestrator stages a **per-run private copy** (`orchestration/evaluation.py::stage_reference_dir`,
+symlinks stripped) into a tempdir and never preserves it into `run_dir/artifacts`. Cleanup
+goes through `rmtree_restrictive`, keyed on a root recorded BEFORE the copy so a failed copy
+still cleans up — `rmtree(ignore_errors=True)` silently declines on a tree left at 000.
+
+That copy is held at mode `000` for the whole of every `agent.communicate` call, via
+`Sandbox.set_permissions`. Whether the window is a real control at all, and why it keys on
+`CODER_EVAL_IN_CONTAINER` rather than `sandbox.driver`, is
+[isolation.md](isolation.md) § Capability drops and the anti-cheat window;
+`resolve_reference_dir` gates its `/work/references` branch on the same var for the same
+reason. How the window stacks is § The stacked chmod window below, and why an
+unappliable window is a hard error is § strict=True and the hard-fail path.
+
+The task directory is shielded ALONGSIDE the reference, which matters because it holds
+grading material beyond it: `run_command` fixtures, expected outputs, and — for a task laid
+out flat — every SIBLING task's reference. That is possible only because the task dir is a
+read-write throwaway copy; when it was bind-mounted `:ro` the chmod returned EROFS. There is
+no tmpfs mask and has not been one since: see
+[isolation.md](isolation.md) § Why the framework mounts are writable copies.
+
+What the window does NOT hide is the task DEFINITION. `task.yaml` is also staged at
+`/work/input` for the in-container orchestrator and that mount is untouched, so hiding the
+criteria from the agent remains a separate, unsolved problem.
+
+Criteria address reference files with the `$REFERENCE_DIR` token (same resolver as
+`$TASK_DIR`) and the `REFERENCE_DIR` env var for `run_command`; `reference_comparison` names
+one file via `reference_file`.
+
+**KNOWN GAP — defense-in-depth, not a boundary.** Two holes, both documented in
+[docs/DOCKER_ISOLATION.md](../../docs/DOCKER_ISOLATION.md#architecture) rather than restated
+here: a deliberate re-chmod by the root agent, and waiting the window out (it spans
+`agent.communicate` only, and nothing reaps agent child processes at turn end).
+
+The **write** half of the second is closed: `path_utils.digest_tree` hashes the tree at
+staging and `Orchestrator._verify_reference_integrity` re-checks before grading, raising
+`ReferenceTamperedError` on a mismatch — so an agent cannot overwrite the reference to drive
+`reference_comparison` to 1.0. Passive reads are blocked; an adversarial agent is not. Full
+containment needs the agent running as a non-root uid AND the window held for its whole
+lifetime. `tasks/anti_cheat_reference` probes the passive-read half.
 
 ## The stacked chmod window
 
