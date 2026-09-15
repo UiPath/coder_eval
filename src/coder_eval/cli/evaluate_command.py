@@ -609,9 +609,9 @@ def _report_and_exit(
 def _write_back(run_dir: Path, result: EvaluationResult) -> None:
     """Replace the graded run's ``task.json`` with the verdict, keeping a copy of the original.
 
-    Updating in place is what makes the rest of the toolchain free: plain
-    ``coder-eval aggregate <run>`` then rebuilds ``run.json`` from these rows
-    with no new code, and every report and evalboard view reads the graded row.
+    Updating in place is what makes the rest of the toolchain free:
+    ``coder-eval report <run> --rebuild`` then rebuilds ``run.json`` from these rows
+    with no grading-specific code, and every report and evalboard view reads the graded row.
 
     The pre-grade original is kept alongside as ``task.execute.json`` so the
     ungraded record is auditable — the write is not a silent overwrite of the
@@ -635,5 +635,5 @@ def _write_back(run_dir: Path, result: EvaluationResult) -> None:
         return
     console.print(
         f"[dim]Updated {target} (original kept as {backup.name}); "
-        + "run `coder-eval aggregate` to refresh run.json.[/dim]"
+        + "run `coder-eval report <run_dir> --rebuild` to refresh run.json.[/dim]"
     )

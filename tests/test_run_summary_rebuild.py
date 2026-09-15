@@ -1,7 +1,9 @@
-"""Tests for the run-summary seam: build_run_summary / recover_task_results / `aggregate`."""
+"""The run-summary seam: build_run_summary, recover_task_results, rebuild_run_summary and `report --rebuild`."""
 
 import json
 import logging
+import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -9,9 +11,23 @@ import pytest
 from typer.testing import CliRunner
 
 from coder_eval.cli import app
-from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TaskResult
+from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, RunSummary, TaskResult
 from coder_eval.orchestration.batch import build_run_summary, recover_task_results, write_run_summary
+from coder_eval.orchestration.run_summary_rebuild import find_run_root, rebuild_run_summary
 from coder_eval.path_utils import build_task_run_dir
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _shows(output: str, text: str) -> bool:
+    """Whether the console ``output`` shows ``text``. Rich styles output and hard-wraps long
+    tokens such as paths at any character, so both sides are compared with all whitespace removed."""
+
+    def squash(s: str) -> str:
+        return "".join(_ANSI_RE.sub("", s).split())
+
+    return squash(text) in squash(output)
 
 
 def _eval(task_id: str, *, variant_id: str = "default", status: FinalStatus = FinalStatus.SUCCESS) -> EvaluationResult:
@@ -42,6 +58,16 @@ def _write_task_json(run_dir: Path, result: EvaluationResult, *, replicate_index
     path = task_dir / "task.json"
     path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
     return path
+
+
+def _write_prior(run_dir: Path, **fields: object) -> None:
+    """Write a minimal prior run.json carrying the given run-level fields."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run.json").write_text(json.dumps({"task_results": [{"task_id": "a"}], **fields}), encoding="utf-8")
+
+
+def _run_json(run_dir: Path) -> dict:
+    return json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
 
 
 # --- build_run_summary (pure aggregation) -------------------------------------
@@ -213,24 +239,31 @@ def test_write_run_summary_emits_run_json_and_md(tmp_path: Path) -> None:
     assert on_disk["tasks_succeeded"] == 1
 
 
-# --- `coder-eval aggregate` CLI -----------------------------------------------
+# --- rebuild_run_summary ------------------------------------------------------
 
 
-def test_aggregate_cli_rebuilds_run_json(tmp_path: Path) -> None:
-    _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
-    _write_task_json(tmp_path, _eval("b", status=FinalStatus.ERROR))
-
-    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
-
-    assert result.exit_code == 0, result.output
-    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
-    assert run_json["tasks_run"] == 2
-    assert run_json["tasks_succeeded"] == 1
-    assert run_json["tasks_error"] == 1
-    assert (tmp_path / "run.md").exists()
+def test_rebuild_returns_none_on_an_empty_run_dir(tmp_path: Path) -> None:
+    assert rebuild_run_summary(tmp_path) is None
+    assert not (tmp_path / "run.json").exists()
 
 
-def test_aggregate_cli_carries_prior_tags(tmp_path: Path) -> None:
+def test_rebuild_does_not_print(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Callable from both `report` and `evaluate` only because it prints nothing — even the
+    malformed-entry path, which is a warning in the log instead."""
+    _write_task_json(tmp_path, _eval("a"))
+    _write_prior(tmp_path, skipped_tasks=["not-a-dict", {"reason": "missing required path"}])
+
+    with caplog.at_level(logging.WARNING):
+        assert rebuild_run_summary(tmp_path) is not None
+
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+    assert any("malformed skipped_tasks" in m for m in caplog.messages)
+
+
+def test_rebuild_carries_prior_tags(tmp_path: Path) -> None:
     """tags/source-path are static metadata — carried from an existing run.json."""
     _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
     (tmp_path / "run.json").write_text(
@@ -243,67 +276,36 @@ def test_aggregate_cli_carries_prior_tags(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+    rebuild_run_summary(tmp_path)
 
-    assert result.exit_code == 0, result.output
-    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    run_json = _run_json(tmp_path)
     assert run_json["max_parallel"] == 8
     (row,) = run_json["task_results"]
     assert row["tags"] == ["windows"]
     assert row["task_path"] == "tasks/a.yaml"
 
 
-def test_aggregate_cli_to_separate_output_dir(tmp_path: Path) -> None:
-    src = tmp_path / "src"
-    out = tmp_path / "out"
-    out.mkdir()
-    _write_task_json(src, _eval("a", status=FinalStatus.SUCCESS))
-
-    result = CliRunner().invoke(app, ["aggregate", str(src), "-o", str(out)])
-
-    assert result.exit_code == 0, result.output
-    assert (out / "run.json").exists()
-    assert not (src / "run.json").exists()
-    assert json.loads((out / "run.json").read_text(encoding="utf-8"))["run_id"] == "out"
-
-
-def test_aggregate_cli_errors_on_empty_dir(tmp_path: Path) -> None:
-    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
-    assert result.exit_code == 1
-    assert "no finalized task.json" in result.output
-
-
-def _write_prior(run_dir: Path, **fields: object) -> None:
-    """Write a minimal prior run.json carrying the given run-level fields."""
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "run.json").write_text(json.dumps({"task_results": [{"task_id": "a"}], **fields}), encoding="utf-8")
-
-
-def test_aggregate_cli_uses_prior_window_timestamps(tmp_path: Path) -> None:
+def test_rebuild_uses_prior_window_timestamps(tmp_path: Path) -> None:
     """When the prior run.json carries start/end, total_duration uses that real wall-clock."""
     _write_task_json(tmp_path, _eval("a"))
     _write_prior(tmp_path, start_time="2026-01-01T12:00:00", end_time="2026-01-01T12:10:00")
 
-    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+    rebuild_run_summary(tmp_path)
 
-    assert result.exit_code == 0, result.output
-    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
-    assert run_json["total_duration_seconds"] == 600.0
+    assert _run_json(tmp_path)["total_duration_seconds"] == 600.0
 
 
-def test_aggregate_cli_malformed_prior_timestamps_fall_back_to_results(tmp_path: Path) -> None:
+def test_rebuild_malformed_prior_timestamps_fall_back_to_results(tmp_path: Path) -> None:
     """A bad timestamp string falls back to the results-derived window (started_at + duration)."""
     _write_task_json(tmp_path, _eval("a"))  # started_at 12:00:00, duration_seconds 2.0
     _write_prior(tmp_path, start_time="not-a-date", end_time="also-bad")
 
-    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+    rebuild_run_summary(tmp_path)
 
-    assert result.exit_code == 0, result.output
-    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
-    assert run_json["total_duration_seconds"] == 2.0
+    assert _run_json(tmp_path)["total_duration_seconds"] == 2.0
 
 
-def test_aggregate_cli_carries_skipped_tasks_and_drops_malformed(tmp_path: Path) -> None:
+def test_rebuild_carries_skipped_tasks_and_drops_malformed(tmp_path: Path) -> None:
     """Valid skipped_tasks carry over; a non-dict and a schema-invalid dict drop without crashing."""
     _write_task_json(tmp_path, _eval("a"))
     _write_prior(
@@ -315,33 +317,149 @@ def test_aggregate_cli_carries_skipped_tasks_and_drops_malformed(tmp_path: Path)
         ],
     )
 
-    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+    rebuild_run_summary(tmp_path)
 
-    assert result.exit_code == 0, result.output  # must NOT abort on the bad entries
-    run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    run_json = _run_json(tmp_path)
     assert len(run_json["skipped_tasks"]) == 1
     assert run_json["skipped_tasks"][0]["path"] == "tasks/skip_me.yaml"
 
 
-def test_aggregate_cli_coerces_missing_or_zero_max_parallel_to_one(tmp_path: Path) -> None:
+def test_rebuild_coerces_missing_or_zero_max_parallel_to_one(tmp_path: Path) -> None:
     """RunSummary requires max_parallel >= 1; a missing or falsy prior value coerces to 1."""
     _write_task_json(tmp_path, _eval("a"))
 
     _write_prior(tmp_path)  # no max_parallel key
-    assert CliRunner().invoke(app, ["aggregate", str(tmp_path)]).exit_code == 0
-    assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))["max_parallel"] == 1
+    rebuild_run_summary(tmp_path)
+    assert _run_json(tmp_path)["max_parallel"] == 1
 
     _write_prior(tmp_path, max_parallel=0)  # falsy → still coerced to 1
-    assert CliRunner().invoke(app, ["aggregate", str(tmp_path)]).exit_code == 0
-    assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))["max_parallel"] == 1
+    rebuild_run_summary(tmp_path)
+    assert _run_json(tmp_path)["max_parallel"] == 1
 
 
-def test_aggregate_cli_output_rejects_a_file(tmp_path: Path) -> None:
-    """`-o` is a directory (file_okay=False) — pointing it at a file is a clean usage error."""
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege on Windows")
+def test_rebuild_names_the_run_after_the_resolved_directory(tmp_path: Path) -> None:
+    """`runs/latest` is a symlink; the run id must be the run's own directory name, not `latest`."""
+    run_dir = tmp_path / "2026-06-22_14-32-27"
+    _write_task_json(run_dir, _eval("a"))
+    latest = tmp_path / "latest"
+    latest.symlink_to(run_dir)
+
+    summary = rebuild_run_summary(latest)
+
+    assert summary is not None and summary.run_id == "2026-06-22_14-32-27"
+
+
+# --- find_run_root ------------------------------------------------------------
+
+
+def test_find_run_root_walks_up_to_the_nearest_run_json(tmp_path: Path) -> None:
+    _write_prior(tmp_path)
+    task_dir = _write_task_json(tmp_path, _eval("a")).parent
+
+    assert find_run_root(task_dir) == tmp_path
+
+
+def test_find_run_root_walks_past_the_working_directory_for_a_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`evaluate .` from inside a task dir: `Path(".").parents` is empty unless resolved first."""
+    _write_prior(tmp_path)
+    task_dir = _write_task_json(tmp_path, _eval("a")).parent
+    monkeypatch.chdir(task_dir)
+
+    assert find_run_root(Path(".")) == tmp_path.resolve()
+
+
+def test_find_run_root_returns_none_outside_a_run(tmp_path: Path) -> None:
+    task_dir = _write_task_json(tmp_path / "copied-out", _eval("a")).parent
+
+    assert find_run_root(task_dir) is None
+
+
+# --- `coder-eval report --rebuild` --------------------------------------------
+
+
+def test_report_rebuild_writes_run_json(tmp_path: Path) -> None:
+    _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
+    _write_task_json(tmp_path, _eval("b", status=FinalStatus.ERROR))
+
+    result = CliRunner().invoke(app, ["report", str(tmp_path), "--rebuild"])
+
+    assert result.exit_code == 0, result.output
+    run_json = _run_json(tmp_path)
+    assert run_json["tasks_run"] == 2
+    assert run_json["tasks_succeeded"] == 1
+    assert run_json["tasks_error"] == 1
+    assert (tmp_path / "run.md").exists()
+
+
+def test_report_rebuild_output_matches_the_recorded_counts_line(tmp_path: Path) -> None:
+    _write_task_json(tmp_path, _eval("a", status=FinalStatus.SUCCESS))
+    _write_task_json(tmp_path, _eval("b", status=FinalStatus.FAILURE))
+    _write_task_json(tmp_path, _eval("c", status=FinalStatus.ERROR))
+
+    result = CliRunner().invoke(app, ["report", str(tmp_path), "--rebuild"])
+
+    assert result.exit_code == 0, result.output
+    summary = RunSummary.model_validate_json((tmp_path / "run.json").read_text(encoding="utf-8"))
+    counts = f"{summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err"
+    expected = f"Aggregated {summary.tasks_run} task(s) ({counts}) → {tmp_path / 'run.json'}"
+    assert _shows(result.output, expected), result.output
+
+
+def test_report_rebuild_reports_the_not_graded_bucket(tmp_path: Path) -> None:
+    """A rebuild is the step right after `execute`, so the ungraded bucket must be named."""
+    _write_task_json(tmp_path, _eval("a", status=FinalStatus.NOT_GRADED))
+    _write_task_json(tmp_path, _eval("b", status=FinalStatus.SUCCESS))
+
+    result = CliRunner().invoke(app, ["report", str(tmp_path), "--rebuild"])
+
+    assert result.exit_code == 0, result.output
+    summary = RunSummary.model_validate_json((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert summary.tasks_not_graded == 1
+    assert _shows(result.output, f"/ {summary.tasks_not_graded} not graded)"), result.output
+
+
+def test_report_rebuild_on_an_empty_dir_exits_1(tmp_path: Path) -> None:
+    result = CliRunner().invoke(app, ["report", str(tmp_path), "--rebuild"])
+    assert result.exit_code == 1
+    assert _shows(result.output, "no finalized task.json"), result.output
+
+
+@pytest.mark.parametrize("extra", [["--format", "md"], ["--format", "html"], ["--output", "summary.md"]])
+def test_report_rebuild_refuses_format_and_output(tmp_path: Path, extra: list[str]) -> None:
+    """--rebuild writes in place; a --format or --output beside it has no meaning, so it is refused."""
     _write_task_json(tmp_path, _eval("a"))
-    a_file = tmp_path / "not_a_dir.txt"
-    a_file.write_text("x", encoding="utf-8")
 
-    result = CliRunner().invoke(app, ["aggregate", str(tmp_path), "-o", str(a_file)])
+    result = CliRunner().invoke(app, ["report", str(tmp_path), "--rebuild", *extra])
 
-    assert result.exit_code != 0  # Typer rejects before our code runs (no raw OSError traceback)
+    assert result.exit_code == 2, result.output
+    assert not (tmp_path / "run.json").exists()
+
+
+def test_report_rebuild_refuses_a_directory_inside_a_run(tmp_path: Path) -> None:
+    """A run.json written below the root would make every later rebuild of the root drop those rows."""
+    _write_task_json(tmp_path, _eval("a"))
+    _write_prior(tmp_path)
+    variant_dir = tmp_path / "default"
+
+    result = CliRunner().invoke(app, ["report", str(variant_dir), "--rebuild"])
+
+    assert result.exit_code == 2, result.output
+    assert not (variant_dir / "run.json").exists()
+
+
+def test_report_rebuild_refuses_a_task_directory(tmp_path: Path) -> None:
+    task_dir = _write_task_json(tmp_path / "copied-out", _eval("a")).parent
+
+    result = CliRunner().invoke(app, ["report", str(task_dir), "--rebuild"])
+
+    assert result.exit_code == 2, result.output
+    assert not (task_dir / "run.json").exists()
+
+
+def test_aggregate_is_no_longer_a_command(tmp_path: Path) -> None:
+    result = CliRunner().invoke(app, ["aggregate", str(tmp_path)])
+    assert result.exit_code == 2
+    assert _shows(result.output, "No such command"), result.output

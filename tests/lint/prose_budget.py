@@ -52,7 +52,6 @@ _TYPER_COMMANDS = frozenset(
         ("cli/plan_command.py", "plan_command"),
         ("cli/evaluate_command.py", "evaluate_command"),
         ("cli/report_command.py", "report_command"),
-        ("cli/aggregate_command.py", "aggregate_command"),
         ("cli/export_command.py", "export_command"),
         ("cli/harbor_command.py", "reward_command"),
         ("cli/run_task_internal_command.py", "run_task_internal_command"),
