@@ -37,7 +37,7 @@ import re
 
 
 _PKG = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")
-_NON_CORE = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\](cli|reports)[/\\]")
+_NON_CORE = re.compile(_PKG.pattern + r"(cli|reports)[/\\]")
 
 
 def is_core_path(filepath: str) -> bool:
