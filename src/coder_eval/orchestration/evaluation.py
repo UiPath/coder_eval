@@ -64,9 +64,9 @@ def resolve_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path 
     if not task.reference:
         return None
 
-    # Under docker the host bind-mounts the reference at a fixed container path
-    # and masks its original location with an empty tmpfs, so resolving relative
-    # to task_file would find the MASK. Gated on the env var as well as the path,
+    # Under docker the host bind-mounts a private COPY of the reference at a fixed
+    # container path, and the task dir is a separate shielded copy -- so resolving
+    # relative to task_file would find the wrong tree. Gated on the env var as well as the path,
     # for the reason Sandbox.enforces_permission_windows is: a bare
     # `/work/references` probe would silently hijack every task's reference on any
     # host that happens to have that directory, invisibly.
@@ -76,12 +76,12 @@ def resolve_reference_dir(task: TaskDefinition, task_file: Path | None) -> Path 
         if container_mount.is_dir():
             logger.debug("Reference resolved from the container mount at %s", container_mount)
             return container_mount
-        # HARD FAIL rather than falling back to task_file.parent: in-container
-        # that fallback resolves to the UN-masked reference under the `:ro`
-        # task-dir bind, which the mode-000 window cannot chmod (EROFS) — so the
-        # run would complete with the solution readable for the whole turn,
-        # reporting a normal pass/fail. A missing mount means the host-side wiring
-        # is broken, and that must be LOUD rather than silently unprotected.
+        # HARD FAIL rather than falling back to task_file.parent: in-container that
+        # fallback resolves to the reference embedded in the task-dir copy, which is
+        # NOT the path the window was opened over — so the run would complete with
+        # the solution readable for the whole turn, reporting a normal pass/fail. A
+        # missing mount means the host-side wiring is broken, and that must be LOUD
+        # rather than silently unprotected.
         raise FileNotFoundError(
             f"Task declares reference.directory={task.reference.directory!r} but {CONTAINER_REFERENCE_DIR} "
             + "is not mounted in this container; refusing to run unprotected. Most likely that path does not "

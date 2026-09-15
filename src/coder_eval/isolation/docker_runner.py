@@ -1407,10 +1407,11 @@ class DockerRunner:
         if self.grade_workspace is not None:
             argv += ["-v", f"{self.grade_workspace.resolve()}:{CONTAINER_GRADE_WORKSPACE}"]
 
-        # ANTI-CHEAT: the reference normally lives INSIDE the task dir, so an empty
-        # tmpfs masks its path there and a writable COPY is mounted at
-        # /work/references instead. Docker applies mounts by target-path depth, so
-        # the deeper tmpfs wins regardless of argv order.
+        # ANTI-CHEAT: the reference normally lives INSIDE the task dir, and a
+        # writable COPY is mounted at /work/references for the window to chmod.
+        # There is NO tmpfs mask -- the task dir is itself a shielded copy now
+        # (see _reference_mount_args), so the embedded original is covered by the
+        # same window rather than hidden by a layered filesystem.
         # Rationale: .claude/notes/isolation.md § Why the framework mounts are writable copies
         argv += self._reference_mount_args()
         # A throwaway lean COPY of ~/.claude, read-WRITE at the host's own path
@@ -1468,8 +1469,8 @@ class DockerRunner:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
         # HAZARD: task.reference.directory is deliberately NOT auto-mounted at its
-        # host path -- that would re-expose it through $TASK_DIR, the exact hole
-        # the tmpfs mask closes.
+        # host path. That would bind the REAL tree in beside the shielded copy, so
+        # the mode-000 window would leave it readable through $TASK_DIR.
         for mount in cfg.extra_mounts:
             normalized = _validate_extra_mount(mount)
             argv += ["-v", normalized]
