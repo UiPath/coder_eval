@@ -159,7 +159,7 @@ def test_ce003_skips_files_outside_criteria(write_py):
 
 
 def test_ce004_flags_cli_import_in_core(write_py, tmp_path):
-    sub = tmp_path / "coder_eval" / "evaluation"
+    sub = tmp_path / "src" / "coder_eval" / "evaluation"
     sub.mkdir(parents=True)
     path = sub / "thing.py"
     path.write_text("from coder_eval.cli.utils import something\n", encoding="utf-8")
@@ -169,7 +169,7 @@ def test_ce004_flags_cli_import_in_core(write_py, tmp_path):
 
 
 def test_ce004_flags_bare_cli_import_in_core(write_py, tmp_path):
-    sub = tmp_path / "coder_eval" / "criteria"
+    sub = tmp_path / "src" / "coder_eval" / "criteria"
     sub.mkdir(parents=True)
     path = sub / "thing.py"
     path.write_text("import coder_eval.cli\n", encoding="utf-8")
@@ -180,7 +180,7 @@ def test_ce004_flags_bare_cli_import_in_core(write_py, tmp_path):
 
 def test_ce004_flags_in_models_layer(write_py, tmp_path):
     """models/ is part of the core layer in the expanded rule."""
-    sub = tmp_path / "coder_eval" / "models"
+    sub = tmp_path / "src" / "coder_eval" / "models"
     sub.mkdir(parents=True)
     path = sub / "thing.py"
     path.write_text("from coder_eval.cli import app\n", encoding="utf-8")
@@ -189,7 +189,7 @@ def test_ce004_flags_in_models_layer(write_py, tmp_path):
 
 
 def test_ce004_allows_cli_import_in_cli(write_py, tmp_path):
-    sub = tmp_path / "coder_eval" / "cli"
+    sub = tmp_path / "src" / "coder_eval" / "cli"
     sub.mkdir(parents=True)
     path = sub / "thing.py"
     path.write_text("from coder_eval.cli.utils import something\n", encoding="utf-8")
@@ -484,7 +484,7 @@ def test_ce009_allows_subclass_inheriting_forbid_from_same_file(tmp_path: Path) 
     assert violations == []
 
 
-def test_ce008_skips_files_outside_scope(tmp_path: Path) -> None:
+def test_ce009_skips_files_outside_scope(tmp_path: Path) -> None:
     """Files outside tasks.py / criteria.py are not flagged (results.py uses extra='allow')."""
     from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
 

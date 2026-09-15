@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from tests.lint.rules._layers import is_core_path
 from tests.lint.runner import ALL_RULES, check_paths
 
 
@@ -131,7 +132,7 @@ class TestCE043NoCommandOutputTruncation:
 
         from tests.lint.rules.ce043_no_command_output_truncation import NoCommandOutputTruncation
 
-        path = "src/coder_eval/agents/codex_agent.py" if in_agents else "src/coder_eval/reports_html.py"
+        path = "src/coder_eval/agents/codex_agent.py" if in_agents else "src/coder_eval/reports/html.py"
         return NoCommandOutputTruncation(path).check(ast.parse(src))
 
     @pytest.mark.parametrize(
@@ -1567,8 +1568,6 @@ class TestPluginArtifacts:
         )
 
     def test_activation_rows_have_both_polarities(self):
-        import json
-
         rows = [
             json.loads(line)
             for line in (self.TEMPLATES / "activation-rows.jsonl").read_text(encoding="utf-8").splitlines()
@@ -2093,6 +2092,360 @@ class TestPluginArtifacts:
             assert pointer in skill.read_text(encoding="utf-8"), (
                 f"{skill} no longer reads {pointer} — it has silently forked the shared rubric"
             )
+
+
+# The `driver: docker` evaluation path, and the reason the core-layer predicate
+# became an allowlist: the directory-list form it replaced named ten packages and
+# `isolation` was not one, so the driver that runs the whole evaluation loop in a
+# container was invisible to BOTH layering rules. Shared, so the two pins below
+# cannot drift to different paths.
+CORE_ISOLATION = "/repo/src/coder_eval/isolation/docker_runner.py"
+
+
+@pytest.mark.lint
+class TestCE004CatchesBothImportSpellings:
+    """CE004 must fire on the RELATIVE form, not only `coder_eval.cli`.
+
+    It had checked `node.module` alone since it was written, so `from ..cli
+    import x` — the codebase's dominant idiom — passed silently. Found while
+    fixing the identical bug in CE066; the shared `_layers.imports_package`
+    helper is what stops the two drifting again.
+    """
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
+
+        return list(NoCliImportsInCore(filepath).check(ast.parse(source)))
+
+    CORE = "/repo/src/coder_eval/orchestration/batch.py"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from ..cli import run_command",
+            "from ..cli.run_command import run_pipeline",
+            "from .. import cli",
+            "from coder_eval.cli import run_command",
+            "import coder_eval.cli",
+        ],
+    )
+    def test_every_spelling_of_a_cli_import_violates(self, source):
+        assert self._violations(source, self.CORE), f"CE004 missed: {source}"
+
+    @pytest.mark.parametrize("source", ["from ..models import TurnRecord", "from ..client import X"])
+    def test_a_non_cli_import_does_not_violate(self, source):
+        """`..client` must not prefix-match `cli` — the old `^coder_eval\\.cli`
+        regex would have matched `coder_eval.client` too."""
+        assert not self._violations(source, self.CORE)
+
+    def test_a_non_core_file_is_exempt(self):
+        assert not self._violations("from ..cli import run_command", "/repo/src/coder_eval/cli/report_command.py")
+
+    def test_the_docker_driver_is_core(self):
+        assert self._violations("from ..cli import run_command", CORE_ISOLATION)
+
+    def test_the_reports_package_is_in_scope(self):
+        """CE004's only exemption is `cli/`. The reports package runs without the
+        CLI — the orchestrator writes a task report mid-run — so a `cli` import
+        there closes a cli -> orchestration -> reports -> cli cycle. It was exempt
+        only because CE004 borrowed CE066's core predicate."""
+        assert self._violations("from ..cli import run_command", "/repo/src/coder_eval/reports/markdown.py")
+
+
+@pytest.mark.lint
+class TestCE066NoReportImportsInCore:
+    """CE066 — core may import only the reports package's public writers.
+
+    Before the split the orchestrator imported `turn_time_buckets` and
+    `visible_turn_count` from `reports_stats`, and `orchestration/batch.py`
+    imported the run.json row serializer from `reports_experiment`. Those names
+    moved to `result_metrics` / `stats` / `run_record`; this rule is what stops
+    the next one drifting back.
+    """
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce066_no_report_imports_in_core import NoReportImportsInCore
+
+        return list(NoReportImportsInCore(filepath).check(ast.parse(source)))
+
+    CORE = "/repo/src/coder_eval/orchestration/batch.py"
+    ORCHESTRATOR = "/repo/src/coder_eval/orchestrator.py"
+    NON_CORE = "/repo/src/coder_eval/cli/report_command.py"
+
+    def test_a_non_writer_imported_into_core_violates(self):
+        found = self._violations("from coder_eval.reports import format_score", self.CORE)
+        assert len(found) == 1
+        assert "format_score" in found[0].message
+        # The message must say what to do, not just that it is wrong.
+        assert "result_metrics" in found[0].message and "stats.py" in found[0].message
+
+    def test_a_writer_imported_into_core_does_not_violate(self):
+        assert not self._violations("from coder_eval.reports import write_task_html", self.CORE)
+
+    def test_top_level_orchestrator_is_core_even_though_it_is_in_no_package(self):
+        """CE004's directory regex cannot see this file, and it held 3 of the 5
+        edges the rule exists to prevent — so it is the rule's main target."""
+        assert self._violations("from coder_eval.reports import turn_time_buckets", self.ORCHESTRATOR)
+        assert not self._violations("from coder_eval.reports import write_task_html", self.ORCHESTRATOR)
+
+    def test_a_submodule_import_is_checked_too(self):
+        assert self._violations("from coder_eval.reports.helpers import fmt_p", self.CORE)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from ..reports import format_score",
+            "from ..reports.helpers import VariantSeries",
+            "from .. import reports",
+        ],
+    )
+    def test_the_relative_spelling_is_caught(self, source):
+        """The relative form is the LOCAL IDIOM — both surviving edges use it.
+
+        A relative import keeps its dots in `node.level` and leaves
+        `node.module == "reports"`, so a rule matching only the absolute
+        `coder_eval.reports` fires on nothing this codebase actually writes.
+        """
+        assert self._violations(source, self.CORE), f"CE066 missed the relative form: {source}"
+
+    def test_a_relative_writer_import_is_still_allowed(self):
+        """orchestrator.py's real `from .reports import write_task_html`."""
+        assert not self._violations("from .reports import write_task_html", self.ORCHESTRATOR)
+
+    def test_a_top_level_core_module_other_than_the_orchestrator_is_core(self):
+        """`result_metrics.py` is where the violation message tells you to move a
+        metric TO — exempting it would be a hole in the middle of the rule."""
+        assert self._violations("from .reports.helpers import fmt_p", "/repo/src/coder_eval/result_metrics.py")
+        assert self._violations("from .reports import format_score", "/repo/src/coder_eval/run_record.py")
+
+    def test_wholesale_module_import_into_core_violates(self):
+        """No name to check, so every attribute access through it is invisible."""
+        assert self._violations("import coder_eval.reports", self.CORE)
+
+    def test_a_non_core_file_is_exempt(self):
+        assert not self._violations("from coder_eval.reports import format_score", self.NON_CORE)
+
+    def test_the_docker_driver_is_core(self):
+        assert self._violations("from ..reports import format_score", CORE_ISOLATION)
+        assert not self._violations("from ..reports import write_task_html", CORE_ISOLATION)
+
+    def test_the_reports_package_itself_stays_exempt(self):
+        """Pins that narrowing CE004's scope did not widen this rule's: a report
+        module reaching a sibling's non-writer is the package's own business."""
+        assert not self._violations("from ..reports.helpers import fmt_p", "/repo/src/coder_eval/reports/markdown.py")
+
+    def test_every_allowlisted_name_resolves_in_the_package(self):
+        """Staleness guard: a renamed writer must not leave a dead entry silencing
+        the rule. This is the pattern the deleted pricing test used correctly.
+        """
+        import coder_eval.reports as pkg
+        from tests.lint.rules.ce066_no_report_imports_in_core import ALLOWED_WRITERS
+
+        missing = sorted(n for n in ALLOWED_WRITERS if not hasattr(pkg, n))
+        assert not missing, f"CE066 allowlists names that no longer exist in coder_eval.reports: {missing}"
+
+
+@pytest.mark.lint
+class TestCE067ClaudeMdTreeParity:
+    """CE067 — CLAUDE.md's directory tree must name every top-level package member.
+
+    The tree is the map an assistant reads before touching this package, so a
+    missing entry is a module nobody is told exists. It had drifted in BOTH
+    directions and only one was ever checked: a `optimize/` row survived for a
+    directory that lives solely on an unmerged branch, and the audit that removed
+    it walked entries -> filesystem, so it could not see that `errors/` and
+    `plugins.py` were absent — the second of which is the plugin SPI the
+    "Adding a New Agent" section tells you to use.
+
+    Reasons over Markdown rather than one Python AST, so it lives here rather
+    than in the AST runner, alongside CE028/CE033/CE065.
+
+    Only the TOP level is checked. Nested rows (`models/enums.py` and friends)
+    are illustrative rather than exhaustive, and pinning them would turn every
+    new sibling module into a docs edit for no reader benefit.
+    """
+
+    # Not modules a reader navigates to: the build marker, the typing marker, the
+    # export-hygiene rule file, and a 3-line `__init__` holding only `__version__`.
+    IGNORED = frozenset({"__pycache__", "py.typed", ".gitattributes", "__init__.py"})
+
+    @staticmethod
+    def _documented() -> set[str]:
+        """The tree's TOP-LEVEL rows only — anchored, so an indented `│   ├──`
+        row for a nested module is not mistaken for a package member."""
+        text = (SRC.parent / "CLAUDE.md").read_text(encoding="utf-8")
+        tree = re.search(r"^```\ncoder_eval/\n(.*?)^```", text, re.S | re.M)
+        assert tree is not None, "CLAUDE.md no longer opens a fenced `coder_eval/` tree block"
+        rows = set(re.findall(r"^[├└]── (\S+?)/?\s", tree.group(1), re.M))
+        assert rows, "the tree block parsed to zero top-level rows — the box-drawing shape changed"
+        return rows
+
+    def test_every_top_level_member_is_in_the_tree(self):
+        actual = {p.name for p in (SRC / "coder_eval").iterdir() if p.name not in self.IGNORED}
+        missing = sorted(actual - self._documented())
+        assert not missing, f"add to CLAUDE.md's directory tree: {missing}"
+
+    def test_no_tree_row_names_a_deleted_member(self):
+        """The direction the `optimize/` audit did run — kept so a removal is
+        caught as loudly as an addition."""
+        actual = {p.name for p in (SRC / "coder_eval").iterdir()}
+        phantom = sorted(self._documented() - actual)
+        assert not phantom, f"CLAUDE.md's directory tree names members that do not exist: {phantom}"
+
+
+@pytest.mark.lint
+class TestCoreLayerMembership:
+    """`_layers` is the single definition of where a file sits, for CE004 and CE066.
+
+    Pinned against the real filesystem because the core predicate's two previous
+    forms were denylists that each left a hole: the first exempted every top-level
+    module but `orchestrator.py`, the second named ten directories and missed
+    `isolation/`. The allowlist form has no per-package list to keep honest — only
+    each rule's exemption set, which is what this class pins: `{cli, reports}` for
+    CE066's core, `{cli}` for CE004's scope.
+
+    Deliberately NOT named `TestCE\\d{3}`: that prefix is this file's convention
+    for a class guarding one numbered rule, and this class guards the predicates
+    two rules share. Taking a CE number would claim an id that indexes no rule.
+    """
+
+    NON_CORE = frozenset({"cli", "reports"})
+    PKG = SRC / "coder_eval"
+
+    def test_exactly_two_packages_are_non_core(self):
+        dirs = [d for d in self.PKG.iterdir() if d.is_dir() and d.name != "__pycache__"]
+        found = {d.name for d in dirs if not is_core_path(str(d / "x.py"))}
+        assert found == self.NON_CORE, f"the non-core set moved: {sorted(found)}"
+
+    def test_every_module_is_classified_by_its_top_level_package(self):
+        misclassified = [
+            str(py.relative_to(self.PKG))
+            for py in self.PKG.rglob("*.py")
+            if is_core_path(str(py)) is not (py.relative_to(self.PKG).parts[0] not in self.NON_CORE)
+        ]
+        assert not misclassified, f"is_core_path disagrees with the package layout for: {misclassified}"
+
+    def test_ce004_scope_is_every_module_outside_cli(self):
+        """CE004 exempts only `cli/`. It once inherited CE066's `reports/`
+        exemption by borrowing the core predicate whole.
+
+        Runs the RULE at every real module path rather than recomputing its scope
+        from the helpers, so it fails if the rule stops using them."""
+        import ast
+
+        from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
+
+        cli_import = ast.parse("from ..cli import run_command")
+        misscoped = [
+            str(py.relative_to(self.PKG))
+            for py in self.PKG.rglob("*.py")
+            if bool(list(NoCliImportsInCore(str(py)).check(cli_import))) is (py.relative_to(self.PKG).parts[0] == "cli")
+        ]
+        assert not misscoped, f"CE004's scope disagrees with the package layout for: {misscoped}"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # A `src` component that is NOT the package's parent, and none at all.
+            "/home/dev/src/exp/coder_eval/conftest.py",
+            "/home/dev/projects/coder_eval/conftest.py",
+        ],
+    )
+    def test_a_repo_root_file_is_not_core(self, path):
+        """The checkout directory is itself named `coder_eval`, so the unanchored
+        regex made every repo-root module core. Anchoring on `src/` is the fix."""
+        assert not is_core_path(path)
+
+    def test_the_src_named_parent_residual_is_unreachable_not_fixed(self):
+        """Blind spot, pinned so the anchoring is not mistaken for a complete fix.
+
+        A clone at `~/src/coder_eval` collides with the anchor itself, and no path
+        substring can separate it from the package. Unreachable: both rules are
+        only ever handed paths under the runner's `SRC`.
+        """
+        assert is_core_path("/Users/x/src/coder_eval/conftest.py")
+        assert is_core_path("/Users/x/src/coder_eval/tests/test_a.py")
+
+    def test_neither_consumer_is_ever_handed_a_path_outside_src(self):
+        """The residual above is harmless only because both rules scan `SRC` alone.
+
+        Adding CE004 or CE066 to `_ALSO_SCAN_TESTS` would hand them the whole
+        `tests/` tree, and on a clone at `~/src/coder_eval` — an ordinary layout —
+        that tree matches `_PKG`. The reachability argument lives in
+        `_layers.py`'s docstring as prose; this is the line that enforces it.
+        """
+        assert {"CE004", "CE066"}.isdisjoint(_ALSO_SCAN_TESTS)
+
+    @pytest.mark.parametrize(
+        ("relative", "expected"),
+        [
+            ("src/coder_eval/orchestrator.py", True),
+            ("src/coder_eval/reports/markdown.py", False),
+            # Only the PACKAGES are non-core: each layer pattern requires a
+            # trailing separator, so a top-level module whose name merely starts with
+            # `reports` or `cli` stays core. Nothing in the tree has that shape
+            # today, so this is the only thing pinning the boundary.
+            ("src/coder_eval/reports_legacy.py", True),
+            ("src/coder_eval/cli_helpers.py", True),
+        ],
+    )
+    def test_the_relative_and_absolute_spelling_agree(self, relative, expected):
+        assert is_core_path(relative) is expected
+        assert is_core_path(f"/repo/{relative}") is expected
+
+
+@pytest.mark.lint
+class TestCE065PricingMirrorParity:
+    """CE065 — the evalboard's rate table is generated from coder_eval.pricing.
+
+    lib/pricing.ts used to hand-copy the Python rate card, guarded by a regex
+    parser, a meta-guard on that regex, an exemption set and a staleness guard
+    for the exemption set — five layers that still let four heavily-used models
+    render "—" for cost. The table is now generated; `make pricing-mirror`
+    writes it and this class diffs it. Reasons over generated text rather than
+    one Python AST, so it lives here rather than in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_generated_mirror_matches_disk(self):
+        from tests.lint.pricing_mirror import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, (
+            "\nThe evalboard's rate table drifted from src/coder_eval/pricing.py — run "
+            "`make pricing-mirror` to regenerate:\n\n"
+            + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
+        )
+
+    def test_every_statically_priced_model_is_mirrored(self):
+        """Table-driven, so a new rate in pricing.py needs zero edits here.
+
+        The old hand-copy's exemption set is what shipped the bug: an id could
+        sit in it forever and silence the guard. The only exclusion now is the
+        `per_request_billing` product rule, declared on the rate itself.
+        """
+        from coder_eval.pricing import builtin_rates
+        from tests.lint.pricing_mirror import render_pricing
+
+        rendered = render_pricing()
+        for key, rate in builtin_rates().items():
+            # Build the needle the way the renderer builds the row, so a key
+            # needing escaping is not reported as spuriously missing.
+            needle = json.dumps(key) + ": {"
+            if rate.per_request_billing:
+                assert needle not in rendered, (
+                    f"{key} bills per request — statically pricing it on the frontend replaces "
+                    "the captured actual per-call cost with an estimate"
+                )
+            else:
+                assert needle in rendered, f"{key} is priced in pricing.py but missing from the mirror"
 
 
 @pytest.mark.lint
@@ -4111,6 +4464,7 @@ class TestCE061WindowViaCloseWindow:
         assert suppressed == set()
 
 
+@pytest.mark.lint
 class TestRuffExternalCoversEveryRule:
     """Every CE rule's documented `# noqa` must be accepted by ruff.
 
@@ -4120,21 +4474,47 @@ class TestRuffExternalCoversEveryRule:
     advertise `# noqa: CE054` / `# noqa: CE048` as the supported escape hatch. So
     the first person to use the documented exemption got a red `make check`
     instead, for doing exactly what the rule told them to.
+
+    The list then drifted a SECOND time, and this class is why it drifted
+    quietly: it read `ALL_RULES` alone, so it could not see a rule that is a
+    `@pytest.mark.lint` class here rather than a `BaseRule`. CE044 and CE065 are
+    both such rules, both were missing, and only CE065 was noticed — by a human
+    reading a diff. `_known()` now unions both registries.
+
+    Both directions are asserted. A declared id for a deleted rule is the
+    exemption-set rot that the generated pricing table exists to remove.
+
+    Blind spot: the `@pytest.mark.lint` half of `_known()` discovers ids by the
+    `class TestCE\\d{3}` naming convention, which every such class follows today
+    but nothing enforces. A class named otherwise is invisible here, and its id
+    can go undeclared exactly as CE044 did.
+
+    Nothing is red today for want of these two entries — no `# noqa: CE044` or
+    `# noqa: CE065` exists in the tree — so this is pre-emptive rather than the
+    fix for a broken build.
     """
 
     @staticmethod
     def _external() -> set[str]:
         import tomllib
-        from pathlib import Path
 
-        data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        data = tomllib.loads((SRC.parent / "pyproject.toml").read_text(encoding="utf-8"))
         return set(data["tool"]["ruff"]["lint"]["external"])
 
-    def test_every_registered_rule_is_listed(self):
-        from tests.lint.runner import ALL_RULES
+    @staticmethod
+    def _known() -> set[str]:
+        own_source = Path(__file__).read_text(encoding="utf-8")
+        return {r.id for r in ALL_RULES} | set(re.findall(r"^class Test(CE\d{3})", own_source, re.M))
 
-        missing = sorted({r.id for r in ALL_RULES} - self._external())
+    def test_every_registered_rule_is_listed(self):
+        missing = sorted(self._known() - self._external())
         assert not missing, f"add to [tool.ruff.lint] external in pyproject.toml: {missing}"
+
+    def test_no_dead_entry_survives(self):
+        """A declared id for a rule that no longer exists silences RUF102 for a
+        code nothing defines — the exemption-set rot the pricing mirror removed."""
+        dead = sorted(self._external() - self._known())
+        assert not dead, f"pyproject.toml [tool.ruff.lint] external declares ids with no such rule: {dead}"
 
     def test_every_listed_id_is_well_formed(self):
         """Cheap guard against a typo silently widening the allowlist."""
@@ -4198,7 +4578,7 @@ class TestCE053NoRunRecordFilenameLiteral:
     """CE053 flags a `task.json` literal outside path_utils."""
 
     @staticmethod
-    def _run(src: str, filepath: str = "src/coder_eval/reports.py"):
+    def _run(src: str, filepath: str = "src/coder_eval/reports/markdown.py"):
         import ast
 
         from tests.lint.rules.ce053_run_record_filename_literal import NoRunRecordFilenameLiteral

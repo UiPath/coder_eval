@@ -98,7 +98,7 @@ class EventCollector:
     def visible_turn_count(self) -> int:
         """Visible timeline entries observed so far — one per resolved tool call.
 
-        The live, in-stream counterpart of ``reports_stats.visible_turn_count``,
+        The live, in-stream counterpart of ``result_metrics.visible_turn_count``,
         which counts the very same list once the turn is a finished
         ``TurnRecord`` (minus its trailing final-reply entry, which cannot exist
         while the turn is still running).

@@ -57,9 +57,9 @@
 // recorded token mix exactly.
 
 import type { MessageEvent, TokenTotals } from "@/lib/runs";
-// Rates and resolution live in lib/pricing.ts (the single source of truth,
-// ported from src/coder_eval/proxy/pricing.py). Import directly from there;
-// this module no longer re-exports them.
+// Rates and resolution live in lib/pricing.ts, whose table is GENERATED from
+// src/coder_eval/pricing.py by `make pricing-mirror`. Import directly from
+// there; this module no longer re-exports them.
 import { type Pricing, resolvePricing } from "@/lib/pricing";
 
 // Per-tool aggregates for the tool-skip simulator.

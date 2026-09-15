@@ -2276,7 +2276,7 @@ def test_finalize_result_logs_summary_on_success(tmp_path, caplog):
 
     with (
         caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
-        patch("coder_eval.reports_html.write_task_html", return_value=None),
+        patch("coder_eval.reports.write_task_html", return_value=None),
     ):
         orch._finalize_result(start_time=time.time() - 1.5)
 
@@ -2301,7 +2301,7 @@ def test_finalize_result_logs_summary_on_timeout(tmp_path, caplog):
 
     with (
         caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
-        patch("coder_eval.reports_html.write_task_html", return_value=None),
+        patch("coder_eval.reports.write_task_html", return_value=None),
     ):
         orch._finalize_result(start_time=time.time())
 
@@ -2324,7 +2324,7 @@ def test_finalize_result_logs_zero_score_when_no_criteria(tmp_path, caplog):
     orch = _bootstrap_finalize_orchestrator(tmp_path, final_status=FinalStatus.ERROR, iterations=0)
     with (
         caplog.at_level(_logging.INFO, logger="coder_eval.orchestrator"),
-        patch("coder_eval.reports_html.write_task_html", return_value=None),
+        patch("coder_eval.reports.write_task_html", return_value=None),
     ):
         orch._finalize_result(start_time=time.time())
 

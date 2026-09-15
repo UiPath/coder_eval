@@ -139,7 +139,7 @@ curl -s https://openrouter.ai/api/v1/models -H "Authorization: Bearer $KEY" \
   | python3 -c "import sys,json;[print(m['id'],m['pricing']) for m in json.load(sys.stdin)['data'] if 'SEARCH' in m['id'].lower()]"
 ```
 
-### 2. Register pricing in **both** tables (rates must match)
+### 2. Register pricing (one table, mirrored automatically)
 
 - `src/coder_eval/pricing.py` — add to the `_PRICING` dict, keyed on the
   `model_name` (bare id as passed in `agent.model`):
@@ -148,9 +148,10 @@ curl -s https://openrouter.ai/api/v1/models -H "Authorization: Bearer $KEY" \
   ```
   These implicit-caching providers charge no separate cache-write fee, so
   `cache_write == input` (unused) and `cache_read` is the discounted rate.
-- `evalboard/lib/pricing.ts` — add the same entry so the evalboard cost columns
-  populate. A test (`lib/__tests__/pricing-parity.test.ts`) fails the build if a
-  rate here disagrees with `pricing.py`.
+  That is the only place to add it. The evalboard's table
+  (`evalboard/lib/pricing.generated.ts`) is GENERATED from `pricing.py` — run
+  `make pricing-mirror` and commit the result; CE065 fails the build if the two
+  drift. Never hand-edit the generated file.
 
 ### 3. Restart the proxy
 
@@ -193,4 +194,4 @@ subject to this. Bedrock models are single-provider and not affected.
 | `Invalid model name passed in model=...` | Model added to yaml but proxy not restarted — restart it. |
 | HTTP 401 / "Unable to locate credentials" | Missing `AWS_BEARER_TOKEN_BEDROCK` / `OPENROUTER_API_KEY` in `.env`, or key mismatch between `LITELLM_AUTH_TOKEN` (client) and the proxy's master key. |
 | `ModuleNotFoundError: No module named 'proxy_server'` (masked startup death) | fastapi drifted past 0.140.0 (`get_flat_dependant` removed). Use `start-litellm.sh` (it pins the deps), or run with `--with 'fastapi==0.140.0'`. If overriding `LITELLM_SPEC`, bump `LITELLM_FASTAPI_SPEC` to match. |
-| evalboard cost column blank for a model | Model missing from `evalboard/lib/pricing.ts`. |
+| evalboard cost column blank for a model | Model missing from `_PRICING` in `pricing.py`, or the mirror was not regenerated — add it and run `make pricing-mirror`. (A `per_request_billing` model is blank by design: the board shows its captured actual per-call cost instead.) |

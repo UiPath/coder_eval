@@ -178,19 +178,21 @@ jobs:
           echo "📊 All checks passed: formatting, linting, types, security, tests"
 
   evalboard:
-    # The dashboard's own gate. `evalboard/` ships ~460 vitest assertions,
-    # including the pricing drift guard that asserts lib/pricing.ts still agrees
-    # with src/coder_eval/pricing.py — and until this job existed NOTHING ran
-    # them: not a workflow, not a Makefile target, not a pre-commit hook. The
-    # guard was consequently red on `main` for weeks while a 3x-wrong Opus rate
-    # and five unpriced in-use models shipped to the board. An unrun assertion is
-    # documentation, not enforcement.
+    # The dashboard's own gate. `evalboard/` ships ~460 vitest assertions, and
+    # until this job existed NOTHING ran them: not a workflow, not a Makefile
+    # target, not a pre-commit hook. The pricing guard was consequently red on
+    # `main` for weeks while a 3x-wrong Opus rate and five unpriced in-use models
+    # shipped to the board. An unrun assertion is documentation, not enforcement.
+    #
+    # Rate-table drift is no longer this job's concern: lib/pricing.generated.ts
+    # is GENERATED from src/coder_eval/pricing.py, and CE065 in `quality-gate`
+    # fails a reprice that was not regenerated. What runs here is the CONSUMPTION
+    # half (pricing-generated.test.ts) — a generated file that is missing, empty
+    # or narrow fails the board's own build.
     #
     # Deliberately NOT path-filtered. `paths:` is workflow-scoped in GitHub
-    # Actions, and the parity guard's whole point is that a reprice in
-    # src/coder_eval/pricing.py — a pure-Python diff touching no evalboard file —
-    # must trip it. A `evalboard/**`-only filter would skip exactly the change
-    # class this job exists to catch.
+    # Actions, and a skipped required check blocks a PR rather than passing it —
+    # so the filter buys nothing and costs a merge-blocking pending status.
     name: Evalboard (Types, Tests, Build)
     # Fork-PR carve-out — see `quality-gate`. `pnpm install --frozen-lockfile` runs
     # the PR's own lockfile install scripts, same untrusted-code class.

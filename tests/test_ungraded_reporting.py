@@ -145,7 +145,7 @@ def test_ungraded_loses_to_every_real_outcome_when_picking_the_worst_status() ->
 
 
 def test_markdown_pass_rate_uses_the_graded_denominator() -> None:
-    from coder_eval.reports import _pass_rate_lines
+    from coder_eval.reports.markdown import _pass_rate_lines
 
     text = "\n".join(_pass_rate_lines(_summary()))
 
@@ -154,7 +154,7 @@ def test_markdown_pass_rate_uses_the_graded_denominator() -> None:
 
 
 def test_markdown_reports_no_rate_at_all_for_a_fully_ungraded_run() -> None:
-    from coder_eval.reports import _pass_rate_lines
+    from coder_eval.reports.markdown import _pass_rate_lines
 
     text = "\n".join(_pass_rate_lines(_summary(tasks_succeeded=0, tasks_not_graded=2, tasks_measured=0)))
 
@@ -165,7 +165,7 @@ def test_markdown_reports_no_rate_at_all_for_a_fully_ungraded_run() -> None:
 def test_markdown_reports_no_rate_change_for_an_ordinary_graded_run() -> None:
     """The regression guard: adding the fourth bucket must not alter any surface
     of a run that has none."""
-    from coder_eval.reports import _pass_rate_lines
+    from coder_eval.reports.markdown import _pass_rate_lines
 
     text = "\n".join(_pass_rate_lines(_summary(tasks_run=2, tasks_succeeded=1, tasks_failed=1, tasks_not_graded=0)))
 
@@ -184,7 +184,7 @@ def _junit_for(status: FinalStatus, tmp_path: Path) -> Any:
     # defusedxml on the test side, matching tests/test_reports_junit.py.
     from defusedxml.ElementTree import parse as parse_xml
 
-    from coder_eval.reports_junit import write_junit_xml
+    from coder_eval.reports import write_junit_xml
 
     run_dir = tmp_path / "run"
     task_dir = run_dir / "default" / "t" / "00"

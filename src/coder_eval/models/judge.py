@@ -63,7 +63,7 @@ class JudgeVerdict(BaseModel):
         # spaces. Two reasons:
         #   1. ``format_details`` writes "rationale: <text>" on one line; a multi-line
         #      rationale would break that single-line invariant.
-        #   2. ``reports_html._extract_rationale`` parses by line and grabs only the
+        #   2. ``reports.html._extract_rationale`` parses by line and grabs only the
         #      first one starting with "rationale: " — multi-line content would be
         #      silently truncated in the Judge Verdicts card.
         # The schema asks for "1-2 sentence headline summary"; collapsing whitespace

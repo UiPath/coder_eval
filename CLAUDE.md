@@ -26,20 +26,22 @@ data-driven analysis.
 ```
 coder_eval/
 ├── agent.py                  # Agent ABC (start, communicate, stop, get_state)
+├── plugins.py                # Agent/pricing plugin SPI (entry-point group coder_eval.plugins)
 ├── config.py                 # Settings via pydantic-settings (.env loading)
 ├── sandbox.py                # Sandbox manager (tempdir, venv, templates, adopt)
 ├── orchestrator.py           # Main evaluation loop
-├── reports.py                # Markdown/JSON run reports + per-suite rollups
-├── reports_experiment.py     # Cross-variant experiment reports
-├── reports_junit.py          # JUnit XML from a finalized run dir (CI ingestion)
-├── reports_html.py           # Single-file HTML report (the evalboard's static twin)
-├── reports_stats.py          # Shared report statistics + ungraded rendering helpers
-├── formatting.py             # Number/duration formatting shared by the renderers
+├── reports/                  # Report rendering — a LEAF layer (CE066): markdown,
+│                             #   html, experiment, junit + shared helpers
+├── result_metrics.py         # EvaluationResult metrics the ORCHESTRATOR reads mid-run
+├── run_record.py             # run.json task-row serializer (not a report — see CE066)
+├── stats.py                  # Distribution-free statistics; dependency-free by contract
+├── durations.py              # format_ms (split from formatting.py: no SDK dependency)
+├── formatting.py             # SDK payload formatting for logs and stream events
 ├── analysis.py               # Command statistics aggregation
 ├── logging_config.py         # Structured logging setup
 ├── path_utils.py             # Run IDs, path utilities, atomic writes, tree digests
 ├── fs_permissions.py         # set_permissions: stacked chmod window
-├── pricing.py                # Model pricing (mirrored by evalboard/lib/pricing.ts)
+├── pricing.py                # Model pricing (SSOT; `make pricing-mirror` generates the evalboard's copy)
 ├── litellm_cost.py           # Join proxy-captured actual per-call cost onto turns
 ├── timing.py                 # TurnClock + turn decomposition (single subtraction seam)
 ├── invocation_log.py         # record_cli recording shim + JSON Lines reader
@@ -47,7 +49,7 @@ coder_eval/
 ├── telemetry.py              # App Insights / OpenTelemetry emission
 ├── isolation/                # driver: docker — one container per task
 ├── harbor/                   # Harbor export + coder-eval as a Harbor agent
-├── optimize/                 # Prompt/config optimization helpers
+├── errors/                   # Error categorization, retry logic, error context capture
 ├── utils.py                  # Version info helpers
 │
 ├── agents/                   # Agent implementations (claude_code, codex, antigravity,
@@ -207,11 +209,15 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 # Regenerate a generated surface — never hand-edit the output
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
+make pricing-mirror    # the evalboard's rate table from pricing.py (CE065)
 ```
 
-Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is
-a hand-copied mirror, and `evalboard/lib/__tests__/pricing-parity.test.ts` fails the
-build on drift in either direction.
+`src/coder_eval/pricing.py` is the single source of truth for rates on both halves of
+the repo. The evalboard's table (`evalboard/lib/pricing.generated.ts`) is generated from
+it by `make pricing-mirror` — regenerate and commit after a reprice; **CE065** fails the
+build on drift. Never hand-edit the generated file. A rate flagged
+`per_request_billing` is deliberately omitted from the mirror: the provider bills per
+request, so the board shows the captured actual per-call cost instead of a static estimate.
 
 ## Custom Lint Rules (CE000+)
 
@@ -244,6 +250,13 @@ A few rules constrain routine edits, so they are worth knowing before you start:
   Renaming an action input means updating that skill too — the user-facing contract is
   [CI Gate: GitHub Action & JUnit reports](docs/CI_GATE.md).
 - **CE047** requires every onboarding surface to name every built-in `AgentKind`.
+- **CE065** diffs `evalboard/lib/pricing.generated.ts` against `pricing.py`; the table was
+  a hand-copy whose exemption set let four heavily-used models render `—` for cost.
+  Regenerate with `make pricing-mirror`; never hand-edit the generated file.
+- **CE066** lets the core layer import only the `reports/` package's public *writers*. A
+  metric, statistic or serializer pulled out of `reports*` is what put `turn_time_buckets`
+  and the run.json serializer in a rendering module; they now live in `result_metrics.py`,
+  `stats.py` and `run_record.py`.
 
 **Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
 source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go

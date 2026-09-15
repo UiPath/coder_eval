@@ -1372,7 +1372,7 @@ async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path,
 #
 # max_turns was accepted and never read on this backend, so a task capping turns ran
 # uncapped here while the same file capped on Claude Code. The cap counts VISIBLE
-# turns (tool calls — reports_stats.visible_turn_count's unit), enforced on the same
+# turns (tool calls — result_metrics.visible_turn_count's unit), enforced on the same
 # step-loop boundary as the cooperative stop.
 
 

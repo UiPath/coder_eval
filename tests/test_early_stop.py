@@ -79,8 +79,8 @@ from coder_eval.orchestration.early_stop import (
 from coder_eval.orchestration.experiment import load_experiment, resolve_all_tasks
 from coder_eval.orchestrator import Orchestrator, build_task_event
 from coder_eval.reports import ReportGenerator
-from coder_eval.reports_experiment import eval_result_to_task_dict
-from coder_eval.reports_html import _render_criteria, _render_header
+from coder_eval.reports.html import _render_criteria, _render_header
+from coder_eval.run_record import eval_result_to_task_dict
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
