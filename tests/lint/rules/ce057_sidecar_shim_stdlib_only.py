@@ -1,27 +1,17 @@
 """CE057: a sidecar module copied beside a generated sandbox shim stays stdlib-only.
 
 ``Sandbox._generate_cli_recorders`` writes every module in
-``models.sandbox.SIDECAR_MODULES`` into the recorder directory beside each
-``record_cli`` shim that declares response rules, and the shim imports it as a
-sibling. That sidecar runs inside the sandbox, where ``coder_eval`` is not
-installed and no project dependency is guaranteed, so one
-``from coder_eval.models import ...`` or ``import pydantic`` makes every shadowed
-CLI die with an ImportError the moment the agent runs it. It surfaces as "the
-tool is broken", never as "the harness wrote an unimportable sidecar", and it
-costs a whole run to diagnose.
+``models.sandbox.SIDECAR_MODULES`` beside each ``record_cli`` shim that declares
+response rules, and the shim imports it as a sibling where ``coder_eval`` is not
+installed. Such a module may import only roots in ``STDLIB_ALLOWED``, an allowlist,
+so growing it is a deliberate edit. A relative import always fires.
+``from __future__`` gets its own message: drop the line, do not widen the allowlist.
 
-Import-time enforcement (a test that renders and executes a shim) only catches it
-when a test happens to declare a response rule; this rule catches it the moment
-the import is written.
+HAZARD: the target set derives from ``SIDECAR_MODULES``, and
+``tests/test_custom_lint.py`` asserts it matches a file that exists, so the rule
+cannot silently guard zero files.
 
-A stdlib module that is genuinely needed is added to ``STDLIB_ALLOWED`` below --
-deliberately an allowlist rather than a check against ``sys.stdlib_module_names``,
-so growing the sidecar's surface is a decision someone makes on purpose.
-
-``from __future__ import ...`` falls out of that allowlist too, and is reported
-separately: it is not an import hazard (every interpreter that can run the shim
-supports it), so the fix is to drop the line rather than widen the allowlist --
-which is what the generic message would otherwise suggest.
+Rationale: .claude/notes/lint-rules.md § CE057
 """
 
 import ast

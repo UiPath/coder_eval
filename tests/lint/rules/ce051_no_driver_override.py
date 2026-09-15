@@ -1,29 +1,19 @@
 """CE051: a sandbox driver may not be rewritten silently.
 
-The driver IS the isolation boundary. Rewriting ``docker`` to ``tempdir`` behind
-the caller's back does not degrade gracefully — it moves execution from a
-container onto the operator's own machine, where the task's criteria address
-paths and toolchains that do not exist. They score 0.0 and the row is written
-back FAILURE for a trajectory that passed, and the same commands (``rm -rf
-/verifier``, ``mkdir -p /logs/verifier``) run unsandboxed on the grading host.
+In ``src/coder_eval/``, fires on any construction that carries an existing
+sandbox config forward while replacing ``driver``:
 
-The motivating bug: ``regrade.grading_sandbox_config`` rewrote the driver
-unconditionally on BOTH new grading entry points, which also neutralized the
-``driver: docker`` refusal in ``Sandbox.adopt`` — a guard added in the same
-change specifically to catch this.
-
-A driver downgrade must be an explicit, logged, operator-visible decision. Fires
-on any construction that carries an existing sandbox config forward while
-replacing ``driver``:
-
-  * ``SandboxConfig.model_validate({**cfg.model_dump(), "driver": ...})``
+  * ``SandboxConfig.model_validate({**cfg.model_dump(), "driver": ...})`` (a
+    spread dict only; a dict built from scratch is an ordinary construction)
   * ``cfg.model_copy(update={"driver": ...})``
   * ``setattr(cfg, "driver", ...)`` / ``cfg.driver = ...``
 
-Exempt: ``models/sandbox.py`` (the model's own construction), and any site
-carrying ``# noqa: CE051`` with a reason — today the two legitimate ones are the
-in-container rewrite in ``run_task_internal_command`` and the opt-in host-grading
-branch, which refuses by default and stamps ``graded_on_host`` on the row.
+A driver downgrade must be an explicit, logged, operator-visible decision.
+Exempt: ``models/sandbox.py`` (the model's own construction). Elsewhere,
+``# noqa: CE051`` must name the reason, for example an opt-in that refuses by
+default and stamps the row.
+
+Rationale: .claude/notes/lint-rules.md § CE051
 """
 
 import ast

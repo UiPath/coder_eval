@@ -1,22 +1,19 @@
 """CE054: every ``environment_info`` key that is READ must also be WRITTEN.
 
-``EvaluationResult.environment_info`` is a ``dict[str, Any]`` bag, so nothing —
-not pydantic, not pyright — connects the site that writes a key to the site that
-reads it back. A reader whose writer was never added (or was later removed) is
-silently inert: ``.get("k")`` returns ``None``, the guard takes its early return,
-and the feature reports success while doing nothing.
+``EvaluationResult.environment_info`` is ``dict[str, Any]``, so nothing connects
+a writer to a reader; a reader with no writer silently gets ``None``. In
+``src/coder_eval/``, a literal key read via ``.environment_info.get("k")`` or
+``.environment_info["k"]`` must appear in an ``environment_info["k"] = ...``
+write somewhere in the tree. Computed keys, ``graded_by_*`` keys and
+``_EXTERNALLY_WRITTEN`` entries are skipped.
 
-The motivating case: ``verify_reference_unchanged`` read
-``environment_info.get("reference_digest")`` to refuse a re-grade whose answer key
-had changed. Nothing anywhere wrote that key — a whole-tree grep found exactly one
-occurrence, the read itself. The anti-cheat guard shipped, was documented in
-CLAUDE.md and the user guide as protection, and never fired once. Every automated
-gate in the repo was green.
-
-This is deliberately a one-way check. An unread key is ordinary (recorded for a
-human or a downstream consumer); an unwritten key is always a bug.
+One-way on purpose: an unread key is ordinary; an unwritten key is always a bug.
+The anti-cheat guard that shipped this way read ``reference_digest``, which
+nothing wrote, so it never fired.
 
 Use ``# noqa: CE054`` for a key genuinely supplied from outside this repo.
+
+Rationale: .claude/notes/lint-rules.md § CE054
 """
 
 import ast
@@ -44,9 +41,9 @@ def _written_keys() -> set[str]:
     """
     written: set[str] = set()
     pattern = re.compile(r"""environment_info\[\s*["']([\w.-]+)["']\s*\]\s*=""")
-    # Also count keys named in a dict literal that becomes environment_info, and
-    # the f-string-built provenance keys (`f"graded_by_{key}"`), which no literal
-    # scan can resolve — those are covered by the prefix allowance below.
+    # Only subscript assignments count; a key set in a dict literal does not. The
+    # f-string-built provenance keys (`f"graded_by_{key}"`), which no literal scan
+    # can resolve, are covered by the prefix allowance in `_require_writer`.
     for path in sorted(_SRC_ROOT.rglob("*.py")):
         try:
             text = path.read_text(encoding="utf-8")

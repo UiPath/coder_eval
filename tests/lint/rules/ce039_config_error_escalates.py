@@ -1,27 +1,18 @@
 """CE039: a criterion checker must not book an IO/config error as score 0.0.
 
-``CriterionResult(score=0.0)`` means *the agent did the work and it was wrong*.
-It is gating (``all_criteria_passed`` is a strict AND) and it flows into every
-downstream count that consumes criterion scores: ``CriterionAggregate``
-mean/median, ``suite_thresholds`` gates on dataset-fanned suites, run and
-experiment pass rates, the JUnit report, the evalboard.
+``CriterionResult(score=0.0)`` means *the agent did the work and it was wrong*,
+and it gates. An IO failure on a path the TASK AUTHOR named is an eval-config
+error: raise ``CheckerMisuseError``, which ``criteria/base.py``'s
+``_ESCALATING_EXCEPTIONS`` routes to ``FinalStatus.ERROR``.
 
-An ``except OSError`` around a file the TASK AUTHOR named is not that. The
-motivating case: a typo in ``reference_comparison.reference_file`` raised
-``FileNotFoundError`` (an ``OSError``), got turned into a gating 0.0, and was
-counted against the agent's pass rate — silently zeroing every row of a
-dataset-fanned suite while looking like a genuine similarity failure.
+Fires, in ``coder_eval/criteria/``, on a ``return CriterionResult(...)`` with a
+literal ``score=0.0`` lexically inside an ``except`` handler for ``OSError`` /
+``IOError`` / ``FileNotFoundError`` / ``PermissionError`` / ``IsADirectoryError``.
 
-Raise ``CheckerMisuseError`` instead. ``criteria/base.py``'s
-``_ESCALATING_EXCEPTIONS`` routes it to ``FinalStatus.ERROR``, which is what an
-eval-config error is.
+A failure caused by the AGENT's own output (its file is missing, its JSON is
+malformed) is legitimately 0.0: mark it ``# noqa: CE039`` with a one-line reason.
 
-Fires only on a ``return CriterionResult(...)`` with a literal ``score=0.0``
-lexically inside an ``except`` handler for ``OSError`` / ``FileNotFoundError`` /
-``PermissionError`` / ``IsADirectoryError``, in ``coder_eval/criteria/``. A
-failure attributable to the AGENT's own output (its file is missing, its JSON is
-malformed) is legitimately 0.0 — mark those ``# noqa: CE039`` with a one-line
-reason.
+Rationale: .claude/notes/lint-rules.md § CE039
 """
 
 import ast

@@ -1,63 +1,20 @@
 """CE064: a clocked harness must stamp its turn BRACKET off that same clock.
 
-``decompose_turn`` computes the head and the tail by subtracting a generation
-window bound from an ``AgentStartEvent`` / ``AgentEndEvent`` timestamp. Those
-two stamps therefore have to share a basis, and a reducer that derives its
-window bounds from a ``TurnClock`` while letting the bracket fall back to
-``StreamEvent.timestamp``'s ``default_factory=datetime.now`` puts a
-monotonic-derived stamp and a raw wall stamp inside one subtraction — the exact
-split ``timing.TurnClock`` exists to remove, reintroduced at the one seam the
-clock does not own.
+In ``src/coder_eval/agents/``, a module that imports ``TurnClock`` must pass an
+explicit ``timestamp=`` to every ``AgentStartEvent`` and ``AgentEndEvent``.
+``decompose_turn`` subtracts a generation-window bound from a bracket stamp, so
+both must share a basis; ``StreamEvent.timestamp`` defaults to a raw
+``datetime.now()``.
 
-MEASURED, not hypothetical. Instrumenting ``decompose_turn`` on a live
-antigravity turn printed::
+SCOPE IS DERIVED, never a harness list: a module is in scope because it imports
+``TurnClock``, so a harness that adopts a clock comes into scope with no edit
+here. Which harnesses have a clock: ``docs/agents/HARNESS_PARITY.md``.
 
-    PROBE tail: elapsed=-0.017000ms busy=0.000000ms raw=-0.017000ms
-                last_completed = 09:05:22.033099
-                agent_end      = 09:05:22.033082
+BLIND SPOT: presence, not correctness. The rule cannot tell
+``self.clock.now()`` from ``datetime.now()`` written at the call site. The guard
+for the source is behavioural: ``tests/_bracket_clock.py``.
 
-an ``AgentEndEvent`` stamped 17 us BEFORE its own last message finished, which
-cannot happen: the event is constructed strictly after the final flush.
-``decompose_turn`` then clamps the negative to ``0.0`` and publishes it, which
-is "measured, and instant" — the CE058 confusion, arrived at from the other
-direction. The published ``harness_teardown_ms`` was ``0.0`` for a harness
-whose real tail is ~0.1 ms.
-
-WHY IT ONLY SHOWED ON ONE HARNESS, and why the rule is not scoped to that one:
-the drift between the two clocks is tens of microseconds, so it can only flip a
-sign where the true interval is itself that small. Antigravity is the only
-harness that spawns its process ONCE in ``start()`` and holds it across turns,
-so nothing happens between its last flush and its ``AgentEndEvent``; every
-other harness books a head of 0.2-6 s and a tail of 7-543 ms, where the drift
-is invisible. Invisible is not absent. The fix belongs at every clocked site
-because that is what makes the subtraction single-basis rather than
-usually-close, and "usually-close" is not a property a millisecond field can
-rest on.
-
-SCOPE IS DERIVED, never listed. The rule applies to a module under
-``agents/`` that imports ``TurnClock`` — antigravity, pi and claude-code today.
-Codex and OpenCode take their spans from the CLI's own epoch stamps and
-deliberately have no ``TurnClock`` (see that class's docstring), so a raw
-``datetime.now()`` bracket is CONSISTENT with their bounds and the rule must
-not fire on them; the noop agent has no windows at all. The day one of them
-adopts a clock, this rule starts applying to it with no edit here — which is
-the half a hardcoded harness list would get wrong.
-
-Separate id from CE058/CE059/CE060/CE061 for the reason CE060 states: one
-invariant per id, so a ``# noqa`` means one thing. CE058 is about publishing a
-literal for an unknown duration, CE059 about a window built from a single clock
-read, CE060 about identity, CE061 about where a window's arithmetic comes from.
-This one is about the turn's OUTER bounds, which no other rule looks at — they
-all scope to ``AssistantMessage``, and the bracket is not one.
-
-BLIND SPOT: presence, not correctness. The rule requires ``timestamp=`` to be
-passed; it cannot tell ``self.clock.now()`` from ``datetime.now()`` written out
-at the call site, because an agent may legitimately reach its clock through any
-expression (a local ``clock`` in ``communicate``, ``state.clock`` from the
-caller, ``self.clock`` inside the state). Demanding a specific spelling would
-make the rule a syntax check on three harnesses' internal structure. What it
-removes is the SILENT case — a default nobody chose — which is the one that
-shipped.
+Rationale: .claude/notes/lint-rules.md § CE064
 """
 
 import ast

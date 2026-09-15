@@ -1,26 +1,20 @@
 """CE043: Agents must not truncate a command's output when recording it.
 
-``CommandTelemetry.result_summary`` is contractually the *untruncated* tool-result
-body, and its length drives the ``result_tokens`` computed field (the cost
-simulator's cache-independent measure of tool-output size). An agent that clips a
-command's captured output before storing it silently under-reports every tool
-result — exactly the bug the Codex agent shipped with (``f"Output: {output[:100]}"``),
-which pinned ~77% of its Bash results at ~31 tokens and skewed the cost model.
-
-This rule flags, inside ``src/coder_eval/agents/``, a constant-upper-bound slice
-(``x[:N]``) applied to a value that denotes captured command output:
+``CommandTelemetry.result_summary`` is the *untruncated* tool-result body, and
+its length drives the ``result_tokens`` computed field. Inside
+``src/coder_eval/agents/``, the rule flags a constant-upper-bound slice
+(``x[:N]``) of a value that denotes captured command output:
 
   * a name whose id is/ends with ``output`` / ``stdout`` / ``stderr``
     (e.g. ``output[:100]``, ``aggregated_output[:512]``, ``proc_stdout[:80]``)
   * an attribute access ``.aggregated_output`` / ``.output`` / ``.stdout`` / ``.stderr``
-    (e.g. ``command_item.aggregated_output[:100]``)
 
-Store the output whole (it is already bounded by the harness's own exec-output
-truncation) and trim for DISPLAY in the renderers/reports instead.
+Store the output whole and trim for DISPLAY in the renderers/reports instead.
 
-Add ``# noqa: CE043`` on the offending line for a genuinely non-recorded use
-(e.g. slicing stdout only to build a short crash/log message that never becomes a
-``result_summary``), with a comment explaining why.
+Add ``# noqa: CE043``, with a comment explaining why, only for a slice that never
+becomes a ``result_summary`` (e.g. a short crash/log message).
+
+Rationale: .claude/notes/lint-rules.md § CE043
 """
 
 import ast

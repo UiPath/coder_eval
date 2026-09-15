@@ -1,26 +1,17 @@
 """CE053: no bare run-record or run-log filename literal outside ``path_utils``.
 
-``path_utils`` defines ``TASK_JSON_FILENAME`` / ``PRE_GRADE_JSON_FILENAME`` and
-its comment states why: "~12 sites name them — including three that ``rglob`` for
-the first — and two half-copies of the same string in different packages is how a
-rename becomes a silent no-op on the sites it missed."
+Fires on any string constant in ``src/coder_eval/`` (outside ``path_utils.py``)
+that equals a filename ``path_utils`` exports — ``TASK_JSON_FILENAME``,
+``PRE_GRADE_JSON_FILENAME`` and the four per-run log names (``task.log`` /
+``grade.log`` / ``docker.log`` / ``grade.docker.log``) — or has one as its last
+``/``-separated segment (``"*/task.json"``). Any string containing ``/`` whose
+text after the last ``/`` is a name fires, prose included; a name followed by
+more text (``"task.json is missing"``) or after a backslash does not. The set is
+read from ``path_utils``, never retyped.
 
-The constant shipped with that rationale and the twelve pre-existing literals
-were not converted, so it created exactly the second source of truth it argues
-against and delivered zero rename safety: the new modules used the constant, and
-``orchestrator.py``, ``batch.py``, ``docker_runner.py``, ``reports/markdown.py``,
-``reports/junit.py``, ``reports/helpers.py`` and ``report_command.py`` kept the
-string — the three ``rglob("task.json")`` calls the comment specifically cites
-among them.
-
-A rationale that only a human remembers is not a rule. Fires on any string
-constant in ``src/coder_eval/`` (outside ``path_utils.py``) that equals one of
-those filenames, or embeds it as a trailing path segment (``"*/task.json"``).
 Import the constant instead; ``# noqa: CE053`` for a genuinely unrelated string.
 
-Covers the per-run LOG names too (``task.log`` / ``grade.log`` / ``docker.log`` /
-``grade.docker.log``) — same shape, one release later, and the ``docker.log``
-case was worse because its consumer skips silently when the file is absent.
+Rationale: .claude/notes/lint-rules.md § CE053
 """
 
 import ast

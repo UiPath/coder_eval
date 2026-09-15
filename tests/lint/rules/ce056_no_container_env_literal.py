@@ -1,33 +1,16 @@
 """CE056: no bare ``CODER_EVAL_IN_CONTAINER`` literal outside ``container_paths``.
 
-``models/container_paths.py`` defines ``IN_CONTAINER_ENV`` and its comment states
-why: the string is the predicate for four separate gates, and "two half-copies of
-the same string in different packages is how a rename becomes a silent no-op".
-
-The constant shipped with that rationale, every READER was migrated to it -- and
-the single WRITER was not. ``docker_runner`` kept emitting
-``--env CODER_EVAL_IN_CONTAINER=1``, which is the one site that produces the
-value all four gates consume. Changing the constant would therefore have updated
-every consumer and left the container exporting the old name, so all four gates
-would read "not in a container" at once:
-
-  * ``Sandbox.enforces_permission_windows`` -- the reference-solution anti-cheat
-    window silently stops being applied, and a run that is NOT protected scores
-    like one that is;
-  * ``resolve_reference_dir`` -- the ``/work/references`` branch is skipped;
-  * ``_should_grade_in_container`` -- a grading container dispatches another
-    grading container;
-  * the orphan-container heartbeat watchdog's ``os._exit(137)`` gate.
-
-None of those fail loudly. This is the CE053 shape exactly (a rename-safety
-constant that shipped beside the literals it was meant to replace), and CE052
-cannot catch it -- that rule inspects ``if`` guards, so it never looks at the
-writer at all.
-
-Fires on any string constant in ``src/coder_eval/`` (outside the defining module)
-that equals the env-var name or embeds it as an ``NAME=value`` assignment.
-Import ``IN_CONTAINER_ENV`` from ``coder_eval.models`` instead; ``# noqa: CE056``
+Fires on any string constant in ``src/coder_eval/``, outside
+``models/container_paths.py``, that equals the env-var name or starts with ``NAME=``
+(the child-process assignment form). Prose that only mentions the name does not fire.
+Import ``IN_CONTAINER_ENV`` from ``coder_eval.models`` instead; add ``# noqa: CE056``
 for a genuinely unrelated string.
+
+HAZARD: several gates read this one variable (see ``models/container_paths.py``). A
+WRITER left on the literal disarms all of them silently after a rename. CE052 does not
+cover this: it inspects ``if`` guards, never the writer.
+
+Rationale: .claude/notes/lint-rules.md § CE056
 """
 
 import ast

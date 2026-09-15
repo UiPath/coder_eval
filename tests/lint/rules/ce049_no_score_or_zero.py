@@ -1,28 +1,18 @@
 """CE049: never coalesce a possibly-unmeasured score to a numeric literal.
 
-``weighted_score is None`` means *nothing measured this row*, and it is a
-different fact from ``weighted_score == 0.0``, which means *this row was measured
-and scored nothing*. ``score or 0.0`` erases that difference — and it does it
-silently, producing a real-looking number that every downstream consumer treats
-as a genuine miss.
-
-The motivating bug: ``build_task_event`` published ``Score = float(
-result.weighted_score or 0.0)`` on every ``CoderEval.Task.End``. Four shipped
-App Insights tiles compute ``avg(todouble(customDimensions.Score))`` with no
-status filter, so one ``coder-eval execute`` night dragged every score tile
-toward zero, indistinguishable from a genuinely bad night. The hazard was
-already documented in prose in ``orchestrator.py`` ("every downstream
-`score or 0.0` would launder it into a real-looking failure") — this rule makes
-it mechanical.
+``weighted_score is None`` means *nothing measured this row*; ``0.0`` means *this
+row was measured and scored nothing*. ``score or 0.0`` silently erases that
+difference.
 
 Fires on ``<name> or <numeric literal>`` where the left operand's trailing name
 looks like a score or a rate. The fix is to omit the value, keep it ``None``, or
 branch explicitly on ``is None``.
 
-``# noqa: CE049`` for a genuinely aggregate-internal use where a missing value
-really is a miss — e.g. summing a variant's scores where an errored row must
-count as 0.0 (see ``orchestration/experiment._measured_scores``, which makes that
-decision explicitly and states why).
+``# noqa: CE049`` for an aggregate-internal use where a missing value really is
+a miss, e.g. an errored row that must count as 0.0 (see
+``orchestration/experiment._measured_scores``).
+
+Rationale: .claude/notes/lint-rules.md § CE049
 """
 
 import ast
