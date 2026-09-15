@@ -1,28 +1,20 @@
 """Execute command - run evaluation tasks WITHOUT grading them.
 
 ``coder-eval execute`` is ``coder-eval run`` with the grading half removed: the
-sandbox is built, the agent runs, and the full trajectory is captured into the
-usual ``task.json`` / ``run.json`` layout — but no success criterion is checked,
+sandbox is built, the agent runs, and the full trajectory is captured into the usual
+``task.json`` / ``run.json`` layout -- but no success criterion is checked,
 ``weighted_score`` stays ``None``, and each row finalizes as
 ``FinalStatus.NOT_GRADED``.
 
-It exists so an *external* harness can own the verdict. The motivating case is
-Harbor (Terminal-Bench 2.0), which builds its own container, calls coder-eval as
-the agent, and grades with its own ``tests/test.sh``. Grading twice there would
-be worse than not grading at all: coder-eval's verdict would be reported
-alongside Harbor's without being the one that counts.
-
-Every flag on ``run`` is available here except ``--junit-xml``, which is a report
-of verdicts and there are none.
-
-``--resume`` IS supported, because ``partition_for_resume`` now takes the
-resuming command into account: a ``NOT_GRADED`` row owes ``execute`` nothing (it
-finished executing) but owes ``run`` a grade, so ``run --resume`` grades those
-rows in place rather than skipping them as "already complete".
+Every flag on ``run`` is available here except ``--junit-xml``, which is a report of
+verdicts and there are none. ``--resume`` IS supported: a ``NOT_GRADED`` row owes
+``execute`` nothing but owes ``run`` a grade.
 
 The command shares ``run``'s entire body (``run_command.run_pipeline``); only the
 Typer signature is restated, because Typer builds its parser from the signature.
 ``tests/test_execute_command.py`` asserts the two signatures stay in step.
+
+Rationale: .claude/notes/orchestration.md § Execute vs. run: the grading switch
 """
 
 from pathlib import Path

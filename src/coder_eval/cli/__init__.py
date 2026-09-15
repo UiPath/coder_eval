@@ -75,9 +75,9 @@ def main(
         raise typer.Exit(0)
 
 
-# Register core commands. Each public command is wrapped with track_command so it
-# emits a CoderEval.Cli.<name> event (Status/DurationMs/ErrorType) on completion;
-# functools.wraps preserves the signature so Typer still parses each command's flags.
+# Each public command is wrapped with track_command so it emits a
+# CoderEval.Cli.<name> event; functools.wraps preserves the signature so Typer
+# still parses each command's flags.
 app.command(name="run")(track_command("run")(run_command))
 app.command(name="execute")(track_command("execute")(execute_command))
 app.command(name="plan")(track_command("plan")(plan_command))

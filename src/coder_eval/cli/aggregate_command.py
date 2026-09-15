@@ -59,10 +59,8 @@ def aggregate_command(
 
     out_dir = output_dir or run_dir
 
-    # tags / source-path / run-level fields are inputs (static task metadata), not
-    # results, so carry them from an existing run.json when present — reading them
-    # from a stale summary is safe. Absent → empty maps + a window derived from the
-    # recovered results.
+    # Inputs (static task metadata), not results, so carrying them from an existing
+    # run.json is safe even when that summary is stale.
     task_tags, task_paths, prior = _read_prior_metadata(run_dir)
     start_time, end_time = _resolve_window(results, prior)
     skipped = _recover_skipped_tasks(prior)
@@ -78,11 +76,9 @@ def aggregate_command(
         skipped_tasks=skipped,
     )
     write_run_summary(summary, out_dir)
-    # The fourth bucket is named here too. `coder-eval aggregate <run>` is the
-    # step right after `coder-eval execute`, so an ungraded run is the FIRST
-    # thing this line renders — and without the term it reads
-    # "Aggregated 12 task(s) (0 ok / 0 fail / 0 err)", four numbers that no
-    # longer sum to tasks_run with nothing on screen to say where the rest went.
+    # The fourth bucket is named here too: `aggregate` is the step right after
+    # `execute`, so an ungraded run is the FIRST thing this line renders.
+    # Rationale: .claude/notes/orchestration.md § What the exit code counts
     counts = f"{summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err"
     if summary.tasks_not_graded:
         counts += f" / {summary.tasks_not_graded} not graded"

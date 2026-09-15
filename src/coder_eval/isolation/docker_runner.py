@@ -68,14 +68,12 @@ logger = logging.getLogger(__name__)
 # RESERVED_CONTAINER_DIRS) are imported above from models.container_paths and
 # kept in lockstep with docker/coder_eval_entrypoint.sh.
 
-# In-image path of the framework entrypoint, pinned by the host via
-# `docker run --entrypoint` (the image bakes no ENTRYPOINT). MUST equal the
-# `COPY` destination in docker/Dockerfile -- a drift guard test enforces that.
+# MUST equal the `COPY` destination in docker/Dockerfile (drift-guarded by a test).
+# Rationale: .claude/notes/isolation.md § The entrypoint and the image contract
 CONTAINER_ENTRYPOINT = "/usr/local/bin/coder_eval_entrypoint.sh"
 
-# Docker Desktop's stable alias for the host, from inside a bridge-network
-# container. Auto-resolves on macOS/Windows; on Linux it must be published
-# explicitly via `--add-host host.docker.internal:host-gateway`.
+# Docker Desktop's stable host alias from a bridge-network container. Auto-resolves
+# on macOS/Windows; on Linux it must be published via `--add-host`.
 _DOCKER_HOST_ALIAS = "host.docker.internal"
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -96,25 +94,10 @@ def _rewrite_loopback_for_container(url: str) -> str | None:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-# Top-level entries under ~/.claude that the per-task RW copy SKIPS. We copy
-# the host's ~/.claude into a throwaway tmp dir and mount that copy read-WRITE
-# so the in-container CLI can write anywhere it needs without ever touching the
-# host's real ~/.claude. The container needs only auth + settings + plugins;
-# everything else under ~/.claude is heavy, transient, or host-local state it
-# never reads, so we drop it to keep the per-task copy cheap. On a real host
-# this is the difference between a ~300 MB copy and a few MB: `security/` (the
-# security plugin's data) alone is often hundreds of MB, and `projects/`
-# (transcripts), `cache/`, `file-history/`, `backups/`, `sessions/`,
-# `telemetry/`, `downloads/`, and `shell-snapshots/` all accumulate without
-# bound. `session-env/` (per-Bash ephemera) is recreated fresh in the copy by
-# the container. The last group is volatile per-session churn the *running* CLI
-# rewrites continuously (this harness itself runs inside Claude Code, so the live
-# host ~/.claude is mutating while we copy): dropping it both keeps the copy lean
-# AND shrinks the window for a mid-walk vanish/rewrite race under --max-parallel
-# (the residual race is covered by the bounded retry in `_copy_claude_home`).
-# Patterns match by basename at every level (shutil.ignore_patterns semantics), so
-# this is a denylist: anything NOT listed here (settings.json, .credentials.json,
+# DENYLIST of top-level entries the per-task RW copy of ~/.claude skips. Matched by
+# basename at every level, so anything unlisted (settings.json, .credentials.json,
 # plugins/) is copied through.
+# Rationale: .claude/notes/isolation.md § The lean ~/.claude copy
 CLAUDE_COPY_IGNORE = (
     "projects",
     "shell-snapshots",
@@ -136,30 +119,20 @@ CLAUDE_COPY_IGNORE = (
     "tasks",
 )
 
-# Bounded retries for the lean ~/.claude copy. The live host dir is rewritten by
-# the running CLI while we walk it, so a file can vanish mid-copy and raise; a
-# couple of retries clears the transient case before we give up (see
-# `_copy_claude_home`).
+# The live host dir is rewritten while we walk it, so a file can vanish mid-copy.
+# Rationale: .claude/notes/isolation.md § The lean ~/.claude copy
 CLAUDE_COPY_MAX_ATTEMPTS = 3
 
-# Host-side heartbeat: the runner touches this file every HEARTBEAT_INTERVAL
-# seconds while alive. The in-container watchdog exits if the file is stale
-# (older than HEARTBEAT_STALE_SECONDS) -- our only defence against the host
-# being SIGKILL'd (e.g. Claude Code's Escape) before the asyncio cleanup
-# runs. Lives in the output dir, which is bind-mounted into the container.
+# The runner touches this file while alive; the in-container watchdog exits if it
+# goes stale. Lives in the output dir, which is bind-mounted into the container.
+# Rationale: .claude/notes/isolation.md § The heartbeat watchdog is armed only inside a container
 HEARTBEAT_FILENAME = ".coder_eval_host_heartbeat"
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_STALE_SECONDS = 20
 
-# asyncio's StreamReader caps a single line at 64 KiB by default. The
-# container streams stream events as one NDJSON line each (wire.py), and a
-# single event carrying a large tool input -- e.g. an agent Write of a whole
-# .flow/.json file -- serialises well past 64 KiB. The default-limit reader
-# then raises ValueError mid-stream, which tore the container down before it
-# wrote task.json: the entire task was lost and the host recorded a bare
-# ERROR with no per-task report. Give the line reader generous headroom (run()
-# also degrades gracefully past it). Mirrors Orchestrator._POST_RUN_STREAM_LIMIT,
-# the same guard on the orchestrator's post-run subprocesses.
+# asyncio's StreamReader caps a line at 64 KiB by default, which a single stream
+# event can exceed. Mirrors Orchestrator._POST_RUN_STREAM_LIMIT.
+# Rationale: .claude/notes/isolation.md § The stdout line limit
 STDOUT_LINE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
 
 
@@ -249,9 +222,9 @@ def _preflight_image_version(image: str) -> None:
             timeout=10,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        # Image absent locally or inspect failed. Let `docker run` raise the
-        # canonical error; suppress here so we don't double-fail in argv
-        # logging paths that hit this even when the image is fine.
+        # Image absent locally or inspect failed: let `docker run` raise the canonical
+        # error. Suppressed rather than raised because argv-logging paths reach here
+        # even when the image is fine, and would then double-fail.
         logger.debug("Pre-flight image inspect failed for %s: %s", image, exc)
         return
     image_version = result.stdout.strip()
@@ -272,10 +245,8 @@ def _preflight_image_version(image: str) -> None:
 
 _CONTAINER_NAME_INVALID = re.compile(r"[^a-zA-Z0-9_.-]")
 
-# A leading Windows drive letter (``C:\foo`` / ``c:/foo``). Used so the colon
-# in ``C:\foo`` is not misread as the ``src:dst`` separator when a Windows
-# task author writes an extra_mounts entry. Bare ``C:`` (no path body) is
-# intentionally not matched — that is malformed and should fail downstream.
+# A leading Windows drive letter. Bare ``C:`` is deliberately not matched.
+# Rationale: .claude/notes/isolation.md § Extra mounts and reserved destinations
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -288,10 +259,8 @@ def _sanitize_container_name_component(s: str) -> str:
     return _CONTAINER_NAME_INVALID.sub("_", s)
 
 
-# Destinations that would shadow framework-owned mounts inside the container.
-# Letting a user spec collide with these silently breaks input/output staging.
-# Same reserved set the workspace-dir validator uses (single source of truth in
-# models.container_paths). Extra-mount destinations and WORKDIR both reject these.
+# Single source of truth in models.container_paths; extra-mount destinations and
+# WORKDIR both reject these.
 _RESERVED_MOUNT_DESTS = RESERVED_CONTAINER_DIRS
 
 
@@ -314,10 +283,7 @@ def _validate_extra_mount(spec: str) -> str:
       - Destinations colliding with framework mounts (``/work``, ``/``,
         etc.) are rejected outright.
     """
-    # Split off an optional leading Windows drive letter so the colon in
-    # ``C:\foo`` is not misread as the ``src:dst`` separator. The container
-    # side is always POSIX (Docker containers are Linux), so only the source
-    # side can carry a drive letter.
+    # The container side is always POSIX, so only the source can carry a drive letter.
     if _DRIVE_PREFIX.match(spec):
         head, body = spec[:2], spec[2:]
     else:
@@ -326,9 +292,7 @@ def _validate_extra_mount(spec: str) -> str:
     if len(parts) < 2 or len(parts) > 3:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: expected `src:dst[:ro|rw]`.")
     src, raw_dst = head + parts[0], parts[1]
-    # Default to read-only when mode is omitted. Mounting host paths RW
-    # by default is the wrong sandbox stance: the few RW use-cases are
-    # better stated explicitly than implied by silence.
+    # Default read-only: mounting host paths RW by default is the wrong sandbox stance.
     mode = parts[2] if len(parts) == 3 else "ro"
     if not src:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: empty source path.")
@@ -337,9 +301,8 @@ def _validate_extra_mount(spec: str) -> str:
     # Expanded before the absolute-path check: that is the point.
     expanded_src = os.path.expandvars(os.path.expanduser(src))
     dst = os.path.expandvars(os.path.expanduser(raw_dst))
-    # A variable whose value carries a ':' would add fields to the spec rebuilt
-    # at the bottom, silently moving the destination or widening the mode.
-    # The drive prefix is excluded: its colon is legitimate and already split off.
+    # HAZARD: a variable expanding to a ':' would add fields to the rebuilt spec,
+    # silently moving the destination or widening the mode.
     if ":" in dst or ":" in expanded_src[len(head) :]:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: expansion introduced a ':' into a path.")
     if not dst.startswith("/"):
@@ -350,10 +313,8 @@ def _validate_extra_mount(spec: str) -> str:
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: mode must be 'ro' or 'rw'.")
     if not Path(expanded_src).exists():
         raise ValueError(f"Invalid extra_mounts entry {spec!r}: source path does not exist on host.")
-    # Reject destinations that shadow framework-owned mounts inside the
-    # container. ``/work`` substrings are caught too -- /work/foo would
-    # land underneath our staging dir and shadow the input/output tree.
-    # Expanded form: a var could itself expand to a reserved path.
+    # Checked in EXPANDED form: a var could itself expand to a reserved path, and a
+    # ``/work/...`` destination shadows the input/output tree.
     dst_norm = dst.rstrip("/") or "/"
     if dst_norm in _RESERVED_MOUNT_DESTS or dst_norm.startswith(CONTAINER_WORK_DIR + "/"):
         raise ValueError(
@@ -458,12 +419,9 @@ def _copy_claude_home(host_claude_dir: Path, claude_copy: Path) -> None:
                 host_claude_dir,
                 claude_copy,
                 ignore=shutil.ignore_patterns(*CLAUDE_COPY_IGNORE),
-                # Copy symlinks AS symlinks (do not follow): a plugin marketplace
-                # cache can contain a self-referential symlink (e.g. uipath-marketplace
-                # `plugins/uipath -> ..`) that makes a symlink-following walk recurse
-                # infinitely ("too many levels of symbolic links") and abort the copy.
-                # Copying them verbatim is correct and loop-proof. Dangling ones are
-                # skipped via ignore_dangling_symlinks.
+                # AS symlinks, not followed: a self-referential marketplace link
+                # makes a following walk recurse infinitely.
+                # Rationale: .claude/notes/isolation.md § The lean ~/.claude copy
                 symlinks=True,
                 ignore_dangling_symlinks=True,
                 dirs_exist_ok=True,
@@ -489,47 +447,26 @@ def _copy_claude_home(host_claude_dir: Path, claude_copy: Path) -> None:
 def grant_container_access(root: Path, *, writable: bool) -> list[tuple[Path, int]]:
     """Widen ``root`` (recursively) so the container can reach it without DAC caps.
 
-    Paired with the ``--cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH`` in
-    :meth:`DockerRunner._build_argv`. The container runs as **root but is not
-    the owner** of any framework-owned bind mount: on native Linux the mount
-    preserves the uid that ran ``coder-eval`` (uid 1000/1001), so every access
-    root makes to those paths is an "other" access. It only ever succeeded via
-    ``CAP_DAC_OVERRIDE``. Dropping that capability to make the reference's
-    mode-000 window real therefore also revoked the container's ability to write
-    its own output -- the in-container orchestrator died on the very first
-    ``open('/work/output/task.log', 'w')`` with EACCES, taking every
-    ``driver: docker`` task with it (regression-guarded by
-    ``TestContainerAccessWidening``).
+    COUNTERPART to the ``--cap-drop DAC_OVERRIDE --cap-drop DAC_READ_SEARCH`` in
+    :meth:`DockerRunner._build_argv`: the container is root but owns no
+    framework-owned mount, so every access it makes is an "other" access. Semantics
+    match ``chmod -R o+rwX`` (``o+rX`` when ``writable=False``). ``writable=False``
+    is load-bearing, not cosmetic -- it keeps ``/work/references`` off the list of
+    things the agent can overwrite.
 
-    Widening the *host* side restores that access through the ``other`` bits
-    instead of through a capability, which is what keeps the drop affordable.
-    Semantics match ``chmod -R o+rwX`` (``o+rX`` when ``writable=False``): the
-    ``X`` form adds execute only to directories and to files that are already
-    executable, so a copied hook script stays runnable and a data file does not
-    silently become one.
+    Returns ``(path, original_mode)`` for every entry it changed, so a caller that
+    widened a tree it does not own can put it back (see :func:`restore_modes`).
+    No-op on Windows.
 
-    ``writable=False`` is not cosmetic -- it is what keeps ``/work/references``
-    off the list of things the agent can overwrite. The container only ever
-    *reads* and ``chmod``s that copy (``chmod`` is gated on owner-or-CAP_FOWNER,
-    and FOWNER is deliberately retained), so it needs no write bit, and
-    withholding it keeps ``_verify_reference_integrity`` from being the sole
-    guard against tampering.
-
-    Returns ``(path, original_mode)`` for every entry it actually changed, so a
-    caller that widened a tree it does not own can put it back (see
-    :func:`restore_modes`). The framework-created staging dirs are disposable and
-    ignore it; the graded workspace is not.
-
-    No-op on Windows, where POSIX mode bits are not the access-control mechanism.
+    Rationale: .claude/notes/isolation.md § grant_container_access
     """
     widened_paths: list[tuple[Path, int]] = []
     if os.name == "nt":  # pragma: no cover - POSIX mode bits are meaningless here
         return widened_paths
     extra = 0o006 if writable else 0o004
     for path in (root, *root.rglob("*")):
-        # lstat + skip: chmod follows symlinks, so widening one would silently
-        # re-mode its target -- which for the ~/.claude copy can be an arbitrary
-        # path outside the staging tree (it is copied with symlinks=True).
+        # HAZARD: chmod follows symlinks, so widening one would re-mode its target --
+        # for the ~/.claude copy, an arbitrary path outside the staging tree.
         if path.is_symlink():
             continue
         try:
@@ -613,39 +550,28 @@ class DockerRunner:
         self.stream_callback = stream_callback
         self.verbose = verbose
         # DETACHED GRADE. Both set together or neither: `prior_result` is the
-        # already-executed row (trajectory + execution facts) the in-container
-        # Orchestrator seeds from, and `grade_workspace` is the host directory
-        # that run left behind, mounted at CONTAINER_GRADE_WORKSPACE and ADOPTED
-        # rather than recreated.
-        #
-        # This is what makes `evaluate` over a `driver: docker` row honest. The
-        # criteria of such a task address container paths and the image's
-        # toolchain, so grading them on the host scores a FAILURE for a run that
-        # passed. Running them back inside the same image is not a workaround for
-        # that — it is the only place the verdict means what it meant during the
-        # run.
+        # already-executed row the in-container Orchestrator seeds from, and
+        # `grade_workspace` is the host directory that run left behind, mounted at
+        # CONTAINER_GRADE_WORKSPACE and ADOPTED rather than recreated.
+        # Rationale: .claude/notes/isolation.md § Grading a docker row inside a container
         self.prior_result = prior_result
         self.grade_workspace = grade_workspace
         if (prior_result is None) != (grade_workspace is None):
             raise ValueError("prior_result and grade_workspace must be passed together")
-        # Forwarded to the in-container orchestrator via context.json. It is a
-        # run-level decision made by the CLI, so it cannot be recovered from the
-        # staged task.yaml on the other side.
+        # Forwarded via context.json: a run-level decision by the CLI, not
+        # recoverable from the staged task.yaml on the other side.
         self.grade = grade
-        # Set by _prepare_host_mounts: the tmp lean copy of ~/.claude that
-        # _build_argv mounts read-write. None when there is no ~/.claude to
-        # forward or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT).
+        # Set by _prepare_host_mounts: the lean RW copy of ~/.claude. None when
+        # there is none to forward or CODER_EVAL_NO_CLAUDE_MOUNT is set.
         self._claude_mount_src: Path | None = None
-        # Set by _prepare_host_mounts: a throwaway copy of the reference
-        # directory, mounted read-WRITE at CONTAINER_REFERENCE_DIR. It must be a
-        # copy, and it must be writable -- see _prepare_host_mounts.
+        # A throwaway COPY of the reference, mounted read-WRITE. Both are
+        # load-bearing -- see _prepare_reference_mount.
         self._reference_mount_src: Path | None = None
         # Host path the copy came from, cached by _prepare_reference_mount so the
         # argv builder doesn't re-stat it (and re-emit its warning).
         self._reference_source_dir: Path | None = None
-        # Set by _prepare_task_dir_mount: a throwaway copy of the task directory,
-        # mounted read-WRITE at CONTAINER_TASK_DIR so the agent-turn window can
-        # chmod it. None when the task has no task_file.
+        # A throwaway COPY of the task dir, mounted read-WRITE so the agent-turn
+        # window can chmod it. None when the task has no task_file.
         self._task_dir_mount_src: Path | None = None
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
@@ -668,18 +594,13 @@ class DockerRunner:
         dispatcher converts that to an ERROR-status EvaluationResult.
         """
         _preflight()
-        # Resolve the run image: build from a Dockerfile if configured (which
-        # overrides `image`), else use the configured image. The build is
-        # side-effecting, so it runs in a worker thread like the other docker
-        # calls in this method.
+        # Side-effecting, so it runs in a worker thread like the other docker calls.
         try:
             image = await asyncio.to_thread(self._build_image)
         except DockerBuildError as exc:
-            # The build happens before run_dir/docker.log/task.json exist, so a
-            # build failure would otherwise leave an empty result dir with no
-            # trace. Persist the build log to docker.log and a BUILD_FAILED
-            # synthetic task.json so the failure is visible per-task, then
-            # re-raise for the batch dispatcher to record run-level.
+            # The build precedes run_dir/docker.log and task.json, so persist the
+            # log and a BUILD_FAILED record before re-raising.
+            # Rationale: .claude/notes/isolation.md § A container that produced no task.json
             await self._record_build_failure(exc)
             raise
         # The version-label preflight only makes sense for the framework image;
@@ -688,18 +609,13 @@ class DockerRunner:
             await asyncio.to_thread(_preflight_image_version, image)
         await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
 
-        # Docker WORKDIR alignment: resolve the concrete workspace path
-        # once, host-side (config value / "auto" -> inspect the built image / fallback
-        # /root). Forwarded to the in-container orchestrator via the staged context
-        # and rendered as `docker run -w`. None keeps the standard artifacts workspace.
+        # Docker WORKDIR alignment: config value / "auto" -> inspect / fallback /root.
+        # None keeps the standard artifacts workspace.
         self._workspace_dir = await asyncio.to_thread(_resolve_workspace_dir, self._docker_config.working_dir, image)
 
-        # Stage only the inputs (task YAML + context). The *output* dir is
-        # the host's run_dir itself, bind-mounted at the same path inside
-        # the container so the in-container Orchestrator writes
-        # task.json/task.log/task.html/artifacts/ straight into the host
-        # filesystem -- no copy step, paths are symmetric inside and out.
-        # Sanitize task_id: dataset ids are ``suite_id/row_id`` and the ``/`` breaks mkdtemp (missing parent dir).
+        # Stage only the inputs. The OUTPUT dir is the host's run_dir itself,
+        # bind-mounted at the same path inside the container, so paths are symmetric.
+        # Sanitize task_id: dataset ids are ``suite_id/row_id`` and ``/`` breaks mkdtemp.
         safe_staging_id = _sanitize_container_name_component(self.rt.task.task_id)
         staging = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix=f"coder_eval_docker_{safe_staging_id}_"))
         input_dir = staging / "input"
@@ -712,49 +628,26 @@ class DockerRunner:
         try:
             await self._stage_inputs(input_dir)
 
-            # Give the container a stable, *unique* name so cancellation can
-            # target it. PID alone collides under --max-parallel >1 (same
-            # host process spawns N concurrent containers); the uuid suffix
-            # and replicate_index disambiguate. Sanitize+truncate task_id
-            # so dataset row ids like ``suite/row`` don't break docker name
-            # validation.
+            # Stable and UNIQUE so cancellation can target it: PID alone collides
+            # under --max-parallel >1. Sanitized and truncated -- dataset row ids break
+            # docker name validation, and a 30-char cap collided on shared prefixes.
             short_uuid = uuid.uuid4().hex[:8]
-            # Docker name limit is 253 chars; keep generous task_id headroom
-            # so `docker ps` rows stay readable. Earlier 30-char cap collided
-            # visibly on long shared prefixes; 80 covers all realistic ids
-            # while leaving room for the suffix.
             safe_task_id = _sanitize_container_name_component(self.rt.task.task_id)[:80]
             container_name = f"coder-eval-{safe_task_id}-r{self.rt.replicate_index}-{os.getpid()}-{short_uuid}"
-            # Side-effecting prep that _build_argv must NOT do (argv rendering
-            # stays pure for testability). Makes a lean RW copy of ~/.claude
-            # under `staging` and records it on self._claude_mount_src for
-            # _build_argv to mount. Cleaned up with `staging` in the finally.
+            # Side-effecting prep _build_argv must NOT do: argv rendering stays pure
+            # so it is testable without a docker daemon. Cleaned up with `staging`.
             await asyncio.to_thread(self._prepare_host_mounts, staging)
             await asyncio.to_thread(self._prepare_reference_mount, staging)
             await asyncio.to_thread(self._prepare_task_dir_mount, staging)
-            # AFTER staging, BEFORE the container starts: the DAC caps are
-            # dropped, so every framework-owned mount must be reachable through
-            # its `other` bits. Read-only for the inputs the container merely
-            # consumes; writable only for the run dir it must produce into.
+            # AFTER staging, BEFORE the container starts: the DAC caps are dropped, so
+            # every framework-owned mount must be reachable through its `other` bits.
+            # Rationale: .claude/notes/isolation.md § grant_container_access
             await asyncio.to_thread(grant_container_access, input_dir, writable=False)
             await asyncio.to_thread(grant_container_access, output_dir, writable=True)
             if self.grade_workspace is not None:
-                # The graded workspace is a framework-owned mount like any other,
-                # so it needs the same widening -- and it is the one mount whose
-                # files the harness did NOT create, so the owner bits cannot be
-                # assumed. It happens to work when container #1 (running as root)
-                # wrote the tree, which is exactly what makes the broken case
-                # expensive: an operator-supplied `--workspace`, or artifacts
-                # re-created host-side, are owned by the host uid, and container
-                # root without DAC_OVERRIDE reaches them only through `other`.
-                # Criteria then fail EACCES and book a gating 0.0 that reads as
-                # an agent failure -- the CE039 shape this feature exists to end.
-                #
-                # Recorded and restored in the `finally` below, unlike the two
-                # staging dirs above: those are disposable and deleted with the
-                # dispatch, while this tree survives it. An operator-supplied
-                # `--workspace` left world-writable forever is a real, permanent
-                # exposure on a shared host.
+                # The one mount whose files the harness did NOT create, so the owner
+                # bits cannot be assumed -- and the one that SURVIVES the dispatch,
+                # which is why it is recorded and restored in the `finally` below.
                 widened_workspace = await asyncio.to_thread(grant_container_access, self.grade_workspace, writable=True)
             argv = self._build_argv(input_dir, output_dir, container_name=container_name, image=image)
             logger.info("Running task '%s' in docker: %s", self.rt.task.task_id, " ".join(argv))
@@ -771,35 +664,28 @@ class DockerRunner:
             )
             log_path = self.rt.run_dir / DOCKER_LOG_FILENAME
             log_fh = await asyncio.to_thread(log_path.open, "w", encoding="utf-8")
-            # Cancellation guard: `docker run --rm` does NOT propagate kill
-            # to the container daemon-side. Without this `finally`, Ctrl-C
-            # on the host leaves the container running and burning LLM
-            # budget. Covers CancelledError, KeyboardInterrupt, and any
-            # other exit-by-exception path uniformly.
+            # HAZARD: `docker run --rm` does NOT propagate a kill daemon-side, so
+            # without this `finally` Ctrl-C leaves the container burning budget.
+            # Rationale: .claude/notes/isolation.md § A container that produced no task.json
             try:
                 returncode = await self._stream_container_output(proc, log_fh)
             finally:
                 heartbeat_task.cancel()
-                # await the cancellation so the task doesn't outlive us;
-                # narrow to CancelledError so genuine KeyboardInterrupt /
-                # SystemExit from a parallel sibling still propagates.
+                # Narrowed so a genuine KeyboardInterrupt / SystemExit from a
+                # parallel sibling still propagates.
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
                 await asyncio.to_thread(log_fh.close)
-                # If proc is still alive we got cancelled mid-flight. Kill
-                # the container *and* the docker CLI subprocess. Best-effort,
-                # no exception leak from cleanup.
+                # Cancelled mid-flight: kill the container AND the docker CLI
+                # subprocess, best-effort.
                 if proc.returncode is None:
                     await self._kill_container(proc, container_name)
 
             return await self._parse_result_or_raise(output_dir, returncode, log_path)
         finally:
-            # rmtree_restrictive, not rmtree(ignore_errors=True): `staging`
-            # holds the /work/references copy, which the in-container
-            # orchestrator keeps at mode 000 for the whole of every turn. A
-            # container killed mid-turn never restores it, and scandir on a 000
-            # directory raises PermissionError -- which ignore_errors swallows,
-            # orphaning a tempdir that holds the reference solution.
+            # rmtree_restrictive, not ignore_errors: `staging` holds the references
+            # copy, which a container killed mid-turn leaves at mode 000.
+            # Rationale: .claude/notes/isolation.md § Why the framework mounts are writable copies
             await asyncio.to_thread(rmtree_restrictive, staging)
             # The graded workspace is the caller's tree, not ours; give it back
             # the modes it had. See `restore_modes`.
@@ -810,10 +696,9 @@ class DockerRunner:
         staging ``input_dir`` (``task.yaml`` + ``context.json``). Pure I/O off the event
         loop; no control-flow change.
         """
-        # Always serialise the *post-override* TaskDefinition. We can't use
-        # rt.source_yaml because that's the raw on-disk text -- _apply_cli_overrides
-        # has since mutated rt.task in-memory (e.g. --model, -D run_limits.max_turns), and the
-        # container needs to see those mutations.
+        # POST-override, not rt.source_yaml: _apply_cli_overrides has since mutated
+        # rt.task in-memory and the container must see those mutations.
+        # Rationale: .claude/notes/isolation.md § The context payload is untrusted input
         task_yaml_in = input_dir / "task.yaml"
 
         def _dump_task_yaml() -> str:
@@ -821,11 +706,8 @@ class DockerRunner:
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
-        # Lineage + variant metadata so the in-container Orchestrator
-        # reconstructs the same context (variant_id is load-bearing for
-        # report grouping). source_yaml carries the *raw* on-disk text
-        # so the in-container Orchestrator records the same audit trail
-        # as the in-process driver (task.json.task_config.source_yaml).
+        # Lineage + variant metadata so the in-container Orchestrator reconstructs
+        # the same context (variant_id is load-bearing for report grouping).
         context_payload = json.dumps(
             {
                 "variant_id": self.rt.variant_id,
@@ -835,18 +717,13 @@ class DockerRunner:
                 # `coder-eval run` vs `coder-eval execute`. Not derivable from
                 # task.yaml on the container side (deliberately not a task field).
                 "grade": self.grade,
-                # A detached grade: seed from prior.json (staged beside this
-                # file) and adopt CONTAINER_GRADE_WORKSPACE instead of running
-                # an agent. Absent/False on every ordinary run.
+                # A detached grade: seed from prior.json and adopt
+                # CONTAINER_GRADE_WORKSPACE instead of running an agent.
                 "regrade": self.prior_result is not None,
                 "source_yaml": self.rt.source_yaml,
-                # The HOST's task-file path, recorded verbatim into task.json's
-                # audit trail. The container resolves TASK_DIR against
-                # /work/task_dir/task.yaml, which is right in there and exists on
-                # no host -- recording THAT made a detached grade of this row
-                # rebuild the task around an unresolvable path and silently mount
-                # no task dir. Absent -> the container falls back to its own path,
-                # so an older host keeps today's behaviour.
+                # The HOST's path, recorded verbatim into task.json's audit trail --
+                # distinct from the container path TASK_DIR resolves against.
+                # Rationale: .claude/notes/orchestration.md § Recording the task as authored
                 "host_task_file": str(self.rt.task_file) if self.rt.task_file else None,
                 # Docker WORKDIR alignment: concrete path the in-container
                 # orchestrator runs at + captures out (None = standard workspace).
@@ -855,9 +732,8 @@ class DockerRunner:
         )
         await asyncio.to_thread((input_dir / "context.json").write_text, context_payload, encoding="utf-8")
         if self.prior_result is not None:
-            # The row being graded, carried in whole. The container seeds from
-            # it exactly as the host path does, so the trajectory an `llm_judge`
-            # or `command_executed` criterion reads is the ORIGINAL run's.
+            # Carried in whole, so the trajectory an `llm_judge` or
+            # `command_executed` criterion reads is the ORIGINAL run's.
             await asyncio.to_thread(
                 (input_dir / PRIOR_RESULT_FILENAME).write_text,
                 self.prior_result.model_dump_json(indent=2),
@@ -874,20 +750,15 @@ class DockerRunner:
         touches the heartbeat/log-fh/container teardown.
         """
         assert proc.stdout is not None
-        # Explicit readline loop (not `async for`) so a single
-        # over-limit line degrades to a dropped line instead of a
-        # ValueError that tears the whole task down -- see below.
+        # Explicit readline loop (not `async for`) so a single over-limit line
+        # degrades to a dropped line instead of tearing the task down.
+        # Rationale: .claude/notes/isolation.md § The stdout line limit
         while True:
             try:
                 raw_line = await proc.stdout.readline()
             except ValueError:
-                # A single line exceeded STDOUT_LINE_LIMIT_BYTES.
-                # readline() drains the offending bytes and resyncs at
-                # the next newline, so we keep streaming. The dropped
-                # line is a STREAM_EVENT (host-side live render) or a
-                # log line; task.json crosses via the bind mount, not
-                # stdout, so the task result is unaffected. Degrade,
-                # don't die.
+                # readline() drains the offending bytes and resyncs at the next
+                # newline. task.json crosses via the bind mount, not stdout.
                 logger.warning(
                     "Dropped a stdout line over %d bytes from task %r's container; continuing to stream.",
                     STDOUT_LINE_LIMIT_BYTES,
@@ -897,14 +768,10 @@ class DockerRunner:
             if not raw_line:
                 break
             line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
-            # Three-way split:
-            #   - Has the wire-format prefix AND parses cleanly -> emit
-            #     to the host StreamCallback; do not echo to docker.log
-            #     (the StreamCallback is the canonical destination).
-            #   - Has the prefix but parses badly -> wire bug;
-            #     deserialize_event already logged a WARN. Preserve
-            #     the raw line in docker.log so it isn't lost.
-            #   - No prefix -> plain log line.
+            # Three-way split: wire-prefixed and parses -> the host StreamCallback
+            # (canonical destination, not echoed to docker.log); prefixed but
+            # unparseable -> wire bug, preserved raw so it is not lost; no prefix ->
+            # plain log line.
             if has_prefix(line):
                 event = deserialize_event(line)
                 if event is not None:
@@ -938,10 +805,8 @@ class DockerRunner:
             if kill_result.returncode == 0:
                 logger.info("Container %s killed cleanly.", container_name)
             else:
-                # Non-zero from `docker kill` typically means the
-                # container was already gone (race with --rm) OR
-                # the daemon refused. Surface stderr so the
-                # ambiguity is debuggable.
+                # Usually the container was already gone (race with --rm) or the
+                # daemon refused. Surface stderr so the ambiguity is debuggable.
                 logger.warning(
                     "docker kill %s returned %s; container may already be gone or daemon refused: %s",
                     container_name,
@@ -959,9 +824,8 @@ class DockerRunner:
             logger.warning("docker kill failed: %s", kill_exc)
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-        # Narrow to CancelledError -- a generic BaseException
-        # catch here would silently eat KeyboardInterrupt /
-        # SystemExit propagation from parallel tasks.
+        # HAZARD: narrow to CancelledError -- a generic BaseException catch here
+        # eats KeyboardInterrupt / SystemExit propagation from parallel tasks.
         with contextlib.suppress(asyncio.CancelledError):
             await proc.wait()
 
@@ -974,13 +838,9 @@ class DockerRunner:
         """
         task_json = output_dir / TASK_JSON_FILENAME
         if not await asyncio.to_thread(task_json.exists):
-            # The container died before its orchestrator's `finally` could
-            # write task.json (e.g. it was torn down by the cleanup above
-            # after a host-side stream failure, or killed externally).
-            # Persist a synthetic ERROR task.json so the test stays
-            # visible on dashboards/timelines instead of silently
-            # vanishing -- the batch layer's in-memory skeleton never
-            # reaches the per-task dir.
+            # Persist a synthetic ERROR task.json so the row stays visible instead of
+            # vanishing -- the batch layer's skeleton never reaches the per-task dir.
+            # Rationale: .claude/notes/isolation.md § A container that produced no task.json
             error = DockerRunError(
                 f"Container exited with code {returncode} without producing task.json. "
                 + f"See {log_path} for container output."
@@ -993,9 +853,8 @@ class DockerRunner:
         try:
             result = EvaluationResult.model_validate_json(task_json_text)
         except ValueError as exc:
-            # Present but unparseable (schema skew from a stale image, or a
-            # truncated/torn write). Degrade like the missing-file branch
-            # rather than crashing with an uncaught ValidationError/JSONDecodeError.
+            # Present but unparseable (schema skew from a stale image, a torn
+            # write): degrade like the missing-file branch.
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
         self._warn_on_version_mismatch(result)
         self._assert_grade_honored(result, task_json)
@@ -1005,28 +864,17 @@ class DockerRunner:
     def _assert_regrade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
         """Fail loudly when a detached GRADE came back as a fresh agent run.
 
-        Exactly the sibling of :meth:`_assert_grade_honored`, for exactly the
-        same reason one release later. ``regrade`` crosses the boundary only
-        through ``context.json``; an image that predates container-side grading
-        ignores the unknown key, ignores the staged ``prior.json``, ignores the
-        ``/work/workspace`` mount, and falls through to the ordinary
-        ``Orchestrator`` branch -- which **starts an agent** from
-        ``initial_prompt``.
+        ``regrade`` crosses the boundary only through ``context.json``; an image
+        that predates container-side grading ignores it and falls through to the
+        ordinary ``Orchestrator`` branch -- which **starts an agent**. Nothing else
+        catches it: ``_assert_grade_honored`` early-returns because a grading
+        container is dispatched with ``grade=True``.
 
-        Nothing else catches it. ``_warn_on_version_mismatch`` only warns (and is
-        skipped entirely for ``dockerfile_path`` tasks), and
-        ``_assert_grade_honored`` early-returns because a grading container is
-        dispatched with ``grade=True``. So the host would fold a fabricated
-        trajectory back over the recorded row as its "grade" -- publishing a
-        verdict for work it never looked at, and billing the model for it.
+        Keyed on EVIDENCE: a container that honored the request seeds from
+        ``prior`` and never runs the agent, so a DIFFERENT ``started_at`` is the
+        tell.
 
-        Keyed on EVIDENCE, like its sibling: a container that honored the request
-        seeds from ``prior`` and never runs the agent, so the trajectory it
-        returns is the one we sent in. A DIFFERENT ``started_at`` is the tell --
-        ``_seed_from_prior_result`` restores the agent run's ``started_at``
-        verbatim (deliberately, so a re-graded row does not report the grading
-        pass's 2 seconds into ``average_duration``), so a fresh run is the only
-        way that field can move.
+        Rationale: .claude/notes/isolation.md § The two honored-request guards
         """
         if self.prior_result is None:
             return
@@ -1044,30 +892,20 @@ class DockerRunner:
     def _assert_grade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
         """Fail loudly when `execute` came back with a graded verdict.
 
-        ``grade`` crosses the boundary only through ``context.json``. An image
-        that predates ``execute`` ignores the unknown key and grades anyway, and
-        the image-version preflight only warns — so ``execute --driver docker``
-        against a stale image would silently produce SUCCESS/FAILURE rows that
-        look like a normal graded run. Version skew must not change what a
-        command MEANS, so refuse the row rather than publish it.
+        ``grade`` crosses the boundary only through ``context.json``. An image that
+        predates ``execute`` ignores the unknown key and grades anyway, and the
+        image-version preflight only warns -- so version skew would change what a
+        command MEANS.
 
-        ``task_json`` is the on-disk record, quarantined before the raise. The
-        refusal used to be in-memory only, which left the graded ``task.json``
-        sitting in the bind-mounted host run dir: a later
-        ``execute --resume`` read it back as a completed row (its category is
-        ``succeeded``, so the resume partition files it under prior results) and
-        plain ``aggregate`` folded it straight into ``run.json`` — publishing
-        exactly the row this guard declined to publish. Refusing in memory while
-        leaving contradictory bytes on disk is not a refusal.
+        ``task_json`` is the on-disk record, quarantined before the raise: refusing
+        in memory while leaving contradictory bytes on disk is not a refusal.
+
+        Rationale: .claude/notes/isolation.md § The two honored-request guards
         """
         if self.grade:
             return
-        # Keyed on EVIDENCE, not on the label. Exempting every execution-fact
-        # status let a stale image return a fully graded MAX_TURNS_EXHAUSTED row
-        # — criteria vector, weighted score and all — unchallenged, because the
-        # exemption exists for statuses a *fresh* image also produces, and a
-        # fresh one produces them with neither. The question is not "what status
-        # is this" but "did it grade".
+        # Keyed on EVIDENCE, not on the label: the question is not "what status is
+        # this" but "did it grade".
         graded_anyway = bool(result.success_criteria_results) or result.weighted_score is not None
         if not graded_anyway and (
             result.final_status.is_execution_fact or result.final_status is FinalStatus.NOT_GRADED
@@ -1157,14 +995,10 @@ class DockerRunner:
         def _write() -> None:
             if target.exists():
                 return
-            # Through `write_text_atomic` like every other writer of this file.
-            # The hand-rolled tmp+replace here used `Path.write_text`, which
-            # FOLLOWS symlinks — so a pre-planted `task.json.synthetic.tmp` in a
-            # run directory (a shareable artifact, bind-mounted writable into the
-            # agent's own container) redirected this harness-privileged write to
-            # any path the grading user could reach. It also falsified the
-            # helper's "one writer, so the crash semantics cannot differ" claim,
-            # which is the property future readers rely on.
+            # HAZARD: through `write_text_atomic` like every other writer of this
+            # file. A hand-rolled `Path.write_text` FOLLOWS symlinks, and a run
+            # directory is bind-mounted writable into the agent's own container.
+            # Rationale: .claude/notes/isolation.md § A container that produced no task.json
             write_text_atomic(target, result.model_dump_json(indent=2))
 
         try:
@@ -1248,43 +1082,22 @@ class DockerRunner:
             return
         claude_copy = staging / "claude-home"
         _copy_claude_home(host_claude_dir, claude_copy)
-        # Writable: the CLI rewrites settings/state in place. copytree preserves
-        # the host modes, and ~/.claude is routinely 0700 with 0600 files -- with
-        # DAC_OVERRIDE dropped that is unreadable to the container, so the agent
-        # cannot authenticate.
+        # Writable: the CLI rewrites settings and state in place, and ~/.claude is
+        # routinely 0700/0600 -- unreadable to the container without DAC_OVERRIDE.
+        # Rationale: .claude/notes/isolation.md § grant_container_access
         grant_container_access(claude_copy, writable=True)
         self._claude_mount_src = claude_copy
 
     def _prepare_task_dir_mount(self, staging: Path) -> None:
         """Copy the task directory under ``staging`` for a read-WRITE mount.
 
-        Replaces the old *symmetric* ``-v <host task dir>:<host task dir>:ro``
-        mount, and for the same reason ``_prepare_reference_mount`` copies: the
-        in-container orchestrator holds this path at mode 000 for the duration of
-        every agent turn, and neither alternative works.
+        The in-container orchestrator holds this path at mode 000 for the duration
+        of every agent turn, which neither a ``:ro`` mount (EROFS) nor an uncopied
+        read-write mount (it would chmod the operator's real ``tasks/`` tree)
+        survives. Lives under ``staging``, which ``run()`` removes in its
+        ``finally``; one container per task means no cross-task interference.
 
-        * ``:ro`` rejects the chmod outright -- verified: ``chmod: /ro:
-          Read-only file system``. No window is expressible at all.
-        * Read-write *without* a copy chmods the operator's REAL ``tasks/`` tree.
-          Verified: the host directory came back 0600 and even the harness's own
-          cleanup then failed with ``Permission denied``. A crashed run would
-          strand a checkout at 000.
-
-        Shielding the whole tree (rather than masking just
-        ``reference.directory`` with a tmpfs, as the symmetric mount required)
-        also closes a leak that mask could not: a task at ``tasks/foo.yaml`` has
-        parent ``tasks/``, so the old mount exposed every SIBLING task's
-        directory -- including their reference solutions, which the
-        single-subdir mask never covered.
-
-        Symmetry was never load-bearing. The container is told where the task
-        dir is via ``--task-dir``, and ``run_task_internal_command`` uses that
-        path only to seed ``TASK_DIR`` -- it is never re-read. ``TASK_DIR`` is
-        exposed solely in ``_build_run_command_env`` (criterion subprocesses), so
-        the agent has no legitimate need for this tree mid-turn.
-
-        Lives under ``staging``, which ``run()`` removes in its ``finally``; one
-        container per task means no cross-task interference.
+        Rationale: .claude/notes/isolation.md § Why the framework mounts are writable copies
         """
         if not self.rt.task_file:
             return
@@ -1293,9 +1106,8 @@ class DockerRunner:
             return
         task_dir_copy = staging / "task_dir"
         shutil.copytree(source, task_dir_copy, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
-        # Read-only for the same reason as the reference copy: criteria read
-        # fixtures here, nothing legitimately writes them, and withholding `o+w`
-        # keeps an agent from rewriting the expectations it is graded against.
+        # Read-only like the reference copy: criteria read fixtures here, nothing
+        # legitimately writes them.
         grant_container_access(task_dir_copy, writable=False)
         self._task_dir_mount_src = task_dir_copy
 
@@ -1320,12 +1132,10 @@ class DockerRunner:
             return
         reference_copy = staging / "reference"
         shutil.copytree(source, reference_copy, ignore=ignore_patterns_and_symlinks(REFERENCE_COPY_IGNORE))
-        # Read-only on purpose: the harness reads this copy for grading and
-        # chmods it (owner-or-CAP_FOWNER, and FOWNER is retained), but nothing
-        # legitimately writes it. Withholding `o+w` keeps the agent from being
-        # able to overwrite the solution during the gaps between windows, so
-        # _verify_reference_integrity is not the only thing standing between an
-        # agent and a forged reference_comparison score.
+        # HAZARD: read-only on purpose -- withholding `o+w` keeps
+        # _verify_reference_integrity from being the only thing between an agent
+        # and a forged reference_comparison score.
+        # Rationale: .claude/notes/isolation.md § grant_container_access
         grant_container_access(reference_copy, writable=False)
         self._reference_mount_src = reference_copy
         self._reference_source_dir = source
@@ -1333,36 +1143,24 @@ class DockerRunner:
     def _build_image(self) -> str:
         """Resolve the image to run, building from a Dockerfile when configured.
 
-        When ``docker.dockerfile_path`` is set it overrides ``docker.image``:
-        we shell out to ``docker build`` using the Dockerfile's parent directory
-        as the build context (so relative ``COPY`` paths resolve) and tag the
-        result with a deterministic, per-task name so Docker's layer cache is
-        reused across runs. ``docker.build`` (:class:`DockerBuildConfig`) adds
-        ``--build-arg`` / ``--secret`` / extra flags; the build runs with
-        BuildKit enabled. Otherwise the configured ``image`` is returned
-        unchanged.
-
-        **Contract:** the container runs the coder-eval orchestrator. The image
-        bakes no ``ENTRYPOINT``; the host pins it at run time via
-        ``docker run --entrypoint`` (see :meth:`_build_argv`). A task Dockerfile
-        must therefore start ``FROM coder-eval-agent:<version>`` and only ADD
-        task-specific layers, so the runtime (the ``coder_eval_entrypoint.sh``
-        script + the ``coder-eval`` CLI + the ``org.coder-eval.version`` label)
-        is present. After building we assert that label is present and fail with
-        an actionable error otherwise -- without this, a bare ``FROM ubuntu``
-        image builds fine, then dies at ``docker run`` with a cryptic
-        ``exec: "/usr/local/bin/coder_eval_entrypoint.sh": no such file``.
+        ``docker.dockerfile_path`` overrides ``docker.image``: the Dockerfile's
+        parent directory is the build context (so relative ``COPY`` paths resolve)
+        and the result is tagged deterministically per task so Docker's layer cache
+        is reused. ``docker.build`` adds ``--build-arg`` / ``--secret`` / extra
+        flags; BuildKit is enabled.
 
         Side-effecting (network + docker daemon state); call via
         ``asyncio.to_thread`` from :meth:`run`, never from :meth:`_build_argv`,
         which must stay pure.
 
+        Rationale: .claude/notes/isolation.md § The entrypoint and the image contract
+
         Returns:
             The image reference to pass to ``docker run``.
 
         Raises:
-            DockerRunError: If ``docker build`` exits non-zero, or the built
-                image is not a coder-eval runtime image (missing the
+            DockerRunError: If ``docker build`` exits non-zero, or the built image
+                is not a coder-eval runtime image (missing the
                 ``org.coder-eval.version`` label).
         """
         cfg = self._docker_config
@@ -1370,9 +1168,8 @@ class DockerRunner:
             return cfg.image
         dockerfile = Path(cfg.dockerfile_path)
         context = dockerfile.parent
-        # Image repository names must be lowercase; task ids are typically
-        # already kebab-case, but lowercase defensively. Deterministic tag ->
-        # Docker layer cache is reused across runs of the same task.
+        # Lowercase: image repository names must be. Deterministic tag -> Docker
+        # layer cache is reused across runs of the same task.
         safe_id = _sanitize_container_name_component(self.rt.task.task_id).lower()
         image = f"coder-eval-task-{safe_id}:built"
 
@@ -1507,66 +1304,31 @@ class DockerRunner:
         """
         if self._reference_mount_src is None:
             return []
-        # Read-WRITE, and of a COPY: the in-container orchestrator chmods this
-        # path to 000 for every agent turn, which a `:ro` mount would reject with
-        # EROFS. See _prepare_reference_mount.
+        # Read-WRITE, and of a COPY: the anti-cheat window chmods this path to 000
+        # every turn, which a `:ro` mount rejects with EROFS.
         return ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
 
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
         cfg = self._docker_config
-        # `image` is resolved by run() via _build_image() (which may shell out to
-        # `docker build`). _build_argv stays pure -- no side effects -- so it
-        # remains testable without a docker daemon. Fall back to the configured
-        # image when called directly (e.g. unit tests of mount rendering).
+        # _build_argv stays PURE -- no side effects -- so it remains testable without
+        # a docker daemon. Fall back to the configured image when called directly.
         if image is None:
             image = cfg.image
 
         argv: list[str] = ["docker", "run", "--rm", "--name", container_name]
 
-        # Pin the framework entrypoint at run time rather than trusting whatever
-        # the task image baked into ENTRYPOINT. This makes the orchestrator launch
-        # robust to a task Dockerfile that sets its own ENTRYPOINT/CMD (or clears
-        # it via `ENTRYPOINT []`). `--entrypoint` resets the image CMD, which is
-        # fine -- the run command (`--output`/`--task-dir`, appended after the
-        # image) is passed explicitly below and is forwarded to the entrypoint.
+        # Pinned at run time, not trusted from the image: this survives a task
+        # Dockerfile that sets or clears its own ENTRYPOINT/CMD.
+        # Rationale: .claude/notes/isolation.md § The entrypoint and the image contract
         argv += ["--entrypoint", CONTAINER_ENTRYPOINT]
 
-        # ANTI-CHEAT (load-bearing, not hardening boilerplate). The container runs
-        # as root, and root bypasses ordinary file permissions via CAP_DAC_OVERRIDE
-        # / CAP_DAC_READ_SEARCH. Without dropping both, the mode-000 window that
-        # fs_permissions.py puts around every agent turn is a NO-OP on
-        # native Linux -- verified: a `chmod 000` dir is still readable by root in a
-        # default container, and Permission denied once these two caps are dropped.
-        # (It appears to work on macOS Docker Desktop even without this, because
-        # virtiofs enforces host-side; that is a platform accident, not the rule.)
-        # Nothing in a sandbox legitimately needs to override discretionary access
-        # control, so dropping these costs the task nothing.
-        #
-        # FOWNER/CHOWN are deliberately NOT dropped, though an earlier revision
-        # did. chmod(2) is gated on owner-OR-CAP_FOWNER, so dropping FOWNER does
-        # stop a root agent from restoring the mode — but it stops the HARNESS
-        # from applying it in the first place, because the in-container
-        # orchestrator that opens the window is the same root process with the
-        # same capability set. On native Linux the bind mount preserves the host
-        # uid that ran coder-eval, so `chmod 000 /work/references` then fails
-        # with EPERM (verified: container root, uid-1000-owned dir, FOWNER
-        # dropped -> "Operation not permitted") and the run completes UNPROTECTED
-        # while still looking protected. The drop therefore only ever bites on
-        # the hosts where it also disables the control it is meant to enforce.
-        # Keeping the caps means the mode-000 window works on every host; a
-        # deliberate re-chmod by a root agent stays the documented KNOWN GAP,
-        # closed by running the agent as a non-root uid (see
-        # docs/DOCKER_ISOLATION.md).
-        #
         # COUNTERPART, do not remove one without the other: dropping DAC_OVERRIDE
-        # revokes root's bypass on EVERY framework-owned mount, not just the
-        # reference -- including the run dir it must write task.json/task.log
-        # into. `grant_container_access` widens those host-side so the container
-        # reaches them through `other` instead of through the capability. Drop
-        # the caps without that widening and every docker task dies on its first
-        # log write; widen without the drop and the anti-cheat window is a no-op.
+        # revokes root's bypass on every framework-owned mount, and
+        # `grant_container_access` widens those host-side to compensate. Drop without
+        # widening and every docker task dies on its first log write.
+        # Rationale: .claude/notes/isolation.md § Capability drops and the anti-cheat window
         argv += [
             "--cap-drop",
             "DAC_OVERRIDE",
@@ -1586,15 +1348,9 @@ class DockerRunner:
         if self._limits.max_pids is not None:
             argv += ["--pids-limit", str(self._limits.max_pids)]
 
-        # Forward environment variables: explicit allowlist (optionally extended via env_passthrough_extra).
-        # `--env VAR` (name-only) tells docker to copy the value from our current env at
-        # run time, so secrets stay out of the rendered argv list that we log.
-        #
-        # The run's backend rides this same path: API_BACKEND is in the default allowlist,
-        # and `--backend` syncs it into os.environ at the CLI (run_command), so it forwards
-        # here exactly like every other allowlisted var. A flag that only mutated in-process
-        # Settings would be dropped at the container boundary and the in-container Settings
-        # would silently default to DIRECT — downgrading the judge (and agent) route.
+        # Explicit allowlist. `--env VAR` (name-only) tells docker to copy the value
+        # from our env at run time, so secrets stay out of the argv we log.
+        # Rationale: .claude/notes/isolation.md § Environment forwarding
         merged_allowlist = set(cfg.env_passthrough) | set(cfg.env_passthrough_extra)
         for env_var in merged_allowlist:
             # LITELLM_BASE_URL / LITELLM_COST_LOG are forwarded below with a value
@@ -1604,13 +1360,9 @@ class DockerRunner:
             if env_var in os.environ:
                 argv += ["--env", env_var]
 
-        # LITELLM_BASE_URL points at a proxy on the HOST. A bridge-network container
-        # can't reach the host's loopback, so rewrite localhost/127.0.0.1 to the
-        # docker host alias and publish that alias (`--add-host`) for Linux parity
-        # (it's automatic on macOS/Windows Docker Desktop). It's only a URL, so an
-        # explicit `--env VAR=value` is safe to render in the logged argv — unlike
-        # the auth token, which stays name-only above. Skipped when the container
-        # has no network (the proxy is unreachable anyway → validation errors).
+        # A bridge-network container cannot reach the host's loopback, so rewrite it
+        # to the docker host alias and publish that alias. Only a URL, so an
+        # explicit `--env VAR=value` is safe in the logged argv -- unlike the token.
         litellm_base_url = os.environ.get("LITELLM_BASE_URL")
         if litellm_base_url and "LITELLM_BASE_URL" in merged_allowlist and cfg.network != "none":
             rewritten = _rewrite_loopback_for_container(litellm_base_url)
@@ -1619,104 +1371,62 @@ class DockerRunner:
             else:
                 argv += ["--env", "LITELLM_BASE_URL"]
 
-        # LITELLM_COST_LOG is the proxy's per-call cost log, written on the HOST by
-        # the proxy; the in-container Orchestrator's actual-cost join READS it. So
-        # bind-mount its directory at the SAME host path (read-only — the container
-        # only reads; the host proxy is the sole writer) and forward the resolved
-        # ABSOLUTE path so it points at the mount regardless of a relative/env value.
-        # Skipped when the dir is absent → the join no-ops and the run keeps static
-        # pricing, exactly as a local run does when the log is missing.
+        # The proxy's per-call cost log: written on the HOST, READ by the
+        # in-container cost join, so bind-mount its dir at the SAME host path
+        # read-only and forward the resolved ABSOLUTE path.
         litellm_cost_log = os.environ.get("LITELLM_COST_LOG")
         if litellm_cost_log and "LITELLM_COST_LOG" in merged_allowlist and cfg.network != "none":
             abs_log = Path(litellm_cost_log).expanduser().resolve()
             if abs_log.parent.is_dir():
                 argv += ["-v", f"{abs_log.parent}:{abs_log.parent}:ro", "--env", f"LITELLM_COST_LOG={abs_log}"]
 
-        # Signal to in-container agents that the harness already provides OS-level
-        # isolation. The Codex agent reads this to fall back to its full-access
-        # sandbox: Codex's Landlock-backed read-only / workspace-write sandboxes
-        # can't initialize inside a container and otherwise fail writes silently.
+        # Tells in-container agents the harness already provides OS-level isolation;
+        # Codex reads it to fall back to its full-access sandbox.
         argv += ["--env", f"{IN_CONTAINER_ENV}=1"]
 
-        # Hard-disable telemetry INSIDE the container. The app ships a baked-in
-        # default connection string, so without this the in-container orchestrator
-        # would emit CoderEval.Task.End — and the host re-emits the same event after
-        # the container result is parsed (orchestration/batch.py), double-counting
-        # every docker-driver task. The invariant is "container silent, host emits
-        # once"; this restores it regardless of the host's own telemetry setting.
-        # Explicit value (not name-only) so it overrides any inherited/baked value.
+        # The invariant is "container silent, host emits once": the host re-emits
+        # CoderEval.Task.End after parsing the result. Explicit value, not
+        # name-only, so it overrides any inherited or baked-in value.
+        # Rationale: .claude/notes/isolation.md § Environment forwarding
         argv += ["--env", "TELEMETRY_ENABLED=false"]
 
         argv += ["-v", f"{input_dir.resolve()}:{CONTAINER_INPUT_DIR}:ro"]
-        # Mount the host run_dir to the container's standard output location
-        # so the in-container Orchestrator writes task.json/task.log/etc.
-        # directly to the host filesystem via bind-mount.
+        # The host run_dir at the container's standard output location, so the
+        # in-container Orchestrator writes straight to the host filesystem.
         argv += ["-v", f"{output_dir}:{CONTAINER_OUTPUT_DIR}"]
-        # Mount a COPY of the task dir at a fixed container path. Read-WRITE and
-        # a copy for the same reason as the reference (see
-        # _prepare_task_dir_mount): the agent-turn window chmods it to 000, which
-        # `:ro` rejects with EROFS and which -- applied to the real tree --
-        # would chmod the operator's own `tasks/`.
+        # A COPY at a fixed container path, read-WRITE: see _prepare_task_dir_mount.
         if self._task_dir_mount_src is not None:
             argv += ["-v", f"{self._task_dir_mount_src}:{CONTAINER_TASK_DIR}"]
 
-        # DETACHED GRADE: the already-executed workspace, read-WRITE and NOT a
-        # copy. Read-write because criteria legitimately mutate what they grade
-        # (a `run_command` that compiles, a post_run that cleans up), and the
-        # real tree because copying is what the host path proved wrong —
-        # `_setup_template` filters out node_modules / dist / build / .venv, so a
-        # criterion reading those would fail as a copying artifact rather than as
-        # a verdict.
+        # DETACHED GRADE: the already-executed workspace, read-WRITE and NOT a copy
+        # -- criteria legitimately mutate what they grade, and _setup_template's
+        # filtering would drop node_modules / dist / .venv from a copy.
+        # Rationale: .claude/notes/isolation.md § Why the framework mounts are writable copies
         if self.grade_workspace is not None:
             argv += ["-v", f"{self.grade_workspace.resolve()}:{CONTAINER_GRADE_WORKSPACE}"]
 
-        # ANTI-CHEAT: the reference solution normally lives INSIDE the task dir,
-        # so the symmetric mount above would hand the agent the answer via
-        # `$TASK_DIR/<reference dir>`. Two things close that:
-        #
-        #  1. An empty tmpfs is layered over the reference's path inside the
-        #     task-dir mount, masking it. The agent sees an empty directory there.
-        #  2. A throwaway COPY of the reference is mounted read-WRITE at
-        #     /work/references, and the in-container orchestrator shields THAT
-        #     path directly rather than re-copying it. Writable is load-bearing,
-        #     not an oversight: the window chmods this exact path to 000 every
-        #     turn, and chmod on a `:ro` bind mount fails with EROFS.
-        #
-        # Ordering matters: docker applies mounts by target-path depth, so the
-        # tmpfs at the deeper path wins over the task-dir bind regardless of argv
-        # order, but we emit it after for readability.
+        # ANTI-CHEAT: the reference normally lives INSIDE the task dir, so an empty
+        # tmpfs masks its path there and a writable COPY is mounted at
+        # /work/references instead. Docker applies mounts by target-path depth, so
+        # the deeper tmpfs wins regardless of argv order.
+        # Rationale: .claude/notes/isolation.md § Why the framework mounts are writable copies
         argv += self._reference_mount_args()
-        # Forward the host's Claude Code OAuth state so the in-container CLI
-        # inherits the same login as the host. We mount a *throwaway lean copy*
-        # of ~/.claude (made by _prepare_host_mounts) read-WRITE at the host's
-        # ~/.claude path — HOME is forwarded, so the path is symmetric inside
-        # the container. The container can therefore write anywhere under
-        # ~/.claude (settings, session ephemera, cache) without ever mutating
-        # the host's real ~/.claude. _claude_mount_src is None when ~/.claude
-        # doesn't exist or the mount is opted out (CODER_EVAL_NO_CLAUDE_MOUNT=1).
+        # A throwaway lean COPY of ~/.claude, read-WRITE at the host's own path
+        # (HOME is forwarded, so the path is symmetric), so the container never
+        # mutates the host's real one.
+        # Rationale: .claude/notes/isolation.md § The lean ~/.claude copy
         if self._claude_mount_src is not None:
             host_claude_dir = Path.home() / ".claude"
             argv += ["-v", f"{self._claude_mount_src}:{host_claude_dir}"]
 
-        # Auto-mount host paths the task references so they resolve inside
-        # the container at the *same* path they have on the host.
-        # Includes:
-        #   - Claude Code plugin dirs (`agent.plugins[].path`)
-        #   - Template directories (`sandbox.template_sources[].path` for
-        #     TemplateDirSource entries -- already absolute after
-        #     resolve_template_paths runs on the host).
-        # `run_command` criteria that use `$TASK_DIR/...` are covered by the
-        # symmetric task_dir mount above. The reference is deliberately NOT here:
-        # it gets its own mount at CONTAINER_REFERENCE_DIR and is masked out of
-        # the task_dir mount (see _reference_mount_args). ``mounted`` dedupes overlapping entries.
+        # Host paths the task references (plugin dirs, resolved template dirs), at
+        # the SAME path inside the container. The reference is deliberately NOT
+        # here -- it has its own mount and is masked out of the task_dir mount.
+        # ``mounted`` dedupes overlapping entries.
         mounted: set[Path] = set()
-        # Auto-mount sources that look like credential / secret dirs get a
-        # loud warning. Task YAMLs typically come from in-house suite authors,
-        # but the `plugin.path` / `reference.directory` / `template_sources`
-        # fields are user-controlled strings, and a typo (or a hostile suite)
-        # can silently expose `~/.ssh` etc. Warning, not hard fail, because
-        # legitimate uses exist (a task that does in fact want to read
-        # `~/.aws/config`). The warning surfaces the surprise.
+        # Warned, not refused: `plugin.path` / `reference.directory` /
+        # `template_sources` are user-controlled strings, and legitimate uses exist.
+        # Rationale: .claude/notes/isolation.md § Extra mounts and reserved destinations
         sensitive_sources = self._sensitive_source_paths()
 
         def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
@@ -1749,28 +1459,22 @@ class DockerRunner:
             if isinstance(source, TemplateDirSource):
                 _auto_mount(source.path)
 
-        # Defensive: system_prompt_file is normally inlined into
-        # system_prompt by load_task / experiment resolution, but a variant
-        # could conceivably inject an absolute path that survives. Cover
-        # that path so the in-container Orchestrator can read it.
+        # Defensive: normally inlined into system_prompt by load_task / experiment
+        # resolution, but a variant could inject an absolute path that survives.
         agent_cfg = self.rt.task.agent
         if agent_cfg and agent_cfg.system_prompt_file:
             _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
-        # NOTE: task.reference.directory is deliberately NOT auto-mounted at its
-        # host path here. A copy of it gets a single dedicated read-write mount
-        # at CONTAINER_REFERENCE_DIR (above; writable so the anti-cheat window
-        # can chmod it), and mounting the original at its host path too would
-        # re-expose it to the agent through $TASK_DIR — the exact hole the tmpfs
-        # mask above closes.
+        # HAZARD: task.reference.directory is deliberately NOT auto-mounted at its
+        # host path -- that would re-expose it through $TASK_DIR, the exact hole
+        # the tmpfs mask closes.
         for mount in cfg.extra_mounts:
             normalized = _validate_extra_mount(mount)
             argv += ["-v", normalized]
 
-        # Docker WORKDIR alignment: run the agent at the image's own WORKDIR. Set
-        # the container's initial cwd via `-w` (the in-container orchestrator also
-        # runs the agent there). NO bind mount targets it -- capture is a copy-out
-        # (see Orchestrator._cleanup), not a mount, so baked inputs/HOME survive.
+        # Docker WORKDIR alignment: `-w` only. NO bind mount targets it -- capture
+        # is a copy-out (see Orchestrator._cleanup), so baked inputs and HOME
+        # survive.
         if self._workspace_dir is not None:
             _assert_workspace_not_reserved(self._workspace_dir)
             argv += ["-w", self._workspace_dir]
@@ -1782,10 +1486,8 @@ class DockerRunner:
             argv += ["-v"]
         argv += ["--output", str(CONTAINER_OUTPUT_DIR)]
         if self._task_dir_mount_src is not None:
-            # The container-side path, not the host's. run_task_internal_command
-            # uses this only to seed TASK_DIR for run_command criteria; it never
-            # re-reads the path, which is why the mount no longer has to be
-            # symmetric.
+            # The container-side path: it only ever seeds TASK_DIR and is never
+            # re-read, which is why the mount no longer has to be symmetric.
             argv += ["--task-dir", CONTAINER_TASK_DIR]
         return argv
 

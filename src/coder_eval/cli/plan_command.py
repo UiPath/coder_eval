@@ -106,14 +106,11 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
     all_valid = True
     for task_file in resolved_task_files:
         try:
-            # Capture warnings so unknown-field UnknownTaskFieldWarnings
-            # (emitted by TaskDefinition._warn_on_unknown_fields while the
-            # top-level schema stays in soft-launch mode) surface inline
-            # below \u2014 they don't fail the run, but they're visible to the
-            # author and to any CI log scraper. Other DeprecationWarnings
-            # raised during load (legacy-timing migrations, pydantic,
-            # transitive libs) are re-emitted through warnings.showwarning
-            # so they still reach stderr instead of getting swallowed.
+            # Captured so unknown-field warnings surface inline below -- NON-blocking,
+            # and the way a stale top-level field (`max_iterations`, `llm_reviewer`)
+            # the soft-launch validator drops silently becomes visible. Every other
+            # warning raised during load is re-emitted through warnings.showwarning so
+            # it still reaches stderr.
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always", DeprecationWarning)
                 task, _source_yaml = load_task(task_file)
@@ -132,12 +129,8 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
 
             console.print(f"  [dim]Success criteria: {len(task.success_criteria)}[/dim]")
 
-            # Surface unknown-field warnings as inline notices (non-blocking;
-            # catches stale top-level fields like max_iterations / llm_reviewer
-            # that the soft-launch validator otherwise drops silently). Match
-            # by category, not message text, so a reworded warning string
-            # doesn't silently break this rendering. Anything else captured
-            # gets re-emitted to stderr so non-target deprecations stay visible.
+            # Matched by CATEGORY, not message text, so a reworded warning string
+            # does not silently break this rendering.
             for w in caught:
                 if issubclass(w.category, UnknownTaskFieldWarning):
                     console.print(f"  [yellow]⚠[/yellow] [yellow]{w.message}[/yellow]")
