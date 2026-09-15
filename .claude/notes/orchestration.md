@@ -10,7 +10,7 @@
 
 ## Execute vs. run: the grading switch
 
-- **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run` with grading removed — the agent runs and the full trajectory is captured, but no criterion is checked, `weighted_score` is `None` (never `0.0`, which would be indistinguishable from "graded and scored zero"), and the row finalizes as **`FinalStatus.NOT_GRADED`**, whose `category` is a **fourth** bucket, `"ungraded"`. Ungraded rows leave BOTH sides of every rate: `RunSummary.pass_rate` / `error_share` and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run - tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run` invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it** — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are facts about the *run*, not about grading, and still apply (so `execute` still exits non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)` → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog check, and post-failure diagnostics); it crosses the docker boundary in `context.json` (defaulting to `True` in-container, so a host predating `execute` keeps grading). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because a task YAML must never declare itself ungraded; only the invoking command decides. `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in that flag, so there is no third code path. Three things are refused rather than degraded: `--junit-xml` (a report of verdicts, and there are none — though `reports_junit` still emits `<skipped>` for an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades nothing), and simulation tasks (their turn-continuation logic reads criteria results, so an ungraded dialog would silently change its own stopping behavior). `stop_early:` blocks are inert under `execute` for the same reason the kill switch exists: the full trajectory is the deliverable. Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and grades with its own tests.
+- **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run` with grading removed — the agent runs and the full trajectory is captured, but no criterion is checked, `weighted_score` is `None` (never `0.0`, which would be indistinguishable from "graded and scored zero"), and the row finalizes as **`FinalStatus.NOT_GRADED`**, whose `category` is a **fourth** bucket, `"ungraded"`. Ungraded rows leave BOTH sides of every rate: `RunSummary.pass_rate` / `error_share` and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run - tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run` invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it** — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are facts about the *run*, not about grading, and still apply (so `execute` still exits non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)` → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog check, and post-failure diagnostics); it crosses the docker boundary in `context.json` (a required contract field with no default, so a host and image that disagree about it fail at parse time). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because a task YAML must never declare itself ungraded; only the invoking command decides. `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in that flag, so there is no third code path. Three things are refused rather than degraded: `--junit-xml` (a report of verdicts, and there are none — though `reports_junit` still emits `<skipped>` for an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades nothing), and simulation tasks (their turn-continuation logic reads criteria results, so an ungraded dialog would silently change its own stopping behavior). `stop_early:` blocks are inert under `execute` for the same reason the kill switch exists: the full trajectory is the deliverable. Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and grades with its own tests.
 
 ### The terminal-status chain
 
@@ -125,8 +125,8 @@ on both the success and the raised path, without catching the `typer.Exit` decid
 Per-suite rollups are skipped entirely under `execute`: a rollup aggregates per-criterion
 results and there are none, so running it would gate a suite on an empty aggregate and
 report a threshold failure for a run that was never measured. The ungraded bucket is named
-explicitly in the aggregate line for the same reason — `coder-eval aggregate <run>` is the
-step right after `coder-eval execute`, so an ungraded run is the FIRST thing it renders, and
+explicitly in the rebuild line for the same reason — `coder-eval report <run> --rebuild` is
+the step right after `coder-eval execute`, so an ungraded run is the FIRST thing it renders, and
 without the term it reads "Aggregated 12 task(s) (0 ok / 0 fail / 0 err)": four numbers that
 no longer sum to `tasks_run`, with nothing on screen to say where the rest went. The
 end-of-run summary likewise reports what happened instead of "0/N succeeded", which for a
@@ -326,9 +326,9 @@ rather than errors live in the run-limits validator for the same post-merge visi
 `task_config.resolved` and `source_file` describe the task as AUTHORED, which is NOT
 always what this process runs.
 
-`run_task_internal_command` rewrites `driver: docker` → `tempdir` before building the
-in-container orchestrator, because it is already inside the container the driver asked
-for. Recording that rewrite made the run's own record deny it ever used docker — and a
+The host stages a `driver: docker` task for its container with `driver: tempdir`, because
+the container is the isolation the driver asked for. Recording that execution copy made
+the run's own record deny it ever used docker — and a
 later `evaluate <run_dir>` reads the driver back out of the record, so the host-grading
 refusal never fired and the `graded_on_host` stamp was never applied. A container task's
 criteria ran against the host filesystem silently, which is the exact outcome that gate
@@ -342,17 +342,29 @@ around it: the docker dispatch guard saw a non-None `Path` and let it through, a
 task-dir mount then silently mounted nothing, so every `$TASK_DIR` criterion resolved
 against the wrong tree and scored a verdict nobody could explain.
 
-### The in-container driver rewrite
+### The host-side driver rewrite
 
-CE051 forbids rewriting `sandbox.driver`, and this is its single exemption: the process is
-already inside the container the docker driver asked for, so the isolation the driver names
-is present rather than bypassed, and a nested docker would be both wrong and impossible (no
-docker CLI in the image). The rewrite goes through `model_validate` rather than
-`model_copy(update=...)`, matching its sibling in `regrade.grading_sandbox_config`: `update`
-skips BOTH pydantic and pyright, so a typo produces a `SandboxConfig` violating its own
-`Literal` and only surfaces far downstream. Two driver-rewrite sites landing in one change
-with two different levels of type safety is how the weaker one becomes the pattern people
-copy.
+CE051 forbids rewriting `sandbox.driver` silently, and `DockerRunner._stage_inputs` is one of
+its two exemptions: the host resolves the driver for the container it is itself about to
+start, so the isolation the driver names is present rather than bypassed, and a nested docker
+inside the image would be both wrong and impossible (no docker CLI in it). The rewrite happens
+where both values are in hand — the staged `task.yaml` carries the execution copy and
+`ContainerContext.authored_sandbox` carries the block as authored, which the container
+records. Doing it inside the container instead took a rewrite plus a "captured BEFORE the
+rewrite" local in the consumer, and a lint exemption for code on the far side of the boundary.
+
+The rewrite goes through `model_validate` rather than `model_copy(update=...)`, matching its
+sibling in `regrade.grading_sandbox_config`: `update` skips BOTH pydantic and pyright, so a
+typo produces a `SandboxConfig` violating its own `Literal` and only surfaces far downstream.
+Two driver-rewrite sites with two different levels of type safety is how the weaker one
+becomes the pattern people copy.
+
+The two sites are deliberately NOT collapsed into a `SandboxConfig.as_tempdir()` helper.
+CE051 exempts `models/sandbox.py` outright ("the model's own construction"), so moving the
+rewrite there would take both call sites out of the rule's view and turn a guarded operation
+into an unguarded one-liner any future caller could reach. Each site carries a different
+reason in its `noqa`, and that reason text is the operator-visible control the rule exists to
+force.
 
 ## Three routes, resolved separately
 

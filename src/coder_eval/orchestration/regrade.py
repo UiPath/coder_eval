@@ -24,7 +24,7 @@ import shutil
 import tempfile
 from functools import cache
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from coder_eval.models import (
     IN_CONTAINER_ENV,
@@ -641,10 +641,10 @@ def _should_grade_in_container(task: TaskDefinition, *, allow_host_grading: bool
 
     * ``driver: docker`` — a tempdir task has no container to grade in.
     * NOT already inside one. Gated on ``CODER_EVAL_IN_CONTAINER``, never on the
-      driver, for the same reason the reference-permission window is: the
-      in-container entry point rewrites `docker` -> `tempdir` before building its
-      Orchestrator, so a driver-based test would be reading a value that has
-      already been changed. Without this, a grading container would try to
+      driver, for the same reason the reference-permission window is: the host
+      stages a container's task with `driver: tempdir`, so a driver-based test
+      would be reading a value that has already been resolved. Without this, a
+      grading container would try to
       dispatch a grading container.
     * ``--allow-host-grading`` not passed. That flag is the operator saying
       "grade it here anyway" — the escape hatch for a machine with no docker, or
@@ -664,14 +664,21 @@ def _fold_back_container_logs(container_run_dir: Path, run_dir: Path) -> None:
 
     ``grade.log`` is the grading pass's OWN log, holding the per-criterion detail
     that is the only durable record of WHY a criterion scored what it did, and a
-    documented part of the run-directory contract.
+    documented part of the run-directory contract. A ``task.json.unhonored`` record
+    the contract echo refused is rescued the same way, beside the row it was grading.
 
     Best-effort throughout: a side-car log is not the verdict, and this runs where
     an exception is already in flight.
 
     Rationale: .claude/notes/isolation.md § Grading a docker row inside a container
     """
-    for name, dest_name in ((DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME), (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME)):
+    unhonored = f"{TASK_JSON_FILENAME}.unhonored"
+    rescued = (
+        (DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME),
+        (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME),
+        (unhonored, unhonored),
+    )
+    for name, dest_name in rescued:
         # Renamed for the PHASE: on the resume path that name is already taken by
         # the executed container's log. `grade.log` does not collide.
         source = container_run_dir / name
@@ -872,9 +879,10 @@ async def _grade_in_container(
             # OSError joins it because the staging copies raise it unwrapped.
             raise RegradeError(
                 f"Grading {task.task_id!r} in a container failed: {e}. The container's own output was "
-                + f"kept at {run_dir / GRADE_DOCKER_LOG_FILENAME}. Re-run with --allow-host-grading "
-                + "to grade on this machine instead (path- and toolchain-dependent criteria may then "
-                + "score differently, and the row is stamped graded_on_host)."
+                + f"kept at {run_dir / GRADE_DOCKER_LOG_FILENAME}. If the image itself was refused (its "
+                + "version or its contract echo), rebuild or pull a matching image. Otherwise, re-run with "
+                + "--allow-host-grading to grade on this machine instead (path- and toolchain-dependent "
+                + "criteria may then score differently, and the row is stamped graded_on_host)."
             ) from e
         finally:
             # ALWAYS, not only on success: the scratch dir dies with this `with`,
@@ -903,6 +911,7 @@ async def regrade_in_place(
     allow_host_grading: bool = False,
     recorded_task: TaskDefinition | None = None,
     recorded_task_file: Path | None = None,
+    container_contract: dict[str, Any] | None = None,
 ) -> EvaluationResult:
     """Run ``task``'s criteria against an already-executed ``workspace``.
 
@@ -916,7 +925,10 @@ async def regrade_in_place(
 
     ``recorded_task`` / ``recorded_task_file`` are two halves of one seam — what
     the row RECORDS, as distinct from what this process runs. Both matter only in
-    the container, where the task is rewritten to ``driver: tempdir``.
+    the container, whose task the host stages with ``driver: tempdir``.
+
+    ``container_contract`` is the echo the in-container caller forwards to the
+    Orchestrator; the host never passes it.
 
     Rationale: .claude/notes/orchestration.md § Recording the task as authored
     """
@@ -991,6 +1003,7 @@ async def regrade_in_place(
         prior_result=prior,
         recorded_task=recorded_task,
         recorded_task_file=recorded_task_file,
+        container_contract=container_contract,
     )
     result = await orchestrator.run()
     stamp_host_grading(result, task)

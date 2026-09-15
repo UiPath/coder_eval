@@ -1,13 +1,26 @@
 """Tests for evaluate CLI command."""
 
+import json
+import re
+import shutil
+import sys
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import typer
+from typer.testing import CliRunner
+
+from coder_eval.cli import app
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+AGENTLESS_TASK = Path(__file__).resolve().parents[1] / "tasks" / "agentless_smoke_test.yaml"
+_needs_agentless = pytest.mark.skipif(
+    not AGENTLESS_TASK.is_file(), reason="needs a source checkout (tasks/ is not in the wheel)"
+)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def test_evaluate_command_success(tmp_path):
@@ -216,3 +229,191 @@ def test_evaluate_command_multiple_criteria(tmp_path):
 
         # All 3 criteria should pass
         assert exc_info.value.exit_code == 0
+
+
+# --------------------------------------------------------------------------
+# `evaluate <run_dir>` refreshes the run-level run.json itself
+# --------------------------------------------------------------------------
+
+
+def _shows(output: str, text: str) -> bool:
+    """Whether console ``output`` shows ``text``; Rich wraps paths at any character, so compare without whitespace."""
+
+    def squash(s: str) -> str:
+        return "".join(_ANSI_RE.sub("", s).split())
+
+    return squash(text) in squash(output)
+
+
+def _row_dirs(run_dir: Path) -> list[Path]:
+    return sorted(p.parent for p in run_dir.rglob("task.json"))
+
+
+def _read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _plant_ungraded_row(run_dir: Path, source_row: Path, task_id: str) -> Path:
+    """A second executed row beside ``source_row``, under its own task id."""
+    from coder_eval.models import EvaluationResult
+    from coder_eval.path_utils import build_task_run_dir
+
+    record = EvaluationResult.model_validate_json((source_row / "task.json").read_text(encoding="utf-8"))
+    record.task_id = task_id
+    target = build_task_run_dir(run_dir, record.variant_id, task_id, 0)
+    target.mkdir(parents=True)
+    (target / "task.json").write_text(record.model_dump_json(indent=2), encoding="utf-8")
+    return target
+
+
+def _evaluate(target: Path):
+    return CliRunner().invoke(app, ["evaluate", str(target)])
+
+
+@pytest.fixture
+def executed_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A real `execute` run dir: one NOT_GRADED row and its run.json. Grading passes stay inside tmp_path."""
+    from coder_eval.cli import run_helpers
+
+    monkeypatch.setattr(run_helpers.settings, "runs_dir", tmp_path / "default-runs")
+    run_dir = tmp_path / "r"
+    result = CliRunner().invoke(app, ["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
+    assert result.exit_code == 0, result.output
+    return run_dir
+
+
+@_needs_agentless
+def test_evaluate_refreshes_the_run_level_run_json(executed_run: Path) -> None:
+    """No second command: after grading one row, run.json agrees with every row on disk."""
+    from coder_eval.orchestration.batch import recover_task_results
+
+    (graded_row,) = _row_dirs(executed_run)
+    _plant_ungraded_row(executed_run, graded_row, "a_second_row")
+    stale = _read_json(executed_run / "run.json")
+
+    result = _evaluate(graded_row)
+
+    assert result.exit_code == 0, result.output
+    buckets = Counter(r.result.final_status.category for r in recover_task_results(executed_run))
+    refreshed = _read_json(executed_run / "run.json")
+    assert refreshed["tasks_run"] == sum(buckets.values()) == stale["tasks_run"] + 1
+    assert refreshed["tasks_succeeded"] == buckets["succeeded"]
+    assert refreshed["tasks_not_graded"] == buckets["ungraded"]
+    assert _shows(result.output, f"Refreshed {executed_run / 'run.json'}")
+
+
+@_needs_agentless
+def test_evaluate_without_a_run_root_says_so(executed_run: Path, tmp_path: Path) -> None:
+    """A row copied out of its run has no run.json above it: say so, and create none."""
+    (row,) = _row_dirs(executed_run)
+    copied_root = tmp_path / "copied-out"
+    copied_row = copied_root / "00"
+    shutil.copytree(row, copied_row, symlinks=True)
+    # The recorded workspace still points into the original run, so name the copy explicitly.
+    (workspace,) = (copied_row / "artifacts").iterdir()
+
+    result = CliRunner().invoke(app, ["evaluate", str(copied_row), "--workspace", str(workspace)])
+
+    assert result.exit_code == 0, result.output
+    assert _shows(result.output, "not inside a run directory")
+    assert not list(copied_root.rglob("run.json"))
+
+
+@_needs_agentless
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege on Windows")
+def test_a_symlinked_run_json_is_refused(executed_run: Path, tmp_path: Path) -> None:
+    """A run dir is a shareable artifact; following its run.json link would overwrite any file the grader can write."""
+    (row,) = _row_dirs(executed_run)
+    victim = tmp_path / "victim.json"
+    victim.write_text("keep me", encoding="utf-8")
+    (executed_run / "run.json").unlink()
+    (executed_run / "run.json").symlink_to(victim)
+
+    result = _evaluate(row)
+
+    assert result.exit_code == 0, result.output
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert (executed_run / "run.json").is_symlink()
+    assert _shows(result.output, "is a symlink"), result.output
+
+
+@_needs_agentless
+def test_a_quarantined_row_is_not_folded_in(executed_run: Path) -> None:
+    """`task.json.unhonored` is a refused container record; `rglob("task.json")` must not see it."""
+    (row,) = _row_dirs(executed_run)
+    graded_task_id = _read_json(row / "task.json")["task_id"]
+    refused = _plant_ungraded_row(executed_run, row, "refused_by_the_contract_echo")
+    (refused / "task.json").rename(refused / "task.json.unhonored")
+
+    result = _evaluate(row)
+
+    assert result.exit_code == 0, result.output
+    assert _shows(result.output, f"Refreshed {executed_run / 'run.json'}"), result.output
+    assert {r["task_id"] for r in _read_json(executed_run / "run.json")["task_results"]} == {graded_task_id}
+
+
+@_needs_agentless
+def test_a_rebuild_failure_does_not_change_the_exit_code(executed_run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Best-effort, like the write-back: the verdict is computed and printed before the refresh."""
+    from coder_eval.orchestration import run_summary_rebuild
+
+    def _boom(_run_dir: Path) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(run_summary_rebuild, "rebuild_run_summary", _boom)
+    (row,) = _row_dirs(executed_run)
+
+    result = _evaluate(row)
+
+    assert result.exit_code == 0, result.output
+    assert _shows(result.output, "disk full")
+    assert _read_json(row / "task.json")["final_status"] == "SUCCESS"
+
+
+@_needs_agentless
+def test_a_grading_run_dir_inside_the_run_does_not_refresh(executed_run: Path) -> None:
+    """`--run-dir` under the owning run writes a second task.json there; folding it in would count the row twice."""
+    (row,) = _row_dirs(executed_run)
+    before = (executed_run / "run.json").read_text(encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["evaluate", str(row), "--run-dir", str(executed_run / "regrade")])
+
+    assert result.exit_code == 0, result.output
+    assert _shows(result.output, "would count as a second row"), result.output
+    assert (executed_run / "run.json").read_text(encoding="utf-8") == before
+
+
+def test_the_refresh_lines_survive_rich_markup_in_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run directory name is untrusted; `[/y]` in it must print, not raise a MarkupError after the verdict."""
+    from coder_eval.cli.evaluate_command import _refresh_run_summary
+    from coder_eval.orchestration import run_summary_rebuild
+
+    odd_root = tmp_path / "odd[/y]run"
+    monkeypatch.setattr(run_summary_rebuild, "find_run_root", lambda _path: odd_root)
+    monkeypatch.setattr(run_summary_rebuild, "rebuild_run_summary", lambda _root: object())
+
+    _refresh_run_summary(tmp_path / "row", tmp_path / "elsewhere")
+
+    assert _shows(capsys.readouterr().out, f"Refreshed {odd_root / 'run.json'}")
+
+
+@_needs_agentless
+def test_work_dir_mode_refreshes_no_run_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`evaluate <task.yaml> <dir>` grades a directory, not a run row, so nothing run-level is touched."""
+    from coder_eval.cli import run_helpers
+
+    monkeypatch.setattr(run_helpers.settings, "runs_dir", tmp_path / "default-runs")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "proof.txt").write_text("coder-eval-ran-without-a-coder", encoding="utf-8")
+    ancestor_run_json = '{"run_id": "not-this-one", "task_results": []}'
+    (tmp_path / "run.json").write_text(ancestor_run_json, encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["evaluate", str(AGENTLESS_TASK), str(work)])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "run.json").read_text(encoding="utf-8") == ancestor_run_json
+    assert not _shows(result.output, "Refreshed")
+    assert not _shows(result.output, "not inside a run directory")

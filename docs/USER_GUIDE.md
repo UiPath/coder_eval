@@ -176,8 +176,7 @@ coder-eval evaluate tasks/hello_date.yaml ./my_solution
 
 # 2. Re-grade a finished run — including one left NOT_GRADED by `execute`
 coder-eval execute  tasks/hello_date.yaml --run-dir ./r
-coder-eval evaluate ./r/default/hello_date/00
-coder-eval aggregate ./r                      # run.json now reports the verdict
+coder-eval evaluate ./r/default/hello_date/00   # grades the row and refreshes ./r/run.json
 ```
 
 **Run-directory mode** rebuilds the task from the run's own recorded
@@ -189,8 +188,11 @@ criteria that read the agent's tool calls (`command_executed`, `skill_triggered`
 judges with trajectory) score exactly as they would have during the run.
 
 It writes the verdict back into the run's `task.json` and keeps the pre-grade
-record beside it as `task.execute.json`. Writing back in place is what makes
-`aggregate` free — no new flag, no second copy of the results. If grading itself
+record beside it as `task.execute.json`. It then rebuilds the run's
+`run.json` from the rows on disk, so `run.json` reports the verdict with no second command
+and no second copy of the results. A row that is not inside a run directory gets no
+`run.json`, a symlinked `run.json` is refused, and a failed refresh only warns — the exit
+code is always the verdict's. If grading itself
 crashes, the ungraded record is put back: `ERROR` counts as complete for both
 commands, so an errored row could never be graded again.
 
@@ -286,6 +288,7 @@ new answer key.
 coder-eval report runs/latest                 # view latest run (markdown to stdout)
 coder-eval report runs/latest -o summary.md    # export markdown to a file
 coder-eval report runs/latest --format html    # (re)render every task.json as task.html
+coder-eval report runs/2026-06-22_14-32-27 --rebuild   # rebuild run.json + run.md in place
 ```
 
 The `run` command already writes reports during execution; `report` re-displays or
@@ -296,26 +299,23 @@ reads, see [Output Structure](#output-structure) and the
 | Flag | Description |
 | --- | --- |
 | `--output, -o` | Write to a file instead of stdout (markdown). |
-| `--format, -f` | `md` (default) or `html`. `html` re-renders each `task.json` under the run dir to a `task.html` beside it (or to `-o` when exactly one task is found). |
+| `--format, -f` | `md` (default), `html` or `junit`. `html` re-renders each `task.json` under the run dir to a `task.html` beside it (or to `-o` when exactly one task is found); `junit` writes JUnit XML from `run.json`. |
+| `--rebuild` | Rebuild the run-level `run.json` + `run.md` in place from the finalized `task.json` files under the run dir. Cannot be combined with `--format` or `--output`. |
 
-### `coder-eval aggregate` — rebuild `run.json` from task results
-
-```bash
-coder-eval aggregate runs/2026-06-22_14-32-27           # rebuild the summary in place
-coder-eval aggregate runs/combined -o runs/combined     # aggregate a merged dir
-```
-
-Re-derives the run-level `run.json` + `run.md` from the finalized `task.json` files
-already on disk, using the same builder a live run uses. Use it when a run dir's
-top-level summary is missing or stale — e.g. after recovering an interrupted run or
-combining several run directories. It rebuilds the **run-level summary only**;
-per-suite rollups (`suite.json`/`suite.md`) and experiment reports
-(`experiment.json`/`experiment.md`) are *not* rebuilt, because the per-row
-suite/variant grouping they need is not recoverable from `task.json` alone.
-
-| Flag | Description |
-| --- | --- |
-| `--output, -o` | Write `run.json`/`run.md` into this directory instead of the run dir (e.g. a merged output dir). |
+**Rebuilding `run.json`.** `--rebuild` re-derives the run-level `run.json` + `run.md`
+from the finalized `task.json` files already on disk, using the same builder a live run
+uses. Use it when a run dir's top-level summary is missing or stale — e.g. after
+recovering an interrupted run or combining several run directories. Point it at the run
+root (the directory that holds `run.json`); a task directory, or any directory inside a
+run, is refused. It writes in place: to summarize a combined directory, gather the task
+directories into it first, then rebuild that directory. Copy the task directories, not
+whole run directories — a copied run keeps its own `run.json`, so its rows belong to it and
+are left out. It rebuilds the **run-level summary only**; per-suite rollups
+(`suite.json`/`suite.md`) and experiment reports (`experiment.json`/`experiment.md`) are
+*not* rebuilt, because the per-row suite/variant grouping they need is not recoverable
+from `task.json` alone. It exits 1 when no finalized `task.json` is found. A rebuild —
+including the one `coder-eval evaluate <run_dir>` runs — records the rebuilding host's
+coder-eval version and environment in `run.json`.
 
 ### Claude Code slash commands
 

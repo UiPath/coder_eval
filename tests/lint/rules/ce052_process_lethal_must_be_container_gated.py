@@ -30,8 +30,8 @@ Fires on ``os._exit(...)`` anywhere in ``src/coder_eval/`` that is not lexically
 inside a branch testing ``CODER_EVAL_IN_CONTAINER``. That env var is the repo's
 established in-container predicate (``Sandbox.enforces_permission_windows``,
 ``orchestration/evaluation.resolve_reference_dir``) and is deliberately NOT
-``sandbox.driver`` — ``run_task_internal_command`` rewrites the driver to
-``tempdir`` before building the in-container Orchestrator, so a driver-based gate
+``sandbox.driver`` — ``DockerRunner._stage_inputs`` stages the in-container task
+with ``driver: tempdir``, so a driver-based gate
 disables itself on precisely the path that needs it.
 
 The check is lexical (an enclosing ``if``/``elif`` whose test mentions the var),

@@ -22,8 +22,11 @@ replacing ``driver``:
 
 Exempt: ``models/sandbox.py`` (the model's own construction), and any site
 carrying ``# noqa: CE051`` with a reason — today the two legitimate ones are the
-in-container rewrite in ``run_task_internal_command`` and the opt-in host-grading
-branch, which refuses by default and stamps ``graded_on_host`` on the row.
+host-side staging rewrite in ``docker_runner._stage_inputs`` (the host resolves the
+driver for the container it is about to start itself, and the authored sandbox
+crosses beside it in the contract) and the opt-in host-grading branch in
+``regrade.grading_sandbox_config``, which refuses by default and stamps
+``graded_on_host`` on the row.
 """
 
 import ast

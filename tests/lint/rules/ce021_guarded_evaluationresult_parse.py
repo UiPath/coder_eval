@@ -4,8 +4,8 @@
 thing that crosses the container boundary, and the per-task record every
 dashboard/timeline reads. Parsing it with a bare
 ``EvaluationResult.model_validate_json(text)`` means a present-but-malformed file
-— a schema skew between a stale ``:latest`` image and the host (the docker
-version checks only warn), or a truncated/torn write — surfaces as an uncaught
+— a schema skew between a stale ``:latest`` image and the host that the docker
+image preflight did not catch, or a truncated/torn write — surfaces as an uncaught
 ``pydantic.ValidationError`` / ``json.JSONDecodeError`` (both subclass
 ``ValueError``) that crashes the run. That was a real incident at
 ``docker_runner.py`` (the parse re-bucketed the task to a non-persisted in-memory
