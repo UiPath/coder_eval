@@ -41,7 +41,14 @@ data-driven analysis.
 - **`models/container_paths.py`** owns `IN_CONTAINER_ENV` (CE056).
 - **`pricing.py`** is the rate SSOT; `evalboard/lib/pricing.generated.ts` is generated
   from it by `make pricing-mirror`, and CE065 fails the build on drift.
-- **`reports_html.py`** is the evalboard's static twin.
+- **`reports/`** is a LEAF rendering layer (markdown, html, experiment, junit +
+  helpers): it may import anywhere, and core may import only its public writers
+  (CE066). `reports/html.py` is the evalboard's static twin.
+- **`result_metrics.py`** holds `EvaluationResult` metrics the ORCHESTRATOR reads
+  mid-run; **`stats.py`** is distribution-free statistics, dependency-free by
+  contract; **`run_record.py`** is the `run.json` task-row serializer, not a report.
+- **`durations.py`** is `format_ms`, split from `formatting.py` so the reports layer
+  does not reach through an SDK-shaped module for it.
 - **`isolation/`** is `driver: docker`, one container per task.
 - **`streaming/`** is the event protocol and `EventCollector`.
 
@@ -198,6 +205,13 @@ A few rules constrain routine edits, so they are worth knowing before you start:
   Renaming an action input means updating that skill too — the user-facing contract is
   [CI Gate: GitHub Action & JUnit reports](docs/CI_GATE.md).
 - **CE047** requires every onboarding surface to name every built-in `AgentKind`.
+- **CE065** diffs `evalboard/lib/pricing.generated.ts` against `pricing.py`; the table was
+  a hand-copy whose exemption set let four heavily-used models render `—` for cost.
+  Regenerate with `make pricing-mirror`; never hand-edit the generated file.
+- **CE066** lets the core layer import only the `reports/` package's public *writers*. A
+  metric, statistic or serializer pulled out of `reports*` is what put `turn_time_buckets`
+  and the run.json serializer in a rendering module; they now live in `result_metrics.py`,
+  `stats.py` and `run_record.py`.
 
 **Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
 source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go

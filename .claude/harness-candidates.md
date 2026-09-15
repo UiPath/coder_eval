@@ -450,7 +450,7 @@ with the two `action.yml` items above — one considered change to the action's 
   `verify-published-action.yml` reads `task_results[*].status` / `weighted_score` /
   `total_tokens`, and `action.yml`'s score gate reads `weighted_score` / `task_id`.
   These are string keys in shell/YAML that no test or type-checker binds to
-  `eval_result_to_task_dict` (`reports_experiment.py`), so renaming a key there
+  `eval_result_to_task_dict` (`run_record.py`), so renaming a key there
   silently turns an external gate into a no-op — a reviewer here proposed
   `final_status`, which does not exist in `run.json` and would have made a new
   assertion dead on arrival. Guard: assert the key set that non-Python consumers
