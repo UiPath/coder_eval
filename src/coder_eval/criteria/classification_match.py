@@ -22,9 +22,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Sentinels for the observed label — surfaced as their own classes in the
-# suite rollup's confusion matrix so "didn't write anything" and "wrote
+# Their own classes in the confusion matrix, so "wrote nothing" and "wrote
 # something unrecognisable" are visible failure modes rather than vanishing.
+# Rationale: .claude/notes/contracts.md § Criterion aggregation
 _SENTINEL_NONE = "(none)"
 _SENTINEL_OTHER = "(other)"
 

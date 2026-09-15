@@ -413,12 +413,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "VariantResult",
 ]
 
-# Type aliases (forward compatible)
-# Typed as the discriminated union so callers that iterate the result list
-# and use ``isinstance(cr, JudgeCriterionResult)`` get the precise variant
-# membership. The runtime objects are concrete subclasses regardless; the
-# alias change is purely a type-checking precision fix that mirrors the
-# ``EvaluationResult.success_criteria_results`` field type.
+# Typed as the discriminated union so an ``isinstance`` over the result list gets
+# precise variant membership. The runtime objects are concrete subclasses either
+# way; this mirrors the ``EvaluationResult.success_criteria_results`` field type.
 type CriteriaResults = list[CriterionResultUnion]
 type SuccessCriteria = list[SuccessCriterion]
 type TurnRecords = list[TurnRecord]

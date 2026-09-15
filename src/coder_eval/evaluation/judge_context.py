@@ -28,17 +28,11 @@ from coder_eval.models import (
 )
 
 
-# Paths in `llm_judge.files` / `agent_judge.files` that begin with one of these
-# tokens are resolved against a host directory and read from the host filesystem
-# instead of the sandbox: `$TASK_DIR` against the task YAML's parent directory,
-# `$REFERENCE_DIR` against the per-run staged copy of `task.reference.directory`.
-# Both mirror the same-named env vars `run_command` exposes, so judges and shell
-# criteria address the same places by the same name.
-#
-# `$REFERENCE_DIR` is how a task attaches *specific* grading assets from the
-# reference (`$REFERENCE_DIR/rubric.md`) instead of the whole tree, and it is
-# readable here because judges run outside the agent's turn — the directory sits
-# at mode 000 for the whole of `agent.communicate`.
+# Paths beginning with one of these tokens resolve against a HOST directory rather
+# than the sandbox, mirroring the same-named env vars `run_command` exposes.
+# `$REFERENCE_DIR` is readable here only because judges run outside the agent's
+# turn -- the directory sits at mode 000 for all of `agent.communicate`.
+# Rationale: .claude/notes/contracts.md § Judge context and untrusted text
 
 
 if TYPE_CHECKING:
@@ -100,22 +94,14 @@ def scrub_reference(content: str, secrets: list[str] | None) -> str:
     """Redact any occurrence of each secret in ``content``.
 
     Takes the per-file contents of a reference directory, or ``None`` (no-op).
-    Deliberately ``list[str]``, not the old ``str | Iterable[str]`` and not
-    ``Sequence[str]``: ``str`` satisfies both of those, so a caller passing a
-    bare string type-checked clean and then had its characters iterated as
-    individual "secrets" (each under the 8-char floor, so silently redacting
-    nothing). ``list[str]`` is the one spelling that makes that a type error.
+    Deliberately ``list[str]``: ``str`` satisfies ``str | Iterable[str]`` and
+    ``Sequence[str]`` alike, so a caller passing a bare string type-checked clean
+    and had its CHARACTERS iterated as individual secrets.
 
-    No-op for ``None`` or empty inputs — guards against the
-    ``"".replace("", "<redacted>")`` pathology that ballooned strings.
-    Secrets shorter than 8 characters are skipped: redacting a tiny common
-    substring (e.g. ``" = 1"``) would produce gibberish output and isn't a
-    realistic leak vector — references at that scale carry no proprietary
-    information. Directory-mode caveat: every file in the reference directory
-    becomes its own secret entry, so a reference solution that includes very
-    short files (a one-liner ``__init__.py``, a tiny config blob) will leave
-    those files unscrubbed — mention this explicitly because the per-file
-    threshold is invisible at the call site.
+    Secrets shorter than 8 characters are skipped, so a reference that includes
+    very short files leaves those files unscrubbed.
+
+    Rationale: .claude/notes/contracts.md § Scrub before truncate
     """
     if secrets is None:
         return content
@@ -129,12 +115,8 @@ def scrub_reference(content: str, secrets: list[str] | None) -> str:
     return out
 
 
-# Budget for ``collect_reference_secrets``. Reference directories are expected to
-# be small project skeletons (a handful of source files); a runaway tree (vendored
-# node_modules, generated XML, embedded assets) must not pull the host into an OOM
-# or hang the walk. When a budget triggers we log + stop reading more files —
-# remaining files are left unscrubbed, which is no worse than the pre-budget world
-# would have been if the user had pointed at a code-form reference instead.
+# A runaway tree must not pull the host into an OOM or hang the walk. When the
+# budget trips we log and stop; remaining files are left unscrubbed.
 _MAX_REFERENCE_FILES = 200
 _MAX_REFERENCE_BYTES = 2 * 1024 * 1024  # 2 MB total content cap
 
@@ -142,28 +124,15 @@ _MAX_REFERENCE_BYTES = 2 * 1024 * 1024  # 2 MB total content cap
 def iter_reference_files(reference_dir: Path) -> Iterator[tuple[Path, str]]:
     """Yield ``(path, text)`` for every readable text file under ``reference_dir``.
 
-    The single walk behind both reference consumers: ``collect_reference_secrets``
-    (scrub keys) and ``render_reference_dir`` (judge prompt content). Sharing it
-    means the budget and symlink rules can't diverge between "what we show the
-    judge" and "what we redact from the judge's output" — a divergence there
-    would leak reference content into a persisted transcript.
+    The single walk behind both reference consumers, so the budget and symlink
+    rules cannot diverge between what the judge is shown and what is redacted from
+    its output.
 
-    Binary and unreadable files are skipped silently — they're not realistic
-    leak vectors and reading them would raise UnicodeDecodeError.
+    Symlinks are NOT followed. Binary and unreadable files are skipped silently.
+    File count and total content are capped; when either trips we log and stop.
+    Yields nothing when the directory is missing, empty, or sitting at mode 000.
 
-    Symlinks are NOT followed: a reference bundle that ships
-    ``secrets -> /etc/passwd`` would otherwise read the host file into the
-    scrub-key list (and quietly grow it), and a symlinked subdir back to the
-    root would loop ``rglob`` forever.
-
-    File count and total content are capped (``_MAX_REFERENCE_FILES`` /
-    ``_MAX_REFERENCE_BYTES``) — when either trips we log + stop. The cap is
-    sized well above any realistic reference skeleton, so this only fires for
-    misconfigured trees.
-
-    Yields nothing when the directory is missing or empty. A reference
-    directory sitting at mode 000 (i.e. this was called during an agent turn,
-    which should never happen) also yields nothing rather than raising.
+    Rationale: .claude/notes/contracts.md § The reference walk's budget and symlink rules
     """
     if not reference_dir.is_dir():
         return
@@ -191,12 +160,9 @@ def iter_reference_files(reference_dir: Path) -> Iterator[tuple[Path, str]]:
             continue
         if not path.is_file():
             continue
-        # Size pre-check BEFORE read_text: a single 100 MB file in an otherwise
-        # small reference dir would otherwise be pulled into memory in full before
-        # the per-iteration budget check fires. Using stat() bytes (rather than
-        # char count post-read) also keeps the accounting unit consistent with the
-        # ``_MAX_REFERENCE_BYTES`` constant name. OSError on stat (race with delete,
-        # permission edge cases) → skip silently.
+        # BEFORE read_text: one huge file would otherwise be pulled into memory in
+        # full before the per-iteration budget check fires. stat() bytes also keep
+        # the unit consistent with the constant's name.
         try:
             file_size = path.stat().st_size
         except OSError:
@@ -249,9 +215,8 @@ def collect_reference_secrets(reference_dir: Path, max_file_chars: int | None) -
     return keys
 
 
-# Total budget for the rendered reference block. `max_file_chars` bounds each
-# file, but a tree of many small files could still blow the judge's context —
-# which surfaces as a failed judge call scored 0.0, not as graceful degradation.
+# `max_file_chars` bounds each file, but many small files could still blow the
+# judge's context -- which surfaces as a failed call scored 0.0.
 _MAX_RENDERED_REFERENCE_CHARS = 200_000
 
 
@@ -275,9 +240,8 @@ def render_reference_dir(reference_dir: Path, max_file_chars: int) -> str | None
         except ValueError:  # pragma: no cover - rglob results are always relative
             label = path.name
         block = f"--- {label} ---\n{truncate(text, max_file_chars)}"
-        # Drop trailing files rather than truncating mid-block, mirroring how the
-        # trajectory degrades, and tell the judge explicitly so it doesn't read
-        # the omission as "the reference doesn't implement that".
+        # Drop TRAILING files rather than truncating mid-block, and say so, or the
+        # judge reads the omission as "the reference doesn't implement that".
         if used + len(block) > _MAX_RENDERED_REFERENCE_CHARS and blocks:
             dropped += 1
             continue
@@ -315,13 +279,10 @@ class JudgeContext:
 
     files: list[FileBlock] = field(default_factory=list)
     reference: str | None = None
-    # Every piece of reference-derived text that reached the prompt, in the exact
-    # shape the judge saw it (post-truncation). The scrub gate keys on THIS being
-    # non-empty, not on ``include_reference``: a `$REFERENCE_DIR/...` entry in
-    # ``files:`` attaches reference bytes with include_reference=false, which is
-    # the documented way to show a judge one rubric without inlining the tree.
-    # Keying on the flag left that combination persisting the solution verbatim
-    # into the archived judge transcript.
+    # HAZARD: every reference-derived byte that reached the prompt, in the exact
+    # shape the judge saw. The scrub gate keys on THIS being non-empty, never on
+    # ``include_reference``.
+    # Rationale: .claude/notes/contracts.md § What counts as reference-derived
     reference_secrets: list[str] = field(default_factory=list)
     agent_output: str | None = None
     tool_calls_summary: str | None = None
@@ -439,10 +400,8 @@ class JudgeContextBuilder:
             rendered = render_reference_dir(reference_dir, self.max_file_chars)
             if rendered:
                 ctx.reference = rendered
-                # max_file_chars is mandatory here: render_reference_dir truncated
-                # each file, and scrub_reference redacts by exact substring, so a
-                # key built only from the untruncated text would never match what
-                # the judge was actually shown.
+                # Mandatory: the renderer truncated each file, and a key built only
+                # from untruncated text would never match what the judge was shown.
                 ctx.reference_secrets.extend(collect_reference_secrets(reference_dir, self.max_file_chars))
                 return
         # Silent omission matches legacy behavior — some tasks deliberately run without a reference.
@@ -473,12 +432,9 @@ class JudgeContextBuilder:
             if not turn_records:
                 ctx.degraded_notes.append("include_dialog requested but no turn records available")
             else:
-                # Aggregate budget cap (max_dialog_chars) prevents an N-turn simulation from
-                # blowing out the judge's context window. Per-message cap (max_file_chars) is
-                # applied first so a single huge message can't crowd out later turns. When the
-                # aggregate budget is exhausted we drop *trailing* turns and record a note —
-                # TODO: a smarter strategy (keep first+last K, or middle-ellipsis) better matches
-                # what graders want, but the naïve cap is enough for the common case.
+                # The per-message cap is applied FIRST so one huge message cannot
+                # crowd out later turns; the aggregate cap then drops trailing turns
+                # and records a note. TODO: keep first+last K instead.
                 total = 0
                 dropped = 0
                 for turn in turn_records:
@@ -508,10 +464,8 @@ def format_details(score: float, rationale: str, missing_files: list[str], degra
     return "\n".join(lines)
 
 
-# Per-tool detail/result_preview cap used when capturing an agent_judge transcript.
-# Generous enough to preserve audit value (a typical Bash command, a grep pattern,
-# a tool result blurb) but small enough that 100+ tool calls fit under the default
-# max_transcript_chars=100_000 cap before truncation kicks in.
+# Generous enough to preserve audit value, small enough that 100+ tool calls fit
+# under the default max_transcript_chars before truncation.
 _TRANSCRIPT_DETAIL_CAP = 200
 _TRANSCRIPT_RESULT_CAP = 200
 
@@ -563,10 +517,8 @@ def build_judge_transcript(
     cmds = commands or []
     tool_calls = [_summarize_command_for_transcript(c) for c in cmds]
 
-    # Budget pass: keep tool calls until we exhaust the cap, then start clipping.
-    # The only way ``len(kept) < len(tool_calls)`` is to break out of the loop,
-    # and that branch already sets ``truncated = True`` — no post-loop redundant
-    # assignment needed.
+    # The only way ``len(kept) < len(tool_calls)`` is to break out of the loop, and
+    # that branch already sets ``truncated``.
     used = 0
     kept: list[JudgeTranscriptToolCall] = []
     truncated = False
@@ -578,14 +530,9 @@ def build_judge_transcript(
         kept.append(tc)
         used += cost
 
-    # SECURITY: scrub BEFORE clipping. ``scrub_reference`` uses ``str.replace``,
-    # which only matches the secret as a contiguous whole string. If we clipped
-    # first, a multi-KB reference cut by the per-field budget would leave a
-    # partial fragment in the field that no longer matches the full secret —
-    # ``replace`` finds nothing, the prefix gets persisted unsanitized. Scrubbing
-    # first guarantees the secret is replaced with the short ``<reference redacted>``
-    # marker before any clipping, so on-disk fields can never carry partial
-    # reference content.
+    # SECURITY: scrub BEFORE clipping. Clipping first leaves a partial fragment that
+    # no longer matches the full secret, so `str.replace` finds nothing.
+    # Rationale: .claude/notes/contracts.md § Scrub before truncate
     if scrub_key:
         raw_verdict = scrub_reference(raw_verdict, scrub_key)
         judge_prompt = scrub_reference(judge_prompt, scrub_key)
@@ -600,9 +547,8 @@ def build_judge_transcript(
             for tc in kept
         ]
 
-    # Distribute the remaining budget across raw_verdict / judge_prompt / system_prompt.
-    # A naive even split would clip the verdict (the most important field) for tasks
-    # with long rubrics; weight verdict at 60%, user prompt at 30%, system at 10%.
+    # Weighted, not an even split: an even one clipped the verdict -- the most
+    # important field -- for tasks with long rubrics.
     remaining = max(0, max_chars - used)
     verdict_budget = int(remaining * 0.6)
     prompt_budget = int(remaining * 0.3)

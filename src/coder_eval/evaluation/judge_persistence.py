@@ -1,38 +1,18 @@
 """Sibling-file persistence for ``JudgeCriterionResult.transcript``.
 
-The full judge transcript (tool calls, raw verdict, rendered prompt and
-system prompt) can run 10-100 KB. Inlining it into every ``task.json``
-inflates the row record for consumers (suite rollups, report renderers)
-that don't need it. Spilling each transcript to a sibling YAML file next to
-``task.json`` keeps the row record lean and lets reviewers grep transcripts
-independently.
+A judge transcript runs 10-100 KB, so it spills to a sibling YAML file next to
+``task.json`` and the row keeps only a ``transcript_path``. The inline value is
+left in place so in-memory HTML rendering still sees it; ``model_dump_json``
+callers strip it via ``exclude={...}``.
 
-YAML (over JSON) for the sibling: the transcript carries multi-line text
-(``judge_prompt``, ``judge_system_prompt``, ``raw_verdict``) which YAML's
-literal block scalar (``|``) renders as readable paragraphs instead of
-single-line strings with ``\\n`` escapes. Sibling consumers are humans;
-YAML wins.
+- ``spill_judge_transcripts``: called by the orchestrator just before it writes
+  ``task.json``.
+- ``load_judge_transcripts``: called by re-render paths after
+  ``EvaluationResult.model_validate_json``. Accepts both ``.yaml`` (current) and
+  ``.json`` (previous), and treats ``transcript_path is None`` as a no-op, so old
+  inline records keep working.
 
-Two functions:
-
-- ``spill_judge_transcripts``: called by the orchestrator just before it
-  writes ``task.json``. For each judge result with an inline ``transcript``,
-  writes a sibling file and sets ``transcript_path`` on the result. The
-  inline ``transcript`` is left in place so HTML rendering against the
-  in-memory ``EvaluationResult`` still sees it; ``model_dump_json``
-  callers strip it via ``exclude={...}``.
-
-- ``load_judge_transcripts``: called by re-render paths
-  (``coder-eval report``, stats loaders) after
-  ``EvaluationResult.model_validate_json``. For each result whose
-  ``transcript_path`` points at an existing sibling file, reads it back
-  and attaches it as a dict on ``transcript`` so renderers see the same
-  shape they get during the original run. Accepts both ``.yaml`` (the
-  current format) and ``.json`` (the previous format) so previously-spilled
-  runs keep rendering.
-
-Backward compatibility: old ``task.json`` files with inline ``transcript``
-keep working — the loader treats ``transcript_path is None`` as a no-op.
+Rationale: .claude/notes/persistence.md § Judge persistence
 """
 
 from __future__ import annotations
@@ -63,20 +43,15 @@ TASK_JSON_TRANSCRIPT_EXCLUDE = {
 }
 
 
-# Windows reserved device basenames. The Win32 API maps these to character
-# devices regardless of the directory they sit in — opening ``CON`` or ``NUL.yaml``
-# inside ``task_dir`` resolves to the console or the null device, not a file.
-# Case-insensitive; the trailing extension (if any) is ignored by Win32 too,
-# so ``con``, ``CON``, ``CON.yaml``, ``nul.txt`` all map to devices.
-# Only COM1-9 / LPT1-9 are device names; COM10 and beyond are regular files.
+# Win32 maps these to character devices wherever they sit, extension ignored, so
+# ``con``, ``CON.yaml`` and ``nul.txt`` all open a device. Only COM1-9 / LPT1-9 are
+# device names. Rationale: .claude/notes/persistence.md § transcript_path is untrusted input
 _WINDOWS_RESERVED_BASENAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
 )
 
 
-# Field order in the YAML output: lead with the human-readable summary fields
-# (durations, token counts, prompts), then the long body fields. Verdict-shape
-# (raw_verdict) goes last because it's the bulkiest.
+# Human-readable summary fields first, bulkiest (raw_verdict) last.
 _TRANSCRIPT_FIELD_ORDER = (
     "duration_seconds",
     "truncated",
@@ -141,9 +116,8 @@ def spill_judge_transcripts(result: EvaluationResult, output_dir: Path) -> int:
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     spilled = 0
-    # ORDER IS LOAD-BEARING. Each filename is keyed off the criterion's
-    # position in its result list; ``load_judge_transcripts`` reads the stored
-    # path, so each list must retain its order through persistence.
+    # ORDER IS LOAD-BEARING: each filename is keyed off the criterion's position in
+    # its result list, so each list must retain its order through persistence.
     result_groups = (
         ("judge", result.success_criteria_results),
         ("post-failure-judge", result.post_failure_criteria_results),
@@ -196,39 +170,27 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         path = getattr(cr, "transcript_path", None)
         if not path:
             continue
-        # Skip results that already have an inline transcript — typical for
-        # the orchestrator's own first HTML render, which runs against the
-        # in-memory result before it gets dumped + reloaded.
+        # Already inline -- typical for the orchestrator's own first HTML render,
+        # which runs against the in-memory result.
         if getattr(cr, "transcript", None):
             continue
-        # SECURITY: transcript_path comes from task.json, which may travel across
-        # trust boundaries (CI artifacts, shared eval bundles). spill_judge_transcripts
-        # only ever writes generated basename-only paths, with no separators or
-        # ``..``. Allowlist that shape directly so a tampered
-        # ``transcript_path: '/etc/passwd'`` or ``../../secrets`` is refused at the
-        # door rather than relying on ``is_relative_to`` to catch it after a join.
-        # Check BOTH PurePosixPath (forward-slash separator) AND PureWindowsPath
-        # (forward and back-slash separators, drive-letter prefixes): a path like
-        # ``subdir\judge-0.yaml`` passes the POSIX check on Linux (backslash is a
-        # regular char) but resolves to a nested file on Windows. Rejecting under
-        # either interpretation enforces the basename-only policy regardless of
-        # which platform the task.json travels to next.
+        # SECURITY: transcript_path comes from task.json, which travels across trust
+        # boundaries. The writer only ever emits a generated basename, so ALLOWLIST
+        # that shape -- under BOTH POSIX and Windows semantics, since
+        # ``subdir\judge-0.yaml`` passes a POSIX check and nests on Windows.
+        # Rationale: .claude/notes/persistence.md § transcript_path is untrusted input
         if path in {".", ".."} or PurePosixPath(path).name != path or PureWindowsPath(path).name != path:
             logger.warning("Refusing to load judge transcript with non-basename path: %s", path)
             continue
-        # Reject Windows reserved device basenames. On Windows, ``CON.yaml`` /
-        # ``NUL`` / ``COM1`` open the console / null device / serial port
-        # regardless of where they sit in the directory tree. The check is
-        # platform-independent so a task.json minted on Linux that ships such a
-        # transcript_path is rejected before it travels to Windows.
+        # Platform-INDEPENDENT, so a task.json minted on Linux carrying such a path
+        # is rejected before it travels to Windows.
         stem_upper = path.split(".", 1)[0].upper()
         if stem_upper in _WINDOWS_RESERVED_BASENAMES:
             logger.warning("Refusing to load judge transcript with reserved Windows device name: %s", path)
             continue
         sibling = task_dir / path
-        # Defense-in-depth: even with the basename guard above, resolve and verify
-        # containment before reading — symlinks inside ``task_dir`` could redirect
-        # outside it (a malicious bundle could ship one).
+        # Defense-in-depth: a symlink inside ``task_dir`` could still redirect
+        # outside it, so verify containment after resolving.
         try:
             resolved_sibling = sibling.resolve()
             resolved_root = task_dir.resolve()
@@ -249,42 +211,31 @@ def load_judge_transcripts(result: EvaluationResult, task_dir: Path) -> int:
         sibling = resolved_sibling
         try:
             text = sibling.read_text(encoding="utf-8")
-            # Parse as JSON for legacy ``.json`` siblings; anything else (today's
-            # ``.yaml`` and any future format yaml.safe_load handles) goes through
-            # PyYAML, which also accepts JSON as a subset.
+            # JSON for legacy siblings; everything else through PyYAML, which
+            # accepts JSON as a subset anyway.
             data = json.loads(text) if path.endswith(".json") else yaml.safe_load(text)
         except Exception as e:
             logger.warning("Failed to read judge transcript %s: %s", sibling, e)
             continue
         if not isinstance(data, dict):
-            # A scalar / list / None payload would silently land on the result and
-            # crash the HTML renderer (which assumes dict-or-typed) with an
-            # AttributeError on the first ``.get()``. Reject early.
+            # A scalar / list / None payload would land on the result and crash the
+            # renderer on its first ``.get()``.
             logger.warning(
                 "Judge transcript %s is %s, expected mapping — skipping",
                 sibling,
                 type(data).__name__,
             )
             continue
-        # Prefer typed JudgeTranscript so renderer / aggregator code that does
-        # isinstance checks sees the same shape it gets during the original run.
-        # Fall back to the raw dict on ValidationError — older spilled siblings
-        # (pre-schema-change) or forward-compat keys shouldn't break re-render.
+        # Typed, so isinstance checks see the same shape as during the original
+        # run; the raw-dict fallback keeps an older sibling rendering.
         attached: JudgeTranscript | dict[str, Any]
         try:
             attached = JudgeTranscript.model_validate(data)
         except ValidationError as e:
             logger.debug("Judge transcript %s did not match JudgeTranscript schema, attaching as dict: %s", sibling, e)
             attached = data
-        # Use object.__setattr__ so we don't go through pydantic's setter,
-        # which (depending on model_config of the loaded subclass) might
-        # validate or reject. The HTML renderer accepts both typed
-        # JudgeTranscript and dict-shape so either shape works downstream.
-        # NOTE: With the ``CriterionResultUnion`` discriminator on both
-        # ``EvaluationResult`` criterion-result lists, ``cr`` is now a
-        # properly-typed ``JudgeCriterionResult`` after reload (not a base
-        # ``CriterionResult`` with the field in ``__pydantic_extra__``), so
-        # the assignment lands on the declared field directly.
+        # Bypasses pydantic's setter, which a loaded subclass's config might
+        # validate or reject. The renderer accepts both shapes.
         try:
             object.__setattr__(cr, "transcript", attached)
         except Exception as e:

@@ -8,6 +8,20 @@
 
 - **Reconciliation message (stream self-reconciles to the turn total)**: The per-message stream consistently under-reports the authoritative turn total — a fixed prompt slice (~512 input tokens on Claude) is billed on no SDK-emitted message, and sub-agent input/cache only partially bubbles up. So `EventCollector.build_turn_record` appends one synthetic `ReconciliationMessage` (`role="reconciliation"`, in the `TranscriptMessage` union) per turn, carrying the per-bucket residual = `token_usage` − Σ(assistant message buckets). The invariant: **summing the four token buckets across `TurnRecord.messages` (assistant + reconciliation) equals `token_usage` exactly**, for both Claude and Codex (Codex's stream is already complete after `_recover_subagent_tool_calls`, so its residual is usually 0 and no entry is emitted). This is what lets the evalboard SUM the message stream as the source of truth instead of reading a separate aggregate ("agent tokens"): `selectTokenTotals` returns the stream sum whenever a reconciliation entry is present, and the timeline renders it as its own row. It is agent-agnostic (booked at the single `EventCollector` seam), carries no cost (cost stays on `token_usage`), and is excluded from generation/turn counts and the cost simulator. The LiteLLM open-weight actual-cost join (`litellm_cost.apply_actual_cost`) deliberately writes cost at the TURN level only (`token_usage.total_cost_usd` = the real OpenRouter bill) plus the per-call `TurnRecord.provider_call_costs` audit record; it does NOT touch the message token buckets, so `EventCollector` stays the single writer and this invariant holds on every backend. The Python `token_usage`/`total_token_usage` aggregate is unchanged and still authoritative for budget/judges/reports. The residual is almost always positive; a NEGATIVE one means the captured generations over-report some bucket, which is why the note's wording is branched — a `-512` entry must not read as "billed but not surfaced".
 
+### The result_tokens measure and CE043
+
+`result_tokens` approximates the size of the tool result the model received, derived from the
+UNTRUNCATED summary content. It is deliberately cache-independent — available identically
+whether prompt caching was on or off — because the alternative, inferring result size from
+prompt-cache growth, is unavailable when caching is disabled. Approximate rather than the
+API's exact count, but deterministic and always present.
+
+The measure is only meaningful while the summary stays whole. An agent that truncates a
+command's output before recording it, as one once did, silently under-reports that command's
+result — which is what CE043 forbids. One-line summaries of non-command tool items are
+intentionally brief and out of scope; trimming for DISPLAY belongs in the renderers.
+
+
 ## Harness run-limit parity
 
 - **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same thing on every backend, so a divergence is either fixed or documented — never silent. **`run_limits.max_turns` on Codex/Antigravity counts VISIBLE turns** (resolved tool calls, read live off the shared `EventCollector.visible_turn_count`, the same list `TurnRecord.commands` holds) because one `communicate()` is a single SDK turn on both, so a native counter would clamp at 1; claude-code keeps its native SDK cap, whose unit (an agent-loop turn) absorbs arbitrarily many parallel calls — the same number is NOT the same budget across harnesses. OpenCode and Pi each keep a native unit too, because their CLIs stream a real multi-step loop per `communicate()` (`step_start`/`step_finish`, `turn_start`/`turn_end`). The cap is enforced on the same loop boundary as the cooperative early stop and finalizes cleanly as `max_turns_exhausted` (no crash, no retry); on Antigravity that boundary lives in `_drain()`, so the background-work poll loop honors it too.
@@ -623,3 +637,25 @@ The session id is sanitized because dataset-row tasks have path-shaped ids
 (`suite/row_3`, set in `task_loader`) and Pi derives its session file from the id under
 `--session-dir` — so a raw `/` resolves to a non-existent subdir and fails the row before
 any work is done.
+
+## The sdk_options pass-through
+
+`sdk_options` forwards SDK fields the framework does not model. Validation is an ALLOW rule —
+a key must be a real SDK field AND not framework-owned — so the user-visible set is the
+difference of the two. The denylist is explicit rather than derived, so the reason each key is
+withheld stays next to the code.
+
+What is withheld: anything `coder_eval` already owns as a typed field (setting it here would
+silently shadow the typed one), anything transport- or lifecycle-critical, and anything
+security-critical. Hooks, MCP servers, the permission-prompt tool, the tool callback and
+sub-agent definitions all run BEFORE any allowed-tools gate — `agent_judge` forces
+`setting_sources=[]` for exactly that reason, and letting `hooks` through would re-open the
+hole. Session lifecycle is owned by the orchestrator's "advance the session id only on a clean
+turn" logic. Budgeting overlaps the run limits the orchestrator enforces with explicit final
+statuses, and two independent budget guards would disagree on counts. Telemetry is required to
+recover per-emission output tokens around an upstream bug, so turning it off would silently
+drop per-message accounting.
+
+The classification is kept from failing open as the SDK grows: a test asserts EVERY field on
+the SDK's options type is classified, either typed-mirrored or framework-owned, so a new SDK
+release adding an unclassified field fails loudly instead of silently passing through.

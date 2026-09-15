@@ -59,23 +59,14 @@ class JudgeVerdict(BaseModel):
             return ""
         if not isinstance(v, str):
             raise ValueError(f"rationale must be a string, got {type(v).__name__}")
-        # Collapse internal whitespace (newlines, tabs, runs of spaces) to single
-        # spaces. Two reasons:
-        #   1. ``format_details`` writes "rationale: <text>" on one line; a multi-line
-        #      rationale would break that single-line invariant.
-        #   2. ``reports_html._extract_rationale`` parses by line and grabs only the
-        #      first one starting with "rationale: " — multi-line content would be
-        #      silently truncated in the Judge Verdicts card.
-        # The schema asks for "1-2 sentence headline summary"; collapsing whitespace
-        # makes that contract explicit.
+        # Collapsed to single spaces because two consumers parse this by LINE:
+        # ``format_details`` writes it on one, and the HTML report grabs only the
+        # first "rationale: " line. The schema asks for a 1-2 sentence headline.
         collapsed = " ".join(v.split())
         if not collapsed:
-            # Whitespace-only / empty input surfaces as a validation error so the
-            # judge result records the error string instead of silently emitting
-            # a blank ``rationale: `` line in ``format_details``. The
-            # ``extract_verdict_from_*`` extractors translate the
-            # ``ValidationError`` into a JudgeCriterionResult(score=0.0, error=...)
-            # — uniform shape across all three backends.
+            # A validation error, so the result records the error string rather than
+            # emitting a blank ``rationale: `` line. The extractors turn it into a
+            # score=0.0 result -- one shape across all three backends.
             raise ValueError("rationale is empty after whitespace collapse")
         return collapsed
 

@@ -33,20 +33,10 @@ logger = logging.getLogger(__name__)
 #   - Monotonic: once it returns "pass"/"fail" for some trajectory prefix, it MUST
 #     return that SAME verdict for every longer prefix (i.e. every later call in the
 #     same run). "undecided" is the only verdict allowed to change on a later call.
-# EarlyStopWatcher's deferred fail-stop and pass/fail flip-attribution
-# (early_stop.py::_prev_verdicts) are correct only because both existing
-# implementations (skill_triggered, command_executed) honor this. A non-monotonic or
-# non-deterministic override compiles and passes CE025 (which only checks
-# LiveSuccessCriterion subclassing / live_verdict pairing, not this) but silently corrupts
-# the stop logic.
 #
-# ENFORCEMENT: lint rule CE036 (tests/lint/live_verdict_contract.py) replays every live
-# criterion against every prefix of recorded trajectories and asserts both properties —
-# monotonicity over arbitrary Python is undecidable, so replay is the only sound check.
-# Adding a LiveSuccessCriterion REQUIRES adding ContractCase fixtures for it in the same
-# change (CE036 fails on a live type with no cases, and on a polarity its instances claim
-# decidable but no fixture reaches). Note the limit: CE036 proves the contract on the
-# trajectories an author supplied, not in general — honoring it is still on the author.
+# Enforced by lint rule CE036, which replays every live criterion against every prefix
+# of recorded trajectories; CE025 checks only the subclassing/pairing shape.
+# Rationale: .claude/notes/contracts.md § The live_verdict contract
 LiveVerdict = Literal["pass", "fail", "undecided"]
 
 
@@ -75,15 +65,13 @@ class CheckContext:
     reference_dir: "Path | None" = None
 
 
-# Module-level ParamSpec (rather than the PEP 695 `def f[**P](...)` form ruff's
-# UP047 prefers) — CodeQL's Python extractor doesn't yet parse PEP 695 type
-# parameters referenced via `P.args`/`P.kwargs` and flags `P` as a potentially
-# uninitialized local; a plain `typing.ParamSpec` is unambiguous to both tools.
+# Module-level ParamSpec, not the PEP 695 form ruff's UP047 prefers: CodeQL's Python
+# extractor flags `P` as a possibly-uninitialized local there.
 P = ParamSpec("P")
 
-# Exceptions that must escalate rather than be captured into a scored-0.0
-# CriterionResult — a judge-infra outage or a checker-contract misuse is not an
-# agent failure. Shared by both handle_criterion_errors(_async) wrappers below.
+# Exceptions that must ESCALATE rather than be captured into a scored-0.0
+# CriterionResult. Shared by both handle_criterion_errors(_async) wrappers below.
+# Rationale: .claude/notes/contracts.md § What escalates instead of scoring 0.0
 _ESCALATING_EXCEPTIONS: tuple[type[Exception], ...] = (JudgeInfrastructureError, CheckerMisuseError)
 
 
@@ -138,9 +126,8 @@ def handle_criterion_errors(  # noqa: UP047
         try:
             return func(self, criterion, *args, **kwargs)
         except _ESCALATING_EXCEPTIONS:
-            # Judge infra failure / checker-contract misuse is NOT an agent
-            # failure — do not score it 0.0. Propagates to Orchestrator.run()'s
-            # broad except → FinalStatus.ERROR.
+            # NOT an agent failure -- do not score it 0.0. Propagates to
+            # Orchestrator.run()'s broad except -> FinalStatus.ERROR.
             raise
         except Exception as e:
             return _failed_result(self, criterion, e, "check")
@@ -178,38 +165,17 @@ def handle_criterion_errors_async(  # noqa: UP047
 class BaseCriterion[C: BaseSuccessCriterion](ABC):
     """Abstract base class for all criterion checkers.
 
-    The checking logic's PRIMARY surface is async (``_check_impl_async``) —
-    every criterion, at bottom, is "read some inputs, produce a score," and
-    async is the strictly more general shape: it covers both a criterion that
-    never awaits anything (a CPU/file-bound check) and one that awaits genuine
-    I/O (an LLM judge call). A checker implements exactly ONE of the two
-    ``_check_impl*`` methods — whichever is its natural form — and the base
-    class derives the other automatically:
+    A checker implements exactly ONE of ``_check_impl`` (plain sync) or
+    ``_check_impl_async`` (native async I/O) -- whichever is its natural form -- and
+    the base class derives the other. ``__init_subclass__`` enforces that at
+    class-definition time.
 
-    - CPU/file-bound criteria (file_exists, command_executed, ...) override
-      ``_check_impl`` (plain sync code, no event loop to think about). The
-      base's default ``_check_impl_async`` offloads it to a worker thread via
-      ``asyncio.to_thread`` so it never blocks the event loop.
-    - Criteria that make genuine async I/O (llm_judge, agent_judge) override
-      ONLY ``_check_impl_async`` (using an async HTTP client / subprocess
-      bridge) — there is no reason to hand-maintain a second, sync-client
-      implementation just for the rarely-used direct-sync-call path. The
-      base's default ``_check_impl`` derives a sync call by running the async
-      one to completion on a fresh event loop (``asyncio.run``).
+    ``check()`` / ``check_async()`` are FINAL: they apply centralized error handling
+    and must not be overridden.
 
-    ``__init_subclass__`` enforces that a checker overrides EXACTLY ONE of
-    the two, at class-definition time — overriding neither would recurse
-    forever between the defaults (``asyncio.run`` <-> ``asyncio.to_thread``)
-    the first time either is called, and overriding both would let the two
-    implementations silently drift into different scores depending on which
-    entry point (``check`` vs ``check_async``) ran.
+    Type parameter C binds the checker to its specific criterion model.
 
-    ``check()`` / ``check_async()`` are FINAL — they apply centralized error
-    handling and must not be overridden; implement ``_check_impl`` /
-    ``_check_impl_async`` instead.
-
-    Type parameter C binds the checker to its specific criterion model for
-    better IDE support and static type checking.
+    Rationale: .claude/notes/contracts.md § Exactly one of _check_impl or _check_impl_async
 
     Example:
         @register_criterion
@@ -244,25 +210,15 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
         """Enforce the ``_check_impl`` / ``_check_impl_async`` override contract
-        at class-definition time (module import), regardless of which entry
-        point later registers the class — closing the gap where a subclass
-        registered via ``CriterionRegistry.register`` directly (bypassing the
-        ``register_criterion`` decorator) escaped the check, and turning the
-        mutual-recursion failure mode (``asyncio.run`` <-> ``asyncio.to_thread``
-        exhausting OS threads) into an immediate, clearly-named ``TypeError``.
+        at class-definition time (module import), regardless of which entry point
+        later registers the class.
 
-        Enforces "exactly one", not just "at least one": overriding BOTH is
-        also rejected — a checker with two live implementations (sync-path
-        `_check_impl` and async-path `_check_impl_async`) is free to have them
-        drift into different scores for identical agent output depending on
-        which entry point (``check`` vs ``check_async``) happened to run it,
-        which is exactly the class of bug this derivation design exists to
-        eliminate.
+        Enforces "exactly one", not just "at least one". Pass ``abstract=True`` on a
+        class that intentionally implements neither (e.g. a shared abstract base for
+        a family of checkers) to opt out for that one class; every one of its
+        subclasses is still checked normally.
 
-        Pass ``abstract=True`` on a class that intentionally implements
-        neither (e.g. a shared abstract base for a family of related
-        checkers) to opt out of the check for that one class; every one of
-        ITS subclasses is still checked normally.
+        Rationale: .claude/notes/contracts.md § Exactly one of _check_impl or _check_impl_async
         """
         super().__init_subclass__(**kwargs)
         if abstract:
@@ -333,10 +289,9 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     ) -> CriterionResult:
         """Sync checking logic. Override this OR ``_check_impl_async`` (not both).
 
-        Base default: runs ``_check_impl_async`` to completion on a fresh event
-        loop (``asyncio.run``) — the bridge for checkers whose natural form is
-        async (they override ``_check_impl_async`` only). Override THIS instead
-        when the checker's natural form is plain sync CPU/file-bound code.
+        Base default: runs ``_check_impl_async`` to completion on a fresh event loop
+        — the bridge for checkers whose natural form is async. Override THIS when
+        the checker's natural form is plain sync CPU/file-bound code.
 
         Args:
             criterion: The specific criterion definition (Pydantic model)
@@ -350,11 +305,9 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
             CriterionResult with score (0.0-1.0), details, and error info
 
         Raises:
-            CheckerMisuseError: this bridge is called from inside a running
-                event loop (``asyncio.run`` cannot start a nested loop) — this
-                is a caller mistake (the async-primary surface should have
-                been awaited instead), not an agent failure, so it escalates
-                rather than silently scoring 0.0.
+            CheckerMisuseError: this bridge is called from inside a running event
+                loop (``asyncio.run`` cannot start a nested one) — a caller
+                mistake, not an agent failure, so it escalates.
             Any other exception - will be caught by @handle_criterion_errors
         """
         try:
@@ -430,25 +383,21 @@ class BaseCriterion[C: BaseSuccessCriterion](ABC):
     ) -> LiveVerdict:
         """Decide this criterion from a PARTIAL, mid-run trajectory (early-stop).
 
-        Reads ONLY ``turn_records`` — a live verdict, by definition, may not peek
-        at the finished sandbox (that would invite end-state peeking), so there is
-        no ``sandbox`` parameter. Returns ``"pass"``/``"fail"`` only when the
-        outcome is already knowable from the events seen so far, else
-        ``"undecided"``.
+        Reads ONLY ``turn_records``: a live verdict may not peek at the finished
+        sandbox, so there is no ``sandbox`` parameter. Returns ``"pass"``/``"fail"``
+        only when the outcome is already knowable, else ``"undecided"``.
 
         This only *triggers* an early stop; the authoritative scores always come
-        from ``check()``/``_check_impl`` run on the frozen trajectory after the
-        stop, so a live/final divergence can never corrupt scoring.
+        from ``check()`` on the frozen trajectory, so a live/final divergence can
+        never corrupt scoring.
 
-        Base default: ``"undecided"`` (not observable mid-run). A checker
-        overrides this iff its criterion model is a ``LiveSuccessCriterion``
-        subclass (``models/criteria.py``) — that subclassing is the single
-        source of truth for "is this criterion type live-observable", checked
-        by ``validate_early_stop`` / ``EarlyStopWatcher`` and enforced by lint
-        rule CE025. An override MUST also satisfy the deterministic + monotonic
-        contract documented on the ``LiveVerdict`` type above, enforced by lint
-        rule CE036 — which requires this criterion type to supply replay fixtures
-        (``tests/lint/live_verdict_contract.py::CASES``) in the same change.
+        Base default: ``"undecided"``. Override iff the criterion model is a
+        ``LiveSuccessCriterion`` subclass — that subclassing is the single source of
+        truth for "is this type live-observable" (CE025). An override MUST satisfy
+        the deterministic + monotonic contract on the ``LiveVerdict`` type above,
+        and must supply CE036 replay fixtures in the same change.
+
+        Rationale: .claude/notes/contracts.md § The live_verdict contract
         """
         return "undecided"
 

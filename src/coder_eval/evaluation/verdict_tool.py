@@ -61,8 +61,7 @@ class VerdictCapture:
     error: str | None = None
     called_count: int = 0
     # LAST observed call wins: a successful retry overwrites the previous verdict,
-    # and an invalid retry clears the prior valid verdict (and sets ``error``).
-    # The criterion reads the final state via ``extract_verdict_from_capture``.
+    # and an invalid one clears it and sets ``error``.
 
 
 def _build_submit_verdict_tool(capture: VerdictCapture) -> SdkMcpTool[Any]:
@@ -229,9 +228,8 @@ def _format_validation_error(e: ValidationError) -> str:
         msg = err.get("msg", "")
 
         if etype == "missing":
-            # Generic on ``field`` so any future required ``JudgeVerdict`` field gets
-            # the legacy "<name> field missing in judge verdict" vocabulary. Today
-            # ``score`` is the only required field; the test suite pins the string.
+            # Generic on ``field`` so a future required field gets the same
+            # vocabulary; the test suite pins the string.
             messages.append(f"{field or 'unknown'} field missing in judge verdict")
             continue
 
