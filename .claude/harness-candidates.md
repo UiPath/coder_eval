@@ -992,3 +992,20 @@ re-derive from scratch.
   such pointer exists today. Deferred because restricting the target is a design
   decision (a `docs/` guide heading is a plausible SSOT target) rather than a
   mechanical guard. Caught in: tests prose slimming, final review (gpt-5.6-sol).
+
+## From container-contract-and-command-surface (2026-09-15)
+
+- [ ] **A field-name assertion against CLI output can pass vacuously through `tmp_path`.**
+  `assert "variant_id" in result.output` matched the echoed `context.json` path, because
+  pytest names each `tmp_path` after the test (`test_a_non_string_variant_id_i…`). Nothing
+  guards it today; the fix was to assert the pydantic `loc` line (`"\nvariant_id\n"`).
+  Deferred because telling a vacuous substring from a real one needs to know the test's
+  own name and what the command echoes — a convention for reviewers, not an AST pattern.
+  Caught in: Phase 1 quality review.
+- [ ] **A path interpolated into Rich markup without `escape()`.** A run directory name is
+  untrusted, and `[/y]` in it raised `rich.errors.MarkupError` (not an `OSError`) inside
+  `evaluate`'s best-effort refresh, after the verdict printed. Nothing guards it; the fix
+  escaped every new console line. Deferred because the rule needs type information (which
+  f-string placeholders are `Path`s) that an AST-only rule does not have, and the existing
+  CLI has many pre-existing unescaped lines a literal rule would flag at once. Caught in:
+  Phase 5 quality review.

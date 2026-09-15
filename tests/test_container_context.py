@@ -95,6 +95,44 @@ def test_round_trip_through_json() -> None:
     assert parsed.model_dump(mode="json") == ctx.model_dump(mode="json")
 
 
+def test_the_echo_round_trips_a_maximal_authored_sandbox(tmp_path: Path) -> None:
+    """The host compares the container's echo with its own dump, so any validator under
+    `authored_sandbox` that is not idempotent across a JSON round trip refuses EVERY
+    docker run. Exercised with every sandbox field a validator normalizes."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    authored = SandboxConfig.model_validate(
+        {
+            "driver": "docker",
+            "python": {"env_packages": ["requests"]},
+            "node": {"env_packages": ["left-pad"]},
+            "limits": {"max_memory_mb": 2048, "max_cpus": 2.0, "max_pids": 128},
+            "template_sources": [
+                {"type": "repo", "url": "https://example.com/repo.git"},
+                {"type": "template_dir", "path": str(template_dir)},
+            ],
+            "mock_path_dirs": ["mocks"],
+            "record_cli": [
+                {"tool": "uip", "responses": [{"when": {"verb": "ixp dummy1"}, "stdout": "ok"}]},
+            ],
+            "additional_ignore_patterns": ["!dist", "*.log"],
+            "docker": {
+                "image": "img:1",
+                "network": "none",
+                "working_dir": "/srv/app",
+                "env_passthrough_extra": ["FOO"],
+                "build": {"args": {"A": "1"}, "secrets": ["id=npm,env=NPM_TOKEN"]},
+            },
+        }
+    )
+    host_dump = ContainerContext.model_validate(contract_payload(authored_sandbox=authored)).model_dump(mode="json")
+
+    container_parse = ContainerContext.model_validate_json(json.dumps(host_dump))
+    echo = json.loads(json.dumps(container_parse.model_dump(mode="json")))
+
+    assert echo == host_dump
+
+
 def test_host_task_file_null_is_accepted() -> None:
     """Required key, nullable value: `null` is a real answer (the task has no file); absence is not."""
     assert ContainerContext.model_validate(contract_payload(host_task_file=None)).host_task_file is None
