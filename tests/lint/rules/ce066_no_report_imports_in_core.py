@@ -35,26 +35,9 @@ actually seen" note.
 """
 
 import ast
-import re
 
-from tests.lint.rules._layers import is_core_path
+from tests.lint.rules._layers import imports_package, is_bare_package_import, is_core_path
 from tests.lint.rules.base import BaseRule
-
-
-_ABSOLUTE = re.compile(r"^coder_eval\.reports(\.|$)")
-_RELATIVE = re.compile(r"^reports(\.|$)")
-
-
-def _targets_reports(node: ast.ImportFrom) -> bool:
-    """Whether this `from … import …` names the reports package, either spelling.
-
-    A relative import puts its dots in ``node.level`` and the rest in
-    ``node.module``, so ``from ..reports import X`` arrives as
-    ``level=2, module="reports"`` — matching only the absolute form misses it.
-    """
-    if not node.module:
-        return False
-    return bool(_RELATIVE.match(node.module) if node.level else _ABSOLUTE.match(node.module))
 
 
 # The reports package's public writer entry points — the only names core may import.
@@ -90,15 +73,15 @@ class NoReportImportsInCore(BaseRule):
             return
         # `from . import reports` / `from .. import reports`: no module, the
         # package arrives as an alias — the relative twin of `import coder_eval.reports`.
-        if node.level and node.module is None:
+        if is_bare_package_import(node, "reports"):
             for alias in node.names:
-                if _RELATIVE.match(alias.name):
+                if alias.name == "reports":
                     self.violation(
                         node,
                         f"architectural violation: '{alias.name}' (reports layer) imported wholesale "
                         f"into core — import the specific writer instead, or {_FIX}",
                     )
-        elif _targets_reports(node):
+        elif imports_package(node, "reports"):
             for alias in node.names:
                 if alias.name not in ALLOWED_WRITERS:
                     self.violation(
@@ -113,7 +96,7 @@ class NoReportImportsInCore(BaseRule):
         # to check and every attribute access through it is invisible.
         if self._in_core:
             for alias in node.names:
-                if _ABSOLUTE.match(alias.name):
+                if alias.name == "coder_eval.reports" or alias.name.startswith("coder_eval.reports."):
                     self.violation(
                         node,
                         f"architectural violation: '{alias.name}' (reports layer) imported wholesale "

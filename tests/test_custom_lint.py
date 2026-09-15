@@ -2096,6 +2096,49 @@ class TestPluginArtifacts:
 
 
 @pytest.mark.lint
+class TestCE004CatchesBothImportSpellings:
+    """CE004 must fire on the RELATIVE form, not only `coder_eval.cli`.
+
+    It had checked `node.module` alone since it was written, so `from ..cli
+    import x` — the codebase's dominant idiom — passed silently. Found while
+    fixing the identical bug in CE066; the shared `_layers.imports_package`
+    helper is what stops the two drifting again.
+    """
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
+
+        return list(NoCliImportsInCore(filepath).check(ast.parse(source)))
+
+    CORE = "/repo/src/coder_eval/orchestration/batch.py"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from ..cli import run_command",
+            "from ..cli.run_command import run_pipeline",
+            "from .. import cli",
+            "from coder_eval.cli import run_command",
+            "import coder_eval.cli",
+        ],
+    )
+    def test_every_spelling_of_a_cli_import_violates(self, source):
+        assert self._violations(source, self.CORE), f"CE004 missed: {source}"
+
+    @pytest.mark.parametrize("source", ["from ..models import TurnRecord", "from ..client import X"])
+    def test_a_non_cli_import_does_not_violate(self, source):
+        """`..client` must not prefix-match `cli` — the old `^coder_eval\\.cli`
+        regex would have matched `coder_eval.client` too."""
+        assert not self._violations(source, self.CORE)
+
+    def test_a_non_core_file_is_exempt(self):
+        assert not self._violations("from ..cli import run_command", "/repo/src/coder_eval/cli/report_command.py")
+
+
+@pytest.mark.lint
 class TestCE066NoReportImportsInCore:
     """CE066 — core may import only the reports package's public writers.
 
