@@ -1,0 +1,149 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:1280px; height:640px; }
+  body {
+    background:#0B1826;
+    font-family:-apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color:#E8EEF5;
+    overflow:hidden;
+    position:relative;
+    -webkit-font-smoothing:antialiased;
+  }
+  .grid {
+    position:absolute; inset:0;
+    background-image:
+      linear-gradient(to right, #0E1C2A 1px, transparent 1px),
+      linear-gradient(to bottom, #0E1C2A 1px, transparent 1px);
+    background-size:64px 64px;
+  }
+  .glow {
+    position:absolute; right:-180px; bottom:-240px;
+    width:820px; height:740px; border-radius:50%;
+    background:radial-gradient(circle, rgba(250,70,22,0.15) 0%, rgba(250,70,22,0.035) 46%, transparent 70%);
+  }
+  .bar { position:absolute; left:0; right:0; bottom:0; height:10px; background:#FA4616; }
+
+  .wrap { position:relative; display:flex; height:100%; padding:62px 68px; gap:40px; }
+  .left  { width:558px; display:flex; flex-direction:column; }
+  .right { flex:1; display:flex; align-items:center; }
+
+  .kicker {
+    font-family:"SF Mono", Menlo, monospace;
+    font-size:15.5px; letter-spacing:0.01em; font-weight:500;
+    color:#6E8399;
+  }
+  .kicker b { color:#FA4616; font-weight:600; }
+  .logo { height:42px; width:134px; color:#FFFFFF; margin-top:24px; display:block; align-self:flex-start; }
+
+  h1 {
+    margin-top:22px;
+    font-size:45px; line-height:1.08; font-weight:800; letter-spacing:-0.025em;
+    color:#FFFFFF;
+  }
+  h1 .accent { color:#FA4616; }
+
+  .sub { margin-top:16px; font-size:19.5px; line-height:1.45; color:#A7B8CA; }
+  .sub b { color:#FFFFFF; font-weight:600; }
+
+  .runline {
+    margin-top:13px; font-size:18px; line-height:1.45; color:#7E93A9;
+  }
+  .runline b { color:#C6D5E3; font-weight:600; }
+
+  .chips { margin-top:18px; display:flex; flex-wrap:nowrap; gap:8px; }
+  .chip {
+    border:1px solid #1E3C5E; border-radius:999px;
+    padding:6px 12px; font-size:13px; color:#8FA4B9;
+    background:rgba(16,34,55,0.6); white-space:nowrap;
+  }
+
+  .install {
+    margin-top:22px; align-self:flex-start;
+    border:1px solid #1C3A5C; border-radius:9px;
+    padding:13px 20px;
+    font-family:"SF Mono", Menlo, monospace; font-size:18px;
+    background:rgba(13,30,49,0.55);
+  }
+  .install .p { color:#4D6party; }
+  .install .dollar { color:#5C7governance; }
+
+  .foot {
+    position:absolute; left:68px; bottom:54px;
+    font-size:17px; color:#7E93A9; letter-spacing:0.005em;
+  }
+  .foot b { color:#BACBDC; font-weight:600; }
+
+  /* terminal panel */
+  .term {
+    width:100%; background:#091420; border:1px solid #16293D; border-radius:12px;
+    box-shadow:0 26px 70px rgba(0,0,0,0.42);
+    overflow:hidden;
+  }
+  .term-head {
+    display:flex; align-items:center; gap:10px;
+    padding:13px 16px; border-bottom:1px solid #16293D;
+  }
+  .dot { width:11px; height:11px; border-radius:50%; }
+  .term-title {
+    margin-left:6px; background:#122437; border-radius:6px;
+    padding:4px 11px; font-family:"SF Mono", Menlo, monospace;
+    font-size:13px; color:#8A95A2;
+  }
+  .term-body {
+    padding:20px 22px 24px;
+    font-family:"SF Mono", Menlo, monospace; font-size:14.5px; line-height:1.85;
+    color:#C3CEDA; white-space:pre;
+  }
+  .c-dim { color:#6B7B8C; }
+  .c-org { color:#FA6A3C; }
+  .c-grn { color:#3FCF6E; }
+  .c-wht { color:#FFFFFF; font-weight:600; }
+  .c-blu { color:#5BA7F7; }
+  .barfill { color:#3FCF6E; }
+</style></head>
+<body>
+  <div class="grid"></div>
+  <div class="glow"></div>
+
+  <div class="wrap">
+    <div class="left">
+      <div class="kicker">github.com/<b>UiPath/coder_eval</b></div>
+      <svg class="logo" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 440" fill="none"><g transform="translate(-75,-36)"><path d="M224 176 L216 176 A56 56 0 0 0 160 232 L160 280 A56 56 0 0 0 216 336 L224 336" fill="none" stroke="#FA4616" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/><rect x="200" y="210" width="78" height="18" rx="9" fill="currentColor"/><rect x="200" y="247" width="52" height="18" rx="9" fill="currentColor"/><rect x="200" y="284" width="104" height="18" rx="9" fill="currentColor"/></g><g fill="currentColor"><g transform="translate(270.00,278.00) scale(0.19000,-0.19000)"><path d="M308 -10Q237 -10 185.0 16.5Q133 43 104.5 91.5Q76 140 76 206V524Q76 590 104.5 638.5Q133 687 185.0 713.5Q237 740 308 740Q378 740 430.0 713.5Q482 687 511.0 638.5Q540 590 540 524H414Q414 575 386.5 602.5Q359 630 308 630Q257 630 229.0 602.5Q201 575 201 524V206Q201 155 229.0 127.5Q257 100 308 100Q359 100 386.5 127.5Q414 155 414 206H540Q540 140 511.0 91.5Q482 43 430.0 16.5Q378 -10 308 -10Z"/></g><g transform="translate(380.00,278.00) scale(0.19000,-0.19000)"><path d="M300 -9Q194 -9 132.0 50.5Q70 110 70 211V339Q70 441 132.0 500.0Q194 559 300 559Q406 559 468.0 500.0Q530 441 530 339V211Q530 110 468.0 50.5Q406 -9 300 -9ZM300 100Q350 100 377.5 127.5Q405 155 405 207V343Q405 395 377.5 422.5Q350 450 300 450Q250 450 222.5 422.5Q195 395 195 343V207Q195 155 222.5 127.5Q250 100 300 100Z"/></g><g transform="translate(490.00,278.00) scale(0.19000,-0.19000)"><path d="M250 -10Q170 -10 120.5 47.0Q71 104 71 200V349Q71 446 120.0 503.0Q169 560 250 560Q307 560 346.5 531.0Q386 502 402 450L398 576V730H523V0H401V100Q386 48 347.0 19.0Q308 -10 250 -10ZM297 98Q345 98 371.5 127.0Q398 156 398 209V341Q398 394 371.5 423.0Q345 452 297 452Q249 452 222.5 426.0Q196 400 196 346V204Q196 150 222.5 124.0Q249 98 297 98Z"/></g><g transform="translate(600.00,278.00) scale(0.19000,-0.19000)"><path d="M301 -10Q231 -10 179.0 17.0Q127 44 98.5 93.5Q70 143 70 210V340Q70 407 98.5 456.5Q127 506 179.0 533.0Q231 560 301 560Q370 560 421.5 533.0Q473 506 501.5 457.5Q530 409 530 344V244H190V206Q190 150 219.0 121.5Q248 93 301 93Q340 93 367.5 106.5Q395 120 400 146H524Q511 75 450.0 32.5Q389 -10 301 -10ZM190 344V325L410 326V345Q410 402 382.0 433.0Q354 464 301 464Q246 464 218.0 432.5Q190 401 190 344Z"/></g><g transform="translate(710.00,278.00) scale(0.19000,-0.19000)"><path d="M97 0V550H219V443Q229 497 268.5 528.5Q308 560 371 560Q455 560 502.0 506.0Q549 452 549 355V303H424V349Q424 399 398.0 425.5Q372 452 324 452Q274 452 248.0 422.0Q222 392 222 337V0Z"/></g></g><g fill="#FA4616"><g transform="translate(890.00,278.00) scale(0.19000,-0.19000)"><path d="M88 0V730H526V620H211V430H491V324H211V110H526V0Z"/></g><g transform="translate(1000.00,278.00) scale(0.19000,-0.19000)"><path d="M221 0 36 550H167L273 216Q283 186 290.5 155.5Q298 125 301 103Q305 125 311.5 155.5Q318 186 327 215L432 550H564L380 0Z"/></g><g transform="translate(1110.00,278.00) scale(0.19000,-0.19000)"><path d="M239 -10Q155 -10 106.5 37.5Q58 85 58 162Q58 242 113.0 289.5Q168 337 264 337H398V376Q398 459 301 459Q257 459 231.0 442.0Q205 425 202 394H82Q86 468 144.5 514.0Q203 560 302 560Q407 560 465.0 511.0Q523 462 523 373V0H401V103Q394 50 351.0 20.0Q308 -10 239 -10ZM279 92Q334 92 366.0 119.0Q398 146 398 191V256H270Q229 256 205.0 233.0Q181 210 181 174Q181 137 206.5 114.5Q232 92 279 92Z"/></g><g transform="translate(1220.00,278.00) scale(0.19000,-0.19000)"><path d="M389 0Q307 0 257.5 49.0Q208 98 208 178V617H27V730H333V181Q333 150 350.5 131.5Q368 113 398 113H559V0Z"/></g></g></svg>
+      <h1>Playwright for<br>coding <span class="accent">agents</span>.</h1>
+      <div class="sub">Test that your <b>skills</b>, <b>MCP servers</b>, and <b>CLIs</b><br>actually work when an agent uses them.</div>
+      <div class="runline">Run it from the <b>command line</b>, in a <b>sandbox</b>,<br>as an <b>A/B experiment</b>, or as a <b>CI gate</b>.</div>
+      <div class="chips">
+        <span class="chip">YAML suites</span>
+        <span class="chip">Activation checks</span>
+        <span class="chip">Weighted scoring</span>
+        <span class="chip">Cost telemetry</span>
+      </div>
+      <div class="install"><span class="c-dim">$</span> uv tool install coder-eval</div>
+    </div>
+
+    <div class="right">
+      <div class="term">
+        <div class="term-head">
+          <span class="dot" style="background:#FF5F57"></span>
+          <span class="dot" style="background:#FEBC2E"></span>
+          <span class="dot" style="background:#28C840"></span>
+          <span class="term-title">coder-eval run</span>
+        </div>
+        <div class="term-body"><span class="c-dim">$</span> coder-eval run tasks/*.yaml
+<span class="c-wht">Run directory:</span> runs/latest
+<span class="c-wht">Running</span> <span class="c-org">4</span> <span class="c-wht">task(s)</span>  <span class="c-dim">Agent: claude-code</span>
+<span class="c-blu">[INFO]</span> skill_triggered: <span class="c-grn">PASS</span>   score 1.000
+<span class="c-blu">[INFO]</span> file_exists:     <span class="c-grn">PASS</span>   score 1.000
+Tasks: 100%|<span class="barfill">████████████████</span>| 4/4
+<span class="c-grn">Run complete:</span>  <span class="c-dim">$0.14 · 21.6s</span>
+<span class="c-wht">Results:</span> <span class="c-grn">4/4</span> succeeded   score <span class="c-org">1.000</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Apache-2.0 &middot; Python 3.13+ &middot; <b>Claude Code &middot; Codex &middot; Gemini &middot; OpenCode &middot; Pi</b></div>
+
+  <div class="bar"></div>
+</body></html>

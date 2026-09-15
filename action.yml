@@ -3,7 +3,7 @@
 # Display only: consumers reference the action by repo path.
 name: coder_eval
 author: UiPath
-description: Install a pinned coder-eval and run evaluation tasks as a CI gate, with JUnit XML output.
+description: Gate CI on coding-agent quality — run sandboxed coder-eval suites and fail the build on a regression, with JUnit XML output.
 branding:
   icon: check-circle
   color: orange
