@@ -32,9 +32,7 @@ from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_all_tasks
 
 
-# Sources a resolved field's ConfigLineageEntry can carry (see
-# models/results.py::ConfigLineageEntry). Only these two mean "the experiment
-# introduced this, the task's own YAML did not."
+# Only these two mean "the experiment introduced this, the task's own YAML did not".
 _EXPERIMENT_INTRODUCED_SOURCES = {"variant", "experiment-defaults"}
 
 
@@ -106,9 +104,8 @@ def _out_subdir(out_dir: Path, resolved: ResolvedTask, *, needs_replicate_segmen
         dest = dest / resolved.task.row_id
     if needs_replicate_segment:
         dest = dest / f"rep{resolved.replicate_index:02d}"
-    # `resolve()` on a path that doesn't exist yet still normalizes `..`
-    # segments against its (existing) parents, so this catches traversal
-    # without requiring `dest` to already exist.
+    # `resolve()` normalizes `..` against existing parents even for a path that
+    # does not exist yet, so this catches traversal without requiring `dest`.
     if not dest.resolve().is_relative_to(out_dir_resolved):
         raise UnsafeExportPathError(
             f"resolved export path for variant {resolved.variant_id!r}, task {resolved.task.task_id!r} "

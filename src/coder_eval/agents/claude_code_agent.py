@@ -21,11 +21,11 @@ from claude_agent_sdk import (
     query,
 )
 
-# Private SDK import — the public `query()` API doesn't expose the subprocess
-# handle, but we need it to SIGKILL on timeout (the SDK's anyio task groups
-# swallow asyncio cancellation, so cooperative cancel doesn't preempt a stuck
-# CLI). If this import breaks on an SDK upgrade, the threaded watchdog loses
-# its kill target and timeouts will no longer be enforced at the agent layer.
+# Private SDK import: the public `query()` API does not expose the subprocess
+# handle, which the watchdog needs to SIGKILL on timeout. If this breaks on an
+# SDK upgrade the watchdog loses its kill target and timeouts stop being
+# enforced at the agent layer.
+# Rationale: .claude/notes/agents.md § The threaded watchdog
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 # SystemPromptPreset is not re-exported from the SDK root, so claude_agent_sdk.types
@@ -107,16 +107,13 @@ def _is_text_block(block: Any) -> bool:
 def _distribute_output_tokens(total: int, weights: list[int]) -> list[int]:
     """Split a call's output_tokens across its block-emissions by content weight.
 
-    The Anthropic API reports output_tokens per API *call*, not per content
-    block, but the CLI surfaces one call as several per-block emissions. To make
-    each emission's recorded output sensible (rather than dumping the whole
-    call on the first block and zeroing the rest), we apportion the call total
-    across emissions by a content-length proxy (thinking/text length, or tool
-    name + serialized args length).
+    The API reports output_tokens per API *call*, but the CLI surfaces one call
+    as several per-block emissions, so the total is apportioned by a
+    content-length proxy rather than dumped on the first block.
 
-    Uses the largest-remainder (Hamilton) method so the returned integers sum
-    EXACTLY to ``total`` — per-message output stays reconcilable with the
-    iteration aggregate. Falls back to an even split when all weights are zero.
+    Largest-remainder (Hamilton), so the returned integers sum EXACTLY to
+    ``total`` and per-message output stays reconcilable with the aggregate. Falls
+    back to an even split when all weights are zero.
     """
     n = len(weights)
     if n == 0:
@@ -162,13 +159,12 @@ def _tool_result_text(content: Any) -> str:
 def _is_task_notification(message: Any) -> bool:
     """Check if message is a TaskNotificationMessage (sub-agent terminal event).
 
-    It is a SystemMessage carrying per-sub-agent ``usage`` (a TaskUsage), keyed
-    by the spawning ``tool_use_id``. It also has ``session_id`` + ``usage``, so
-    it would otherwise be misread as the final ResultMessage — hence the
-    explicit guard, checked before ``_is_sdk_result_message``. Identified by the
-    SDK type or ``subtype`` (both reliably present on the real message); we avoid
-    attribute-presence sniffing so it can't misfire on test mocks. The ``subtype``
-    fallback also lets duck-typed mocks (not real SDK instances) be recognized.
+    It carries ``session_id`` + ``usage``, so it would otherwise be misread as
+    the final ResultMessage — hence this guard, checked BEFORE
+    ``_is_sdk_result_message``. Identified by the
+    SDK type or ``subtype`` rather than attribute-presence sniffing, so it cannot
+    misfire on a mock; the ``subtype`` fallback is what lets a duck-typed mock be
+    recognized.
     """
     return isinstance(message, TaskNotificationMessage) or getattr(message, "subtype", None) == "task_notification"
 
@@ -188,16 +184,13 @@ _JSON_START_SEARCH_LIMIT = 200
 class _ClaudeTurnState:
     """Per-turn mutable scratch state for one ``ClaudeCodeAgent.communicate`` call.
 
-    Holds every cross-branch local the SDK-stream pump mutates and exposes one
-    method per message kind (``on_*``) plus ``dispatch`` (the type-dispatch
-    ladder, order-preserving) and ``finalize`` (terminal ``AgentEndEvent`` +
-    partial-record build). A plain module-private class (NOT Pydantic, NOT
-    exported) — it carries a back-reference to the agent so it can reuse the
-    agent's existing helpers (``_finalize_commands`` / ``_build_token_usage`` /
-    ``_format_messages`` / …). The two raw lists are kept DISTINCT and typed
-    separately: ``messages`` (raw SDK ``Message`` objects, fed to
-    ``_update_state_from_messages`` / ``_format_messages``) and ``sdk_messages``
-    (telemetry ``TranscriptMessage`` objects, carried on ``AgentEndEvent``).
+    Holds every cross-branch local the SDK-stream pump mutates, with one method
+    per message kind plus ``dispatch`` and ``finalize``. A back-reference to the
+    agent lets it reuse the agent's helpers.
+
+    The two raw lists are DISTINCT and must stay so: ``messages`` holds raw SDK
+    ``Message`` objects and ``sdk_messages`` holds telemetry
+    ``TranscriptMessage`` objects, carried on ``AgentEndEvent``.
     """
 
     def __init__(
@@ -245,21 +238,12 @@ class _ClaudeTurnState:
         self.sequence_number = 0
 
         self.last_assistant_message_index: int | None = None
-        # ONE clock per turn, and every wall stamp this turn records derives
-        # from it — the window bounds below, the tool spans
-        # `_resolve_pending_command` stamps, the fallback tool timestamp. The
-        # central subtraction clips those WALL tool spans to these WALL window
-        # bounds, so the two sharing one basis is what keeps the arithmetic
-        # meaningful; before `TurnClock` they shared only naive-LOCAL
-        # `datetime.now()`, which a DST transition or an NTP step inside a turn
-        # lands directly in a generation window — an hour-long jump in a
-        # millisecond field, on runs that start at 04:18 and last hours.
-        # Injectable so a test supplies a fake rather than monkeypatching this
-        # module's `datetime` global, which a derived stamp silently escapes —
-        # leaving the test passing against the real clock.
-        # `turn_start_time` stays raw monotonic and is untouched:
-        # `duration_seconds` and the turn deadline read it, and a deadline must
-        # not move when the wall clock steps.
+        # ONE clock per turn, and every wall stamp this turn records derives from
+        # it, so the central subtraction clips WALL tool spans to WALL window
+        # bounds. Injectable so a test supplies a fake rather than monkeypatching
+        # this module's `datetime`, which a derived stamp silently escapes.
+        # `turn_start_time` stays raw monotonic: a deadline must not move when the
+        # wall clock steps.
         self.clock = clock or TurnClock()
         self.last_event_wall: datetime = self.clock.now()
         # Re-seeded ONCE, at the first observed model output. See
@@ -311,8 +295,8 @@ class _ClaudeTurnState:
     def dispatch(self, message: Message) -> None:
         """Record the raw message and route it to its per-kind handler.
 
-        Order is load-bearing: ``_is_sdk_result_message`` must be checked before
-        ``_is_user_message``; the TaskNotification guard before the result guard.
+        ORDER IS LOAD-BEARING: ``_is_sdk_result_message`` before
+        ``_is_user_message``, and the TaskNotification guard before both.
         """
         self.messages.append(message)
         msg_type = type(message).__name__
@@ -442,12 +426,9 @@ class _ClaudeTurnState:
                 out_tok = int(msg_usage.get("output_tokens", 0) or 0)
             self.pending_delta_output_tokens = None
 
-        # The RAW window. Tool execution comes out of it once, centrally, in
-        # `EventCollector.build_turn_record` — so this harness now asks the same
-        # helper as the other four and CE061 no longer needs its one permanent
-        # exception. The mark is the only harness-shaped decision left, and it
-        # stays here: `started` is the mark, since this stream carries no
+        # The RAW window. `started` is the mark, since this stream carries no
         # per-emission item start to pull the window open to.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
         started, raw_generation_ms = close_window(mark=generation_started_wall, now=message_arrival_wall)
         assistant_telemetry = AssistantMessageTelemetry(
             started_at=started,
@@ -478,9 +459,9 @@ class _ClaudeTurnState:
         self.last_event_wall = message_arrival_wall
 
     def on_task_notification(self, message: Message) -> None:
-        """TaskNotification carries lossy per-sub-agent usage; we capture it from
-        the Agent tool-result instead. This guard exists only to keep
-        ``_is_sdk_result_message`` from misreading it (session_id + usage)."""
+        """TaskNotification carries LOSSY per-sub-agent usage, captured from the
+        Agent tool-result instead. This exists only to keep
+        ``_is_sdk_result_message`` from misreading it."""
         pass
 
     def on_result_message(self, message: Message) -> None:
@@ -516,52 +497,18 @@ class _ClaudeTurnState:
     def _seed_first_generation_window(self) -> None:
         """Move the first window's mark to the first observed model output.
 
-        ``harness_startup_ms`` is defined as the wall clock from the turn
-        starting until the harness first observed model output, and that instant
-        is also where the first generation window opens — which is what keeps
-        the head and the generation disjoint so the four-bucket identity still
-        closes.
+        ONCE PER TURN, and that is the whole contract: re-seeding on every
+        ``message_start`` would stop the windows tiling and drop the gap before
+        the next emission into no bucket. The flag needs no reset — a fresh
+        ``_ClaudeTurnState`` is built per ``communicate()``. A turn with no
+        ``message_start`` keeps the turn-entry mark and clamps to ``0.0``, which is
+        the correct degradation.
 
-        Without this the mark is stamped in ``__init__``, BEFORE
-        ``AgentStartEvent`` is emitted, so the head comes out negative and
-        ``decompose_turn`` clamps it to ``0.0``. The fault is NOT the clamp —
-        that function's own docstring is right that a measured inversion is a
-        real zero, because both ends were observed. The fault is that the head
-        was measured against the WRONG INSTANT: the mark sat before the turn
-        bracket rather than at the first observed model output, so the interval
-        being measured was not the one the field is defined as. Everything the
-        CLI spent booting, resolving a provider and reaching its first token was
-        booked as msg0's generation instead: ~3.6 s per turn on this harness,
-        inflating every generation figure, the Generation split and the 10 s
-        slow-generation bar.
-
-        The old rejection rested on this harness running the model in-process.
-        It does not: ``claude-agent-sdk`` spawns the ``claude`` CLI over
-        ``anyio.open_process`` and ``_pump_messages`` calls ``query()`` once
-        per ``communicate()`` — a fresh CLI per turn, the same shape as codex,
-        opencode and pi.
-
-        ONCE PER TURN, and that is the whole contract. ``message_start`` arrives
-        for every API call in the turn; re-seeding on each would stop the
-        windows tiling and drop the gap before the next emission — a tool result
-        landing, then the next request going out — into no bucket at all, which
-        is the defect pi shipped with. The flag needs no reset: a fresh
-        ``_ClaudeTurnState`` is built per ``communicate()``, so it is
-        per-attempt by construction. If a future harness reuses a turn state,
-        the reset belongs there and not here.
-
-        A turn with no ``message_start`` — a mocked ``query()``, a crash before
-        the first event — never calls this, keeps the turn-entry mark and clamps
-        to ``0.0`` exactly as before. That is the correct degradation rather
-        than a gap.
-
-        One route to it is OPERATOR-REACHABLE and worth knowing: this harness
-        sets ``include_partial_messages=True`` BEFORE spreading
-        ``**self.config.sdk_options``, so
+        One route to that degradation is OPERATOR-REACHABLE:
         ``-D agent.sdk_options.include_partial_messages=false`` turns the raw
-        stream off, and with it this re-seed — the head silently returns to the
-        clamped ``0.0`` it used to publish. Nothing warns; the degradation is
-        safe but the number changes meaning.
+        stream off and with it this re-seed. Nothing warns.
+
+        Rationale: .claude/notes/agents.md § First-generation window seeding
         """
         if self.first_output_seen:
             return
@@ -570,7 +517,7 @@ class _ClaudeTurnState:
 
     def on_stream_event(self, message: Message) -> None:
         """Recover cumulative output_tokens from raw ``message_start`` /
-        ``message_delta`` stream events (handles both sub-cases internally)."""
+        ``message_delta`` stream events."""
         evt: dict[str, Any] = getattr(message, "event", None) or {}
         evt_type = evt.get("type")
         if evt_type == "message_start":
@@ -596,30 +543,13 @@ class _ClaudeTurnState:
     def on_user_message(self, message: Message) -> None:
         """Process tool results (and a sub-agent's terminal generation) from a
         tool-result UserMessage. The sub-agent message is appended BEFORE the
-        tool-result loop — its position in ``sdk_messages`` is observable."""
-        # The generation mark is DELIBERATELY NOT advanced here. It used to be
-        # reset to `self.clock.now()`, which opened the next window at the
-        # instant the tool RESULT arrived rather than tiling it from the
-        # previous window's close — so everything between the tool finishing
-        # and its result reaching this handler (SDK transport, CLI processing,
-        # next-request dispatch) fell into no bucket at all. Measured on
-        # `tasks/dataset_example.yaml`: a 21.5 ms `Write` followed by a 2511.7 ms
-        # round trip, which is 21% of an 11.7 s turn accounted to nothing and
-        # the reason CI's residual gate failed on that task while a
-        # `sleep`-heavy probe read 0.05%. A tool-heavy shape cannot see this:
-        # the tool union absorbs the interval. A fast tool leaves it exposed.
-        #
-        # Leaving the mark where `on_assistant_message` put it makes the next
-        # window run from the previous emission's arrival, so the windows tile
-        # the turn contiguously — the same rule pi follows with `gen_mark`, and
-        # the one pi was explicitly fixed for.
-        #
-        # The tool's OWN interval is not double-counted by this: it is a
-        # separate bucket, and `streaming/collector.py::subtract_tool_time`
-        # clips the tool union out of every window it overlaps, once, for all
-        # five harnesses. That is exactly why the mark can be left alone here —
-        # the reducer no longer has to carve the tool out of its own windows.
+        tool-result loop — its position in ``sdk_messages`` is observable.
 
+        The generation mark is DELIBERATELY NOT advanced here: leaving it where
+        ``on_assistant_message`` put it is what makes the windows tile.
+
+        Rationale: .claude/notes/agents.md § Per-harness generation marks
+        """
         sub_msg = self._agent._synthesize_subagent_terminal_message(message, self.sdk_model_used)
         if sub_msg is not None:
             self.sdk_messages.append(sub_msg)
@@ -662,12 +592,10 @@ class _ClaudeTurnState:
     def _finalize_token_usage(self) -> TokenUsage:
         """Build the turn's cumulative TokenUsage, repricing for LiteLLM.
 
-        Extracted from ``finalize`` so the LiteLLM repricing *wiring* (not just the
-        static ``_reprice_for_litellm`` helper) is directly testable. The SDK's
-        cost estimate assumes Claude pricing and is wrong for an open-weight model
-        behind LiteLLM, so reprice the top-line from the token buckets at the
-        model's real rate — buckets untouched, so the reconciliation invariant
-        holds.
+        Extracted from ``finalize`` so the LiteLLM repricing *wiring*, not just
+        the helper, is directly testable.
+
+        Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
         """
         usage = (
             self._agent._build_token_usage(
@@ -762,17 +690,15 @@ class _ClaudeTurnState:
 class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
-    # The Claude message loop has a between-messages guard where the cooperative
-    # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
+    # The message loop has a between-messages guard where `should_stop` runs.
     supports_cooperative_stop: ClassVar[bool] = True
 
-    # This agent's __init__ accepts cost_log_tags and stamps them into
-    # ANTHROPIC_CUSTOM_HEADERS for the proxy-side actual-cost join (LiteLLM backend).
+    # __init__ accepts cost_log_tags and stamps them into ANTHROPIC_CUSTOM_HEADERS
+    # for the proxy-side actual-cost join (LiteLLM backend).
     supports_cost_log_tags: ClassVar[bool] = True
 
-    # One warning per agent for a replace-mode config with no prompt to replace
-    # with: _resolve_system_prompt() runs on every query and once per env-info
-    # snapshot, and a per-turn repeat would bury the rest of task.log.
+    # One warning per agent for a replace-mode config with no prompt: the resolver
+    # runs on every query, and a per-turn repeat would bury the rest of task.log.
     _warned_prompt_mode_downgrade: bool = False
 
     def __init__(
@@ -789,48 +715,37 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         Args:
             config: Agent configuration
             route: API routing configuration. If None, uses DirectRoute.
-            instance_name: Short label used to prefix this instance's log
-                records (e.g. ``"coder"`` for the coding agent,
-                ``"simulator"`` for the tools-disabled user-simulator agent).
-                Lets you tell them apart in ``task.log`` when both run in
-                the same process.
-            extra_mcp_servers: Runtime-only in-process MCP servers (e.g. the
-                judge ``submit_verdict`` tool) merged into ``ClaudeAgentOptions.mcp_servers``.
-                NOT sourced from YAML — ``mcp_servers`` is in
-                ``_FRAMEWORK_OWNED_SDK_FIELDS`` and explicitly denied via
-                ``sdk_options`` for security. The judge criterion is the only
-                caller today.
-            cost_log_tags: LiteLLM-only correlation headers (``x-ce-run-id`` /
-                ``x-ce-task-id`` / ``x-ce-attempt``, with ``x-ce-iteration`` appended
-                per turn) stamped into ``ANTHROPIC_CUSTOM_HEADERS`` so a proxy-side
-                cost callback can attribute each call's real cost back to this run.
-                None on Direct/Bedrock.
+            instance_name: Short label prefixing this instance's log records, so
+                the coding agent and the user-simulator are distinguishable in
+                ``task.log`` when both run in the same process.
+            extra_mcp_servers: Runtime-only in-process MCP servers merged into
+                ``ClaudeAgentOptions.mcp_servers``. NOT sourced from YAML —
+                ``mcp_servers`` is explicitly denied via ``sdk_options`` for
+                security. The judge criterion is the only caller today.
+            cost_log_tags: LiteLLM-only correlation headers stamped into
+                ``ANTHROPIC_CUSTOM_HEADERS`` so a proxy-side cost callback can
+                attribute each call's real cost back to this run. None on
+                Direct/Bedrock.
         """
         self.config = config
         self.route = route or DirectRoute()
         self._extra_mcp_servers = extra_mcp_servers or {}
-        # Correlation headers stamped on every SDK->proxy request (LiteLLM route
-        # only), so a proxy-side cost-logging callback can join each call's real
-        # usage.cost + cache buckets back to this run/task. None => no header
-        # (Direct/Bedrock, or when the orchestrator supplies none). This turn's
-        # iteration is appended per-communicate() in _build_claude_query.
+        # Correlation headers stamped on every SDK->proxy request (LiteLLM only).
+        # This turn's iteration is appended per-communicate().
         self._cost_log_tags = cost_log_tags
         self.client: ClaudeSDKClient | None = None
         self.working_directory: Path | None = None
-        # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
-        # bookkeeping lives on the Agent base class (shared defaults + helpers).
+        # Turn-lifecycle bookkeeping lives on the Agent base class.
         self._sdk_options_dump: dict[str, Any] | None = None
         self._session_id: str | None = None
-        # Transport reference held only while a communicate() call is in flight,
-        # so kill() can reach into the CLI subprocess when the SDK swallows
-        # asyncio cancellation.
+        # Held only while a communicate() call is in flight, so kill() can reach
+        # the CLI subprocess when the SDK swallows asyncio cancellation.
         self._active_transport: SubprocessCLITransport | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
-        # Deduplicate "unhandled SDK message type" warnings per agent
-        # instance — _format_messages runs many times per task and these
-        # types are stable for the lifetime of a session.
+        # Dedupe "unhandled SDK message type" warnings: _format_messages runs
+        # many times per task and the types are stable for a session.
         self._warned_unknown_types: set[str] = set()
 
     async def start(
@@ -866,16 +781,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         Args:
             route: API routing configuration.
-            path_prepend: Absolute directories to prepend (in order) to PATH so their
-                contents shadow same-named binaries in the parent PATH. Resolved by the
-                sandbox manager from ``SandboxConfig.mock_path_dirs``; the agent does no
-                filesystem inspection of its own.
-            plugin_tools_dir: Fallback canonical ``node_modules/@uipath`` to export as
-                ``PLUGIN_TOOLS_DIR`` when the process environment doesn't already
-                provide one. An external ``PLUGIN_TOOLS_DIR`` always wins.
-            cost_log_tags: LiteLLM-only correlation headers stamped (newline-separated
-                ``Name: Value``) into ``ANTHROPIC_CUSTOM_HEADERS``. Values must be
-                single-line ASCII (validated here) — the header block is CR/LF-delimited.
+            path_prepend: Directories prepended (in order) to PATH so they shadow
+                same-named binaries. Resolved by the sandbox manager; the agent
+                does no filesystem inspection of its own.
+            plugin_tools_dir: Fallback ``PLUGIN_TOOLS_DIR``; an external one wins.
+            cost_log_tags: LiteLLM-only correlation headers stamped
+                (newline-separated ``Name: Value``) into
+                ``ANTHROPIC_CUSTOM_HEADERS``. Values MUST be single-line ASCII,
+                validated here — the header block is CR/LF-delimited.
 
         Returns:
             Tuple of (env_vars_dict, model_override_or_None).
@@ -888,8 +801,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             prefix = os.pathsep.join(path_prepend)
             base_env["PATH"] = f"{prefix}{os.pathsep}{base_env.get('PATH', '')}"
 
-        # Pin UiPath CLI plugin discovery for the agent SDK subprocess. External
-        # env wins over sandbox-derived fallback so operators can override.
+        # Pin plugin discovery for the SDK subprocess; external env wins so
+        # operators can override.
         if tools_dir := os.environ.get("PLUGIN_TOOLS_DIR"):
             base_env["PLUGIN_TOOLS_DIR"] = tools_dir
         elif plugin_tools_dir:
@@ -897,13 +810,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         match route:
             case BedrockRoute() as br:
-                # `or ""` rather than asserting non-None here (unlike judge_bedrock.py's
-                # invoke_bedrock_judge_async): reaching a BedrockRoute at all already implies
-                # validate_api_keys()/resolve_route() confirmed the token upstream, and this
-                # is a pure env-dict builder with no error-reporting seam of its own — an
-                # empty token still produces a clear downstream SDK auth failure rather than
-                # a crash here. Kept deliberately lenient; do not "fix" to assert without
-                # also deciding how the resulting AssertionError should surface to the caller.
+                # `or ""` rather than asserting: reaching a BedrockRoute implies the
+                # token was confirmed upstream, and this is a pure env-dict builder
+                # with no error-reporting seam. Do not "fix" to an assert without
+                # deciding how the AssertionError should surface.
                 env: dict[str, str] = {
                     "CLAUDE_CODE_USE_BEDROCK": "1",
                     "AWS_BEARER_TOKEN_BEDROCK": settings.aws_bearer_token_bedrock or "",
@@ -920,12 +830,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
             case DirectRoute() as dr:
                 # Neutralize inherited Bedrock creds: the CLI auto-selects Bedrock
-                # DIRECT when AWS_BEARER_TOKEN_BEDROCK is present in the inherited
-                # environment (same auto-selection the LiteLLM arm above guards
-                # against), so an explicit `route: direct` (e.g. via
-                # checker_context.api_route.route on a run whose agent is on
-                # Bedrock) would otherwise silently spend the operator's Bedrock
-                # bearer token instead of ANTHROPIC_API_KEY (PR #137 review).
+                # DIRECT whenever AWS_BEARER_TOKEN_BEDROCK is inherited, so an
+                # explicit `route: direct` would otherwise silently spend the
+                # operator's Bedrock token instead of ANTHROPIC_API_KEY.
                 env = {
                     "AWS_BEARER_TOKEN_BEDROCK": "",
                     "CLAUDE_CODE_USE_BEDROCK": "",
@@ -935,28 +842,23 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 return {**base_env, **env}, dr.model
 
             case LiteLLMRoute() as cr:
-                # Point the SDK at the custom Anthropic-compatible endpoint (e.g.
-                # a LiteLLM gateway). These override any inherited value: the SDK
-                # merges {**os.environ, ..., **options.env} at spawn, so setting
-                # them here wins over the parent environment.
+                # Point the SDK at the custom Anthropic-compatible endpoint. These
+                # override any inherited value: the SDK merges
+                # {**os.environ, ..., **options.env} at spawn.
                 env = {
                     "ANTHROPIC_BASE_URL": settings.litellm_base_url or "",
                     "ANTHROPIC_AUTH_TOKEN": settings.litellm_auth_token or "",
-                    # Neutralize any inherited ANTHROPIC_API_KEY: auth on this
-                    # route is the bearer ANTHROPIC_AUTH_TOKEN, and a stray
-                    # x-api-key (e.g. a real Anthropic key exported from .env)
-                    # would conflict with the gateway's key auth.
+                    # Auth here is the bearer ANTHROPIC_AUTH_TOKEN; a stray
+                    # x-api-key would conflict with the gateway's key auth.
                     "ANTHROPIC_API_KEY": "",
-                    # Claude Code attaches usage-attribution metadata (metadata.user_id)
-                    # that Bedrock's requestMetadata regex rejects (HTTP 400) once LiteLLM
-                    # forwards it to Bedrock. Disable it, mirroring the BedrockRoute case above.
+                    # The attribution metadata Claude Code attaches is rejected by
+                    # Bedrock's requestMetadata regex (HTTP 400) once LiteLLM
+                    # forwards it.
                     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-                    # Neutralize inherited Bedrock creds. The CLI auto-selects Bedrock DIRECT
-                    # when AWS_BEARER_TOKEN_BEDROCK is present (`if(process.env.AWS_BEARER_TOKEN_BEDROCK)`),
-                    # and that token is forwarded into docker task containers via the default
-                    # env-passthrough allowlist — so without blanking it the CLI bypasses
-                    # ANTHROPIC_BASE_URL (the LiteLLM proxy) and calls Bedrock directly. Empty string
-                    # is falsy in the CLI's check, so this forces it back onto the gateway.
+                    # Same auto-selection as the DirectRoute arm, and that token IS
+                    # forwarded into docker task containers by the default
+                    # env-passthrough allowlist — so without blanking it the CLI
+                    # bypasses the LiteLLM proxy entirely. Empty is falsy there.
                     "AWS_BEARER_TOKEN_BEDROCK": "",
                     "CLAUDE_CODE_USE_BEDROCK": "",
                 }
@@ -965,17 +867,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 if cr.small_model:
                     env["ANTHROPIC_SMALL_FAST_MODEL"] = cr.small_model
                 if cost_log_tags:
-                    # Stamp every SDK->proxy request with correlation headers so a
-                    # LiteLLM logging callback can attribute each call's real
-                    # usage.cost + cache buckets back to this run/task/turn. Claude
-                    # Code forwards ANTHROPIC_CUSTOM_HEADERS (newline-separated
-                    # `Name: Value`) verbatim, incl. to a non-anthropic base URL.
-                    #
-                    # Sanitize at the seam: x-ce-task-id carries the author-defined
-                    # task_id/variant_id, so a value with a CR/LF would inject extra
-                    # headers into every SDK->proxy request (forged cost attribution,
-                    # or an auth/routing header override). Non-ASCII also breaks the
-                    # latin-1 header encoding. Reject both loudly rather than emit them.
+                    # SANITIZE AT THE SEAM. x-ce-task-id carries the author-defined
+                    # task_id/variant_id, and Claude Code forwards this block
+                    # verbatim — so a CR/LF would inject extra headers into every
+                    # SDK->proxy request (forged cost attribution, or an auth /
+                    # routing override). Non-ASCII breaks the latin-1 encoding.
+                    # Reject both loudly rather than emit them.
                     for name, value in cost_log_tags.items():
                         joined = f"{name}{value}"
                         if "\r" in joined or "\n" in joined or not joined.isascii():
@@ -990,12 +887,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     ) -> str | None:
         """Resolve the effective model and sync subprocess env on Bedrock.
 
-        Precedence: config_model (task YAML / --model / -D agent.model) wins
-        over the route default (BEDROCK_MODEL). On a Bedrock route, a bare alias
-        is auto-qualified with ``anthropic.`` and the region's inference-profile
-        prefix (``eu.``/``us.``/``apac.``) so the same value works across regions.
-        On Bedrock, the resolved value is always written to ``ANTHROPIC_MODEL``
-        so the subprocess sees the same model as ``ClaudeAgentOptions.model``.
+        Precedence: ``config_model`` wins over the route default. On Bedrock a
+        bare alias is auto-qualified with the region's inference-profile prefix so
+        one value works across regions, and the resolved value is written to
+        ``ANTHROPIC_MODEL`` so the subprocess sees the same model as the options.
         """
         if isinstance(self.route, BedrockRoute):
             if config_model is not None:
@@ -1005,8 +900,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 env["ANTHROPIC_MODEL"] = effective
             return effective
         if isinstance(self.route, LiteLLMRoute):
-            # Same env-sync as Bedrock, but pass the id verbatim (no
-            # inference-profile qualification — the gateway maps it).
+            # Same env-sync, but verbatim: the gateway maps the id itself.
             effective = config_model or route_model
             if effective:
                 env["ANTHROPIC_MODEL"] = effective
@@ -1027,18 +921,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         Args:
             user_input: The message/prompt to send
             stream_callback: Optional callback for real-time event streaming
-            timeout: Hard wall-clock deadline in seconds. When exceeded, a
-                watchdog task force-kills the CLI subprocess (the SDK's anyio
-                task groups suppress cooperative cancellation, so a graceful
-                asyncio.wait_for is not sufficient).
-            max_turns: Hard cap on inner-loop turns for this call. None defers
-                to the SDK default.
-            should_stop: Cooperative early-stop poll (early-stop-on-criterion).
-                When provided, it is checked after each dispatched SDK message;
-                the first True finalizes the turn cleanly as STOPPED_EARLY
-                (``crashed=False``, no raise) at the next message boundary.
-                ``None`` (default) leaves the message loop behaviorally
-                identical to before.
+            timeout: Hard wall-clock deadline in seconds. A watchdog force-kills
+                the CLI subprocess when it elapses — the SDK's anyio task groups
+                suppress cooperative cancellation, so `asyncio.wait_for` is not
+                sufficient.
+            max_turns: Hard cap on inner-loop turns. None defers to the SDK.
+            should_stop: Cooperative early-stop poll, checked after each dispatched
+                message; the first True finalizes cleanly as STOPPED_EARLY
+                (``crashed=False``, no raise) at the next boundary.
 
         Returns:
             TurnRecord containing the complete interaction
@@ -1051,9 +941,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if not self.working_directory:
             raise RuntimeError("Agent not started. Call start() first.")
 
-        # AgentConfig.type is `str | None`, but the orchestrator, SubAgentRunner,
-        # and UserSimulator all set it before construction. Assert the invariant so
-        # streaming-event sites below can safely use `str(self.config.type)`.
+        # Every constructor path sets it; assert so the streaming-event sites
+        # below can use `str(self.config.type)`.
         assert self.config.type is not None, "ClaudeCodeAgent requires AgentConfig.type to be set before communicate()"
 
         # Reset the pending slot + bump the iteration counter (shared lifecycle).
@@ -1062,18 +951,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         turn_start_time = time.monotonic()
         deadline = turn_start_time + timeout if timeout is not None else None
 
-        # Event emission: the agent is the SOLE emitter. Events fan out to an
-        # internal EventCollector (which assembles the TurnRecord — the single,
-        # agent-agnostic capture path) and the caller's stream_callback.
+        # The agent is the SOLE emitter: events fan out to an internal
+        # EventCollector and the caller's stream_callback.
         task_id = str(self.config.type)  # str() so a plugin subclass with a non-enum kind also works
         collector = EventCollector()
         emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
 
-        # All per-turn scratch state lives on the state object so each stream
-        # branch is a method. Built BEFORE the try so the except/finally can
-        # finalize even when setup (_build_claude_query) crashes — `timeout_hit`
-        # is set by both the in-loop deadline break and the watchdog callback;
-        # Python bool assignment is atomic under the GIL, so no lock is needed.
+        # Built BEFORE the try so except/finally can finalize even when setup
+        # crashes. `timeout_hit` is written by both the in-loop deadline break and
+        # the watchdog callback; bool assignment is atomic under the GIL.
         state = _ClaudeTurnState(
             self,
             emit=emit,
@@ -1087,9 +973,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             deadline=deadline,
         )
 
-        # stderr capture STAYS a communicate local: it is wired into the SDK
-        # options during setup (a construction-order hazard if it lived on the
-        # state, which is built first), and only the error ladder reads its lines.
+        # STAYS a communicate local: it is wired into the SDK options during
+        # setup, which the state (built first) would order-invert.
         stderr_lines: list[str] = []
 
         def capture_stderr(line: str) -> None:
@@ -1112,41 +997,30 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                     prompt=user_input,
                     iteration=self._iteration,
                     model=effective_model,
-                    # Stamped from the TURN CLOCK, not the event model's raw
-                    # `datetime.now()` default. This bound is subtracted against
-                    # window bounds the same clock produced (`decompose_turn`), and
-                    # two bases inside one subtraction is what `TurnClock` exists to
-                    # remove. Measured: antigravity's tail came out at -0.017 ms —
-                    # an `AgentEndEvent` stamped 17 us BEFORE its own last message
-                    # finished, which cannot happen — and `decompose_turn` clamped
-                    # it to the `0.0` that means "measured, and instant" (CE058).
-                    # It only bites where the true interval is smaller than the
-                    # drift between the two clocks, which is the one harness that
-                    # holds its process across turns; the fix belongs at every
-                    # clocked site regardless, since that is what makes the
-                    # subtraction single-basis rather than usually-close.
+                    # From the TURN CLOCK, not the model's raw `datetime.now()`
+                    # default: this bound is subtracted against window bounds the
+                    # same clock produced, and two bases in one subtraction publish
+                    # a clamped inversion as a measured 0.0 (CE058).
                     timestamp=state.clock.now(),
                 )
             )
 
-            # IMPORTANT: the transport is captured in the closure (not read from
-            # self._active_transport) so a stale watchdog from an earlier turn
-            # cannot kill a subsequent turn's subprocess.
+            # Captured in the CLOSURE, not read from self._active_transport, so a
+            # stale watchdog from an earlier turn cannot kill this turn's process.
             watchdog_target = transport
 
             def _on_turn_timeout() -> None:
                 state.timeout_hit = True
                 self._kill_transport(watchdog_target)
 
-            # Only forward the transport kwarg when we actually built one —
-            # otherwise keep the call shape identical to the no-timeout path so
-            # mocks with strict (prompt, options) signatures keep working.
+            # Only when one was built, so mocks with strict (prompt, options)
+            # signatures keep working on the no-timeout path.
             query_kwargs: dict[str, Any] = {"prompt": user_input, "options": options}
             if transport is not None:
                 query_kwargs["transport"] = transport
             self._log.debug("Starting agent query stream...")
-            # OS-thread watchdog: fires at `timeout` seconds regardless of
-            # event-loop liveness. Immune to anyio cancel-scope suppression.
+            # OS-thread watchdog: fires regardless of event-loop liveness, and is
+            # immune to anyio cancel-scope suppression.
             with ThreadedWatchdog(
                 timeout_seconds=timeout,
                 on_timeout=_on_turn_timeout,
@@ -1158,24 +1032,20 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             self._log.debug("Agent query stream ended")
 
         except asyncio.CancelledError:
-            # The threaded watchdog cancels the running task via
-            # loop.call_soon_threadsafe(task.cancel) when it fires. If that
-            # cancel landed *because* of the timeout, re-raise as
-            # TurnTimeoutError so the retry system sees a terminal timeout (not a
-            # transient cancel). External cancels propagate unchanged.
+            # A cancel that landed BECAUSE of the timeout re-raises as
+            # TurnTimeoutError, so the retry system sees a terminal timeout rather
+            # than a transient cancel. External cancels propagate unchanged.
             if self._timed_out(state.timeout_hit, deadline):
                 assert timeout is not None
                 self._finalize_and_raise_timeout(state.finalize, timeout)
-            # Cancelled from outside this turn: park the telemetry on `pending_turn`
-            # for the caller to drain. Otherwise the `finally` below finalizes as
-            # COMPLETED, which keeps no record.
+            # Cancelled from outside: park the telemetry on `pending_turn`, or the
+            # `finally` finalizes as COMPLETED and keeps no record.
             if not state.finalized:
                 self._finalize_external_cancel(state.finalize)
             raise
         except ProcessError as e:
-            # When the watchdog SIGKILLs the subprocess, the SDK surfaces it as a
-            # ProcessError (exit code -9). Classify as a timeout so the retry
-            # system doesn't treat it as a transient AGENT_CRASH.
+            # A watchdog SIGKILL surfaces as ProcessError (exit -9); classify it as
+            # a timeout so the retry system does not treat it as AGENT_CRASH.
             if self._timed_out(state.timeout_hit, deadline):
                 assert timeout is not None
                 self._finalize_and_raise_timeout(state.finalize, timeout, cause=e)
@@ -1186,15 +1056,14 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 message = f"CLI process failed (exit code {e.exit_code}): {detail}"
                 self._finalize_and_raise_crash(state.finalize, message, cause=e)
         except Exception as e:
-            # Same race as above: the watchdog may have killed the subprocess and
-            # the SDK may have re-raised as a generic Exception. Check both the
-            # flag AND the wall-clock in case the flag flip races with our catch.
+            # The SDK may re-raise a watchdog kill as a generic Exception. Check
+            # both the flag AND the wall clock, in case the flip races this catch.
             if self._timed_out(state.timeout_hit, deadline):
                 assert timeout is not None
                 self._finalize_and_raise_timeout(state.finalize, timeout, cause=e)
             if not self._max_turns_short_circuit(state.sdk_result_summary, "Generic Exception"):
-                # The SDK wraps ProcessError as a generic Exception via the message stream.
-                # Read the captured ResultMessage summary (if any) for diagnostic context.
+                # The SDK wraps ProcessError as a generic Exception via the
+                # message stream; read the ResultMessage summary for context.
                 error_info = self._format_error_summary(state.sdk_result_summary)
                 cause_stderr = self._extract_cause_stderr(e)
                 stderr = self._build_stderr_message(cause_stderr, stderr_lines)
@@ -1206,30 +1075,22 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 message = f"Communication with agent failed: {error_details}"
                 self._finalize_and_raise_crash(state.finalize, message, cause=e)
         finally:
-            # Auto-finalize any path the except blocks didn't (happy path,
-            # max_turns short-circuit, in-loop timeout break). Idempotent
-            # (guarded by state.finalized) so the crash/timeout branches that
-            # already finalized are a no-op here. Exactly one AgentEndEvent + one
-            # EventCollector-built TurnRecord are produced on every exit path.
+            # Auto-finalize any path the except blocks did not. Idempotent, so
+            # exactly one AgentEndEvent is produced on every exit path.
             if not state.finalized:
                 if state.timeout_hit:
                     assert timeout is not None
                     state.finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
                 elif state.stopped_early_hit:
-                    # Clean cooperative stop: NOT a crash, NOT a timeout. The
-                    # max_turns_exhausted promotion in finalize() only fires for
-                    # COMPLETED, so STOPPED_EARLY survives; the post-finally
-                    # timeout raise is gated on timeout_hit, which is False here.
+                    # NOT a crash, NOT a timeout. The max_turns promotion in
+                    # finalize() only fires for COMPLETED, so this survives.
                     state.finalize(AgentEndStatus.STOPPED_EARLY, crashed=False, crash_reason=None)
                 else:
                     state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
             self._active_transport = None
 
-        # Only trust `timeout_hit` in the happy path: if the loop completed
-        # cleanly, a wall-clock drift during post-loop cleanup would falsely
-        # classify a successful turn as a timeout. The watchdog and in-loop guard
-        # are the authoritative signals. (pending_turn already set by the
-        # finalize(TIMEOUT) call in the finally above.)
+        # Only the flag here, never the wall clock: a drift during post-loop
+        # cleanup would misclassify a successful turn as a timeout.
         if state.timeout_hit:
             assert timeout is not None
             raise TurnTimeoutError(timeout, iteration=self._iteration)
@@ -1239,8 +1100,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # This turn completed successfully — the iteration increment stands.
         self._end_turn_ok()
 
-        # The TurnRecord is the EventCollector's reduction of the events emitted
-        # above — single, agent-agnostic capture path (no parallel record build).
+        # The collector's reduction of the events emitted above.
         return collector.build_turn_record()
 
     async def _pump_messages(
@@ -1252,21 +1112,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     ) -> None:
         """Drive the SDK message stream for one turn (extracted from ``communicate``).
 
-        Kept separate so the added cooperative-stop check keeps ``communicate``
-        under ruff's statement cap. ``query`` is still resolved as a module global
-        at call time, so ``patch("...claude_code_agent.query", ...)`` test mocks
-        keep working.
+        Kept separate so the cooperative-stop check keeps ``communicate`` under
+        ruff's statement cap. ``query`` is still resolved as a module global at
+        call time, so ``patch("...claude_code_agent.query", ...)`` mocks work.
 
-        Two break conditions, and the order matters:
+        Two break conditions, and the ORDER MATTERS:
 
-        - The wall-clock guard runs at the TOP of the loop — it breaks BEFORE the
-          message is dispatched, so the over-deadline message is DISCARDED (no
-          append, no events). Do NOT relocate this to a post-loop check.
-        - The cooperative stop runs AFTER ``state.dispatch(message)`` so a watcher
-          observing events during dispatch can flip its flag on THIS message and
-          the next message is never pulled — the deciding message is kept, the
-          next is not. No-op when ``should_stop is None`` (behaviorally identical
-          to before).
+        - The wall-clock guard runs at the TOP, so an over-deadline message is
+          DISCARDED — no append, no events. Do NOT move it to a post-loop check.
+        - The cooperative stop runs AFTER ``state.dispatch(message)``, so a watcher
+          can flip its flag on THIS message and the next is never pulled.
         """
         async for message in query(**query_kwargs):
             if deadline is not None and time.monotonic() > deadline:
@@ -1288,24 +1143,18 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     ) -> tuple[ClaudeAgentOptions, SubprocessCLITransport | None, str | None]:
         """Build the SDK options (+ a timeout-only transport) for one turn.
 
-        Returns ``(options, transport, effective_model)``. ``transport`` is None
-        unless a ``timeout`` is set — it is pre-constructed only so the watchdog
-        can hard-kill the subprocess (the SDK's default path creates it internally
-        and never exposes it). ``effective_model`` is the resolved model id (may be
-        None on a DirectRoute with no configured model). ``stderr_callback`` is
-        wired into the options here but owned by ``communicate`` — it must exist
-        before the options are built, and only the error ladder reads its lines.
+        ``transport`` is None unless a ``timeout`` is set: it is pre-constructed
+        only so the watchdog can hard-kill the subprocess. ``effective_model`` may
+        be None on a DirectRoute with no configured model. ``stderr_callback`` is
+        wired in here but owned by ``communicate``.
         """
         assert self.working_directory is not None  # guaranteed by communicate's guard above
 
         # Process plugins: copy from config and replace env vars in paths.
         plugins = process_plugins(self.config.plugins or [], log=self._log)  # type: ignore[arg-type]
 
-        # Build env overrides and resolve model for the configured API route.
-        # Precedence: task/CLI agent.model > route default (e.g. BEDROCK_MODEL).
-        # Per-turn cost-correlation headers (LiteLLM route only): the run/task tag
-        # from the orchestrator plus this turn's iteration, so the proxy-side cost
-        # log can be joined back to the exact turn.
+        # Per-turn cost-correlation headers (LiteLLM only): the run/task tag plus
+        # this turn's iteration, so the proxy-side cost log joins to the turn.
         cost_log_tags: dict[str, str] | None = None
         if self._cost_log_tags is not None:
             cost_log_tags = {**self._cost_log_tags, "x-ce-iteration": str(self._iteration)}
@@ -1322,21 +1171,17 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if "ToolSearch" not in disallowed_tools:
             disallowed_tools.append("ToolSearch")
 
-        # The SDK maps system_prompt=None to `--system-prompt ""` (an explicit
-        # EMPTY custom prompt) and a plain string to a full replacement — either
-        # way Claude Code's default behavioral guidance (parallel tool-call
-        # batching, conciseness) is lost. So ALWAYS send the claude_code preset:
-        # without `append` the CLI runs its default prompt; with it the configured
-        # prompt is appended. exclude_dynamic_sections keeps the prompt static
-        # across runs (the per-run tempdir path would otherwise be baked into the
-        # system prompt, breaking prompt caching and run comparability); the SDK
-        # re-injects the stripped sections into the first user message.
-        # system_prompt_mode="replace" (judge sub-agents) opts out of the preset:
-        # the configured prompt IS the entire system prompt.
+        # ALWAYS the claude_code preset: the SDK maps `system_prompt=None` to an
+        # explicit EMPTY prompt and a plain string to a full replacement, either
+        # of which loses Claude Code's default behavioral guidance.
+        # `exclude_dynamic_sections` keeps the prompt static across runs — the
+        # per-run tempdir path would otherwise be baked in, breaking prompt caching
+        # and comparability — and the SDK re-injects the stripped sections into the
+        # first user message. `system_prompt_mode="replace"` opts out.
         system_prompt = self._resolve_system_prompt()
 
         # as_posix(), not str(): bash on Windows strips backslashes from unquoted
-        # paths, so a redirect like `> D:\foo\bar` ends up writing to "Dfoobar".
+        # paths, so `> D:\foo\bar` writes to "Dfoobar".
         options = ClaudeAgentOptions(
             cwd=self.working_directory.as_posix(),
             permission_mode=self.config.permission_mode.value,
@@ -1347,12 +1192,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             plugins=plugins,  # type: ignore[arg-type]
             stderr=stderr_callback,  # Capture stderr for better error messages
             env=env,
-            # Subscribe to raw stream events so we can recover the *cumulative*
-            # output_tokens for each emission from ``message_delta.usage`` events.
-            # Claude Code CLI ships AssistantMessage.usage.output_tokens with only
-            # a partial streaming snapshot (anthropics/claude-code#22686), so
-            # summing per-message values undercounts by 10x+. Without this flag
-            # StreamEvents are suppressed by the SDK.
+            # Recovers the CUMULATIVE output_tokens per emission from
+            # `message_delta.usage`: the CLI ships only a partial streaming
+            # snapshot (anthropics/claude-code#22686), so summing per-message
+            # values undercounts by 10x+. Without this the SDK suppresses
+            # StreamEvents. It also gates the first-window re-seed.
             include_partial_messages=True,
             system_prompt=system_prompt,
             setting_sources=self.config.setting_sources if self.config.setting_sources is not None else ["project"],
@@ -1364,14 +1208,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             **self.config.sdk_options,
         )
 
-        # Dump SDK options for later inspection (captures all 37+ fields including defaults).
+        # For later inspection: captures every field, defaults included.
         self._sdk_options_dump = dump_dataclass(options)
 
-        # When a timeout is set, pre-construct the transport so we retain a
-        # reference to the subprocess for hard-kill; the SDK's default path
-        # creates this internally and never exposes it. When no timeout is set we
-        # leave it None so the SDK uses its own default (keeps the door open for
-        # tests that mock query() without a real CLI).
+        # Pre-constructed only under a timeout, to retain the subprocess handle
+        # for hard-kill. None otherwise, so the SDK uses its own default and tests
+        # can mock query() without a real CLI.
         transport: SubprocessCLITransport | None = None
         if timeout is not None:
             transport = SubprocessCLITransport(prompt=user_input, options=options)
@@ -1381,22 +1223,20 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _resolve_system_prompt(self) -> str | SystemPromptPreset:
         """The system-prompt VALUE that actually goes on the wire.
 
-        Single source of truth for both the options builder and the
-        ``system_prompt_semantics`` run-record marker (derived from this value,
-        never re-computed), so the persisted regime can never disagree with what
-        was sent. Returning the value rather than a mode string is what lets the
-        caller skip a type-narrowing re-check of the invariant resolved here.
+        Single source of truth for the options builder AND the
+        ``system_prompt_semantics`` run marker, which is derived from this value
+        and never recomputed — so the persisted regime cannot disagree with what
+        was sent.
 
-        ``replace`` requires a configured prompt (the config validator rejects
-        the pair at load, but a mutated or hand-built config falls back to the
-        preset here — fail open to append).
+        ``replace`` requires a configured prompt. The config validator rejects the
+        pair at load, but a hand-built config falls open to the preset here.
         """
         if self.config.system_prompt_mode == "replace":
             if self.config.system_prompt is not None:
                 return self.config.system_prompt
             if not self._warned_prompt_mode_downgrade:
-                # Warn once per agent so the downgrade is visible in task.log
-                # rather than only inferable from run.json's marker.
+                # Once per agent, so the downgrade is visible in task.log rather
+                # than only inferable from run.json's marker.
                 self._warned_prompt_mode_downgrade = True
                 logger.warning(
                     "system_prompt_mode='replace' with no system_prompt — falling back to the claude_code "
@@ -1410,13 +1250,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def get_environment_info(self) -> dict[str, Any]:
         """Record which system-prompt regime built this run's prompts.
 
-        ``append`` = the claude_code preset (dynamic sections excluded) with the
-        configured system_prompt, if any, appended; ``replace`` = the configured
-        prompt is the ENTIRE system prompt (judge sub-agents). Unlike the other
-        agents this is per-config, not fixed, so it overrides the base ClassVar
-        with the resolved value. Runs from before this marker existed used
-        replace-on-set / empty-on-unset semantics — trend dashboards must not
-        pool scores across that boundary.
+        ``append`` = the claude_code preset with the configured prompt appended;
+        ``replace`` = the configured prompt IS the entire system prompt (judge
+        sub-agents). Unlike the other agents this is per-config, not fixed, so it
+        overrides the base ClassVar with the resolved value.
+
+        Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
         """
         semantics: SystemPromptSemantics = "replace" if isinstance(self._resolve_system_prompt(), str) else "append"
         return {**super().get_environment_info(), "system_prompt_semantics": semantics}
@@ -1429,20 +1268,17 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     async def kill(self) -> None:
         """Force-terminate the in-flight Claude CLI subprocess, if any.
 
-        Async wrapper around ``kill_sync`` for callers that prefer async.
-        The threaded watchdog inside communicate() uses ``_kill_transport``
-        directly on a captured transport (not via ``self._active_transport``)
-        to avoid a cross-turn race where a stale watchdog could kill a later
-        turn's subprocess.
+        Async wrapper around ``kill_sync``. The watchdog inside communicate() uses
+        ``_kill_transport`` on a CAPTURED transport instead, to avoid a stale
+        watchdog killing a later turn's subprocess.
         """
         self.kill_sync()
 
     def kill_sync(self) -> None:
         """Synchronously SIGKILL the in-flight Claude CLI subprocess, if any.
 
-        Safe to call from a non-asyncio thread (e.g. a ``threading.Timer``
-        callback). Reads ``self._active_transport`` once; if a later turn
-        has already cleared it, this is a no-op.
+        Safe from a non-asyncio thread. Reads ``self._active_transport`` once; a
+        no-op if a later turn already cleared it.
         """
         self._kill_transport(self._active_transport)
 
@@ -1450,10 +1286,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _timed_out(timeout_hit: bool, deadline: float | None) -> bool:
         """Return True if the turn has exceeded its deadline by either path.
 
-        Checks both the watchdog flag AND the wall clock. The flag-only check
-        races with the watchdog: if the handler was entered just before the
-        watchdog flipped the flag, we'd misreport a timeout as a generic
-        error. Checking wall-clock is the belt that catches that case.
+        BOTH the watchdog flag and the wall clock: a flag-only check races the
+        watchdog and misreports a timeout entered just before the flip.
         """
         if timeout_hit:
             return True
@@ -1463,10 +1297,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _kill_transport(transport: SubprocessCLITransport | None) -> None:
         """SIGKILL the subprocess behind `transport`, if any.
 
-        The SDK wraps the subprocess in anyio cancel scopes that suppress
-        asyncio.CancelledError, so cooperative cancellation doesn't reliably
-        stop a stuck CLI. Sending SIGKILL releases stdout/stdin, which
-        unblocks the anyio readers so the async generator unwinds cleanly.
+        SIGKILL releases stdout/stdin, which unblocks the anyio readers so the
+        async generator unwinds cleanly.
+
+        Rationale: .claude/notes/agents.md § The threaded watchdog
         """
         if transport is None:
             return
@@ -1491,11 +1325,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         for tool_id, cmd_data in pending_commands.items():
             cmd = cmd_data["telemetry"]
             if cmd.result_status is None:
-                # Unknown status and unknown duration are the same fact: nothing
-                # resolved this command, so nothing timed it either. duration_ms
-                # is deliberately LEFT as None here — it used to be coerced to
-                # 0.0, which put an invented measurement on both sides of
-                # avg_command_time_ms and dragged the average toward zero.
+                # Unknown status and unknown duration are one fact: nothing
+                # resolved this command, so nothing timed it. `duration_ms` is
+                # deliberately left None (CE058).
+                # Rationale: .claude/notes/agents.md § Why only a RESOLVED tool is timed
                 cmd.result_status = "unknown"
                 unknown_status_count += 1
                 self._log.warning(
@@ -1522,14 +1355,11 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _aggregate_model_usage(model_usage: dict[str, Any] | None) -> TokenUsage | None:
         """Sum the SDK ResultMessage ``model_usage`` into a cumulative TokenUsage.
 
-        ``model_usage`` maps each model id to its cumulative billing for the
-        session — ``{model: {inputTokens, outputTokens, cacheReadInputTokens,
-        cacheCreationInputTokens, costUSD, ...}}`` (camelCase, unlike ``usage``).
-        This is the SDK's authoritative cost breakdown: summed and priced it
+        Maps each model id to its cumulative session billing (camelCase, unlike
+        ``usage``). The SDK's authoritative cost breakdown: summed and priced it
         reconciles to ``total_cost_usd`` exactly, and it INCLUDES sub-agent
-        consumption (notably cache-creation/input) that the assistant-message
-        stream and the ``usage`` snapshot under-report. Returns None when absent
-        or empty so the caller can fall back.
+        consumption the stream under-reports. None when absent, so the caller can
+        fall back.
         """
         if not isinstance(model_usage, dict) or not model_usage:
             return None
@@ -1567,82 +1397,24 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         Source-of-truth order:
 
-        1. ``ResultMessage.model_usage`` — the SDK's cumulative per-model billing.
-           Summed + priced at list rates it equals ``total_cost_usd`` exactly,
-           and it captures sub-agent token consumption (especially cache-creation
-           and input) that the assistant-message stream and the ``usage`` snapshot
-           do NOT — sub-agent emissions are only partially (sometimes never)
-           bubbled into the recorded stream. This is authoritative; prefer it.
+        1. ``ResultMessage.model_usage`` — the SDK's cumulative per-model billing,
+           authoritative and inclusive of sub-agent consumption. Prefer it.
+        2. Per-call telemetry stream (sum) — used when ``model_usage`` is absent.
+           Exact only when EVERY token-bearing emission carries a ``message_id``,
+           since that is what the dedup keys on.
+        3. ``ResultMessage.usage`` snapshot — last resort; it under-reports the
+           cache-read cascade ~2-3x on multi-call runs.
 
-        2. Per-call telemetry stream (sum) — used when ``model_usage`` is absent
-           (e.g. legacy/mock SDKs). Recorded usage is deduped by
-           ``message_id``, so summing is exact when every token-bearing emission
-           carries an id; this still beats the ``usage`` snapshot, which
-           under-reports the cache-read cascade ~2-3x on multi-call runs.
+        ``total_cost_usd`` comes from ``model_usage.costUSD``, else the
+        ResultMessage total, else the priced buckets (a killed turn has no
+        terminal ``ResultMessage``).
 
-        3. ``ResultMessage.usage`` snapshot — last resort.
+        **The BILLING view: summing ``messages`` does not reproduce it on its
+        own.** ``EventCollector`` books the residual as one synthetic
+        ``ReconciliationMessage``, so the stream still sums to this total. Do NOT
+        smear by-difference tokens onto real generations.
 
-        ``total_cost_usd`` comes from ``model_usage.costUSD`` when present, else
-        the ResultMessage ``total_cost_usd`` — the real billed total. When BOTH
-        are absent (timeout / kill — there is no terminal ``ResultMessage``), it
-        is backfilled from the priced token buckets via ``calculate_cost``,
-        mirroring the Codex self-pricing path so killed turns still record a cost
-        instead of ``—``. The tokens are already captured; this is pure pricing.
-
-        WHY THIS FIELD IS NECESSARY — AND WHY YOU CANNOT DERIVE IT FROM ``messages``
-        ---------------------------------------------------------------------------
-        There are two distinct token views, and they are NOT meant to reconcile:
-
-        * **Billing view** — ``model_usage`` (this method's output, carried as
-          ``AgentEndEvent.usage`` → ``TurnRecord.token_usage``). The complete,
-          cost-accurate per-model total for the turn. Cost/budget/reports read
-          this.
-        * **Attribution view** — the per-message ``messages`` transcript. Useful
-          for per-generation / per-sub-agent display (group by
-          ``parent_tool_use_id``), but NOT cost-complete.
-
-        Summing the per-generation ``AssistantMessage`` entries does NOT, on its
-        own, equal ``model_usage`` — for three independent reasons (all confirmed
-        empirically against live ``claude_subagent_test`` runs — see the dumps
-        under ``tmp/agentusage-*`` and ``CODER_EVAL_RAW_SDK_LOG=1``):
-
-        1. **Per-step input/output are lossy snapshots.** The streamed
-           ``message_start``/``message_delta`` ``usage`` under-reports
-           ``input_tokens`` (and ``output_tokens``) vs. the billed total; the
-           docs say to "prefer the result message." Only ``output`` gets a
-           ``message_delta`` correction — ``input`` never does.
-        2. **Sub-agent generations are not fully streamed.** A sub-agent's calls
-           never emit ``message_start``/``message_delta`` into the parent stream;
-           its terminal generation arrives only as the Agent tool result (we
-           synthesize it — see ``_synthesize_subagent_terminal_message``), and
-           its input is billed to ``model_usage`` without a corresponding parent
-           message.
-        3. **A fixed ~512-token input is billed but never streamed.** Across runs
-           ``model_usage.inputTokens`` exceeds the sum of ALL captured generations
-           by a constant ~512 — and this gap is IDENTICAL with prompt caching
-           disabled (``DISABLE_PROMPT_CACHING=1`` → cw=cr=0), so it is NOT a
-           cache-bucketing artifact. ``message_start`` count == captured
-           ``AssistantMessage`` count (we drop nothing); the 512 simply belongs to
-           no SDK-emitted message. It is an upstream billing-vs-stream property,
-           not a capture bug.
-
-        Cache (``cache_creation`` + ``cache_read``) reconciles from the generation
-        messages to the token; only ``input``/``output`` carry the residual above.
-        ``costUSD``/``total_cost_usd`` are themselves client-side estimates (the
-        SDK computes them locally) — the authoritative figure is Anthropic's
-        Usage/Cost API.
-
-        HOW THE STREAM RECONCILES (the residual is booked, not smeared). The full
-        ``TurnRecord.messages`` stream DOES sum to ``token_usage`` exactly —
-        because ``EventCollector`` appends one synthetic ``ReconciliationMessage``
-        (``role="reconciliation"``) carrying the per-bucket residual (this method's
-        ``model_usage`` total minus the sum of the real generations). The residual
-        is the three sources above. Do NOT instead smear by-difference tokens onto
-        the real ``AssistantMessage`` generations: that would fabricate
-        per-generation numbers matching no real call and break per-sub-agent
-        attribution. ``token_usage`` (billing) stays authoritative for
-        cost/budget/reports; ``messages`` (one reconciliation entry included) is
-        the attribution view that now sums to the same total.
+        Rationale: .claude/notes/agents.md § Token accounting, per harness
         """
         from_models = ClaudeCodeAgent._aggregate_model_usage(sdk_result_model_usage)
         if from_models is not None:
@@ -1656,9 +1428,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             for m in assistant_msgs
             if m.input_tokens or m.output_tokens or m.cache_creation_tokens or m.cache_read_tokens
         ]
-        # Summing is exact only when every token-bearing emission has an id (so
-        # the dedup in communicate() applied and no ResultMessage backfill was
-        # mixed in). Otherwise defer to the ResultMessage summary.
+        # Exact only when every token-bearing emission has an id, so the dedup
+        # applied and no ResultMessage backfill was mixed in.
         if token_bearing and all(m.message_id for m in token_bearing):
             return ClaudeCodeAgent._backfill_cost(
                 TokenUsage(
@@ -1687,9 +1458,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _price_from_buckets(usage: TokenUsage, model: str | None) -> float | None:
         """Price the four token buckets at ``model``'s list rate.
 
-        Shared by ``_backfill_cost`` (price-if-absent) and ``_reprice_for_litellm``
-        (always-reprice). Returns ``None`` when ``model`` is unset or absent from
-        the rate card.
+        ``None`` when ``model`` is unset or absent from the rate card.
         """
         if not model:
             return None
@@ -1705,12 +1474,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _backfill_cost(usage: TokenUsage, model: str | None) -> TokenUsage:
         """Price the token buckets when the SDK gave no cost (timeout / kill).
 
-        On a clean turn the SDK supplies ``costUSD`` / ``total_cost_usd``. When a
-        turn is timed out or killed there is no terminal ``ResultMessage``, so the
-        cost is absent even though the tokens are fully captured. Backfill it from
-        the rate card — the same self-pricing the Codex agent always does — so the
-        recorded top-line cost matches the evalboard simulator instead of ``—``.
-        A no-op when the cost is already set or the model is unknown/unpriced.
+        A timed-out or killed turn has no terminal ``ResultMessage``, so the cost
+        is absent even though the tokens are fully captured. A no-op when the cost
+        is already set or the model is unpriced.
         """
         if usage.total_cost_usd is not None or not model:
             return usage
@@ -1718,9 +1484,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if cost is not None:
             usage.total_cost_usd = cost
         else:
-            # Model not in the rate card — the turn reverts to a null cost (the
-            # pre-#386 symptom). Surface it so a stale pricing table is visible
-            # rather than silently reproducing "Cost = —" for new models.
+            # Not in the rate card, so the turn reverts to a null cost. Surface
+            # it, or a stale pricing table silently reads as "Cost = —".
             logger.warning("No pricing for model %r; timeout/kill turn cost left unset", model)
         return usage
 
@@ -1728,18 +1493,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _reprice_for_litellm(usage: TokenUsage, model: str | None) -> None:
         """Recompute the top-line cost for the LiteLLM backend, in place.
 
-        The Claude Agent SDK's ``costUSD``/``total_cost_usd`` is a client-side
-        estimate that assumes Claude/Anthropic pricing, so it is wrong for an
-        open-weight model driven through LiteLLM. Reprice from the (already
-        authoritative) token buckets at the model's real rate. The token buckets
-        are left untouched, so the per-message stream / reconciliation invariant
-        is unaffected — only the cost scalar changes.
+        The SDK's cost estimate assumes Anthropic pricing, so it is wrong behind
+        LiteLLM. The token buckets are left UNTOUCHED, so the reconciliation
+        invariant is unaffected — only the cost scalar changes.
 
-        An unknown/unpriced model sets the cost to ``None`` (an honest "N/A")
-        **and logs a warning** — mirroring ``_backfill_cost`` — because a proxy
-        model missing from the rate card otherwise silently yields
-        ``total_cost_usd = None``, which makes the orchestrator skip the
-        ``max_usd`` gate with no diagnostic.
+        An unpriced model sets the cost to ``None`` **and warns**: a silent
+        ``None`` makes the orchestrator skip the ``max_usd`` gate with no
+        diagnostic.
+
+        Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
         """
         cost = ClaudeCodeAgent._price_from_buckets(usage, model)
         usage.total_cost_usd = cost
@@ -1760,29 +1522,21 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _try_parse_json_value(content: Any) -> dict[str, Any] | list[Any] | None:
         """Return the parsed JSON object or array from content, else None.
 
-        Strict telemetry-capture variant. ``coder_eval.formatting._extract_json``
-        is the lenient display-path variant — keep behaviour aligned when you
-        change one, but they are intentionally separate: the telemetry path
-        feeds ``CommandTelemetry.result_data`` where false positives persist
-        into ``task.json`` and downstream dashboards.
+        The STRICT telemetry-capture variant. ``formatting._extract_json`` is the
+        lenient display-path twin — keep behaviour aligned, but they are
+        intentionally separate: this one feeds ``CommandTelemetry.result_data``,
+        where a false positive persists into ``task.json`` and downstream
+        dashboards.
 
-        Accepts the two SDK-delivered shapes for ToolResultBlock.content: a plain
-        string, or a list of content blocks (MCP tools use this, e.g.
-        [{"type": "text", "text": "..."}]). Within the first 200 characters,
-        looks for the first line whose first non-whitespace character is `{` or
-        `[` and parses from there using raw_decode, so prefix noise (e.g. warning
-        lines the `uip` CLI prints before the JSON body) and trailing garbage are
-        tolerated. Requiring the brace to start a line avoids false positives
-        from incidental `{` or `[` embedded inside text (e.g. the Read tool's
-        line-numbered source where `items: list = []` would otherwise parse as
-        an empty list). The 200-char cap further rules out braces buried deep in
-        long text output. If the candidate fails to parse, returns None — no
-        fragment fallback, which would surface misleading partial captures from
-        truncated payloads. Bare empty containers (`{}` / `[]`) are rejected:
-        a non-empty dict or list is evidence of real structured content.
-        Primitives (strings, numbers, booleans, null) are rejected for the same
-        reason — a bare primitive adds no information beyond result_summary.
-        Non-JSON tool output is normal; parse failures are swallowed silently.
+        Accepts a plain string or a list of content blocks (MCP tools use the
+        latter), and parses with ``raw_decode`` from the first line whose first
+        non-whitespace character is ``{`` or ``[``, so prefix noise and trailing
+        garbage are tolerated. Requiring the brace to START A LINE is what stops
+        an incidental ``[`` inside text matching.
+
+        Rejected on purpose: a failed parse (no fragment fallback), bare ``{}`` /
+        ``[]``, and bare primitives. Non-JSON tool output is normal, so failures
+        are silent.
         """
         if isinstance(content, list):
             text_parts = [
@@ -1795,9 +1549,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             content = "".join(text_parts)
         if not isinstance(content, str):
             return None
-        # Only look for the JSON start within the first 200 chars — enough to skip
-        # a few prefix warning lines but not so lax that a brace buried in a long
-        # text body gets mistaken for a structured payload.
+        # First 200 chars only: enough for a few prefix warning lines, not so lax
+        # that a brace buried in long text reads as a structured payload.
         match = re.search(r"(?:^|\n)[^\S\n]*[{[]", content[:_JSON_START_SEARCH_LIMIT])
         if not match:
             return None
@@ -1805,9 +1558,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             parsed, _ = json.JSONDecoder().raw_decode(content, match.end() - 1)
         except ValueError:
             return None
-        # Reject bare empty containers ({} / []): a non-empty dict or list is
-        # evidence of real structured content, an empty one is indistinguishable
-        # from an accidental match and adds nothing over result_summary.
+        # A non-empty dict or list is evidence of real structured content; an
+        # empty one is indistinguishable from an accidental match.
         if isinstance(parsed, (dict, list)) and parsed:
             return parsed
         return None
@@ -1828,24 +1580,18 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _synthesize_subagent_terminal_message(message: Any, model: str | None) -> AssistantMessageTelemetry | None:
         """Materialize a sub-agent's TERMINAL generation as an AssistantMessage.
 
-        A sub-agent that calls tools runs several generations. Its intermediate
-        ones bubble into the parent stream as ``parent_tool_use_id``-tagged
-        assistant messages, but its terminal generation is delivered as the Agent
-        tool RESULT (``UserMessage.tool_use_result``), never as a streamed
-        message. We synthesize it as one so the sub-agent's full lifecycle lives
-        in the transcript and per-sub-agent usage is recoverable by grouping
-        messages on ``parent_tool_use_id`` — no separate sidecar field needed.
+        A sub-agent's intermediate generations bubble into the parent stream as
+        ``parent_tool_use_id``-tagged messages, but its terminal one is delivered
+        as the Agent tool RESULT and never streamed. Synthesizing it puts the
+        sub-agent's full lifecycle in the transcript, so per-sub-agent usage is
+        recoverable by grouping on that id.
 
-        ``tool_use_result.usage`` is the terminal call's usage breakdown (input /
-        output / cache-creation / cache-read — complete, incl. the cache-read that
-        ``TaskNotification.usage`` drops). It is terminal-only, not cumulative, so
-        it does NOT overlap the bubbled intermediate generations (its output is
-        the final reply's alone). Returns None for non-sub-agent tool results
-        (regular Bash/Write/etc. carry ``tool_use_result`` but no ``agentId``).
+        ``tool_use_result.usage`` is the terminal call's own breakdown — complete,
+        and terminal-only, so it does NOT overlap the bubbled intermediates.
+        Returns None for a non-sub-agent tool result (no ``agentId``).
 
-        The token total is unaffected: the normal path derives it from
-        ``ResultMessage.model_usage`` (which ignores this transcript), so the
-        synthetic message is purely additive for attribution/display.
+        The token total is unaffected: it derives from ``model_usage``, which
+        ignores this transcript, so the synthetic message is purely additive.
         """
         tur = getattr(message, "tool_use_result", None)
         if not isinstance(tur, dict) or "agentId" not in tur:
@@ -1874,18 +1620,13 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             except (TypeError, ValueError):
                 return 0
 
-        # This generation arrives as a tool result and is never streamed, so no
-        # window exists to measure — None (unknown), not 0.0 (instant).
-        #
-        # Deliberately NOT on the turn's `TurnClock`, and the only wall stamp in
-        # this harness that is not. These two bounds are an admitted
-        # PLACEHOLDER, not a measurement: `generation_duration_ms is None` and
-        # `parent_tool_use_id` is set, which is exactly what excludes this
-        # message from `subtract_tool_time` and from `_overhead_ms`'s
-        # head/tail bracket. A stamp no arithmetic reads has no basis to share,
-        # and threading a clock into a `@staticmethod` to produce one would
-        # claim otherwise. Codex's rollout rebuild stamps the same placeholder
-        # the same way, for the same reason.
+        # Never streamed, so no window exists to measure: None (unknown), not 0.0.
+        # These bounds are an admitted PLACEHOLDER, which is why they are
+        # deliberately NOT on the turn's `TurnClock` — the only wall stamp in this
+        # harness that is not. `generation_duration_ms is None` plus a set
+        # `parent_tool_use_id` is exactly what excludes this message from the
+        # subtraction and the head/tail bracket, so the stamp is read by no
+        # arithmetic and has no basis to share.
         now = datetime.now()
         return AssistantMessageTelemetry(
             started_at=now,
@@ -1922,9 +1663,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             pending_commands: Map of tool_id -> {telemetry, command_start_time}
             processed_results: Set of already-processed tool IDs (for duplicate detection)
             now: This turn's ``TurnClock`` reading, passed in rather than read
-                here. The span stamped below is clipped against the window
-                bounds the same clock produced, so a second basis at this one
-                call site would put two clocks inside one subtraction.
+                here: the span stamped below is clipped against window bounds the
+                same clock produced.
         """
         # Normalize content to string for storage
         content_str = str(content) if content is not None else ""
@@ -1944,22 +1684,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             cmd.result_summary = content_str if content_str else None
             cmd.result_data = ClaudeCodeAgent._try_parse_json_value(content)
 
-            # Wall-clock execution bounds. `execution_completed_at` is the
-            # turn clock's reading; `execution_started_at` is reconstructed by
-            # subtracting the measured monotonic duration. This avoids storing
-            # a separate wall-clock start (we don't have one without
-            # restructuring pending_commands further) while still giving
-            # consumers two explicit timestamps with the right delta — and the
-            # reconstruction is now exact rather than approximate, since the
-            # turn clock is itself monotonic-derived.
+            # `execution_started_at` is RECONSTRUCTED by subtracting the measured
+            # monotonic duration from the turn clock's reading, which is exact
+            # because the turn clock is itself monotonic-derived.
             cmd.execution_completed_at = now
             cmd.execution_started_at = cmd.execution_completed_at - timedelta(milliseconds=duration_ms)
 
             if is_error:
                 cmd.error_message = content_str
 
-                # Permission-blocked tool use is abnormal flow — warn so it
-                # surfaces in runs that don't have DEBUG enabled.
+                # Abnormal flow: warn so it surfaces without DEBUG enabled.
                 content_lower = content_str.lower()
                 if any(
                     phrase in content_lower
@@ -1982,16 +1716,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _build_stderr_message(sdk_stderr: str | None, stderr_lines: list[str]) -> str:
         """Combine SDK stderr with captured stderr lines, filtering out placeholder text.
 
-        The SDK often returns a hardcoded placeholder like "Check stderr output for details"
-        instead of actual error content. The real error details are in stderr_lines captured
-        via the stderr callback.
-
-        Args:
-            sdk_stderr: The stderr string from ProcessError (may be a placeholder)
-            stderr_lines: Lines captured via the stderr callback during execution
-
-        Returns:
-            Combined stderr message with real content, or "No stderr captured"
+        The SDK often returns a hardcoded placeholder instead of real error
+        content; the details are in the lines captured via the stderr callback.
         """
         parts = []
 
@@ -2009,14 +1735,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _extract_cause_stderr(error: Exception) -> str | None:
         """Walk the exception __cause__ chain looking for a ProcessError with stderr.
 
-        The SDK re-raises ProcessError as a generic Exception via the Query message stream.
-        This method recovers the original stderr from the cause chain.
-
-        Args:
-            error: The caught exception
-
-        Returns:
-            stderr string from the original ProcessError, or None
+        The SDK re-raises ProcessError as a generic Exception via the Query
+        message stream, so the original stderr is only in the cause chain.
         """
         cause = error.__cause__
         depth = 0
@@ -2058,11 +1778,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _summarize_result(msg: Message) -> ResultSummary | None:
         """Build a ``ResultSummary`` from an SDK ResultMessage, or None.
 
-        Returns None only when ``msg`` lacks the SDK ResultMessage shape
-        (``session_id`` + ``usage``). For real ResultMessages the SDK
-        always provides ``subtype`` (it's a required dataclass field), so
-        any missing/non-string value is treated as ``"unknown"`` rather
-        than silently disabling the summary downstream.
+        None only when ``msg`` lacks the ResultMessage shape. ``subtype`` is a
+        required dataclass field there, so a missing value becomes ``"unknown"``
+        rather than silently disabling the summary downstream.
         """
         if not _is_sdk_result_message(msg):
             return None
@@ -2080,11 +1798,10 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     def _format_error_summary(summary: ResultSummary | None) -> str | None:
         """Format an errored ``ResultSummary`` for surfacing to the user.
 
-        Prefers free-form ``result`` text; falls back to the
-        ``subtype``/``stop_reason`` classification when ``result`` is
-        unset (which is the common shape on hard CLI crashes). Returns
-        None when there is nothing useful to surface, so callers can
-        decide whether to fall back to stderr.
+        Prefers free-form ``result`` text, falling back to the
+        ``subtype``/``stop_reason`` classification — the common shape on a hard
+        CLI crash. None when there is nothing useful, so the caller can fall back
+        to stderr.
         """
         if summary is None or not summary.is_error:
             return None
@@ -2104,8 +1821,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         Args:
             messages: List of messages from the agent (SDK objects)
         """
-        # Check for explicit error messages (use getattr for safe access).
-        # ResultMessage.is_error is intentionally NOT a state-change trigger —
+        # `ResultMessage.is_error` is intentionally NOT a state-change trigger:
         # the agent may recover from a tool error on a later turn.
         for msg in messages:
             if getattr(msg, "error", None):

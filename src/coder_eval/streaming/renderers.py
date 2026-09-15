@@ -95,18 +95,17 @@ class RichStreamRenderer:
             model = f" (model={escape(event.model)})" if event.model else ""
             return f"[bold]--- Iteration {event.iteration}{model} ---[/bold]"
 
-        # TurnStartEvent is intentionally not rendered on the console: the Rich
-        # view is a terse live feed and Claude emits one per API call (noisy).
-        # The full turn tree lives in task.log via LoggingStreamRenderer.
+        # Intentionally NOT rendered on the console: Claude emits one per API
+        # call, which is noisy for a terse live feed. The full turn tree lives in
+        # task.log via LoggingStreamRenderer.
 
         if isinstance(event, ToolStartEvent):
             params_str = escape(format_payload(event.tool.parameters, max_chars=_MAX_PARAMS_LEN))
             return f"[cyan]>>> TOOL: {escape(event.tool.tool_name)}[/cyan] | {params_str}"
 
         if isinstance(event, ToolEndEvent):
-            # result_summary is stored WHOLE (untruncated) at capture; cap it here
-            # for the terse live feed so a large command output doesn't flood the
-            # console. The reported char count reflects the true (full) length.
+            # result_summary is stored WHOLE at capture; capping is a display
+            # concern only, and the reported char count is the true full length.
             full = event.tool.result_summary or ""
             preview = escape(_truncate(full, _MAX_RESULT_LEN))
             if event.status == ToolEndStatus.OK:

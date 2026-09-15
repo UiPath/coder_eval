@@ -150,9 +150,8 @@ class SimulationConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Master switch — when false, simulation is skipped entirely.")
 
-    # The simulator runs as a tools-disabled Claude Code agent sharing the coding
-    # agent's ApiRoute, so temperature/max_tokens are resolved at the route level and
-    # are not configured here. The MODEL is pinned below rather than inherited.
+    # The simulator shares the coding agent's ApiRoute, so temperature/max_tokens
+    # resolve at the route level. The MODEL is pinned below rather than inherited.
     model: str = Field(
         default=DEFAULT_SIMULATOR_MODEL,
         description=(
@@ -471,10 +470,9 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             "the YAML — pair with a comment citing the blocker (e.g. Jira link, upstream dependency)."
         ),
     )
-    # ResolvedAgentConfig = base-typed + registry-driven dict coercion + SerializeAsAny:
-    # the concrete subclass (built-in or plugin) is chosen by parse_agent_config, not a
-    # static discriminated union, so any registered plugin kind validates here and its
-    # subclass-only fields (e.g. sdk_options) survive model_dump().
+    # ResolvedAgentConfig: the concrete subclass is chosen by parse_agent_config, not
+    # a static union, so a plugin kind validates and its subclass-only fields survive
+    # model_dump(). Rationale: .claude/notes/agents.md § The sdk_options pass-through
     agent: ResolvedAgentConfig | None = Field(
         default=None,
         description=(
@@ -706,11 +704,8 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             return self
         offenders: list[str] = []
         for c in self.success_criteria:
-            # isinstance narrowing, NOT getattr(c, "files"/"command"): with an
-            # untyped string probe, renaming LLMJudgeCriterion.files or
-            # RunCommandCriterion.command turns this load-time guard into a
-            # silent no-op that pyright cannot see. The union members are
-            # imported here already.
+            # isinstance narrowing, NOT a getattr string probe: a rename would
+            # otherwise turn this load-time guard into a no-op pyright cannot see.
             if isinstance(c, ReferenceComparisonCriterion):
                 offenders.append(f"{c.type} (needs a reference to compare against)")
             elif isinstance(c, LLMJudgeCriterion | AgentJudgeCriterion) and any(
@@ -718,12 +713,10 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
             ):
                 offenders.append(f"{c.type} (files: uses {REFERENCE_DIR_TOKEN})")
             elif isinstance(c, RunCommandCriterion) and command_uses_token(c.command, REFERENCE_DIR_TOKEN):
-                # run_command is the third documented consumer: with no reference
-                # the env var is simply absent, so `diff -r "$REFERENCE_DIR" out/`
-                # expands to an empty argument and misbehaves instead of failing.
                 # command_uses_token, not a raw `in`: the brace form
-                # `${REFERENCE_DIR}` is standard shell and slipped straight past
-                # a substring test, while `$REFERENCE_DIRECTORY` false-positived.
+                # `${REFERENCE_DIR}` slipped past a substring test while
+                # `$REFERENCE_DIRECTORY` false-positived. Without the reference the
+                # var is simply absent, so the command misbehaves instead of failing.
                 offenders.append(f"{c.type} (command: uses {REFERENCE_DIR_TOKEN})")
         if offenders:
             raise ValueError(
@@ -741,9 +734,8 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
         """
         if self.dataset is None and self.suite_id is None:
             for c in self.success_criteria:
-                # Direct attribute access, not getattr: suite_thresholds is
-                # declared on BaseSuccessCriterion, so every union member has it
-                # and pyright can see a rename.
+                # Direct attribute access, not getattr: declared on
+                # BaseSuccessCriterion, so pyright can see a rename.
                 if c.suite_thresholds:
                     raise ValueError(
                         f"success_criteria[{c.type!r}].suite_thresholds requires a dataset: block "
@@ -783,11 +775,9 @@ class TaskDefinition(BaseModel):  # noqa: CE009 -- soft-launch: see _warn_on_unk
                     if ctype in REMOVED_CRITERION_TYPES:
                         raise ValueError(f"Criterion type '{ctype}' has been removed. {REMOVED_CRITERION_TYPES[ctype]}")
                     if ctype in NORMALIZED_CRITERION_ALIASES:
-                        # `{**item, **overlay}` — the overlay WINS, and the order is
-                        # load-bearing. A legacy `command_not_executed` carrying an explicit
-                        # `min_count: 2` is still asking for "this was NOT run"; letting that
-                        # count survive would yield a criterion passing exactly when the
-                        # original asked it to fail.
+                        # HAZARD: the overlay WINS, and the order is load-bearing. A
+                        # legacy `command_not_executed` with `min_count: 2` still
+                        # means "was NOT run"; letting that count survive inverts it.
                         item = {**item, **NORMALIZED_CRITERION_ALIASES[ctype]}
                 normalized.append(item)
             return normalized

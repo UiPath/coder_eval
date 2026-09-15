@@ -1,26 +1,19 @@
 """Vendored ATIF (Agent Trajectory Interchange Format) models, v1.7.
 
-Mirrors the schema in ``harbor.models.trajectories`` (harbor 0.22.0) so
-coder_eval can emit and parse ATIF trajectories with ZERO runtime dependency
-on the ``harbor`` pip package. Fidelity is guarded by a frozen fixture in
-``tests/fixtures/atif/`` that was validated once against the real harbor
-models (see ``tests/test_atif_models.py`` for the reproducible procedure).
+Mirrors the schema in ``harbor.models.trajectories`` so coder_eval can emit and parse
+ATIF trajectories with ZERO runtime dependency on the ``harbor`` package. Fidelity is
+guarded by a frozen fixture validated once against the real models (see
+``tests/test_atif_models.py`` for the reproducible procedure).
 
-Deliberate deviations from harbor's models:
+``schema_version`` is a pattern-validated ``str`` rather than a closed Literal, so a
+FUTURE harbor minor version still parses; major-version bumps are rejected. harbor's
+``Agent`` is renamed :class:`AtifAgent` here to avoid clashing with
+``coder_eval.agent.Agent``.
 
-- ``schema_version`` is a pattern-validated ``str`` (``^ATIF-v1\\.\\d+$``)
-  instead of a closed Literal, so trajectories written by a FUTURE harbor
-  minor version (e.g. ``ATIF-v1.9``) still parse — harbor 0.22.0 itself
-  would reject them. Major-version bumps (``ATIF-v2.0``) are rejected.
-- harbor's ``Agent`` model is named :class:`AtifAgent` here to avoid clashing
-  with ``coder_eval.agent.Agent``.
-- ``ContentPart.source`` (image payloads) is an untyped dict — coder_eval
-  emits text-only content and only needs to *tolerate* image parts on read.
+These live outside ``coder_eval.models`` on purpose: interchange models for Harbor
+interop, not evaluation models.
 
-Deliberate deviation from the repo convention "all models importable from
-``coder_eval.models``": these are interchange-format models for Harbor
-interop, not evaluation models — they are exported from ``coder_eval.harbor``
-to keep the core model namespace clean.
+Rationale: .claude/notes/reporting.md § The ATIF trajectory bridge
 """
 
 from __future__ import annotations

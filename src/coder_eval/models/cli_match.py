@@ -113,13 +113,9 @@ class FlagMatch(BaseModel):
         if self.flags and self.matches_regex is None:
             msg = f"FlagMatch.flags applies only to matches_regex, but the predicate is {set_predicates[0]!r}"
             raise ValueError(msg)
-        # Compile HERE, not in a checker: this model now feeds two consumers, and
-        # only one of them can report. A `record_cli` response rule evaluates the
-        # pattern inside the sandbox, where a PatternError is swallowed and the
-        # tool serves its fallback -- a log line indistinguishable from a
-        # legitimate no-match, so the task scores differently for identical agent
-        # behaviour with nothing on any report surface. At load, both surfaces
-        # refuse the pattern instead.
+        # Compile HERE, not in a checker: this model feeds two consumers and only
+        # one of them can report an error at all.
+        # Rationale: .claude/notes/contracts.md § The five refuse-to-score paths are uniform at a gating 0.0
         if self.matches_regex is not None:
             try:
                 re.compile(self.matches_regex, self.flags)
@@ -129,11 +125,9 @@ class FlagMatch(BaseModel):
         return self
 
 
-# The argv facets every matching surface must offer. `cli_called` declares these
-# fields itself (with grading-specific guidance in each description) rather than
-# inheriting them, so a facet added to one surface and forgotten on the other is
-# caught by the parity test in tests/test_cli_match_parity.py instead of shipping
-# as a rule the criterion cannot express.
+# The argv facets every matching surface must offer. `cli_called` declares them
+# itself rather than inheriting, so a facet added to one surface and forgotten on
+# the other is caught by tests/test_cli_match_parity.py.
 MATCH_FACET_FIELDS: tuple[str, ...] = ("verb", "verb_any_of", "positional", "flags", "value_flags", "ignore_flags")
 
 
@@ -167,12 +161,10 @@ def validate_verbs(verb: str | None, verb_any_of: list[str] | None, spellings: l
     if any(not tokens for tokens in spellings):
         msg = f"{label} verb must not be blank: a blank verb is an empty prefix and matches every invocation"
         raise ValueError(msg)
-    # A verb is compared against the NON-FLAG arguments, so a flag written into it
-    # can never match anything -- and the failure is silent: the criterion scores 0
-    # against a log that holds the very call it describes, and a response rule falls
-    # through to the tool's default. Inviting, too, since a whole verb reads like a
-    # command line. `is_number` mirrors the splitter's own rule so this check cannot
-    # forbid a token (`-1`) that the matcher would in fact have seen.
+    # HAZARD: a verb is compared against the NON-FLAG arguments, so a flag written
+    # into one can never match -- silently. `is_number` mirrors the splitter's own
+    # rule so this cannot forbid a token the matcher would have seen.
+    # Rationale: .claude/notes/contracts.md § The five refuse-to-score paths are uniform at a gating 0.0
     for tokens in spellings:
         for token in tokens:
             if token.startswith("-") and token != "-" and not is_number(token.lstrip("-")):

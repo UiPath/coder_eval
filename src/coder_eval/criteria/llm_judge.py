@@ -74,19 +74,14 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
         ctx = context or CheckContext()
         route = ctx.route
         reference_dir = ctx.reference_dir
-        # Precedence: an explicit per-criterion `model:` always wins; otherwise fall
-        # back to `checker_context.api_route.model` (baked into route.model by
-        # resolve_evaluation_route — set only when a real override was given, never
-        # the agent's own model); otherwise DEFAULT_JUDGE_MODEL. `criterion.model` is
-        # `None` (not a materialized default) when unset, so this precedence survives
-        # a `model_dump(mode="json")` / reload round trip (e.g. the docker driver's
-        # task-serialization step) unlike a `model_fields_set` check would.
+        # Precedence: per-criterion `model:`, then the route's, then the default.
+        # `criterion.model` is None rather than a materialized default when unset, so
+        # this survives a model_dump/reload round trip as a model_fields_set check
+        # would not. Rationale: .claude/notes/contracts.md § Route resolution
         judge_model = criterion.model or (route.model if route is not None else None) or DEFAULT_JUDGE_MODEL
 
-        # Master enablement gate. Skipped criteria don't make an LLM call and don't
-        # affect cost; weighted score includes them as 1.0 so they don't penalize.
-        # Authors who want them excluded from weighted score should remove the
-        # criterion from the YAML or use experiment variants to override.
+        # Master enablement gate. A skipped criterion makes no LLM call and scores
+        # 1.0; to exclude it from the weighted score, remove it or use a variant.
         if not criterion.enabled:
             return JudgeCriterionResult(
                 criterion_type=criterion.type,
@@ -95,9 +90,8 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 details="(skipped: enabled=false)",
             )
 
-        # .build() does synchronous file I/O (reading sandbox/reference files) — offload
-        # to a worker thread so it doesn't stall the event loop this checker otherwise
-        # never blocks (that's the whole point of it being native-async).
+        # .build() does synchronous file I/O -- offload it so it does not stall the
+        # event loop this native-async checker otherwise never blocks.
         judge_ctx = await asyncio.to_thread(
             JudgeContextBuilder(
                 files=criterion.files,
@@ -115,9 +109,8 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
 
         user_msg = _render_user_message(criterion.prompt, judge_ctx)
 
-        # Transport-unconfigured arm needs to short-circuit BEFORE backend dispatch.
-        # Hit when the run uses the Direct backend with no ANTHROPIC_API_KEY (or no
-        # route at all). The Bedrock backend always has a usable judge transport.
+        # Short-circuits BEFORE backend dispatch: Direct with no ANTHROPIC_API_KEY,
+        # or no route at all. Bedrock always has a usable judge transport.
         if route is None or (isinstance(route, DirectRoute) and route.judge_transport is None):
             logger.error("llm_judge unreachable: no usable judge transport for the current backend")
             return JudgeCriterionResult(
@@ -133,17 +126,10 @@ class LLMJudgeChecker(BaseCriterion[LLMJudgeCriterion]):
                 ),
             )
 
-        # Scrub keys are the per-FILE contents of the reference directory, not the
-        # single rendered block: the model is far more likely to echo one file back
-        # than to reproduce the whole concatenation verbatim, and a whole-block key
-        # would never match.
-        #
-        # Taken from the CONTEXT, not recomputed from `criterion.include_reference`:
-        # the builder records every reference-derived byte it actually attached,
-        # which includes `$REFERENCE_DIR/...` entries in `files:` — the documented
-        # way to show a judge one reference asset with include_reference=false.
-        # Gating on the flag left exactly that combination unscrubbed, persisting
-        # the solution verbatim into the archived judge transcript.
+        # HAZARD: per-FILE contents, and taken from the CONTEXT rather than
+        # recomputed from `include_reference` -- gating on the flag left a
+        # `$REFERENCE_DIR/...` entry unscrubbed in the archived transcript.
+        # Rationale: .claude/notes/contracts.md § What counts as reference-derived
         scrub_key = judge_ctx.reference_secrets or None
 
         # Attribute the judge's API call to ``JudgeCriterionResult.token_usage``
@@ -244,11 +230,8 @@ async def _invoke_tool_channel(
             verdict, err = extract_verdict_from_anthropic_response(anthropic_response)
             response_usage = token_usage_from_anthropic_dict(anthropic_response, model=model)
         case LiteLLMRoute():
-            # Reachable via an explicit `checker_context.api_route.route: litellm`
-            # override (see resolve_evaluation_route). Dispatches through the
-            # `litellm` library (see invoke_litellm_judge_async's module docstring)
-            # rather than assuming one wire protocol — task authors point this at
-            # whatever gateway their judge model actually lives behind.
+            # Reached via an explicit `route: litellm` override. Dispatches through
+            # the `litellm` library rather than assuming one wire protocol.
             litellm_response = await invoke_litellm_judge_async(
                 route=route,
                 model=model,

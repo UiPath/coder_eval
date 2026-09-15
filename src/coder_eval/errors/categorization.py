@@ -36,9 +36,8 @@ def _categorize_by_exception_type(error: Exception, component: str) -> ErrorCate
     if isinstance(error, BudgetExceededError):
         return ErrorCategory.BUDGET_EXCEEDED
 
-    # AgentConfigError subclasses RuntimeError, so this typed check must precede
-    # any string-pattern fallback that could re-categorise a missing-prerequisite
-    # message as the retryable AGENT_API_ERROR.
+    # HAZARD: AgentConfigError subclasses RuntimeError, so this typed check must
+    # precede any pattern fallback that would re-categorise it as retryable.
     if isinstance(error, AgentConfigError):
         return ErrorCategory.AGENT_CONFIG_ERROR
 
@@ -82,10 +81,9 @@ def _categorize_by_message(error_str: str, component: str) -> ErrorCategory | No
     if any(pat in error_str for pat in ["authentication", "unauthorized", "invalid api key", "401"]):
         return ErrorCategory.AGENT_AUTH_ERROR
 
-    # Billing/credit errors (NOT retryable - retrying wastes time)
-    # NOTE: Broad patterns like "insufficient" and "credit" are intentional. We prefer
-    # false positives (skipping retry on a non-billing error) over false negatives
-    # (wasting retries on a billing error that will never succeed).
+    # Billing/credit errors (NOT retryable). Broad patterns are intentional: a false
+    # positive skips one retry, a false negative wastes every retry on an error that
+    # will never succeed.
     if any(
         pat in error_str
         for pat in ["credit", "billing", "payment", "insufficient", "402", "quota exceeded", "spending limit"]
@@ -141,11 +139,8 @@ def _categorize_by_component(error: Exception, error_str: str, component: str) -
         return ErrorCategory.SANDBOX_SETUP_ERROR
 
     if component == "agent":
-        # Substring heuristics for plain RuntimeErrors that mention a crash
-        # but aren't typed as AgentCrashError. The typed-AgentCrashError
-        # check below catches the agent's wrapped exceptions; this branch
-        # only fires for bare exceptions whose message happens to describe
-        # a crash.
+        # Heuristics for a plain RuntimeError that describes a crash without being
+        # typed as one; the typed check below catches the agent's wrapped ones.
         if (
             "crash" in error_str
             or "killed" in error_str
@@ -156,11 +151,9 @@ def _categorize_by_component(error: Exception, error_str: str, component: str) -
         if "invalid" in error_str or "malformed" in error_str:
             return ErrorCategory.AGENT_INVALID_OUTPUT
 
-        # Typed agent-crash exception is the LAST agent-side resort: by this
-        # point pattern matching has had a chance to recognise auth / rate-
-        # limit / billing / content-filter / api-network signatures stamped
-        # into the message, so anything still typed as AgentCrashError here
-        # is a genuinely unexpected failure that the user wants retried.
+        # LAST agent-side resort: by here the patterns have had their chance at the
+        # auth / rate-limit / billing signatures, so what remains is a genuinely
+        # unexpected failure the user wants retried.
         if isinstance(error, AgentCrashError):
             return ErrorCategory.AGENT_CRASH
 
@@ -216,10 +209,9 @@ def categorize_error(
 
     component = context.get("component", "")
 
-    # Precedence: typed-exception group → message-string group → component group.
-    # A helper returning None means "no match in my group, fall through" — including
-    # the component-gated timeout/network arms for non-agent components, so a
-    # sandbox failure reaches the sandbox categories (and their retries) below.
+    # Precedence: typed-exception group -> message-string group -> component group.
+    # None means "no match in my group, fall through", so a sandbox failure reaches
+    # the sandbox categories and their retries below.
     if (category := _categorize_by_exception_type(error, component)) is not None:
         return category
 

@@ -1,31 +1,18 @@
 """OpenCode agent implementation (the open-source terminal coding agent).
 
-Drives the ``opencode`` CLI in non-interactive mode::
+Drives the ``opencode`` CLI in non-interactive mode, which streams
+newline-delimited JSON events on stdout, and reduces that stream into the
+standardized coder_eval event protocol so :class:`EventCollector` builds the
+``TurnRecord``.
 
-    opencode run --format json -m <provider/model> --dir <cwd> [--auto] [--pure] <prompt>
+The CLI emits TWO envelope shapes on the same stream: the normal form carries
+its payload under ``part``, while the CLI's own error path emits a flat object
+with none. :func:`_unwrap` normalizes both to ``(event_type, payload)`` so the
+dispatch table is written once.
 
-which streams **newline-delimited JSON events** on stdout. Each line is one
-event; this module reduces that stream into the standardized coder_eval event
-protocol (``AgentStart`` / ``TurnStart`` / ``ToolStart`` / ``ToolEnd`` /
-``TurnEnd`` / ``AgentEnd``) and lets :class:`EventCollector` build the
-``TurnRecord`` — so no telemetry is assembled by hand here.
-
-Envelope normalization
-----------------------
-The CLI emits two envelope shapes on the same stream: the normal form carries
-its payload under ``part`` — ``{"type": "tool_use", "sessionID": …,
-"part": {…}}`` — while the CLI's own error path emits a flat object with no
-``part`` (``{"type": "error", "sessionID": …, "error": {…}}``). :func:`_unwrap`
-normalizes both to ``(event_type, payload)`` so the dispatch table is written
-once. (The ``session.next.*``/``properties`` envelopes belong to ``opencode
-serve``'s HTTP/SSE surface and never appear here — see the note on the event
-constants below.)
-
-Session continuity
-------------------
-The ``sessionID`` observed on the first event is retained and replayed via
-``--session`` on the next ``communicate()`` call, which is what makes multi-turn
-(dialog-mode) evaluation work against a stateless CLI invocation.
+The ``sessionID`` observed on the first event is replayed via ``--session`` on
+the next ``communicate()``, which is what makes dialog mode work against a
+stateless CLI invocation.
 """
 
 from __future__ import annotations
@@ -85,9 +72,7 @@ from .registry import AgentRegistry
 logger = logging.getLogger(__name__)
 
 # Grace period between SIGTERM and SIGKILL when tearing down the CLI subprocess.
-# Doubles as the post-EOF exit grace in _settle_turn when no turn deadline is
-# configured (a CLI that closed its stream but won't exit gets this long to die
-# before the turn is crashed).
+# Doubles as the post-EOF exit grace in _settle_turn when no deadline is set.
 _TERM_GRACE_SECONDS = 5.0
 
 # SIGKILL does not exist on Windows (where the process-group sweep is a no-op
@@ -95,15 +80,15 @@ _TERM_GRACE_SECONDS = 5.0
 # platform, falling back to SIGTERM for the direct-pid kill_sync path.
 _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
 
-# How long to keep draining stdout/stderr after the CLI process has been reaped.
-# `opencode run` leaves a local server child holding the inherited pipes open, so
-# EOF never arrives on its own and every post-exit read must be bounded.
+# How long to keep draining stdout/stderr after the CLI has been reaped:
+# `opencode run` leaves a server child holding the pipes open, so EOF never
+# arrives on its own.
+# Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
 _DRAIN_SECONDS = 2.0
 
-# Event type strings emitted by `opencode run --format json`. These are the CLI's
-# OWN compact vocabulary, captured from a live run — NOT the `session.next.*`
-# names in the server's OpenAPI schema, which describe the HTTP/SSE surface of
-# `opencode serve` instead. The two are not interchangeable.
+# The CLI's OWN compact vocabulary, captured from a live run — NOT the
+# `session.next.*` names in the server's OpenAPI schema, which describe
+# `opencode serve`'s HTTP/SSE surface. The two are not interchangeable.
 _STEP_START = "step_start"
 _STEP_FINISH = "step_finish"
 _TEXT = "text"
@@ -111,10 +96,8 @@ _TOOL_USE = "tool_use"
 _ERROR = "error"
 
 # The full recognized vocabulary. A zero-exit turn that recognized NOTHING from
-# this set captured zero telemetry, and is crashed rather than reported as a
-# clean empty success — an earlier version of this harness parsed the wrong
-# vocabulary and scored SUCCESS 1.0 with zero turns and zero tokens, which is
-# indistinguishable from a real pass in every aggregate. See _settle_turn.
+# it captured zero telemetry and is crashed, not scored.
+# Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
 _RECOGNIZED_EVENTS = frozenset({_STEP_START, _STEP_FINISH, _TEXT, _TOOL_USE, _ERROR})
 
 # How many distinct unrecognized event-type strings to retain for the crash
@@ -122,11 +105,8 @@ _RECOGNIZED_EVENTS = frozenset({_STEP_START, _STEP_FINISH, _TEXT, _TOOL_USE, _ER
 _MAX_UNRECOGNIZED_TYPES = 8
 
 # OpenCode's native tool names -> the canonical (Claude) vocabulary that every
-# criterion is written against. Mirrors codex_agent's _TOOL_ITEM_NAMES: without
-# it a `command_executed` criterion with `tool_name: Bash` matches NOTHING on an
-# OpenCode run, and the shell-aware `parameters["command"]` extraction in
-# criteria/command_executed.py degrades to raw-JSON matching — so the same task
-# scores differently per harness. Unknown tools pass through unchanged.
+# criterion is written against. Unknown tools pass through unchanged.
+# Rationale: .claude/notes/agents.md § Tool-name and argument normalization
 _TOOL_NAME_MAP: dict[str, str] = {
     "bash": "Bash",
     "read": "Read",
@@ -141,40 +121,18 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "todowrite": "TodoWrite",
     "todoread": "TodoRead",
     "task": "Agent",
-    # The GPT-family edit tool. OpenCode exposes a provider-specific tool set, so
-    # the vocabulary varies by MODEL within this one harness: a live 174-task run
-    # showed DeepSeek using write/edit 199 times and apply_patch 0, while GPT-5.6
-    # used apply_patch 120 times and write/edit 0. Unmapped, every
-    # `tool_name: Write` / `tool_name: Edit` criterion scores 0 on a GPT-family
-    # model that edited the file correctly. Maps to `Write` to match codex_agent's
-    # `_TOOL_ITEM_NAMES["apply_patch"] = "Write"`, so one criterion reads the same
-    # on both harnesses.
+    # The GPT-family edit tool: OpenCode's tool set varies by MODEL within this
+    # one harness. `Write` matches codex_agent's own mapping.
     "apply_patch": "Write",
-    # OpenCode's native skill loader. Without this entry `skill_triggered` (which
-    # keys on the canonical `Skill`) and any `command_executed` written against
-    # `tool_name: Skill` read false on every OpenCode run — the engagement happened
-    # but no criterion could see it.
+    # OpenCode's native skill loader; `skill_triggered` keys on the canonical name.
     "skill": "Skill",
 }
 
-# OpenCode per-tool INPUT-arg key -> canonical (Claude) key. Mirrors
-# antigravity_agent's _ANTIGRAVITY_ARG_RENAME and completes what _TOOL_NAME_MAP
-# starts: normalizing the tool NAME alone still leaves a `command_executed` with
-# a non-Bash `tool_name` matching against a differently-keyed JSON blob (see
-# criteria/command_executed.py, which falls back to `json.dumps(parameters)` for
-# every tool but Bash), so the same task scores differently per harness. Keyed by
-# the canonical tool name (post _TOOL_NAME_MAP); unlisted keys pass through.
-#
-# `bash` needs no entry: OpenCode already names it `command`, which is why the
-# Bash-only shell-aware extraction in command_executed.py was correct as-is.
-# `glob`/`grep`/`list` also need none — their `path` already matches Claude's.
-#
-# BOTH file-path spellings are mapped because the CLI has MOVED: a live capture
-# on 2026-08-13 emitted `filePath` (see the fixture in tests/test_opencode_agent.py),
-# while the tool schemas registered by the CLI installed at the time of writing
-# read `path` (`read`/`write`/`edit` all take `{path, ...}`). Accepting both keeps
-# telemetry canonical across the CLI versions a run might use, and neither
-# spelling collides with a legitimate parameter of these three tools.
+# OpenCode per-tool INPUT-arg key -> canonical (Claude) key, keyed by the
+# canonical tool name (post _TOOL_NAME_MAP). Unlisted keys pass through.
+# `bash`/`glob`/`grep`/`list` need no entry — their keys already match Claude's.
+# BOTH file-path spellings are mapped because the CLI has MOVED between them.
+# Rationale: .claude/notes/agents.md § Tool-name and argument normalization
 _OPENCODE_ARG_RENAME: dict[str, dict[str, str]] = {
     "Read": {"path": "file_path", "filePath": "file_path"},
     "Write": {"path": "file_path", "filePath": "file_path"},
@@ -185,17 +143,15 @@ _OPENCODE_ARG_RENAME: dict[str, dict[str, str]] = {
         "newString": "new_string",
         "replaceAll": "replace_all",
     },
-    # The skill loader's argument. With this rename, `skill_triggered` reads the
-    # agent-agnostic `parameters["skill"]` on every harness instead of carrying a
-    # per-harness alternative list in a criterion that must know nothing about
-    # harnesses.
+    # So `skill_triggered` reads the agent-agnostic `parameters["skill"]` rather
+    # than carrying a per-harness alternative list.
     "Skill": {"name": "skill"},
 }
 
 # Config fields the OpenCode CLI has no equivalent knob for. `experiments/default.yaml`
-# sets `allowed_tools` on every task, so these are silently dropped by default —
-# warn once at start() rather than letting a task believe it constrained the agent.
-# `plugins` is NOT here: its skills half is honored via _plugin_skill_dirs below.
+# sets `allowed_tools` on every task, so start() warns once rather than letting a
+# task believe it constrained the agent. `plugins` is NOT here: its skills half is
+# honored. Per-harness table: docs/agents/HARNESS_PARITY.md.
 _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "system_prompt",
     "system_prompt_file",
@@ -203,24 +159,10 @@ _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "disallowed_tools",
 )
 
-# --- skill injection ------------------------------------------------------
-#
-# A `plugins:` entry is a Claude-plugin root. Claude Code reads its skills from
-# the `skills` field of `<root>/.claude-plugin/plugin.json` (conventionally
-# `./skills/`). OpenCode has no plugin knob, but it does load skills from
-# `skills.paths` in its config — so mapping the plugin root to that directory is
-# what makes one `plugins:` line mean the same thing on both harnesses.
-#
-# The config is handed over through OPENCODE_CONFIG_CONTENT, which OpenCode
-# merges as a final local-scope layer. That was chosen over writing
-# `<sandbox>/.opencode/skills/` because it (a) writes nothing into the sandbox
-# that is later preserved as run artifacts and inspected by file criteria, and
-# (b) does not depend on how the CLI resolves a project root from `--dir`.
-# Verified orthogonal to `--pure`, which skips external *plugins*, not
-# configured skill paths.
-#
-# Only the skills half of a plugin is honored. A Claude plugin's agents, hooks,
-# commands and MCP servers have no OpenCode equivalent and are still dropped.
+# Skill injection: each plugin root's skills dir is merged into `skills.paths`
+# through this variable, which OpenCode applies as a final local-scope layer.
+# Only the SKILLS half of a plugin is honored.
+# Rationale: .claude/notes/agents.md § Skills, per harness
 _CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
 
 # ToolEndStatus -> CommandTelemetry.result_status (the persisted tri-state).
@@ -235,10 +177,9 @@ _RESULT_STATUS: dict[ToolEndStatus, Literal["success", "error", "unknown"]] = {
 def _unwrap(obj: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Normalize an OpenCode CLI event to ``(event_type, payload)``.
 
-    Every line is ``{type, timestamp, sessionID, part: {...}}`` with the payload
-    under ``part`` — except the CLI's own error line, which is flat
-    (``{type: "error", sessionID, error: {...}}``). Returning the top-level dict
-    for the flat case is safe: the accessors read named keys, never iterate.
+    Every line carries its payload under ``part`` except the CLI's own error
+    line, which is flat. Returning the top-level dict for that case is safe: the
+    accessors read named keys, never iterate.
     """
     event_type = str(obj.get("type") or "")
     part = obj.get("part")
@@ -250,8 +191,7 @@ def _unwrap(obj: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 def _epoch_ms_to_dt(value: Any) -> datetime | None:
     """Convert OpenCode's epoch-millisecond timestamps to naive local datetimes.
 
-    Naive-local matches what the rest of the telemetry uses (``datetime.now()``),
-    so durations computed against these stay consistent.
+    Naive-local matches the rest of the telemetry, so durations stay consistent.
     """
     if not isinstance(value, int | float):
         return None
@@ -264,8 +204,7 @@ def _epoch_ms_to_dt(value: Any) -> datetime | None:
 def _canonical_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
     """Rename a tool call's argument keys to the canonical cross-agent vocabulary.
 
-    Order is preserved and unlisted keys pass through untouched, so this only ever
-    re-labels what ``_OPENCODE_ARG_RENAME`` names for this tool.
+    Order is preserved and unlisted keys pass through untouched.
     """
     rename = _OPENCODE_ARG_RENAME.get(tool_name)
     if not rename:
@@ -299,10 +238,8 @@ class _OpenCodeTurnState:
         self.messages: list[TranscriptMessage] = []
         self.text_parts: list[str] = []
         self.step_count = 0
-        # Steps the CLI reported as FINISHED (`step_finish`), as opposed to
-        # `step_count`, which counts the ones it started. `_settle_turn` needs the
-        # distinction: a finished step is the CLI's own claim that a generation
-        # completed, so one that booked no tokens means the token schema moved.
+        # Steps the CLI reported as FINISHED, as opposed to `step_count`, which
+        # counts the ones it started. `_settle_turn` needs the distinction.
         self.steps_finished = 0
         self.turn_id: str = ""
         # True between a step's `step_start` and its `step_finish`. `finalize`
@@ -310,18 +247,9 @@ class _OpenCodeTurnState:
         self.step_open = False
         self.step_started_at: datetime | None = None
         # Where the NEXT generation window starts: the previous step's finish.
-        # The CLI announces a step only once it is already producing one, so a
-        # window bounded by `step_start` drops the model time that PRODUCED the
-        # step into the gap before it. Measured on tasks/hello_date with a live
-        # claude-haiku-4.5: two gaps of 857 ms and 851 ms, carrying no tool
-        # (the Write inside them took 7 ms), attributed to nothing — 24% of the
-        # turn's wall clock, enough on its own to hold OpenCode above the
-        # evalboard's 25% "Unaccounted" red threshold.
-        #
-        # None until the first step finishes, and deliberately so: the first
-        # window keeps its own `step_start`, because everything before it is
-        # CLI process spawn, not model time. Tiling that in would report Node's
-        # boot as generation. Same shape as Codex's `gen_mark_ms`.
+        # None until the first step finishes, and deliberately so — everything
+        # before the first `step_start` is CLI process spawn, not model time.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
         self.gen_mark: datetime | None = None
         self.step_text_parts: list[str] = []
         self.step_tool_ids: list[str] = []
@@ -362,13 +290,8 @@ class _OpenCodeTurnState:
         self.step_started_at = datetime.now()
         self.step_text_parts = []
         self.step_tool_ids = []
-        # There is no per-step span list to reset here any more, and that whole
-        # class of defect is gone with it: `timing.subtract_tool_time`
-        # sees every span at once and clips each to the window it overlaps, so
-        # a call closing in the gap before this `step_start` needs nobody to
-        # remember it. The reset rule that used to live here was wrong once
-        # (clearing at `step_start` wiped the span before `step_finish` could
-        # subtract it — a 100% overstatement of that window).
+        # No per-step span list to reset here any more: the collector sees every
+        # span at once and clips each to the window it overlaps.
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -391,12 +314,11 @@ class _OpenCodeTurnState:
         """A ``tool_use`` event carries the tool's whole state under ``state``.
 
         In practice the CLI emits one already-``completed`` event per call rather
-        than a call/result pair, so the matching ``ToolStart``/``ToolEnd`` are
-        both synthesized here. A non-terminal state (``pending``/``running``) is
-        still handled: the tool is left open and closed by a later event for the
-        same ``callID``, or force-closed as ``unresolved`` if the turn dies first.
-        Execution timestamps come from ``state.time``, so ``duration_ms`` reflects
-        the tool's real runtime rather than our parse instant.
+        than a call/result pair, so both ``ToolStart`` and ``ToolEnd`` are
+        synthesized here. A non-terminal state is still handled: the tool is left
+        open and closed by a later event for the same ``callID``, or force-closed
+        as ``unresolved``. Execution timestamps come from ``state.time``, so
+        ``duration_ms`` is the tool's real runtime, not our parse instant.
         """
         state = part.get("state")
         state = state if isinstance(state, dict) else {}
@@ -427,12 +349,10 @@ class _OpenCodeTurnState:
                 ToolStartEvent(task_id=self.task_id, thread_id=self.thread_id, turn_id=self.turn_id, tool=telemetry)
             )
         else:
-            # A SECOND event for a call already open — the pending/running-then-
-            # completed lifecycle. The first event routinely carries no `input`
-            # (the CLI has not finished assembling the call), so freezing the
-            # first event's view would leave `parameters` permanently `{}` and
-            # zero every `command_executed` row while the run looked normal.
-            # Later evidence wins; absent evidence never clears what we have.
+            # A SECOND event for a call already open. The first routinely carries
+            # no `input` yet, so freezing its view would leave `parameters`
+            # permanently `{}` and zero every `command_executed` row while the run
+            # looked normal. Later evidence wins; absent evidence clears nothing.
             if params:
                 telemetry.parameters = _canonical_params(telemetry.tool_name, params)
             if started is not None:
@@ -452,10 +372,8 @@ class _OpenCodeTurnState:
             message = None
             status = ToolEndStatus.OK
 
-        # `times` is the SAME dict read at the top of this function: `state` is
-        # bound once at the start and nothing between here and there rebinds or
-        # mutates it, so re-reading `state["time"]` produced an identical value
-        # from an identical source. One read, one name.
+        # `times` is the SAME dict read at the top: nothing between rebinds or
+        # mutates `state`.
         self._close_tool(
             call_id,
             status=status,
@@ -505,9 +423,7 @@ class _OpenCodeTurnState:
     def _rate_card_cost(self) -> float | None:
         """Price the captured buckets from the static rate card.
 
-        ``None`` when the model is unpinned or unpriced, matching "nothing could
-        be priced". See :meth:`_resolve_cost` for how this composes with the
-        stream's own ``cost`` reporting.
+        ``None`` when the model is unpinned or unpriced.
         """
         if not self.model or self.usage.is_empty():
             return None
@@ -522,19 +438,11 @@ class _OpenCodeTurnState:
     def _resolve_cost(self) -> float | None:
         """Decide the turn's cost: the stream's own accounting vs the rate card.
 
-        A non-zero cost the CLI reported always wins — it is the provider's own
-        accounting, and (on OpenRouter) per-request routing makes it strictly
-        better than a static headline rate. The rate card fills two gaps that
-        would otherwise book tokens with no money and silently understate the
-        run-level bill:
+        A non-zero cost the CLI reported always wins. The rate card fills two gaps
+        that would otherwise book tokens with no money: no ``cost`` field at all,
+        and ``cost: 0`` for tokens the rate card prices above zero.
 
-        - the stream reported no ``cost`` at all (a provider or auth mode that
-          omits it, or a turn that died before its first ``step_finish``);
-        - the stream reported ``cost: 0`` for tokens the rate card prices above
-          zero. OpenCode reports 0 when its own model registry has no price for
-          the model, or under subscription-style auth — neither means the tokens
-          were free. A genuinely free model has an all-zero rate entry (or no
-          entry), so it still resolves to the stream's 0 here.
+        Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
         """
         rate = self._rate_card_cost()
         if not self.saw_cost:
@@ -559,19 +467,10 @@ class _OpenCodeTurnState:
     def _as_int(self, bucket: str, value: Any) -> int:
         """Coerce one stream-supplied token count, warning instead of raising.
 
-        A bare ``int()`` raises on anything non-numeric (``int("abc")`` ->
-        ``ValueError``; ``int({...})``/``int([...])`` -> ``TypeError``), which
-        ``communicate``'s ``except Exception`` turns into an ``AgentCrashError``
-        — categorized ``AGENT_CRASH`` with ``max_retries=2``, so ONE mistyped
-        bucket burns three full attempts and lands the task as ERROR.
+        This is what makes ``_handle_line``'s advertised "Never raises on bad
+        input" true.
 
-        That is the opposite of the policy every neighbouring field follows:
-        ``_epoch_ms_to_dt`` type-checks, ``state``/``input``/``cost``/``total`` are
-        all ``isinstance``-gated, and ``_fresh_input_slice`` exists specifically to
-        warn-once on token-schema drift rather than fail. A changed type in the
-        very same ``tokens`` dict is drift too, so it is reported the same way and
-        the turn survives on the buckets it could read. It is also what makes
-        ``_handle_line``'s advertised "Never raises on bad input" true.
+        Rationale: .claude/notes/agents.md § Why token-shape drift warns instead of raising
         """
         if isinstance(value, bool) or not isinstance(value, int | float | str):
             if value is not None:
@@ -599,26 +498,19 @@ class _OpenCodeTurnState:
     ) -> int:
         """Decide what ``tokens.input`` means on this stream — per step, from evidence.
 
-        coder_eval's ``uncached_input_tokens`` is the fresh slice only (cost bills it
-        at the input rate and the cache buckets separately), and two conventions for
-        ``input`` exist in the wild:
+        Two conventions exist in the wild: **flat**, where ``input`` already IS the
+        fresh slice and ``total = input + output + reasoning + cache``, and
+        **nested**, where the cache buckets are counted inside ``input`` (the
+        OpenAI ``prompt_tokens`` convention) and ``total = input + output +
+        reasoning``.
 
-        - **flat** — ``input`` already IS the fresh slice and
-          ``total = input + output + reasoning + cache.read + cache.write``. This is
-          what a live capture on the current CLI shows (observed 2026-08-13:
-          ``7966 = 6796 + 128 + 18 + 1024`` exactly).
-        - **nested** — cached tokens are counted inside ``input`` (the OpenAI
-          ``prompt_tokens`` convention), so ``total = input + output + reasoning``
-          and the fresh slice subtracts the cache buckets.
+        The stream's own ``total`` arbitrates PER STEP. With no cache traffic the
+        two agree. With no usable ``total`` the flat reading is taken, but warns
+        once if cache traffic is present — that is an unverifiable assumption, and
+        the original mapping bug was exactly one of those. A ``total`` matching
+        NEITHER warns loudly.
 
-        The stream's own ``total`` arbitrates per step, so a CLI upgrade that flips
-        the convention re-classifies itself instead of silently mis-booking a bucket.
-        With no cache traffic the conventions agree. With no usable ``total`` the
-        flat (live-verified) reading is taken — but if cache traffic is present that
-        is an UNVERIFIABLE assumption (the original mapping bug was exactly an
-        unverified assumption of this kind), so it warns once per turn rather than
-        defaulting in silence. A ``total`` matching NEITHER warns loudly — the
-        schema moved, and cost should not be trusted blind.
+        Rationale: .claude/notes/agents.md § Token accounting, per harness
         """
         total = tokens.get("total")
         if not isinstance(total, int):
@@ -640,8 +532,8 @@ class _OpenCodeTurnState:
         if total == nested:  # implies cache traffic, since flat was checked first
             fresh = raw_in - cr - cw
             if fresh < 0:
-                # The stream contradicts itself: `total` says the cache buckets nest
-                # inside `input`, but `input` is too small to contain them.
+                # The stream contradicts itself: `total` says the cache buckets
+                # nest inside `input`, but `input` is too small to hold them.
                 self._warn_token_shape(
                     "tokens.total says the cache buckets nest inside input, but input(%d) < "
                     + "cache.read(%d) + cache.write(%d); keeping `input` as the fresh slice",
@@ -675,9 +567,8 @@ class _OpenCodeTurnState:
         step_cr = self._as_int("cache.read", cache.get("read") or 0)
 
         step_in = self._fresh_input_slice(tokens, raw_in, raw_out, step_reasoning, step_cw, step_cr)
-        # Reasoning tokens are billed at the output rate but reported apart from
-        # `output`, so fold them in for the turn total; the per-message record
-        # keeps `reasoning_tokens` separately for visibility.
+        # Reasoning bills at the output rate but is reported apart from `output`,
+        # so fold it into the turn total; the per-message record keeps it apart.
         step_out = raw_out + step_reasoning
 
         self.usage = TokenUsage(
@@ -704,9 +595,7 @@ class _OpenCodeTurnState:
         for i, tool_id in enumerate(self.step_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
-        # Tile from the previous step's finish. The RAW window only —
-        # `timing.subtract_tool_time` takes the tool union back out of
-        # it, once, for every harness.
+        # Tile from the previous step's finish. The RAW window only.
         started, generation_ms = close_window(
             mark=self.gen_mark if self.gen_mark is not None else step_start,
             now=completed,
@@ -729,20 +618,15 @@ class _OpenCodeTurnState:
                 message_id=str(part.get("messageID") or "") or None,
             )
         )
-        # A message was appended, so the next window starts where this one
-        # ended. Only `step_finish` advances the mark: a step that never
-        # finished published nothing, so tiling past it would attribute its
-        # time to whichever step finishes next. There is no span list to clear
-        # alongside it any more — see `on_step_start`.
+        # A message was appended, so the next window starts where this one ended.
+        # Only `step_finish` advances the mark.
         self.gen_mark = completed
-        # And so is this step's own start stamp, because it has now been SPENT.
-        # It is passed to `close_window` as `item_start`, whose `min()` pulls
-        # the window open to cover it; left in place, a second `step_finish`
-        # with no intervening `step_start` would reopen the next window back at
-        # the previous step's start and publish that whole span a second time.
-        # The `min()` still defends a genuinely OPEN step against a backwards
-        # clock, which is what it is for — this reducer's stamps are raw
-        # `datetime.now()` and are not on a `TurnClock`.
+        # SPENT state, cleared HERE and not only in `on_step_start`: a second
+        # `step_finish` with no intervening start would otherwise republish this
+        # step's whole span as the next one's. The `min()` in `close_window` still
+        # defends a genuinely OPEN step against a backwards clock, which is what
+        # it is for — this reducer's stamps are raw `datetime.now()`.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
         self.step_started_at = None
         self.emit(
             TurnEndEvent(
@@ -762,8 +646,8 @@ class _OpenCodeTurnState:
     def on_error(self, part: dict[str, Any]) -> None:
         """Record the CLI's own structured error, which ``_settle_turn`` crashes on.
 
-        The payload is the flat envelope (no ``part``), and its shape varies: a
-        nested ``error.data.message`` when the CLI has one, otherwise the error's
+        The payload is the flat envelope, and its shape varies: a nested
+        ``error.data.message`` when the CLI has one, otherwise the error's
         ``name``. Anything else degrades to its string form rather than raising.
         """
         error = part.get("error")
@@ -789,11 +673,9 @@ class _OpenCodeTurnState:
         """Close orphaned tools and emit the terminal ``AgentEndEvent``.
 
         Idempotent: the protocol allows EXACTLY ONE ``AgentEndEvent`` per
-        ``communicate()``, and the outer ``except Exception`` guard can fire after
-        a normal finalize (e.g. a failure while building the record). The first
-        call wins so a late crash cannot emit a second terminal event into the
-        caller's ``stream_callback``; it still raises, so the failure is not
-        swallowed.
+        ``communicate()``.
+
+        Rationale: .claude/notes/agents.md § Shared turn lifecycle
         """
         if self.finalized:
             return
@@ -803,15 +685,9 @@ class _OpenCodeTurnState:
         cost = self._resolve_cost()
         if cost is not None:
             usage = usage.model_copy(update={"total_cost_usd": cost})
-        # A step still open here never received its `step_finish` — the turn
-        # died between the two (crash, timeout, cancel) or was cut cleanly
-        # (should_stop, max_turns). Either way its TurnStartEvent must be
-        # closed, or the protocol's one-pair-per-inner-turn contract
-        # (Agent.communicate) is broken and every renderer shows a turn that
-        # opens and never ends. Unlike the siblings, the completed steps have
-        # already closed themselves in `on_step_finish`, so this fires ONLY for
-        # the straggler. TurnEndStatus mirrors AgentEndStatus value-for-value
-        # precisely so this conversion is total.
+        # A step still open never received its `step_finish`; close it or the
+        # one-pair-per-inner-turn contract breaks. Completed steps already closed
+        # themselves, so this fires ONLY for the straggler.
         if self.step_open:
             self.step_open = False
             self.emit(
@@ -854,14 +730,11 @@ class _OpenCodeTurnState:
 class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     """Runs the ``opencode`` CLI as a subprocess, one invocation per turn."""
 
-    # `should_stop` is polled at every event boundary — i.e. tool-call
-    # granularity — and honored by terminating the CLI subprocess cleanly.
+    # `should_stop` is polled at every event boundary (tool-call granularity).
     supports_cooperative_stop: ClassVar[bool] = True
 
-    # OpenCode neither appends to nor replaces the system prompt — `system_prompt`
-    # is in `_UNSUPPORTED_CONFIG_FIELDS` (no CLI knob), so the honest regime is
-    # `"unknown"` (also the base default). Declared explicitly so the run marker
-    # is deliberate rather than an unset oversight.
+    # No CLI knob for `system_prompt`, so the honest regime is `"unknown"`.
+    # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     system_prompt_semantics: ClassVar[SystemPromptSemantics] = "unknown"
 
     def __init__(
@@ -873,19 +746,12 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     ) -> None:
         """Every parameter the agent factory can pass is DECLARED, not absorbed.
 
-        ``create_agent`` calls ``agent_class(config, route=route, **kwargs)`` through
-        a ``cast(Any, ...)``, so pyright checks nothing at the call site; a ``**_``
-        sink on this side would mean nothing checks it at runtime either. The
-        orchestrator depends on that TypeError as a signal — it gates
-        ``cost_log_tags`` on ``supports_cost_log_tags`` precisely "otherwise the
-        agent-agnostic factory would forward it into ... constructors that don't
-        declare it and crash with TypeError" — so a mis-gated kwarg must be loud
-        here rather than silently dropped.
-
         ``route`` is accepted for factory parity and deliberately unused: the CLI
-        owns its own provider configuration (see ``docs/agents/OPENCODE.md``), so
-        the run's Bedrock/Anthropic routing does not apply to it. ``task_id`` only
-        labels the emitted event stream.
+        owns its own provider configuration (``docs/agents/OPENCODE.md``), so the
+        run's Bedrock/Anthropic routing does not apply. ``task_id`` only labels
+        the event stream.
+
+        Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         """
         self.config = config
         self.route = route
@@ -896,10 +762,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         self._skill_dirs: list[str] = []
         self._session_id: str | None = None
         self._process: asyncio.subprocess.Process | None = None
-        # Process-group ids (== the CLI's pid under start_new_session) of every
-        # invocation this agent spawned, swept on kill()/kill_sync()/stop() —
-        # `opencode run` leaves a server child alive after the CLI exits, and
-        # signaling only the CLI pid would orphan it (a slow leak across a batch).
+        # Process-group ids of every invocation this agent spawned, swept on
+        # kill()/kill_sync()/stop(): signalling only the CLI pid orphans the
+        # server child `opencode run` leaves behind.
         self._spawned_pgids: list[int] = []
         self._state = AgentState.WORKING
 
@@ -933,8 +798,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 self._skill_dirs,
             )
         elif self.config.plugins:
-            # Plugins were declared but produced nothing — the run is about to
-            # measure the model without the skills under test. Say so loudly.
+            # The run is about to measure the model without the skills under
+            # test. Say so loudly.
             logger.warning(
                 "opencode: %d plugin(s) declared but 0 skill path(s) resolved — the agent will run "
                 + "WITHOUT them (see docs/agents/OPENCODE.md).",
@@ -973,13 +838,10 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     def _sweep_process_groups(self) -> None:
         """SIGKILL every process group this agent spawned (POSIX only).
 
-        Each invocation runs in its own session (``start_new_session``), so its
-        pgid is the CLI's pid and the group contains ONLY what that invocation
-        spawned — the lingering server child included, a shared daemon we did not
-        start excluded. The CLI itself gets SIGTERM-then-SIGKILL first (see
-        ``kill``); this reaps whatever survives it. Sessions are persisted on
-        disk by OpenCode, so killing a turn's server does not lose ``--session``
-        continuity.
+        Each invocation runs in its own session, so its pgid is the CLI's pid and
+        the group holds ONLY what that invocation spawned. The CLI itself gets
+        SIGTERM-then-SIGKILL first (see ``kill``); this reaps what survives.
+        Sessions persist on disk, so this does not lose ``--session`` continuity.
         """
         if os.name != "posix":
             return
@@ -989,16 +851,16 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         self._spawned_pgids.clear()
 
     def get_environment_info(self) -> dict[str, Any]:
-        # Spread the base first so the `system_prompt_semantics` run marker is
-        # always present (dashboards read an absent marker as a pre-marker run).
+        # Base first so the `system_prompt_semantics` run marker is always
+        # present (an absent marker reads as a pre-marker run).
         info: dict[str, Any] = {
             **super().get_environment_info(),
             "opencode_model": self.config.model,
             "opencode_pure": self.config.pure,
         }
         if self._skill_dirs:
-            # Recorded per task so a run's report can be checked for whether the
-            # skills under test actually reached the agent.
+            # Recorded per task so a report can confirm the skills reached the
+            # agent.
             info["opencode_skill_paths"] = list(self._skill_dirs)
         if self.config.variant:
             info["opencode_variant"] = self.config.variant
@@ -1018,8 +880,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             argv += ["--variant", self.config.variant]
         if self.config.pure:
             argv.append("--pure")
-        # PLAN mode is the one mode that must not auto-approve side effects; every
-        # other mode runs unattended, where an approval prompt would simply hang.
+        # PLAN is the one mode that must not auto-approve side effects; every
+        # other runs unattended, where an approval prompt would simply hang.
         if self.config.permission_mode is not PermissionMode.PLAN:
             argv.append("--auto")
         if self._session_id:
@@ -1037,12 +899,11 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         real one. ``PLUGIN_TOOLS_DIR`` is advisory and never overrides an
         inherited value.
 
-        Unlike ``CodexAgent._build_codex_env`` — which hands the SDK a partial
-        dict merged over the real environment, and so must resolve the PATH key
-        case-insensitively — this returns the WHOLE environment, seeded from
-        ``os.environ``, whose keys CPython upper-cases on Windows (``os.py``'s
-        ``encodekey``). ``"PATH"`` is therefore the inherited key on every
-        platform and cannot duplicate a differently-cased one.
+        Returns the WHOLE environment, seeded from ``os.environ``, whose keys
+        CPython upper-cases on Windows — so ``"PATH"`` is the inherited key on
+        every platform and cannot duplicate a differently-cased one. (Codex hands
+        the SDK a PARTIAL dict instead, which is why it resolves the key
+        case-insensitively.)
         """
         env = dict(os.environ)
         if self._env_path_prepend:
@@ -1055,10 +916,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     def _inject_skill_paths(self, env: dict[str, str]) -> None:
         """Merge the resolved skill directories into ``OPENCODE_CONFIG_CONTENT``.
 
-        No plugins means the variable is left exactly as inherited, so a run
-        without a ``plugins:`` block behaves byte-for-byte as before. An inherited
-        value is preserved and appended to rather than clobbered, since the host
-        may legitimately configure OpenCode through the same seam.
+        No plugins means the variable is left exactly as inherited. An inherited
+        value is appended to, never clobbered: the host may legitimately configure
+        OpenCode through the same seam.
         """
         if not self._skill_dirs:
             return
@@ -1129,9 +989,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         stderr_drain: asyncio.Future[bytes] | None = None
-        # Bound OUTSIDE the try so the teardown in `finally` can tell "never
-        # spawned" (a create_subprocess_exec failure) from "spawned and possibly
-        # still running".
+        # Bound OUTSIDE the try so `finally` can tell "never spawned" from
+        # "spawned and possibly still running".
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1140,13 +999,11 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.working_directory,
                 env=self._build_env(),
-                # A single nd-JSON event can carry a whole tool result (a large file
-                # read), which blows past StreamReader's default 64 KiB line cap and
-                # would raise ValueError mid-stream, killing the read loop.
+                # One nd-JSON event can carry a whole tool result, past
+                # StreamReader's default 64 KiB cap.
                 limit=STDOUT_LINE_LIMIT_BYTES,
-                # Own session/process group, so teardown can killpg the lingering
-                # server child without touching anything this invocation didn't
-                # spawn. POSIX-only knob; harmless False elsewhere.
+                # Own session/process group, so teardown can killpg the server
+                # child. POSIX-only knob; harmless False elsewhere.
                 start_new_session=os.name == "posix",
             )
             self._process = proc
@@ -1154,21 +1011,14 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 self._spawned_pgids.append(proc.pid)
             assert proc.stdout is not None
 
-            # Drain stderr CONCURRENTLY, from the moment the CLI starts. Reading it
-            # only after exit (while stdout drives the loop) deadlocks the pair: a
-            # child that fills the ~64 KiB stderr pipe blocks on write, stops
-            # emitting stdout, and never exits — so the turn hangs to its deadline.
-            # docker_runner dodges this by merging stderr into stdout; here that
-            # would corrupt the nd-JSON, so it gets its own reader instead.
+            # Drain stderr CONCURRENTLY, or a child that fills the pipe blocks on
+            # write and hangs the turn to its deadline.
+            # Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
             if proc.stderr is not None:
                 stderr_drain = asyncio.ensure_future(proc.stderr.read())
 
-            # `opencode run` spawns a local server child that INHERITS this stdout
-            # pipe, so the pipe is NOT closed when the CLI itself exits — readline()
-            # would block until the turn deadline waiting for an EOF that never
-            # comes. So race each read against process exit: whichever lands first
-            # wins, and once the process is gone a bounded drain collects whatever
-            # is still buffered before the loop ends.
+            # The server child INHERITS this stdout pipe, so it is not closed when
+            # the CLI exits: race each read against process exit, then drain.
             exit_waiter = asyncio.ensure_future(proc.wait())
             read_task: asyncio.Future[bytes] | None = None
             try:
@@ -1187,9 +1037,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     if not done:
                         await self._timeout_turn(state, collector, timeout or 0.0)
                     if not read_task.done():
-                        # The process exited with the read still pending. Give the
-                        # buffered tail a bounded window, then stop rather than
-                        # waiting on the grandchild's open write end.
+                        # Exited with the read still pending: bound the tail rather
+                        # than wait on the grandchild's open write end.
                         try:
                             await asyncio.wait_for(asyncio.shield(read_task), _DRAIN_SECONDS)
                         except TimeoutError:
@@ -1225,8 +1074,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             )
             state.finalize(status)
             # Build BEFORE marking the turn clean: a failure in the reduction is a
-            # failed turn, and `_end_turn_ok` would clear the rollback flag that
-            # `discard_pending_turn` needs to un-bump `_iteration`.
+            # failed turn, and `_end_turn_ok` clears the rollback flag.
             record = collector.build_turn_record()
             self._end_turn_ok()
             return record
@@ -1239,15 +1087,10 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             self._capture_partial_turn(collector)
             raise
         except Exception as e:
-            # Everything the turn loop does NOT anticipate: a spawn failure
-            # (OSError/PermissionError from create_subprocess_exec), a StreamReader
-            # ValueError on a line past `limit`, a malformed-payload TypeError in a
-            # handler, a pydantic error assembling telemetry. Without this the
-            # exception escapes raw and breaks the pending-turn contract three ways:
-            # no AgentEndEvent (an unbalanced event tree for every renderer), the
-            # captured telemetry dropped instead of parked on `pending_turn`, and
-            # `_iteration` left incremented because the orchestrator never reaches
-            # `discard_pending_turn`. Same guard, same reasons, as CodexAgent.
+            # Everything the loop does NOT anticipate. Without this the exception
+            # escapes raw and breaks the pending-turn contract three ways: no
+            # AgentEndEvent, the telemetry dropped rather than parked, and
+            # `_iteration` left incremented.
             self._crash_turn(state, collector, f"OpenCode turn failed: {e!s}", cause=e)
             raise  # unreachable (_crash_turn is NoReturn) — makes the no-fall-through explicit
         finally:
@@ -1259,27 +1102,13 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     def _reap_orphaned_cli(self, proc: asyncio.subprocess.Process | None) -> None:
         """Kill a CLI that is still running as the turn unwinds. No-op otherwise.
 
-        Two exits from :meth:`communicate` reach its ``finally`` with the child
-        ALIVE: the ``except Exception`` crash (a ``StreamReader`` ``ValueError``
-        on an over-long line, a malformed-payload ``TypeError`` in a handler) and
-        an external cancellation — neither passes through the graceful
-        ``await self.kill()`` that the intentional cuts and ``_settle_turn`` use.
+        Deliberately synchronous: this runs while a ``CancelledError`` is
+        propagating, where any await can itself be cut short. Skipping the SIGTERM
+        courtesy is right for a turn that is already lost — :meth:`kill` still
+        owns every path with something left to flush. ``proc`` is ``None`` when
+        the spawn itself failed.
 
-        Abandoning it is not merely a leak. ``AgentCrashError`` is categorized
-        ``AGENT_CRASH`` (``max_retries=2``) and the orchestrator's attempt-failure
-        hook only drains ``pending_turn``, so attempt 2 would spawn a SECOND
-        ``opencode --dir <sandbox> --session <same id>`` while attempt 1 is still
-        editing the files the criteria are about to score — and whichever writer
-        won would decide the task's result. ``docker_runner`` kills its container
-        from ``finally`` for the same reason.
-
-        Deliberately synchronous. This runs while a ``CancelledError`` is
-        propagating, where any await can itself be cut short and leave the child
-        alive after all; ``Process.kill()`` and the group sweep deliver their
-        signals with no suspension point. Skipping the SIGTERM courtesy is right
-        for a turn that is already lost — the graceful escalation in :meth:`kill`
-        still owns every path that has something left to flush. ``proc`` is
-        ``None`` when the spawn itself failed, i.e. there is nothing to reap.
+        Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
         """
         if proc is None or proc.returncode is not None:
             return
@@ -1300,19 +1129,13 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     ) -> AgentEndStatus:
         """Reap the CLI once the read loop is done and decide the turn's end status.
 
-        Raises ``AgentCrashError`` (via :meth:`_crash_turn`) when the stream carried
-        a structured error, when the process died with neither a structured error
-        nor an intentional stop, or when a clean exit captured no token telemetry
-        (a zero-telemetry turn must not score — see the guard below). Raises
-        ``TurnTimeoutError`` when the turn deadline elapses while waiting for the
-        exit.
+        Raises ``AgentCrashError`` (via :meth:`_crash_turn`) on a structured error,
+        on a death with neither a structured error nor an intentional stop, or on
+        a clean exit that captured no token telemetry. Raises ``TurnTimeoutError``
+        when the deadline elapses while waiting for the exit.
         """
-        # Bound the reap: the read loop can end at EOF with the CLI still alive
-        # (it closed its stream but never exited), and an unbounded wait here
-        # would outlive the turn deadline — the one window where `timeout` was
-        # previously unenforced. Give the exit the deadline's remainder, or a
-        # short fixed grace when no deadline is configured (post-EOF, a healthy
-        # CLI exits almost immediately).
+        # Bound the reap: the read loop can end at EOF with the CLI still alive,
+        # and an unbounded wait here would outlive the turn deadline.
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
         try:
             await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS if remaining is None else remaining)
@@ -1325,10 +1148,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 collector,
                 f"OpenCode closed its event stream but did not exit within {_TERM_GRACE_SECONDS:.0f}s",
             )
-        # Collect what the concurrent reader drained. Bounded for the same reason as
-        # the read loop: the inherited stderr pipe outlives the CLI, so waiting for
-        # the reader's own EOF would block. Shielded so the timeout doesn't kill it
-        # before communicate()'s finally can.
+        # Bounded for the same reason as the read loop: the inherited stderr pipe
+        # outlives the CLI. Shielded so the timeout doesn't kill it early.
         stderr_bytes = b""
         if stderr_drain is not None:
             with contextlib.suppress(TimeoutError):
@@ -1337,34 +1158,19 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         if state.error_message is not None:
             self._crash_turn(state, collector, f"OpenCode error: {state.error_message}")
 
-        # A non-zero exit with no structured error event still means the turn
-        # died — surface stderr rather than reporting a silent empty success.
+        # A non-zero exit with no structured error still means the turn died:
+        # surface stderr rather than reporting a silent empty success.
         if proc.returncode not in (0, None) and not stopped_early and not state.max_turns_exhausted:
             detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
             self._crash_turn(state, collector, f"OpenCode exited non-zero: {detail}")
 
-        # A clean exit that captured NO token telemetry must not score. File-based
-        # criteria can still pass on whatever the agent did, producing a SUCCESS
-        # that is silently missing from every aggregate — and, worse, one whose
-        # `run_limits.max_total_tokens` / `max_usd` gates could never have tripped
-        # no matter how much the run actually billed. This already happened once
-        # (the harness parsed the `session.next.*` server vocabulary instead of
-        # the CLI's), so drift is crashed loudly instead of scored.
-        #
-        # The condition is the TELEMETRY, not the event vocabulary. Keying on
-        # `recognized_events == 0` alone left the identical outcome reachable one
-        # layer down: a `step_finish` carrying no `tokens` key (a provider or auth
-        # mode that omits usage) recognizes three events, books an all-zero
-        # `TokenUsage`, and `EventCollector` then maps that to `token_usage=None`
-        # — a COMPLETED turn with no tokens, no cost and no warning.
-        #
-        # Intentional cuts (should_stop / max_turns) are exempt: both can land
-        # before the first event, or between a step's start and its `step_finish`.
-        #
-        # The second arm keys on a step the CLI reported as FINISHED — its own
-        # claim that a generation completed — rather than on `usage.is_empty()`
-        # alone, which would also condemn a stream that was cut before any step
-        # could finish.
+        # A clean exit that captured NO token telemetry must not score. Keying on
+        # the token counts ALONE is what misses the second arm: an exit that
+        # recognized no events at all reaches the same silent-empty-success
+        # outcome. Intentional cuts are exempt — either can land before the first
+        # event, or mid-step. (The two arms are NOT interchangeable downstream;
+        # see the require_token_telemetry escape hatch below.)
+        # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
         nothing_recognized = state.recognized_events == 0
         finished_without_tokens = state.steps_finished > 0 and state.usage.is_empty()
         if not stopped_early and not state.max_turns_exhausted and (nothing_recognized or finished_without_tokens):
@@ -1381,11 +1187,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 + "event or token schema may have changed — see docs/agents/OPENCODE.md (Telemetry) before "
                 + "trusting any run from this CLI version."
             )
-            # Escape hatch for a provider/auth mode that reports no usage at all,
-            # where crashing every turn would make the harness unusable rather than
-            # merely imprecise. Deliberately does NOT cover `nothing_recognized`:
-            # that arm is vocabulary drift, which has silently zeroed a whole run
-            # before, and no provider quirk can explain it.
+            # Escape hatch for a provider/auth mode that reports no usage at all.
+            # Deliberately does NOT cover `nothing_recognized`: that arm is
+            # vocabulary drift, which no provider quirk explains.
             if not self.config.require_token_telemetry and not nothing_recognized:
                 logger.warning("opencode: %s Scored anyway — require_token_telemetry is off.", message)
             else:
@@ -1407,8 +1211,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     ) -> NoReturn:
         """Park the crashed partial record and raise ``AgentCrashError``.
 
-        ``cause`` preserves the explicit ``__cause__`` link when called from
-        inside an ``except ... as e`` block.
+        ``cause`` preserves the ``__cause__`` link from an ``except ... as e``.
         """
         state.close_open_tools()
         try:
@@ -1424,9 +1227,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     ) -> NoReturn:
         """Kill the CLI, park the crashed partial record, raise ``TurnTimeoutError``.
 
-        ``_finalize_and_raise_timeout`` emits the terminal event via
-        ``state.finalize``; the partial record is captured immediately after so
-        ``pending_turn`` carries everything observed before the deadline.
+        The partial record is captured immediately after, so ``pending_turn``
+        carries everything observed before the deadline.
         """
         await self.kill()
         state.close_open_tools()
@@ -1443,8 +1245,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
-            # OpenCode occasionally interleaves non-JSON notices (e.g. the Bun
-            # AVX warning) on stdout; a malformed line must not kill the turn.
+            # OpenCode interleaves non-JSON notices (the Bun AVX warning) on
+            # stdout; a malformed line must not kill the turn.
             logger.debug("opencode: skipping non-JSON stdout line: %s", raw[:200])
             return
         if not isinstance(obj, dict):

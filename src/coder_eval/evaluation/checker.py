@@ -87,21 +87,16 @@ class SuccessChecker:
         """
         self.sandbox = sandbox
         self._checker_instances: dict[str, BaseCriterion[Any]] = {}
-        # Cached reference directory (the per-run staged copy of
-        # task.reference.directory). Set by check()/check_all() when provided and
-        # reused by subsequent calls that don't pass it explicitly.
+        # The per-run staged copy, set by check()/check_all() and reused by calls
+        # that do not pass it explicitly.
         self._reference_dir: Path | None = None
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
         self.route = route
-        # Cumulative wall ms spent grading, across every `check_all_async` call
-        # this checker serves. Accumulated HERE rather than at the four
-        # orchestrator call sites (single-shot, evaluate-only, the per-dialog-turn
-        # check, the post-failure diagnostics) so a fifth call site cannot be
-        # added without it — the same reason the tool subtraction lives at the
-        # one collector seam. `None` until something is actually checked, so an
-        # ungraded row reports "never measured" rather than an instant 0.0
-        # (CE058).
+        # Accumulated HERE, not at the four orchestrator call sites, so a fifth
+        # cannot be added without it. `None` until something is checked, so an
+        # ungraded row reports "never measured" rather than 0.0 (CE058).
+        # Rationale: .claude/notes/contracts.md § What escalates instead of scoring 0.0
         self.grading_ms: float | None = None
 
         # V3: Lazy initialization - registry loaded here, not at import
@@ -181,43 +176,26 @@ class SuccessChecker:
     ) -> CriteriaResults:
         """Async twin of ``check_all`` — the orchestrator's entry point.
 
-        Runs every criterion SEQUENTIALLY, strictly in declaration order —
-        the same order/isolation guarantee ``check_all`` provides. A checker
-        is "native async" when it overrides ``_check_impl_async`` itself (see
-        ``BaseCriterion``) — that's the criteria making genuine async I/O
-        (``llm_judge``, ``agent_judge``); those are awaited directly on the
-        event loop instead of pinning a thread-pool thread for the network
-        wait. Everything else (CPU/file-bound criteria that only override the
-        sync ``_check_impl``) is offloaded to a worker thread via
-        ``asyncio.to_thread`` so it doesn't block the loop either. Neither of
-        those is about concurrency between criteria — each criterion is fully
-        awaited before the next one starts, exactly like ``check_all``.
-
-        Concurrent dispatch of adjacent judge criteria (the actual GH #55
-        motivation — firing multiple judges' LLM calls at once instead of
-        serializing them) is DELIBERATELY NOT done here; that scheduling
-        change is scoped to a follow-up PR so it can be reviewed (and its
-        sandbox-mutation-ordering implications tested) on its own. This
-        method exists as the async entry point the orchestrator now calls
-        unconditionally, with sequential semantics identical to ``check_all``
-        in the meantime.
+        Runs every criterion SEQUENTIALLY, strictly in declaration order, with the
+        same isolation guarantee ``check_all`` provides. A natively-async checker is
+        awaited directly on the event loop; every other one is offloaded to a worker
+        thread. Neither is concurrency BETWEEN criteria — each is fully awaited
+        before the next starts.
 
         Args:
             criteria: List of criterion definitions.
             turn_records: Optional turn records for command inspection.
             reference_dir: Optional resolved path to a reference directory.
-                Consumed by ``reference_comparison`` (which scores 0.0 without
-                it), ``llm_judge`` and ``agent_judge``; other criteria accept the
-                uniform signature and ignore it.
+                Consumed by ``reference_comparison`` (which scores 0.0 without it),
+                ``llm_judge`` and ``agent_judge``; the rest ignore it.
 
         Returns:
             List of criterion results with scores, in the same order as ``criteria``.
         """
         records, ref_dir = self._resolve_refs(turn_records, reference_dir)
 
-        # Monotonic, like every other duration in this codebase: a wall-clock
-        # delta would move if the clock stepped mid-grade, and an `agent_judge`
-        # criterion can run for minutes.
+        # Monotonic: a wall-clock delta would move if the clock stepped mid-grade,
+        # and an `agent_judge` criterion can run for minutes.
         started = time.monotonic()
         results: list[CriterionResult] = []
         try:
@@ -227,9 +205,7 @@ class SuccessChecker:
                 else:
                     results.append(await asyncio.to_thread(self._check_single, criterion, records, ref_dir))
         finally:
-            # In `finally` so a grade that raises still books the time it spent.
-            # Its cost is what the caller is trying to account for, and a crash
-            # does not un-spend it.
+            # In `finally` so a grade that raises still books what it spent.
             self.grading_ms = (self.grading_ms or 0.0) + (time.monotonic() - started) * 1000.0
         return results
 
@@ -401,12 +377,8 @@ class SuccessChecker:
             )
             return self._finalize_result(criterion, result)
         except KeyError:
-            # Deliberate dead-code defence: an unregistered type resolves to
-            # `_is_native_async(...) is False` (see that method), so
-            # `_check_single_async` is only ever invoked for already-registered
-            # types — this arm exists only to keep the two `_check_single*`
-            # methods' exception shape identical, in case that invariant ever
-            # changes.
+            # Deliberate dead-code defence: unreachable today, kept so the two
+            # `_check_single*` methods' exception shape stays identical.
             return self._missing_checker_result(criterion)
         except _ESCALATING_EXCEPTIONS:
             raise

@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra evalboard-verify clean run lint docs-indexes plugin-reference docker-image docker-image-full coder-eval-runtime docker-images
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra evalboard-verify clean run lint docs-indexes plugin-reference docs-budget docker-image docker-image-full coder-eval-runtime docker-images
 
 # Single source of the installed coder-eval version (used to tag the docker
 # images). Referenced lazily inside the docker recipes, so it doesn't run on
@@ -36,6 +36,9 @@ docs-indexes:  ## Regenerate README/docs indexes from the mkdocs nav (SSOT)
 plugin-reference:  ## Regenerate the plugin's bundled criteria reference from the models (SSOT)
 	uv run python -m tests.lint.plugin_reference
 
+docs-budget:  ## Report the docstring/comment prose budget and check it against the baseline
+	uv run python -m tests.lint.prose_budget
+
 typecheck:  ## Run type checking with pyright
 	uv run pyright
 	# The CE036 contract engine executes checker code and feeds the early-stop
@@ -64,6 +67,7 @@ verify:  ## Run all verification steps (CI equivalent)
 	uv run ruff check $(LINT_PATHS)
 	uv run pyright
 	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
+	uv run python -m tests.lint.prose_budget
 	# uv run pip-audit --desc --skip-editable
 	# uv run bandit -r src/ -ll --format json -o bandit-report.json
 	uv run pytest tests/ -n auto -m "not live and not lint" --cov=coder_eval --cov-report=term-missing --cov-report=xml --cov-fail-under=80

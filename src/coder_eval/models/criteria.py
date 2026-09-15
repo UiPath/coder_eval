@@ -1,9 +1,8 @@
 """Success criteria models for task evaluation."""
 
 # Each concrete criterion narrows the base ``type: str`` to its ``Literal[...]`` tag
-# (the standard pydantic discriminated-union pattern). Pyright treats a Literal
-# subtype override of a mutable str field as variable-invariant-incompatible, but
-# the narrowing is exactly the intended discriminator behaviour here.
+# (the standard pydantic discriminated-union pattern), which pyright reads as a
+# variable-invariance violation.
 # pyright: reportIncompatibleVariableOverride=false
 
 from __future__ import annotations
@@ -29,17 +28,14 @@ from coder_eval.models.judge_defaults import DEFAULT_JUDGE_MODEL
 from coder_eval.models.sandbox import RECORD_CLI_LOG
 
 
-# SECURITY: ignore_patterns floor. The judge's working directory is a copy of
-# the agent's sandbox; if the agent dropped these in, they'd otherwise be
-# copied across and either (a) cause the SDK to load hooks / MCP servers from
-# the main agent's settings (despite ``setting_sources=[]``, the agent ignore
-# patterns also gate what shutil.copytree pulls in) or (b) collide with the
-# reference mount point. The floor is enforced UNCONDITIONALLY in
-# ``criteria/agent_judge.py::_build_agent_config``, even when the user
-# supplied their own ``agent.ignore_patterns`` — author convenience does not
-# override the judge's safety floor. Single source of truth: importing this
-# constant from both call-sites keeps the model defaults and the checker
-# floor in sync.
+# SECURITY: the judge's ignore_patterns FLOOR, enforced unconditionally in
+# ``criteria/agent_judge.py::_build_agent_config`` even when the user supplied their
+# own list. These are COPY-TIME controls, not just SDK settings: the same list is
+# the ``ignore`` passed to ``shutil.copytree`` in ``evaluation/sub_agent.py``, so
+# dropping an entry lets an agent-planted ``.claude/`` or ``.mcp.json`` land in the
+# judge's own working directory. Imported from both call sites so the model
+# defaults and the checker floor cannot drift.
+# Rationale: .claude/notes/contracts.md § The security floor
 JUDGE_SECURITY_IGNORE_FLOOR: tuple[str, ...] = (".claude", ".mcp.json", "_reference")
 
 
@@ -156,11 +152,9 @@ class BaseSuccessCriterion(BaseModel, ABC):
         return False
 
     def model_post_init(self, context: Any, /) -> None:
-        # Pin the discriminator tag into model_fields_set so it survives
-        # model_dump(exclude_unset=True) → model_validate() round-trips even for
-        # directly-constructed criteria (where the tag comes from the Literal
-        # default, not the caller). Without this, exclude_unset drops the tag and
-        # the discriminated union rejects the dump with union_tag_not_found.
+        # Pin the tag into model_fields_set so it survives a
+        # model_dump(exclude_unset=True) -> model_validate() round trip even for
+        # directly-constructed criteria, where the tag comes from the Literal default.
         self.__pydantic_fields_set__.add("type")
 
     @model_validator(mode="after")
@@ -205,12 +199,10 @@ class BaseSuccessCriterion(BaseModel, ABC):
     # Business logic (check operations) moved to SuccessChecker in evaluator.py
 
 
-# The two polarities a live-observable criterion can decide mid-run — distinct
-# from the 3-value LiveVerdict ("pass"/"fail"/"undecided") the checker's
-# live_verdict returns: this is the narrower CAPABILITY type, "undecided" is
-# never a valid decidable polarity. Typed here (not a bare frozenset[str]) so
-# a live_decidable_polarities override returning a stray/typo'd string, or
-# "undecided" itself, is a pyright error rather than a runtime-only lint gap.
+# The two polarities a live-observable criterion can decide mid-run -- the narrower
+# CAPABILITY type, distinct from the 3-value LiveVerdict. Typed, not a bare
+# frozenset[str], so a stray or typo'd polarity is a pyright error.
+# Rationale: .claude/notes/contracts.md § Why replay is the only sound check
 LivePolarity = Literal["pass", "fail"]
 
 
@@ -432,67 +424,22 @@ class CliCalledCriterion(BaseSuccessCriterion):
     """Check whether a CLI invocation matching a structured pattern was recorded.
 
     Reads a **structured invocation log** the sandbox produced: JSON Lines, one
-    object per invocation, each with at minimum an ``argv`` list. A test harness
-    that shadows a CLI with a recording mock writes this log; this criterion
-    matches against it field-by-field instead of regexing a flattened command
-    string.
-
-    Record schema (extra keys ignored)::
+    object per invocation, each with at minimum an ``argv`` list::
 
         {"argv": ["ixp", "projects", "get", "proj-1", "--output", "json"],
          "tool": "uip", "exit": 1, "ts": 1785416844.987}
 
-    Only ``argv`` is required. ``tool`` enables one log to serve several shadowed
-    executables; ``exit`` and ``ts`` are recorded for reporting, not matched.
+    Only ``argv`` is required. ``tool`` lets one log serve several shadowed
+    executables; ``exit`` and ``ts`` are reporting only, as is the ``rule`` a
+    generated shim adds. Its ``sidecar_error`` and ``rule_error`` are NOT ignored:
+    each means the responses the agent saw were not the ones the task described.
 
-    A generated ``record_cli`` shim adds ``rule`` (the index of the response rule
-    that answered), which is reporting only, plus two keys that are NOT ignored
-    because each means the responses the agent saw were not the ones the task
-    described: ``sidecar_error`` (the shim could not import its matcher module)
-    and ``rule_error`` (rule evaluation raised). Both fail the criterion. Neither
-    escalates, because the recorder directory sits inside the sandbox the agent
-    writes to, so both are agent-reachable; an authoring mistake is caught
-    earlier instead, by :class:`~coder_eval.models.RecordedCli`'s load-time
-    check that every response rule is evaluable.
+    EVIDENCE, NOT ATTESTATION -- the log sits in the sandbox the agent writes to.
 
-    Why not ``file_matches_regex`` over a flattened log line: a flat line cannot
-    express "verb X was called AND flag Y had value Z" without stacked
-    lookaheads, cannot tell a quoted argument containing spaces from two
-    arguments, and cannot stop a match from running across shell operators.
+    Pure data model - checking logic in CliCalledChecker._check_impl(). Authoring
+    reference: docs/TASK_DEFINITION_GUIDE.md#cli_called
 
-    EVIDENCE, NOT ATTESTATION. The log is an ordinary file in the sandbox the
-    agent writes to, so an agent that wants to can append a record for a call it
-    never made, or delete one it did. This criterion is built to keep an HONEST
-    run honest -- a missing or unreadable log fails rather than passing a
-    ``max_count: 0`` guard vacuously -- not to withstand an adversary. Do not
-    build an anti-cheat control on it; see ``tasks/anti_cheat_reference`` and
-    docs/DOCKER_ISOLATION.md for what that requires.
-
-    Pure data model - checking logic in CliCalledChecker._check_impl()
-
-    Example YAML (positive — flag value must match)::
-
-        success_criteria:
-          - type: "cli_called"
-            description: "Switched the project to the capable model"
-            log: "mocks/calls.jsonl"
-            verb: "ixp projects configure-model"
-            positional: ["my_invoices-f1afa9ef-ixp"]
-            flags:
-              model: "gemini_2_5_pro"
-            min_count: 1
-
-    Example YAML (negative — must NOT have been called; ``min_count: 0`` + ``max_count: 0``)::
-
-        success_criteria:
-          - type: "cli_called"
-            description: "Did not use --corrections to flip a boolean field"
-            log: "mocks/calls.jsonl"
-            verb: "ixp labellings confirm"
-            flags:
-              corrections: {contains: "f-100"}
-            min_count: 0
-            max_count: 0
+    Rationale: .claude/notes/contracts.md § Recording a CLI invocation
     """
 
     type: Literal["cli_called"] = "cli_called"
@@ -624,10 +571,10 @@ class CliCalledCriterion(BaseSuccessCriterion):
         # Matching slices an empty expectation and compares it to itself, so this reads
         # as "took no arguments" while asserting nothing.
         validate_positional(self.positional, "cli_called")
-        # Falsiness, not `is None`: `verb: ""` slipped past an `is None` check here and
-        # then matched every record, scoring 1.0. `tool` counts as a facet here (but not
-        # for a response rule), since a criterion may legitimately count every
-        # invocation of one shadowed executable.
+        # HAZARD: falsiness, not `is None`. A `verb: ""` slipped past an `is None`
+        # check here and then matched every record, scoring 1.0. `tool` counts as a
+        # facet here, though not for a response rule: a criterion may legitimately
+        # count every invocation of one shadowed executable.
         if not self.verb and not self.verb_any_of and not self.positional and not self.flags and not self.tool:
             msg = "cli_called requires at least one of verb / verb_any_of / positional / flags / tool to match on"
             raise ValueError(msg)
@@ -1122,17 +1069,14 @@ class LLMJudgeCriterion(BaseSuccessCriterion):
     validator. Non-numeric / non-finite score -> 0.0 with error.
     """
 
-    # Strict YAML-key validation: catch typos at load time rather than silently
-    # ignoring an unknown key (e.g. ``capture_transcripts:`` instead of
-    # ``capture_transcript:``) and producing a misconfigured judge.
+    # Strict YAML-key validation: a typo becomes a load-time error rather than a
+    # silently misconfigured judge.
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["llm_judge"] = "llm_judge"
 
-    # Override the BaseSuccessCriterion default of 0.9 — that's calibrated for binary
-    # checks like file_exists where partial = fail. Judges produce continuous scores
-    # that rarely emit 1.0 even for excellent solutions; 0.7 matches the "good enough
-    # for a strict reviewer" semantics most authors want. Override per task as needed.
+    # Overrides the 0.9 default, which is calibrated for binary checks. Judges produce
+    # continuous scores that rarely emit 1.0 even for excellent solutions.
     pass_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum score to pass (default 0.7).")
 
     enabled: bool = Field(
@@ -1268,35 +1212,21 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
     """Spawn a Claude Code SDK agent as the judge.
 
     The judge runs in an isolated copy of the sandbox with tool access (Bash, Read,
-    Glob, Grep by default) and reports its verdict by calling the in-process
-    ``submit_verdict`` MCP tool (``mcp__coder_eval_judge__submit_verdict``,
-    force-added to ``allowed_tools``) exactly once with ``score`` / ``rationale``
-    / ``findings``. The SDK has no ``tool_choice`` equivalent so the channel
-    relies on system-prompt discipline; a judge that never calls the tool
-    scores 0.0 with a "did not call submit_verdict" diagnostic.
+    Glob, Grep by default) and reports by calling the in-process ``submit_verdict``
+    MCP tool exactly once. The SDK has no ``tool_choice`` equivalent, so unlike
+    ``llm_judge`` the channel relies on system-prompt discipline: a judge that never
+    calls it scores 0.0 with a "did not call submit_verdict" diagnostic.
 
-    File access: the judge has live access to the sandbox copy as its working
-    directory and can load files via its tools (``Read``, ``Glob``). The optional
-    ``files`` field pre-attaches selected file contents to the prompt envelope —
-    useful when you want a fast verdict (single turn, no tool calls) or want to
-    grade with the narrowest tool surface (``allowed_tools=[]``). Pre-attach and
-    tool-driven inspection compose: the judge sees the pre-attached blocks and
-    can still ``Read`` anything else.
+    It works in the sandbox copy and can load files via its tools; ``files``
+    pre-attaches selected contents to the prompt envelope, and the two compose.
 
-    SECURITY: The judge runs with the evaluator's API credentials and can execute
-    arbitrary Bash by default. Four attack surfaces:
-      1. Malicious generation artifacts the judge executes (e.g. via `python x.py`).
-      2. Prompt injection from included agent_output / tool-call summaries.
-      3. Credential exfiltration via any network-capable tool (primarily Bash).
-      4. Hooks / MCP servers planted by the main agent (e.g. `.claude/settings.json`
-         or `.mcp.json` dropped into the sandbox) that would run before any LLM turn
-         and before allowed_tools gating. The judge sets ``setting_sources=[]`` and
-         excludes both paths from the sandbox copy, so neither gets loaded.
-    Use ``llm_judge`` for scenarios with adversarial generation. Narrow
-    ``allowed_tools`` per task when Bash is not needed.
+    SECURITY: the judge runs with the evaluator's API credentials and can execute
+    arbitrary Bash by default. Use ``llm_judge`` for adversarial generation, and
+    narrow ``allowed_tools`` per task when Bash is not needed.
 
-    Continuous scoring. Verdict-validation errors or a "did not call" diagnostic
-    -> 0.0. Score clamped to [0.0, 1.0] by the ``JudgeVerdict`` validator.
+    Continuous scoring. Score clamped to [0.0, 1.0] by the ``JudgeVerdict`` validator.
+
+    Rationale: .claude/notes/contracts.md § The security floor
     """
 
     # Strict YAML-key validation: catch typos at load time rather than silently
@@ -1305,9 +1235,8 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
 
     type: Literal["agent_judge"] = "agent_judge"
 
-    # Override the BaseSuccessCriterion default of 0.9 — that's calibrated for binary
-    # checks. Judges produce continuous scores that rarely emit 1.0; 0.7 matches the
-    # "good enough for a strict reviewer" semantics most authors want. Override per task.
+    # Overrides the 0.9 default, which is calibrated for binary checks. Judges produce
+    # continuous scores that rarely emit 1.0 even for excellent solutions.
     pass_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum score to pass (default 0.7).")
 
     enabled: bool = Field(
@@ -1401,9 +1330,8 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         ge=10,
         description="Wall-clock timeout for the judge turn (seconds). Minimum 10.",
     )
-    # Intentionally the closed built-in AgentConfig union, NOT ResolvedAgentConfig:
-    # agent_judge spawns a Claude Code SDK sub-agent (SubAgentRunner) with evaluator
-    # credentials, so a plugin agent kind is deliberately not accepted as a judge.
+    # HAZARD: the CLOSED built-in union, not ResolvedAgentConfig -- agent_judge spawns
+    # a sub-agent with evaluator credentials, so a plugin kind is not accepted here.
     agent: AgentConfig = Field(
         default_factory=_default_judge_agent_config,
         description=(
@@ -1441,11 +1369,10 @@ class AgentJudgeCriterion(BaseSuccessCriterion):
         return _reject_removed_verdict_channel(data)
 
 
-# Discriminated union of all success criteria. The `type` tag is REQUIRED in
-# dict/YAML input: a missing or unknown tag raises one crisp discriminator error
-# instead of smart-union coercion across every variant. The per-variant
-# `type: Literal[...] = "<tag>"` defaults remain, so direct construction
-# (e.g. FileExistsCriterion(path=...)) and model_dump() serialization are unaffected.
+# The `type` tag is REQUIRED in dict/YAML input: a missing or unknown tag raises one
+# crisp discriminator error instead of smart-union coercion across every variant. The
+# per-variant Literal defaults remain, so direct construction and model_dump() are
+# unaffected.
 SuccessCriterion = Annotated[
     FileExistsCriterion
     | FileContainsCriterion

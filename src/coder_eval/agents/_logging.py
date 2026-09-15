@@ -36,27 +36,22 @@ def log_raw_sdk_event(
 ) -> None:
     """Dump an SDK event verbatim, the instant it arrives, when opted in.
 
-    Gated behind ``CODER_EVAL_RAW_SDK_LOG`` so normal runs stay quiet. Emits at
-    INFO so it shows up in task.log without flipping the whole logger to DEBUG.
-    Shared by every agent so the dump format is identical across backends.
+    Gated behind ``CODER_EVAL_RAW_SDK_LOG`` so normal runs stay quiet, and emitted
+    at INFO so it reaches task.log without flipping the whole logger to DEBUG.
+    Shared by every agent, so the dump format is identical across backends.
 
-    For each event we log, in order:
-      * the caller-supplied ``header_fields`` (e.g. ``type=`` for Claude,
-        ``method=``/``root_type=`` for Codex),
-      * the full ``repr(repr_target)`` (untruncated), and
-      * a sorted ``key=value`` dump of every public attribute of
-        ``attr_target`` (defaulting to ``repr_target``), so token fields like
-        ``usage`` / ``model_usage`` are visible exactly as the SDK delivered
-        them even when ``repr`` is terse.
+    Logs the caller's ``header_fields``, then the UNTRUNCATED
+    ``repr(repr_target)``, then a sorted dump of every public attribute of
+    ``attr_target`` (default ``repr_target``) — so token fields are visible exactly
+    as the SDK delivered them even when ``repr`` is terse.
 
     Args:
         log: The agent's prefixed logger adapter.
         repr_target: The object to ``repr()`` in full.
-        attr_target: The object to introspect for the attribute dump. Defaults
-            to ``repr_target`` (Codex passes the notification's item root here,
-            falling back to the notification when the root is absent).
-        header_fields: Arbitrary ``key=value`` pairs rendered into the header
-            line, in insertion order.
+        attr_target: The object to introspect. Codex passes the notification's
+            item root, falling back to the notification when the root is absent.
+        header_fields: ``key=value`` pairs rendered into the header line, in
+            insertion order.
     """
     if not raw_sdk_logging_enabled():
         return

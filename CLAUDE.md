@@ -2,10 +2,13 @@
 
 Working reference for AI assistants on the `coder_eval` codebase.
 
+**Communication style:** use ASD-STE-100 when you speak to the user, and when you edit
+this file.
+
 Design *rationale* — why a subsystem is shaped the way it is, and which shipped defect
-shaped it — lives in **`.claude/architecture-notes.md`**, which is not auto-loaded. Read
-it before changing grading, resume, early stop, timing, the reference anti-cheat, or an
-agent adapter.
+shaped it — lives under **`.claude/notes/`**, which is not auto-loaded; start at
+[`.claude/notes/README.md`](.claude/notes/README.md). Read it before changing grading,
+resume, early stop, timing, the reference anti-cheat, or an agent adapter.
 
 User-facing documentation lives in [`docs/`](docs/index.md): start with the
 [User Guide](docs/USER_GUIDE.md) for CLI behaviour and the
@@ -89,7 +92,7 @@ action.yml                     # Published composite GitHub Action
 
 ## Key Architectural Patterns
 
-Each entry is a pointer. Full rationale: `.claude/architecture-notes.md`.
+Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes/README.md`).
 
 - **Discriminated unions** for criteria types and template sources.
 - **Plugin registry**: `criteria/` auto-discovers via `pkgutil` + `@register_criterion`.
@@ -117,7 +120,8 @@ Each entry is a pointer. Full rationale: `.claude/architecture-notes.md`.
   Defense-in-depth, not a boundary — the known gaps are documented in the notes.
   Authoring reference: [Reference Solutions](docs/TASK_DEFINITION_GUIDE.md#reference-solutions).
 - **Harness run-limit parity**: a shared config field must mean the same thing on every
-  backend, or the divergence is documented. Table:
+  backend, or the adapter rejects it at load time. A silently ignored field is a defect,
+  not a table row. Table:
   [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Caps are authored under
   [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
 - **Execute vs. run**: `execute` is `run` with grading off — rows finalize as
@@ -193,6 +197,8 @@ is `.claude/shared/run-layout.md`.
 
 ## Development Commands
 
+If you run one command, run `make verify`. `make test` does not run the lint rules.
+
 ```bash
 # MANDATORY: run after every implementation phase
 make format      # ruff format
@@ -207,6 +213,8 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 # Regenerate a generated surface — never hand-edit the output
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
+
+make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
 ```
 
 Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is
@@ -229,7 +237,8 @@ When fixing a bug, ask: *could a custom lint rule have prevented this?* If the r
 cause is a mechanically detectable pattern, add a rule following the CE000+ pattern and
 wire it up. See `tests/test_custom_lint.py` for how rules are tested. Prefer removing
 the sharp edge over guarding it: a rule is right when the pattern is genuinely
-unavoidable, not when a shared helper would do. Candidates not yet promoted to rules
+unavoidable, not when a shared helper would do. A cap rule sets its limit below the
+current value, never at it. Candidates not yet promoted to rules
 are collected in `.claude/harness-candidates.md`.
 
 A few rules constrain routine edits, so they are worth knowing before you start:
@@ -353,14 +362,21 @@ bandit, pre-commit, mcp
 - **YAGNI** — don't add complexity until actually needed
 - **KISS** — keep it simple
 - **Clean code** — no dead code, all imports used, all tests passing
-- **Greenfield project** — no backward-compatibility burden
+- **Delete before you guard** — before you add a lint rule, doc paragraph, criterion
+  type or config field, try to delete the pattern that needs it. A new type that
+  subsumes an old one removes the old one in the same change (no back-compat burden)
 - **Comments are a last resort** — default to ZERO comments. Names, types and small
   functions carry the meaning. A comment is allowed ONLY when it records something the
   code cannot say
+- **A docstring states the contract, not the history** — what a caller must know to call
+  it correctly. Why the design is this shape belongs in `.claude/notes/`; what it used to
+  be belongs in git. `make docs-budget` enforces two rules, both self-adjusting: a file's
+  own-line comments may not exceed `MAX(20, 0.15 × its length)`, and no docstring may
+  exceed 150 words of PROSE (an `Args:`/`Returns:`/`Raises:` block is structure, not
+  prose; an `@abstractmethod` is exempt because its docstring IS the interface contract).
 
 ## Notes for AI Assistants
 
-- Communication style: use ASD-STE-100 when you speak to the user.
 - Temporary files go in `tmp/`, not `/tmp`.
-- Read `.claude/architecture-notes.md` before changing grading, resume, early stop,
-  timing, the reference anti-cheat, or any significant parts of this code's architecture. 
+- Read `.claude/notes/` before changing grading, resume, early stop, timing, the
+  reference anti-cheat, or any significant parts of this code's architecture. 

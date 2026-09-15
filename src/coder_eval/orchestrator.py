@@ -151,12 +151,10 @@ async def _pump_stream(
             log_fn("[%s] %s", label, line)
 
 
-# Structural tags emitted by ClaudeCodeAgent._format_messages. Other
-# bracketed words (markdown footnotes, pylint codes, unknown SDK message types
-# like [TaskStartedMessage]) are intentionally NOT matched — they pass through
-# as content. Source of truth for the tag vocabulary is
-# ``ClaudeCodeAgent._format_messages``; this regex is telemetry-only (utterance
-# extraction for the per-task log), not a correctness-critical parser.
+# Structural tags emitted by ClaudeCodeAgent._format_messages, which is the SSOT
+# for the vocabulary. Other bracketed words (markdown footnotes, pylint codes,
+# unknown SDK message types) are intentionally NOT matched — they pass through as
+# content. Telemetry-only, not a correctness-critical parser.
 _UTTERANCE_TAG_RE = re.compile(r"^\[(ASSISTANT|RESULT - SUCCESS|RESULT - ERROR|TOOL USE)\](?: (.*))?$")
 
 
@@ -192,34 +190,22 @@ def _format_routing(route: ApiRoute, effective_model: str | None = None) -> str:
 def _extract_utterance(raw: str) -> str:
     """Collapse a ClaudeCodeAgent-formatted transcript to a clean utterance.
 
-    Input looks like:
+    Input looks like::
+
         [ASSISTANT] Sure, I'll do X.
         [TOOL USE] Read
-        [ASSISTANT] Here is the answer...
         [RESULT - SUCCESS] Here is the answer...
 
-    The SDK's ``ResultMessage`` duplicates the final assistant text, which
-    makes conversation.log read as if every message is repeated. Prefer the
-    ``[RESULT - ...]`` payload when it is non-empty (it is the canonical
-    final utterance); otherwise fall back to concatenated ``[ASSISTANT]``
-    blocks. ``[TOOL USE]`` lines are dropped. Input that does not look
-    tagged at all (plain user text like a pinned initial_prompt) is
-    returned unchanged.
+    Prefers a non-empty ``[RESULT - ...]`` payload — the SDK's canonical final
+    utterance, which duplicates the final assistant text and otherwise makes
+    conversation.log read as if every message is repeated. Falls back to
+    concatenated ``[ASSISTANT]`` blocks, including any content appearing before
+    the first tag. ``[TOOL USE]`` lines are dropped, and untagged input (a pinned
+    ``initial_prompt``) is returned unchanged.
 
-    Pre-tag content handling: any content appearing BEFORE the first
-    tagged line is collected into an implicit ``[ASSISTANT]`` block. It
-    survives in the output only on the ASSISTANT-fallback path (no
-    ``[RESULT - ...]`` in the transcript). When a ``[RESULT - SUCCESS]``
-    is present, it supersedes all ``[ASSISTANT]`` content — including
-    any pre-tag content — because the ResultMessage is the SDK's
-    canonical final utterance and ASSISTANT lines are chain-of-thought
-    that the RESULT already incorporates. ClaudeCodeAgent always begins
-    its output with a tag in practice, so this mostly matters for
-    defensive handling of upstream format drift.
-
-    Asymmetry note: ``[RESULT - SUCCESS]`` strips its label (it is the
-    canonical answer); ``[RESULT - ERROR]`` keeps a ``[RESULT - ERROR]``
-    prefix in the output so the error state remains visible in the log.
+    Asymmetric on purpose: ``[RESULT - SUCCESS]`` strips its label, while
+    ``[RESULT - ERROR]`` KEEPS its prefix so the error state stays visible in the
+    log.
     """
     if not raw:
         return ""
@@ -279,25 +265,19 @@ def _extract_failure_reason(result: CriterionResult) -> str | None:
 def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) -> tuple[str, dict[str, Scalar]]:
     """Build the (event_name, properties) for a finalized task's telemetry event.
 
-    Shared by the in-process path (``Orchestrator._finalize_result``) and the
-    docker path (``orchestration/batch.py``) so both drivers emit an identical
-    ``CoderEval.Task.End`` event. Carries only enums/counts/durations/config-derived
-    ids — no user content. None-safe.
+    Shared by the in-process path and the docker path so both drivers emit an
+    identical ``CoderEval.Task.End`` event. Carries only
+    enums/counts/durations/config-derived ids — no user content. None-safe.
 
-    Every task emits the SAME event name (``CoderEval.Task.End``); the outcome
-    lives in dimensions, never the name. ``Status`` carries the exact
-    ``FinalStatus`` and ``Category`` carries the canonical ``FinalStatus.category``
-    bucket (``succeeded`` / ``failed`` / ``error``) — the single source of truth
-    shared with reports. Slicing belongs in dimensions (the App Insights idiom),
-    so dashboards group by ``Status``/``Category`` rather than matching event
-    names, and the telemetry bucketing can never drift from ``category``.
+    Every task emits the SAME event name; the outcome lives in DIMENSIONS, never
+    the name, so dashboards group by ``Status``/``Category`` and the telemetry
+    bucketing can never drift from ``FinalStatus.category``.
 
-    The return type is the scalar event contract (``dict[str, Scalar]``) so a
-    non-scalar property is caught here by pyright, not just str()-coerced at
-    runtime by the telemetry layer. Token counts are intentionally NOT emitted —
-    this is usage telemetry, not eval analytics. Task/variant ids are emitted as
-    stable one-way hashes (``hash_identifier``) so an author-defined free-text id
-    that could encode sensitive data never reaches the telemetry store verbatim.
+    The return type is the scalar event contract, so a non-scalar property is
+    caught by pyright rather than str()-coerced at runtime. Token counts are
+    deliberately NOT emitted — this is usage telemetry, not eval analytics — and
+    task/variant ids are one-way hashes, so an author-defined free-text id never
+    reaches the telemetry store verbatim.
     """
     props: dict[str, Scalar] = {
         "TaskId": hash_identifier(result.task_id),
@@ -312,19 +292,13 @@ def build_task_event(result: EvaluationResult, *, driver: str, variant_id: str) 
         "EarlyStopped": result.early_stop is not None,
         "EarlyStopReason": (result.early_stop.reason.value if result.early_stop is not None else ""),
     }
-    # `Score` is OMITTED, never coalesced to 0.0, when the row was not graded.
-    # Dashboards compute `avg(todouble(customDimensions.Score))` with no status
-    # filter, so a laundered zero for a `coder-eval execute` night drags every
-    # score tile toward zero and is indistinguishable from a genuinely bad night.
-    # An absent dimension drops out of the average instead.
+    # OMITTED, never coalesced to 0.0, when the row was not graded.
+    # Rationale: .claude/notes/orchestration.md § Where the orchestrator's own time is booked
     if result.weighted_score is not None:
         props["Score"] = float(result.weighted_score)
     # The four wall-clock buckets, from the ONE canonical summation — this
-    # function does not add anything up itself. Each is OMITTED rather than
-    # coalesced to 0, for the same reason as `Score` above: a dashboard
-    # averaging `StartupMs` with no filter would read a laundered zero as a
-    # harness that booted instantly, which is indistinguishable from a run that
-    # predates the capture. An absent dimension drops out of the average.
+    # function adds nothing up itself. Each is omitted rather than zeroed, for the
+    # reason `Score` above is.
     from .reports_stats import turn_time_buckets
 
     buckets = turn_time_buckets(result)
@@ -403,44 +377,34 @@ class Orchestrator:
         """Initialize the orchestrator.
 
         Args:
-            task: Task definition to evaluate
-            run_dir: Per-task directory within a run (e.g., runs/2025-10-09_15-30-45/default/hello_date/00/)
-            preservation_mode: How to persist the sandbox after completion
-                (NONE / MOVE_ON_WRITE / DIRECT_WRITE). The driver-derived
-                default is resolved upstream at the batch dispatch seam.
-            task_file: Path to task YAML file (for resolving reference file paths)
-            stream_callback: Optional callback for real-time event streaming
-            sandbox: Pre-built Sandbox to use directly; if None, creates one from task config and runs the agent
-            variant_id: Experiment variant identifier for this task
-            source_yaml: Raw YAML text from the task file
-            config_lineage: Config lineage dict (dotted-path -> ConfigLineageEntry)
-            replicate_index: Zero-indexed trial number (for simulation tasks with n_trials > 1).
-                Defaults to 0, which covers single-shot tasks and single-trial simulations.
-            workspace_dir: Docker WORKDIR alignment. When set, the agent runs
-                in-place at this absolute container path (the task image's WORKDIR) instead of
-                run_dir/artifacts/<task>, and the workspace is copied out to run_dir/artifacts/<task>
-                at cleanup. Resolved host-side by DockerRunner; None keeps standard behavior.
-                Takes precedence over preservation_mode when set.
-            grade: Whether to evaluate success criteria after execution. False is
-                `coder-eval execute`: the agent runs and the full trajectory is
-                captured, but no criterion is checked, ``weighted_score`` stays
-                None, and the row finalizes as ``FinalStatus.NOT_GRADED``. It is
-                deliberately NOT a task-config field — a task YAML must never be
-                able to declare itself ungraded — so it arrives only from
-                ``BatchRunConfig.grade``, never from the 5-layer merge or -D.
-            prior_result: A completed run's ``EvaluationResult`` to re-grade
-                (evaluate-only mode). Its trajectory and execution facts are
-                carried onto the fresh result so the grade describes the run that
-                actually happened instead of an empty one — see
-                ``_seed_from_prior_result`` for the field-by-field rationale.
+            task: Task definition to evaluate.
+            run_dir: Per-task run directory.
+            preservation_mode: How to persist the sandbox (NONE / MOVE_ON_WRITE /
+                DIRECT_WRITE). The driver-derived default resolves upstream.
+            task_file: Task YAML path, for resolving reference file paths.
+            stream_callback: Optional real-time event callback.
+            sandbox: Pre-built Sandbox; if None, one is created from task config.
+            variant_id: Experiment variant identifier.
+            source_yaml: Raw YAML text from the task file.
+            config_lineage: Dotted-path -> ConfigLineageEntry.
+            replicate_index: Zero-indexed trial number for n_trials > 1.
+            workspace_dir: Docker WORKDIR alignment — the agent runs in-place
+                there and the workspace is copied out at cleanup. Takes
+                precedence over ``preservation_mode``.
+            grade: False is ``coder-eval execute``. Deliberately NOT a task-config
+                field — a task YAML must never declare itself ungraded.
+            prior_result: A completed run's result to re-grade.
+            recorded_task / recorded_task_file: What the run RECORDS, which is not
+                always what this process runs.
+
+        Rationale: .claude/notes/orchestration.md § Recording the task as authored
         """
         self.task = task
         self.run_dir = run_dir
-        # Per-attempt nonce for the LiteLLM cost-log join. The proxy log is
+        # Per-attempt nonce for the LiteLLM cost-log join: the proxy log is
         # append-only and the run_id is a deterministic hash of run_dir, so a
-        # re-run into the same --run-dir would otherwise re-match (and double-count)
-        # a prior attempt's rows. A fresh nonce per Orchestrator (one per process
-        # invocation) scopes the join to THIS attempt's records.
+        # re-run into the same --run-dir would otherwise re-match a prior
+        # attempt's rows.
         self._cost_attempt_nonce = uuid.uuid4().hex
         self.preservation_mode = preservation_mode
         self.workspace_dir = workspace_dir
@@ -452,36 +416,23 @@ class Orchestrator:
         self.config_lineage = config_lineage or {}
         self.replicate_index = replicate_index
         self.grade = grade
-        # What `task_config.resolved` records, which is NOT always what we RUN.
-        # `run_task_internal_command` rewrites `driver: docker` -> `tempdir`
-        # before building the in-container Orchestrator (we are already inside
-        # the container the driver asked for), and recording that rewrite made
-        # the run's own record deny it ever used docker. A later
-        # `evaluate <run_dir>` reads the driver back out of the record, so the
-        # host-grading refusal never fired and the `graded_on_host` stamp was
-        # never applied: a container task's criteria ran against the host
-        # filesystem silently, which is the exact outcome that gate exists to
-        # prevent. The record must describe the task as AUTHORED.
+        # What `task_config.resolved` records, which is NOT always what we RUN:
+        # the in-container path rewrites `driver: docker` -> `tempdir` before
+        # building its Orchestrator, and recording that made the run's own record
+        # deny it ever used docker.
+        # Rationale: .claude/notes/orchestration.md § Recording the task as authored
         self.recorded_task = recorded_task if recorded_task is not None else task
-        # Same seam, same reason, for the PATH. `task_file` is what this process
-        # resolves TASK_DIR and the reference against -- in a container that is
-        # `/work/task_dir/task.yaml`, which is correct here and meaningless
-        # anywhere else. Recording it made a container row's `source_file` name a
-        # path that exists on no host, so a later `evaluate <run_dir>` rebuilt the
-        # task around it: the docker dispatch guard saw a non-None Path and let it
-        # through, and `_prepare_task_dir_mount` then silently mounted nothing
-        # (`if not source.is_dir(): return`), so every `$TASK_DIR` criterion
-        # resolved against the wrong tree and scored a verdict nobody could
-        # explain. The host forwards its own path for the record.
+        # Same seam, same reason, for the PATH: in a container `task_file` is
+        # `/work/task_dir/task.yaml`, correct here and meaningless anywhere else.
+        # The host forwards its own path for the record.
         self.recorded_task_file = recorded_task_file if recorded_task_file is not None else task_file
         self.prior_result = prior_result
 
         # Derived paths
         self.report_path = self.run_dir / TASK_JSON_FILENAME
         self.html_report_path = self.run_dir / "task.html"
-        # Clean user<->agent transcript for simulation runs. Written alongside
-        # task.log so a human can follow the conversation without the
-        # orchestrator noise in between.
+        # Clean user<->agent transcript for simulation runs, written alongside
+        # task.log so a human can follow it without the orchestrator noise.
         self.conversation_log_path = self.run_dir / "conversation.log"
         # Note: artifacts directory (run_dir/artifacts) is created on-demand during sandbox preservation
 
@@ -491,50 +442,37 @@ class Orchestrator:
 
         # API routing (initialized in _setup)
         self.route: ApiRoute | None = None
-        # Route for the simulated user, a real Claude Code CLI subprocess like
-        # the agent under test. Resolved via resolve_evaluation_route(settings,
-        # self.route) with NO checker_context overrides — decoupled from
-        # checker_context.api_route (that override is llm_judge-only and has no
-        # bearing on the simulator) while still inheriting the LiteLLM-agent ->
-        # pinned-Claude-backend guard, since the simulated user is part of the
-        # measuring instrument and must not run on the agent's own open-weight
-        # gateway either. Equals self.route for the Direct/Bedrock backends.
+        # The simulated user's route: pinned like eval_route, but resolved with NO
+        # checker_context overrides.
+        # Rationale: .claude/notes/orchestration.md § Three routes, resolved separately
         self.simulator_route: ApiRoute | None = None
-        # Route for the evaluation side (llm_judge / agent_judge):
-        # pinned to a constant Claude backend so grading stays comparable when the
-        # agent runs on an open-weight (LiteLLM) model. Equals self.route for the
-        # Direct/Bedrock backends.
+        # The judge's route: pinned to a constant Claude backend so grading stays
+        # comparable when the agent runs on an open-weight model.
         self.eval_route: ApiRoute | None = None
 
         # Result tracking
         self.result: EvaluationResult | None = None
 
-        # Per-run private copy of task.reference.directory, staged in _setup and
-        # removed in _cleanup. Criteria address it as $REFERENCE_DIR / REFERENCE_DIR.
-        # It is a COPY, not the checked-out path, so the mode-000 anti-cheat window
-        # around each agent turn can't block a sibling task's judge mid-read, and a
-        # crashed run can only leave a throwaway directory unreadable.
+        # Per-run private COPY of task.reference.directory, staged in _setup and
+        # removed in _cleanup; criteria address it as $REFERENCE_DIR. A copy, not
+        # the checked-out path, so the anti-cheat window cannot block a sibling
+        # task's judge mid-read.
+        # Rationale: .claude/notes/permissions.md § Reference solutions and the anti-cheat window
         self._reference_dir: Path | None = None
 
-        # The mkdtemp root that holds ``_reference_dir``, recorded the moment it
-        # is created and BEFORE the copy runs, so a copy that raises part-way
-        # (unreadable source file, ENOSPC) still gets cleaned up. Keying cleanup
-        # on ``_reference_dir.parent`` instead would leak the partial copy of the
-        # reference solution, because ``_reference_dir`` is only assigned on the
-        # success path. None under docker, where the reference is a host-owned
-        # bind mount rather than a tempdir of ours.
+        # Recorded BEFORE the copy runs, so a copy that raises part-way still gets
+        # cleaned up: keying cleanup on `_reference_dir.parent` would leak the
+        # partial copy, since that field is only assigned on the success path.
+        # None under docker, where the reference is a host-owned bind mount.
         self._reference_staging_root: Path | None = None
 
-        # SHA-256 of the staged reference tree, taken right after staging and
-        # re-verified before grading. The window is per-turn, so between turns
-        # the (necessarily writable) docker mount is back at its normal mode; an
-        # agent-backgrounded process could overwrite the reference and drive
-        # ``reference_comparison`` to 1.0. See _verify_reference_integrity.
+        # SHA-256 of the staged reference tree, re-verified before grading: the
+        # window is per-turn, so between turns an agent-backgrounded process could
+        # overwrite the reference and drive `reference_comparison` to 1.0.
         self._reference_digest: str | None = None
 
-        # Early-stop watcher (created in _setup only when a criterion carries a
-        # stop_early: block and the kill switch is not thrown; None otherwise,
-        # so the default path is entirely unaffected).
+        # Created in _setup only when armed; None otherwise, so the default path
+        # is entirely unaffected.
         self._early_stop_watcher: EarlyStopWatcher | None = None
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
@@ -568,38 +506,13 @@ class Orchestrator:
     def _terminal_status(self, success: bool) -> FinalStatus:
         """The status a normally-completed evaluation loop lands on.
 
-        Extracted from ``run()`` because the chain answers one question and
-        ``run()`` answers several; inlining it grew ``run()`` past the
-        complexity bound the moment the grading switch was threaded in.
-
-        Order matters at every step:
-
-        * A detached grade may NOT overturn an execution fact. The prior run's
-          terminal status (TIMEOUT, ERROR, a budget stop) describes an agent
-          phase this pass neither repeated nor observed. Without the first arm a
-          crashed run re-graded against its half-finished workspace reports
-          SUCCESS — with the original ``error_message`` still attached.
-        * The NOT_GRADED arm sits ABOVE ``max_turns_exhausted``, and that order
-          is what makes ``execute`` + ``evaluate`` equal a single ``run``.
-          MAX_TURNS_EXHAUSTED reads like an execution fact but is not one: on the
-          graded path it is subordinate to the verdict — ``run`` returns SUCCESS
-          for a max-turns trajectory whose criteria pass, and only falls through
-          to MAX_TURNS_EXHAUSTED when they do not. So it is not knowable under
-          ``grade=False``. Consuming it here first made it terminal *and*
-          permanent (``is_execution_fact`` pins it in the first arm), so the same
-          agent output scored SUCCESS/1.0 under ``run`` and MAX_TURNS_EXHAUSTED
-          under ``execute`` → ``evaluate`` — and, being category ``failed``,
-          `run --resume` called the row complete and left it forever unscored.
-          Nothing is lost by deferring: the fact lives on
-          ``result.max_turns_exhausted``, which ``_seed_from_prior_result``
-          carries, so the detached grade walks this identical chain and reaches
-          the arm below.
-
-          The statuses that ARE execution facts (TIMEOUT, ERROR, the budget
-          stops) differ in kind: they abort the run before a verdict is
-          reachable, so preserving them overturns nothing.
+        ORDER MATTERS at every step: a detached grade may not overturn an
+        execution fact, and the NOT_GRADED arm sits ABOVE ``max_turns_exhausted``
+        so that ``execute`` + ``evaluate`` equals a single ``run``.
 
         With ``grade=True`` and no prior result the chain is the original one.
+
+        Rationale: .claude/notes/orchestration.md § The terminal-status chain
         """
         assert self.result is not None, "Result not initialized"
         inherited = self.prior_result.final_status if self.prior_result is not None else None
@@ -628,9 +541,8 @@ class Orchestrator:
         """
         from .logging_config import task_log_handler
 
-        # Agent must be resolved before reaching the orchestrator. No-op (type: none)
-        # tasks are resolved to a NoneAgentConfig like any other agent, so there is
-        # no separate "no agent" branch here.
+        # No-op (type: none) tasks resolve to a NoneAgentConfig like any other
+        # agent, so there is no separate "no agent" branch here.
         assert self.task.agent is not None, (
             f"Task '{self.task.task_id}' has no agent config. Ensure experiment resolution ran before orchestration."
         )
@@ -641,14 +553,10 @@ class Orchestrator:
         agent_type = self.task.agent.type
 
         start_time = time.time()
-        # The monotonic twin of `start_time`, and the mark `setup_ms` measures
-        # from. It sits HERE rather than at `_setup()` because the phase is
-        # defined as everything before the agent runs, and the single largest
-        # item is already behind us by then: `get_version_info()` shells out for
-        # the git commit and every CLI's `--version` and costs 733 ms measured.
-        # Starting the mark at `_setup()` put that outside every named bucket,
-        # so it landed in the report's residual — 733 of the 758 ms that made
-        # "Unaccounted" look like a real unknown when it was one nameable call.
+        # The mark `setup_ms` measures from. It sits HERE and not at `_setup()`:
+        # the phase is everything before the agent runs, and its single largest
+        # item (`get_version_info`, 733 ms measured) is already behind us by then.
+        # Rationale: .claude/notes/orchestration.md § Where the orchestrator's own time is booked
         setup_started = time.monotonic()
         started_at = datetime.now()
 
@@ -666,9 +574,9 @@ class Orchestrator:
 
         self._seed_from_prior_result()
 
-        # Calculate task log path. A re-grade gets its own file: `prior_result`
-        # means the agent phase already ran and its trajectory log is sitting in
-        # this very directory, and `task_log_handler` opens `mode="w"`.
+        # A re-grade gets its OWN file: `prior_result` means the agent phase
+        # already ran and its trajectory log is in this directory, and the handler
+        # opens `mode="w"`.
         task_log_file = task_log_path(self.run_dir, regrade=self.prior_result is not None)
         task_log_file.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
@@ -678,28 +586,15 @@ class Orchestrator:
                 # Setup components
                 await self._setup()
 
-                # Run pre-run commands inside the sandbox before the agent starts.
-                # A failing command with fail_on_error=True raises RuntimeError,
-                # which propagates to the outer except Exception below and lands
-                # the run as FinalStatus.ERROR; _run_post_run_commands and
-                # _cleanup still execute via the finally block.
+                # A failing command with fail_on_error=True raises, landing the
+                # run as ERROR; post_run and _cleanup still run via the finally.
                 await self._run_pre_run_commands()
-                # Everything before the agent phase, booked as ONE task-level
-                # bucket: the environment capture, criterion discovery, sandbox
-                # provisioning, agent start() and pre_run. Roughly harness-
-                # independent — measured within ~10 ms of each other for
-                # claude-code and pi on the same machine — which is the tell
-                # that it is the orchestrator's own cost rather than any
-                # harness's. It used to land in the report's residual, where a
-                # known constant reads as unexplained time: 10% of a 19s task,
-                # and it would read 60% of a 3s one.
+                # Everything before the agent phase, as ONE task-level bucket.
                 self.result.setup_ms = (time.monotonic() - setup_started) * 1000.0
 
-                # Enforce task-level timeout via an OS-thread watchdog that
-                # SIGKILLs the in-flight CLI subprocess AND cancels this
-                # task. The threaded approach is immune to anyio cancel
-                # scopes that were silently swallowing asyncio.wait_for
-                # cancellations during long rate-limited API calls.
+                # An OS-thread watchdog, immune to the anyio cancel scopes that
+                # silently swallowed asyncio.wait_for cancellations during long
+                # rate-limited API calls.
                 task_timeout = self.task.run_limits.task_timeout if self.task.run_limits else None
 
                 def _kill_agent_subprocess_sync() -> None:
@@ -720,9 +615,8 @@ class Orchestrator:
                         task_timeout=task_timeout,
                         start_time=start_time,
                     )
-                # Belt-and-suspenders: if the loop returned normally but the
-                # watchdog fired during post-loop work or the inner coro
-                # swallowed the cancel, still classify as TIMEOUT.
+                # The loop can return normally while the watchdog fired during
+                # post-loop work, or the inner coro swallowed the cancel.
                 if wd.fired and task_timeout is not None:
                     raise TaskTimeoutError(
                         task_timeout,
@@ -750,10 +644,9 @@ class Orchestrator:
 
                 logger.error(f"Task timed out: {e}")
 
-                # Recover the turn in flight when the watchdog killed the agent.
-                # Nothing else on this path does: the cancel arrives as a
-                # BaseException, so it never reaches the retry executor's
-                # per-attempt hook that drains the slot on a turn-level timeout.
+                # Nothing else on this path recovers the in-flight turn: the
+                # cancel arrives as a BaseException, so it never reaches the retry
+                # executor's per-attempt hook.
                 await self._drain_killed_turn()
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
@@ -796,15 +689,10 @@ class Orchestrator:
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
 
             finally:
-                # Teardown must be interrupt-proof: the task-timeout watchdog can
-                # fire while post-run commands are awaiting and deliver its
-                # CancelledError right here in the finally block, which used to
-                # abort it wholesale — skipping _cleanup() (tempdir leaked) AND
-                # _finalize_result() (task.json lost, so the task silently drops
-                # out of the run). Catch the interrupt, finish the full teardown,
-                # then re-raise it at the end so callers observe the same exception
-                # as before. The watchdog cancels exactly once, so the teardown
-                # awaits below run normally after the CancelledError is caught.
+                # INTERRUPT-PROOF: the task-timeout watchdog can deliver its
+                # CancelledError right here. Catch it, finish the teardown, then
+                # re-raise so callers observe the same exception.
+                # Rationale: .claude/notes/orchestration.md § Teardown must be interrupt-proof
                 teardown_interrupt: BaseException | None = None
                 try:
                     # BEFORE post-run/cleanup: needs the live sandbox to resolve
@@ -819,14 +707,10 @@ class Orchestrator:
                         e,
                     )
                 await self._cleanup()
-                # Capture the sanitised log tail AFTER teardown so any errors
-                # logged during post-run / cleanup also land in the report,
-                # but BEFORE _finalize_result so task.json includes the field.
-                # Allowlist non-success terminal statuses; SUCCESS and
-                # MAX_TURNS_EXHAUSTED skip the tail to keep task.json compact.
-                # NOT_GRADED is deliberately absent: like SUCCESS and
-                # MAX_TURNS_EXHAUSTED it is not a diagnosis of something going
-                # wrong, so it keeps task.json compact.
+                # AFTER teardown, so post-run and cleanup errors land in the
+                # report, but BEFORE finalization so task.json includes it. An
+                # ALLOWLIST: SUCCESS, MAX_TURNS_EXHAUSTED and NOT_GRADED all skip
+                # it, none being a diagnosis of something going wrong.
                 if self.result.final_status in {
                     FinalStatus.ERROR,
                     FinalStatus.TIMEOUT,
@@ -856,31 +740,22 @@ class Orchestrator:
         if prior is None or self.result is None:
             return
 
-        # A task row describes the TASK, so its clock is the agent run's, not the
-        # grading pass's. Left alone, a 10-minute run re-graded in 2 seconds would
-        # report 2 seconds — and that figure feeds average_duration, the report
-        # tables and the evalboard, so harness-vs-harness comparisons would be
-        # quietly wrong. _finalize_result restores the duration after its own
-        # timing write; the grading pass's cost is recorded separately there.
+        # A task row describes the TASK, so its clock is the agent run's.
+        # Rationale: .claude/notes/isolation.md § Detached grading and `Sandbox.adopt`
         self.result.started_at = prior.started_at
-        # completed_at too, so the row's three time fields stay consistent with
-        # each other: leaving it at grading wall-clock produces a triple where
-        # completed_at - started_at != duration_seconds, which misleads anyone
-        # deriving a duration from the timestamps.
+        # completed_at too, or the row's three time fields disagree.
         self.result.completed_at = prior.completed_at
 
-        # The trajectory itself. Every derived figure in _finalize_result —
-        # token totals, cost, command_stats, model_used, assistant turns —
-        # recomputes from `iterations`, so seeding it reproduces them exactly.
+        # Every derived figure recomputes from `iterations`, so seeding it
+        # reproduces them exactly.
         self.result.iterations = list(prior.iterations)
         # Evaluate-only hardcodes 1; a multi-turn run must not be reported as
         # single-turn just because the re-grade ran once.
         self.result.iteration_count = prior.iteration_count or len(prior.iterations)
 
-        # LOAD-BEARING for the verdict: gate selection is FIRED-ONLY. When
-        # early_stop is not None the checker gates on the weighted ARMED subset
-        # instead of strict-AND over every criterion. Dropping it would re-grade a
-        # truncated trajectory under the full-run gate and flip the verdict.
+        # LOAD-BEARING for the verdict: gate selection is FIRED-ONLY, so dropping
+        # this re-grades a truncated trajectory under the full-run gate.
+        # Rationale: .claude/notes/orchestration.md § Gate selection is fired-only
         self.result.early_stop = prior.early_stop
 
         # Execution facts that outlive the agent process.
@@ -892,44 +767,23 @@ class Orchestrator:
         self.result.agent_config = prior.agent_config
         self.result.expected_commands = prior.expected_commands
         self.result.simulation = prior.simulation
-        # The run's own setup cost, for the reason `duration_seconds` is
-        # restored: it is a fact about the run, not about this pass. A detached
-        # grade ADOPTS the workspace rather than building one
-        # (`Sandbox.adopt`), so its own setup is a different activity — writing
-        # it here would report the re-grade's cheap adoption as the run's
-        # provisioning. `grading_ms` goes the other way and is deliberately NOT
-        # carried: the verdict this row now holds came from THIS pass's grading.
+        # The run's own setup cost, for the reason `duration_seconds` is restored.
+        # `grading_ms` goes the other way and is deliberately NOT carried.
         self.result.setup_ms = prior.setup_ms
 
-        # pre_run belongs to the execute phase and is NOT re-run against an
-        # adopted workspace (see _skip_pre_run_for_adopted), so its recorded
-        # outcomes would otherwise vanish from the graded row.
-        #
-        # post_run is the opposite: it belongs to the GRADING phase, so on a row
-        # that came from `execute` this list is EMPTY and this grade is about to
-        # fill it (see _skip_post_run). Copied into a fresh list either way, so
-        # appending here can never mutate the prior result.
+        # pre_run belongs to the EXECUTE phase and post_run to the GRADING phase,
+        # so one is carried and the other is about to be filled. Fresh lists
+        # either way, so appending cannot mutate the prior result.
+        # Rationale: .claude/notes/isolation.md § Detached grading and `Sandbox.adopt`
         self.result.pre_run_results = list(prior.pre_run_results)
         self.result.post_run_results = list(prior.post_run_results)
 
-        # The artifacts pointer. An adopted sandbox is not deleted by cleanup(),
-        # so the path stays valid — and a SECOND grade needs it, since without it
-        # the caller falls back to guessing the workspace.
+        # An adopted sandbox is not deleted by cleanup(), so the path stays valid
+        # — and a SECOND grade needs it, or the caller guesses the workspace.
         self.result.sandbox_path = prior.sandbox_path
 
-        # environment_info: the prior run's capture describes the machine that
-        # RAN the task (installed_tools, api route, coder_eval version). Ours
-        # describes the machine grading it. Prior wins on conflict, and ours is
-        # preserved as flat `graded_by_*` scalars rather than being interleaved —
-        # a report that shows the grader's tool versions as the run's is worse
-        # than one that shows neither.
-        # Flattened to scalars rather than nested wholesale: environment_info is
-        # a flat map everywhere it is consumed (the HTML report `_esc`apes each
-        # value into a table cell; the evalboard types it as
-        # Record<string, string | number | null | Record<string, string>>), so a
-        # whole nested env capture renders as a Python dict repr. Only the three
-        # facts that identify the grading HOST are kept, and only when they
-        # differ from the run's.
+        # Merged, never replaced: prior wins on conflict, and ours survives as
+        # flat `graded_by_*` scalars.
         grader = self.result.environment_info
         provenance = {
             f"graded_by_{key}": grader[key]
@@ -1029,9 +883,9 @@ class Orchestrator:
         if self.result is None:
             return
         if not self.grade:
-            # Grading site 4 of 4. Under `execute` no criterion is checked on any
-            # path, diagnostics included — recording a not_evaluated vector here
-            # would imply criteria we were supposed to run and couldn't.
+            # Grading site 4 of 4: recording a not_evaluated vector would imply
+            # criteria we were supposed to run and couldn't.
+            # Rationale: .claude/notes/orchestration.md § The four grading sites
             return
         if self.success_checker is None or self.sandbox is None:
             self._record_post_failure_not_evaluated("the sandbox or success checker was unavailable")
@@ -1121,11 +975,9 @@ class Orchestrator:
             if self.grade:
                 self.result.calculate_weighted_score(self.task.success_criteria)
             else:
-                # Explicit None, NOT the 0.0 calculate_weighted_score writes for
-                # an empty results list — that value is indistinguishable from a
-                # task that was graded and scored zero, and every downstream
-                # `score or 0.0` would launder it into a real-looking failure
-                # (CE049).
+                # Explicit None, NOT the 0.0 written for an empty results list —
+                # that value is indistinguishable from a graded row that scored
+                # zero, and every downstream `score or 0.0` launders it (CE049).
                 self.result.weighted_score = None
         except ValueError as e:
             logger.error("Weighted-score computation failed; marking row ERROR: %s", e, exc_info=True)
@@ -1182,32 +1034,28 @@ class Orchestrator:
         if not self.result:
             return
 
-        # Every resolved task carries an agent config (no-op tasks resolve to a
-        # NoneAgentConfig); a missing one is a resolution bug. The evaluate-only
-        # path doesn't reach here with task.agent unset.
+        # Every resolved task carries an agent config; a missing one is a
+        # resolution bug.
         if self.task.agent is None:
             logger.error("Cannot finalize result: task.agent is None")
             return
 
         self.result.completed_at = datetime.now()
         self.result.duration_seconds = time.time() - start_time
-        # Read off the checker, which accumulated it across every call site it
-        # served. Stays None when nothing was graded (`coder-eval execute`),
-        # which is the distinction CE058 is about: no criteria ran, so no
-        # measurement exists — as opposed to one that came back instant.
+        # Accumulated by the checker across every call site it served. Stays None
+        # when nothing was graded: no criteria ran, so no measurement exists, as
+        # opposed to one that came back instant (CE058).
         if self.success_checker is not None:
             self.result.grading_ms = self.success_checker.grading_ms
 
-        # Re-grade: the row keeps the agent run's duration (see
-        # _seed_from_prior_result). The grading pass's own cost is preserved
-        # alongside rather than discarded, so a slow judge is still visible.
+        # The row keeps the agent run's duration; the grading pass's own cost is
+        # preserved alongside, so a slow judge is still visible.
         self._finalize_regrade_timing()
 
-        # Weighted score. This call site is wrapped because _finalize_result runs
-        # inside run()'s finally — an unguarded raise here would skip persistence and
-        # lose task.json. The other calculate_weighted_score calls (the simulation
-        # path) run inside run()'s try, whose broad `except Exception` already converts
-        # a raise into a populated ERROR result, so they intentionally stay unwrapped.
+        # Wrapped because _finalize_result runs inside run()'s finally, where an
+        # unguarded raise would skip persistence and lose task.json. The
+        # simulation-path calls run inside run()'s try, whose broad handler already
+        # converts a raise into a populated ERROR result.
         self._finalize_weighted_score()
 
         # Command statistics
@@ -1223,9 +1071,8 @@ class Orchestrator:
         if not self.result.model_used and self.task.agent is not None and self.task.agent.model:
             self.result.model_used = self.task.agent.model
 
-        # Open-weight (LiteLLM) backend: replace per-turn cost with the ACTUAL
-        # per-call OpenRouter cost captured proxy-side. Runs BEFORE aggregation so
-        # the run total re-derives from the corrected per-turn costs.
+        # Replace per-turn cost with the ACTUAL proxy-side cost. BEFORE
+        # aggregation, so the run total re-derives from the corrected values.
         self._join_litellm_actual_cost()
 
         # Aggregate token usage
@@ -1268,18 +1115,15 @@ class Orchestrator:
             "Task finished: status=%s duration=%.1fs score=%s iterations=%d",
             self.result.final_status.value,
             self.result.duration_seconds or 0.0,
-            # "n/a", not 0.000: this line is read when diagnosing a run, and a
-            # zero here would say the criteria scored nothing rather than that
-            # nothing was scored.
+            # "n/a", not 0.000: a zero here would say the criteria scored nothing
+            # rather than that nothing was scored.
             "n/a" if self.result.weighted_score is None else f"{self.result.weighted_score:.3f}",
             self.result.iteration_count,
         )
 
-        # Usage telemetry (non-fatal; placed before persistence since track_event
-        # cannot raise). For the docker driver this in-process emit runs INSIDE the
-        # container where telemetry is off (the connection-string env vars aren't
-        # forwarded), so the host emits the event from batch.py instead — see
-        # build_task_event. Non-docker tasks finalize on the host and emit here.
+        # Non-fatal, and before persistence since track_event cannot raise. Under
+        # the docker driver this runs INSIDE the container, where telemetry is off,
+        # so the host emits the event from batch.py instead.
         from .telemetry import track_event
 
         driver = self.task.sandbox.driver if self.task.sandbox else ""
@@ -1289,33 +1133,28 @@ class Orchestrator:
         # Persist
         self.report_path.parent.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
 
-        # Spill any judge transcripts to sibling YAML files BEFORE
-        # we dump task.json, so transcript_path is set on each judge result.
-        # The inline `transcript` field stays in memory — HTML rendering below
-        # uses it directly. We strip it from the JSON dump via `exclude=...`.
+        # BEFORE the task.json dump, so transcript_path is set on each judge
+        # result. The inline `transcript` stays in memory for HTML rendering and is
+        # stripped from the JSON dump.
         from .evaluation.judge_persistence import TASK_JSON_TRANSCRIPT_EXCLUDE, spill_judge_transcripts
 
         spill_judge_transcripts(self.result, self.report_path.parent)
 
-        # Atomic write: tmp file + os.replace. A SIGKILL mid-write (e.g. the
-        # docker-driver host-heartbeat watchdog firing) would otherwise leave
-        # a truncated task.json that the host parses as malformed-JSON rather
-        # than as "no result", conflating two distinct failure modes.
+        # A SIGKILL mid-write would otherwise leave a truncated task.json that
+        # parses as malformed-JSON rather than as "no result".
+        # Rationale: .claude/notes/persistence.md § write_text_atomic
         write_text_atomic(  # noqa: CE002 — small JSON write at end of run
             self.report_path,
             self.result.model_dump_json(
                 indent=2,
-                # Strip inline transcripts: they live in sibling YAML files
-                # next to task.json, referenced by transcript_path. Excluding
-                # `transcript` here avoids ~20-100 KB of bloat per judge result
-                # in the row record without losing any data.
+                # They live in sibling YAML files, referenced by transcript_path;
+                # this avoids ~20-100 KB of bloat per judge result.
                 exclude=TASK_JSON_TRANSCRIPT_EXCLUDE,
             ),
         )
 
-        # Also emit an HTML trace/report alongside task.json. HTML failure must
-        # never mask the underlying run outcome — write_task_html logs and
-        # returns None on failure.
+        # HTML failure must never mask the run outcome — write_task_html logs and
+        # returns None.
         from .reports_html import write_task_html
 
         write_task_html(self.result, self.html_report_path)
@@ -1451,11 +1290,9 @@ class Orchestrator:
         if not (isinstance(self.route, LiteLLMRoute) and settings.litellm_cost_log and self.result is not None):
             return
         if self.prior_result is not None:
-            # Re-grading someone else's trajectory. The join keys on THIS
-            # Orchestrator's per-attempt nonce, which the original turns were
-            # never tagged with, so it would match nothing and overwrite the
-            # already-corrected per-turn costs with a warning about a missing
-            # bill. The prior run's cost is the real one; leave it alone.
+            # The join keys on THIS Orchestrator's per-attempt nonce, which the
+            # original turns were never tagged with — it would match nothing and
+            # overwrite the already-correct per-turn costs.
             logger.debug("Re-grade of a prior trajectory: keeping its recorded cost, skipping the LiteLLM join.")
             return
         try:
@@ -1469,9 +1306,8 @@ class Orchestrator:
             if applied:
                 logger.info("LiteLLM actual-cost join: real per-call cost applied to %d turn(s)", applied)
             else:
-                # Tags were stamped but nothing matched (file absent, proxy never
-                # wrote, wrong path, or a run/task/attempt mismatch). The run stays
-                # on the static rate card — warn so it isn't mistaken for the real bill.
+                # Stamped but unmatched: the run stays on the static rate card, so
+                # warn rather than let it pass as the real bill.
                 logger.warning(
                     "LiteLLM actual-cost join found no matching records in %s (run=%s task=%s); cost stays static",
                     settings.litellm_cost_log,
@@ -1541,10 +1377,9 @@ class Orchestrator:
             destination = staging / "reference"
             self._reference_dir = await asyncio.to_thread(stage_reference_dir, source, destination)
         self._reference_digest = await asyncio.to_thread(digest_tree, self._reference_dir)
-        # Persist it: a DETACHED grade happens in a different process with no
-        # access to this instance, and refuses to score old work against a new
-        # answer key by comparing the tree it stages against this recorded hash
-        # (orchestration/regrade.py::verify_reference_unchanged).
+        # Persisted because a DETACHED grade runs in another process and refuses
+        # to score old work against a new answer key by comparing the tree it
+        # stages against this recorded hash.
         if self.result is not None:
             self.result.environment_info["reference_digest"] = self._reference_digest
         self._validate_reference_consumers()
@@ -1608,11 +1443,8 @@ class Orchestrator:
         if self.grade:
             self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
             return
-        # Early stop cuts the run once coder-eval's own criteria decide the
-        # outcome. Under `execute` there is no outcome to decide and the
-        # trajectory is the deliverable (an external harness grades it), so an
-        # armed criterion must not truncate it. Same effect as the
-        # run_limits.stop_early kill switch, decided one layer up.
+        # Under `execute` there is no outcome to decide and the trajectory IS the
+        # deliverable, so an armed criterion must not truncate it.
         logger.info(
             "Grading disabled (execute mode): early-stop is armed but stays disabled; "
             + "the full trajectory is the deliverable."
@@ -1639,22 +1471,19 @@ class Orchestrator:
         Raises:
             RuntimeError: If setup fails
         """
-        # Defensive early-stop guardrails for the library-use and in-container
-        # paths (the CLI already validated during resolution). No-op unless
-        # some criterion carries a stop_early: block.
+        # Guardrails for the library-use and in-container paths; the CLI already
+        # validated during resolution.
         validate_early_stop(self.task)
         self._warn_on_ineffective_task_timeout()
 
-        # Build the early-stop watcher once, up front, when armed (>= 1 criterion
-        # with a stop_early: block and the run_limits.stop_early kill switch not
-        # thrown). This sits BEFORE the evaluate-only early return below, so an
-        # armed evaluate-only re-grade builds an inert (never-fed) watcher —
-        # harmless, and keeps a single creation point.
+        # ONCE, up front, and BEFORE the evaluate-only early return: an armed
+        # evaluate-only re-grade builds an inert watcher, which is harmless and
+        # keeps a single creation point.
+        # Rationale: .claude/notes/orchestration.md § Gate selection is fired-only
         self._arm_early_stop()
 
-        # Stage the reference BEFORE either branch returns: judge criteria with
-        # include_reference=true (and any $REFERENCE_DIR/... file entry) expect it
-        # populated in evaluate-only re-grades too, where no agent ever runs.
+        # BEFORE either branch returns: judge criteria with include_reference
+        # expect it populated in evaluate-only re-grades too.
         await self._stage_reference()
 
         if self.sandbox is not None:
@@ -1669,9 +1498,8 @@ class Orchestrator:
             self._record_route_environment_info()
             return
 
-        # Validate API keys (agent guaranteed non-None after experiment resolution).
-        # validate_api_keys exempts the no-op agent (type: none) internally — it
-        # makes no API call, so it needs no agent keys.
+        # validate_api_keys exempts the no-op agent internally — it makes no API
+        # call, so it needs no agent keys.
         assert self.task.agent is not None and self.task.agent.type is not None
         settings.validate_api_keys(str(self.task.agent.type))
 
@@ -1680,13 +1508,11 @@ class Orchestrator:
         self.sandbox = Sandbox(self.task.sandbox, task_id=self.task.task_id, task_dir=task_dir)
         self.sandbox.reference_dir = self._reference_dir
 
-        # workspace_dir (docker WORKDIR alignment) wins: run the agent in-place at
-        # the image's own WORKDIR so its inputs/verifier paths line up, then copy
-        # the workspace out to run_dir/artifacts in _cleanup. Otherwise:
-        # DIRECT_WRITE runs the sandbox straight in run_dir/artifacts/<task_id>
-        # (no end-of-run copy/move); MOVE_ON_WRITE / NONE run in a tempdir —
-        # this keeps the run off run_dir on shared hosts, where parent-dir
-        # node_modules can contaminate Node tool resolution (MST-9795).
+        # workspace_dir (docker WORKDIR alignment) WINS: run the agent in-place at
+        # the image's own WORKDIR so its paths line up, then copy out in _cleanup.
+        # Otherwise DIRECT_WRITE runs straight in run_dir/artifacts and the rest
+        # run in a tempdir, which keeps the run off run_dir on shared hosts where
+        # a parent-dir node_modules contaminates Node tool resolution (MST-9795).
         if self.workspace_dir is not None:
             if self.preservation_mode == PreservationMode.DIRECT_WRITE:
                 logger.debug(
@@ -1698,19 +1524,12 @@ class Orchestrator:
             direct_target = self.run_dir / "artifacts" / self.task.task_id
         else:
             direct_target = None
-        # DIRECT_WRITE deliberately does NOT clear the target dir, so a reused
-        # --run-dir (or --resume) can leave a prior run's files alongside this
-        # run's outputs and silently perturb file-based criteria. Surface it.
-        # Suppressed in workspace_dir mode ONLY inside a container
-        # (IN_CONTAINER_ENV, per CE056 -- never on the field itself): the
-        # original writer was exclusively `run_task_internal_command`, where
-        # the WORKDIR is a fresh container filesystem every run, so a WORKDIR
-        # (/root, /app) legitimately holds the image's baked inputs there, not
-        # stale prior-run files. `--workspace-dir` is now also a host-reachable
-        # CLI flag on `run`/`execute`, where the named directory persists
-        # across invocations exactly like DIRECT_WRITE's own target -- keying
-        # the suppression on `workspace_dir is None` silently disabled the
-        # warning on precisely the new path where it is needed.
+        # DIRECT_WRITE deliberately does NOT clear the target, so a reused
+        # --run-dir can leave a prior run's files beside this one's and perturb
+        # file-based criteria. Suppressed in workspace_dir mode ONLY inside a
+        # container (CE056 — never on the field itself), where the WORKDIR is a
+        # fresh filesystem holding the image's baked inputs; `--workspace-dir` is
+        # also a host flag, where the directory persists and the warning is needed.
         in_container = os.environ.get(IN_CONTAINER_ENV) == "1"
         if (
             not (self.workspace_dir is not None and in_container)
@@ -1741,10 +1560,8 @@ class Orchestrator:
         # Determine API routing from settings.api_backend enum
         self._resolve_routes()
 
-        # Create and start the agent. For a no-op (type: none) task this dispatches
-        # to NoOpAgent, whose start/communicate/stop are no-ops — the orchestrator
-        # runs the normal lifecycle without any agentless branching, and the
-        # criteria are checked against the pre_run-prepared sandbox.
+        # A no-op (type: none) task dispatches to NoOpAgent, whose lifecycle is
+        # no-ops, so the orchestrator needs no agentless branching.
         assert self.task.agent is not None
         self.agent = await self._create_agent()
 
@@ -1768,18 +1585,11 @@ class Orchestrator:
         # Save agent config on result (copy to prevent mutation of shared reference)
         self.result.agent_config = self.task.agent.model_copy(deep=True)
 
-        # Re-capture environment_info with sandbox path (for CLAUDE.md hash).
-        #
         # UPDATE, never rebind. `get_version_info` returns a FRESH dict, so
-        # assigning it here discarded every key written earlier in `_setup` —
-        # and `_stage_reference` runs earlier and writes `reference_digest`
-        # there. The digest therefore never reached task.json, which left
-        # `regrade.verify_reference_unchanged` taking its "recorded no digest"
-        # early return on every real run: the answer-key anti-cheat was a
-        # permanent no-op that CE054 could not see, because a write DID exist
-        # in `src/` — it was just dead. Merging keeps the sandbox-derived
-        # capture authoritative for the keys it owns without deleting anyone
-        # else's.
+        # assigning it discarded every key written earlier in `_setup` — including
+        # `reference_digest`, which left the answer-key anti-cheat a permanent
+        # no-op that CE054 could not see, because a write DID exist in `src/`; it
+        # was just dead.
         self.result.environment_info.update(
             get_version_info(
                 sandbox_path=Path(self.result.sandbox_path) if self.result.sandbox_path else None,
@@ -1796,35 +1606,17 @@ class Orchestrator:
     def _sync_sandbox_command_path_with_agent(self) -> None:
         """Align criteria command PATH with the PATH used for the last agent query.
 
-        Scope: called from the per-turn happy path in ``run_iteration`` /
-        ``run_simulation`` *after* a successful ``_communicate_with_retry``.
-        That means three pre-existing gaps remain (none introduced by this
-        change):
+        Called from the per-turn happy path AFTER a successful
+        ``_communicate_with_retry``, which leaves three gaps: an agent crash or
+        turn timeout, evaluate-only mode, and the window before the first turn. In
+        each, criteria fall back to ambient ``os.environ['PATH']``.
 
-        - **Agent crash / turn timeout** — the sync is skipped because the
-          method never returns; criteria fall back to ambient
-          ``os.environ['PATH']``. Acceptable: a crashed agent's SDK PATH may
-          itself be unreliable.
-        - **Evaluate-only mode** (``orchestrator.run_evaluation_only``) — no
-          agent turn runs, so no sync. Criteria use ambient PATH, same as
-          before this change.
-        - **Before the first turn** — same reason; first criterion check
-          always runs after at least one turn under the normal flow.
+        ``Agent.get_sdk_options()`` is declared synchronous on the ABC, but
+        ``AsyncMock`` fixtures return a coroutine for ANY attribute access, so it
+        is closed rather than awaited — a test-fixture concern, logged at DEBUG. A
+        non-dict, non-None return IS a production contract violation and warns.
 
-        Sandbox-setup-time sync (using ``SandboxConfig.mock_path_dirs``) was
-        considered but rejected: the agent SDK's effective PATH is only
-        knowable after the SDK initializes, so a setup-time sync would
-        capture only the configured prepends, not the full agent env.
-
-        ``Agent.get_sdk_options()`` is declared synchronous on the ABC
-        (``dict[str, Any] | None``). ``AsyncMock``-based test fixtures
-        return a coroutine for *any* attribute access regardless of the
-        declared signature; ``isawaitable`` plus ``coroutine.close()``
-        prevents leaking ``RuntimeWarning: coroutine was never awaited``
-        from those fixtures into unrelated tests. That is a test-fixture
-        concern, not a production contract violation — logged at DEBUG.
-        Returning a non-dict-and-non-None *is* a production contract
-        violation and is logged at WARNING.
+        Rationale: .claude/notes/orchestration.md § Restoring a PATH from a run directory
         """
         if self.agent is None or self.sandbox is None:
             return
@@ -1834,10 +1626,8 @@ class Orchestrator:
         if isawaitable(sdk_options):
             close = getattr(sdk_options, "close", None)
             if callable(close):
-                # ``coroutine.close()`` only documents ``RuntimeError``
-                # (raised when invoked on a currently-running coroutine,
-                # which cannot apply here). Narrow the suppress accordingly
-                # so genuine unexpected exceptions still propagate.
+                # `close()` only documents RuntimeError, which cannot apply here,
+                # so narrow the suppress and let real exceptions propagate.
                 with suppress(RuntimeError):
                     close()
             logger.debug(
@@ -1857,11 +1647,8 @@ class Orchestrator:
         path = sdk_env.get("PATH")
         if isinstance(path, str) and path:
             self.sandbox.set_command_base_path(path)
-            # Persist it so a LATER detached grade (`coder-eval evaluate` over a
-            # finished run dir) can restore the same PATH. Without this the
-            # "evaluate-only mode" gap named above is permanent: the re-grade
-            # would resolve `run_command` criteria against ambient PATH and could
-            # reach a different verdict than the run it claims to be grading.
+            # Persisted so a LATER detached grade can restore the same PATH;
+            # otherwise it resolves run_command criteria against ambient PATH.
             if self.result is not None:
                 self.result.environment_info["command_base_path"] = path
 
@@ -1900,12 +1687,7 @@ class Orchestrator:
         assert self.sandbox is not None
         self.route = resolve_route(settings)
         overrides = self._eval_route_overrides()
-        # Decoupled from checker_context.api_route (no overrides passed) so the
-        # simulator never reads the litellm-judge-only knob, but still routed
-        # through resolve_evaluation_route (not aliased to self.route) so the
-        # LiteLLM-agent -> pinned-Claude-backend guard still applies to it: the
-        # simulated user is part of the measuring instrument and must not run on
-        # the agent's own open-weight gateway either.
+        # Rationale: .claude/notes/orchestration.md § Three routes, resolved separately
         self.simulator_route = resolve_evaluation_route(settings, self.route)
         self.eval_route = resolve_evaluation_route(
             settings,
@@ -1975,35 +1757,21 @@ class Orchestrator:
         assert self.result is not None
         assert self.route is not None
         if self.prior_result is not None:
-            # A detached grade resolves routes for ITS OWN host, which may be a
-            # different backend from the one that ran the task. Writing them into
-            # the run's keys contradicts the "prior wins" contract in
-            # _seed_from_prior_result and leaves a self-contradictory record —
-            # `api_routing: anthropic_direct` beside the run's stale `aws_region`
-            # and `bedrock_model`. Keep the run's routing; record the grader's
-            # alongside it, under the same `graded_by_` provenance prefix the
-            # seeding uses, and only when it actually differs.
+            # A detached grade resolves routes for ITS OWN host: writing them into
+            # the run's keys leaves a self-contradictory record, so they go under
+            # the `graded_by_` prefix and only when they differ.
             self._record_grader_route_provenance()
             return
         self.result.environment_info["api_routing"] = ROUTE_NAMES[type(self.route)]
-        # The judge side (llm_judge / agent_judge) may run on a different,
-        # constant backend — pinned to Claude when the agent is on LiteLLM — so
-        # record it: a run then shows what actually graded it, distinct from the
+        # Recorded so a run shows what actually graded it, distinct from the
         # agent's api_routing.
         if self.eval_route is not None:
             self.result.environment_info["eval_routing"] = ROUTE_NAMES[type(self.eval_route)]
-            # bedrock_model/litellm_model below are sourced from self.route (the
-            # AGENT's route) — record the judge's own model separately so a
-            # checker_context.api_route.model override (or the LiteLLM-agent
-            # pinned-to-Bedrock default) is visible in run artifacts, not just
-            # inferable from the agent's model.
+            # The models below are the AGENT's; record the judge's separately so a
+            # checker_context override is visible rather than merely inferable.
             if self.eval_route.model:
                 self.result.environment_info["eval_model"] = self.eval_route.model
-        # The simulator is pinned the same way eval_route is (LiteLLM agent ->
-        # constant Claude backend) but resolved independently of
-        # checker_context.api_route — record it separately so a run shows what
-        # the simulated user actually talked to, distinct from both api_routing
-        # and eval_routing above.
+        # Recorded separately so a run shows what the simulated user talked to.
         if self.simulator_route is not None:
             self.result.environment_info["simulator_routing"] = ROUTE_NAMES[type(self.simulator_route)]
             if self.simulator_route.model:
@@ -2056,10 +1824,9 @@ class Orchestrator:
             self.sandbox.refresh_plugin_tools_dir()
             versions = runtime_uip_versions(self.sandbox.plugin_tools_dir, self.sandbox.uip_search_path)
             # Keep the setup-time values when post-task resolution comes back
-            # empty (e.g. `uip` gone from PATH) — they are the better estimate
-            # of what the task ran than "unknown"/{}. Gate on looks_like_version
-            # (not a "" / "unknown" denylist) so this sink shares the one
-            # version-shape contract with _uip_version and the run-level join.
+            # empty — they estimate what the task ran better than "unknown". Gated
+            # on looks_like_version, not a denylist, so this shares one
+            # version-shape contract with the run-level join.
             if looks_like_version(versions.get("cli_version")):
                 self.result.environment_info["cli_version"] = versions["cli_version"]
             if versions.get("tool_plugins"):
@@ -2082,23 +1849,17 @@ class Orchestrator:
         from coder_eval.agents import AgentRegistry, create_agent
         from coder_eval.plugins import ensure_plugins_loaded
 
-        # Safety net for the production agent-construction path: create_agent no
-        # longer self-loads (to keep plugins -> registry a one-way import edge), so
-        # ensure plugin kinds are registered here before dispatch.
+        # create_agent no longer self-loads (keeping plugins -> registry one-way),
+        # so plugin kinds are registered here before dispatch.
         ensure_plugins_loaded()
         assert self.task.agent is not None
         assert self.task.agent.type is not None
-        # LiteLLM (open-weight) route only: give the agent correlation headers so a
-        # proxy-side cost-logging callback can attribute each call's real cost +
-        # cache buckets back to this task-run. x-ce-run-id is a stable per-task-run
-        # key (the join, in _finalize_result, recomputes it identically); x-ce-task-id
-        # is the human-readable canonical id.
-        #
-        # Gate on AGENT CAPABILITY, not the route: the route is settings-derived and
-        # independent of agent type, but only agents whose __init__ accepts the kwarg
-        # (supports_cost_log_tags) may receive it — otherwise the agent-agnostic
-        # factory would forward it into NoOp/Codex/Antigravity/plugin constructors
-        # that don't declare it and crash with TypeError under API_BACKEND=litellm.
+        # LiteLLM only: correlation headers so a proxy-side cost callback can
+        # attribute each call back to this task-run. GATED ON AGENT CAPABILITY, not
+        # on the route — the route is settings-derived and independent of agent
+        # type, so the agent-agnostic factory would otherwise forward the kwarg
+        # into constructors that do not declare it.
+        # Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         kwargs: dict[str, Any] = {}
         registration = AgentRegistry.get(self.task.agent.type)
         if (
@@ -2145,11 +1906,9 @@ class Orchestrator:
         if self.stream_callback is not None:
             agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
 
-        # Compose the early-stop watcher into the stream when armed. It is the
-        # sole callback when --stream is off, else it runs alongside the
-        # TaskScopedCallback. The same watcher instance persists across retry
-        # attempts (created once in _setup), so its turn/tool counters and
-        # wall-clock origin accumulate correctly. The closures below read `watcher`.
+        # The sole callback when --stream is off, else alongside the
+        # TaskScopedCallback. The same instance persists across retry attempts, so
+        # its counters and wall-clock origin accumulate.
         watcher = self._early_stop_watcher
         if watcher is not None:
             agent_callback = (
@@ -2225,29 +1984,14 @@ class Orchestrator:
                     iteration=iteration,
                 ) from None
 
-        # ANTI-CHEAT WINDOW. The agent shares a filesystem with the harness, so
-        # without this it can simply read the reference solution (and the task YAML
-        # with its criteria) instead of solving the task. Both directories sit at
-        # mode 000 for the whole of every communicate attempt — including retries,
-        # since the wrapper is outside execute_with_retry — and are restored on
-        # every exit path, so criteria and judges that run afterwards read normally.
-        #
-        # Routed through the SANDBOX, which owns whether a chmod window means
-        # anything for its driver.
-        #
-        # task_dir is shielded ALONGSIDE reference_dir. It previously was not,
-        # because under docker it was bind-mounted `:ro` and the chmod returned
-        # EROFS -- producing only a per-turn "could not chmod" warning. It is now
-        # a read-write throwaway copy (docker_runner._prepare_task_dir_mount), so
-        # the window applies. That matters because the task dir holds grading
-        # material beyond the reference: run_command fixtures, expected outputs,
-        # and -- for a task laid out flat, whose parent is the whole `tasks/`
-        # tree -- every SIBLING task's reference solution.
-        #
-        # What this does NOT do is hide the task DEFINITION. `task.yaml` is also
-        # staged at /work/input for the in-container orchestrator to read, and
-        # that mount is untouched by this window. Hiding the criteria from the
-        # agent remains a separate, unsolved problem.
+        # ANTI-CHEAT WINDOW. Both the reference and the task dir sit at mode 000
+        # for the whole of every communicate attempt — retries included, since this
+        # wrapper is outside execute_with_retry — and are restored on every exit
+        # path. Routed through the SANDBOX, which owns whether a chmod window means
+        # anything for its driver. It does NOT hide the task DEFINITION: task.yaml
+        # is also staged at /work/input, and hiding the criteria from the agent is
+        # a separate, unsolved problem.
+        # Rationale: .claude/notes/permissions.md § Reference solutions and the anti-cheat window
         assert self.sandbox is not None
         async with self.sandbox.set_permissions([self._reference_dir, self.sandbox.task_dir]):
             turn_record = await execute_with_retry(
@@ -2304,30 +2048,16 @@ class Orchestrator:
     def _sanitize_restored_path(self, recorded: str) -> str:
         """Filter a PATH restored from a run's own ``task.json`` before prepending it.
 
-        The restored value is PREPENDED ahead of the host PATH, and it arrives
-        from a file inside the directory being graded — a run dir is a shareable
-        artifact (that is the whole point of the detached-grading flow), and under
-        ``driver: docker`` it is bind-mounted writable into the container the agent
-        runs in. Prepending it verbatim lets a run dir decide which binary
+        The restored value arrives from inside the directory being graded — a
+        shareable artifact, bind-mounted writable into the agent's container under
+        ``driver: docker`` — so verbatim it lets a run dir decide which binary
         ``pytest`` resolves to on the grader's host.
 
-        Four filters, all cheap and all about what PATH parity actually needs:
+        Four filters: absolute paths only, existing directories only, nothing
+        inside the workspace, nothing inside the run directory. What remains is the
+        run's genuine toolchain locations.
 
-        * **Absolute only.** A relative entry resolves against the grader's
-          *current working directory*, which has nothing to do with the run — so
-          ``evilbin`` in a recorded PATH becomes ``$PWD/evilbin`` at the front of
-          every criterion subprocess's PATH. It also cannot be the toolchain
-          location it claims to be, since the run resolved it somewhere else.
-        * Drop anything that is not an existing directory (a dead entry buys no
-          parity).
-        * Drop any entry inside the **workspace** being graded — that tree is
-          agent-writable, so a shim dropped there would shadow a real tool.
-        * Drop any entry inside the **run directory** as a whole. The workspace
-          is only part of it; ``artifacts/``, a sibling replicate's tree and the
-          run root itself all travel in the same shared artifact and are all
-          equally attacker-chosen.
-
-        What remains is the run's genuine toolchain locations.
+        Rationale: .claude/notes/orchestration.md § Restoring a PATH from a run directory
         """
         workspace = self.sandbox.sandbox_dir.resolve() if self.sandbox and self.sandbox.sandbox_dir else None
         run_root = self.run_dir.resolve()
@@ -2361,43 +2091,19 @@ class Orchestrator:
     def _select_gate(self) -> bool:
         """Apply the verdict gate to the criteria results already on ``self.result``.
 
-        Gate selection is FIRED-ONLY: the weighted armed gate applies iff the
-        watcher actually cut the run (``early_stop is not None``) — on a truncated
-        trajectory the unarmed criteria never had the chance to be satisfied, so
-        they stay advisory. A run that completed naturally (armed or not, watcher
-        never fired or disarmed fail-open) has a full trajectory and gates
-        strict-AND over every gating criterion, exactly like an unarmed run —
-        arming a criterion (e.g. adding a ``decide_within`` fail-fast timeout)
-        must never change the verdict of a run it didn't cut.
+        Gate selection is FIRED-ONLY: the weighted armed gate applies IFF the
+        watcher actually cut the run. BOTH single-shot grading paths must call
+        this — the live one and the evaluate-only one — or a re-graded
+        early-stopped run is scored under the full-run gate and flips its verdict.
 
-        BOTH SINGLE-SHOT grading paths must call this — the live one and the
-        evaluate-only one, which are its two call sites. A detached grade
-        (``evaluate <run_dir>`` / ``run --resume``) reaches the verdict through
-        the evaluate-only branch, where ``early_stop`` arrives via
-        ``_seed_from_prior_result`` rather than from a live watcher; selecting
-        the gate there in a second, hand-written place is exactly how the
-        seeded field came to be carried but never read — re-grading an
-        early-stopped run under the full-run strict-AND gate flips its verdict.
+        The simulation dialog path does NOT route through here.
 
-        The simulation dialog path does NOT route through here, and saying "both
-        grading paths" without that qualifier read as though it did. It is
-        benign only because ``result.early_stop`` is never assigned on the
-        dialog path, so an armed simulation task silently gates strict-AND on a
-        possibly-truncated trajectory. Wiring the dialog path through this seam
-        means also setting ``early_stop`` there; until then the limit is stated
-        rather than implied.
+        Rationale: .claude/notes/orchestration.md § Gate selection is fired-only
         """
         assert self.result is not None
         if self.result.early_stop is not None:
-            # One gate for every early-stopped run, no per-reason branches: a
-            # decision-budget stop is just a fail-stop whose deciding criterion
-            # timed out (the watcher only fires once the weighted ceiling
-            # proves the armed gate cannot pass). The ceiling is an upper bound
-            # on the authoritative armed score only because the watcher reduces
-            # the SAME trajectory the checker scores — it records UNRESOLVED
-            # tool ends exactly like the agent's EventCollector does (see
-            # EarlyStopWatcher._on_event_impl) — so the weighted armed gate is
-            # correct whether the watcher fired on a pass, a fail, or a timeout.
+            # ONE gate for every early-stopped run, with no per-reason branches.
+            # Rationale: .claude/notes/orchestration.md § Gate selection is fired-only
             gate_threshold = (
                 self.task.run_limits.stop_early_gate_threshold
                 if self.task.run_limits is not None
@@ -2432,17 +2138,15 @@ class Orchestrator:
         assert self.task.agent is not None
 
         if self.agent is None:
-            # Grading site 1 of 4. Evaluate-only with grading off would neither
-            # run an agent nor check anything — a no-op that still writes a
-            # task.json. Refuse instead of producing an empty row.
+            # Grading site 1 of 4: refuse rather than write an empty row.
+            # Rationale: .claude/notes/orchestration.md § The four grading sites
             if not self.grade:
                 raise ValueError(
                     "grade=False is meaningless on the evaluate-only path (no agent attached): "
                     + "the run would neither execute nor grade."
                 )
-            # No agent attached: evaluate-only re-grade of a completed sandbox.
-            # (No-op tasks have a NoOpAgent here, so they take the normal path
-            # below.) Check the criteria directly against the sandbox.
+            # Evaluate-only re-grade of a completed sandbox. (No-op tasks have a
+            # NoOpAgent here, so they take the normal path below.)
             assert self.success_checker is not None
             assert self.result is not None
             unsupported = [c.type for c in self.task.success_criteria if c.requires_agent]
@@ -2454,14 +2158,12 @@ class Orchestrator:
                     unsupported,
                 )
             # A bare `evaluate <task> <dir>` has no trajectory, so one nominal
-            # iteration stands for the single grading pass. A re-grade seeded
-            # from a prior result already carries the real count (and the turns
-            # the trajectory-reading criteria need) — do not flatten it to 1.
+            # iteration stands for the grading pass. A seeded re-grade already
+            # carries the real count — do not flatten it.
             if self.prior_result is None:
                 self.result.iteration_count = 1
-            # Load reference in evaluate-only mode too: judge criteria with
-            # include_reference=true expect this populated even when no agent
-            # runs. The agent-driven branch below has the same call.
+            # Evaluate-only loads the reference too: include_reference judges
+            # expect it populated even when no agent runs.
             criteria_results = await self.success_checker.check_all_async(
                 self.task.success_criteria,
                 reference_dir=self._reference_dir,
@@ -2475,18 +2177,15 @@ class Orchestrator:
         assert self.sandbox is not None and self.sandbox.sandbox_dir is not None
         sandbox_dir = self.sandbox.sandbox_dir
 
-        # When a SimulationConfig is present and enabled, replace the
-        # criteria-feedback iteration loop with a multi-turn dialog between
-        # the agent and an LLM-simulated user. The single-shot loop below is
-        # skipped entirely — simulated tasks run exactly one dialog per call.
+        # A simulation block replaces the single-shot loop entirely; a simulated
+        # task runs exactly one dialog per call.
         if self.task.simulation is not None and self.task.simulation.enabled:
             # initial_prompt is optional in simulation mode — when unset, the
             # simulator produces the opening utterance itself.
             return await self._simulation_dialog_loop(self.task.initial_prompt, sandbox_dir)
 
-        # initial_prompt is guaranteed for real agents (check_prompt_fields); a
-        # no-op (type: none) task runs with no prompt — send empty, NoOpAgent
-        # ignores it and returns an empty turn.
+        # Guaranteed for real agents by check_prompt_fields; a no-op task runs with
+        # no prompt, which NoOpAgent ignores, returning an empty turn.
         current_prompt = self.task.initial_prompt or ""
 
         iteration = 1
@@ -2512,16 +2211,12 @@ class Orchestrator:
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
-        # Facts about the RUN, recorded before the grading switch. `execute`
-        # withholds the verdict, never the facts: `_seed_from_prior_result`
-        # cannot restore a fact the execute phase never captured, so a later
-        # `evaluate` would inherit the wrong terminal status.
-        #
-        # Recording the fact is NOT the same as finalizing on it. `max_turns`
-        # exhaustion decides the status only when the criteria fail (see
-        # `_terminal_status`), so under `grade=False` this flag is carried into
-        # task.json and consumed by the detached grade, not turned into a
-        # terminal status here.
+        # Facts about the RUN, recorded BEFORE the grading switch: `execute`
+        # withholds the verdict, never the facts. Recording the fact is not
+        # finalizing on it — max_turns decides the status only when the criteria
+        # fail, so under grade=False this is carried into task.json for the
+        # detached grade rather than turned into a terminal status.
+        # Rationale: .claude/notes/orchestration.md § The four grading sites
         if turn_record.max_turns_exhausted:
             self.result.max_turns_exhausted = True
             logger.warning(
@@ -2531,16 +2226,15 @@ class Orchestrator:
         # Soft cumulative-turn check (logs once; never aborts).
         self._check_expected_turns(iteration=iteration)
 
-        # Grading site 2 of 4. `execute` stops here: the trajectory is captured
-        # and persisted exactly as on a graded run, but nothing is scored.
-        # Returning False keeps FinalStatus off SUCCESS; run()'s status chain
-        # turns it into NOT_GRADED. The reference-integrity check is skipped too
-        # — it exists to protect a grade that is not happening.
+        # Grading site 2 of 4. The trajectory is captured and persisted exactly as
+        # on a graded run, but nothing is scored; returning False keeps FinalStatus
+        # off SUCCESS and the status chain turns it into NOT_GRADED. The
+        # reference-integrity check is skipped — it protects a grade that is not
+        # happening.
         if not self.grade:
             logger.info("Grading disabled (execute mode): skipping success criteria.")
-            # The budget gate is a run limit, not a verdict. Its only reason to
-            # sit after the criteria on the graded path is partial-credit
-            # visibility, and there is no partial credit here.
+            # A run limit, not a verdict: its only reason to sit after the
+            # criteria on the graded path is partial-credit visibility.
             self._check_run_limits(iteration=iteration)
             return False
 
@@ -2554,9 +2248,8 @@ class Orchestrator:
         )
         self.result.success_criteria_results = criteria_results
 
-        # Determine if all criteria passed their thresholds. all_passed is
-        # single-sourced via the model gate; passed_count/total_count are kept
-        # only for the human-readable log line below.
+        # all_passed is single-sourced via the model gate; the counts below are
+        # only for the log line.
         pairs = list(zip(criteria_results, self.task.success_criteria, strict=True))
         passed_count = sum(1 for r, c in pairs if r.score >= c.pass_threshold)
         total_count = len(pairs)
@@ -2564,18 +2257,15 @@ class Orchestrator:
 
         # Reuse the model method for weighted score (single source of truth)
         self.result.calculate_weighted_score(self.task.success_criteria)
-        # calculate_weighted_score just ran, so a score exists; the fallback is
-        # for the type, not for an unmeasured row (this branch only runs when
-        # grading did).
+        # A score exists (calculate_weighted_score just ran); the fallback is for
+        # the type, not for an unmeasured row.
         current_score = self.result.weighted_score or 0.0  # noqa: CE049 — graded here by construction
 
         logger.info(f"Success criteria: {passed_count}/{total_count} passed, weighted score: {current_score:.3f}")
 
         self._emit_criteria_event(criteria_results)
 
-        # Budget gate runs AFTER criteria so partial-credit visibility is preserved.
-        # (max_turns capture and the soft turn check are recorded above, before
-        # the grading switch — they are facts about the run, not verdicts.)
+        # AFTER the criteria, so partial-credit visibility is preserved.
         self._check_run_limits(iteration=iteration)
 
         return all_passed
@@ -2620,21 +2310,11 @@ class Orchestrator:
         """
         assert self.result is not None
         assert self.success_checker is not None
-        # Grading site 3 of 4. Unreachable today — `execute` rejects simulation
-        # tasks at the CLI, because the dialog's turn-continuation logic reads
-        # criteria results to decide whether to keep talking, so an ungraded
-        # dialog would silently change its own stopping behavior.
-        #
-        # RAISES rather than returning an empty list, matching the evaluate-only
-        # path's refusal. The empty-list version described itself as a
-        # "defensive no-op so the gate holds", and it was neither: both callers
-        # go straight on to `all_criteria_passed`/`calculate_weighted_score`,
-        # which treat an empty criteria list as a vacuous pass/0.0 rather than
-        # raising, so a silent no-op here would produce a criteria-free dialog
-        # that scores as though nothing had been asked of the agent. If the
-        # simulation restriction ever lifts, that "no-op" turns every ungraded
-        # dialog into a silently-passing one. A loud refusal here is honest
-        # about the fact that this path has no ungraded semantics yet.
+        # Grading site 3 of 4. Unreachable today, and RAISES rather than returning
+        # an empty list: both callers go straight on to the gate, which treats an
+        # empty criteria list as a vacuous pass, so a silent no-op here would
+        # produce a criteria-free dialog scoring as though nothing was asked.
+        # Rationale: .claude/notes/orchestration.md § The four grading sites
         if not self.grade:
             raise ValueError(
                 "Grading is disabled but the simulation dialog path requires criteria results to "
@@ -2768,30 +2448,23 @@ class Orchestrator:
     async def _simulation_dialog_loop(self, initial_prompt: str | None, sandbox_dir: Path) -> bool:  # noqa: PLR0915 — sequential dialog driver; decomposed into helpers, residual length is irreducible without a _DialogState rewrite (see plan Phase 5). Statement count ratcheted by CE022.
         """Run the task as a multi-turn dialog driven by an LLM user simulator.
 
-        This replaces the criteria-feedback iteration loop for tasks that
-        define a ``simulation`` block. One invocation runs exactly one
-        dialog trajectory (trial). Parallel trials are handled upstream by
-        the batch expander — this method is per-trial.
+        Replaces the criteria-feedback iteration loop for tasks that define a
+        ``simulation`` block. One invocation runs exactly ONE dialog trajectory;
+        parallel trials are expanded upstream.
 
-        Lifecycle:
-          1. Obtain the opening user utterance. If the task pinned one via
-             ``initial_prompt``, use it verbatim; otherwise ask the simulator
-             to produce it from persona + goal (pure-simulation mode).
-          2. Send the opening utterance to the agent as turn 1.
-          3. After each agent reply, optionally check success criteria.
-             Break with ``criteria_passed`` if they pass and
-             ``stop_on_criteria_pass`` is set.
-          4. Evaluate stop conditions (turn cap, token budget).
-          5. Ask the simulator for the next user message. If the simulator
-             emits the stop token, break with ``stop_token``.
-          6. Loop. On any simulator exception, terminate with ``error``.
-          7. After the dialog ends, run a final criteria check unless one
-             just happened, and return pass/fail.
+        Lifecycle: obtain the opening utterance (pinned ``initial_prompt``, else
+        ask the simulator), send it as turn 1, then after each agent reply
+        optionally check criteria, evaluate the stop conditions (turn cap, token
+        budget), and ask the simulator for the next message — breaking on a passing
+        criteria check with ``stop_on_criteria_pass``, on the simulator's stop
+        token, or on a simulator exception. A final criteria check runs afterwards
+        unless one just did.
 
-        Emits the same streaming events as the single-shot loop (the agent emits
-        its ``AgentStart``/``Turn``/``Tool``/``AgentEnd`` lifecycle; the orchestrator
-        adds ``CriteriaCheckEvent``) so downstream UI renderers work unchanged.
-        Simulator telemetry is recorded on ``self.result.simulation``.
+        Emits the same streaming events as the single-shot loop, so downstream
+        renderers work unchanged. Simulator telemetry lands on
+        ``self.result.simulation``.
+
+        Rationale: .claude/notes/orchestration.md § The dialog loop
         """
         assert self.result is not None
         assert self.task.simulation is not None
@@ -2804,17 +2477,14 @@ class Orchestrator:
             config=sim_config,
             task_description=self.task.description,
             initial_prompt=initial_prompt,
-            # simulator_route is resolved independently of eval_route/
-            # checker_context.api_route (see _resolve_routes) — the simulator
-            # is a real Claude Code CLI subprocess, same as the agent under
-            # test, not a checker/judge concern.
+            # Resolved independently of eval_route and checker_context: the
+            # simulator is a real CLI subprocess, not a checker concern.
             route=self.simulator_route,
         )
         await simulator.start()
 
-        # stop_reason is left unset until the loop picks a concrete reason;
-        # the final assertion before telemetry-write catches any exit path
-        # that forgot to set it, instead of silently defaulting.
+        # Left UNSET until the loop picks a concrete reason, so the assertion
+        # before the telemetry write catches an exit path that forgot one.
         stop_reason: DialogStopReason | None = None
         simulator_input_tokens = 0
         simulator_output_tokens = 0
@@ -2828,8 +2498,7 @@ class Orchestrator:
         # UserMessage captured for the upcoming agent call; prepended to the
         # next turn_record.messages. None outside simulation paths.
         pending_user_turn: UserMessage | None = None
-        # The RESOLVED simulator model (backend-translated), not the configured id —
-        # it labels each simulator UserMessage and is persisted on the telemetry so
+        # The RESOLVED model (backend-translated), not the configured id, so
         # simulator cost prices from the model that actually served the call.
         sim_model_id = simulator.model
         # Track whether we entered the agent-call loop — used by the finally
@@ -2856,24 +2525,20 @@ class Orchestrator:
                 current_prompt = initial_prompt
                 pending_user_turn = UserMessage(text=initial_prompt)
                 self._log_conversation("USER", 1, current_prompt, metadata="pinned initial_prompt")
-            # Parallel history of clean (user, agent) pairs for the simulator.
-            # This intentionally excludes the working-directory prefix that gets
-            # prepended to agent prompts — the simulator should see the user's
-            # actual utterances, not framework wrapping.
+            # Clean (user, agent) pairs, deliberately without the
+            # working-directory prefix the framework prepends to agent prompts.
             dialog_pairs: list[tuple[str, str]] = []
 
             check_every_turn = sim_config.check_criteria in ("every_turn", "both")
 
-            # Dialog-wide running total of each judge's token usage. The per-turn
-            # check replaces ``success_criteria_results`` wholesale, so we fold
-            # each turn's judge slice into this accumulator (see
-            # ``_accumulate_judge_usage``) to avoid dropping earlier judge calls.
+            # The per-turn check replaces `success_criteria_results` WHOLESALE, so
+            # each turn's judge slice folds into this or earlier calls are lost.
             # Keyed by (position, criterion_type) — a stable criterion identity.
             judge_usage_accum: dict[tuple[int, str], TokenUsage] = {}
 
-            # turns_completed advances in lockstep with the agent's _iteration:
-            # one _communicate_with_retry call per sim turn keeps partials
-            # and the successful retry on the same iteration number.
+            # In lockstep with the agent's _iteration — one
+            # _communicate_with_retry per sim turn — so a partial turn and its
+            # successful retry share an iteration number.
             while True:
                 turns_completed += 1
                 self.result.iteration_count = turns_completed
@@ -2931,10 +2596,8 @@ class Orchestrator:
                 except BudgetExceededError:
                     stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
                     if not criteria_checked_this_turn:
-                        # Run for partial-credit side effects only (stores results
-                        # on self.result + recomputes score). This fallback site
-                        # deliberately neither sets all_passed nor emits an event,
-                        # so the return value is unused.
+                        # Partial-credit side effects only; this fallback site
+                        # neither sets all_passed nor emits an event.
                         await self._run_dialog_criteria_check(judge_usage_accum)
                     raise
 
@@ -2949,9 +2612,8 @@ class Orchestrator:
                     stop_reason = stop_decision.reason
                     break
 
-                # Soft cumulative-turn check (logs once; never aborts the dialog).
-                # Runs BEFORE the max_turns break so a single turn that trips both
-                # the hard cap and the soft target still emits the expected_turns
+                # Soft check (logs once, never aborts). BEFORE the max_turns
+                # break, so a turn tripping both still emits the expected_turns
                 # warning before the dialog terminates.
                 self._check_expected_turns(iteration=turns_completed)
 
@@ -3019,16 +2681,13 @@ class Orchestrator:
             )
             return all_passed
         finally:
-            # If an agent turn was attempted but crashed before attaching pending_user_turn to a turn_record,
-            # append it as a standalone entry so its telemetry is not lost. (If the simulator's opener
-            # had stop_requested, we never entered the agent loop, so don't record it.)
+            # An agent turn attempted but crashed before attaching its user turn
+            # to a record: append it standalone or its telemetry is lost.
             if agent_turn_attempted and pending_user_turn is not None and self.result is not None:
-                # TurnRecord.duration_seconds defaults to 0.0 and no caller passes
-                # it, so this turn used to report 0s for a simulator call that
-                # really took seconds — halving `avg_turn` in the HTML report for
-                # every simulation task. A pinned opener has no simulator call
-                # behind it (generation_duration_ms is None by design), so 0.0
-                # there is the real duration, not a placeholder.
+                # `duration_seconds` defaults to 0.0 and no caller passes it, so
+                # this used to report 0 s for a simulator call that took seconds,
+                # halving `avg_turn` for every simulation task. A PINNED opener has
+                # no simulator call behind it, so 0.0 there is real.
                 sim_ms = pending_user_turn.generation_duration_ms
                 standalone_turn = TurnRecord(
                     iteration=turns_completed,
@@ -3039,12 +2698,9 @@ class Orchestrator:
                 )
                 self.result.iterations.append(standalone_turn)
 
-            # When the dialog bails out via exception (TurnTimeoutError,
-            # TaskTimeoutError, etc.) before reaching the explicit telemetry
-            # write above, the happy-path write never happens — record partial
-            # telemetry here so analytics still see the run. ``stop_reason``
-            # being None at this point means "exit was not an in-band stop
-            # decision" (i.e., exception-driven), which we classify as ERROR.
+            # The happy-path telemetry write never happens when the dialog bails
+            # out through an exception. A None `stop_reason` here means the exit
+            # was not an in-band stop decision, so it is classified ERROR.
             if self.result is not None and self.result.simulation is None:
                 self.result.simulation = self._build_simulation_telemetry(
                     n_trials=sim_config.n_trials,
@@ -3158,13 +2814,11 @@ class Orchestrator:
                     limit=self._POST_RUN_STREAM_LIMIT,
                 )
                 # No `# nosec` here: bandit does not flag
-                # asyncio.create_subprocess_shell at all (B602 is
-                # subprocess.Popen(shell=True)), so the suppression this line
-                # used to carry was inert -- and an inert id silently
-                # pre-suppresses a real finding if a flagged construct is ever
-                # added here. The shell IS intentional: pre/post_run commands are
-                # authored in the task YAML, which is already a trusted artifact
-                # (it can run anything via a run_command criterion).
+                # asyncio.create_subprocess_shell at all, so the suppression this
+                # line used to carry was inert — and an inert id pre-suppresses a
+                # real finding if a flagged construct is ever added. The shell IS
+                # intentional: pre/post_run commands are authored in the task YAML,
+                # already a trusted artifact.
 
                 stdout_chunks: list[str] = []
                 stderr_chunks: list[str] = []
@@ -3232,11 +2886,9 @@ class Orchestrator:
                     raise RuntimeError(f"{human} command failed: {cmd.command!r}") from e
                 logger.warning("%s command '%s' failed: %s", human, cmd.command, e)
             finally:
-                # Every exit from this iteration -- normal, `continue` from the
-                # timeout branch, or a raised RuntimeError -- must release the
-                # two pipes this command opened. Without it they survive until
-                # GC, which on Windows reports as an unraisable ResourceWarning
-                # against an unrelated test. See _close_subprocess_transport.
+                # EVERY exit must release the two pipes this command opened, or
+                # they survive until GC and surface on Windows as an unraisable
+                # ResourceWarning against an unrelated test.
                 _close_subprocess_transport(proc)
 
     async def _run_pre_run_commands(self) -> None:
@@ -3271,24 +2923,16 @@ class Orchestrator:
     def _skip_pre_run_for_adopted(self, commands: Sequence[PreRunCommand]) -> bool:
         """True when ``pre_run`` must not run against an adopted sandbox.
 
-        ``adopt()`` guarantees it materializes nothing into the workspace, but
-        that guarantee is only as strong as its weakest caller: ``run()`` invokes
-        the hooks unconditionally, and those commands run with
-        ``cwd = sandbox_dir``. Several in-tree tasks stage fixtures there
-        (``cp -a /app/[!.]* "$PWD/"``), so re-running them during a detached
-        grade would overwrite the agent's deliverables *before* the criteria read
-        them — silently changing the verdict and destroying preserved artifacts.
+        ``pre_run`` prepares the environment the AGENT needs, so it belongs to the
+        execute phase; the prior run already ran it, and its recorded results are
+        carried over by the seeding. Re-running it would overwrite the agent's
+        deliverables before the criteria read them.
 
-        ``pre_run`` prepares the environment the AGENT needs, so it belongs to
-        the execute phase; the prior run already ran it, and its recorded results
-        are carried over by ``_seed_from_prior_result``. Its ``post_run`` sibling
-        is the opposite case — see ``_skip_post_run``.
+        ``commands`` is passed in rather than looked up from a phase NAME: that
+        lookup was a stringly-typed branch whose only consumer was a log line, so a
+        typo would silently report the wrong count with nothing able to see it.
 
-        ``commands`` is passed in rather than looked up from a phase name. The
-        lookup was a stringly-typed branch whose only consumer was a log line, so
-        a typo (``"prerun"``) would silently report the wrong count with
-        nothing — not pyright, not ruff — able to see it, in the same module
-        CE050 was written to protect from exactly that.
+        Rationale: .claude/notes/isolation.md § Why pre_run and post_run each run exactly once
         """
         if self.sandbox is None or not self.sandbox.was_adopted:
             return False
@@ -3303,29 +2947,15 @@ class Orchestrator:
     def _skip_post_run(self) -> bool:
         """True when ``post_run`` must not run in THIS phase.
 
-        ``post_run`` runs after the verdict is finalized and is free to mutate
-        the workspace (``rm -rf node_modules`` is the archetype), so it belongs
-        to whichever phase GRADES — never to the phase that merely executes.
-        Running it under ``execute`` inverted its own contract and broke
-        round-trip equivalence: the criteria had not read the tree yet, so
-        ``execute`` + ``evaluate`` graded a workspace ``post_run`` had already
-        modified and could return a different verdict than a single ``run`` for
-        the identical trajectory.
+        ``post_run`` is free to mutate the workspace, so it belongs to whichever
+        phase GRADES — never to the phase that merely executes.
 
-        Two skips, and they are NOT the same condition:
+        TWO SKIPS, and they are NOT the same condition: ``grade=False`` DEFERS the
+        commands to the grading pass, while an adopted sandbox whose prior row
+        already recorded ``post_run`` results has run them once already. Together
+        they mean each command runs exactly once, in the grading phase.
 
-        * ``grade=False`` (``execute``) — deferred, not cancelled. The commands
-          run later, when ``evaluate`` / ``run --resume`` grades the row. A run
-          that is never graded therefore never tidies its sandbox; that is the
-          accepted cost of keeping the verdict honest.
-        * an adopted sandbox whose prior row ALREADY recorded ``post_run``
-          results — that phase graded, so the commands have run once. Nothing
-          declares them idempotent, and ``_seed_from_prior_result`` has already
-          copied those results onto this row, so a second pass would both re-run
-          the side effects and double-count the records.
-
-        The two combined mean each command runs exactly once, in the grading
-        phase, whichever command that turns out to be.
+        Rationale: .claude/notes/isolation.md § Why pre_run and post_run each run exactly once
         """
         assert self.result is not None
         commands = self.task.post_run
@@ -3367,21 +2997,18 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"Failed to stop agent: {e}")
 
-        # Drop the staged reference copy. Deliberately NOT preserved into
-        # run_dir/artifacts: run directories get archived, uploaded, and shared,
-        # and the reference solution must not ride along.
+        # Deliberately NOT preserved into run_dir/artifacts: run directories get
+        # archived, uploaded and shared, and the reference must not ride along.
         #
-        # Keyed on _reference_staging_root, recorded before the copy — NOT on
-        # _reference_dir.parent, which is only set once the copy succeeds and so
-        # would leak a half-written reference when copytree raises. The field is
-        # None under docker, where the reference is the host-owned bind mount:
-        # that one is not ours to delete, and rmtree'ing its parent would take
-        # /work with it.
+        # Keyed on the staging root recorded BEFORE the copy — NOT on
+        # `_reference_dir.parent`, which is only set once the copy succeeds. The
+        # field is None under docker, where the reference is the host-owned bind
+        # mount: that one is NOT OURS TO DELETE, and rmtree'ing its parent would
+        # take `/work` with it.
         #
-        # rmtree_restrictive, not rmtree(ignore_errors=True): a run killed
-        # mid-turn leaves the tree at mode 000, where scandir raises
-        # PermissionError and plain rmtree silently declines — orphaning a
-        # tempdir that holds the reference solution, with no log line.
+        # rmtree_restrictive, because a run killed mid-turn leaves the tree at
+        # mode 000, where plain rmtree silently declines.
+        # Rationale: .claude/notes/persistence.md § rmtree_restrictive
         staging_root = self._reference_staging_root
         self._reference_dir = None
         self._reference_staging_root = None
@@ -3391,16 +3018,14 @@ class Orchestrator:
             except Exception as e:
                 logger.warning("Failed to remove staged reference dir %s: %s", staging_root, e)
 
-        # Cleanup sandbox. Preservation and cleanup() are SIBLING try blocks:
-        # a preservation failure (e.g. disk full during preserve_to) must never
-        # skip cleanup(), or the tempdir leaks.
+        # SIBLING try blocks: a preservation failure must never skip cleanup(),
+        # or the tempdir leaks.
         if self.sandbox:
             try:
                 if self.workspace_dir is not None and self.result:
-                    # Docker WORKDIR alignment: the agent ran in-place at the image
-                    # WORKDIR; copy that workspace out to run_dir/artifacts/<task>
-                    # (capture_to grants cross-uid read on the COPY and tolerates
-                    # dangling symlinks). Takes precedence over preservation_mode.
+                    # Docker WORKDIR alignment: the agent ran in-place at the
+                    # image WORKDIR, so copy that workspace out. Takes precedence
+                    # over preservation_mode.
                     artifacts_dir = self.run_dir / "artifacts"
                     preserved_path = await asyncio.to_thread(self.sandbox.capture_to, artifacts_dir)
                     self.result.sandbox_path = str(preserved_path)
@@ -3412,11 +3037,9 @@ class Orchestrator:
                     self.result.sandbox_path = str(preserved_path)
                     logger.info(f"Sandbox preserved to: {preserved_path}")
                 elif self.preservation_mode == PreservationMode.DIRECT_WRITE and self.result:
-                    # Sandbox already lives in run_dir/artifacts — nothing to move.
-                    # Set sandbox_path first, then grant a+rX (a fallible chmod) so
-                    # artifacts written by a root-owned docker container stay
-                    # traversable across the host uid boundary (MOVE_ON_WRITE gets
-                    # this via preserve_to; DIRECT_WRITE skips it, so apply it here).
+                    # Already in run_dir/artifacts — nothing to move. Set the path
+                    # first, then grant a+rX so artifacts written by a root-owned
+                    # container stay traversable across the host uid boundary.
                     self.result.sandbox_path = str(self.sandbox.sandbox_dir)
                     await asyncio.to_thread(self.sandbox.grant_read_access)
                     logger.info(f"Sandbox preserved (in-place): {self.sandbox.sandbox_dir}")
@@ -3430,10 +3053,9 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"Failed to preserve sandbox (continuing with cleanup): {e}")
                 if self.result and self.preservation_mode == PreservationMode.MOVE_ON_WRITE:
-                    # The artifacts were never moved — don't point at the tempdir
-                    # cleanup() is about to delete. DIRECT_WRITE keeps its path:
-                    # that sandbox is persistent (cleanup() is a no-op) and the
-                    # artifacts still exist even if the a+rX chmod failed.
+                    # Never moved — do not point at the tempdir cleanup() is about
+                    # to delete. DIRECT_WRITE keeps its path: that sandbox is
+                    # persistent and the artifacts exist even if the chmod failed.
                     self.result.sandbox_path = None
 
             try:

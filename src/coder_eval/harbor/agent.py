@@ -1,43 +1,20 @@
 """``CoderEvalAgent`` — coder-eval as a Harbor agent (C1.2).
 
-The mirror image of Part C's packager: instead of coder-eval grading a
-Harbor-authored task (coder-eval as the verifier), this makes coder-eval
-Harbor's AGENT — ``harbor run -a coder_eval.harbor.agent:CoderEvalAgent``
-invokes ``coder-eval execute --format harbor`` inside Harbor's own container
-against the fixed-path agent-phase task.yaml the packager bakes in (see
-``agent_paths.py``), then Harbor picks up the resulting ``trajectory.json``
-from ``self.logs_dir`` exactly as it does for its own ``ClaudeCode`` agent.
+The mirror image of the packager: instead of coder-eval grading a Harbor-authored
+task, this makes coder-eval Harbor's AGENT. ``harbor run -a
+coder_eval.harbor.agent:CoderEvalAgent`` invokes ``coder-eval execute --format
+harbor`` inside Harbor's own container against the fixed-path agent-phase task.yaml
+the packager bakes in (see ``agent_paths.py``), writing ``task.json`` and a
+``trajectory.json`` sibling directly into the container's ``/logs/agent/``, which
+Harbor bind-mounts from ``self.logs_dir``.
 
-Design, per ``tmp/harborframework.md``'s "Scoping note — Part A revisited":
+``BaseAgent.run()`` returns ``None`` and must not return the trajectory itself —
+Harbor discovers it by reading ``self.logs_dir / "trajectory.json"`` after the
+container syncs back — so this class overrides ``populate_context_post_run`` to parse
+that file and fill in the context's token and cost fields, matching the installed
+agents' own pattern. ``environment.exec()`` takes a single shell command STRING.
 
-- The agent-phase task.yaml is at :data:`AGENT_TASK_YAML_PATH`, criteria-free
-  (see ``packager.py``'s ``_write_agent_phase_task_yaml``) — this agent never
-  sees ``success_criteria``, only the real ``agent``/prompt/sandbox config.
-- ``coder-eval execute --format harbor --run-dir <environment_logs_dir>``
-  writes ``task.json`` AND a ``trajectory.json`` (ATIF) sibling directly into
-  the container's ``/logs/agent/`` (``environment_logs_dir``), which Harbor
-  bind-mounts from ``self.logs_dir`` on the host — the same path Harbor's own
-  ``ClaudeCode`` agent writes its trajectory to (verified against the
-  installed ``harbor`` package's ``populate_context_post_run``: it writes to
-  ``self.logs_dir / "trajectory.json"`` on the HOST side, after the container
-  syncs back). This class instead has coder-eval write it directly inside the
-  container at the mirrored path.
-- ``--workspace-dir "$(pwd)"`` (Gap 2's real fix, not a workaround): without
-  it, ``coder-eval execute``'s own ``tempdir`` sandbox writes the agent's
-  workspace to a throwaway ``mkdtemp()`` elsewhere in the container, never
-  where Harbor's verifier phase (``tests/test.sh``) looks (the container's
-  ``WORKDIR``) — confirmed live, agent output was real but every criterion
-  scored 0 as "file does not exist". See ``run()``'s docstring.
-
-Verified against a real ``harbor==0.22.0`` install (``tmp/harbor-venv``):
-``BaseAgent.name()`` is a ``@staticmethod``; ``run()`` returns ``None`` and
-must not return the trajectory itself (Harbor discovers it by reading
-``self.logs_dir / "trajectory.json"`` after the container syncs back, the same
-way ``ClaudeCode.populate_context_post_run`` does) — so this class overrides
-``populate_context_post_run`` to parse that file and fill in
-``AgentContext``'s token/cost fields, matching ``ClaudeCode``'s own pattern
-exactly. ``environment.exec()`` takes a single shell command STRING (not an
-argv list).
+Rationale: .claude/notes/reporting.md § Harbor export
 """
 
 from __future__ import annotations
@@ -99,25 +76,14 @@ class CoderEvalAgent(BaseInstalledAgent):
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         """Run ``coder-eval execute --format harbor`` inside the environment.
 
-        ``instruction`` (Harbor's resolved ``instruction.md`` text) is NOT
-        forwarded — the agent-phase task.yaml at :data:`AGENT_TASK_YAML_PATH`
-        already carries the identical resolved prompt (``packager.py`` writes
-        both from the same source), so there is nothing to forward. Token/cost
-        totals are filled in afterward by ``populate_context_post_run``, not
-        here, matching every other installed agent's convention.
+        ``instruction`` is NOT forwarded: the agent-phase task.yaml already carries
+        the identical resolved prompt. Token and cost totals are filled in afterward
+        by ``populate_context_post_run``.
 
-        ``--workspace-dir "$(pwd)"``: without it, ``coder-eval execute``'s own
-        ``tempdir`` sandbox (the agent-phase task.yaml forces ``driver:
-        tempdir`` — see ``packager._write_agent_phase_task_yaml``) writes the
-        agent's workspace to a fresh ``mkdtemp()`` elsewhere in the container,
-        NOT at the image's ``WORKDIR`` -- which is exactly where Harbor's own
-        verifier phase (``tests/test.sh``) looks for the agent's output.
-        ``$(pwd)`` is resolved by the container's shell at exec time, not by
-        this Python process, and equals the WORKDIR because ``environment.exec``
-        is not given an explicit ``cwd`` (Docker execs default to the image's
-        configured WORKDIR). Confirmed live: without this flag the agent wrote
-        real output but the verifier scored every criterion 0 with "file does
-        not exist", because it never left the tempdir.
+        ``--workspace-dir "$(pwd)"`` is load-bearing — without it the tempdir sandbox
+        writes the agent's workspace somewhere Harbor's verifier never looks.
+
+        Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
         """
         del instruction, context  # nothing to forward; context is populated post-run
         run_dir = self.environment_logs_dir.as_posix()

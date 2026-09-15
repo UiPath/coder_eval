@@ -63,34 +63,18 @@ def _arm_host_heartbeat_watchdog(output_dir: Path) -> None:
     process-lethal code in this command sits behind one named, testable seam
     instead of being a side effect of the command body.
     """
-    # Start the host-heartbeat watchdog: if the host process dies
-    # ungracefully (SIGKILL, Claude-Code Escape, crash) before it can
-    # `docker kill` us, the heartbeat file in output_dir goes stale and
-    # we self-exit -- otherwise the container would keep burning LLM
-    # budget orphaned. Daemon thread so it doesn't block normal shutdown.
+    # Daemon thread so it doesn't block normal shutdown.
     import os as _os
     import threading
     import time
 
-    # ARMED ONLY INSIDE THE CONTAINER, and not even defined outside one. The
-    # watchdog's whole authority is `os._exit(137)` on the process it runs in,
-    # and the only process that may be reaped that way is the container's own
-    # disposable main -- there is no container to orphan anywhere else, so
-    # outside one the thread can do nothing but harm. It did: a test invoked
-    # this command in-process (legitimately -- the command must refuse a
-    # malformed context.json, and proving that means calling it) and the pytest
-    # worker inherited the thread, which found no heartbeat and 40s later exited
-    # the worker mid-way through an unrelated test file. It named a different
-    # test on each run and on each platform, carried no traceback, and took that
-    # worker's coverage data with it -- so the gate reported "65.13 < 80.00",
-    # naming neither the test nor the cause.
-    #
-    # Gated on CODER_EVAL_IN_CONTAINER (set by docker_runner on the container's
-    # argv), NOT on `driver`, for the same reason the reference-permission
-    # window is: this command rewrites `driver: docker` -> `tempdir` before
-    # building the in-container Orchestrator, so a driver-based gate would
-    # disarm itself on exactly the path that needs it. See
-    # `Sandbox.enforces_permission_windows`.
+    # HAZARD: armed ONLY inside the container. The thread's whole authority is
+    # `os._exit(137)` on the process it runs in, so anywhere else it can only harm
+    # -- it once killed a pytest worker mid-test-file and took its coverage with it.
+    # Gated on CODER_EVAL_IN_CONTAINER, NOT on `driver`, for the same reason
+    # `Sandbox.enforces_permission_windows` is: this command rewrites
+    # `driver: docker` -> `tempdir` before building the Orchestrator.
+    # Rationale: .claude/notes/isolation.md § The heartbeat watchdog is armed only inside a container
     if _os.environ.get(IN_CONTAINER_ENV) == "1":
 
         def _watch_host_heartbeat() -> None:
@@ -119,11 +103,8 @@ def _arm_host_heartbeat_watchdog(output_dir: Path) -> None:
                         "Host heartbeat stale (>%ss); exiting to reap orphan container.",
                         HEARTBEAT_STALE_SECONDS,
                     )
-                    # os._exit skips atexit and IO flushing, so the error line
-                    # above would routinely be lost -- making a genuine
-                    # stale-heartbeat suicide indistinguishable from an external
-                    # SIGKILL in the archived logs. Flush best-effort first;
-                    # never let a flush failure stop the exit.
+                    # os._exit skips atexit and IO flushing, so this line would
+                    # routinely be lost. Best-effort; never block the exit.
                     import sys as _sys
 
                     for _handler in logging.getLogger().handlers:
@@ -165,10 +146,8 @@ def run_task_internal_command(
     ),
 ) -> None:
     """Run a single staged task inside the container."""
-    # Use the same logging path as the host CLI so LOG_LEVEL from the
-    # forwarded env is honoured. Without this, root stays at INFO and the
-    # DEBUG-level task_log_handler attached by Orchestrator never sees the
-    # agent's per-tool-call DEBUG records.
+    # Same logging path as the host CLI, so the forwarded LOG_LEVEL is honoured and
+    # Orchestrator's DEBUG-level task_log_handler sees the agent's records.
     log_level = "DEBUG" if verbose else settings.log_level
     setup_logging(level=log_level)
 
@@ -184,12 +163,9 @@ def run_task_internal_command(
         raise typer.Exit(2)
 
     context = json.loads(context_json.read_text(encoding="utf-8"))
-    # Checked, not just annotated. `json.loads` returns `Any`, so pyright accepts
-    # `variant_id: str = context["variant_id"]` for a value that may be anything
-    # at all — the annotation reads like a guarantee and enforces nothing. A
-    # `"replicate_index": "00"` then reached `build_task_run_dir` typed as `int`.
-    # This is the host→container boundary; the comment below (about `grade`
-    # being the one raw value) was only true because these two looked checked.
+    # CHECKED, not just annotated: `json.loads` returns `Any`, so an annotation
+    # here reads like a guarantee and enforces nothing.
+    # Rationale: .claude/notes/isolation.md § The context payload is untrusted input
     variant_id = context["variant_id"]
     if not isinstance(variant_id, str):
         typer.echo(f"FATAL: context.json 'variant_id' must be a string, got {variant_id!r}", err=True)
@@ -198,55 +174,41 @@ def run_task_internal_command(
     if not isinstance(replicate_index, int) or isinstance(replicate_index, bool):
         typer.echo(f"FATAL: context.json 'replicate_index' must be an integer, got {replicate_index!r}", err=True)
         raise typer.Exit(2)
-    # The host resolves the driver-derived default before dispatch; the container
-    # obeys it verbatim. This command only ever runs inside the docker driver, so
-    # a missing key falls back to the docker default (DIRECT_WRITE) — a deliberate
-    # default, not version back-compat.
+    # The host resolves the driver-derived default; the container obeys it. A
+    # missing key falls back to the docker default -- deliberate, not back-compat.
     preservation_mode = PreservationMode(context.get("preservation_mode", PreservationMode.DIRECT_WRITE.value))
-    # `coder-eval run` vs `coder-eval execute`, decided host-side. Defaults to
-    # True (grade) so a host that predates `execute` — which never writes the
-    # key — keeps its exact behavior.
-    # Coerced, not annotated, like every other value crossing this boundary —
-    # `grade` was once the only raw one, so a hand-edited or older-format
-    # `"grade": "false"` arrived as a truthy str typed as bool and silently
-    # graded a run that asked not to be graded.
+    # `run` vs `execute`, decided host-side. Defaults to True so a host predating
+    # `execute` keeps its behaviour. COERCED, like every value crossing this
+    # boundary: a `"grade": "false"` is a truthy str typed as bool.
     grade_raw = context.get("grade", True)
     if not isinstance(grade_raw, bool):
         typer.echo(f"FATAL: context.json 'grade' must be a boolean, got {grade_raw!r}", err=True)
         raise typer.Exit(2)
     grade: bool = grade_raw
     # A DETACHED GRADE, not a run: seed from the staged prior.json and adopt the
-    # already-executed workspace instead of starting an agent. Coerced for the
-    # same reason `grade` is — a hand-edited `"regrade": "false"` is a truthy
-    # str, and getting this one wrong would re-RUN the agent against a workspace
-    # the operator asked only to grade, destroying the trajectory being graded.
+    # already-executed workspace. Getting this one wrong re-RUNS the agent against
+    # the workspace it was asked only to grade.
     regrade_raw = context.get("regrade", False)
     if not isinstance(regrade_raw, bool):
         typer.echo(f"FATAL: context.json 'regrade' must be a boolean, got {regrade_raw!r}", err=True)
         raise typer.Exit(2)
     regrade: bool = regrade_raw
-    # What task.json RECORDS as the task's source path, as distinct from the
-    # path this process resolves TASK_DIR against (see Orchestrator's
-    # `recorded_task_file`). Absent on an older host -> None -> the container
-    # path is recorded, which is the pre-existing behaviour.
+    # What task.json RECORDS, as distinct from the path this process resolves
+    # TASK_DIR against. Absent on an older host -> the container path is recorded.
+    # Rationale: .claude/notes/orchestration.md § Recording the task as authored
     host_task_file_raw = context.get("host_task_file")
     recorded_task_file = Path(host_task_file_raw) if host_task_file_raw else None
-    # Docker WORKDIR alignment: the host resolves the concrete WORKDIR
-    # (config value / "auto" -> `docker inspect` / fallback) and forwards it here.
-    # Absent -> None -> standard run_dir/artifacts workspace.
+    # Docker WORKDIR alignment, resolved host-side. Absent -> the standard
+    # run_dir/artifacts workspace.
     workspace_dir_raw = context.get("workspace_dir")
     workspace_dir = Path(workspace_dir_raw) if workspace_dir_raw else None
     config_lineage = {k: ConfigLineageEntry.model_validate(v) for k, v in (context.get("config_lineage") or {}).items()}
-    # Prefer the host's raw source_yaml so task.json's audit trail matches
-    # the in-process driver. Fall back to the staged (post-override) YAML
-    # for older host versions that didn't forward it.
+    # The host's RAW source_yaml, so task.json's audit trail matches the in-process
+    # driver. Falls back to the staged post-override YAML on an older host.
     host_source_yaml: str | None = context.get("source_yaml")
 
-    # Load the post-override spec from the staged YAML. We then point
-    # `task_file` at a path *under the symmetric task_dir mount* so the
-    # Orchestrator's `task_file.parent` reasoning -- specifically the
-    # `TASK_DIR` env exposed to `run_command` criteria -- resolves to the
-    # original host task directory rather than `/work/input/`.
+    # `task_file` is then pointed under the task_dir mount, so the `TASK_DIR` the
+    # Orchestrator exposes to `run_command` criteria resolves there, not /work/input.
     task, source_yaml = load_task(task_yaml)
     if host_source_yaml is not None:
         source_yaml = host_source_yaml
@@ -254,26 +216,16 @@ def run_task_internal_command(
     runtime_task_file = task_dir / "task.yaml" if task_dir.is_dir() else task_yaml
 
     # Captured BEFORE the rewrite below: this is what `task.json` records.
-    # Recording the rewritten copy made a docker run's own record claim
-    # `driver: tempdir`, so `evaluate <run_dir>` skipped the host-grading
-    # refusal and the `graded_on_host` stamp entirely. See Orchestrator's
-    # `recorded_task`.
+    # Rationale: .claude/notes/orchestration.md § Recording the task as authored
     authored_task = task
 
     # Force driver back to tempdir for the actual in-container run.
-    # We're already inside the container; another nested docker would be
-    # both wrong and impossible (no docker CLI in image).
     if task.sandbox.driver == "docker":
         # noqa: CE051 — the ONE legitimate rewrite. We are already inside the
-        # container the docker driver asked for, so the isolation the driver
-        # names is present, not bypassed; a nested docker would be both wrong
-        # and impossible (no docker CLI in the image).
-        # Re-validated rather than `model_copy(update=...)`, matching its sibling
-        # `regrade.grading_sandbox_config`: `update` skips BOTH pydantic and
-        # pyright, so a typo would produce a SandboxConfig violating its own
-        # `Literal` and only surface far downstream. Two driver-rewrite sites
-        # landing in one change with two different levels of type safety is how
-        # the weaker one becomes the pattern people copy.
+        # container the docker driver asked for, so the isolation it names is
+        # present, not bypassed. Re-validated rather than `model_copy(update=...)`,
+        # which skips both pydantic and pyright.
+        # Rationale: .claude/notes/orchestration.md § The in-container driver rewrite
         rewritten = SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})  # noqa: CE051
         task = task.model_copy(update={"sandbox": rewritten})
 
@@ -312,9 +264,7 @@ def run_task_internal_command(
         recorded_task=authored_task,
     )
 
-    # Install the stdout-NDJSON stream callback so per-tool-call events
-    # reach the host. Late import keeps the streaming module out of the
-    # default --help path.
+    # Late import keeps the streaming module out of the default --help path.
     from coder_eval.streaming.wire import StdoutNDJsonCallback
 
     orchestrator.stream_callback = StdoutNDJsonCallback()
@@ -337,33 +287,19 @@ def _grade_recorded_run(
 ) -> None:
     """Grade an already-executed row INSIDE the container that produced it.
 
-    This is the container half of `evaluate <run_dir>` / `run --resume` over a
-    `driver: docker` task. The host stages `prior.json` next to `task.yaml` and
-    bind-mounts the executed workspace at ``CONTAINER_GRADE_WORKSPACE``; here we
-    seed from that row and run its criteria against that workspace.
+    The container half of `evaluate <run_dir>` / `run --resume` over a
+    `driver: docker` task: the host stages `prior.json` next to `task.yaml` and
+    bind-mounts the executed workspace at ``CONTAINER_GRADE_WORKSPACE``.
 
-    Why it must happen here at all: a container task's criteria address the
-    image's paths and toolchain, so grading them on the host scores a FAILURE for
-    a run that passed. The host path therefore REFUSES by default and demands
-    `--allow-host-grading`. Running them back inside the same image is the only
-    place the verdict means what it meant during the run — so a container-graded
-    detached row carries no `graded_on_host` stamp, exactly like a `run` row.
+    ``task`` is the driver-rewritten copy (docker -> tempdir), which is also what
+    keeps ``regrade_in_place`` from dispatching a container from within one.
+    ``authored_task`` is what gets RECORDED, and ``recorded_task_file`` is the path
+    half of that same distinction and travels with it.
 
-    ``task`` is the driver-rewritten copy (docker -> tempdir, done above because
-    we are already inside the container the driver asked for), which is also what
-    keeps ``regrade_in_place`` from trying to dispatch a container from within
-    one. ``authored_task`` is what gets RECORDED, so the row keeps saying
-    `driver: docker`. ``recorded_task_file`` is the path half of that same
-    distinction and travels with it: without it the row re-records
-    ``/work/task_dir/task.yaml`` as its ``source_file``, a path on no host, and a
-    later ``evaluate <run_dir>`` over the row refuses or mounts the wrong tree.
-    The ordinary run branch above has always forwarded it; this one is the
-    second consumer and must not be the one that forgets.
+    Delegates to the same ``regrade_in_place`` the host uses rather than restating
+    it.
 
-    Delegates to the same ``regrade_in_place`` the host uses rather than
-    restating it. The two implementations that already drifted apart once —
-    `evaluate`'s run-dir mode hardcoding `replicate_index=0` and relabelling
-    every replicate but the first — are the reason that function exists.
+    Rationale: .claude/notes/isolation.md § Grading a docker row inside a container
     """
     from coder_eval.models import CONTAINER_GRADE_WORKSPACE
     from coder_eval.orchestration.regrade import RegradeError, regrade_in_place
@@ -375,10 +311,8 @@ def _grade_recorded_run(
     try:
         prior = EvaluationResult.model_validate_json(prior_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        # Degrade to a clean message rather than a traceback: the host parses
-        # this container's task.json, so a crash here surfaces as the opaque
-        # "container exited without producing task.json" rather than naming the
-        # staged file that could not be read.
+        # A clean message, not a traceback: the host parses this container's
+        # task.json, so a crash here surfaces as the opaque "no task.json".
         typer.echo(f"FATAL: {prior_path} is not a readable EvaluationResult: {e}", err=True)
         raise typer.Exit(2) from e
 
@@ -403,8 +337,7 @@ def _grade_recorded_run(
             )
         )
     except RegradeError as e:
-        # Surfaced as a clean message, not a traceback: the host parses this
-        # container's task.json, and a RegradeError means none was written. Exit
-        # 2 keeps it distinguishable from an agent failure.
+        # Clean message, not a traceback. Exit 2 keeps it distinguishable from an
+        # agent failure.
         typer.echo(f"FATAL: {e}", err=True)
         raise typer.Exit(2) from e

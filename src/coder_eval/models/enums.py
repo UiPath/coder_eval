@@ -15,12 +15,9 @@ class FinalStatus(StrEnum):
     MAX_TURNS_EXHAUSTED = "MAX_TURNS_EXHAUSTED"
     TOKEN_BUDGET_EXCEEDED = "TOKEN_BUDGET_EXCEEDED"
     COST_BUDGET_EXCEEDED = "COST_BUDGET_EXCEEDED"
-    # `coder-eval execute` ran the agent but deliberately skipped grading, so
-    # there is no verdict to report. Distinct from FAILURE (which asserts the
-    # criteria were checked and did not pass) and from ERROR (which asserts
-    # something went wrong). Only SUCCESS/FAILURE collapse into it — every
-    # other member records an *execution* fact that still applies when the
-    # run is ungraded.
+    # No verdict to report. Distinct from FAILURE (criteria checked, did not pass)
+    # and ERROR (something went wrong); only those two collapse into it.
+    # Rationale: .claude/notes/orchestration.md § Execute vs. run: the grading switch
     NOT_GRADED = "NOT_GRADED"
 
     @property
@@ -47,27 +44,21 @@ class FinalStatus(StrEnum):
         return _EXECUTION_FACT_STATUSES[self]
 
 
-# Every FinalStatus maps to exactly one reporting category, listed EXPLICITLY (no
-# catch-all default) so a newly-added status fails the assert below until it is
-# classified — rather than silently collapsing into "failed" (which would skew
-# reports AND the telemetry Category dimension). Mirrors the _STATUS_ICONS guard.
+# EXPLICIT, no catch-all default, so a newly-added status fails the assert below
+# until it is classified. Mirrors the _STATUS_ICONS guard.
+# Rationale: .claude/notes/orchestration.md § Rates need verdict evidence, not bucket counts
 _STATUS_CATEGORIES: dict[FinalStatus, Literal["succeeded", "failed", "error", "ungraded"]] = {
     FinalStatus.SUCCESS: "succeeded",
     FinalStatus.FAILURE: "failed",
     FinalStatus.ERROR: "error",
-    # A failed image build is an environment/setup error, not a task outcome —
-    # group it with ERROR so reports/telemetry don't read it as a legitimate
-    # task failure the agent could have avoided.
+    # An environment fault, not a task outcome the agent could have avoided.
     FinalStatus.BUILD_FAILED: "error",
     FinalStatus.TIMEOUT: "failed",
     FinalStatus.MAX_TURNS_EXHAUSTED: "failed",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "failed",
     FinalStatus.COST_BUDGET_EXCEEDED: "failed",
-    # A fourth category, not a fold into one of the three. Folding into
-    # "failed" would depress every pass rate; folding into "succeeded" would
-    # invent verdicts; folding into "error" would report a healthy run as
-    # broken. Reporting surfaces exclude it from BOTH the numerator and the
-    # denominator of a pass rate — an ungraded task was never measured.
+    # A FOURTH category, not a fold into one of the three. Excluded from both the
+    # numerator and the denominator of a pass rate.
     FinalStatus.NOT_GRADED: "ungraded",
 }
 
@@ -89,9 +80,8 @@ _STATUS_ICONS: dict[FinalStatus, str] = {
 assert set(_STATUS_ICONS) == set(FinalStatus), "Missing icon for FinalStatus member"
 
 
-# Explicit, no catch-all, for the same reason as the two maps above: a new status
-# must be classified as "the agent phase ended this way" (True — a detached grade
-# preserves it) or "grading decided this" (False — a detached grade replaces it).
+# Explicit, no catch-all: a new status is either "the agent phase ended this way"
+# (True -- a detached grade preserves it) or "grading decided this" (False).
 # Defaulting either way silently is how an ERROR row becomes a SUCCESS.
 _EXECUTION_FACT_STATUSES: dict[FinalStatus, bool] = {
     FinalStatus.SUCCESS: False,
@@ -100,16 +90,10 @@ _EXECUTION_FACT_STATUSES: dict[FinalStatus, bool] = {
     FinalStatus.ERROR: True,
     FinalStatus.BUILD_FAILED: True,
     FinalStatus.TIMEOUT: True,
-    # False, and it must stay False: MAX_TURNS_EXHAUSTED is SUBORDINATE to the
-    # verdict, not a fact that outranks it. `run` returns SUCCESS for a
-    # max-turns trajectory whose criteria pass and only falls through to this
-    # status when they do not — see `Orchestrator._terminal_status`, whose
-    # docstring already argued exactly this while this table said the opposite.
-    # With True, a prior max-turns row re-graded through `evaluate` was pinned
-    # at MAX_TURNS_EXHAUSTED *while holding weighted_score 1.000* and exited 1:
-    # a combination `run` can never produce for the same trajectory. The fact
-    # itself is not lost — it lives on `EvaluationResult.max_turns_exhausted`,
-    # which `_seed_from_prior_result` carries.
+    # HAZARD: False, and it must stay False. MAX_TURNS_EXHAUSTED is SUBORDINATE to
+    # the verdict, not a fact that outranks it; the fact itself lives on
+    # `EvaluationResult.max_turns_exhausted`, which the seeding carries.
+    # Rationale: .claude/notes/orchestration.md § The terminal-status chain
     FinalStatus.MAX_TURNS_EXHAUSTED: False,
     FinalStatus.TOKEN_BUDGET_EXCEEDED: True,
     FinalStatus.COST_BUDGET_EXCEEDED: True,

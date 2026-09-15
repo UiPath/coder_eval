@@ -62,38 +62,29 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     slot is always None.
     """
 
-    # Shared turn-lifecycle bookkeeping. Class-level defaults so subclasses get
-    # the behavior without re-declaring them in __init__ (they may still set
-    # `_state` in start()). `_iteration_was_incremented` is set True right after
-    # the counter bump at the top of `communicate()` and consumed by
-    # `discard_pending_turn()`, which rolls the counter back exactly once per
-    # failed turn — even when partial-record assembly leaves `pending_turn=None`.
+    # Class-level defaults so a subclass gets the behaviour without re-declaring it.
+    # `_iteration_was_incremented` is consumed by `discard_pending_turn()`, which
+    # rolls the counter back exactly once per failed turn.
+    # Rationale: .claude/notes/reporting.md § The Agent ABC contract
     _state: AgentState = AgentState.WORKING
     _iteration: int = 0
     _iteration_was_incremented: bool = False
 
-    # Capability flag: whether this agent honors the cooperative ``should_stop``
-    # interrupt threaded through ``communicate()`` (early-stop-on-criterion).
-    # Default False — arming early-stop on an agent that does not set this True
-    # is rejected at resolution time. Concrete agents that check ``should_stop``
-    # between messages override it to True.
+    # Whether this agent honors the cooperative ``should_stop`` interrupt. Default
+    # False: arming early-stop on an agent that does not set it True is rejected at
+    # resolution rather than silently never firing.
     supports_cooperative_stop: ClassVar[bool] = False
 
-    # Capability flag: whether this agent's constructor accepts the ``cost_log_tags``
-    # kwarg (proxy-side actual-cost correlation headers for the LiteLLM backend).
-    # Default False — the agent-agnostic ``create_agent`` factory must only forward
-    # ``cost_log_tags`` to agents that set this True, else a route-driven kwarg would
-    # crash every agent (NoOp/Codex/Antigravity/plugins) whose ``__init__`` lacks it.
+    # Whether this agent's constructor accepts ``cost_log_tags``. The agent-agnostic
+    # factory must only forward it to agents that set this True, or a route-driven
+    # kwarg crashes every agent whose ``__init__`` lacks it.
     supports_cost_log_tags: ClassVar[bool] = False
 
-    # How this agent combines a configured ``system_prompt`` with its own default
-    # prompt, recorded per run as ``environment_info.system_prompt_semantics``.
-    # Declared on the base (not only on the agents that implement a regime) so the
-    # marker is present on EVERY run: dashboards can then read "absent" as one thing
-    # only — a run from before the marker existed — instead of conflating it with a
-    # plugin agent that never declared. Agents whose regime is fixed set this
-    # ClassVar; an agent whose regime depends on its config (Claude Code) overrides
-    # ``get_environment_info`` and emits the resolved value instead.
+    # How this agent combines a configured ``system_prompt`` with its own default,
+    # recorded per run. Declared on the BASE so the marker is present on every run
+    # and "absent" reads as one thing only. An agent whose regime depends on its
+    # config overrides ``get_environment_info`` and emits the resolved value.
+    # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     system_prompt_semantics: ClassVar[SystemPromptSemantics] = "unknown"
 
     def _begin_turn(self) -> None:
@@ -123,12 +114,10 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
 
     # --- Shared mid-turn failure kernels --------------------------------------
     #
-    # Tiny, byte-identical fragments that recur across (and within) the agent
-    # turn-loops. Each agent keeps its OWN outer try/except/finally bracket — the
-    # brackets genuinely differ (flat vs nested, finally vs not) — and calls these
-    # from inside its existing branches. They take the agent's own per-turn
-    # ``finalize`` callable (the turn-state's method) so the helper never needs to
-    # know how each agent assembles its AgentEndEvent payload.
+    # Each agent keeps its OWN outer try/except/finally bracket -- the brackets
+    # genuinely differ -- and calls these from inside its existing branches. They
+    # take the agent's own ``finalize`` callable, so the helper never needs to know
+    # how each agent assembles its end-event payload.
 
     def _finalize_and_raise_timeout(
         self, finalize: _FinalizeFn, timeout: float, *, cause: BaseException | None = None
@@ -228,22 +217,17 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds. When exceeded the
                 agent must force-terminate any in-flight subprocess and raise
-                TurnTimeoutError. Implementations should not rely solely on
-                asyncio cancellation (the Claude Agent SDK uses anyio task
-                groups that swallow cooperative cancellation).
+                TurnTimeoutError. Do not rely solely on asyncio cancellation --
+                some SDKs swallow it.
             max_turns: Hard cap on inner-loop turns within this single
                 ``communicate()`` call. When the agent would exceed it, the
                 returned ``TurnRecord`` has ``max_turns_exhausted=True``.
                 None defers to the underlying SDK default.
-            should_stop: Cooperative early-stop poll for early-stop-on-criterion.
-                When provided, an implementation that supports cooperative
-                stopping (``supports_cooperative_stop=True``) should call it at
-                each safe message boundary and, when it returns True, stop
-                pulling further work and finalize the turn cleanly
-                (``crashed=False``, no raise). ``None`` (default) preserves the
-                pre-existing behavior exactly. Agents that do not support it
-                accept the argument and ignore it (the orchestrator only passes
-                it to a capable agent).
+            should_stop: Cooperative early-stop poll. An implementation with
+                ``supports_cooperative_stop=True`` calls it at each safe message
+                boundary and, when it returns True, stops pulling further work and
+                finalizes the turn cleanly (``crashed=False``, no raise). Agents
+                that do not support it accept and ignore the argument.
 
         Returns:
             TurnRecord containing the complete interaction
