@@ -29,12 +29,13 @@ coder_eval/
 ├── config.py                 # Settings via pydantic-settings (.env loading)
 ├── sandbox.py                # Sandbox manager (tempdir, venv, templates, adopt)
 ├── orchestrator.py           # Main evaluation loop
-├── reports.py                # Markdown/JSON run reports + per-suite rollups
-├── reports_experiment.py     # Cross-variant experiment reports
-├── reports_junit.py          # JUnit XML from a finalized run dir (CI ingestion)
-├── reports_html.py           # Single-file HTML report (the evalboard's static twin)
-├── reports_stats.py          # Shared report statistics + ungraded rendering helpers
-├── formatting.py             # Number/duration formatting shared by the renderers
+├── reports/                  # Report rendering — a LEAF layer (CE066): markdown,
+│                             #   html, experiment, junit + shared helpers
+├── result_metrics.py         # EvaluationResult metrics the ORCHESTRATOR reads mid-run
+├── run_record.py             # run.json task-row serializer (not a report — see CE066)
+├── stats.py                  # Distribution-free statistics; dependency-free by contract
+├── durations.py              # format_ms (split from formatting.py: no SDK dependency)
+├── formatting.py             # SDK payload formatting for logs and stream events
 ├── analysis.py               # Command statistics aggregation
 ├── logging_config.py         # Structured logging setup
 ├── path_utils.py             # Run IDs, path utilities, atomic writes, tree digests
@@ -248,6 +249,13 @@ A few rules constrain routine edits, so they are worth knowing before you start:
   Renaming an action input means updating that skill too — the user-facing contract is
   [CI Gate: GitHub Action & JUnit reports](docs/CI_GATE.md).
 - **CE047** requires every onboarding surface to name every built-in `AgentKind`.
+- **CE065** diffs `evalboard/lib/pricing.generated.ts` against `pricing.py`; the table was
+  a hand-copy whose exemption set let four heavily-used models render `—` for cost.
+  Regenerate with `make pricing-mirror`; never hand-edit the generated file.
+- **CE066** lets the core layer import only the `reports/` package's public *writers*. A
+  metric, statistic or serializer pulled out of `reports*` is what put `turn_time_buckets`
+  and the run.json serializer in a rendering module; they now live in `result_metrics.py`,
+  `stats.py` and `run_record.py`.
 
 **Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
 source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go

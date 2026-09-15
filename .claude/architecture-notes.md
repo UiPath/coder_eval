@@ -73,7 +73,7 @@ lint rule docstrings in `tests/lint/rules/`, then the guides under `docs/`.
 
 ## Execute vs. run: the grading switch
 
-- **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run` with grading removed — the agent runs and the full trajectory is captured, but no criterion is checked, `weighted_score` is `None` (never `0.0`, which would be indistinguishable from "graded and scored zero"), and the row finalizes as **`FinalStatus.NOT_GRADED`**, whose `category` is a **fourth** bucket, `"ungraded"`. Ungraded rows leave BOTH sides of every rate: `RunSummary.pass_rate` / `error_share` and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run - tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run` invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it** — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are facts about the *run*, not about grading, and still apply (so `execute` still exits non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)` → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog check, and post-failure diagnostics); it crosses the docker boundary in `context.json` (defaulting to `True` in-container, so a host predating `execute` keeps grading). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because a task YAML must never declare itself ungraded; only the invoking command decides. `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in that flag, so there is no third code path. Three things are refused rather than degraded: `--junit-xml` (a report of verdicts, and there are none — though `reports_junit` still emits `<skipped>` for an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades nothing), and simulation tasks (their turn-continuation logic reads criteria results, so an ungraded dialog would silently change its own stopping behavior). `stop_early:` blocks are inert under `execute` for the same reason the kill switch exists: the full trajectory is the deliverable. Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and grades with its own tests.
+- **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run` with grading removed — the agent runs and the full trajectory is captured, but no criterion is checked, `weighted_score` is `None` (never `0.0`, which would be indistinguishable from "graded and scored zero"), and the row finalizes as **`FinalStatus.NOT_GRADED`**, whose `category` is a **fourth** bucket, `"ungraded"`. Ungraded rows leave BOTH sides of every rate: `RunSummary.pass_rate` / `error_share` and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run - tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run` invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it** — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are facts about the *run*, not about grading, and still apply (so `execute` still exits non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)` → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog check, and post-failure diagnostics); it crosses the docker boundary in `context.json` (defaulting to `True` in-container, so a host predating `execute` keeps grading). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because a task YAML must never declare itself ungraded; only the invoking command decides. `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in that flag, so there is no third code path. Three things are refused rather than degraded: `--junit-xml` (a report of verdicts, and there are none — though `reports/junit.py` still emits `<skipped>` for an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades nothing), and simulation tasks (their turn-continuation logic reads criteria results, so an ungraded dialog would silently change its own stopping behavior). `stop_early:` blocks are inert under `execute` for the same reason the kill switch exists: the full trajectory is the deliverable. Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and grades with its own tests.
 
 
 ---
@@ -126,3 +126,65 @@ Recent additions, each traceable to a shipped defect: **CE064** (in `src/coder_e
 plugins/coder-eval/                # The published Claude Code plugin: `.claude-plugin/plugin.json` (its `version` is a derived pin of pyproject's, bumped by release.yml, guarded by tests/test_action_version_pin.py), `skills/<name>/SKILL.md` × 6 (`/coder-eval:init`, `/coder-eval:check-skill`, `/coder-eval:task`, `/coder-eval:lint-tasks`, `/coder-eval:analyze`, `/coder-eval:ci`), and `reference/` — everything a skill reads must live here, since an installed plugin is copied to ~/.claude/plugins/cache/ WITHOUT its parent dirs (address it via `${CLAUDE_PLUGIN_ROOT}`). `reference/criteria.md` is generated (`make plugin-reference`, CE033); `reference/run-layout.md` is a verbatim mirror of `.claude/shared/run-layout.md`; `reference/task-rubric.md` is the shared task-quality rubric that `task` and `lint-tasks` both read (plugin-only — no repo-side twin); `reference/repo-layout.md` is the eval-tree DISCOVERY policy every skill reads (`SKILL_NEEDS_EVAL_ROOT_DISCOVERY`, which a new skill must declare a stance in) — glob for `task_id:` files and `run.json`, never assume `tasks/`/`runs/latest` — as distinct from `run-layout.md`, which describes what is inside a run directory. Every skill must appear in all four surfaces in `SKILL_DOC_SURFACES` (derived test), and their combined frontmatter `description` length is capped (`SKILL_LISTING_BUDGET_CHARS`) because the skill listing's budget is shared with every skill the user has installed. **Skill naming is verb-first imperative** — a skill is a command you issue (`/coder-eval:<name>`) and every one of them takes an action, so name it for the action: a bare verb where that is unambiguous (`init`, `analyze` — the object comes from the argument), otherwise `<verb>-<object>` (`lint-tasks`, `check-skill`). Never `<object>-<verb>`: `skill-check` was renamed to `check-skill` precisely because it read backwards next to `lint-tasks`. `task` and `ci` predate the rule and stay — renaming a published skill breaks every user's muscle memory for no functional gain, since activation keys on the `description`, never the name. Distinct from `.claude/commands/`, which stays repo-local contributor tooling.
 
 action.yml                         # Published composite GitHub Action (coder-eval as a CI gate). release.yml's `release` job maintains its `version:` default; its `promote` job (gated on publish-pypi) moves the `v<major>` tag + cuts the Release, so nothing consumer-visible moves before the wheel is on PyPI. verify-published-action.yml then verifies the published composite (tag/pin/PyPI/Marketplace parity, plus a real consumer run) after each Release and nightly. Runbook: CONTRIBUTING.md § Releasing.
+
+## The reports package
+
+`reports/` is a **leaf**: it may import from anywhere in `coder_eval`, and the core layers
+may import only its public *writer* entry points. That asymmetry is the whole point, and
+**CE066** enforces it. The invariant is not "core must not import reports" — core
+legitimately *writes* reports (`orchestrator.py` writes the per-task HTML,
+`orchestration/batch.py` drives `ReportGenerator`). It is that a **metric, a statistic, a
+serializer or a formatter** must never be reached out of the rendering layer.
+
+That was the actual shape of the code before the split. `reports_stats.py` was three
+unrelated modules sharing a file, and the orchestrator imported `turn_time_buckets` and
+`visible_turn_count` from it *during a run* — a number the evaluation loop needs, living in
+a reporting module. The three pieces now sit where their consumers are:
+
+- **`stats.py`** — distribution-free statistics, **dependency-free by contract**: stdlib
+  only, no `coder_eval` import, direct or relative. A unit test parses its AST and asserts
+  that, rather than leaving it to convention, because being reasonable-about-in-isolation is
+  the only reason it is a separate module. Display formatters (`fmt_mean_sd`, `fmt_p`) stay
+  in `reports/helpers.py`: they return `"N/A"`, `"—"` and `"<0.001"`, which is presentation.
+- **`result_metrics.py`** — metrics derived from a finished `EvaluationResult`, consumed by
+  the orchestrator mid-run as well as by the reporters. Deliberately **not** folded into
+  `timing.py`, which has no `EvaluationResult` dependency and is imported by every agent
+  adapter; adding one would widen that surface for everyone.
+- **`run_record.py`** — the `run.json` task-row serializer. It is a run-record serializer,
+  not a report, and its old home inside the experiment reporter was the *only* reason
+  `orchestration/batch.py` reached into the reports layer at all. Moving it is what lets
+  CE066's allowlist be purely writers; carrying a serializer on that list would be the rule
+  documenting a wart instead of the wart being removed.
+
+**CE066 checks both the absolute and the relative import spelling.** Its first draft matched
+only `node.module`, which for `from ..reports import X` holds `"reports"` with the dots in
+`node.level` — so it fired on neither of the two real edges in the tree, and its own tests
+passed because they used the absolute form. The core-layer predicate lives in
+`tests/lint/rules/_layers.py` so CE004 and CE066 cannot drift about what "core" means, and is
+stated as *every module directly under `src/coder_eval/`*: naming only `orchestrator.py` left
+`result_metrics.py` exempt — the module CE066's own fix message points at.
+
+**`format_ms` lives in `durations.py`, not `formatting.py`.** `formatting.py` imports
+`claude_agent_sdk` for the payload formatters, and the reports package should not reach
+through an SDK-shaped module for a 14-line duration formatter. This does *not* make the
+package SDK-free — `models/agent_config.py` imports `ClaudeAgentOptions` and every report
+module needs `models` — so the tests assert what is true: `durations.py` is SDK-free, and
+`reports` no longer imports `coder_eval.formatting`.
+
+### Rejected: a shared section-data layer
+
+The markdown and HTML reporters render four "duplicated" sections. All four pairs were read
+in full before deciding, and **only one shares an input shape** (command statistics, both
+taking `CommandStatistics`); the others take a `list[dict]` row, a `TokenUsage`, an
+`EvaluationResult` and a `list[EvaluationResult]` across three different scopes. The
+remaining differences are legitimate per-surface presentation, not drift: `:.1f%` vs `:.0f%`,
+and an unmeasured average **hidden** in markdown versus **dashed** in HTML — two valid
+renderings of the same `None`. Building the adapter would mean normalizing dict-row and
+live-model inputs across three scopes, touching the `run.json` contract, to remove about
+twenty lines. Rejected on KISS/YAGNI. The two things in those pairs that *were* real — a
+literal `50` beside its own `SLOW_PARAMS_PREVIEW_CHARS`, and a hand-rolled
+`TokenUsage.total_tokens` — were simply fixed.
+
+`analysis.py` and `formatting.py` stay top-level on purpose: they are not report modules,
+and moving them in would give the package an SDK dependency and force CE066 to exempt the
+orchestrator's `analysis` import.
