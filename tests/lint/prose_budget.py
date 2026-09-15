@@ -27,7 +27,7 @@ from typing import NamedTuple
 
 _DOCSTRING_ESSAY_WORDS = 150
 _COMMENT_BLOCK_LINES = 3
-_ESSAY_BASELINE_WORDS = 79_754
+_ESSAY_BASELINE_WORDS = 73_413
 
 _SRC = Path("src/coder_eval")
 

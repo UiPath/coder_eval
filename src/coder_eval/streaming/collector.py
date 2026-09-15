@@ -1,23 +1,16 @@
 """EventCollector: reduce a standardized event stream into a TurnRecord.
 
-This is the single, agent-agnostic place where the persisted ``TurnRecord``
-(and therefore ``task.json``) is assembled from the event stream — so adding a
-new agent means emitting the standard events, with capture coming for free
-(no per-agent telemetry-assembly code).
+The single, agent-agnostic place where the persisted ``TurnRecord`` (and
+therefore ``task.json``) is assembled — so a new agent emits the standard events
+and gets capture for free.
 
-Reduction split:
+An agent attaches its own collector alongside the caller's ``stream_callback``
+and returns ``build_turn_record()`` from ``communicate()``.
 
-- ``commands`` are derived from the ``ToolEndEvent`` stream (every tool call,
-  including crash-orphaned ones force-closed as ``unresolved``), ordered by the
-  tool's ``sequence_number``. This is the genuine "events are the source of
-  truth" path for tool telemetry.
-- The per-message telemetry / token payload (the intricate, SDK-specific token
-  machinery the plan defers) rides on the terminal ``AgentEndEvent`` and is read
-  back verbatim — no re-derivation, so token correctness is untouched.
-
-An agent attaches its own ``EventCollector`` alongside the caller's callback and
-returns ``build_turn_record()`` from ``communicate()``; the orchestrator keeps
-reading the return value (and ``pending_turn`` on crash), now event-derived.
+``commands`` are derived from the ``ToolEndEvent`` stream (crash-orphaned calls
+included, force-closed as ``unresolved``), ordered by ``sequence_number``. The
+per-message telemetry / token payload rides on the terminal ``AgentEndEvent`` and
+is read back verbatim, never re-derived.
 """
 
 from __future__ import annotations
@@ -64,12 +57,8 @@ class EventCollector:
         self._agent_end: AgentEndEvent | None = None
 
     def on_event(self, event: StreamEvent) -> None:
-        # Only the main agent's own events shape its TurnRecord. This guard is
-        # forward-looking: nested sub-agent events (parent_thread_id set) are NOT
-        # emitted by any agent yet (sub-agent nesting is deferred), so this branch
-        # is currently never taken. It's here so that when nesting lands, child
-        # events are skipped here and attributed via the finalization payload
-        # rather than corrupting the main-agent record.
+        # Only the main agent's own events shape its TurnRecord. Forward-looking:
+        # no agent emits nested sub-agent events yet, so this never fires today.
         if event.parent_thread_id is not None:
             return
 
@@ -77,11 +66,9 @@ class EventCollector:
             self._iteration = event.iteration
             self._user_input = event.prompt
             self._agent_start_at = event.timestamp
-            # A new turn has begun, so the previous turn's terminal event is no
-            # longer this turn's. Every agent builds a fresh collector per
-            # communicate(), but EarlyStopWatcher keeps ONE across retries: left
-            # stale, it would pair this attempt's start with the last attempt's
-            # end and publish the clamped inversion as a measured 0.0.
+            # EarlyStopWatcher keeps ONE collector across retries: left stale,
+            # this would pair the new start with the last attempt's end and
+            # publish the clamped inversion as a measured 0.0.
             self._agent_end = None
             if event.model:
                 self._model = event.model
@@ -103,12 +90,10 @@ class EventCollector:
         ``TurnRecord`` (minus its trailing final-reply entry, which cannot exist
         while the turn is still running).
 
-        Agents whose SDK has no meaningful native turn counter — Codex and
-        Antigravity each deliver a single SDK turn per ``communicate()`` — enforce
-        ``run_limits.max_turns`` against this. Reading it from the collector rather
-        than from each agent's own scratch list is what makes the cap mean the same
-        thing on both: the collector is the single agent-agnostic capture path, and
-        keying on ``tool_id`` means a re-emitted end event cannot double-count.
+        Agents whose SDK has no meaningful native turn counter (Codex,
+        Antigravity) enforce ``run_limits.max_turns`` against this, so the cap
+        means the same thing on both. Keying on ``tool_id`` means a re-emitted
+        end event cannot double-count.
         """
         return len(self._commands)
 
@@ -120,47 +105,20 @@ class EventCollector:
     ) -> tuple[float | None, float | None]:
         """The turn's head and tail — the wall clock the generations do not cover.
 
-        Measured against ``AssistantMessage`` entries only: a simulation turn
-        interleaves ``UserMessage`` entries, and a reconciled turn ends with a
-        ``ReconciliationMessage`` that carries no timestamps at all, so indexing
-        the raw list would measure the wrong thing or raise.
+        Measured against ``AssistantMessage`` entries only, skipping any whose
+        ``generation_duration_ms`` is ``None`` — that field is the codebase's
+        marker for "no window was measurable here", and its producers stamp a
+        placeholder ``started_at == completed_at`` that would otherwise read as a
+        measurement (the same exemption CE059 makes).
 
-        Two further restrictions, both of which are the difference between a
-        measurement and an invention:
+        ``min``/``max``, not the first and last entries: the list is not ordered
+        by time. MAIN THREAD ONLY, so all four buckets measure one thread.
 
-        A message whose ``generation_duration_ms`` is ``None`` is SKIPPED. That
-        field is the codebase's own marker for "no window was measurable here",
-        and every producer of one stamps ``started_at == completed_at ==
-        datetime.now()`` at *append* time as an admitted placeholder — Codex's
-        rollout rebuild (``_messages_from_items``), both Codex sub-agent
-        recovery builders, and Claude's ``_synthesize_subagent_terminal_message``.
-        Reading those stamps as window bounds turns a placeholder into a
-        measurement: a Codex turn rebuilt from its rollout stamps every message
-        at turn END, which would book the entire turn as harness startup. It is
-        the same exemption CE059 makes for exactly the same reason.
+        ``tool_spans`` is REQUIRED, never defaulted: its one caller computes the
+        set once and hands the same object to both consumers, and a fallback here
+        would build a SECOND set.
 
-        ``min`` / ``max`` rather than the first and last list entries, because
-        the list is not ordered by time — Codex appends recovered sub-agent
-        messages after the parent's last flush. Positional access made the
-        result depend on append order, which nothing enforces.
-
-        ``tool_spans`` is REQUIRED, never defaulted. Its one caller computes the
-        set once and hands the same object to both consumers; a fallback branch
-        here would build a SECOND set, which is precisely what the comment at
-        that call site says must never happen — the subtraction and the
-        head/tail have to agree about which calls exist or the buckets stop
-        being disjoint.
-
-        MAIN THREAD ONLY, the third restriction and the same rule its two
-        sibling call sites already apply (``codex_agent._token_usage_from_messages``
-        and ``scripts/timing/decompose_run.py``). A sub-agent's generations
-        carry the spawning Agent call's ``parent_tool_use_id``, and the identity
-        these two values complete sums generation over the main thread ONLY —
-        the parent tool call's own interval already spans the sub-agent's whole
-        run. Bracketing the span with a sub-agent message therefore shrinks the
-        head or the tail by time no other bucket claims, and Codex's recovered
-        child messages carry the CHILD's clock, so the bracket can move either
-        way. Excluding them keeps all four buckets measuring one thread.
+        Rationale: .claude/notes/timing.md § _overhead_ms
         """
         generations = [
             m
@@ -182,16 +140,13 @@ class EventCollector:
         """Append a ``ReconciliationMessage`` so the transcript's token buckets
         sum to ``usage`` (the authoritative turn total).
 
-        The per-``AssistantMessage`` stream consistently under-reports the bill —
-        a fixed prompt slice (~512 input tokens on Claude) is billed on no
-        SDK-emitted message, and sub-agent input/cache only partially bubbles up.
-        We book that residual once, explicitly, as a synthetic entry rather than
-        smearing fabricated tokens across real generations. After this, any
-        consumer that sums the four token buckets across the transcript reproduces
-        ``usage`` exactly — no separate aggregate needed. Only assistant
-        generations carry agent-billed tokens, so the residual is measured against
-        them (simulator ``UserMessage`` tokens are a separate bill). Emitted only
+        The per-message stream under-reports the bill, so the residual is booked
+        once, explicitly, rather than smeared across real generations. After
+        this, summing the four buckets across the transcript reproduces ``usage``
+        exactly. Measured against assistant generations only, and emitted only
         when some bucket actually diverges.
+
+        Rationale: .claude/notes/agents.md § Token accounting and the reconciliation message
         """
         in_sum = out_sum = cw_sum = cr_sum = 0
         for m in messages:
@@ -206,10 +161,9 @@ class EventCollector:
         d_cr = usage.cache_read_input_tokens - cr_sum
         if d_in == 0 and d_out == 0 and d_cw == 0 and d_cr == 0:
             return messages
-        # The residual is almost always positive (tokens billed but not streamed).
-        # A negative residual means the captured generations OVER-report the turn
-        # total for some bucket; word the note for that case so a "-512" entry
-        # doesn't read as "billed but not surfaced".
+        # A negative residual means the captured generations OVER-report some
+        # bucket; word the note for that case so "-512" doesn't read as
+        # "billed but not surfaced".
         positive = d_in >= 0 and d_out >= 0 and d_cw >= 0 and d_cr >= 0
         note = (
             "Tokens the agent billed but never surfaced as a generation "
@@ -239,8 +193,7 @@ class EventCollector:
         commands = self._ordered_commands()
 
         if end is None:
-            # No terminal event yet (e.g. mid-stream snapshot). Return a minimal
-            # record from the granular events we have.
+            # No terminal event yet (mid-stream snapshot): minimal record.
             return TurnRecord(
                 iteration=self._iteration,
                 user_input=self._user_input,
@@ -258,33 +211,20 @@ class EventCollector:
             tokens if (not tokens.is_empty() or tokens.total_cost_usd is not None) else None
         )
 
-        # The authoritative turn total (token_usage) is the source of truth, but
-        # the per-message stream under-reports it. Book the residual as a single
-        # synthetic ReconciliationMessage so the transcript's token buckets sum
-        # to the total — making the stream self-reconciling for any downstream
-        # consumer (e.g. the evalboard) without a competing aggregate.
         messages: list[TranscriptMessage] = list(end.messages)
-        # Tool execution comes out of the generation windows HERE, once, for
-        # every harness — the reducers publish raw windows.
-        #
-        # The span set is computed ONCE and handed to both consumers. That is
-        # the invariant worth protecting, and it is the one that is easy to
-        # break: the subtraction and the head/tail must agree about which calls
-        # exist, or the buckets stop being disjoint. (The ORDER of the two is
-        # not load-bearing — `_overhead_ms` reads only the bounds, the
-        # main-thread flag and whether the duration is `None`, none of which
-        # `subtract_tool_time` changes. Do not add a comment claiming it is.)
+        # ONE span set, handed to BOTH consumers: the subtraction and the
+        # head/tail must agree about which calls exist, or the buckets stop being
+        # disjoint. (Their ORDER is not load-bearing. Do not claim it is.)
+        # Rationale: .claude/notes/timing.md § Why the subtraction and the head/tail may run in either order
         tool_spans = main_thread_tool_spans(messages, self._commands.values())
         messages = subtract_tool_time(messages, tool_spans)
         if token_usage is not None:
             messages = self._reconciled_messages(messages, token_usage)
 
         startup_ms, teardown_ms = self._overhead_ms(messages, tool_spans)
-        # The turn's tool bucket, stored rather than left to be re-derived. It
-        # is the UNION (never the sum) of the SAME span set above, so all four
-        # buckets are measured against one selection. `None` when no bounded
-        # span was recorded — a turn that ran tools and timed none is not a
-        # turn whose tools took no time (CE058).
+        # The UNION (never the sum) of the SAME span set above. `None` when no
+        # bounded span was recorded: a turn that ran tools and timed none is not
+        # one whose tools took no time (CE058).
         tool_union = union_ms(tool_spans) if tool_spans else None
 
         return TurnRecord(
