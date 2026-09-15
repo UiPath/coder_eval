@@ -34,19 +34,16 @@ from .path_utils import TASK_JSON_FILENAME
 
 logger = logging.getLogger(__name__)
 
-# Characters outside XML 1.0's legal set. Kept as a plain (non-raw) ASCII-only
-# string with doubled backslashes so this source file carries no literal astral
-# or control characters. ``ElementTree`` will happily serialize control chars
-# into *invalid* XML, so every agent-derived string is scrubbed before it enters
-# the tree.
+# HAZARD: ``ElementTree`` will happily serialize control chars into INVALID XML, so
+# every agent-derived string is scrubbed before it enters the tree. Written
+# ASCII-only so this file carries no literal astral or control characters.
 _ILLEGAL_XML = re.compile("[^\\x09\\x0A\\x0D\\x20-\\uD7FF\\uE000-\\uFFFD\\U00010000-\\U0010FFFF]")
 
 # Per-testcase failure/error body cap (chars). Agent detail dumps can be huge.
 _BODY_LIMIT = 10_000
 
-# Serialized status values we recognize, for distinguishing a known status from a
-# schema-skewed one when labelling a failure/error (classification itself goes
-# through FinalStatus.category — see _category_of).
+# For telling a known status from a schema-skewed one when labelling; the
+# classification itself goes through FinalStatus.category.
 _KNOWN_STATUSES = frozenset(s.value for s in FinalStatus)
 
 
@@ -122,9 +119,8 @@ def _is_safe_relpath(value: str) -> bool:
     ``resolve()``-containment check in :func:`_load_task_json` is the
     belt-and-braces backstop (symlinks included).
     """
-    # A Windows drive-qualified value (``C:/x``) reads as a plain relative path
-    # on POSIX but is absolute on Windows, so reject it explicitly rather than
-    # leaning on the resolve-containment backstop alone.
+    # HAZARD: ``C:/x`` reads as relative on POSIX and absolute on Windows, so reject
+    # it explicitly rather than leaning on the containment backstop alone.
     if not value or value.startswith("/") or "\\" in value or PureWindowsPath(value).drive:
         return False
     parts = PurePosixPath(value).parts
@@ -305,10 +301,8 @@ def _task_case(row: dict[str, Any], run_dir: Path) -> ET.Element:
         return case
 
     if category == "ungraded":
-        # `coder-eval execute`: the task ran but was deliberately not scored.
-        # <skipped> is JUnit's only "no verdict" element — reporting it as a
-        # <failure> would turn a healthy ungraded run red in CI, and reporting
-        # it as a pass would invent a verdict. _set_counts already counts these.
+        # <skipped> is JUnit's only "no verdict" element.
+        # Rationale: .claude/notes/reporting.md § The ungraded row in every surface
         ET.SubElement(case, "skipped", {"message": "not graded (coder-eval execute)"})
         return case
 
@@ -416,9 +410,8 @@ def generate_junit_xml(run_dir: Path) -> str:
     summary = RunSummary.model_validate_json(run_json.read_text(encoding="utf-8"))
 
     root = ET.Element("testsuites", {"name": _xml_safe(summary.run_id)})
-    # Guard the root time identically to per-testcase time: a corrupt/blob-pulled
-    # run.json can carry a NaN/inf total_duration_seconds (RunSummary has no
-    # finite validator), which would emit an invalid time="nan".
+    # Guarded like the per-testcase time: a corrupt run.json can carry a NaN/inf
+    # duration, which would emit an invalid time="nan".
     root.set("time", _time_attr(summary.total_duration_seconds))
 
     # Group task rows by variant, preserving first-seen order.

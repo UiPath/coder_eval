@@ -1,10 +1,10 @@
-"""HTML report generation for coder_eval runs.
+"""Single-file HTML report — the evalboard's STATIC TWIN.
 
-Produces self-contained HTML files (inline CSS/JS, no external fonts or
-images) that visualize a single task's conversation trace and success
-criteria, plus cross-variant experiment summaries.
+This renderer and ``evalboard/`` show the same run and must agree, so a rule
+implemented on one side belongs on the other. The arithmetic itself lives in
+``reports_stats.py``; this module only formats it.
 
-Designed for offline viewing and for upload as CI artifacts.
+Rationale: .claude/notes/reporting.md § Report rollups and the HTML twin
 """
 
 from __future__ import annotations
@@ -39,9 +39,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Styling — fully inline; dark theme with light override via `.light` class.
-# ---------------------------------------------------------------------------
+# Styling -- fully inline; dark theme with a light override via `.light`.
 
 _CSS = """
 :root {
@@ -235,9 +233,7 @@ function toggleTheme() {
 """
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
+# Formatting helpers.
 
 
 _MAX_VALUE_LEN = 400
@@ -285,9 +281,8 @@ def _status_badge(status: Any) -> str:
     status_str = getattr(status, "value", None) or str(status)
     try:
         fs = status if isinstance(status, FinalStatus) else FinalStatus(str(status))
-        # "ungraded" -> neutral: the row carries no verdict, so it must render as
-        # neither green nor red. Same class an unrecognised status falls back to,
-        # reached deliberately here rather than by accident.
+        # "ungraded" -> neutral: no verdict, so neither green nor red. The same
+        # class an unrecognised status falls back to, reached deliberately.
         cls = {"succeeded": "success", "failed": "failure", "error": "error", "ungraded": "neutral"}[fs.category]
     except (ValueError, KeyError):
         cls = "neutral"  # unknown / non-FinalStatus input
@@ -318,9 +313,7 @@ def _format_params(params: dict[str, Any]) -> str:
         return repr(params)
 
 
-# ---------------------------------------------------------------------------
-# Section renderers
-# ---------------------------------------------------------------------------
+# Section renderers.
 
 
 def _render_header(result: EvaluationResult) -> str:
@@ -871,9 +864,8 @@ def _render_error_details(result: EvaluationResult) -> str:
             if retryable
             else '<span class="badge neutral">non-retryable</span>'
         )
-    # Prefer the in-result tail captured at run time (sanitised, bounded). Fall
-    # back to the legacy stack_trace from error_details so reports regenerated
-    # against archived runs (pre-error_log_tail) still surface diagnostics.
+    # Prefer the in-result tail captured at run time; the legacy stack_trace keeps
+    # an archived run's diagnostics renderable.
     log_text = result.error_log_tail or ""
     if not log_text and isinstance(details, dict):
         stack = details.get("stack_trace")
@@ -956,10 +948,9 @@ def _render_generation_metrics(result: EvaluationResult) -> str:
             f'<div class="stat"><div class="label">Crashed Partials</div>'
             f'<div class="value">{_esc(breakdown)}</div></div>'
         )
-    # The four wall-clock buckets. The arithmetic is in reports_stats; this
-    # only formats it. An unmeasured bucket renders as an em dash, never 0ms —
-    # a run predating the head/tail capture measured nothing, and a zero would
-    # claim it measured instantly (CE058).
+    # The arithmetic is in reports_stats; this only formats it. An unmeasured bucket
+    # renders as an em dash, never 0ms (CE058).
+    # Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
     buckets = turn_time_buckets(result)
     startup = format_ms(buckets.startup_ms)
     generation = format_ms(buckets.generation_ms)
@@ -1140,9 +1131,7 @@ def _wrap_document(title: str, body: str) -> str:
 """
 
 
-# ---------------------------------------------------------------------------
-# Variant / Experiment helpers
-# ---------------------------------------------------------------------------
+# Variant / experiment helpers.
 
 
 def _variant_stddev_lines(variant_id: str, result: ExperimentResult | None) -> str:
@@ -1389,9 +1378,8 @@ def _experiment_aggregate_metrics(result: ExperimentResult) -> str:
     )
     rows.append(_row("Failed", [str(result.variant_aggregates[vid].tasks_failed) for vid in result.variant_ids], None))
     rows.append(_row("Errors", [str(result.variant_aggregates[vid].tasks_error) for vid in result.variant_ids], None))
-    # The fourth bucket, conditionally like its siblings elsewhere. Without it
-    # Tasks Run / Succeeded / Failed / Errors no longer sum to tasks_run on an
-    # ungraded run, with nothing on the page to say where the rest went.
+    # The fourth bucket, conditional like its siblings elsewhere.
+    # Rationale: .claude/notes/reporting.md § The ungraded row in every surface
     if any(result.variant_aggregates[vid].tasks_not_graded > 0 for vid in result.variant_ids):
         rows.append(
             _row(
@@ -1528,9 +1516,7 @@ def _experiment_most_divergent(result: ExperimentResult) -> str:
 """
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# Public API.
 
 
 class HTMLReportGenerator:
@@ -1623,9 +1609,8 @@ class HTMLReportGenerator:
         )
         stddev_lines = _variant_stddev_lines(variant_id, result)
         rich_sections = _variant_rich_sections(variant_id, result, run_dir)
-        # Only rendered when non-zero, so an ordinary graded run's tile is
-        # unchanged — but a `coder-eval execute` run says where its tasks went
-        # instead of showing Succeeded/Failed/Errors all at zero.
+        # Non-zero only, so a graded run's tile is unchanged but an `execute` run
+        # says where its tasks went instead of showing three zeros.
         ungraded_stat = (
             '<div class="stat"><div class="label">Not Graded</div>'
             + f'<div class="value">{agg.tasks_not_graded}</div></div>'

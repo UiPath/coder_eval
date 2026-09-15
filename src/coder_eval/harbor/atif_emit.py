@@ -1,27 +1,17 @@
 """EvaluationResult → ATIF Trajectory converter (the emit direction).
 
-Maps coder_eval's persisted trajectory (``EvaluationResult.iterations`` — the
-``TurnRecord`` envelope over the per-generation ``messages`` stream) onto the
-vendored ATIF models, so every run can be consumed by ``harbor view``, Harbor
-Hub, and ATIF-based SFT/RL pipelines.
+Maps coder_eval's persisted trajectory onto the vendored ATIF models, so every run
+can be consumed by ``harbor view``, Harbor Hub, and ATIF-based SFT/RL pipelines.
 
-Mapping highlights:
+``UserMessage`` → ``Step(source="user")``; each ``AssistantMessage`` →
+``Step(source="agent")`` with per-generation ``Metrics``; ``CommandTelemetry`` joins
+its generation via ``assistant_turn_index``. Sub-agent generations are NESTED into
+embedded ``subagent_trajectories``, and ``ReconciliationMessage`` entries never become
+steps.
 
-- ``UserMessage`` → ``Step(source="user")``; ``AssistantMessage`` (one per LLM
-  generation) → ``Step(source="agent")`` with per-generation ``Metrics``.
-- ``CommandTelemetry`` joins its generation via ``assistant_turn_index`` and
-  becomes that step's ``tool_calls`` + ``observation``.
-- Sub-agent generations (``parent_tool_use_id`` set) are NESTED into embedded
-  ``subagent_trajectories`` — flattening them into the main thread would
-  corrupt SFT data derived from the trajectory.
-- ``ReconciliationMessage`` entries never become steps: their residuals are
-  recorded in ``Trajectory.extra["reconciliation"]`` and are already included
-  in the authoritative ``FinalMetrics`` totals (``total_token_usage``).
-- Turns with no message stream (legacy task.json, minimal agents) degrade to
-  one synthetic user step + one agent step carrying all the turn's commands.
+A PURE function of the models: no I/O, no agent-type branching, no mutation.
 
-The converter is a PURE function of the models: no I/O, no agent-type
-branching, no mutation of the input result.
+Rationale: .claude/notes/reporting.md § Emitting
 """
 
 from __future__ import annotations

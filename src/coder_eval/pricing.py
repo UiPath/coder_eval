@@ -7,6 +7,10 @@ https://developers.openai.com/api/docs/pricing,
 https://ai.google.dev/gemini-api/docs/pricing, and OpenRouter's live
 ``/api/v1/models`` (every row re-verified 2026-09-03, except the Bedrock
 open-weight block: AWS publishes no eu-north-1 figures for those three).
+
+HAZARD: this table is a HAND-COPIED MIRROR of ``evalboard/lib/pricing.ts``. Editing
+one means editing the other; ``evalboard/lib/__tests__/pricing-parity.test.ts`` fails
+the build on drift in either direction.
 """
 
 from collections.abc import Iterable
@@ -83,20 +87,16 @@ _PRICING: dict[str, ModelPricing] = {
     "gpt-5.4-pro": ModelPricing(30.0, 180.0, 30.0, 3.0),
     "gpt-5.4-mini": ModelPricing(0.75, 4.5, 0.75, 0.075),
     "gpt-5.4-nano": ModelPricing(0.20, 1.25, 0.20, 0.02),
-    # GPT-5.6: sol flagship / terra balanced (Codex default) / luna economy.
-    # This table is a single current-rate card with no notion of an effective
-    # date, so a repriced model makes historical runs re-price at today's rate.
-    # Sol's rate is promotional through at least 2026-11-21; re-check then.
+    # HAZARD: a single CURRENT-rate card with no effective date, so a repriced
+    # model makes historical runs re-price at today's rate. Sol's rate is
+    # promotional through at least 2026-11-21; re-check then.
     "gpt-5.6-sol": ModelPricing(4.0, 20.0, 4.0, 0.40),
     "gpt-5.6-terra": ModelPricing(2.0, 12.0, 2.0, 0.20),
     "gpt-5.6-luna": ModelPricing(0.20, 1.20, 0.20, 0.02),
-    # Google Gemini (AntigravityAgent, via the Gemini Developer API), keyed on the
-    # literal ids the ListModels endpoint returns. No cache-write fee, so
-    # cache_write == input (unused: the agent maps cache_creation_tokens to 0).
-    # CAVEAT: Pro's >200K-token tier costs more ($4/$18, $0.40 cached), so a
-    # very-large-context run reads low.
-    # 3.6 / 3.7 / 3.8 Flash share one rate card. These are list rates; Google is
-    # discounting all three by half through 2026-12-31.
+    # Keyed on the literal ids ListModels returns. No cache-write fee, so
+    # cache_write == input (unused). CAVEAT: Pro's >200K-token tier costs more, so
+    # a very-large-context run reads LOW. List rates; discounted by half through
+    # 2026-12-31.
     "gemini-3.8-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
     "gemini-3.7-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
     "gemini-3.6-flash": ModelPricing(1.5, 7.5, 1.5, 0.15),
@@ -110,20 +110,17 @@ _PRICING: dict[str, ModelPricing] = {
     # Off the public card (superseded by 3.1 Pro); last published rate kept so
     # historical runs still price.
     "gemini-3-pro-preview": ModelPricing(2.0, 12.0, 2.0, 0.20),
-    # Open-weight models on Bedrock, driven via the LiteLLM backend. These are the
-    # eu-north-1 rates, a ~20% premium over us-east-1 — do NOT "correct" them
-    # against the US column. Bedrock publishes no prompt-cache rate for these, so
-    # cache-creation is priced at input and cache-read at 0.
+    # HAZARD: eu-north-1 rates, a ~20% premium over us-east-1 -- do NOT "correct"
+    # them against the US column. No published prompt-cache rate, so cache-creation
+    # is priced at input and cache-read at 0.
     "deepseek.v3.2": ModelPricing(0.74, 2.22, 0.74, 0.0),
     "zai.glm-5": ModelPricing(1.2, 3.84, 1.2, 0.0),
     "moonshotai.kimi-k2.5": ModelPricing(0.72, 3.6, 0.72, 0.0),
-    # OpenRouter models. These providers cache prefixes implicitly (no
-    # cache_control, no write fee), so cache-creation is priced at input (unused)
-    # and cache-read at OpenRouter's published input_cache_read rate, read from
-    # the live /api/v1/models catalogue. Headline rates only: OpenRouter routes
-    # per request, so the real bill depends on the provider a call lands on —
-    # which is why the litellm path captures actual per-call cost proxy-side and
-    # overrides these (litellm_cost.apply_actual_cost). Static fallback.
+    # These providers cache prefixes implicitly, so cache-creation is priced at
+    # input (unused). HEADLINE rates only: OpenRouter routes per request, so the
+    # real bill depends on the provider a call lands on -- which is why the litellm
+    # path captures actual per-call cost and overrides these. Static fallback.
+    # Rationale: .claude/notes/reporting.md § Cost joining
     "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30),
     "z-ai/glm-5.2": ModelPricing(0.966, 3.036, 0.966, 0.1932),
     "deepseek/deepseek-v4-pro": ModelPricing(1.030776, 2.061552, 1.030776, 0.085898),
@@ -168,10 +165,8 @@ def register_pricing(rates: dict[str, ModelPricing]) -> None:
     _REGISTERED_PRICING.update(rates)
 
 
-# Bedrock cross-region inference-profile prefixes (mirrors
-# models.routing._BEDROCK_KNOWN_PREFIXES). A Bedrock route qualifies a bare
-# alias into e.g. ``eu.anthropic.claude-opus-4-8``; the pricing table is keyed
-# on the bare alias, so we strip these back off before the lookup.
+# Mirrors models.routing._BEDROCK_KNOWN_PREFIXES. A Bedrock route qualifies a bare
+# alias; the table is keyed on the bare alias, so strip these before the lookup.
 _BEDROCK_REGION_PREFIXES: tuple[str, ...] = ("eu.", "us.", "apac.", "global.")
 
 
@@ -183,13 +178,10 @@ def _normalize_model(model: str) -> str:
     so it is safe to apply unconditionally for every route.
     """
     model = model.strip()
-    # LiteLLM/Bedrock routing prefixes (e.g. "converse/zai.glm-5",
-    # "bedrock/converse/deepseek.v3.2") → bare model id. ``openrouter/`` is here
-    # because agents that address OpenRouter natively (OpenCode) report the model
-    # WITH its provider prefix ("openrouter/deepseek/deepseek-v4-pro"),
-    # while the OpenRouter rate-card keys are the bare vendor/model ids that the
-    # LiteLLM route already uses — without this strip the same model prices under
-    # LiteLLM and silently goes unpriced under OpenCode.
+    # Routing prefixes -> bare model id. ``openrouter/`` is here because an agent
+    # that addresses OpenRouter natively reports the model WITH its provider
+    # prefix, while the rate-card keys are bare -- without the strip the same model
+    # prices under LiteLLM and silently goes unpriced under OpenCode.
     for routing_prefix in ("bedrock/converse/", "bedrock/", "converse/", "openrouter/"):
         if model.startswith(routing_prefix):
             model = model[len(routing_prefix) :]

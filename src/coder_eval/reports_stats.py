@@ -321,11 +321,9 @@ class VariantSeries(NamedTuple):
     asst_turns: list[float]
 
 
-# environment_info keys the Environment table must NOT render as ordinary rows.
-# `installed_tools` has its own dedicated section; the rest are harness
-# bookkeeping the reader did not ask for — `command_base_path` is a full PATH
-# string on every row, and the graded_by_* provenance keys only appear on a
-# re-graded row where they would read as facts about the run itself.
+# Keys the Environment table must NOT render as ordinary rows: `installed_tools` has
+# its own section, `command_base_path` is a full PATH string, and the graded_by_*
+# keys appear only on a re-graded row, where they would read as facts about the run.
 ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest"})
 
 
@@ -334,9 +332,9 @@ def is_env_table_key(key: str) -> bool:
     return key not in ENV_TABLE_EXCLUDE and not key.startswith("graded_by_")
 
 
-# What an ungraded row shows where a score would go. Deliberately not "0.000":
-# an ungraded task was never measured, and a zero is indistinguishable from a
-# task that was measured and scored nothing.
+# Deliberately not "0.000": a zero is indistinguishable from a task that WAS
+# measured and scored nothing.
+# Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
 UNGRADED_SCORE_TEXT = "n/a"
 
 
@@ -387,28 +385,24 @@ def turn_time_buckets(result: EvaluationResult) -> TurnTimeBuckets:
     turns = result.iterations or []
     startup = _sum_measured(t.harness_startup_ms for t in turns)
     teardown = _sum_measured(t.harness_teardown_ms for t in turns)
-    # MAIN THREAD ONLY, the same filter the collector and the evalboard apply:
-    # a sub-agent's generations bubble into the same stream, and the spawning
-    # Agent call's own interval already spans them.
+    # MAIN THREAD ONLY, the same filter the collector and the evalboard apply: a
+    # sub-agent's generations bubble into the same stream, and the spawning call's
+    # own interval already spans them.
     generation = _sum_measured(
         m.generation_duration_ms
         for t in turns
         for m in t.messages
         if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None
     )
-    # `None` only when NO turn recorded a bounded tool span. A turn that ran
-    # tools and timed none is indistinguishable from a turn that ran none, so
-    # the presence of a SPAN — not the presence of a turn — is what decides
-    # measured-versus-not. `_sum_measured` over a list of plain floats could
-    # never return None, which made this read `0ms` ("measured and instant")
-    # for a run nobody timed.
+    # `None` only when NO turn recorded a bounded span: the presence of a SPAN, not
+    # of a turn, is what decides measured-versus-not.
+    # Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
     per_turn = [_turn_tool_union_ms(t) for t in turns]
     tool = _sum_measured(per_turn) if any(ms is not None for ms in per_turn) else None
 
-    # `duration_seconds` is a non-optional float defaulting to 0.0, so there is
-    # no None arm to write — but a 0.0 duration is a run that was never timed,
-    # and subtracting real buckets from it renders a fabricated negative
-    # residual. The evalboard keeps that null for the same reason; so do we.
+    # `duration_seconds` defaults to 0.0 with no None arm to write, but a 0.0
+    # duration is a run that was never timed, and subtracting real buckets from it
+    # renders a fabricated negative residual. The evalboard keeps that null too.
     unaccounted = (
         result.duration_seconds * 1000.0 - (startup or 0.0) - (generation or 0.0) - (tool or 0.0) - (teardown or 0.0)
         if result.duration_seconds > 0.0
@@ -434,25 +428,15 @@ def _sum_measured(values: Iterable[float | None]) -> float | None:
 def _turn_tool_union_ms(turn: TurnRecord) -> float | None:
     """One turn's tool execution — the UNION of its main-thread command spans.
 
-    PREFERS THE STORED VALUE. ``EventCollector.build_turn_record`` writes
-    ``TurnRecord.tool_union_ms`` from the single span set it measures all four
-    buckets against, so reading it is how this surface and the collector are
-    guaranteed to agree rather than merely observed to. The derivation below is
-    the LEGACY path: a ``task.json`` written before that field existed carries
-    neither it nor any way to recover it except by recomputing, and every such
-    run must stay renderable.
+    PREFERS THE STORED ``TurnRecord.tool_union_ms``, which the collector writes from
+    the single span set it measures all four buckets against, so this surface and the
+    collector are guaranteed to agree rather than merely observed to. The derivation
+    is the LEGACY path for a ``task.json`` written before that field existed.
 
-    Note the two paths cannot be distinguished by value — both return ``None``
-    for a turn with no bounded span and a float otherwise — which is why the
-    stored one is checked with ``is not None`` rather than by truthiness: a
-    stored ``0.0`` is a measurement (spans were recorded and occupied no
-    measurable time) and must not fall through to a re-derivation.
+    The stored value is checked with ``is not None``, never truthiness: a stored
+    ``0.0`` is a MEASUREMENT and must not fall through to a re-derivation.
 
-    The span SELECTION is ``timing.main_thread_tool_spans``, not a
-    copy of it. That rule (which commands count, and the sub-agent exclusion)
-    is what the collector measures the generation subtraction and the head and
-    tail against, so a second typed implementation here is how two surfaces
-    come to publish two different tool totals for one run.
+    Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
     """
     if turn.tool_union_ms is not None:
         return turn.tool_union_ms
@@ -474,20 +458,12 @@ def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]
             s = series.get(vr.variant_id)
             if s is None:  # a task result for a variant not in variant_ids
                 continue
-            # Only the SCORE is dropped when there is none — never the row.
-            # Duration, tokens and assistant turns are facts about the run that
-            # grading has nothing to do with, and `execute`'s stated contract is
-            # that only the verdict is withheld. Skipping the row whole made an
-            # all-ungraded experiment render `Avg Duration | N/A | N/A` with the
-            # Tokens and Assistant Turns rows absent entirely.
-            #
-            # The series are consumed independently (each statistic reads one
-            # list), so they need not be index-aligned with each other;
-            # `paired_comparison` pairs across VARIANTS by task id, not by index
-            # into these lists. An earlier note here claimed an experiment is
-            # either entirely graded or entirely ungraded because `grade` is
-            # run-level — `run --resume` grades rows independently and folds a
-            # failed one back ungraded, so mixed experiments are real.
+            # Only the SCORE is dropped when there is none, never the row. The
+            # series are consumed independently, so they need not be index-aligned;
+            # `paired_comparison` pairs across VARIANTS by task id. Mixed
+            # graded/ungraded experiments are real -- `run --resume` grades rows
+            # independently and folds a failed one back ungraded.
+            # Rationale: .claude/notes/reporting.md § The ungraded row in every surface
             if vr.weighted_score is not None:
                 s.scores.append(vr.weighted_score)
             s.durations.append(vr.duration_seconds / vr.replicate_count)
