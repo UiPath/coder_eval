@@ -639,6 +639,43 @@ class TestDockerRunnerGradingWiring:
         assert recovered.task_id == prior.task_id
         assert recovered.final_status is FinalStatus.NOT_GRADED
 
+    async def test_the_staged_prior_carries_no_echo_of_its_own(self, tmp_path: Path) -> None:
+        """An image that honors `regrade` but predates the echo keeps the prior row's
+        environment_info (the seed merge lets the prior win). If `prior.json` still held a
+        matching echo from an earlier identical dispatch, that stale copy would pass the
+        host's check for a container that never echoed at all."""
+        from coder_eval.path_utils import PRIOR_RESULT_FILENAME
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        prior = _result(weighted_score=None)
+        prior.environment_info["container_contract"] = {"grade": True, "regrade": True}
+        prior.environment_info["coder_eval"] = "9.9.9"
+        runner = self._runner(tmp_path, prior_result=prior, grade_workspace=ws)
+
+        staged = tmp_path / "input"
+        staged.mkdir()
+        await runner._stage_inputs(staged)
+
+        recovered = EvaluationResult.model_validate_json((staged / PRIOR_RESULT_FILENAME).read_text(encoding="utf-8"))
+        assert "container_contract" not in recovered.environment_info
+        assert recovered.environment_info["coder_eval"] == "9.9.9", "only the echo is stripped"
+        assert "container_contract" in prior.environment_info, "the in-memory prior row must not be mutated"
+
+    def test_a_refused_grading_record_is_folded_back_beside_the_row(self, tmp_path: Path) -> None:
+        """The grading container runs in a scratch dir that is deleted afterwards, so a
+        record the contract echo refused must be rescued, or the evidence is gone."""
+        from coder_eval.orchestration.regrade import _fold_back_container_logs
+
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / "task.json.unhonored").write_text('{"refused": true}', encoding="utf-8")
+        row = tmp_path / "row"
+
+        _fold_back_container_logs(scratch, row)
+
+        assert (row / "task.json.unhonored").read_text(encoding="utf-8") == '{"refused": true}'
+
     async def test_an_ordinary_run_stages_neither(self, tmp_path: Path) -> None:
         """The control: a normal `run` must be byte-identical to before, and in
         particular must not acquire a prior.json nobody asked for."""

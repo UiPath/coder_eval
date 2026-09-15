@@ -16,7 +16,7 @@ from coder_eval.cli import app
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-AGENTLESS_TASK = Path("tasks/agentless_smoke_test.yaml")
+AGENTLESS_TASK = Path(__file__).resolve().parents[1] / "tasks" / "agentless_smoke_test.yaml"
 _needs_agentless = pytest.mark.skipif(
     not AGENTLESS_TASK.is_file(), reason="needs a source checkout (tasks/ is not in the wheel)"
 )

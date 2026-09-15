@@ -664,14 +664,21 @@ def _fold_back_container_logs(container_run_dir: Path, run_dir: Path) -> None:
 
     ``grade.log`` is the grading pass's OWN log, holding the per-criterion detail
     that is the only durable record of WHY a criterion scored what it did, and a
-    documented part of the run-directory contract.
+    documented part of the run-directory contract. A ``task.json.unhonored`` record
+    the contract echo refused is rescued the same way, beside the row it was grading.
 
     Best-effort throughout: a side-car log is not the verdict, and this runs where
     an exception is already in flight.
 
     Rationale: .claude/notes/isolation.md § Grading a docker row inside a container
     """
-    for name, dest_name in ((DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME), (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME)):
+    unhonored = f"{TASK_JSON_FILENAME}.unhonored"
+    rescued = (
+        (DOCKER_LOG_FILENAME, GRADE_DOCKER_LOG_FILENAME),
+        (GRADE_LOG_FILENAME, GRADE_LOG_FILENAME),
+        (unhonored, unhonored),
+    )
+    for name, dest_name in rescued:
         # Renamed for the PHASE: on the resume path that name is already taken by
         # the executed container's log. `grade.log` does not collide.
         source = container_run_dir / name
@@ -872,9 +879,10 @@ async def _grade_in_container(
             # OSError joins it because the staging copies raise it unwrapped.
             raise RegradeError(
                 f"Grading {task.task_id!r} in a container failed: {e}. The container's own output was "
-                + f"kept at {run_dir / GRADE_DOCKER_LOG_FILENAME}. Re-run with --allow-host-grading "
-                + "to grade on this machine instead (path- and toolchain-dependent criteria may then "
-                + "score differently, and the row is stamped graded_on_host)."
+                + f"kept at {run_dir / GRADE_DOCKER_LOG_FILENAME}. If the image itself was refused (its "
+                + "version or its contract echo), rebuild or pull a matching image. Otherwise, re-run with "
+                + "--allow-host-grading to grade on this machine instead (path- and toolchain-dependent "
+                + "criteria may then score differently, and the row is stamped graded_on_host)."
             ) from e
         finally:
             # ALWAYS, not only on success: the scratch dir dies with this `with`,

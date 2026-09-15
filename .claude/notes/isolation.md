@@ -815,7 +815,14 @@ prior row's echo, since that echo describes a container that did not produce the
 The key is excluded from the rendered Environment table: it is a nested object, and
 `environment_info` is rendered as a flat map.
 
-The refusal quarantines the on-disk record to `task.json.unhonored` before raising. The run
+The refusal quarantines the on-disk record to `task.json.unhonored` before raising, and a
+synthetic ERROR `task.json` takes its place, as it does for a container that wrote no record:
+a refused row that simply vanished would drop out of every later rebuild of `run.json` while
+the batch's in-memory summary still counted it. A detached grade runs its container in a
+scratch directory, so the refused record is folded back beside the graded row with the
+grading logs. The staged `prior.json` carries no echo: an image that predates the echo keeps
+the prior row's `environment_info`, and a matching echo from an earlier identical dispatch
+would otherwise pass as its own. The run
 dir is bind-mounted, so a refused `task.json` left in place is read straight back by a later
 `execute --resume` (its category is `succeeded`, so the resume partition files it under prior
 results) and folded into `run.json` by a run-level rebuild — publishing exactly the row the

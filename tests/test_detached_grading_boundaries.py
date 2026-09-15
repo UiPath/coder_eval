@@ -229,8 +229,11 @@ class TestContractEcho:
         task_json.write_text(_result(FinalStatus.SUCCESS).model_dump_json(), encoding="utf-8")
         with pytest.raises(DockerRunError, match="no container_contract echo"):
             await runner_._parse_result_or_raise(output_dir, returncode=0, log_path=output_dir / "docker.log")
-        assert not task_json.exists()
         assert task_json.with_suffix(".json.unhonored").is_file()
+        # Quarantined, not vanished: a synthetic ERROR row keeps it in every later rebuild of run.json.
+        replacement = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))
+        assert replacement.final_status is FinalStatus.ERROR
+        assert "no container_contract echo" in (replacement.error_message or "")
 
 
 class TestInContainerGradeCoercion:

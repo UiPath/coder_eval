@@ -70,7 +70,7 @@ boundary is mechanically detectable, so the rule guards it.
 crosses the container boundary, and the per-task record every dashboard and timeline reads.
 A bare `EvaluationResult.model_validate_json(text)` turns a present-but-malformed file
 into an uncaught exception that crashes the run. Two causes produce such a file: schema
-skew between a stale `:latest` image and the host (the docker version checks only warn),
+skew between a stale `:latest` image and the host that the image preflight did not catch,
 and a truncated or torn write. The incident was at `docker_runner.py`: the parse re-bucketed
 the task to a non-persisted in-memory ERROR with no per-task report. The fix degrades:
 catch `ValueError` and persist a synthetic ERROR record (`batch.py::_load_completed_result`,
