@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 import pytest
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
-from coder_eval.models import ConfigLineageEntry, ContainerContext, PreservationMode
+from coder_eval.cli import app
+from coder_eval.models import (
+    AgentKind,
+    ConfigLineageEntry,
+    ContainerContext,
+    EvaluationResult,
+    FinalStatus,
+    PreservationMode,
+)
+from coder_eval.path_utils import PRIOR_RESULT_FILENAME, TASK_JSON_FILENAME
 from tests._container_contract import contract_payload
 
 
@@ -78,3 +93,114 @@ def test_host_task_file_null_is_accepted() -> None:
 
 def test_an_empty_config_lineage_is_accepted() -> None:
     assert ContainerContext.model_validate(contract_payload(config_lineage={})).config_lineage == {}
+
+
+# --------------------------------------------------------------------------
+# The echo, driven end to end through the real container entry point
+# --------------------------------------------------------------------------
+
+_AGENTLESS_TASK_YAML = (
+    "task_id: echo\ndescription: d\nagent:\n  type: none\n"
+    "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: d\n"
+)
+
+
+def _run_container_entry_point(tmp_path: Path, **overrides: object) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Invoke `_run-task-internal` in process; return (the staged payload, the echo task.json carries)."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(exist_ok=True)
+    (input_dir / "task.yaml").write_text(_AGENTLESS_TASK_YAML, encoding="utf-8")
+    payload = contract_payload(source_yaml=_AGENTLESS_TASK_YAML, **overrides)
+    (input_dir / "context.json").write_text(json.dumps(payload), encoding="utf-8")
+    output_dir = tmp_path / "out"
+
+    invoked = CliRunner().invoke(app, ["_run-task-internal", "--input", str(input_dir), "--output", str(output_dir)])
+
+    record = output_dir / TASK_JSON_FILENAME
+    assert record.is_file(), invoked.output
+    written = EvaluationResult.model_validate_json(record.read_text(encoding="utf-8"))
+    return payload, written.environment_info["container_contract"]
+
+
+def test_every_contract_field_is_echoed(tmp_path: Path) -> None:
+    """Derived from `model_fields`, so a field added to the contract is checked with no new test."""
+    payload, echo = _run_container_entry_point(tmp_path, grade=False)
+
+    assert set(echo) == set(ContainerContext.model_fields)
+    assert echo == ContainerContext.model_validate(payload).model_dump(mode="json")
+
+
+def test_the_echo_survives_a_regrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_seed_from_prior_result` lets the PRIOR row's environment_info win. The prior here
+    carries a stale echo from an earlier pass, so an echo written before the seed would be
+    replaced by it and the host would refuse a correct grade."""
+    from coder_eval import models
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "out.txt").write_text("done", encoding="utf-8")
+    monkeypatch.setattr(models, "CONTAINER_GRADE_WORKSPACE", str(workspace))
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    prior = EvaluationResult(
+        task_id="echo",
+        task_description="d",
+        variant_id="default",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime(2026, 1, 1),
+        final_status=FinalStatus.NOT_GRADED,
+        iteration_count=0,
+        environment_info={"container_contract": {"stale": "from an earlier pass"}},
+    )
+    (input_dir / PRIOR_RESULT_FILENAME).write_text(prior.model_dump_json(), encoding="utf-8")
+
+    payload, echo = _run_container_entry_point(tmp_path, regrade=True)
+
+    assert echo == ContainerContext.model_validate(payload).model_dump(mode="json")
+
+
+async def test_a_host_grade_drops_the_prior_echo(tmp_path: Path) -> None:
+    """A host grade is not a container's verdict. Keeping the prior echo would record
+    `grade: false` / `regrade: false` on a row that this pass just graded."""
+    from coder_eval.orchestration.regrade import regrade_in_place
+    from coder_eval.orchestration.task_loader import load_task
+
+    task_yaml = tmp_path / "task.yaml"
+    task_yaml.write_text(_AGENTLESS_TASK_YAML, encoding="utf-8")
+    task, source_yaml = load_task(task_yaml)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "out.txt").write_text("done", encoding="utf-8")
+    prior = EvaluationResult(
+        task_id="echo",
+        task_description="d",
+        variant_id="default",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime(2026, 1, 1),
+        final_status=FinalStatus.NOT_GRADED,
+        iteration_count=0,
+        environment_info={
+            "container_contract": ContainerContext.model_validate(contract_payload(grade=False)).model_dump(mode="json")
+        },
+    )
+
+    graded = await regrade_in_place(
+        task=task,
+        prior=prior,
+        workspace=workspace,
+        run_dir=tmp_path / "grade",
+        task_file=task_yaml,
+        source_yaml=source_yaml,
+        variant_id="default",
+    )
+
+    assert graded.final_status is FinalStatus.SUCCESS
+    assert "container_contract" not in graded.environment_info
+
+
+def test_the_echo_is_not_rendered_in_the_environment_table() -> None:
+    """A nested object in a flat key/value table renders as a Python dict repr."""
+    from coder_eval.reports_stats import is_env_table_key
+
+    assert not is_env_table_key("container_contract")

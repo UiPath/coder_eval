@@ -224,40 +224,16 @@ class TestBuildImage:
         assert isinstance(ei.value, DockerRunError)
         assert "boom: bad layer" in ei.value.build_log
 
-    def test_accepts_runtime_image_with_version_label(self, tmp_path: Path, mocker) -> None:
-        """An image carrying org.coder-eval.version (FROM coder-eval-agent) passes."""
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM coder-eval-agent:latest\n")
-        mocker.patch.object(dr.subprocess, "run", side_effect=_docker_side_effect(version_label="0.3.0"))
-        runner = _make_runner(task_id="ok", dockerfile_path=str(dockerfile))
-        assert runner._build_image() == "coder-eval-task-ok:built"
-
-    def test_rejects_image_without_version_label(self, tmp_path: Path, mocker) -> None:
-        """A non-framework image (no org.coder-eval.version label) -> actionable DockerRunError.
-
-        The host pins --entrypoint, so the build is no longer gated on the baked
-        ENTRYPOINT; the runtime-image check uses the version label instead.
-        """
+    def test_the_build_leaves_the_label_check_to_the_preflight(self, tmp_path: Path, mocker) -> None:
+        """`_build_image` only builds. Whether the result is a coder-eval runtime image is
+        `_preflight_image_contract`'s job, which `run()` applies to every image; its missing-label,
+        FROM-hint and inspect-failure cases live in tests/test_image_skew_refusal.py."""
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM ubuntu:24.04\n")
-        mocker.patch.object(dr.subprocess, "run", side_effect=_docker_side_effect(version_label=""))
-        runner = _make_runner(dockerfile_path=str(dockerfile))
-        with pytest.raises(DockerRunError, match=r"FROM coder-eval-agent"):
-            runner._build_image()
-
-    def test_label_inspect_failure_is_soft(self, tmp_path: Path, mocker) -> None:
-        """If `docker image inspect` itself fails, don't block -- the run surfaces real issues."""
-        dockerfile = tmp_path / "Dockerfile"
-        dockerfile.write_text("FROM coder-eval-agent:latest\n")
-
-        def _run(argv, *a, **k):
-            if "build" in argv:
-                return subprocess.CompletedProcess(argv, 0, "", "")
-            raise subprocess.CalledProcessError(1, argv, stderr="inspect boom")
-
-        mocker.patch.object(dr.subprocess, "run", side_effect=_run)
+        run = mocker.patch.object(dr.subprocess, "run", side_effect=_docker_side_effect(version_label=""))
         runner = _make_runner(task_id="ok", dockerfile_path=str(dockerfile))
-        assert runner._build_image() == "coder-eval-task-ok:built"  # no raise
+        assert runner._build_image() == "coder-eval-task-ok:built"
+        assert [call.args[0][1] for call in run.call_args_list] == ["build"]
 
 
 # --------------------------------------------------------------------------- #
@@ -445,7 +421,7 @@ def _runtime_dockerfile() -> Path | None:
 def test_runtime_kit_stamps_version_label() -> None:
     """The kit Dockerfile must stamp `org.coder-eval.version`.
 
-    The host's :meth:`_assert_runtime_image` rejects an image lacking that label;
+    The host's ``_preflight_image_contract`` rejects an image lacking that label;
     the converter re-declares it on the *injected* image (guarded converter-side),
     and the kit carries it too for `docker inspect`/parity. Static guard so
     dropping the LABEL fails here, not only against a freshly-built image.

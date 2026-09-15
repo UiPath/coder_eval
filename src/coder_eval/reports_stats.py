@@ -324,7 +324,7 @@ class VariantSeries(NamedTuple):
 # Keys the Environment table must NOT render as ordinary rows: `installed_tools` has
 # its own section, `command_base_path` is a full PATH string, and the graded_by_*
 # keys appear only on a re-graded row, where they would read as facts about the run.
-ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest"})
+ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest", "container_contract"})
 
 
 def is_env_table_key(key: str) -> bool:

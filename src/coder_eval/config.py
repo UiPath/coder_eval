@@ -110,6 +110,7 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"  # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     log_to_file: bool = False  # Whether to enable file logging
+    allow_image_skew: bool = False  # ALLOW_IMAGE_SKEW=1: local image iteration; drops docker reproducibility
 
     # On by default via the baked-in connection string, which any set value (env
     # or .env) overrides. TELEMETRY_ENABLED is the single canonical disable gate.

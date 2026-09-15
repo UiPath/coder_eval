@@ -13,6 +13,7 @@ import contextlib
 import logging
 import os
 import re
+import reprlib
 import shutil
 import subprocess
 import tempfile
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, TextIO
 
 import yaml
 
+from coder_eval.config import settings
 from coder_eval.logging_config import DEFAULT_LOG_TAIL_MAX_BYTES
 from coder_eval.models import (
     CONTAINER_GRADE_WORKSPACE,
@@ -187,26 +189,24 @@ def _preflight() -> None:
         raise DockerRunError("docker daemon is not responding. Start Docker Desktop or check `docker info`.") from exc
 
 
-def _preflight_image_version(image: str) -> None:
-    """Assert the image's ``coder_eval`` label matches the host BEFORE running.
+def _preflight_image_contract(image: str, dockerfile: Path | None) -> None:
+    """Refuse, before a billed container starts, an image that cannot honor this host's contract.
 
-    The PR's original mismatch warning ran *after* ``task.json`` was parsed
-    — i.e. after the billed LLM run. The whole point of ``--driver docker``
-    is reproducibility; warning post-hoc is the wrong order. Here we inspect
-    the image label and warn *before* spawning the container, so a stale
-    ``:latest`` doesn't quietly waste a paid run.
+    The one reader of the ``org.coder-eval.version`` label. A missing label always refuses.
+    A label that differs from the host's installed version refuses unless
+    ``settings.allow_image_skew`` is set, which downgrades it to a warning. A source checkout
+    has no packaged version, so skew is not computable there: warn and continue. An inspect
+    or daemon failure is debug-logged and left for ``docker run`` to report.
 
-    Missing image / missing label / no-host-version are all soft-fail: log
-    and continue (image may have been built before the label was added, or
-    coder-eval may be running from a source checkout without a packaged
-    version).
+    Advisory only: ``DockerRunner._assert_contract_echoed`` is the authoritative check.
+
+    Raises:
+        DockerRunError: The label is absent, or it differs and the escape hatch is off.
+
+    Rationale: .claude/notes/isolation.md § The image version preflight
     """
     from importlib.metadata import PackageNotFoundError, version
 
-    try:
-        host_version = version("coder-eval")
-    except PackageNotFoundError:
-        return
     try:
         result = subprocess.run(
             [
@@ -229,20 +229,38 @@ def _preflight_image_version(image: str) -> None:
         # even when the image is fine, and would then double-fail.
         logger.debug("Pre-flight image inspect failed for %s: %s", image, exc)
         return
+    # `docker inspect` renders a missing label as "" (the Go template zero value); older clients print "<no value>".
     image_version = result.stdout.strip()
-    if not image_version or image_version == "unknown":
-        logger.warning(
-            "Image %s has no org.coder-eval.version label; rebuild with `make docker-image` for pre-flight checks.",
-            image,
+    if not image_version or image_version == "<no value>":
+        base = get_default_docker_image_tag()
+        subject = f"Image built from {dockerfile}" if dockerfile is not None else f"Image {image}"
+        raise DockerRunError(
+            f"{subject} is not a coder-eval runtime image (missing the org.coder-eval.version label). "
+            + "The container must run the in-container orchestrator, so the image must be the framework "
+            + f"image (built via `make docker-image`) or start `FROM {base}` and only add task-specific "
+            + "layers on top. See docs/DOCKER_ISOLATION.md."
         )
-        return
-    if image_version != host_version:
+    try:
+        host_version = version("coder-eval")
+    except PackageNotFoundError:
         logger.warning(
-            "Image %s coder_eval %s != host %s. Rebuild with `make docker-image` to keep reproducibility.",
+            "coder-eval has no installed package version (a source checkout?), so image %s (coder_eval %s) "
+            + "cannot be checked against the host. Continuing; the contract echo still applies.",
             image,
             image_version,
-            host_version,
         )
+        return
+    if image_version == host_version:
+        return
+    message = (
+        f"Image {image} runs coder_eval {image_version} but the host runs {host_version}. Rebuild it with "
+        + "`make docker-image` (then rebuild any image derived from it), or set ALLOW_IMAGE_SKEW=1 to run a "
+        + "deliberately different image without the reproducibility guarantee."
+    )
+    if settings.allow_image_skew:
+        logger.warning("%s Continuing because ALLOW_IMAGE_SKEW is set.", message)
+        return
+    raise DockerRunError(message)
 
 
 _CONTAINER_NAME_INVALID = re.compile(r"[^a-zA-Z0-9_.-]")
@@ -373,7 +391,7 @@ def _resolve_workspace_dir(cfg_working_dir: str | None, image: str) -> str | Non
     ``None`` -> ``None`` (feature off). A concrete path -> re-asserted + returned.
     ``"auto"`` -> the image's WORKDIR via ``docker image inspect`` (falling back to
     ``/root`` on an empty / ``"/"`` WORKDIR or any inspect failure -- never crash
-    the run over WORKDIR detection, mirroring ``_preflight_image_version``).
+    the run over WORKDIR detection, mirroring ``_preflight_image_contract``'s inspect handling).
     """
     if cfg_working_dir is None:
         return None
@@ -511,12 +529,10 @@ def restore_modes(widened: list[tuple[Path, int]]) -> None:
 def _quarantine_record(task_json: Path | None, suffix: str, label: str) -> None:
     """Move a refused container record aside, best-effort.
 
-    Shared by both version-skew refusals (`_assert_grade_honored`,
-    `_assert_regrade_honored`), which had the same seven lines twice and differed
-    only in the suffix and the wording. Refusing in memory while leaving
-    contradictory bytes in the bind-mounted run dir is not a refusal -- a later
-    `aggregate` would publish exactly the row the guard declined -- so this must
-    behave identically on both paths, which one copy per caller cannot promise.
+    Call it before raising a refusal. The run dir is bind-mounted, so a record left
+    readable as ``task.json`` is read straight off disk by a later ``--resume`` or
+    run-level rebuild, publishing exactly the row that was refused. The sidecar name
+    is not matched by ``rglob("task.json")``.
 
     Never masks the caller's raise: a failed move is logged and swallowed.
     """
@@ -607,10 +623,9 @@ class DockerRunner:
             # Rationale: .claude/notes/isolation.md § A container that produced no task.json
             await self._record_build_failure(exc)
             raise
-        # The version-label preflight only makes sense for the framework image;
-        # a task-supplied Dockerfile won't carry the org.coder-eval.version label.
-        if not self._docker_config.dockerfile_path:
-            await asyncio.to_thread(_preflight_image_version, image)
+        # A dockerfile_path image inherits the label from its FROM coder-eval-agent base, so it is checked too.
+        dockerfile = Path(self._docker_config.dockerfile_path) if self._docker_config.dockerfile_path else None
+        await asyncio.to_thread(_preflight_image_contract, image, dockerfile)
         await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
 
         # Docker WORKDIR alignment: config value / "auto" -> inspect / fallback /root.
@@ -848,74 +863,52 @@ class DockerRunner:
             # Present but unparseable (schema skew from a stale image, a torn
             # write): degrade like the missing-file branch.
             raise await self._handle_malformed_task_json(task_json, log_path, exc) from exc
-        self._warn_on_version_mismatch(result)
-        self._assert_grade_honored(result, task_json)
-        self._assert_regrade_honored(result, task_json)
+        self._assert_contract_echoed(result, task_json)
         return result
 
-    def _assert_regrade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
-        """Fail loudly when a detached GRADE came back as a fresh agent run.
+    def _assert_contract_echoed(self, result: EvaluationResult, task_json: Path) -> None:
+        """Refuse a result whose container did not do what the staged contract asked.
 
-        ``regrade`` crosses the boundary only through ``context.json``; an image
-        that predates container-side grading ignores it and falls through to the
-        ordinary ``Orchestrator`` branch -- which **starts an agent**. Nothing else
-        catches it: ``_assert_grade_honored`` early-returns because a grading
-        container is dispatched with ``grade=True``.
+        Compares ``environment_info["container_contract"]`` with what ``_stage_inputs``
+        sent, in JSON mode on both sides. ``settings.allow_image_skew`` never reaches
+        this check. ``task_json`` is quarantined to ``task.json.unhonored`` before every raise.
 
-        Keyed on EVIDENCE: a container that honored the request seeds from
-        ``prior`` and never runs the agent, so a DIFFERENT ``started_at`` is the
-        tell.
+        Raises:
+            DockerRunError: The echo is absent, or any field differs from what was sent.
 
-        Rationale: .claude/notes/isolation.md § The two honored-request guards
+        Rationale: .claude/notes/isolation.md § The contract echo
         """
-        if self.prior_result is None:
+        sent = self._staged_context.model_dump(mode="json") if self._staged_context is not None else None
+        echo = (result.environment_info or {}).get("container_contract")
+        if sent is not None and echo == sent:
             return
-        if result.started_at == self.prior_result.started_at:
-            return
-        _quarantine_record(task_json, ".rerun", "re-run")
+        _quarantine_record(task_json, ".unhonored", "unhonored")
+        if sent is None:
+            raise DockerRunError("A container result was parsed for a dispatch that staged no contract.")
+        if echo is None:
+            raise DockerRunError(
+                "The container returned a result with no container_contract echo: the runtime image predates "
+                + "the host→container contract and may have ignored what it was asked to do (grade, regrade). "
+                + "Rebuild with `make docker-image` or pull the image matching this host's coder-eval version."
+            )
+        used = echo if isinstance(echo, dict) else {}
+        differing = [
+            f"{key}: sent {reprlib.repr(sent.get(key))}, container used "
+            + (reprlib.repr(used[key]) if key in used else "<absent>")
+            for key in sorted(sent.keys() | used.keys())
+            if (key in sent, sent.get(key)) != (key in used, used.get(key))
+        ]
         raise DockerRunError(
-            "Grading asked the container to score an already-executed run, but it returned a "
-            + f"different trajectory (started_at {result.started_at} vs the recorded "
-            + f"{self.prior_result.started_at}). The runtime image predates container-side "
-            + "grading and re-ran the agent instead; rebuild or pull a matching agent image, "
-            + "or grade on the host with --allow-host-grading."
-        )
-
-    def _assert_grade_honored(self, result: EvaluationResult, task_json: Path | None = None) -> None:
-        """Fail loudly when `execute` came back with a graded verdict.
-
-        ``grade`` crosses the boundary only through ``context.json``. An image that
-        predates ``execute`` ignores the unknown key and grades anyway, and the
-        image-version preflight only warns -- so version skew would change what a
-        command MEANS.
-
-        ``task_json`` is the on-disk record, quarantined before the raise: refusing
-        in memory while leaving contradictory bytes on disk is not a refusal.
-
-        Rationale: .claude/notes/isolation.md § The two honored-request guards
-        """
-        if self.grade:
-            return
-        # Keyed on EVIDENCE, not on the label: the question is not "what status is this" but "did it grade".
-        graded_anyway = bool(result.success_criteria_results) or result.weighted_score is not None
-        if not graded_anyway and (
-            result.final_status.is_execution_fact or result.final_status is FinalStatus.NOT_GRADED
-        ):
-            return
-        _quarantine_record(task_json, ".graded", "graded")
-        raise DockerRunError(
-            "`coder-eval execute` asked the container not to grade, but it returned "
-            + f"{result.final_status.value} with {len(result.success_criteria_results)} criterion "
-            + "result(s). The runtime image predates `execute` and ignored the request; "
-            + "rebuild or pull a matching agent image."
+            f"The container did not honor the contract it was sent ({'; '.join(differing)}). The runtime image "
+            + "runs different coder-eval code than this host; rebuild or pull a matching image."
         )
 
     async def _handle_malformed_task_json(self, task_json: Path, log_path: Path, exc: ValueError) -> DockerRunError:
         """Degrade a present-but-malformed task.json; return the DockerRunError to raise.
 
         Triggered by a present-but-unparseable task.json -- most realistically a
-        schema skew between a stale ``:latest`` image and the host (the version
-        checks only warn), or a truncated/torn write. Mirrors the missing-file
+        schema skew between a stale ``:latest`` image and the host that the
+        image preflight did not catch, or a truncated/torn write. Mirrors the missing-file
         branch and the batch.py recovery paths: log naming the path, move the
         original aside to ``task.json.malformed`` (so its possibly-recoverable
         content isn't masked AND so the synthetic write lands --
@@ -996,37 +989,6 @@ class DockerRunner:
             await asyncio.to_thread(_write)
         except OSError as exc:
             logger.warning("Failed to write synthetic task.json to %s: %s", target, exc)
-
-    def _warn_on_version_mismatch(self, result: EvaluationResult) -> None:
-        """Warn loudly if the in-container coder_eval version != the host's.
-
-        Reproducibility is one of two reasons users pick driver:docker.
-        Without this check, an outdated image silently runs stale code
-        against a refreshed host -- a class of "works on my machine"
-        regression that's near-impossible to debug. The host already
-        embeds its own version in environment_info before this point.
-        """
-        from importlib.metadata import PackageNotFoundError, version
-
-        try:
-            host_version = version("coder-eval")
-        except PackageNotFoundError:
-            return
-        env_info = result.environment_info or {}
-        if "coder_eval" not in env_info:
-            # Surface the silent-disable. Future refactor removing this key
-            # would otherwise stop the version check without anyone noticing.
-            logger.warning(
-                "Cannot verify container coder_eval version: result.environment_info missing 'coder_eval' key."
-            )
-            return
-        container_version = env_info["coder_eval"]
-        if container_version and container_version != host_version:
-            logger.warning(
-                "coder_eval version mismatch -- host %s, container %s. Rebuild image with `make docker-image`.",
-                host_version,
-                container_version,
-            )
 
     @staticmethod
     def _sensitive_source_paths() -> list[Path]:
@@ -1149,9 +1111,8 @@ class DockerRunner:
             The image reference to pass to ``docker run``.
 
         Raises:
-            DockerRunError: If ``docker build`` exits non-zero, or the built image
-                is not a coder-eval runtime image (missing the
-                ``org.coder-eval.version`` label).
+            DockerBuildError: If ``docker build`` exits non-zero. Whether the built
+                image is a coder-eval runtime is checked by ``_preflight_image_contract``.
         """
         cfg = self._docker_config
         if not cfg.dockerfile_path:
@@ -1197,58 +1158,7 @@ class DockerRunner:
             raise DockerBuildError(
                 f"Failed to build Docker image from {dockerfile}: {exc.stderr}", build_log=build_log
             ) from exc
-        self._assert_runtime_image(image, dockerfile)
         return image
-
-    def _assert_runtime_image(self, image: str, dockerfile: Path) -> None:
-        """Fail fast unless the built image carries the coder-eval runtime.
-
-        The host pins ``--entrypoint`` at run time, so we no longer inspect the
-        baked ``ENTRYPOINT``; instead we verify the image is a coder-eval runtime
-        image by checking for the ``org.coder-eval.version`` label, which
-        docker/Dockerfile stamps and any ``FROM coder-eval-agent`` task inherits.
-        This is the only pre-run validation for a ``dockerfile_path`` task
-        (``run()`` skips :func:`_preflight_image_version` for that case), so
-        without it a bare ``FROM ubuntu`` image would build, then die at
-        ``docker run`` with a cryptic ``exec ...coder_eval_entrypoint.sh: no
-        such file``. A docker/inspect failure is soft (debug-logged, no raise):
-        the subsequent ``docker run`` surfaces any real problem.
-
-        Raises:
-            DockerRunError: If the image carries no ``org.coder-eval.version``
-                label (i.e. it is not built ``FROM coder-eval-agent``).
-        """
-        try:
-            result = subprocess.run(
-                [
-                    "docker",
-                    "image",
-                    "inspect",
-                    "--format",
-                    '{{ index .Config.Labels "org.coder-eval.version" }}',
-                    image,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=10,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            logger.debug("Could not inspect labels of built image %s: %s", image, exc)
-            return
-        # `docker inspect` renders a missing label as the empty string (the Go
-        # template's zero value); "<no value>" can occur on older clients.
-        label = result.stdout.strip()
-        if not label or label == "<no value>":
-            base = get_default_docker_image_tag()
-            raise DockerRunError(
-                f"Image built from {dockerfile} is not a coder-eval runtime image "
-                + "(missing the org.coder-eval.version label). The container must run the "
-                + f"in-container orchestrator, so a task Dockerfile must start `FROM {base}` "
-                + "(the framework image, built via `make docker-image`) and only add "
-                + "task-specific layers on top. See docs/DOCKER_ISOLATION.md."
-            )
 
     def _resolve_host_reference_dir(self) -> Path | None:
         """Host path of ``task.reference.directory``, or None when unset/missing.
