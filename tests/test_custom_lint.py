@@ -2096,6 +2096,56 @@ class TestPluginArtifacts:
 
 
 @pytest.mark.lint
+class TestCE065PricingMirrorParity:
+    """CE065 — the evalboard's rate table is generated from coder_eval.pricing.
+
+    lib/pricing.ts used to hand-copy the Python rate card, guarded by a regex
+    parser, a meta-guard on that regex, an exemption set and a staleness guard
+    for the exemption set — five layers that still let four heavily-used models
+    render "—" for cost. The table is now generated; `make pricing-mirror`
+    writes it and this class diffs it. Reasons over generated text rather than
+    one Python AST, so it lives here rather than in the AST runner.
+    """
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_generated_mirror_matches_disk(self):
+        from tests.lint.pricing_mirror import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, (
+            "\nThe evalboard's rate table drifted from src/coder_eval/pricing.py — run "
+            "`make pricing-mirror` to regenerate:\n\n"
+            + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
+        )
+
+    def test_every_statically_priced_model_is_mirrored(self):
+        """Table-driven, so a new rate in pricing.py needs zero edits here.
+
+        The old hand-copy's exemption set is what shipped the bug: an id could
+        sit in it forever and silence the guard. The only exclusion now is the
+        `per_request_billing` product rule, declared on the rate itself.
+        """
+        import json
+
+        from coder_eval.pricing import builtin_rates
+        from tests.lint.pricing_mirror import render_pricing
+
+        rendered = render_pricing()
+        for key, rate in builtin_rates().items():
+            # Build the needle the way the renderer builds the row, so a key
+            # needing escaping is not reported as spuriously missing.
+            needle = json.dumps(key) + ": {"
+            if rate.per_request_billing:
+                assert needle not in rendered, (
+                    f"{key} bills per request — statically pricing it on the frontend replaces "
+                    "the captured actual per-call cost with an estimate"
+                )
+            else:
+                assert needle in rendered, f"{key} is priced in pricing.py but missing from the mirror"
+
+
+@pytest.mark.lint
 class TestCE033PluginReferenceParity:
     """CE033 — the plugin's bundled criteria reference is generated from the models.
 
