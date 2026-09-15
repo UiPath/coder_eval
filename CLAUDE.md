@@ -3,9 +3,9 @@
 Working reference for AI assistants on the `coder_eval` codebase.
 
 Design *rationale* — why a subsystem is shaped the way it is, and which shipped defect
-shaped it — lives in **`.claude/architecture-notes.md`**, which is not auto-loaded. Read
-it before changing grading, resume, early stop, timing, the reference anti-cheat, or an
-agent adapter.
+shaped it — lives under **`.claude/notes/`**, which is not auto-loaded; start at
+[`.claude/notes/README.md`](.claude/notes/README.md). Read it before changing grading,
+resume, early stop, timing, the reference anti-cheat, or an agent adapter.
 
 User-facing documentation lives in [`docs/`](docs/index.md): start with the
 [User Guide](docs/USER_GUIDE.md) for CLI behaviour and the
@@ -89,7 +89,7 @@ action.yml                     # Published composite GitHub Action
 
 ## Key Architectural Patterns
 
-Each entry is a pointer. Full rationale: `.claude/architecture-notes.md`.
+Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes/README.md`).
 
 - **Discriminated unions** for criteria types and template sources.
 - **Plugin registry**: `criteria/` auto-discovers via `pkgutil` + `@register_criterion`.
@@ -207,6 +207,8 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 # Regenerate a generated surface — never hand-edit the output
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
+
+make docs-budget       # prose budget report; fails `make verify` if the total grows
 ```
 
 Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is
@@ -357,10 +359,14 @@ bandit, pre-commit, mcp
 - **Comments are a last resort** — default to ZERO comments. Names, types and small
   functions carry the meaning. A comment is allowed ONLY when it records something the
   code cannot say
+- **A docstring states the contract, not the history** — what a caller must know to call
+  it correctly. Why the design is this shape belongs in `.claude/notes/`; what it used to
+  be belongs in git. `make docs-budget` reports the standing total and fails
+  `make verify` if it grows
 
 ## Notes for AI Assistants
 
 - Communication style: use ASD-STE-100 when you speak to the user.
 - Temporary files go in `tmp/`, not `/tmp`.
-- Read `.claude/architecture-notes.md` before changing grading, resume, early stop,
-  timing, the reference anti-cheat, or any significant parts of this code's architecture. 
+- Read `.claude/notes/` before changing grading, resume, early stop, timing, the
+  reference anti-cheat, or any significant parts of this code's architecture. 
