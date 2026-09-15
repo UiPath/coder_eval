@@ -494,9 +494,9 @@ class TestSandboxDriverGate:
     def test_in_container_enforces_even_though_driver_reads_tempdir(self, tmp_path, monkeypatch):
         """REGRESSION GUARD for a silent-disable trap.
 
-        `run_task_internal_command` rewrites `driver: docker` -> `tempdir` before
-        constructing the Orchestrator, because nested docker is impossible in the
-        image. So inside the container the driver reads "tempdir". Gating on the
+        The host stages a container's task with `driver: tempdir`, because nested
+        docker is impossible in the image. So inside the container the driver
+        reads "tempdir". Gating on the
         driver would therefore disable the anti-cheat window on exactly the path
         that needs it — the gate must key on CODER_EVAL_IN_CONTAINER instead.
         """
@@ -678,8 +678,8 @@ def _container_sandbox(task_dir: Path, sandbox_dir: Path, monkeypatch) -> "objec
     """A real Sandbox that reports itself as running inside a docker container.
 
     `enforces_permission_windows` keys on CODER_EVAL_IN_CONTAINER rather than
-    `config.driver`, precisely because the in-container entry point rewrites
-    the driver to "tempdir" — so this fixture mirrors production by leaving the
+    `config.driver`, precisely because the host stages a container's task with
+    the driver at "tempdir" — so this fixture mirrors production by leaving the
     driver at "tempdir" and setting only the env var.
     """
     from coder_eval.models import SandboxConfig

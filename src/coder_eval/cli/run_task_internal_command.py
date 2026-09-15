@@ -36,7 +36,6 @@ from coder_eval.models import (
     IN_CONTAINER_ENV,
     ContainerContext,
     EvaluationResult,
-    SandboxConfig,
     TaskDefinition,
 )
 from coder_eval.orchestration.task_loader import load_task
@@ -72,8 +71,8 @@ def _arm_host_heartbeat_watchdog(output_dir: Path) -> None:
     # `os._exit(137)` on the process it runs in, so anywhere else it can only harm
     # -- it once killed a pytest worker mid-test-file and took its coverage with it.
     # Gated on CODER_EVAL_IN_CONTAINER, NOT on `driver`, for the same reason
-    # `Sandbox.enforces_permission_windows` is: this command rewrites
-    # `driver: docker` -> `tempdir` before building the Orchestrator.
+    # `Sandbox.enforces_permission_windows` is: the host stages the task this
+    # command runs with `driver: tempdir`.
     # Rationale: .claude/notes/isolation.md § The heartbeat watchdog is armed only inside a container
     if _os.environ.get(IN_CONTAINER_ENV) == "1":
 
@@ -180,19 +179,9 @@ def run_task_internal_command(
     # The path below is never re-read; it only seeds Orchestrator's TASK_DIR.
     runtime_task_file = task_dir / "task.yaml" if task_dir.is_dir() else task_yaml
 
-    # Captured BEFORE the rewrite below: this is what `task.json` records.
+    # The staged task is the host's execution copy (driver: tempdir); task.json records the sandbox as authored.
     # Rationale: .claude/notes/orchestration.md § Recording the task as authored
-    authored_task = task
-
-    # Force driver back to tempdir for the actual in-container run.
-    if task.sandbox.driver == "docker":
-        # noqa: CE051 — the ONE legitimate rewrite. We are already inside the
-        # container the docker driver asked for, so the isolation it names is
-        # present, not bypassed. Re-validated rather than `model_copy(update=...)`,
-        # which skips both pydantic and pyright.
-        # Rationale: .claude/notes/orchestration.md § The in-container driver rewrite
-        rewritten = SandboxConfig.model_validate({**task.sandbox.model_dump(), "driver": "tempdir"})  # noqa: CE051
-        task = task.model_copy(update={"sandbox": rewritten})
+    authored_task = task.model_copy(update={"sandbox": ctx.authored_sandbox})
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -259,7 +248,7 @@ def _grade_recorded_run(
     `driver: docker` task: the host stages `prior.json` next to `task.yaml` and
     bind-mounts the executed workspace at ``CONTAINER_GRADE_WORKSPACE``.
 
-    ``task`` is the driver-rewritten copy (docker -> tempdir), which is also what
+    ``task`` is the execution copy the host staged with ``driver: tempdir``, which is also what
     keeps ``regrade_in_place`` from dispatching a container from within one.
     ``authored_task`` is what gets RECORDED, and ``recorded_task_file`` is the path
     half of that same distinction and travels with it.

@@ -517,8 +517,8 @@ host.
 The motivating bug: `regrade.grading_sandbox_config` rewrote the driver unconditionally
 on BOTH new grading entry points, which also neutralized the `driver: docker` refusal in
 `Sandbox.adopt` — a guard added in the same change specifically to catch this. The
-legitimate suppressions are the in-container rewrite in `run_task_internal_command` and
-the opt-in host-grading branch, which refuses by default and stamps `graded_on_host` on
+legitimate suppressions are the host-side staging rewrite in `docker_runner._stage_inputs`
+and the opt-in host-grading branch, which refuses by default and stamps `graded_on_host` on
 the row.
 
 ## CE052

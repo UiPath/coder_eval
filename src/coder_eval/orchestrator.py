@@ -419,9 +419,8 @@ class Orchestrator:
         self.replicate_index = replicate_index
         self.grade = grade
         # What `task_config.resolved` records, which is NOT always what we RUN:
-        # the in-container path rewrites `driver: docker` -> `tempdir` before
-        # building its Orchestrator, and recording that made the run's own record
-        # deny it ever used docker.
+        # a container runs the task the host staged with `driver: tempdir`, and
+        # recording that made the run's own record deny it ever used docker.
         # Rationale: .claude/notes/orchestration.md § Recording the task as authored
         self.recorded_task = recorded_task if recorded_task is not None else task
         # Same seam, same reason, for the PATH: in a container `task_file` is

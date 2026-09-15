@@ -326,8 +326,9 @@ class TestInContainerRegradeBranch:
     `/work/task_dir/task.yaml`, a path that exists on no host.
     """
 
-    _DOCKER_TASK_YAML = (
-        "task_id: t\ndescription: d\nagent:\n  type: none\nsandbox:\n  driver: docker\n"
+    # What the host stages: the execution copy. The authored `driver: docker` crosses in the contract.
+    _STAGED_TASK_YAML = (
+        "task_id: t\ndescription: d\nagent:\n  type: none\nsandbox:\n  driver: tempdir\n"
         "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: d\n"
     )
 
@@ -345,10 +346,10 @@ class TestInContainerRegradeBranch:
 
         input_dir = tmp_path / "input"
         input_dir.mkdir(exist_ok=True)
-        (input_dir / "task.yaml").write_text(self._DOCKER_TASK_YAML, encoding="utf-8")
+        (input_dir / "task.yaml").write_text(self._STAGED_TASK_YAML, encoding="utf-8")
         (input_dir / "prior.json").write_text(_result().model_dump_json(), encoding="utf-8")
         defaults = {
-            "source_yaml": self._DOCKER_TASK_YAML,
+            "source_yaml": self._STAGED_TASK_YAML,
             "regrade": True,
             "host_task_file": str(tmp_path / "host" / "task.yaml"),
         }
@@ -385,8 +386,7 @@ class TestInContainerRegradeBranch:
 
         assert result.exit_code == 0, result.output
         assert captured["workspace"] == Path(tmp_path / "graded-workspace")
-        # What runs: rewritten to tempdir, because we are already inside the
-        # container the docker driver asked for.
+        # What runs: the execution copy the host staged.
         assert captured["task"].sandbox.driver == "tempdir"  # type: ignore[union-attr]
         # What is RECORDED: unchanged.
         assert captured["recorded_task"].sandbox.driver == "docker"  # type: ignore[union-attr]

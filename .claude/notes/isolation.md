@@ -169,32 +169,31 @@
   `CoderEval.Task.End` host-side (`_emit_task_telemetry`), mirroring `batch.py`: the
   grading path had inherited only the silent half of the container-silent invariant (§
   Environment forwarding). The dispatch is gated on `IN_CONTAINER_ENV`, never on the
-  driver — the in-container entry point rewrites `docker` -> `tempdir` before building
-  its Orchestrator, so a driver-based test would read an already-changed value and a
-  grading container would dispatch a grading container. That env var now has ONE
-  definition (`models/container_paths.py::IN_CONTAINER_ENV`), and **CE056** keeps it
-  that way — the migration converted all four READERS and left the single WRITER
-  (`docker_runner`'s `--env CODER_EVAL_IN_CONTAINER=1`) on the literal, which is the one
-  site that produces the value the gates consume: a rename would have updated every
-  consumer and left the container exporting the old name, disarming the reference
-  anti-cheat window, the reference mount, the grading-container recursion guard and the
-  watchdog together, all silently. CE052 accepts both spellings — a rule that saw only
-  the literal would read a constant-based gate as no gate and tell the author to paste
-  the literal back, arguing against the SSOT it exists to reinforce. The earlier
-  behavior silently rewrote the driver to `tempdir`, which ran a container task's
-  criteria against a host filesystem lacking `/verifier` and the image's toolchain
-  (FAILURE for a trajectory `run` scored 1.0, plus `rm -rf /verifier` unsandboxed on the
-  grading machine) and neutralized `adopt`'s own docker guard; an opted-in row is
-  stamped `graded_on_host` so it is never silently comparable with a container-graded
-  one (lint rule CE051). A re-grade refuses on a `reference_digest` mismatch — the
-  digest is persisted into `environment_info` at staging time by `_stage_reference` (it
-  shipped once as a read with no writer anywhere, so the guard was dead code; then it
-  shipped with a writer whose value was **discarded before it reached disk**, because
-  `_setup` REBOUND the whole `environment_info` dict from `get_version_info()` a hundred
-  lines later, which CE054 cannot see — a write existed in `src/`, it was just dead.
-  `_setup` now `update()`s that dict rather than rebinding it, and
-  `tests/test_detached_grading_boundaries.py` asserts the key survives a real end-to-end
-  run, not just that `_staged_digest` works in isolation), and
+  driver — the host stages a container's task with `driver: tempdir`, so a driver-based
+  test would read an already-resolved value and a grading container would dispatch a
+  grading container. That env var now has ONE definition
+  (`models/container_paths.py::IN_CONTAINER_ENV`), and **CE056** keeps it that way — the
+  migration converted all four READERS and left the single WRITER (`docker_runner`'s
+  `--env CODER_EVAL_IN_CONTAINER=1`) on the literal, which is the one site that produces
+  the value the gates consume: a rename would have updated every consumer and left the
+  container exporting the old name, disarming the reference anti-cheat window, the
+  reference mount, the grading-container recursion guard and the watchdog together, all
+  silently. CE052 accepts both spellings — a rule that saw only the literal would read a
+  constant-based gate as no gate and tell the author to paste the literal back, arguing
+  against the SSOT it exists to reinforce. The earlier behavior silently rewrote the
+  driver to `tempdir`, which ran a container task's criteria against a host filesystem
+  lacking `/verifier` and the image's toolchain (FAILURE for a trajectory `run` scored
+  1.0, plus `rm -rf /verifier` unsandboxed on the grading machine) and neutralized
+  `adopt`'s own docker guard; an opted-in row is stamped `graded_on_host` so it is never
+  silently comparable with a container-graded one (lint rule CE051). A re-grade refuses
+  on a `reference_digest` mismatch — the digest is persisted into `environment_info` at
+  staging time by `_stage_reference` (it shipped once as a read with no writer anywhere,
+  so the guard was dead code; then it shipped with a writer whose value was **discarded
+  before it reached disk**, because `_setup` REBOUND the whole `environment_info` dict
+  from `get_version_info()` a hundred lines later, which CE054 cannot see — a write
+  existed in `src/`, it was just dead. `_setup` now `update()`s that dict rather than
+  rebinding it, and `tests/test_detached_grading_boundaries.py` asserts the key survives
+  a real end-to-end run, not just that `_staged_digest` works in isolation), and
   `verify_reference_unchanged` now takes the task file it resolves against and RAISES on
   a vanished or unresolvable reference instead of returning silently. That comparison
   digests a STAGED copy of the source, not the raw tree: the recorded digest is taken
@@ -223,18 +222,18 @@
   cwd) and anything inside the run dir rather than only the workspace, and
   `write_text_atomic` opens its temp file `O_EXCL|O_NOFOLLOW` — a pre-planted
   `task.json.tmp` symlink otherwise bypassed the write-back's destination symlink guard
-  entirely. The record must also describe the task as AUTHORED, not as executed:
-  `run_task_internal_command` rewrites `driver: docker` -> `tempdir` before building the
-  in-container Orchestrator (see .claude/notes/orchestration.md § The in-container
-  driver rewrite), and recording that rewrite made a docker run's own `task.json` claim
-  `driver: tempdir`. Since `grading_sandbox_config` reads the driver back OUT of the
-  record, `evaluate <run_dir>` on a container row skipped BOTH the
-  `--allow-host-grading` refusal and the `graded_on_host` stamp and graded a container
-  task against the host filesystem silently — the exact outcome that gate exists to
-  prevent. `Orchestrator(recorded_task=...)` is the seam: what is recorded, as distinct
-  from what is run — and `recorded_task_file` is its path twin, which must travel with
-  it through EVERY caller. `regrade_in_place` and `_grade_recorded_run` shipped without
-  it, so every container-graded row re-recorded `/work/task_dir/task.yaml` as its
+  entirely. The record must also describe the task as AUTHORED, not as executed: the
+  host stages a container's task with `driver: tempdir` and forwards the authored
+  sandbox beside it (see .claude/notes/orchestration.md § The host-side driver rewrite),
+  and recording that rewrite made a docker run's own `task.json` claim `driver:
+  tempdir`. Since `grading_sandbox_config` reads the driver back OUT of the record,
+  `evaluate <run_dir>` on a container row skipped BOTH the `--allow-host-grading`
+  refusal and the `graded_on_host` stamp and graded a container task against the host
+  filesystem silently — the exact outcome that gate exists to prevent.
+  `Orchestrator(recorded_task=...)` is the seam: what is recorded, as distinct from what
+  is run — and `recorded_task_file` is its path twin, which must travel with it through
+  EVERY caller. `regrade_in_place` and `_grade_recorded_run` shipped without it, so
+  every container-graded row re-recorded `/work/task_dir/task.yaml` as its
   `source_file`, reintroducing the defect one caller down; both seams are now pinned by
   a test that drives the in-container regrade branch end to end, because deleting either
   left the whole suite green. NOTE the Typer command is a thin wrapper over
@@ -458,9 +457,9 @@ one task. On the host (`driver: tempdir`) it is a deliberate no-op: parallel tas
 batch share the checked-out `tasks/<name>/` tree, so chmod-ing it is a cross-task side
 effect on the user's own working copy for no isolation benefit — there is no boundary to
 enforce when the agent is just another process with the same uid. The predicate is the
-`CODER_EVAL_IN_CONTAINER` env var, NOT `config.driver`, because the in-container entry
-point rewrites `driver: docker` to `tempdir` before constructing the orchestrator, so a
-driver-keyed predicate would read "tempdir" inside the container and disable the window on
+`CODER_EVAL_IN_CONTAINER` env var, NOT `config.driver`, because the host stages a
+container's task with `driver: tempdir`, so a driver-keyed predicate would read
+"tempdir" inside the container and disable the window on
 exactly the path that needs it.
 
 ### grant_container_access

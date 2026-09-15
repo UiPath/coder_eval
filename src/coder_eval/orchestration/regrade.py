@@ -641,10 +641,10 @@ def _should_grade_in_container(task: TaskDefinition, *, allow_host_grading: bool
 
     * ``driver: docker`` — a tempdir task has no container to grade in.
     * NOT already inside one. Gated on ``CODER_EVAL_IN_CONTAINER``, never on the
-      driver, for the same reason the reference-permission window is: the
-      in-container entry point rewrites `docker` -> `tempdir` before building its
-      Orchestrator, so a driver-based test would be reading a value that has
-      already been changed. Without this, a grading container would try to
+      driver, for the same reason the reference-permission window is: the host
+      stages a container's task with `driver: tempdir`, so a driver-based test
+      would be reading a value that has already been resolved. Without this, a
+      grading container would try to
       dispatch a grading container.
     * ``--allow-host-grading`` not passed. That flag is the operator saying
       "grade it here anyway" — the escape hatch for a machine with no docker, or
@@ -917,7 +917,7 @@ async def regrade_in_place(
 
     ``recorded_task`` / ``recorded_task_file`` are two halves of one seam — what
     the row RECORDS, as distinct from what this process runs. Both matter only in
-    the container, where the task is rewritten to ``driver: tempdir``.
+    the container, whose task the host stages with ``driver: tempdir``.
 
     ``container_contract`` is the echo the in-container caller forwards to the
     Orchestrator; the host never passes it.

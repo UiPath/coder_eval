@@ -42,6 +42,7 @@ from coder_eval.models import (
     FinalStatus,
     PreservationMode,
     ResourceLimits,
+    SandboxConfig,
 )
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
 from coder_eval.path_utils import (
@@ -594,7 +595,6 @@ class DockerRunner:
         # Resolved in run() (needs the built image for "auto"). Concrete WORKDIR the
         # agent runs at + copies out from; None = standard artifacts workspace.
         self._workspace_dir: str | None = None
-        # What _stage_inputs told the container to do. None until staged.
         self._staged_context: ContainerContext | None = None
 
     @property
@@ -623,7 +623,6 @@ class DockerRunner:
             # Rationale: .claude/notes/isolation.md § A container that produced no task.json
             await self._record_build_failure(exc)
             raise
-        # A dockerfile_path image inherits the label from its FROM coder-eval-agent base, so it is checked too.
         dockerfile = Path(self._docker_config.dockerfile_path) if self._docker_config.dockerfile_path else None
         await asyncio.to_thread(_preflight_image_contract, image, dockerfile)
         await asyncio.to_thread(self.rt.run_dir.mkdir, parents=True, exist_ok=True)
@@ -716,9 +715,13 @@ class DockerRunner:
         # rt.task in-memory and the container must see those mutations.
         # Rationale: .claude/notes/isolation.md § The container contract
         task_yaml_in = input_dir / "task.yaml"
+        # noqa: CE051 — the host resolves the driver for its own container; the authored block rides in the contract.
+        # Rationale: .claude/notes/orchestration.md § The host-side driver rewrite
+        execution_sandbox = SandboxConfig.model_validate({**self.rt.task.sandbox.model_dump(), "driver": "tempdir"})  # noqa: CE051
+        execution_task = self.rt.task.model_copy(update={"sandbox": execution_sandbox})
 
         def _dump_task_yaml() -> str:
-            return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
+            return yaml.safe_dump(execution_task.model_dump(mode="json"), sort_keys=False)
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")
@@ -732,6 +735,7 @@ class DockerRunner:
             source_yaml=self.rt.source_yaml,
             host_task_file=str(self.rt.task_file) if self.rt.task_file else None,
             workspace_dir=self._workspace_dir,
+            authored_sandbox=self.rt.task.sandbox.model_copy(deep=True),
         )
         await asyncio.to_thread(
             (input_dir / "context.json").write_text,

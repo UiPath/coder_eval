@@ -415,9 +415,9 @@ class TestShouldGradeInContainer:
     def test_inside_a_container_it_does_not_recurse(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Gated on CODER_EVAL_IN_CONTAINER, never on the driver.
 
-        The in-container entry point rewrites `docker` -> `tempdir` before
-        building its Orchestrator, so a driver-based test would read a value
-        that has already been changed — the same trap the reference-permission
+        The host stages a container's task with `driver: tempdir`, so a
+        driver-based test would read a value that has already been resolved
+        — the same trap the reference-permission
         window documents. Without this gate a grading container dispatches a
         grading container.
         """
