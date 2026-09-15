@@ -176,8 +176,8 @@ on both the success and the raised path, without catching the `typer.Exit` decid
 Per-suite rollups are skipped entirely under `execute`: a rollup aggregates per-criterion
 results and there are none, so running it would gate a suite on an empty aggregate and
 report a threshold failure for a run that was never measured. The ungraded bucket is named
-explicitly in the aggregate line for the same reason — `coder-eval aggregate <run>` is the
-step right after `coder-eval execute`, so an ungraded run is the FIRST thing it renders, and
+explicitly in the rebuild line for the same reason — `coder-eval report <run> --rebuild` is
+the step right after `coder-eval execute`, so an ungraded run is the FIRST thing it renders, and
 without the term it reads "Aggregated 12 task(s) (0 ok / 0 fail / 0 err)": four numbers that
 no longer sum to `tasks_run`, with nothing on screen to say where the rest went. The
 end-of-run summary likewise reports what happened instead of "0/N succeeded", which for a

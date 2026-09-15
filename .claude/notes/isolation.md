@@ -58,8 +58,8 @@
   (its join keys on a per-Orchestrator nonce the prior turns never carried, so it would
   clobber already-correct costs). The verdict is written back into the run's
   `task.json`, with the pre-grade record kept as `task.execute.json` — that in-place
-  write is what makes plain `coder-eval aggregate <run_dir>` rebuild a graded `run.json`
-  with **zero** new code. **`Sandbox.adopt(workspace)`** is the grade-in-place
+  write is what lets `coder-eval report <run_dir> --rebuild` rebuild a graded `run.json`
+  with no grading-specific code. **`Sandbox.adopt(workspace)`** is the grade-in-place
   primitive: it reuses `setup`'s adoption half but skips every *materializing* step
   (`_setup_template`, `_generate_cli_recorders`, venv/package installs, the destructive
   `$HOME` remediation), running only non-mutating derivation (mock-dir `+x`, venv

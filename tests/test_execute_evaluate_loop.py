@@ -1,4 +1,4 @@
-"""The `execute` -> `evaluate` -> `aggregate` loop.
+"""The `execute` -> `evaluate` -> `report --rebuild` loop.
 
 `coder-eval execute` withholds the verdict; `coder-eval evaluate <run_dir>`
 supplies it later. The pair only earns its keep if it ends up where a single
@@ -111,15 +111,15 @@ def test_evaluate_upgrades_the_row_in_place_and_keeps_the_original(tmp_path: Pat
     assert _row(task_dir, "task.execute.json")["final_status"] == FinalStatus.NOT_GRADED.value
 
 
-def test_aggregate_rebuilds_a_graded_run_json_with_no_extra_step(tmp_path: Path) -> None:
+def test_report_rebuild_sees_a_graded_run_with_no_extra_step(tmp_path: Path) -> None:
     """Grading in place is what makes the rest of the toolchain free: the
-    existing `aggregate` command sees the upgraded rows with no new code."""
+    run-summary rebuild sees the upgraded rows with no grading-specific code."""
     run_dir = tmp_path / "r"
     _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
     assert json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["tasks_not_graded"] == 1
 
     _invoke(["evaluate", str(_task_dir(run_dir))])
-    _invoke(["aggregate", str(run_dir)])
+    _invoke(["report", str(run_dir), "--rebuild"])
 
     summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert summary["tasks_not_graded"] == 0

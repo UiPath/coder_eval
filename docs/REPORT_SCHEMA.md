@@ -11,7 +11,7 @@ Coder Eval writes machine-readable JSON alongside every markdown/HTML report. Th
 page is the field-level reference for consumers (dashboards, CI parsers, evalboard
 forks). For the on-disk directory tree see
 [User Guide → Output Structure](USER_GUIDE.md#output-structure); for how to
-re-generate these files see [`coder-eval report` / `aggregate`](USER_GUIDE.md#cli-commands).
+re-generate these files see [`coder-eval report`](USER_GUIDE.md#cli-commands) (`--rebuild` for `run.json`).
 
 All JSON is Pydantic `model_dump_json` output — keys are the model field names
 verbatim (no aliases, except `iterations` also accepts the legacy key `turns` on
@@ -21,7 +21,7 @@ read). Times are ISO-8601.
 
 | File | Model | When |
 | --- | --- | --- |
-| `run.json` / `run.md` | `RunSummary` | Every run (and rebuildable via `coder-eval aggregate`) |
+| `run.json` / `run.md` | `RunSummary` | Every run (and rebuildable via `coder-eval report <run_dir> --rebuild`) |
 | `<variant>/<task_id>/<NN>/task.json` | `EvaluationResult` | One per replicate |
 | `<variant>/<task_id>/<NN>/task.execute.json` | `EvaluationResult` | Pre-grade snapshot, written once by a detached grade (`evaluate <run_dir>` / `run --resume`). Deliberately **not** matched by `rglob("task.json")`, so it never enters an aggregation. |
 | `<variant>/<suite_id>/suite.json` / `.md` | `SuiteRollup` | Dataset-backed suites only |
@@ -361,6 +361,6 @@ respectively), checked after each completed agent turn — see
 ## See also
 
 - [User Guide → Output Structure](USER_GUIDE.md#output-structure) and the
-  [`aggregate`](USER_GUIDE.md#cli-commands) command
+  [`report --rebuild`](USER_GUIDE.md#cli-commands) command
 - [A/B Experiments → Reading the Report](AB_EXPERIMENTS.md#reading-the-report)
 - [Task Definition Guide](TASK_DEFINITION_GUIDE.md)

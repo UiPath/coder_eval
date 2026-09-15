@@ -23,13 +23,21 @@ def report_command(
         "-o",
         help="Output file (default: display markdown to stdout).",
     ),
-    report_format: str = typer.Option(
-        "md",
+    report_format: str | None = typer.Option(
+        None,
         "--format",
         "-f",
         help=(
             "Output format: 'md' (default markdown), 'html' (render task.json files as HTML), "
             "'junit' (JUnit XML from run.json)."
+        ),
+    ),
+    rebuild: bool = typer.Option(
+        False,
+        "--rebuild",
+        help=(
+            "Rebuild the run-level run.json + run.md in place from the finalized task.json files under "
+            "RUN_DIR, which must be a run root. Cannot be combined with --format or --output."
         ),
     ),
 ) -> None:
@@ -50,8 +58,19 @@ def report_command(
 
         # Write a JUnit XML report (defaults to <run-dir>/junit.xml)
         coder-eval report runs/latest --format junit
+
+        # Rebuild a run's run.json + run.md in place from its task.json files
+        coder-eval report runs/2026-06-22_14-32-27 --rebuild
     """
-    fmt = report_format.lower()
+    if rebuild:
+        if report_format is not None or output_file is not None:
+            raise typer.BadParameter(
+                "--rebuild writes run.json and run.md in place; it cannot be combined with --format or --output."
+            )
+        _rebuild_run_summary(run_dir)
+        return
+
+    fmt = (report_format or "md").lower()
     if fmt not in ("md", "html", "junit"):
         console.print(f"[red]Error: unknown --format '{report_format}' (expected 'md', 'html', or 'junit')[/red]")
         raise typer.Exit(1)
@@ -87,6 +106,32 @@ def report_command(
         console.print(f"[green][OK]Report saved to {output_file}[/green]")
     else:
         console.print(Markdown(report_md))
+
+
+def _rebuild_run_summary(run_dir: Path) -> None:
+    """Rebuild ``run_dir``'s run.json + run.md and print the counts; exit 1 when there is nothing to aggregate."""
+    from ..orchestration.run_summary_rebuild import find_run_root, rebuild_run_summary
+
+    # A run.json written below the real root makes every later rebuild of that root drop these rows.
+    if (run_dir / TASK_JSON_FILENAME).is_file():
+        raise typer.BadParameter(f"{run_dir} is a task directory, not a run root; pass the run directory above it.")
+    enclosing = find_run_root(run_dir.resolve().parent)
+    if enclosing is not None:
+        raise typer.BadParameter(f"{run_dir} is inside the run at {enclosing}; rebuild that directory instead.")
+
+    summary = rebuild_run_summary(run_dir)
+    if summary is None:
+        console.print(f"[red]Error: no finalized task.json files found under {run_dir}[/red]")
+        console.print("\n[dim]Hint: --rebuild aggregates a finished run — use 'coder-eval run' to create one.[/dim]")
+        raise typer.Exit(1)
+    counts = f"{summary.tasks_succeeded} ok / {summary.tasks_failed} fail / {summary.tasks_error} err"
+    if summary.tasks_not_graded:
+        counts += f" / {summary.tasks_not_graded} not graded"
+    console.print(f"[green][OK][/green] Aggregated {summary.tasks_run} task(s) ({counts}) → {run_dir / 'run.json'}")
+    console.print(
+        "[dim]Note: run-level summary only — per-suite (suite.json/suite.md) and "
+        + "experiment (experiment.json/experiment.md) rollups are not rebuilt.[/dim]"
+    )
 
 
 def _regenerate_html_reports(run_dir: Path, output_file: Path | None) -> None:
