@@ -229,7 +229,7 @@ def _resolve_backend_route(
     ``settings.litellm_*``, and raises when ``model_override`` is absent — there
     is no default gateway model to fall back to.
 
-    Rationale: .claude/notes/contracts.md § LiteLLM params and env_params
+    Rationale: .claude/notes/contracts.md § Route resolution
     """
     match backend:
         case ApiBackend.BEDROCK:

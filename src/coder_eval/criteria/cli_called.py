@@ -56,8 +56,10 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         # No pre-flight re.compile: `FlagMatch` compiles at validation, which is
         # where it has to happen -- the response-rule surface cannot report.
         if not sandbox.file_exists(criterion.log):
-            # Harness fault, not agent behaviour. Failing stops a max_count: 0
-            # guard passing vacuously against a log that never existed.
+            # Scored 0.0, never raised: an agent can `rm` the log, so escalating
+            # would hand it a way to turn a failing run into an ERROR. Failing
+            # stops a max_count: 0 guard passing vacuously against a log that
+            # never existed. See the five uniform refuse-to-score paths below.
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
