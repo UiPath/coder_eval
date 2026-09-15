@@ -1,0 +1,4 @@
+services:
+  main:
+    volumes:
+    - <OUT_DIR>/environment/task.yaml:/opt/coder-eval-task/task.yaml:ro

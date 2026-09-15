@@ -145,7 +145,10 @@ class TestEmittedDirectoryStructure:
         doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
         assert doc["task"]["name"] == "coder-eval/greet"
         assert doc["task"]["keywords"] == ["smoke"]
-        assert "docker_image" not in doc["environment"]  # always built from environment/Dockerfile now
+        # No dockerfile_path -- no environment/Dockerfile at all; task.toml points Harbor
+        # straight at the pre-built image instead (see _write_environment).
+        assert not (out_dir / "environment" / "Dockerfile").exists()
+        assert doc["environment"]["docker_image"] == "byod-custom-image:0.1.0"
         assert doc["environment"]["memory_mb"] == 2048
         assert doc["environment"]["cpus"] == 2
         assert doc["environment"]["network_mode"] == "no-network"
@@ -228,8 +231,9 @@ class TestAgentPhaseTaskYaml:
         export_task(task_file, out_dir)
 
         assert (out_dir / "environment" / "task.yaml").exists()
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert "COPY task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        assert any(v.endswith(":/opt/coder-eval-task/task.yaml:ro") for v in volumes)
 
     def test_carries_the_real_agent_config_but_no_real_criteria(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path, {"agent": {"type": "claude-code", "model": "claude-opus-5"}})
@@ -263,7 +267,7 @@ class TestAgentPhaseTaskYaml:
         reloaded = TaskDefinition.model_validate(emitted)  # must not raise
         assert reloaded.task_id == "greet"
 
-    def test_prebuilt_image_with_no_dockerfile_path_gets_one_synthesized(self, tmp_path: Path) -> None:
+    def test_prebuilt_image_with_no_dockerfile_path_gets_no_dockerfile_at_all(self, tmp_path: Path) -> None:
         task_file = _write_task(
             tmp_path, {"sandbox": {"driver": "docker", "docker": {"image": "byod-custom-image:0.1.0"}}}
         )
@@ -272,9 +276,14 @@ class TestAgentPhaseTaskYaml:
         result = export_task(task_file, out_dir)
 
         assert (out_dir / "environment" / "task.yaml").exists()
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert dockerfile_text.startswith("FROM byod-custom-image:0.1.0\n")
-        assert "COPY task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
+        # No dockerfile_path -- no environment/Dockerfile written at all; task.toml's
+        # [environment].docker_image points Harbor at the image directly instead.
+        assert not (out_dir / "environment" / "Dockerfile").exists()
+        doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
+        assert doc["environment"]["docker_image"] == "byod-custom-image:0.1.0"
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        assert any(v.endswith(":/opt/coder-eval-task/task.yaml:ro") for v in volumes)
         assert not any("No Dockerfile to bake" in w for w in result.warnings)
 
 
@@ -311,10 +320,13 @@ class TestDockerfileWorkdirResolution:
 
         assert result.workdir == "/workspace"
         dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        # The WORKDIR-bearing content is untouched; only the task.yaml COPY
-        # line (baked in for a CoderEvalAgent embed, see agent_paths.py) is appended.
+        # The WORKDIR-bearing content is untouched -- task.yaml is bind-mounted in via
+        # docker-compose.yaml (see agent_paths.py), not COPY'd, so the Dockerfile gets
+        # no new lines here at all.
         assert dockerfile_text.startswith(original)
-        assert "COPY task.yaml /opt/coder-eval-task/task.yaml" in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        assert any(v.endswith(":/opt/coder-eval-task/task.yaml:ro") for v in volumes)
         assert not any("declared no WORKDIR" in w for w in result.warnings)
         # test.sh and task.toml must agree with the same resolved workdir.
         assert '"/workspace"' in (out_dir / "tests" / "test.sh").read_text(encoding="utf-8")
@@ -391,20 +403,32 @@ class TestCoderEvalAgentBaseImageWarning:
 
 
 class TestPrePostRunWarnings:
-    def test_pre_run_and_post_run_are_warned_not_silently_dropped(self, tmp_path: Path) -> None:
-        task_file = _write_task(
-            tmp_path,
-            {
-                "pre_run": [{"command": "echo setup"}],
-                "post_run": [{"command": "echo cleanup"}],
-            },
-        )
+    def test_pre_run_is_translated_into_the_agent_phase_task_yaml(self, tmp_path: Path) -> None:
+        """`pre_run` runs inside the sandbox before the agent starts (PreRunCommand's own
+        docstring) -- exactly the phase `coder-eval execute` still performs for the
+        CoderEvalAgent embed (it shares `run`'s pipeline minus grading), so unlike
+        `post_run` this is a real translation, not a dropped/warned-about field."""
+        task_file = _write_task(tmp_path, {"pre_run": [{"command": "echo setup", "timeout": 15}]})
         out_dir = tmp_path / "out"
 
         result = export_task(task_file, out_dir)
 
-        assert any("pre_run" in w for w in result.warnings)
+        assert not any("pre_run" in w for w in result.warnings)
+        emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
+        assert emitted["pre_run"] == [{"command": "echo setup", "timeout": 15, "fail_on_error": True}]
+
+    def test_post_run_is_warned_not_silently_dropped(self, tmp_path: Path) -> None:
+        """`post_run` belongs to the GRADING phase (orchestrator.py's own comment),
+        which `coder-eval execute` never runs at all -- there is no phase left for it
+        to execute in, so (unlike `pre_run`) it stays untranslated and warned."""
+        task_file = _write_task(tmp_path, {"post_run": [{"command": "echo cleanup"}]})
+        out_dir = tmp_path / "out"
+
+        result = export_task(task_file, out_dir)
+
         assert any("post_run" in w for w in result.warnings)
+        emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
+        assert "post_run" not in emitted
 
     def test_no_pre_or_post_run_produces_no_such_warnings(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
@@ -541,8 +565,8 @@ class TestEnvPassthroughSections:
 
 
 class TestTemplateSourcesCopy:
-    """``TemplateDirSource`` directories must be copied into the export -- otherwise
-    ``environment/task.yaml`` would name an absolute HOST path (see
+    """``TemplateDirSource`` directories must be bind-mounted into the export --
+    otherwise ``environment/task.yaml`` would name an absolute HOST path (see
     ``task_loader.resolve_template_source_paths``) that does not exist inside the
     container the ``CoderEvalAgent`` embed actually runs in.
     """
@@ -553,7 +577,7 @@ class TestTemplateSourcesCopy:
         (template_dir / "main.py").write_text("def stub(): ...\n", encoding="utf-8")
         return template_dir
 
-    def test_template_dir_is_copied_and_path_rewritten(self, tmp_path: Path) -> None:
+    def test_template_dir_is_mounted_read_only_at_its_own_path(self, tmp_path: Path) -> None:
         template_dir = self._write_template_dir(tmp_path)
         task_file = _write_task(
             tmp_path,
@@ -569,14 +593,18 @@ class TestTemplateSourcesCopy:
 
         export_task(task_file, out_dir)
 
-        copied = out_dir / "environment" / "templates" / "00-starter" / "main.py"
-        assert copied.read_text(encoding="utf-8") == "def stub(): ...\n"
+        # No copy on the export side -- the template dir stays exactly where it was.
+        assert not (out_dir / "environment" / "templates").exists()
 
         emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
-        assert emitted["sandbox"]["template_sources"][0]["path"] == "/opt/coder-eval-task/templates/00-starter"
+        # Path carried over verbatim -- mounted at its own host path, not rewritten.
+        assert emitted["sandbox"]["template_sources"][0]["path"] == str(template_dir)
 
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert "COPY templates/ /opt/coder-eval-task/templates/" in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        # Compose volume specs are always POSIX-style, regardless of host OS.
+        template_posix = template_dir.as_posix()
+        assert f"{template_posix}:{template_posix}:ro" in volumes
 
     def test_agent_phase_sandbox_preserves_python_and_limits(self, tmp_path: Path) -> None:
         task_file = _write_task(
@@ -598,15 +626,18 @@ class TestTemplateSourcesCopy:
         assert emitted["sandbox"]["python"]["env_packages"] == ["pytest"]
         assert "docker" not in emitted["sandbox"]
 
-    def test_no_templates_dir_or_copy_line_when_the_task_has_no_template_sources(self, tmp_path: Path) -> None:
+    def test_no_templates_dir_or_mount_when_the_task_has_no_template_sources(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"
 
         export_task(task_file, out_dir)
 
         assert not (out_dir / "environment" / "templates").exists()
-        dockerfile_text = (out_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
-        assert "templates" not in dockerfile_text
+        compose = yaml.safe_load((out_dir / "environment" / "docker-compose.yaml").read_text(encoding="utf-8"))
+        volumes = compose["services"]["main"]["volumes"]
+        # Only the always-present task.yaml mount -- no template_sources, so nothing else to mount.
+        assert len(volumes) == 1
+        assert volumes[0].endswith(":/opt/coder-eval-task/task.yaml:ro")
 
     def test_nonexistent_template_dir_is_a_hard_export_failure(self, tmp_path: Path) -> None:
         """A missing template dir is NOT downgraded to a warning: the agent-phase
