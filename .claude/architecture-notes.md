@@ -161,8 +161,11 @@ only `node.module`, which for `from ..reports import X` holds `"reports"` with t
 `node.level` — so it fired on neither of the two real edges in the tree, and its own tests
 passed because they used the absolute form. The core-layer predicate lives in
 `tests/lint/rules/_layers.py` so CE004 and CE066 cannot drift about what "core" means, and is
-stated as *every module directly under `src/coder_eval/`*: naming only `orchestrator.py` left
-`result_metrics.py` exempt — the module CE066's own fix message points at.
+stated as an allowlist of what is *not* core — *everything under `src/coder_eval/` except the
+`cli/` and `reports/` packages* — so a new subpackage is core by default. Both denylist forms
+leaked: naming only `orchestrator.py` left `result_metrics.py` exempt (the module CE066's own
+fix message points at), and its ten-directory successor never named `isolation/`, leaving the
+`driver: docker` evaluation path invisible to both rules.
 
 **`format_ms` lives in `durations.py`, not `formatting.py`.** `formatting.py` imports
 `claude_agent_sdk` for the payload formatters, and the reports package should not reach

@@ -885,3 +885,31 @@ re-derive from scratch.
   live in an ASCII tree, not backticks); a wider variant has the same parsing problem plus
   legitimate non-resolving refs (container paths, plugin-relative paths). Recorded because
   the recurrence is now the argument, not the idea. — caught during the reports consolidation.
+- [ ] The anchored package regex `(?:^|[/\\])src[/\\]coder_eval[/\\]` is compiled
+  independently across the rule tree — `ce050_no_union_getattr_probe.py:101`,
+  `ce051_no_driver_override.py:60`, `ce052_process_lethal_must_be_container_gated.py:78`,
+  `ce053_run_record_filename_literal.py:65`, `ce054_env_info_key_round_trip.py:66`,
+  `ce056_no_container_env_literal.py:51` and `ce058_no_timing_literal.py:116` — seven
+  rule modules, to which `_layers.py` now adds two more compiles of its own, with the
+  `agents/`-suffixed variant of the same idiom in
+  `_model_ctor.py:28` and `ce059_generation_window_is_two_reads.py:45`, plus a near-variant
+  in `ce037_no_dead_private_helper.py:61`. `_layers.py` is the designated shared rule-helper
+  module, though `_model_ctor.py` is an equal peer and a generic src-path regex arguably
+  belongs in a neutrally named helper rather than one named `_layers`. Not hoisted here
+  because retargeting seven unrelated rules needs a per-rule verification that its scope
+  did not shift — a second refactor inside a review-fix plan. The new copies were written
+  in the established *spelling* deliberately: the defect being fixed was a regex that
+  disagreed with its siblings, so a new variant would be that defect again. `_layers.py`'s
+  own two compiles share a prefix and could be folded into one constant independently of
+  the cross-module hoist. — caught during the reports-consolidation review fixes, Phase 1.
+- [ ] **CE004 inherits CE066's `reports/` exemption because the two rules share one
+  predicate.** `_layers.is_core_path` answers "is this core?" for both, and its non-core set
+  is `{cli, reports}` — but that set is CE066's. CE004's own is just `{cli}`: unlike the CLI,
+  the reports package is legitimately used without the CLI (`orchestrator.py` imports
+  `write_task_html`), so exempting it from CE004 means a `from ..cli import X` added inside
+  `reports/` would close a `cli -> orchestration -> reports -> cli` cycle with CE004 silent.
+  Nothing in `reports/` imports `cli` today and the pre-split predicate had the same hole, so
+  this is latent, not live. Fixing it means giving `is_core_path` a per-rule exemption
+  parameter (or splitting it in two) and re-verifying both rules' scope — a semantics change
+  beyond a review-fix plan, and one that must not re-open the drift the shared predicate
+  exists to prevent. — caught in the reports-consolidation review fixes, Phase 1 quality review.

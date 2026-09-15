@@ -1,11 +1,19 @@
 """CE004: core layers must not import from coder_eval.cli.
 
-The "core" layer comprises every package that should be usable without the
-CLI: criteria/, evaluation/, models/, simulation/, scoring/, streaming/,
-errors/, orchestration/, agents/, harbor/, plus top-level orchestrator.py.
-Importing from coder_eval.cli creates an upward dependency that breaks
-testability in isolation. The membership test lives in ``_layers.is_core_path``
-so CE004 and CE066 cannot drift apart about what "core" means.
+The "core" layer is everything under src/coder_eval/ except the cli/ and
+reports/ packages. Importing from coder_eval.cli creates an upward dependency
+that breaks testability in isolation. The membership test lives in
+``_layers.is_core_path`` so CE004 and CE066 cannot drift apart about what
+"core" means; re-enumerating the packages here is how that list rots.
+
+Note that ``reports/`` is exempt here only because the predicate is shared.
+Unlike ``cli/``, the reports package IS used without the CLI — the orchestrator
+writes a task report mid-run — so CE004's own natural exemption set is just
+``{cli}``. Nothing in ``reports/`` imports ``cli`` today, so the wider exemption
+costs nothing; what it would miss is a ``cli`` import added inside ``reports/``,
+closing a cli -> orchestration -> reports -> cli cycle with this rule silent.
+Splitting the predicate is recorded in ``.claude/harness-candidates.md`` rather
+than done here: it widens a rule's scope, which needs its own verification.
 
 ``harbor/`` joined this list for the same reason ``orchestration/`` is on it:
 its reward writer wants to raise a plain exception (``RewardWriteSkippedError``,
