@@ -27,6 +27,7 @@ from coder_eval.models import (
     ToolNameMap,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
 )
 from coder_eval.pricing import ModelPricing, register_pricing
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
@@ -89,6 +90,7 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "TurnRecord",
     "TurnStartEvent",
     "TurnTimeoutError",
+    "UsageGranularity",
     "close_window",
     "end_status_for",
     "register_pricing",

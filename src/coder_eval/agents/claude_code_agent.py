@@ -61,6 +61,7 @@ from coder_eval.models import (
     ToolNameMap,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
     to_bedrock_inference_profile,
 )
 from coder_eval.models import (
@@ -695,6 +696,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.GENERATION,
         permission_modes=frozenset(PermissionMode),
     )
     tool_names = ToolNameMap(names={name: (name,) for name in CANONICAL_TOOL_NAMES}, mcp_names=True)
@@ -1491,18 +1493,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         LiteLLM. The token buckets are left UNTOUCHED, so the reconciliation
         invariant is unaffected — only the cost scalar changes.
 
-        An unpriced model sets the cost to ``None`` **and warns**: a silent
-        ``None`` makes the orchestrator skip the ``max_usd`` gate with no
-        diagnostic.
+        An unpriced model sets the cost to ``None`` **and warns**, so the log names
+        the model when a ``max_usd`` task then finishes ``ERROR``.
 
         Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
         """
         cost = ClaudeCodeAgent._price_from_buckets(usage, model)
         usage.total_cost_usd = cost
         if cost is None:
-            logger.warning(
-                "No pricing for litellm model %r; turn cost left unset (max_usd gate will be skipped)", model
-            )
+            logger.warning("No pricing for litellm model %r; turn cost left unset", model)
 
     def get_sdk_options(self) -> dict[str, Any] | None:
         """Get the raw SDK options used for the last agent query.

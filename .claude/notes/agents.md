@@ -328,8 +328,9 @@ The Claude SDK's own `costUSD` is a client-side estimate assuming Anthropic pric
 is wrong for an open-weight model behind LiteLLM and is repriced from the token buckets at
 the model's real rate. The buckets are untouched, so the reconciliation invariant holds —
 only the cost scalar changes. An unpriced model sets the cost to `None` (an honest N/A)
-**and warns**, because a silent `None` makes the orchestrator skip the `max_usd` gate with
-no diagnostic.
+**and warns**. When the task sets `max_usd`, the `TurnMonitor` then raises
+`BudgetUnenforceableError` at the turn end, so the row finishes `ERROR` and is never a
+silent skip.
 
 ## Codex rollout rebuild
 

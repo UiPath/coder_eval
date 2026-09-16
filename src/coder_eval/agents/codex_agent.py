@@ -38,6 +38,7 @@ from coder_eval.models import (
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
 )
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
@@ -750,6 +751,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.TURN,
     )
 
     def __init__(

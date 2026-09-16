@@ -67,7 +67,7 @@ from .models import (
 )
 from .orchestration.early_stop import early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
-from .orchestration.harness_contract import validate_harness_contract
+from .orchestration.resolution_checks import validate_resolved_task
 from .orchestration.run_limits import validate_run_limits
 from .orchestration.turn_monitor import TurnMonitor
 from .path_utils import (
@@ -475,10 +475,6 @@ class Orchestrator:
         # Built once in _setup and handed to every communicate() call, so every
         # count it answers the should_stop poll from is cumulative per task.
         self._monitor: TurnMonitor | None = None
-
-        # One-shot flag: emit the "cost budget configured but no cost data" warning
-        # exactly once per task even if _check_run_limits fires every turn.
-        self._cost_budget_skipped_logged: bool = False
 
         # One-shot flag: emit the expected_tool_calls rollup warning exactly once per
         # task run even though _check_expected_tool_calls is called after every turn.
@@ -1079,14 +1075,6 @@ class Orchestrator:
         # Aggregate token usage
         self._aggregate_token_usage()
 
-        # Record whether per-turn cost data was available when a cost budget was set.
-        # Lets users audit whether a configured max_usd budget was actually enforceable.
-        if self.task.run_limits is not None and self.task.run_limits.max_usd is not None:
-            any_cost_reported = any(
-                t.token_usage is not None and t.token_usage.total_cost_usd is not None for t in self.result.iterations
-            )
-            self.result.environment_info["cost_data_available"] = any_cost_reported
-
         if self.result.iterations:
             self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.iterations)
 
@@ -1159,74 +1147,6 @@ class Orchestrator:
         from .reports import write_task_html
 
         write_task_html(self.result, self.html_report_path)
-
-    def _check_run_limits(self, *, iteration: int) -> None:
-        """Raise BudgetExceededError if any RunLimits budget is exceeded.
-
-        Called after each completed turn. Aggregates across self.result.iterations.
-        No-op when self.task.run_limits is None.
-        """
-        assert self.result is not None
-        limits = self.task.run_limits
-        if limits is None:
-            return
-
-        usages = [t.token_usage for t in self.result.iterations if t.token_usage is not None]
-        if not usages:
-            return
-
-        input_tokens = sum(u.uncached_input_tokens for u in usages)
-        if limits.count_cache_creation:
-            input_tokens += sum(u.cache_creation_input_tokens for u in usages)
-        if limits.count_cached_input:
-            input_tokens += sum(u.cache_read_input_tokens for u in usages)
-        output_tokens = sum(u.output_tokens for u in usages)
-        total_tokens = input_tokens + output_tokens
-
-        if limits.max_input_tokens is not None and input_tokens > limits.max_input_tokens:
-            raise BudgetExceededError(
-                "input_tokens",
-                actual=input_tokens,
-                limit=limits.max_input_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-        if limits.max_output_tokens is not None and output_tokens > limits.max_output_tokens:
-            raise BudgetExceededError(
-                "output_tokens",
-                actual=output_tokens,
-                limit=limits.max_output_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-        if limits.max_total_tokens is not None and total_tokens > limits.max_total_tokens:
-            raise BudgetExceededError(
-                "total_tokens",
-                actual=total_tokens,
-                limit=limits.max_total_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-
-        if limits.max_usd is not None:
-            costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
-            if not costs:
-                if not self._cost_budget_skipped_logged:
-                    logger.warning(
-                        "[%s] max_usd budget configured but no turn reported cost; skipping cost check",
-                        self.task.task_id,
-                    )
-                    self._cost_budget_skipped_logged = True
-                return
-            total_cost = sum(costs)
-            if total_cost > limits.max_usd:
-                raise BudgetExceededError(
-                    "usd",
-                    actual=total_cost,
-                    limit=limits.max_usd,
-                    task_id=self.task.task_id,
-                    iteration=iteration,
-                )
 
     def _check_expected_tool_calls(self, *, iteration: int) -> None:
         """Emit a one-shot warning if visible tool calls exceed expected_tool_calls.
@@ -1495,7 +1415,7 @@ class Orchestrator:
 
         # After the evaluate-only return: a re-grade builds no agent, so a recorded
         # config from before the contract existed stays gradable.
-        validate_harness_contract(self.task)
+        validate_resolved_task(self.task)
 
         # validate_api_keys exempts the no-op agent internally — it makes no API
         # call, so it needs no agent keys.
@@ -2195,8 +2115,9 @@ class Orchestrator:
 
         # Record early-stop info (if the monitor tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
-        assert self._monitor is not None
-        self.result.early_stop = self._monitor.info
+        monitor = self._monitor
+        assert monitor is not None
+        self.result.early_stop = monitor.info
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
@@ -2212,7 +2133,7 @@ class Orchestrator:
             self.result.tool_calls_exhausted = True
             logger.warning(
                 "Agent reached the tool-call cap (%d resolved tool calls).",
-                self._monitor.tool_calls,
+                monitor.tool_calls,
             )
         # Soft cumulative-turn check (logs once; never aborts).
         self._check_expected_tool_calls(iteration=iteration)
@@ -2226,7 +2147,7 @@ class Orchestrator:
             logger.info("Grading disabled (execute mode): skipping success criteria.")
             # A run limit, not a verdict: its only reason to sit after the
             # criteria on the graded path is partial-credit visibility.
-            self._check_run_limits(iteration=iteration)
+            monitor.raise_if_over_budget(iteration=iteration)
             return False
 
         # Check success criteria (reference_dir feeds reference_comparison + judges)
@@ -2257,7 +2178,7 @@ class Orchestrator:
         self._emit_criteria_event(criteria_results)
 
         # AFTER the criteria, so partial-credit visibility is preserved.
-        self._check_run_limits(iteration=iteration)
+        monitor.raise_if_over_budget(iteration=iteration)
 
         return all_passed
 
@@ -2582,8 +2503,9 @@ class Orchestrator:
 
                 # Budget gate: aborts the dialog with a dedicated stop reason and
                 # ensures end-of-dialog criteria still run for partial credit.
+                assert self._monitor is not None
                 try:
-                    self._check_run_limits(iteration=turns_completed)
+                    self._monitor.raise_if_over_budget(iteration=turns_completed)
                 except BudgetExceededError:
                     stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
                     if not criteria_checked_this_turn:

@@ -19,6 +19,14 @@ class Enforcement(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class UsageGranularity(StrEnum):
+    """How often a harness reports token usage on the event stream, which bounds a budget's overshoot."""
+
+    GENERATION = "generation"
+    STEP = "step"
+    TURN = "turn"
+
+
 class HarnessContract(BaseModel):
     """The per-agent declaration of which uniform fields reach the harness.
 
@@ -42,6 +50,12 @@ class HarnessContract(BaseModel):
     allowed_tools: Enforcement = Field(description="Whether agent.allowed_tools restricts the harness's tools.")
     disallowed_tools: Enforcement = Field(description="Whether agent.disallowed_tools denies the harness's tools.")
     cooperative_stop: bool = Field(description="Whether communicate() honors the should_stop poll.")
+    usage_granularity: UsageGranularity = Field(
+        description=(
+            "How often TurnEndEvent.tokens reports usage: per model generation, per agent-loop step, or once "
+            "per communicate() call. A budget can overshoot by one such report."
+        )
+    )
     permission_modes: frozenset[PermissionMode] | None = Field(
         default=None,
         description=(

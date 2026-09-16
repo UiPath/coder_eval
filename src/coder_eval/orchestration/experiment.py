@@ -673,8 +673,8 @@ def resolve_all_tasks(
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
     """
-    from .early_stop import validate_early_stop
-    from .harness_contract import TaskResolutionError, validate_harness_contract
+    from .harness_contract import TaskResolutionError
+    from .resolution_checks import validate_resolved_task
 
     resolved: list[ResolvedTask] = []
     skipped: list[SkippedTask] = []
@@ -744,8 +744,7 @@ def resolve_all_tasks(
 
                     # Once the task is fully resolved, so the -D kill switch is
                     # already merged. No-op unless armed.
-                    validate_early_stop(resolved_task)
-                    validate_harness_contract(resolved_task)
+                    validate_resolved_task(resolved_task)
 
                     # Fan-out: simulation n_trials takes precedence over experiment repeats
                     # when simulation is active; otherwise use experiment-level repeats.

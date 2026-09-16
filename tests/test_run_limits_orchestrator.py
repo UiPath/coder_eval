@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coder_eval.errors import BudgetExceededError
+from coder_eval.errors import BudgetExceededError, BudgetUnenforceableError
 from coder_eval.models import (
     DEFAULT_SIMULATOR_MODEL,
     AgentKind,
@@ -26,6 +26,7 @@ from coder_eval.models import (
     TurnRecord,
 )
 from coder_eval.orchestrator import Orchestrator
+from coder_eval.streaming.events import AgentEndEvent, AgentStartEvent
 
 
 def _make_task(*, run_limits: RunLimits | None = None) -> TaskDefinition:
@@ -85,6 +86,24 @@ def _make_turn(
     )
 
 
+def _reporting_agent(*turns: TurnRecord) -> AsyncMock:
+    """A fake agent whose each ``communicate`` reports its turn's usage on the stream, as real agents do."""
+    remaining = list(turns)
+
+    async def communicate(user_input, *, stream_callback=None, timeout=None, should_stop=None):
+        turn = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        assert stream_callback is not None
+        stream_callback.on_event(AgentStartEvent(task_id="budget_test", prompt=user_input))
+        stream_callback.on_event(AgentEndEvent(task_id="budget_test", usage=turn.token_usage or TokenUsage()))
+        return turn
+
+    agent = AsyncMock()
+    agent.communicate = communicate
+    agent.get_sdk_options = MagicMock(return_value={})
+    agent.get_environment_info = MagicMock(return_value={})
+    return agent
+
+
 def _make_orchestrator(task: TaskDefinition, tmp_path) -> Orchestrator:
     run_dir = tmp_path / "run" / "budget_test"
     run_dir.mkdir(parents=True)
@@ -106,91 +125,6 @@ def _make_orchestrator(task: TaskDefinition, tmp_path) -> Orchestrator:
     orchestrator.success_checker = MagicMock()
     orchestrator._build_monitor()
     return orchestrator
-
-
-class TestCheckRunLimitsUnit:
-    """Direct tests of the _check_run_limits helper."""
-
-    def test_noop_when_no_limits(self, tmp_path):
-        orch = _make_orchestrator(_make_task(), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=100))
-        # Should not raise.
-        orch._check_run_limits(iteration=1)
-
-    def test_noop_when_no_turns(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=1)), tmp_path)
-        # No turns recorded yet — no usage to check.
-        orch._check_run_limits(iteration=0)
-
-    def test_input_token_trip(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "input_tokens"
-        assert exc.value.actual == 2000
-        assert exc.value.limit == 1000
-
-    def test_output_token_trip(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_output_tokens=1000)), tmp_path)
-        orch.result.iterations.append(_make_turn(output_tokens=2000))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "output_tokens"
-
-    def test_total_token_trip(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=2500)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=1500, output_tokens=1500))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "total_tokens"
-
-    def test_cost_trip(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.20))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.budget_name == "usd"
-        assert exc.value.actual == pytest.approx(0.20)
-
-    def test_cost_skipped_when_no_cost_reported(self, tmp_path, caplog):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
-        # turn has token_usage but no total_cost_usd
-        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=None))
-        with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
-            orch._check_run_limits(iteration=1)
-        assert any("max_usd budget configured but no turn reported cost" in m for m in caplog.messages)
-
-    def test_cost_warning_only_once(self, tmp_path, caplog):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.10)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=None))
-        with caplog.at_level(logging.WARNING, logger="coder_eval.orchestrator"):
-            orch._check_run_limits(iteration=1)
-            orch._check_run_limits(iteration=2)
-        warns = [m for m in caplog.messages if "max_usd budget configured" in m]
-        assert len(warns) == 1
-
-    def test_count_cached_input_false_default(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
-        # 500 < 1000 — cache reads don't count by default.
-        orch._check_run_limits(iteration=1)
-
-    def test_count_cached_input_true(self, tmp_path):
-        orch = _make_orchestrator(
-            _make_task(run_limits=RunLimits(max_input_tokens=1000, count_cached_input=True)), tmp_path
-        )
-        orch.result.iterations.append(_make_turn(input_tokens=500, cache_read_input_tokens=600))
-        with pytest.raises(BudgetExceededError) as exc:
-            orch._check_run_limits(iteration=1)
-        assert exc.value.actual == 1100
-
-    def test_cumulative_across_turns(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_input_tokens=1000)), tmp_path)
-        orch.result.iterations.append(_make_turn(iteration=1, input_tokens=600))
-        orch.result.iterations.append(_make_turn(iteration=2, input_tokens=500))
-        with pytest.raises(BudgetExceededError):
-            orch._check_run_limits(iteration=2)
 
 
 async def _run_orchestrator(
@@ -222,9 +156,7 @@ class TestSingleShotEnforcement:
 
     async def _run_eval_loop_with_turn(self, task: TaskDefinition, tmp_path, turn: TurnRecord) -> EvaluationResult:
         orch = _make_orchestrator(task, tmp_path)
-        mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
-        orch.agent = mock_agent
+        orch.agent = _reporting_agent(turn)
 
         mock_checker = MagicMock()
         mock_checker.check_all_async = AsyncMock(
@@ -248,10 +180,68 @@ class TestSingleShotEnforcement:
 
     async def test_input_budget_trip_records_criteria(self, tmp_path):
         task = _make_task(run_limits=RunLimits(max_input_tokens=10))
-        turn = _make_turn(input_tokens=200)
-        result = await self._run_eval_loop_with_turn(task, tmp_path, turn)
-        # Criteria still ran before budget check (single-shot order).
-        assert len(result.success_criteria_results) == 1
+        orch = _make_orchestrator(task, tmp_path)
+        orch.agent = _reporting_agent(_make_turn(input_tokens=200))
+        orch.success_checker.check_all_async = AsyncMock(
+            return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+        )
+        with (
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+            pytest.raises(BudgetExceededError) as exc,
+        ):
+            await orch._evaluation_loop()
+        assert (exc.value.budget_name, exc.value.actual, exc.value.limit) == ("input_tokens", 200, 10)
+        # Criteria still ran before the budget check (single-shot order).
+        assert len(orch.result.success_criteria_results) == 1
+
+    @pytest.mark.parametrize(
+        ("limits", "turn", "budget_name"),
+        [
+            (RunLimits(max_output_tokens=10), {"output_tokens": 20}, "output_tokens"),
+            (RunLimits(max_total_tokens=25), {"input_tokens": 15, "output_tokens": 15}, "total_tokens"),
+            (RunLimits(max_usd=0.10), {"input_tokens": 10, "total_cost_usd": 0.20}, "usd"),
+        ],
+    )
+    async def test_each_budget_trips_through_the_monitor(self, tmp_path, limits, turn, budget_name):
+        orch = _make_orchestrator(_make_task(run_limits=limits), tmp_path)
+        orch.agent = _reporting_agent(_make_turn(**turn))
+        orch.success_checker.check_all_async = AsyncMock(
+            return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+        )
+        with (
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+            pytest.raises(BudgetExceededError) as exc,
+        ):
+            await orch._evaluation_loop()
+        assert exc.value.budget_name == budget_name
+
+    async def test_an_unpriceable_max_usd_finalizes_error_after_the_first_turn(self, tmp_path):
+        task = _make_task(run_limits=RunLimits(max_usd=0.10))
+        run_dir = tmp_path / "run" / "unpriceable"
+        run_dir.mkdir(parents=True)
+        orch = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
+        agent = _reporting_agent(_make_turn(input_tokens=10, total_cost_usd=None))
+
+        async def setup() -> None:
+            orch._build_monitor()
+            orch.sandbox = MagicMock()
+            orch.sandbox.sandbox_dir = tmp_path / "sandbox"
+            orch.sandbox.sandbox_dir.mkdir()
+            orch.agent = agent
+            orch.success_checker = MagicMock()
+            orch.success_checker.check_all_async = AsyncMock(
+                return_value=[CriterionResult(criterion_type="file_exists", description="x", score=1.0)]
+            )
+
+        orch._setup = setup  # type: ignore[method-assign]
+        orch._cleanup = AsyncMock()  # type: ignore[method-assign]
+        with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
+            result = await orch.run()
+
+        assert result.final_status == FinalStatus.ERROR
+        assert "run_limits.max_usd could not be enforced" in (result.error_message or "")
+        assert "agent.model None" in (result.error_message or "")
+        assert result.iteration_count == 1
 
     async def test_complete_canonical_results_skip_post_failure_regrade(self, tmp_path):
         task = _make_task(run_limits=RunLimits(max_input_tokens=10))
@@ -312,53 +302,6 @@ class TestSingleShotEnforcement:
         assert mock_ctx.call_args.kwargs["component"] == expected_component
 
 
-class TestCostDataAvailableFlag:
-    """The cost_data_available flag is set on result.environment_info in _finalize_result."""
-
-    @staticmethod
-    def _invoke_finalize(orch: Orchestrator) -> None:
-        """Run _finalize_result with side-effecting persistence (report writes) patched out.
-
-        Both ``write_task_html`` and ``spill_judge_transcripts`` are imported lazily
-        inside ``_finalize_result``, so they must be patched on their defining
-        modules rather than on ``coder_eval.orchestrator``.
-        """
-        import time as _time
-        from unittest.mock import patch as _patch
-
-        # The report_path lives under tmp_path so the write_text call lands
-        # in a real (test-scoped) file and we don't need to mock pathlib.
-        with (
-            _patch("coder_eval.reports.write_task_html", return_value=None),
-            _patch("coder_eval.evaluation.judge_persistence.spill_judge_transcripts", return_value=None),
-        ):
-            orch._finalize_result(_time.time())
-
-    def test_flag_true_when_costs_reported(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.5)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
-        self._invoke_finalize(orch)
-        assert orch.result.environment_info["cost_data_available"] is True
-
-    def test_flag_false_when_no_cost_reported(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_usd=0.5)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=None))
-        self._invoke_finalize(orch)
-        assert orch.result.environment_info["cost_data_available"] is False
-
-    def test_flag_absent_when_no_max_usd_budget(self, tmp_path):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_total_tokens=1000)), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
-        self._invoke_finalize(orch)
-        assert "cost_data_available" not in orch.result.environment_info
-
-    def test_flag_absent_when_no_run_limits(self, tmp_path):
-        orch = _make_orchestrator(_make_task(), tmp_path)
-        orch.result.iterations.append(_make_turn(input_tokens=10, total_cost_usd=0.001))
-        self._invoke_finalize(orch)
-        assert "cost_data_available" not in orch.result.environment_info
-
-
 @pytest.mark.asyncio
 class TestSimulationBudgetAbort:
     """The simulation arm raises BudgetExceededError mid-dialog and records telemetry."""
@@ -383,10 +326,7 @@ class TestSimulationBudgetAbort:
 
         orch = _make_orchestrator(task, tmp_path)
         # The agent's first turn reports tokens above the budget.
-        turn = _make_turn(input_tokens=200, output_tokens=10)
-        mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
-        orch.agent = mock_agent
+        orch.agent = _reporting_agent(_make_turn(input_tokens=200, output_tokens=10))
 
         mock_checker = MagicMock()
         mock_checker.check_all_async = AsyncMock(
@@ -418,6 +358,33 @@ class TestSimulationBudgetAbort:
         assert orch.result.simulation.stop_reason == "run_limit_exceeded"
         assert orch.result.simulation.total_turns == 1
         # Simulator must not have been asked for another message after the budget trip.
+        mock_simulator.next_user_message.assert_not_called()
+
+    async def test_an_unpriceable_max_usd_ends_the_dialog_after_its_first_turn(self, tmp_path):
+        from coder_eval.models import SimulationConfig
+
+        sim = SimulationConfig(enabled=True, persona="user", goal="g", max_turns=5, check_criteria="end_of_dialog")
+        task = _make_task(run_limits=RunLimits(max_usd=0.10)).model_copy(
+            update={"simulation": sim, "initial_prompt": "first message"}
+        )
+        orch = _make_orchestrator(task, tmp_path)
+        orch.agent = _reporting_agent(_make_turn(input_tokens=200, output_tokens=10))
+        orch.success_checker.check_all_async = AsyncMock(return_value=[])
+        mock_simulator = MagicMock()
+        mock_simulator.model = DEFAULT_SIMULATOR_MODEL
+        mock_simulator.start = AsyncMock()
+        mock_simulator.stop = AsyncMock()
+        mock_simulator.next_user_message = AsyncMock()
+
+        with (
+            patch("coder_eval.orchestrator.UserSimulator", return_value=mock_simulator),
+            patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+            pytest.raises(BudgetUnenforceableError, match="could not be enforced"),
+        ):
+            await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
+
+        assert orch.result.simulation is not None
+        assert orch.result.simulation.total_turns == 1
         mock_simulator.next_user_message.assert_not_called()
 
 

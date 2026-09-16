@@ -2191,6 +2191,8 @@ class TestCE069HarnessParityTable:
         assert lines[0] == "| field | claude-code | codex | antigravity | opencode | pi | none |"
         system_prompt = next(line for line in lines if line.startswith("| `system_prompt` |"))
         assert system_prompt.split(" | ")[5] == "enforced"
+        granularity = next(line for line in lines if line.startswith("| `usage_granularity` |"))
+        assert granularity == "| `usage_granularity` | generation | turn | turn | step | step | turn |"
 
 
 @pytest.mark.lint

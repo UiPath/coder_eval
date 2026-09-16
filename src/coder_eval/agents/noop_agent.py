@@ -19,7 +19,15 @@ from collections.abc import Callable
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, ApiRoute, Enforcement, HarnessContract, NoneAgentConfig, TurnRecord
+from coder_eval.models import (
+    AgentKind,
+    ApiRoute,
+    Enforcement,
+    HarnessContract,
+    NoneAgentConfig,
+    TurnRecord,
+    UsageGranularity,
+)
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -52,6 +60,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=False,
+        usage_granularity=UsageGranularity.TURN,
     )
 
     def __init__(

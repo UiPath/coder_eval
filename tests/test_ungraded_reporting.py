@@ -86,7 +86,7 @@ def test_variant_aggregate_has_no_pass_rate_when_the_only_non_ungraded_row_is_a_
     """The bug the shared helper exists for.
 
     TIMEOUT and the two budget stops are category ``failed`` and reachable under
-    ``execute`` (``_check_run_limits`` still runs on the ungraded branch), so a
+    ``execute`` (the budget check still runs on the ungraded branch), so a
     bucket-count test read one timed-out row in a 100-task ungraded night as
     proof the run was measured and published ``pass_rate 0.0`` — a real 0% point
     on the evalboard trend for a run that graded nothing.

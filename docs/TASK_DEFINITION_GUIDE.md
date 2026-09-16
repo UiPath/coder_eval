@@ -297,17 +297,22 @@ model.
 
 **Budget-cap semantics:**
 
-- **Checked after each completed agent turn**, and **cumulative** across all of the task's turns.
-  There is no mid-turn enforcement, so a single runaway turn can overshoot the cap before the
-  between-turns check sees it. Size caps with headroom for one turn.
+- **Enforced live**, and **cumulative** across all of the task's turns. The `TurnMonitor` stops the
+  agent at its next poll once a cap is crossed. The overshoot is bounded by one usage report plus
+  any tool calls in flight; how often a harness reports usage is its `usage_granularity` in
+  [Run-Limit Parity](agents/HARNESS_PARITY.md). A harness that reports usage only once per turn is
+  checked at the turn end. Size caps with that headroom.
 - **Subject agent only.** Judge (`llm_judge` / `agent_judge`) and user-simulator token spend are
   **not** counted against these caps.
 - A breach aborts the task with `FinalStatus.TOKEN_BUDGET_EXCEEDED` (any of the three token caps) or
   `FinalStatus.COST_BUDGET_EXCEEDED` (`max_usd`). Both categorize as `failed` — see
   [Report Schema](REPORT_SCHEMA.md).
-- **`max_usd` needs per-turn cost from the SDK.** If no turn reports a cost, the check is **skipped
-  with a one-shot warning per task**, not failed. A run can therefore blow past `max_usd` silently
-  on a backend that doesn't report cost — don't rely on it as your only guardrail.
+- **`max_usd` is priced from the harness's reported cost**, else from the rate card in
+  `coder_eval.pricing` for the model the harness reports (then `agent.model`). A turn with no usage
+  costs nothing. A run that can price a turn neither way finishes **`ERROR`** at that turn's end with
+  the message "run_limits.max_usd could not be enforced". It is never skipped. Add a rate with
+  `register_pricing`, pin a priced model, or remove `max_usd`. Mid-turn usage reports rarely carry a
+  cost, so when the model has no rate the USD cap is checked once the turn's reported cost arrives.
 - **Cached-read and cache-creation tokens are excluded by default.** `count_cache_creation: true` is
   what makes an input-token budget meaningful for **Codex**, which buckets its fresh (full-price)
   prompt slice into `cache_creation`; with the default `false`, a Codex token budget effectively

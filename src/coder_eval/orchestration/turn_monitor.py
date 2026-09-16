@@ -1,4 +1,4 @@
-"""The run's single ``should_stop`` answerer: armed early stop and the tool-call cap.
+"""The run's single ``should_stop`` answerer: armed early stop, the tool-call cap and the budgets.
 
 ``TurnMonitor`` is a ``StreamCallback`` composed into the agent's callback chain
 for the whole task. It owns ONE ``EventCollector`` across every retry attempt and
@@ -6,7 +6,9 @@ every dialog turn, so every count it answers from is cumulative per task. The ag
 polls ``should_stop`` at its safe boundaries; the first non-None ``StopReason`` is
 latched and final.
 
-Precedence on one round: ``EARLY_CRITERION`` then ``TOOL_CALL_CAP``.
+Precedence on one round: ``EARLY_CRITERION``, ``TOOL_CALL_CAP``, ``TOKEN_BUDGET``,
+``USD_BUDGET``. A budget breach seen mid-turn latches its reason and its figures, so a
+turn that stopped on a budget always finalizes as that budget's status.
 
 FAIL-OPEN covers the armed criteria only: any exception while reducing an event or
 evaluating them disarms them and the run degrades to a full run. The cap reads
@@ -18,9 +20,11 @@ Rationale: .claude/notes/orchestration.md § Early stop on criterion
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Any
 
+from coder_eval.errors import BudgetExceededError, BudgetUnenforceableError
 from coder_eval.models import (
     DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     EarlyStopInfo,
@@ -32,6 +36,7 @@ from coder_eval.models import (
     TokenUsage,
 )
 from coder_eval.orchestration.early_stop import early_stop_active
+from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
@@ -74,6 +79,7 @@ class TurnMonitor:
         armed: list[_ArmedPair],
         *,
         limits: RunLimits | None,
+        model: str | None = None,
         gate_threshold: float = DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ) -> None:
         self._task_id = task_id
@@ -115,13 +121,18 @@ class TurnMonitor:
             # but on a non-fanned task this is dead config.
             logger.warning("[%s] all armed stop triggers are inert for this row; run cannot stop early", task_id)
         self._limits = limits
+        self._model = model
+        self._reported_model: str | None = None
         self._collector = EventCollector()
         self._resolved_tool_ids: set[str] = set()
         self._sdk_turn_index = 0
         self._tool_call_index = 0
         self._started_monotonic: float | None = None
         self._committed = TokenUsage()
+        self._committed_cost = 0.0
+        self._unpriced_turn = False
         self._in_flight = TokenUsage()
+        self._budget_breach: tuple[str, float, float] | None = None
         # Once an entry leaves "undecided" on a RESOLVED round its checker is
         # never polled again. `_budget_expired` marks a latched fail as
         # timeout-driven, reported as DECISION_BUDGET_EXCEEDED.
@@ -157,7 +168,8 @@ class TurnMonitor:
             ]
         limits = task.run_limits
         gate_threshold = limits.stop_early_gate_threshold if limits is not None else DEFAULT_STOP_EARLY_GATE_THRESHOLD
-        return cls(task.task_id, armed, limits=limits, gate_threshold=gate_threshold)
+        model = task.agent.model if task.agent is not None else None
+        return cls(task.task_id, armed, limits=limits, model=model, gate_threshold=gate_threshold)
 
     def on_event(self, event: StreamEvent) -> None:
         """Reduce one event; an unexpected exception disarms the criteria and never stops the counters."""
@@ -185,14 +197,18 @@ class TurnMonitor:
             if self._started_monotonic is None:
                 self._started_monotonic = time.monotonic()
             self._in_flight = TokenUsage()
+            self._reported_model = event.model or self._reported_model
         elif isinstance(event, TurnStartEvent):
             self._sdk_turn_index += 1
+            self._reported_model = event.model or self._reported_model
         elif isinstance(event, TurnEndEvent):
             if event.tokens is not None:
                 self._in_flight += event.tokens
+                self._evaluate_budgets()
         elif isinstance(event, AgentEndEvent):
-            self._committed += event.usage
-            self._in_flight = TokenUsage()
+            self._reported_model = event.model_used or self._reported_model
+            self._commit(event.usage)
+            self._evaluate_budgets()
         elif isinstance(event, ToolStartEvent):
             self._evaluate_armed(in_flight=event.tool)
             return
@@ -240,6 +256,94 @@ class TurnMonitor:
     def usage(self) -> TokenUsage:
         """Committed usage from every finished ``communicate()`` plus the in-flight deltas."""
         return self._committed + self._in_flight
+
+    def cost_usd(self) -> float | None:
+        """Cumulative USD: every finished turn priced on its own, plus the priceable in-flight deltas.
+
+        A turn is priced from its reported cost, else from the rate card for the model
+        the harness reported, else for ``agent.model``; a turn with no usage costs 0.
+        ``None`` once any finished turn could be priced none of these ways.
+        """
+        if self._unpriced_turn:
+            return None
+        return self._committed_cost + (self._price(self._in_flight) or 0.0)
+
+    def raise_if_over_budget(self, *, iteration: int) -> None:
+        """Raise when the task is over a budget, or its ``max_usd`` could not be enforced.
+
+        Raises:
+            BudgetExceededError: a budget reason latched mid-turn (with the figures
+                from that moment), or the finished turns' totals breach a budget.
+            BudgetUnenforceableError: ``max_usd`` is set and a finished turn was unpriceable.
+        """
+        breach = self._budget_breach if self._budget_breach is not None else self._breach()
+        if breach is not None:
+            name, actual, limit = breach
+            raise BudgetExceededError(name, actual=actual, limit=limit, task_id=self._task_id, iteration=iteration)
+        if self._limits is not None and self._limits.max_usd is not None and self._unpriced_turn:
+            raise BudgetUnenforceableError(
+                "run_limits.max_usd could not be enforced: the harness reported no cost and "
+                + f"agent.model {self._model!r} (reported {self._reported_model!r}) has no rate in "
+                + "coder_eval.pricing (register one with "
+                + "register_pricing, pin a priced model, or remove max_usd)"
+            )
+
+    def _commit(self, usage: TokenUsage) -> None:
+        self._committed += usage
+        cost = self._price(usage)
+        if cost is None:
+            self._unpriced_turn = True
+        else:
+            self._committed_cost += cost
+        self._in_flight = TokenUsage()
+
+    def _price(self, usage: TokenUsage) -> float | None:
+        if usage.total_cost_usd is not None:
+            return usage.total_cost_usd if math.isfinite(usage.total_cost_usd) else None
+        if usage.is_empty():
+            return 0.0
+        for model in (self._reported_model, self._model):
+            if model is None:
+                continue
+            cost = calculate_cost(
+                model,
+                usage.uncached_input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+            )
+            if cost is not None:
+                return cost
+        return None
+
+    def _breach(self) -> tuple[str, float, float] | None:
+        """The first budget over its cap as ``(budget name, actual, limit)``: input, output, total, usd."""
+        limits = self._limits
+        if limits is None:
+            return None
+        input_tokens, output_tokens, total_tokens = limits.budgeted_tokens(self.usage)
+        for name, actual, limit in (
+            ("input_tokens", input_tokens, limits.max_input_tokens),
+            ("output_tokens", output_tokens, limits.max_output_tokens),
+            ("total_tokens", total_tokens, limits.max_total_tokens),
+        ):
+            if limit is not None and actual > limit:
+                return name, actual, limit
+        cost = self.cost_usd() if limits.max_usd is not None else None
+        if limits.max_usd is not None and cost is not None and cost > limits.max_usd:
+            return "usd", cost, limits.max_usd
+        return None
+
+    def _evaluate_budgets(self) -> None:
+        if self._stop_reason is not None:
+            return
+        breach = self._breach()
+        if breach is None:
+            return
+        self._budget_breach = breach
+        name, actual, limit = breach
+        logger.info("[%s] %s budget reached: %g > %g", self._task_id, name, actual, limit)
+        self._latch(StopReason.USD_BUDGET if name == "usd" else StopReason.TOKEN_BUDGET)
 
     def _latch(self, reason: StopReason) -> None:
         if self._stop_reason is None:

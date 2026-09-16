@@ -51,6 +51,7 @@ from coder_eval.models import (
     ToolNameMap,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
 )
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
@@ -762,6 +763,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.STEP,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES

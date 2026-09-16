@@ -32,6 +32,7 @@ Generated from each agent class's `contract` by `make parity-table`; CE069 fails
 | `allowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `cooperative_stop` | yes | yes | yes | yes | yes | no |
+| `usage_granularity` | generation | turn | turn | step | step | turn |
 | `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
 <!-- harness-contract:end -->
 
@@ -39,6 +40,9 @@ A task that sets a field a harness marks `unsupported`, or a `permission_mode` v
 outside that harness's `permission_modes`, is rejected at resolution and `coder-eval plan`
 exits non-zero. `system_prompt_semantics` `append` / `replace` mean the system or
 developer instruction channel of the model request, never the user turn.
+`usage_granularity` is how often a harness reports token usage on the stream (per model
+generation, per agent-loop step, or once per `communicate()`); a token or USD budget can
+overshoot by one such report.
 
 ### Tool names
 

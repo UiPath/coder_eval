@@ -99,7 +99,7 @@ at resolution, so `coder-eval plan` fails before any run. This is a JSONL CLI ag
 that appends a system prompt and honors `plan` and tool lists natively:
 
 ```python
-from coder_eval.spi import Agent, Enforcement, HarnessContract, PermissionMode, ToolNameMap
+from coder_eval.spi import Agent, Enforcement, HarnessContract, PermissionMode, ToolNameMap, UsageGranularity
 
 # native tool name -> canonical (Claude) name; also used for telemetry
 _TOOL_NAME_MAP = {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "task": "Agent"}
@@ -114,6 +114,7 @@ class MyAgent(Agent[MyAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.STEP,
     )
     tool_names = ToolNameMap.from_inverse(
         _TOOL_NAME_MAP,

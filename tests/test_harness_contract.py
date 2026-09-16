@@ -80,6 +80,12 @@ class TestModel:
         with pytest.raises(ValidationError):
             contract.cooperative_stop = False  # type: ignore[misc]
 
+    def test_usage_granularity_is_required(self) -> None:
+        fields = stub_contract().model_dump()
+        del fields["usage_granularity"]
+        with pytest.raises(ValidationError, match="usage_granularity"):
+            HarnessContract(**fields)
+
     def test_unknown_field_rejected(self) -> None:
         with pytest.raises(ValidationError, match="timing_basis"):
             HarnessContract(**{**stub_contract().model_dump(), "timing_basis": "wall"})

@@ -8,7 +8,7 @@ This package provides production-grade error handling with:
 """
 
 from .agent import AgentConfigError, AgentCrashError, format_timeout_reason, truncate_crash_message
-from .budget import BudgetExceededError
+from .budget import BudgetExceededError, BudgetUnenforceableError
 from .checker_misuse import CheckerMisuseError
 from .judge import JudgeInfrastructureError
 from .reference import ReferenceTamperedError
@@ -19,6 +19,7 @@ __all__ = [
     "AgentConfigError",
     "AgentCrashError",
     "BudgetExceededError",
+    "BudgetUnenforceableError",
     "CheckerMisuseError",
     "EvaluationTimeoutError",
     "JudgeInfrastructureError",
