@@ -3361,7 +3361,7 @@ class TestRunRecordFieldVocabulary:
         assert "`iterations`" in text, "analyze no longer names `iterations` as the current key"
         denial = text.partition("There is no top-level")[2].partition(".")[0]
         assert denial, "analyze lost the never-top-level denial sentence entirely"
-        for name in ("`total_tokens`", "`total_cost_usd`", "`max_turns`", "`criteria_count`"):
+        for name in ("`total_tokens`", "`total_cost_usd`", "`max_tool_calls`", "`criteria_count`"):
             assert name in denial, (
                 f"analyze stopped denying a top-level {name}, which is absent in EVERY "
                 "generation — collateral damage from making the `turns` clause conditional"
@@ -3632,7 +3632,7 @@ class TestCE036LiveVerdictContract:
     """CE036 — every live-observable criterion's `live_verdict` must be deterministic
     and monotonic (GitHub issue #61 item 2).
 
-    `EarlyStopWatcher` latches verdicts, defers the fail-stop, and attributes pass-stop
+    `TurnMonitor` latches verdicts, defers the fail-stop, and attributes pass-stop
     flips against the previous round — all correct only while `live_verdict` never
     contradicts an earlier decision and never varies for identical input. That contract
     was documented on `LiveVerdict`/`BaseCriterion.live_verdict` but unenforced: a third
@@ -3861,7 +3861,7 @@ class TestCE036LiveVerdictContract:
 
     def test_permutation_renumbers_so_a_sequence_sorting_checker_is_still_probed(self):
         """The watcher hands `live_verdict` a trajectory sorted by `sequence_number`
-        (`EarlyStopWatcher._collect_verdicts`), so a checker may legitimately sort by it
+        (`TurnMonitor._collect_verdicts`), so a checker may legitimately sort by it
         too. If the shuffle left the original numbers attached, that sort would undo
         every permutation and this layer would silently probe nothing. Renumbering keeps
         the same recency bug detectable through the sort."""

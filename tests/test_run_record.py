@@ -14,6 +14,8 @@ from pathlib import Path
 from coder_eval.models import (
     AgentKind,
     CommandTelemetry,
+    EarlyStopInfo,
+    EarlyStopReason,
     EvaluationResult,
     FinalStatus,
     ResultSummary,
@@ -73,11 +75,11 @@ EXPECTED_ROW = {
     "task_id": "char-task",
     "task_path": None,
     "teardown_ms": None,
+    "tool_calls_remaining_at_stop": None,
     "tool_ms": None,
     "total_cost_usd": 0.5,
     "total_tokens": 1000,
     "total_turns": 0,
-    "turns_remaining_at_stop": None,
     "variant_id": None,
     "visible_turns": 0,
     "weighted_score": 0.75,
@@ -237,7 +239,7 @@ class TestExpectedTurnsKey:
 
     def test_none_when_unset(self):
         result = _make_result(
-            resolved={"run_limits": {"max_turns": 10}},
+            resolved={"run_limits": {"max_tool_calls": 10}},
             turns=[_turn_with_expected(5)],
         )
         d = eval_result_to_task_dict(result)
@@ -251,9 +253,36 @@ class TestExpectedTurnsKey:
     def test_row_carries_the_tool_call_keys_and_none_of_the_historical_ones(self):
         result = _make_result(resolved={"run_limits": {"expected_turns": 12}}, turns=[_turn_with_expected(5)])
         d = eval_result_to_task_dict(result)
-        assert {"tool_calls_exhausted", "expected_tool_calls", "expected_tool_calls_overage"} <= d.keys()
-        assert not {"max_turns_exhausted", "expected_turns", "expected_turns_overage"} & d.keys()
+        assert {
+            "tool_calls_exhausted",
+            "tool_calls_remaining_at_stop",
+            "expected_tool_calls",
+            "expected_tool_calls_overage",
+        } <= d.keys()
+        assert (
+            not {
+                "max_turns_exhausted",
+                "turns_remaining_at_stop",
+                "expected_turns",
+                "expected_turns_overage",
+            }
+            & d.keys()
+        )
         assert d["expected_tool_calls"] is None
+
+    def test_row_carries_tool_calls_remaining_at_stop_from_early_stop(self):
+        result = _make_result()
+        result.early_stop = EarlyStopInfo(
+            reason=EarlyStopReason.CRITERION_FAILED,
+            deciding_criterion_type="file_exists",
+            deciding_criterion_description="x",
+            sdk_turn_index=2,
+            tool_call_index=3,
+            elapsed_seconds=1.0,
+            tool_calls_remaining_at_stop=7,
+        )
+        d = eval_result_to_task_dict(result)
+        assert d["tool_calls_remaining_at_stop"] == 7
 
     def test_none_when_invalid_type(self):
         result = _make_result(

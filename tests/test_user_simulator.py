@@ -139,6 +139,30 @@ class TestDialogFlow:
         await sim.stop()
 
 
+class TestSdkTurnCap:
+    def test_sdk_max_turns_is_one_via_sdk_options(self):
+        sim = UserSimulator(config=_sim_cfg(), task_description="T", initial_prompt="start")
+        assert sim._agent_config.sdk_options == {"max_turns": 1}
+
+    async def test_communicate_receives_no_turn_cap_kwarg(self):
+        class _KwargRecordingStub(TextStubAgent):
+            def __init__(self, responses: list[str]) -> None:
+                super().__init__(responses)
+                self.kwargs: list[dict[str, object]] = []
+
+            async def communicate(self, user_input: str, **kwargs: object):
+                self.kwargs.append(kwargs)
+                return await super().communicate(user_input, **kwargs)
+
+        stub = _KwargRecordingStub(["hello"])
+        sim = await _make_started(
+            UserSimulator(config=_sim_cfg(), task_description="T", initial_prompt="start", agent_override=stub)
+        )
+        await sim.next_user_message([_pair("start", "reply")])
+        assert stub.kwargs == [{}]
+        await sim.stop()
+
+
 class TestStopTokenHandling:
     async def test_stop_token_triggers_flag_and_strips(self):
         stub = TextStubAgent(["Looks good. <<<DONE>>>"])

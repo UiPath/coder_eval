@@ -104,6 +104,7 @@ def _make_orchestrator(task: TaskDefinition, tmp_path) -> Orchestrator:
     sandbox.sandbox_dir.mkdir()
     orchestrator.sandbox = sandbox
     orchestrator.success_checker = MagicMock()
+    orchestrator._build_monitor()
     return orchestrator
 
 
@@ -432,7 +433,7 @@ class TestCheckExpectedTurnsUnit:
         assert orch._expected_tool_calls_warning_emitted is False
 
     def test_noop_when_expected_tool_calls_unset(self, tmp_path, caplog):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_turns=10)), tmp_path)
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_tool_calls=10)), tmp_path)
         orch.result.iterations.append(_make_turn(commands=20))
         with caplog.at_level(logging.WARNING):
             orch._check_expected_tool_calls(iteration=1)

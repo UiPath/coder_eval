@@ -122,8 +122,10 @@ After each exchange the driver evaluates the stop conditions **in this order**, 
 2. **`stop_on_criteria_pass`** (`criteria_passed`) — every success criterion passes. Requires
    per-turn checking (`check_criteria: every_turn` or `both`); pairing it with the default
    `end_of_dialog` is rejected at load time, since there would be nothing to check against.
-3. **`max_turns`** (`max_turns`) — the hard cap on exchanges. The agent reaching its *own* tool-call
-   cap mid-exchange ends the dialog with its own reason, `tool_call_cap`.
+3. **`max_turns`** (`max_turns`) — the hard cap on exchanges. The agent reaching
+   [`run_limits.max_tool_calls`](TASK_DEFINITION_GUIDE.md#run-limits) mid-exchange ends the dialog
+   with its own reason, `tool_call_cap`. That cap is cumulative across every dialog turn: it counts
+   the agent's resolved tool calls over the whole dialog, not per exchange.
 4. **`max_total_tokens`** (`budget`) — the dialog-wide budget across simulator **and** agent. The
    dialog ends and the task is **still scored** — unlike
    [`run_limits.max_total_tokens`](TASK_DEFINITION_GUIDE.md#run-limits), which covers the subject
@@ -131,8 +133,8 @@ After each exchange the driver evaluates the stop conditions **in this order**, 
 5. **`stop_token`** (`stop_token`) — only if none of the above fired is the simulator asked for
    another message; the sentinel token in *that fresh utterance* ends the dialog. This is the
    workhorse in practice — the simulator decides, in character, that it got what it wanted — but it
-   is evaluated **last**, so a turn that trips `max_turns` or the budget never gets the chance to
-   produce it.
+   is evaluated **last**, so a turn that trips `max_turns`, the tool-call cap or the budget never
+   gets the chance to produce it.
 
 A simulator call that raises ends the dialog with `error` (and increments
 `simulation.simulator_failures`). The reason is recorded as `simulation.stop_reason` on the result,
@@ -188,8 +190,9 @@ with them. That guard is what keeps a chatty simulator from poisoning the grade.
 
 ## What it costs
 
-Budget roughly `max_turns × n_trials` agent turns per (task, variant) — the worst case, since the
-dialog usually stops on the stop token first. On top of that:
+Budget roughly `simulation.max_turns × n_trials` agent turns per (task, variant) — the worst case,
+since the dialog usually stops on the stop token first. `run_limits.max_tool_calls` bounds the tool
+calls of one trial's whole dialog, not of each exchange. On top of that:
 
 - **Simulator tokens**, one generation per turn. Small next to the agent's, but not free, and they
   are reported separately as `simulation.simulator_input_tokens` / `simulator_output_tokens`.

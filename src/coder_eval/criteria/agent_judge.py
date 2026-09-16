@@ -186,11 +186,7 @@ class AgentJudgeChecker(BaseCriterion[AgentJudgeCriterion]):
         )
 
         try:
-            turn = await runner.run_async(
-                user_msg,
-                max_turns=criterion.max_turns,
-                turn_timeout=float(criterion.turn_timeout),
-            )
+            turn = await runner.run_async(user_msg, turn_timeout=float(criterion.turn_timeout))
         except (TurnTimeoutError, AgentCrashError) as e:
             # Two pre-output failure modes share one return path (watchdog timeout,
             # SDK error result). No turn was produced, so no token usage is
@@ -269,11 +265,11 @@ def _build_agent_config(
         deep=True,
     )
     # SECURITY: the floor is present even when the user supplied their own list.
-    # Set-union is idempotent and order-independent.
     config.ignore_patterns = list({*config.ignore_patterns, *JUDGE_SECURITY_IGNORE_FLOOR})
     # SECURITY/contract: the judge MUST be able to call its verdict tool, so the
     # tool name is forced in regardless of the user's override.
     config.allowed_tools = list({*(config.allowed_tools or []), SUBMIT_VERDICT_MCP_TOOL_NAME})
+    config.sdk_options = {**config.sdk_options, "max_turns": criterion.max_turns}
     return config
 
 

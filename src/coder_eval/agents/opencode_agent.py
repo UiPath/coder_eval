@@ -59,6 +59,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     StreamEvent,
     TextChunkEvent,
     ToolEndEvent,
@@ -67,6 +68,7 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import close_window
 
@@ -280,7 +282,6 @@ class _OpenCodeTurnState:
         self.sequence = 0
         self.stop_reason: str | None = None
         self.error_message: str | None = None
-        self.max_turns_exhausted = False
         # Guards the one-terminal-event rule; see finalize().
         self.finalized = False
         # Guards _warn_token_shape: one report per turn, not one per step.
@@ -1026,8 +1027,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         if self.working_directory is None:
             raise RuntimeError("OpenCodeAgent.start() must be called before communicate()")
@@ -1058,7 +1058,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         )
 
         deadline = None if timeout is None else time.monotonic() + timeout
-        stopped_early = False
+        requested_stop: StopReason | None = None
         stderr_drain: asyncio.Future[bytes] | None = None
         # Bound OUTSIDE the try so `finally` can tell "never spawned" from
         # "spawned and possibly still running".
@@ -1119,13 +1119,10 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     if not line:
                         break
 
-                    self._handle_line(line, state, max_turns=max_turns)
+                    self._handle_line(line, state)
 
-                    if state.max_turns_exhausted:
-                        await self.kill()
-                        break
-                    if should_stop is not None and should_stop():
-                        stopped_early = True
+                    requested_stop = should_stop() if should_stop is not None else None
+                    if requested_stop is not None:
                         await self.kill()
                         break
             finally:
@@ -1138,7 +1135,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 state,
                 collector,
                 stderr_drain,
-                stopped_early=stopped_early,
+                requested_stop=requested_stop,
                 deadline=deadline,
                 timeout=timeout,
             )
@@ -1193,7 +1190,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         collector: EventCollector,
         stderr_drain: asyncio.Future[bytes] | None,
         *,
-        stopped_early: bool,
+        requested_stop: StopReason | None,
         deadline: float | None,
         timeout: float | None,
     ) -> AgentEndStatus:
@@ -1230,7 +1227,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
 
         # A non-zero exit with no structured error still means the turn died:
         # surface stderr rather than reporting a silent empty success.
-        if proc.returncode not in (0, None) and not stopped_early and not state.max_turns_exhausted:
+        if proc.returncode not in (0, None) and requested_stop is None:
             detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
             self._crash_turn(state, collector, f"OpenCode exited non-zero: {detail}")
 
@@ -1243,7 +1240,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
         nothing_recognized = state.recognized_events == 0
         finished_without_tokens = state.steps_finished > 0 and state.usage.is_empty()
-        if not stopped_early and not state.max_turns_exhausted and (nothing_recognized or finished_without_tokens):
+        if requested_stop is None and (nothing_recognized or finished_without_tokens):
             if nothing_recognized:
                 seen = ", ".join(sorted(state.unrecognized_types)) or "none (stdout carried no JSON events)"
                 detail = f"It emitted no recognized events at all. Unrecognized event types seen: {seen}."
@@ -1265,11 +1262,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             else:
                 self._crash_turn(state, collector, message)
 
-        if stopped_early:
-            return AgentEndStatus.STOPPED_EARLY
-        if state.max_turns_exhausted:
-            return AgentEndStatus.TOOL_CALLS_EXHAUSTED
-        return AgentEndStatus.COMPLETED
+        return end_status_for(requested_stop) if requested_stop is not None else AgentEndStatus.COMPLETED
 
     def _crash_turn(
         self,
@@ -1307,11 +1300,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         finally:
             self._capture_partial_turn(collector)
 
-    def _handle_line(self, line: bytes, state: _OpenCodeTurnState, *, max_turns: int | None = None) -> None:
-        """Parse one nd-JSON line and dispatch it. Never raises on bad input.
-
-        A ``step_start`` past ``max_turns`` sets ``state.max_turns_exhausted`` instead of opening a step.
-        """
+    def _handle_line(self, line: bytes, state: _OpenCodeTurnState) -> None:
+        """Parse one nd-JSON line and dispatch it. Never raises on bad input."""
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
             return
@@ -1339,9 +1329,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 state.thread_id = session_id
             self._session_id = session_id
 
-        if event_type == _STEP_START and max_turns is not None and state.step_count >= max_turns:
-            state.max_turns_exhausted = True
-        elif event_type == _STEP_START:
+        if event_type == _STEP_START:
             state.on_step_start(part)
         elif event_type == _TEXT:
             state.on_text(part)

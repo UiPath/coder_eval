@@ -187,8 +187,8 @@ def eval_result_to_task_dict(
         # truncated run with a full one.
         "stopped_early": result.early_stop is not None,
         "early_stop_reason": (result.early_stop.reason.value if result.early_stop is not None else None),
-        "turns_remaining_at_stop": (
-            result.early_stop.turns_remaining_at_stop if result.early_stop is not None else None
+        "tool_calls_remaining_at_stop": (
+            result.early_stop.tool_calls_remaining_at_stop if result.early_stop is not None else None
         ),
         # The threshold in effect for this stop, so a sweep that varies it can tell
         # which weighted-gate value produced a given verdict.

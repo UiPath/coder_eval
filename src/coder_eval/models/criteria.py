@@ -145,8 +145,8 @@ class BaseSuccessCriterion(BaseModel, ABC):
         Always ``False`` on the base: only live-observable criteria
         (``LiveSuccessCriterion`` subclasses) carry stop triggers, so arming an
         unobservable criterion is unrepresentable rather than a validation
-        error. The armed set drives both the runtime watcher
-        (``EarlyStopWatcher``) and the weighted armed gate
+        error. The armed set drives both the runtime TurnMonitor
+        (``TurnMonitor``) and the weighted armed gate
         (``EvaluationResult.armed_criteria_passed``).
         """
         return False
@@ -210,8 +210,8 @@ class StopEarlyPolicy(BaseModel):
     """Per-criterion early-stop policy — presence of the block IS the arming.
 
     Attaching ``stop_early:`` to a live-observable criterion arms it for the
-    run's early-stop watcher — there is no run-level master switch; the block
-    alone activates the watcher (``run_limits.stop_early: false`` is the
+    run's TurnMonitor — there is no run-level master switch; the block
+    alone arms the TurnMonitor (``run_limits.stop_early: false`` is the
     run-level veto). Arming carries ONE implicit trigger — a definitive *effective* fail
     (a native live-fail, or the ``decide_within`` timeout expiring) may end the
     run under the weighted ceiling rule — plus the two knobs below. A trigger
@@ -244,7 +244,7 @@ class StopEarlyPolicy(BaseModel):
             "live-fail, reported as reason 'decision_budget_exceeded'. Inert on an instance "
             "that can only ever live-fail (a distractor/guard, whose 'undecided' is its "
             "success state). None (default) = no timeout. The step count is CUMULATIVE across "
-            "every retry attempt of the turn (the same EarlyStopWatcher instance, and its "
+            "every retry attempt of the turn (the same TurnMonitor instance, and its "
             "counters, persist across retries) — including attempts that ultimately crashed or "
             "timed out before this criterion's own investigation even began. Size it with that "
             "headroom in mind."
@@ -268,7 +268,7 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
     Only ``SkillTriggeredCriterion`` / ``CommandExecutedCriterion`` subclass
     this today; a criterion type is "live-observable" iff it is a
     ``LiveSuccessCriterion`` subclass — the single source of truth
-    ``validate_early_stop`` / ``EarlyStopWatcher`` consult (no separate
+    ``validate_early_stop`` / ``TurnMonitor`` consult (no separate
     checker-side flag to keep in sync).
     """
 
@@ -276,7 +276,7 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
         default=None,
         description=(
             "Opt-in early-stop policy block; its PRESENCE arms this criterion for the run's "
-            "early-stop watcher — the block alone activates the watcher, there is no run-level "
+            "TurnMonitor — the block alone arms it, there is no run-level "
             "master switch (run_limits.stop_early: false is the run-level veto). An armed "
             "criterion's definitive effective FAIL — a native live-fail, or the decide_within "
             "timeout expiring — may end the run under the weighted ceiling rule (deferred "
@@ -308,7 +308,7 @@ class LiveSuccessCriterion(BaseSuccessCriterion):
 
         Must return a subset of the polarities the corresponding checker's
         ``live_verdict`` can ever emit for this criterion type. Used by
-        ``EarlyStopWatcher`` to decide which triggers of an armed criterion's
+        ``TurnMonitor`` to decide which triggers of an armed criterion's
         ``stop_early`` block are live for this instance: ``on_pass: stop``
         needs ``"pass"``, the implicit fail trigger needs ``"fail"``, and
         ``decide_within`` needs ``"pass"`` (a fail-only instance's 'undecided'
@@ -1044,7 +1044,7 @@ class SkillTriggeredCriterion(LiveSuccessCriterion):
           live-``fail`` (a wrong skill engaging is a decidable miss; its
           absence is not).
 
-        ``EarlyStopWatcher`` consults this set to decide which triggers are
+        ``TurnMonitor`` consults this set to decide which triggers are
         live per instance: on a positive row ``on_pass: stop`` and
         ``decide_within`` are live while the implicit fail trigger is inert;
         on a distractor row the reverse. That per-row adaptivity is what lets

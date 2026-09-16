@@ -99,7 +99,7 @@ it (the unification invariant). The per-field strategy is:
   **most lists** (`allowed_tools`, `disallowed_tools`, `plugins`, …) — **replace**
   (last layer wins; a variant's `allowed_tools: ["Read"]` replaces the lower list
   entirely). `run_limits` is per-field replace, so a variant setting
-  `run_limits.max_turns` leaves the task's `task_timeout` intact.
+  `run_limits.max_tool_calls` leaves the task's `task_timeout` intact.
 - **nested models** (`sandbox.docker`, `python`, `node`, `limits`) and **free-form
   dicts** (`agent.sdk_options`) — **deep**-merge: a higher layer touching one
   sub-key (e.g. `docker.network`) preserves siblings set below it (e.g.
@@ -152,7 +152,7 @@ From `ExperimentVariant` (`coder_eval/models/experiment.py`):
 | `prompt_mutations`    | list               | Ordered mutations applied to `initial_prompt`                                          |
 | `initial_prompt`      | str                | Full prompt replacement (mutually exclusive with the two below)                        |
 | `initial_prompt_file` | str                | Prompt replacement loaded from a file                                                  |
-| `run_limits`          | block              | Per-key cap overrides (`max_turns`, `task_timeout`, token/USD budgets)                 |
+| `run_limits`          | block              | Per-key cap overrides (`max_tool_calls`, `task_timeout`, token/USD budgets)            |
 | `driver`              | `tempdir`/`docker` | Sandbox driver — enables tempdir-vs-docker arms                                        |
 | `checker_context`     | dict               | Backend/model override for the judge side (llm_judge, agent_judge) — has no bearing on the simulator; see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context); **not** currently `-D`-reachable |
 
@@ -309,7 +309,7 @@ that define "the interesting thing happened" with `stop_early:` blocks in the
 task file;
 the `smoke` variant cuts off as soon as they're decided, while `e2e` runs to
 completion. Because the field merge is per-key, the variant sets only
-`stop_early` (the run-level kill switch) without disturbing the task's `max_turns`.
+`stop_early` (the run-level kill switch) without disturbing the task's `max_tool_calls`.
 
 ```yaml
 experiment_id: early-stop-ab
@@ -324,7 +324,7 @@ variants:
 ```
 
 The task file supplies the arming (`stop_early:` blocks on the criteria that gate the
-flavor) and a `max_turns` generous enough for `e2e`; see
+flavor) and a `max_tool_calls` generous enough for `e2e`; see
 [`stop_early`](TASK_DEFINITION_GUIDE.md#stop_early-opt-in-early-stop). This recipe
 ships as `experiments/early-stop-ab.yaml`.
 
@@ -390,8 +390,8 @@ if any listed metric is below its minimum.
 | `--driver tempdir\|docker`                                                                                                                                        | Override sandbox driver for all tasks.                                                                 |
 | `-j, --max-parallel N`                                                                                                                                            | Run up to N tasks concurrently.                                                                        |
 | `-t, --tags` / `--exclude-tags`                                                                                                                                   | Filter which tasks run.                                                                                |
-| `-D path=value` / `--set` | Generic layer-5 override of any resolved task-config field, applied to **every** variant — e.g. `-D agent.model=opus -D run_limits.max_turns=30`. Repeatable; schema-validated. |
-| `--model`, `--driver` | Thin aliases for `-D` (`--model` ≡ `-D agent.model`, `--driver` ≡ `-D sandbox.driver`). All other task-config knobs (permission mode, turn/timeout limits, tools, plugins, SDK options) are set via `-D`. Layer-5 overrides apply to **every** variant (use sparingly — they erase the contrast between arms). |
+| `-D path=value` / `--set` | Generic layer-5 override of any resolved task-config field, applied to **every** variant — e.g. `-D agent.model=opus -D run_limits.max_tool_calls=30`. Repeatable; schema-validated. |
+| `--model`, `--driver` | Thin aliases for `-D` (`--model` ≡ `-D agent.model`, `--driver` ≡ `-D sandbox.driver`). All other task-config knobs (permission mode, tool-call/timeout limits, tools, plugins, SDK options) are set via `-D`. Layer-5 overrides apply to **every** variant (use sparingly — they erase the contrast between arms). |
 | `--type` | Dedicated flag for agent type, applied to every variant (re-parses the agent discriminated union). |
 
 Layer-5 flags win over variant config, so overriding the very thing you're

@@ -78,7 +78,6 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "stderr",
         "debug_stderr",
         "resume",
-        "max_turns",
         "session_id",
         "session_store",
         "session_store_flush",
@@ -88,6 +87,8 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "fork_session",
         # budgeting -- overlaps RunLimits, which the orchestrator enforces with
         # explicit FinalStatus codes. Two guards would disagree on counts.
+        # (`max_turns` is the SDK's own agent-loop cap; the framework cap is
+        # `run_limits.max_tool_calls`.)
         "max_budget_usd",
         "task_budget",
         # security-critical: arbitrary code injection or settings-bypass

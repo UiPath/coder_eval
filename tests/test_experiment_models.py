@@ -36,7 +36,7 @@ class TestExperimentVariant:
         variant = ExperimentVariant(
             variant_id="fast",
             agent={"model": "claude-sonnet-4-20250514"},
-            run_limits=RunLimits(max_turns=5, task_timeout=120, turn_timeout=30),
+            run_limits=RunLimits(max_tool_calls=5, task_timeout=120, turn_timeout=30),
         )
         assert variant.run_limits is not None
         assert variant.run_limits.task_timeout == 120

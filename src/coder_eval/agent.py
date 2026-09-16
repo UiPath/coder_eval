@@ -14,7 +14,7 @@ from .models import AgentState as AgentState
 from .models import ApiRoute, BaseAgentConfig, HarnessContract, ToolNameMap, TurnRecord
 from .streaming.callbacks import StreamCallback
 from .streaming.collector import EventCollector
-from .streaming.events import AgentEndStatus
+from .streaming.events import AgentEndStatus, StopReason
 
 
 logger = logging.getLogger(__name__)
@@ -214,8 +214,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Send a message to the agent and receive its response.
 
@@ -226,15 +225,11 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 agent must force-terminate any in-flight subprocess and raise
                 TurnTimeoutError. Do not rely solely on asyncio cancellation --
                 some SDKs swallow it.
-            max_turns: Hard cap on inner-loop turns within this single
-                ``communicate()`` call. When the agent would exceed it, the
-                returned ``TurnRecord`` has ``tool_calls_exhausted=True``.
-                None defers to the underlying SDK default.
-            should_stop: Cooperative early-stop poll. An implementation with
-                ``contract.cooperative_stop`` calls it at each safe message
-                boundary and, when it returns True, stops pulling further work and
-                finalizes the turn cleanly (``crashed=False``, no raise). Agents
-                that do not support it accept and ignore the argument.
+            should_stop: The run's single stop poll. An implementation with
+                ``contract.cooperative_stop`` calls it at each safe boundary; a
+                non-None reason means stop pulling work, remember the reason, and
+                finalize with ``end_status_for(reason)`` (``crashed=False``, no
+                raise). Agents that do not support it accept and ignore it.
 
         Returns:
             TurnRecord containing the complete interaction

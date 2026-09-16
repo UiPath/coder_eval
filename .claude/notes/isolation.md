@@ -29,11 +29,11 @@
   **`TOOL_CALLS_EXHAUSTED` is deliberately NOT one of them — anywhere**.
   `_EXECUTION_FACT_STATUSES` maps it to `False`, and the table and the chain that reads
   it must agree: it shipped as `True` while `_terminal_status`'s own docstring argued
-  the opposite, and the disagreement pinned a re-graded max-turns row at
+  the opposite, and the disagreement pinned a re-graded capped row at
   TOOL_CALLS_EXHAUSTED *while holding `weighted_score` 1.000* and exit 1 — a combination
   `run` can never produce for the same trajectory. Under `execute`: `_terminal_status`
   puts the `grade=False` arm ABOVE it, because on the graded path it is subordinate to
-  the verdict — `run` returns SUCCESS for a max-turns trajectory whose criteria pass —
+  the verdict — `run` returns SUCCESS for a capped trajectory whose criteria pass —
   so it is not knowable without grading. Consuming it first made it terminal AND
   permanent (the `is_execution_fact` arm then pinned it), so identical agent output
   scored SUCCESS/1.0 under `run` and TOOL_CALLS_EXHAUSTED under `execute` → `evaluate`.

@@ -296,7 +296,7 @@ def test_inline_consumer_task_declares_run_limits(tmp_path: Path):
 
     limits = load_task(path)[0].run_limits
     assert limits is not None, "the unattended paid task must declare run_limits"
-    assert limits.max_turns, "an unbounded turn count on a cron-triggered paid run"
+    assert limits.max_tool_calls, "an unbounded tool-call count on a cron-triggered paid run"
     assert limits.max_usd, "an unbounded spend on a cron-triggered paid run"
     assert limits.task_timeout, "no wall-clock cap below the job's timeout-minutes"
 

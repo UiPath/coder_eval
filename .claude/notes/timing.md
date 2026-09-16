@@ -188,7 +188,7 @@ terminal event as `AgentEndEvent(messages=list(...))` — that copies the LIST, 
 message objects — so writing in place would reach back into the agent's own live state
 from the collector, which is exactly the layering "the collector is the sole capture seam"
 exists to prevent. It is also unconditionally safe for a caller that builds a record
-twice: `EarlyStopWatcher` holds one collector across a turn's tool-call rounds and calls
+twice: `TurnMonitor` holds one collector across a task's tool-call rounds and calls
 `build_turn_record` on every one.
 
 Grouping by identical bounds rather than `message_id`: Codex splits one window across two

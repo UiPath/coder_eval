@@ -344,10 +344,10 @@ jobs:
           # caps are ~10x what the one-file task needs; tripping the spend or wall-clock
           # one produces a COST_BUDGET_EXCEEDED / TIMEOUT row that the gate's run-limit
           # branch prints and fails on (both statuses report as "failed", so nothing else
-          # in the gate would). MAX_TURNS_EXHAUSTED is the one deliberate exception: it is
+          # in the gate would). TOOL_CALLS_EXHAUSTED is the one deliberate exception: it is
           # the classic model-quality outcome, tolerated like an unmet criterion.
           run_limits:
-            max_turns: 5
+            max_tool_calls: 5
             task_timeout: 300
             max_usd: 0.25
 

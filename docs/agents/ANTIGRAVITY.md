@@ -75,7 +75,7 @@ agent:
       path: "$SKILLS_PLUGIN_PATH"  # a directory of skills (SKILL.md), env-expanded
 
 run_limits:
-  max_turns: 5
+  max_tool_calls: 5
   task_timeout: 360
   turn_timeout: 300
 
@@ -201,9 +201,9 @@ as every other agent.
    happens on the subsequent async `stop()`.
 4. **Denied tools stay visible.** A policy denial rejects the call after the model
    makes it, so a denied tool can still cost tokens on a retry.
-5. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
-   so the cap counts resolved tool calls instead, enforced on the step loop. See
-   [Run-Limit Parity](HARNESS_PARITY.md).
+5. **`max_tool_calls` counts resolved tool calls.** The adapter counts nothing itself.
+   The TurnMonitor owns the cap, as on every harness, and the adapter stops at its
+   next `should_stop` poll on the step loop. See [Run-Limit Parity](HARNESS_PARITY.md).
 6. **Shell commands over ~10s are moved to the background.** The localharness has a
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead

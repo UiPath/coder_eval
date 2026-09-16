@@ -41,7 +41,7 @@ answers pass or fail, it answers the same for every longer prefix); `undecided` 
 verdict allowed to change on a later call. Both properties are stated at the definition
 site in `criteria/base.py`, because they are the contract an author has to satisfy.
 
-`EarlyStopWatcher`'s deferred fail-stop and its pass/fail flip-attribution are correct ONLY
+`TurnMonitor`'s deferred fail-stop and its pass/fail flip-attribution are correct ONLY
 because the two shipped implementations honor them. A non-monotonic or non-deterministic
 override compiles, passes CE025, and silently corrupts the stop logic.
 
@@ -92,7 +92,7 @@ matches, but the same haystacks feed `exclude_pattern` and the `max_count` gate,
 normalized form can newly satisfy an exclusion or trip a cap — a command that counted on
 the raw text alone can stop counting.
 
-It is memoized because the early-stop watcher re-scans the whole accumulated trajectory on
+It is memoized because the `TurnMonitor` re-scans the whole accumulated trajectory on
 every tool-call event, normalizing the same command many times per run.
 
 The regex search window is capped to bound ReDoS on a large command string, and

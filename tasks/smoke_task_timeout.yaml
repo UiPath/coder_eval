@@ -15,7 +15,7 @@ initial_prompt: |
 # Sleep is 300s (10× task_timeout) so a regression that lets the agent run
 # through but kills it on the SDK-level turn timeout would also miscount.
 run_limits:
-  max_turns: 2
+  max_tool_calls: 2
   task_timeout: 30
 
 tags: [smoke-fail]

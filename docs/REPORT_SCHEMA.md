@@ -85,7 +85,7 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `actual_commands`, `commands_efficiency`, `agent_config`, `sdk_options`,
 `installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_tool_calls`,
 `expected_tool_calls_overage`, `tool_calls_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
-`early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
+`early_stop_reason`, `tool_calls_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
 crashed, crash_reason}`) — the full transcript is in `task.json`.
 
@@ -97,6 +97,13 @@ crashed, crash_reason}`) — the full transcript is in `task.json`.
 > the fact `false`; one whose `final_status` is `MAX_TURNS_EXHAUSTED`, or whose recorded
 > config sets `run_limits.expected_turns`, does not load. `run --resume` then runs that
 > row again, and `evaluate <run_dir>` cannot re-grade it from its recorded config.
+>
+> Runs written before the tool-call cap replaced the turn cap carry
+> `turns_remaining_at_stop` instead of `tool_calls_remaining_at_stop`, in both
+> `EarlyStopInfo` and the `run.json` row. No reader maps the old key. Their recorded
+> config also sets `run_limits.max_turns`, which no longer validates, so
+> `evaluate <run_dir>` re-grades such a run from the source task YAML and prints its
+> fallback warning.
 
 ### Missing cost is never fatal
 
@@ -242,7 +249,8 @@ criterion timed out undecided past its `stop_early.decide_within`; it gates thro
 the same weighted armed gate as a native fail),
 `deciding_criterion_type`, `deciding_criterion_description`, `armed_criteria`,
 `sdk_turn_index`, `tool_call_index` (1-based, includes the in-flight call),
-`elapsed_seconds`, `turns_remaining_at_stop`, `gate_threshold` (the
+`elapsed_seconds`, `tool_calls_remaining_at_stop` (`max_tool_calls − tool_call_index`,
+floored at `0`; `null` when `run_limits.max_tool_calls` is unset), `gate_threshold` (the
 `run_limits.stop_early_gate_threshold` in effect for this stop; default `1.0`).
 
 ---

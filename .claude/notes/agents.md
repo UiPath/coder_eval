@@ -61,17 +61,9 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
 
 - **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same
   thing on every backend, so a divergence is either fixed or documented — never silent.
-  **`run_limits.max_turns` on Codex/Antigravity counts VISIBLE turns** (resolved tool
-  calls, read live off the shared `EventCollector.visible_turn_count`, the same list
-  `TurnRecord.commands` holds) because one `communicate()` is a single SDK turn on both,
-  so a native counter would clamp at 1; claude-code keeps its native SDK cap, whose unit
-  (an agent-loop turn) absorbs arbitrarily many parallel calls — the same number is NOT
-  the same budget across harnesses. OpenCode and Pi each keep a native unit too, because
-  their CLIs stream a real multi-step loop per `communicate()`
-  (`step_start`/`step_finish`, `turn_start`/`turn_end`). The cap is enforced on the same
-  loop boundary as the cooperative early stop and finalizes cleanly as
-  `tool_calls_exhausted` (no crash, no retry); on Antigravity that boundary lives in
-  `_drain()`, so the background-work poll loop honors it too.
+  **`run_limits.max_tool_calls` is the `TurnMonitor`'s cap, in resolved tool calls, on
+  every harness**: no adapter counts it; each stops at its next `should_stop` poll and
+  finalizes cleanly as `tool_calls_exhausted` (no crash, no retry).
 
   The **known unfixed divergences** — which config fields each harness does and does not
   enforce, and the per-harness `agent.plugins[].path` depth (claude-code REQUIRES a
@@ -113,15 +105,16 @@ bucketing to COMPLETED.
 
 Status precedence is the same everywhere: timeout > stopped_early > tool_calls_exhausted >
 completed. `stopped_early` outranks the cap because an armed criterion deciding the
-outcome is the more specific reason to have cut the run, and every loop checks it first.
+outcome is the more specific reason to have cut the run; the `TurnMonitor` evaluates the
+armed criteria before the cap, so an armed stop wins a tie and the first latched reason is
+final.
 
 ## Why a post-stop exception is not a crash
 
-Once the loop has broken on purpose — a cooperative stop or the turn cap — an exception
-raised while tearing the stream down must NOT be escalated. Escalating triggers the
-orchestrator's retry with the watcher's decision still latched, so the retry stops at turn
-0 having spent nothing useful; a cap-break is the same shape, where the retry burns the
-budget again and re-hits the cap. `ended_cleanly` is the guard.
+Once the loop has broken on purpose — any `should_stop` reason, including the tool-call
+cap — an exception raised while tearing the stream down must NOT be escalated. Escalating
+triggers the orchestrator's retry with the monitor's decision still latched, so the retry
+stops at its first poll having spent nothing useful. `ended_cleanly` is the guard.
 
 ## Why the constructors declare every kwarg
 
@@ -264,7 +257,7 @@ matter how much the run actually billed. So the CLI harnesses crash rather than 
 Every arm is gated on `stopped_early` / `tool_calls_exhausted`, because an intentional cut
 can land before the clearing event arrives. Pi's error case shows why: `error_message` is
 set at an error `turn_end` and cleared only by a LATER non-error `turn_end`, but a
-`max_turns` / `should_stop` cut can fire at the next `turn_start`, leaving a stale error
+`should_stop` cut (an early stop or the tool-call cap) can fire at the next `turn_start`, leaving a stale error
 from a turn Pi was still retrying. Without the guard that clean, budget-exhausted cut
 would crash and burn retries, contradicting the documented "finalizes cleanly as
 `tool_calls_exhausted`, no crash" contract.

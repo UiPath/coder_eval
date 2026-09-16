@@ -1334,7 +1334,7 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
         samples = []
         for _ in range(5):
             started = time.perf_counter()
-            agent._build_claude_query("hi", 60, 10, lambda _line: None)
+            agent._build_claude_query("hi", 60, lambda _line: None)
             samples.append((time.perf_counter() - started) * 1000.0)
         return min(samples)
 
@@ -1399,7 +1399,6 @@ class TestClaudeFirstWindowReseed:
             task_id="t",
             user_input="go",
             iteration=1,
-            max_turns=None,
             log=agent._log,
             turn_start_time=0.0,
             deadline=None,

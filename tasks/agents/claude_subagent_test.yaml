@@ -37,6 +37,6 @@ success_criteria:
     description: "answer.txt must contain the sub-agent's computed sum (5050)."
 
 run_limits:
-  max_turns: 12
+  max_tool_calls: 12
   task_timeout: 240
   turn_timeout: 120

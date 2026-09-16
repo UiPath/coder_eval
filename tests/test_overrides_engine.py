@@ -100,15 +100,15 @@ class TestApplyOverrides:
 
     def test_run_limits_field_merge_keeps_other_keys(self):
         task = _make_task(run_limits=RunLimits(task_timeout=600))
-        apply_overrides(task, {"run_limits.max_turns": 30})
-        assert task.run_limits.max_turns == 30
+        apply_overrides(task, {"run_limits.max_tool_calls": 30})
+        assert task.run_limits.max_tool_calls == 30
         assert task.run_limits.task_timeout == 600
 
     def test_run_limits_none_base(self):
         task = _make_task(run_limits=None)
-        apply_overrides(task, {"run_limits.max_turns": 5})
+        apply_overrides(task, {"run_limits.max_tool_calls": 5})
         assert task.run_limits is not None
-        assert task.run_limits.max_turns == 5
+        assert task.run_limits.max_tool_calls == 5
 
     def test_sandbox_driver(self):
         task = _make_task()
@@ -208,15 +208,15 @@ class TestApplyOverridesLineage:
     def test_preserves_layers_1_4_lineage_for_untouched_fields(self):
         """Fix #1 guard: layer 5 must leave the layers-1-4 lineage for fields it
         doesn't touch untouched, adding only a cli entry for the field it sets."""
-        task = _make_task(run_limits=RunLimits(max_turns=10))
+        task = _make_task(run_limits=RunLimits(max_tool_calls=10))
         lineage: dict[str, ConfigLineageEntry] = {
             "agent.model": ConfigLineageEntry(value="haiku", source="variant"),
-            "run_limits.max_turns": ConfigLineageEntry(value=10, source="task"),
+            "run_limits.max_tool_calls": ConfigLineageEntry(value=10, source="task"),
         }
         apply_overrides(task, {"run_limits.turn_timeout": 45}, lineage=lineage)
         # untouched entries unchanged
         assert lineage["agent.model"].source == "variant"
-        assert lineage["run_limits.max_turns"].source == "task"
+        assert lineage["run_limits.max_tool_calls"].source == "task"
         # only the touched field gained a cli entry
         assert lineage["run_limits.turn_timeout"].source == "cli"
         assert lineage["run_limits.turn_timeout"].source_detail == "-D run_limits.turn_timeout"

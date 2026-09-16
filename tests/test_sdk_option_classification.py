@@ -28,6 +28,7 @@ import dataclasses
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from coder_eval.models import parse_agent_config
 from coder_eval.models.agent_config import (
     _FRAMEWORK_OWNED_SDK_FIELDS,
     _USER_VISIBLE_SDK_FIELDS,
@@ -100,3 +101,14 @@ def test_user_visible_and_framework_owned_are_disjoint() -> None:
     """The two sets must partition the SDK fields (no key on both lists)."""
     overlap = set(_USER_VISIBLE_SDK_FIELDS) & _FRAMEWORK_OWNED_SDK_FIELDS
     assert not overlap, f"Field(s) on both lists: {sorted(overlap)}"
+
+
+def test_max_turns_is_a_user_visible_sdk_option() -> None:
+    """The run's tool-call cap is `run_limits.max_tool_calls`; the SDK's own turn cap is a pass-through."""
+    assert "max_turns" not in _FRAMEWORK_OWNED_SDK_FIELDS
+    assert "max_turns" in _USER_VISIBLE_SDK_FIELDS
+
+
+def test_sdk_options_max_turns_validates_on_claude_code() -> None:
+    config = parse_agent_config(type="claude-code", sdk_options={"max_turns": 3})
+    assert config.sdk_options == {"max_turns": 3}

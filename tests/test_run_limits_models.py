@@ -31,7 +31,7 @@ class TestRunLimitsValidation:
     def test_empty_block_is_valid(self):
         """Empty run_limits constructs (all-None fields)."""
         rl = RunLimits()
-        assert rl.max_turns is None
+        assert rl.max_tool_calls is None
         assert rl.task_timeout is None
         assert rl.turn_timeout is None
         assert rl.max_input_tokens is None
@@ -51,8 +51,8 @@ class TestRunLimitsValidation:
     def test_only_max_usd_ok(self):
         assert RunLimits(max_usd=0.01).max_usd == 0.01
 
-    def test_only_max_turns_ok(self):
-        assert RunLimits(max_turns=20).max_turns == 20
+    def test_only_max_tool_calls_ok(self):
+        assert RunLimits(max_tool_calls=20).max_tool_calls == 20
 
     def test_only_task_timeout_ok(self):
         assert RunLimits(task_timeout=600).task_timeout == 600
@@ -60,10 +60,18 @@ class TestRunLimitsValidation:
     def test_only_turn_timeout_ok(self):
         assert RunLimits(turn_timeout=120).turn_timeout == 120
 
-    def test_max_turns_validation(self):
+    def test_max_tool_calls_validation(self):
         with pytest.raises(ValidationError, match="greater than 0"):
-            RunLimits(max_turns=0)
-        RunLimits(max_turns=1)
+            RunLimits(max_tool_calls=0)
+        RunLimits(max_tool_calls=1)
+
+    def test_max_turns_under_run_limits_is_rejected(self):
+        with pytest.raises(ValidationError, match=r"max_turns\n\s+Extra inputs are not permitted"):
+            RunLimits.model_validate({"max_turns": 5})
+
+    def test_max_turns_under_task_run_limits_is_rejected(self):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            _minimal_task(run_limits={"max_turns": 5})
 
     def test_task_timeout_validation(self):
         with pytest.raises(ValidationError, match="greater than or equal to 30"):
@@ -95,7 +103,7 @@ class TestRunLimitsValidation:
 
     def test_all_fields_roundtrip(self):
         rl = RunLimits(
-            max_turns=20,
+            max_tool_calls=20,
             expected_tool_calls=15,
             task_timeout=600,
             turn_timeout=120,
@@ -120,9 +128,9 @@ class TestRunLimitsValidation:
     def test_expected_tool_calls_yaml_coercion(self):
         assert RunLimits.model_validate({"expected_tool_calls": "10"}).expected_tool_calls == 10
 
-    def test_expected_tool_calls_greater_than_max_turns_allowed(self):
-        rl = RunLimits(max_turns=5, expected_tool_calls=20)
-        assert rl.max_turns == 5
+    def test_expected_tool_calls_greater_than_max_tool_calls_allowed(self):
+        rl = RunLimits(max_tool_calls=5, expected_tool_calls=20)
+        assert rl.max_tool_calls == 5
         assert rl.expected_tool_calls == 20
 
     def test_extra_forbid_still_rejects_unknowns(self):
@@ -181,7 +189,7 @@ class TestRunLimitsOnTaskDefinition:
     def test_empty_run_limits_on_task_is_valid(self):
         task = _minimal_task(run_limits={})
         assert task.run_limits is not None
-        assert task.run_limits.max_turns is None
+        assert task.run_limits.max_tool_calls is None
 
     def test_top_level_max_turns_now_dropped_with_unknown_field_warning(self):
         """The hoist shim is gone: top-level max_turns is now an unknown top-level
@@ -203,9 +211,9 @@ class TestRunLimitsOnTaskDefinition:
     def test_top_level_timing_alongside_run_limits_keeps_canonical_block(self):
         """Top-level timing is dropped (unknown field); the canonical run_limits block stands."""
         with pytest.warns(DeprecationWarning, match=r"unknown top-level field 'max_turns'"):
-            task = _minimal_task(max_turns=20, run_limits={"max_turns": 5})
+            task = _minimal_task(max_turns=20, run_limits={"max_tool_calls": 5})
         assert task.run_limits is not None
-        assert task.run_limits.max_turns == 5
+        assert task.run_limits.max_tool_calls == 5
 
     def test_max_iterations_dropped_with_warning(self):
         """max_iterations was removed in PR #191; the soft-launch hook flags it."""

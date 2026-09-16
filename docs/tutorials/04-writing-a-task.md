@@ -64,7 +64,7 @@ What each block does:
   only when the task needs your MCP servers.
 - **`run_limits.expected_tool_calls`** — an efficiency target, not a cap: exceeding
   it logs a warning and adds a report badge but never aborts (use
-  `run_limits.max_turns` for a hard cap).
+  `run_limits.max_tool_calls` for a hard cap).
 - **`success_criteria`** — each criterion scores 0.0–1.0 and supports `weight`
   (default 1.0) and `pass_threshold` (default 0.9). `run_command` here only
   checks the exit code; it can also match stdout (`expected_stdout`) or read a

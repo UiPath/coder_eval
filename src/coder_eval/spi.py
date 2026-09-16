@@ -35,6 +35,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TextChunkEvent,
     ToolEndEvent,
     ToolEndStatus,
@@ -42,11 +43,12 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import TurnClock, close_window
 
 
-SPI_VERSION: Final[int] = 1
+SPI_VERSION: Final[int] = 2
 
 __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "Agent",
@@ -71,6 +73,7 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "READ_ONLY_DENIED_TOOLS",
     "ResultSummary",
     "SPI_VERSION",
+    "StopReason",
     "StreamCallback",
     "SystemPromptMode",
     "TextChunkEvent",
@@ -87,5 +90,6 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "TurnStartEvent",
     "TurnTimeoutError",
     "close_window",
+    "end_status_for",
     "register_pricing",
 ]

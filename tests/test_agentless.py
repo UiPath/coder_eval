@@ -213,13 +213,13 @@ class TestNoneAgentResolution:
         resolved = self._resolve(_none_task())
         config = BatchRunConfig(
             run_dir=Path("."),
-            overrides={"agent.model": "some-model", "run_limits.max_turns": 5},
+            overrides={"agent.model": "some-model", "run_limits.max_tool_calls": 5},
         )
         _apply_cli_overrides(resolved, config)
 
         assert resolved.is_none_agent is True  # contract intact: still no-op
         assert resolved.agent is not None and resolved.agent.model == "some-model"
-        assert resolved.run_limits is not None and resolved.run_limits.max_turns == 5
+        assert resolved.run_limits is not None and resolved.run_limits.max_tool_calls == 5
 
     def test_explicit_type_override_replaces_none(self) -> None:
         """`--type <x>` is highest-precedence and replaces `type: none` like for any task.

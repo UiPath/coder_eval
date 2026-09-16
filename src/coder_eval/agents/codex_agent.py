@@ -46,6 +46,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TextChunkEvent,
     ToolEndEvent,
     ToolEndStatus,
@@ -53,6 +54,7 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import close_window
 from coder_eval.utils import expand_env_vars
@@ -305,7 +307,6 @@ class _CodexTurnState:
         user_input: str,
         iteration: int,
         turn_start_time: float,
-        max_turns: int | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -317,10 +318,8 @@ class _CodexTurnState:
         self.user_input = user_input
         self.iteration = iteration
         self.turn_start_time = turn_start_time
-        self.max_turns = max_turns
         self.timeout_hit = False
-        self.stopped_early_hit = False
-        self.max_turns_hit = False
+        self.stop_reason: StopReason | None = None
         self.finalized = False
 
         # Live pump scratch (set during streaming).
@@ -488,23 +487,12 @@ class _CodexTurnState:
 
     @property
     def ended_cleanly(self) -> bool:
-        """True once the pump broke on purpose (cooperative stop or the turn cap).
+        """True once the pump broke on a ``should_stop`` reason.
 
-        Both are non-crash terminations, so an exception raised while tearing the
-        stream down afterwards must not be escalated into a retry.
+        A non-crash termination, so an exception raised while tearing the stream
+        down afterwards must not be escalated into a retry.
         """
-        return self.stopped_early_hit or self.max_turns_hit
-
-    def max_turns_reached(self) -> bool:
-        """True once this turn has produced ``max_turns`` visible turns.
-
-        Delegates to ``EventCollector.visible_turn_count`` rather than
-        ``self.commands``, which SKIPS items whose telemetry the SDK does not
-        resolve; the collector counts every emitted tool end, which is what lands
-        in ``TurnRecord.commands``. Codex delivers one SDK turn per
-        ``communicate()``, so a native counter would cap at 1.
-        """
-        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
+        return self.stop_reason is not None
 
     def dispatch(self, notification: Any) -> bool:
         """Route a notification to its handler. Returns True on ``turn/completed``
@@ -858,8 +846,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Send a message to Codex and receive its response.
 
@@ -867,15 +854,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
             user_input: The message/prompt to send
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds
-            max_turns: Hard cap on VISIBLE turns — tool calls, the unit
-                ``result_metrics.visible_turn_count`` counts — enforced in-stream on
-                the same pump boundary as the cooperative stop. Codex delivers one
-                SDK turn per ``communicate()``, so a native turn counter would cap
-                at 1; see docs/agents/HARNESS_PARITY.md.
-            should_stop: Cooperative early-stop callback, polled after each
-                dispatched notification. When it returns True the pump breaks,
-                the in-flight turn is interrupted (best-effort) and the turn
-                finalizes cleanly as ``STOPPED_EARLY`` (``crashed=False``).
+            should_stop: The run's stop poll, called after each dispatched
+                notification. On a reason the pump breaks, the in-flight turn is
+                interrupted (best-effort) and the turn finalizes cleanly with
+                ``end_status_for(reason)`` (``crashed=False``).
 
         Returns:
             TurnRecord containing the complete interaction
@@ -916,7 +898,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
             user_input=user_input,
             iteration=self._iteration,
             turn_start_time=turn_start_time,
-            max_turns=max_turns,
         )
 
         try:
@@ -1003,14 +984,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._state = AgentState.WORKING
         self._end_turn_ok()
 
-        # Precedence: timeout (raised above) > stopped_early > max_turns > done.
+        # Precedence: timeout (raised above) > the stop reason > done.
         # Rationale: .claude/notes/agents.md § Shared turn lifecycle
-        if state.stopped_early_hit:
-            status = AgentEndStatus.STOPPED_EARLY
-        elif state.max_turns_hit:
-            status = AgentEndStatus.TOOL_CALLS_EXHAUSTED
-        else:
-            status = AgentEndStatus.COMPLETED
+        status = end_status_for(state.stop_reason) if state.stop_reason is not None else AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
@@ -1428,7 +1404,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return str(turn_result)
 
     async def _run_turn_with_streaming(
-        self, state: _CodexTurnState, should_stop: Callable[[], bool] | None = None
+        self, state: _CodexTurnState, should_stop: Callable[[], StopReason | None] | None = None
     ) -> tuple[Any, Any, str]:
         """Drive ``turn.stream()`` through the per-turn state, emitting the standard
         event protocol; returns ``(turn_result, latest_token_usage, agent_text)``.
@@ -1437,7 +1413,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         drives the inner pump. ``state`` is mutated IN PLACE, so a mid-turn crash
         keeps the partial.
 
-        ``should_stop`` runs AFTER ``state.dispatch`` (the emission the watcher
+        ``should_stop`` runs AFTER ``state.dispatch`` (the emission the monitor
         latches on) and BEFORE the next notification is pulled.
         """
         # Starts the turn without blocking, and opens the event stream.
@@ -1455,17 +1431,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     break
                 if state.dispatch(notification):  # True on a valid turn/completed
                     break
-                if should_stop is not None and should_stop():
-                    state.stopped_early_hit = True
-                    self._log.debug("Cooperative stop requested; ending notification pump at this boundary")
-                    self._interrupt_active_turn()  # best-effort; stops server-side spend
-                    break
-                # The cap shares this boundary: the notification that reached it is
-                # dispatched whole, the next is never pulled. After the cooperative
-                # stop, so an armed early-stop wins a tie.
-                if state.max_turns_reached():
-                    state.max_turns_hit = True
-                    self._log.debug("max_turns (%s visible turns) reached; ending notification pump", state.max_turns)
+                reason = should_stop() if should_stop is not None else None
+                if reason is not None:
+                    state.stop_reason = reason
+                    self._log.debug("Stop requested (%s); ending notification pump at this boundary", reason.value)
                     self._interrupt_active_turn()  # best-effort; stops server-side spend
                     break
         finally:
@@ -1485,13 +1454,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if not state.messages:
             state.messages.extend(self._messages_from_items(getattr(state.turn_result, "items", None), state.turn_id))
 
-        # RUNS on a turn-cap stop, because recovery is also the only writer of the
-        # `parent_tool_use_id`-tagged messages `_fold_subagent_tokens` sums — so
+        # RUNS on a cap or budget stop, because recovery is also the only writer of
+        # the `parent_tool_use_id`-tagged messages `_fold_subagent_tokens` sums — so
         # skipping it drops the child threads' spend from the run's cost entirely.
-        # Still SKIPPED on a cooperative stop: an armed gate has already decided
-        # the run, and children may have no rollout yet.
+        # Still SKIPPED on an early-criterion stop: an armed gate has already
+        # decided the run, and children may have no rollout yet.
         # Rationale: .claude/notes/agents.md § Codex rollout rebuild
-        if state.spawned_children and not state.stopped_early_hit:
+        if state.spawned_children and state.stop_reason is not StopReason.EARLY_CRITERION:
             await self._recover_subagent_tool_calls(
                 state.spawned_children,
                 state.collab_results,

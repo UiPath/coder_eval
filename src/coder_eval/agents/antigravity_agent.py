@@ -61,6 +61,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TextChunkEvent,
     ToolEndEvent,
     ToolEndStatus,
@@ -68,6 +69,7 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import TurnClock, close_window
 from coder_eval.utils import expand_env_vars
@@ -415,7 +417,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         self,
         conversation: Any,
         state: "_AntigravityTurnState",
-        should_stop: Callable[[], bool] | None,
+        should_stop: Callable[[], StopReason | None] | None,
     ) -> None:
         """Consume one ``receive_steps()`` cycle onto ``state``, honoring a
         cooperative stop mid-stream. Shared by the initial drain and each poll
@@ -437,19 +439,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     async for step in steps:
                         pulled = True
                         state.process_step(step)
-                        if should_stop is not None and should_stop():
-                            state.stopped_early_hit = True
-                            self._log.debug("Cooperative stop requested; ending step loop at this boundary")
-                            break
-                        # The turn cap shares this boundary: the step that reached
-                        # the cap is kept whole, the next is never pulled. After the
-                        # cooperative stop, so an armed early-stop wins a tie.
-                        if state.max_turns_reached():
-                            state.max_turns_hit = True
-                            self._log.debug(
-                                "max_turns (%s visible turns) reached; ending step loop",
-                                state.max_turns,
-                            )
+                        reason = should_stop() if should_stop is not None else None
+                        if reason is not None:
+                            state.stop_reason = reason
+                            self._log.debug("Stop requested (%s); ending step loop at this boundary", reason.value)
                             break
                 return
             except RuntimeError:
@@ -467,20 +460,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Send a message to the Antigravity agent and receive its response.
 
-        ``should_stop`` is the cooperative early-stop callback, polled after each
-        processed step. When it returns True the step loop breaks, the
-        conversation is cancelled (best-effort) and the turn finalizes cleanly as
-        ``STOPPED_EARLY`` (``crashed=False``).
-
-        ``max_turns`` caps VISIBLE turns — resolved tool calls — enforced in-stream
-        on the same boundary as the cooperative stop: one ``communicate()`` here is
-        a single SDK turn, so a native counter would cap at 1 and mean nothing.
-        See docs/agents/HARNESS_PARITY.md.
+        ``should_stop`` is the run's stop poll, called after each processed step.
+        On a reason the step loop breaks, the conversation is cancelled
+        (best-effort) and the turn finalizes cleanly with ``end_status_for(reason)``
+        (``crashed=False``).
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
         ``receive_steps()`` until the turn goes idle.
@@ -520,7 +507,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             model=model,
             turn_start_time=turn_start_time,
             clock=clock,
-            max_turns=max_turns,
         )
 
         try:
@@ -556,7 +542,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 poll_deadline = turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
                 try:
                     await conversation.send(user_input)
-                    # should_stop runs AFTER process_step (the emission the watcher
+                    # should_stop runs AFTER process_step (the emission the monitor
                     # latches on) and BEFORE the next step is pulled.
                     await self._drain(conversation, state, should_stop)
 
@@ -566,8 +552,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     # zero times.
                     # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
                     while (
-                        not state.stopped_early_hit
-                        and not state.max_turns_hit
+                        state.stop_reason is None
                         and not state.timeout_hit
                         and state.has_orphaned_tool_call()
                         and (
@@ -583,19 +568,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             # Skip the re-drain, which could itself await
                             # indefinitely on genuinely non-idle work.
                             break
-                        if should_stop is not None and should_stop():
-                            state.stopped_early_hit = True
+                        reason = should_stop() if should_stop is not None else None
+                        if reason is not None:
+                            state.stop_reason = reason
                             break
-                        # A re-drain honors the turn cap too (the check lives in
-                        # _drain), so a poll cycle can be the one that reaches it.
                         await self._drain(conversation, state, should_stop)
 
-                    if (
-                        state.has_orphaned_tool_call()
-                        and not state.stopped_early_hit
-                        and not state.max_turns_hit
-                        and not state.timeout_hit
-                    ):
+                    if state.has_orphaned_tool_call() and state.stop_reason is None and not state.timeout_hit:
                         # Exited via this loop's OWN bound, not an external
                         # stop/timeout: the call is force-closed as unresolved and
                         # the turn is still graded normally on everything else.
@@ -607,7 +586,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
                         self._log.warning(msg, bound, poll_count)
 
-                    if state.stopped_early_hit or state.max_turns_hit:
+                    if state.stop_reason is not None:
                         # Best-effort server-side cancel. One check point, so it
                         # fires exactly once whichever drain stopped.
                         with contextlib.suppress(Exception):
@@ -649,14 +628,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
-        # Precedence: timeout (raised above) > stopped_early > max_turns > done.
+        # Precedence: timeout (raised above) > the stop reason > done.
         # Rationale: .claude/notes/agents.md § Shared turn lifecycle
-        if state.stopped_early_hit:
-            status = AgentEndStatus.STOPPED_EARLY
-        elif state.max_turns_hit:
-            status = AgentEndStatus.TOOL_CALLS_EXHAUSTED
-        else:
-            status = AgentEndStatus.COMPLETED
+        status = end_status_for(state.stop_reason) if state.stop_reason is not None else AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
@@ -745,7 +719,6 @@ class _AntigravityTurnState:
         model: str,
         turn_start_time: float,
         clock: TurnClock,
-        max_turns: int | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -760,10 +733,8 @@ class _AntigravityTurnState:
         # instead of monkeypatching `datetime` out from under the reducer.
         self.clock = clock
 
-        self.max_turns = max_turns
         self.timeout_hit = False
-        self.stopped_early_hit = False
-        self.max_turns_hit = False
+        self.stop_reason: StopReason | None = None
         self.finalized = False
 
         self.total_usage = TokenUsage()
@@ -794,22 +765,12 @@ class _AntigravityTurnState:
 
     @property
     def ended_cleanly(self) -> bool:
-        """True once the loop broke on purpose (cooperative stop or the turn cap).
+        """True once the loop broke on a ``should_stop`` reason.
 
-        Both are non-crash terminations, so a stray exception raised while
-        unwinding the step generator afterwards must not be escalated.
+        A non-crash termination, so a stray exception raised while unwinding the
+        step generator afterwards must not be escalated.
         """
-        return self.stopped_early_hit or self.max_turns_hit
-
-    def max_turns_reached(self) -> bool:
-        """True once this turn has produced ``max_turns`` visible turns.
-
-        Delegates to ``EventCollector.visible_turn_count``, the single
-        agent-agnostic capture path, so one ``max_turns`` means the same thing here
-        and on Codex. It counts RESOLVED tool calls, so the call that reaches the
-        cap keeps its result instead of being force-closed as unresolved.
-        """
-        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
+        return self.stop_reason is not None
 
     def _seed_first_generation_window(self, source: Any) -> None:
         """Move the first window's mark to the first observed MODEL output.

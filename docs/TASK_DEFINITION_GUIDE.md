@@ -258,7 +258,7 @@ valid and an empty block is legal — every field defaults to "no limit".
 ```yaml
 run_limits:
   # Structural caps
-  max_turns: 20                       # hard cap on agent inner-loop turns per iteration
+  max_tool_calls: 20                  # hard cap on resolved tool calls across the whole task
   expected_tool_calls: 8              # SOFT efficiency budget (visible tool calls) — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
@@ -273,7 +273,7 @@ run_limits:
 
 | Field | Default | Constraint | Description |
 |-------|---------|------------|-------------|
-| `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
+| `max_tool_calls` | *unset* | `> 0` | Hard cap on resolved tool calls across the whole task: every retry attempt and every dialog turn count. The TurnMonitor enforces it at the agent's next poll boundary, on every harness. The round that reaches the cap is processed whole, so tool calls already in flight can still land after it. The run finalizes cleanly as `tool_calls_exhausted`, and the criteria are still checked. Unset means no cap. |
 | `expected_tool_calls` | *unset* | `>= 1` | **Soft** target for cumulative visible tool calls. Exceeding it warns and badges the report; it never aborts. See [`expected_tool_calls`](#expected_tool_calls-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
@@ -317,7 +317,7 @@ model.
 `run_limits` without disturbing the task's other caps:
 
 ```bash
-coder-eval run task.yaml -D run_limits.max_turns=30 -D run_limits.task_timeout=900
+coder-eval run task.yaml -D run_limits.max_tool_calls=30 -D run_limits.task_timeout=900
 coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_tokens=200000
 ```
 
@@ -331,13 +331,16 @@ coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_toke
 > **No longer supported:** `max_turns` / `turn_timeout` (and top-level
 > `task_timeout`) under `agent:` or at the task top level are rejected —
 > the agent model's `extra="forbid"` raises a clear validation error.
-> They must live under `run_limits:`. (A deprecation shim hoisted them
-> automatically until it was removed on 2026-06-01.)
+> `turn_timeout` and `task_timeout` must live under `run_limits:`. (A
+> deprecation shim hoisted them automatically until it was removed on
+> 2026-06-01.) `max_turns` under `run_limits:` is rejected too: use
+> `run_limits.max_tool_calls`, which counts resolved tool calls, not agent
+> inner-loop turns.
 
 ### `expected_tool_calls` (soft efficiency budget)
 
 `run_limits.expected_tool_calls` is a **soft target**, not a cap: the run is never
-aborted for exceeding it (use `max_turns` for a hard limit). It's the budget the
+aborted for exceeding it (use `max_tool_calls` for a hard limit). It's the budget the
 dashboard's **"Within Expected Turns"** metric divides by — a task counts as
 "within budget" when it succeeds *and* its turn count stays within **1.5×**
 `expected_tool_calls`. The run-level headline reports the share of **budgeted** tasks
@@ -356,7 +359,7 @@ default) to exclude a task from the metric entirely.
 ### `stop_early` (opt-in early stop)
 
 Early stop ends a single-shot run **early** once the run's **armed** criteria
-decide the outcome — so you can raise `max_turns` for the full-run flavor
+decide the outcome — so you can raise `max_tool_calls` for the full-run flavor
 without paying for turns the smoke flavor doesn't need. A criterion is *armed*
 by attaching a **`stop_early:` block** to it — the block's presence IS the
 arming, and it alone activates the run's watcher; there is **no run-level
@@ -380,7 +383,7 @@ under the weighted ceiling rule — plus two knobs inside the block:
 
 ```yaml
 run_limits:
-  max_turns: 30
+  max_tool_calls: 30
 success_criteria:
   - type: skill_triggered
     skill_name: date-teller
@@ -518,7 +521,7 @@ Semantics:
   cannot doom the gate is absorbed, and the run continues). The timeout is
   checked after the criterion's own verdict each round, so one that decides on
   that very step is never penalized. `None` (default) = no timeout; the run
-  relies solely on `run_limits.max_turns`. The step count is **cumulative
+  relies solely on `run_limits.max_tool_calls`. The step count is **cumulative
   across every retry attempt** of the turn — including an attempt that crashed
   or timed out before this criterion's own investigation even began — so size
   the budget with that headroom in mind.
@@ -528,8 +531,8 @@ compares a truncated run against a full one):
 
 | Surface | Field / marker |
 |---------|----------------|
-| `run.json` row | `stopped_early`, `early_stop_reason`, `turns_remaining_at_stop` |
-| `run.md` | `> **NOTE:** […] stopped early (<reason>); <= N turn(s) avoided …` |
+| `run.json` row | `stopped_early`, `early_stop_reason`, `tool_calls_remaining_at_stop` |
+| `run.md` | `> **NOTE:** […] stopped early (<reason>); <gate note>` |
 | `task.html` | header badge `stopped early (<reason>)` + `advisory — not gated` markers |
 | Telemetry | `EarlyStopped` / `EarlyStopReason` dimensions on `CoderEval.Task.End` |
 

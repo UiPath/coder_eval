@@ -30,7 +30,7 @@ agent:
   allowed_tools: ["Read", "Write", "Bash"]
 
 run_limits:
-  max_turns: 20
+  max_tool_calls: 20
   stop_early_gate_threshold: 0.7
 
 success_criteria:

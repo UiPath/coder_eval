@@ -296,8 +296,9 @@ the run really billed. Two shapes reach it:
   counts** (a provider or auth mode that omits `tokens`) — the error reports the
   finished-step count and whether cost was present.
 
-Intentional cuts (`should_stop`, `max_turns`) are exempt: both can land before
-the first event, or between a step's start and its `step_finish`.
+Intentional cuts (any `should_stop` reason, including the tool-call cap) are
+exempt: a cut can land before the first event, or between a step's start and its
+`step_finish`.
 
 For a provider or auth mode that genuinely reports no usage — where failing every
 turn would make the harness unusable rather than merely imprecise — set
@@ -343,13 +344,10 @@ any other provider credential can be added via `sandbox.env_passthrough_extra`.
 - **Only the *skills* half of a `plugins:` entry is honored** (see below). A Claude
   plugin's agents, hooks, commands and MCP servers have no OpenCode equivalent and
   are still dropped.
-- **`max_turns` counts OpenCode's native steps.** One step = one assistant
-  generation (`step_start`/`step_finish`) and may carry several tool calls;
-  `max_turns: N` allows N complete steps, then the run finalizes cleanly as
-  `tool_calls_exhausted`. This is the claude-code-style native unit, not the
-  visible-turn unit Codex/Antigravity use — see
-  [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant
-  across harnesses.
+- **`max_tool_calls` counts resolved tool calls, not OpenCode steps.** The adapter
+  counts nothing itself. The TurnMonitor owns the cap, as on every harness; the
+  adapter stops at its next `should_stop` poll, and the run finalizes cleanly as
+  `tool_calls_exhausted`. See [Run-Limit Parity](HARNESS_PARITY.md).
 - **The `docker` sandbox driver is unsupported.** The CLI is not in the image
   (`OPENROUTER_API_KEY` is now forwarded by default, added for Pi, but the OpenCode
   CLI itself is still absent) — see [Running in Docker](#running-in-docker) for the

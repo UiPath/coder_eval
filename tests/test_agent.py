@@ -13,6 +13,7 @@ from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason
 
 
 def test_claude_agent_initialization():
@@ -181,7 +182,6 @@ async def _capture_sdk_options(
     agent: ClaudeCodeAgent,
     *,
     env_path_prepend: list[str] | None = None,
-    max_turns: int | None = None,
 ) -> list[ClaudeAgentOptions]:
     """Run one communicate() turn with a mocked query() and return captured options list."""
     import tempfile
@@ -210,28 +210,27 @@ async def _capture_sdk_options(
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir, env_path_prepend=env_path_prepend)
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            await agent.communicate("hello", max_turns=max_turns)
+            await agent.communicate("hello")
 
     return captured_options
 
 
 @pytest.mark.asyncio
-async def test_claude_agent_max_turns_kwarg_reaches_sdk_options():
-    """`communicate(max_turns=N)` propagates N to ClaudeAgentOptions.max_turns.
-
-    Regression-guard for the Phase-1 refactor: max_turns is a per-call argument
-    (mirrors `timeout`), not a stored field on the agent.
-    """
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+async def test_sdk_options_max_turns_reaches_claude_agent_options():
+    """`sdk_options={"max_turns": N}` is the only way to set ClaudeAgentOptions.max_turns."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, sdk_options={"max_turns": 3})
     agent = ClaudeCodeAgent(config)
 
-    captured_options = await _capture_sdk_options(agent, max_turns=42)
-    assert captured_options[0].max_turns == 42
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        options, _transport, _model = agent._build_claude_query("hello", None, lambda _line: None)
+
+    assert options.max_turns == 3
 
 
 @pytest.mark.asyncio
-async def test_claude_agent_max_turns_default_is_none():
-    """Without an explicit max_turns kwarg, ClaudeAgentOptions.max_turns is None (SDK default)."""
+async def test_claude_agent_options_max_turns_default_is_none():
+    """Without sdk_options.max_turns, ClaudeAgentOptions.max_turns is None (SDK default)."""
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
 
@@ -1644,8 +1643,8 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
     outcome, not a crash. Treating it as AGENT_CRASH would make it
     retryable (max_retries=2) and resume the same prompt that just
     burned its turn budget — pure waste. Instead the agent falls
-    through to the success path so the orchestrator's existing
-    ``tool_calls_exhausted`` handling can stop iterating.
+    through to the success path as a COMPLETED turn. It is NOT
+    TOOL_CALLS_EXHAUSTED: that status is reachable only through ``should_stop``.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -1665,7 +1664,7 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
             self.session_id = "s-1"
             self.usage = {"input_tokens": 100, "output_tokens": 50}
             self.total_cost_usd = 0.01
-            self.num_turns = 11  # > max_turns=10
+            self.num_turns = 11
             self.is_error = True
             self.subtype = "error_max_turns"
             self.stop_reason = "tool_use"
@@ -1676,15 +1675,18 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
         yield ResultMessage()
         raise ProcessError("Command failed with exit code 1", exit_code=1, stderr="")
 
+    recorder = _EventRecorder()
+
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
             # Must NOT raise: error_max_turns is a clean completion path.
-            turn_record = await agent.communicate("solve something hard")
+            turn_record = await agent.communicate("solve something hard", stream_callback=recorder)
 
         assert turn_record.crashed is False
-        assert turn_record.tool_calls_exhausted is True
+        assert turn_record.tool_calls_exhausted is False
+        assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.COMPLETED]
         # Iteration counter advances normally on a clean turn (no rollback).
         assert agent._iteration == 1
         # The ResultMessage details are still captured for diagnostics.
@@ -1730,17 +1732,65 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
         # rather than ProcessError — exercise the except-Exception branch.
         raise RuntimeError("SDK stream wrapped the CLI exit-1 as a bare Exception")
 
+    recorder = _EventRecorder()
+
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            turn_record = await agent.communicate("solve something hard")
+            turn_record = await agent.communicate("solve something hard", stream_callback=recorder)
 
         assert turn_record.crashed is False
-        assert turn_record.tool_calls_exhausted is True
+        assert turn_record.tool_calls_exhausted is False
+        assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.COMPLETED]
         assert agent._iteration == 1
         assert turn_record.result_summary is not None
         assert turn_record.result_summary.subtype == "error_max_turns"
+
+
+class _EventRecorder:
+    def __init__(self) -> None:
+        self.events: list = []
+
+    def on_event(self, event) -> None:
+        self.events.append(event)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "status", "exhausted"),
+    [
+        (StopReason.TOOL_CALL_CAP, AgentEndStatus.TOOL_CALLS_EXHAUSTED, True),
+        (StopReason.TOKEN_BUDGET, AgentEndStatus.TOKEN_BUDGET_EXCEEDED, False),
+        (StopReason.EARLY_CRITERION, AgentEndStatus.STOPPED_EARLY, False),
+    ],
+)
+async def test_claude_agent_should_stop_ends_turn_with_the_reason_status(reason, status, exhausted):
+    """A should_stop reason ends the turn at that boundary, cleanly, with end_status_for(reason)."""
+    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
+    agent = ClaudeCodeAgent(config)
+    recorder = _EventRecorder()
+    dispatched: list[str] = []
+
+    class AssistantMessage:
+        def __init__(self, text):
+            self.content = text
+            self.model = "mock-model"
+
+    async def mock_query(prompt, options, transport=None):
+        for text in ("first", "second", "third"):
+            dispatched.append(text)
+            yield AssistantMessage(text)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            turn_record = await agent.communicate("go", stream_callback=recorder, should_stop=lambda: reason)
+
+    assert dispatched == ["first"]
+    assert turn_record.crashed is False
+    assert turn_record.tool_calls_exhausted is exhausted
+    assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [status]
 
 
 def test_setting_sources_default_is_project():
@@ -1811,7 +1861,6 @@ class TestClaudeTurnState:
             task_id="claude_code",
             user_input="hi",
             iteration=1,
-            max_turns=None,
             log=agent._log,
             turn_start_time=time.monotonic(),
             deadline=None,

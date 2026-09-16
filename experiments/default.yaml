@@ -18,11 +18,12 @@ defaults:
   # Per-row dataset multiplication: a 100-row task with max_usd: 0.10 permits up to
   # $10 cumulative spend.
   run_limits:
-    # Hard safety ceiling on agent inner-loop turns per iteration (null = SDK
-    # default). Set well above the typical 3-18 turns a task needs so it only
-    # trips on runaway loops; task_timeout / turn_timeout below are the practical
+    # Hard safety ceiling on resolved tool calls per task, cumulative across every
+    # retry and dialog turn, in the tool-call unit, the same on every harness.
+    # Local runs show a median of 2 and a p99 of 31 visible turns, so 100 trips
+    # only on runaway loops; task_timeout / turn_timeout below are the practical
     # guards. Override per-task when a task legitimately needs more.
-    max_turns: 100
+    max_tool_calls: 100
     # Soft target: when cumulative visible tool calls across all iterations of a
     # task exceed this, the orchestrator logs a one-shot warning and the report
     # surfaces a badge. Does NOT abort the run.

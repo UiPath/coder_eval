@@ -1,14 +1,15 @@
-task_id: run-limits-max-turns-cap
+task_id: run-limits-max-tool-calls-cap
 description: >-
-  Parity fixture for run_limits.max_turns. The prompt asks for far more
+  Parity fixture for run_limits.max_tool_calls. The prompt asks for far more
   sequential tool calls than the cap allows, so every harness must stop at the
   cap rather than running the prompt to completion. Run it with --type
-  claude-code / codex / antigravity and compare: the cap must produce a CLEAN
-  stop (tool_calls_exhausted, criteria still checked), never a crash.
+  claude-code / codex / antigravity / pi / opencode and compare: the cap must
+  produce a CLEAN stop (`tool_calls_exhausted`, criteria still checked) on every
+  harness, never a crash.
 
 tags:
   - run-limits
-  - max-turns
+  - max-tool-calls
   - parity
 
 initial_prompt: |
@@ -23,7 +24,7 @@ initial_prompt: |
 
 run_limits:
   # Far below the 12 the prompt asks for, so the cap always decides the ending.
-  max_turns: 4
+  max_tool_calls: 4
   # Generous: this fixture must fail on the cap, never on the clock.
   turn_timeout: 300
   task_timeout: 600
@@ -40,11 +41,11 @@ success_criteria:
     weight: 1.0
 
   # And this is the half that actually tests the cap. Without it the fixture
-  # passes on a harness that ignores max_turns entirely — the exact bug it exists
+  # passes on a harness that ignores the cap entirely — the exact bug it exists
   # to catch — because step-01.txt gets written either way. The chained contents
   # in the prompt make each step depend on reading the one before it, so no amount
-  # of batching within a single agent-loop turn can reach step 12 inside a cap of
-  # 4; a run that produced the last file therefore ran uncapped.
+  # of batching can reach step 12 inside a cap of 4 tool calls; a run that
+  # produced the last file therefore ran uncapped.
   - type: run_command
     command: "test ! -f step-12.txt"
     description: "The cap bound the run: the agent never reached the last file"

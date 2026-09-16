@@ -81,7 +81,7 @@ class TestStrategyReader:
         assert merge_strategy_of(ClaudeCodeAgentConfig.model_fields["sdk_options"]) == "deep"
 
     def test_unannotated_list_is_replace(self):
-        assert merge_strategy_of(RunLimits.model_fields["max_turns"]) == "replace"  # scalar
+        assert merge_strategy_of(RunLimits.model_fields["max_tool_calls"]) == "replace"  # scalar
         # an unannotated list field falls back to replace
         assert merge_strategy_of(ClaudeCodeAgentConfig.model_fields["allowed_tools"]) == "replace"
 
@@ -435,7 +435,7 @@ class TestValidatePaths:
         [
             "agent.model",
             "agent.permission_mode",
-            "run_limits.max_turns",
+            "run_limits.max_tool_calls",
             "sandbox.driver",
             "sandbox.docker.network",
             "agent.sdk_options.effort",

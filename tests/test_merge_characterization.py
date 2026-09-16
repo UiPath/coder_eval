@@ -142,13 +142,13 @@ class TestLayers14Current:
         task = _make_task(agent={"type": "claude-code"}, run_limits=RunLimits(task_timeout=300))
         experiment = ExperimentDefinition(
             experiment_id="test",
-            variants=[ExperimentVariant(variant_id="v", run_limits=RunLimits(max_turns=5))],
+            variants=[ExperimentVariant(variant_id="v", run_limits=RunLimits(max_tool_calls=5))],
         )
         resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, experiment, experiment.variants[0])
         assert resolved.run_limits is not None
         assert resolved.run_limits.turn_timeout == 60  # from default experiment
         assert resolved.run_limits.task_timeout == 300  # from task
-        assert resolved.run_limits.max_turns == 5  # from variant
+        assert resolved.run_limits.max_tool_calls == 5  # from variant
 
     def test_env_passthrough_extra_appends(self):
         default_exp = _default_exp()
@@ -273,8 +273,8 @@ class TestLayer5Current:
 
     def test_run_limits_sibling_keys_preserved(self):
         task = _live_task(run_limits=RunLimits(task_timeout=600))
-        apply_overrides(task, {"run_limits.max_turns": 30})
-        assert task.run_limits.max_turns == 30
+        apply_overrides(task, {"run_limits.max_tool_calls": 30})
+        assert task.run_limits.max_tool_calls == 30
         assert task.run_limits.task_timeout == 600
 
     def test_list_field_replaces(self):
@@ -316,10 +316,10 @@ class TestLayer5Current:
         task = _live_task()
         lineage: dict[str, ConfigLineageEntry] = {
             "agent.model": ConfigLineageEntry(value="yaml-model", source="task"),
-            "run_limits.max_turns": ConfigLineageEntry(value=10, source="variant"),
+            "run_limits.max_tool_calls": ConfigLineageEntry(value=10, source="variant"),
         }
-        apply_overrides(task, {"run_limits.max_turns": 20}, lineage=lineage)
+        apply_overrides(task, {"run_limits.max_tool_calls": 20}, lineage=lineage)
         # touched path relabeled to cli; untouched task entry preserved.
-        assert lineage["run_limits.max_turns"].source == "cli"
-        assert lineage["run_limits.max_turns"].source_detail == "-D run_limits.max_turns"
+        assert lineage["run_limits.max_tool_calls"].source == "cli"
+        assert lineage["run_limits.max_tool_calls"].source_detail == "-D run_limits.max_tool_calls"
         assert lineage["agent.model"].source == "task"

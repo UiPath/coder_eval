@@ -41,7 +41,7 @@ initial_prompt: |
   exact contents into a new file named result.txt in the same directory.
 
 run_limits:
-  max_turns: 3
+  max_tool_calls: 3
   task_timeout: 300
   turn_timeout: 120
 

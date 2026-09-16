@@ -155,7 +155,7 @@ Mapping from the CLI's event vocabulary onto `TurnRecord`:
 
 | Pi event | Becomes |
 |---|---|
-| `turn_start` | `TurnStartEvent` (one inner turn; the unit `max_turns` counts) |
+| `turn_start` | `TurnStartEvent` (one inner turn) |
 | `message_update` (`text_delta`) | `TextChunkEvent` + `agent_output` |
 | `tool_execution_start` | `ToolStartEvent` |
 | `tool_execution_end` | `ToolEndEvent` |
@@ -197,7 +197,7 @@ merged. The internal retry is bounded by `turn_timeout` / `task_timeout`.
 A turn whose CLI exits cleanly but which captured **no recognized events** (an
 upgrade renamed the vocabulary) is failed rather than reported as a clean empty
 success — the error names the unrecognized event types it saw. Intentional cuts
-(`should_stop`, `max_turns`) are exempt.
+(any `should_stop` reason, including the tool-call cap) are exempt.
 
 > **Zero-usage turn.** A provider that reports no usage yields an all-zero
 > `token_usage`. Pi does **not** hard-fail such a turn (its multi-provider surface
@@ -240,11 +240,10 @@ docker` whenever the task prompt or workspace is not fully trusted.
   assets (agents/hooks/commands/MCP) are not wired.
 - **`system_prompt_file` is not read by the adapter.** Use `system_prompt` (inline)
   instead — it is enforced via `--append-system-prompt`.
-- **`max_turns` counts Pi's native agent-loop turns.** One `turn_start` = one
-  agent-loop step; `max_turns: N` allows N complete turns, then the run finalizes
-  cleanly as `tool_calls_exhausted`. See
-  [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant across
-  harnesses.
+- **`max_tool_calls` counts resolved tool calls, not Pi turns.** The adapter counts
+  nothing itself. The TurnMonitor owns the cap, as on every harness; the adapter
+  stops at its next `should_stop` poll, and the run finalizes cleanly as
+  `tool_calls_exhausted`. See [Run-Limit Parity](HARNESS_PARITY.md).
 - **No sub-agent attribution.** Pi's CLI stream does not expose nested agent
   generations, so per-sub-agent token grouping (available for Claude and Codex) is
   not derivable.

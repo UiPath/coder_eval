@@ -79,11 +79,11 @@ async def test_runner_happy_path(sandbox: Sandbox, tmp_path: Path) -> None:
     )
     mock_agent = _make_mock_agent()
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        turn = await runner.run_async("grade this", max_turns=10, turn_timeout=30.0)
+        turn = await runner.run_async("grade this", turn_timeout=30.0)
 
     assert turn.agent_output == '{"score": 1.0, "rationale": "ok"}'
     mock_agent.start.assert_awaited_once()
-    mock_agent.communicate.assert_awaited_once_with("grade this", timeout=30.0, max_turns=10)
+    mock_agent.communicate.assert_awaited_once_with("grade this", timeout=30.0)
     mock_agent.stop.assert_awaited()
 
 
@@ -124,7 +124,7 @@ async def test_runner_mounts_reference_dir_at_underscore_reference(sandbox: Sand
             return _make_turn()
 
         mock_agent.communicate.side_effect = capture_files
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert captured["has_reference_dir"] == "True"
     assert captured["has_main"] == "True"
@@ -175,7 +175,7 @@ async def test_runner_handles_sandbox_side_reference_collision(sandbox: Sandbox,
 
         mock_agent.communicate.side_effect = capture_state
         # Must not raise — this is the regression assertion.
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     # _reference/ contains the REAL reference content, NOT the agent-planted file.
     assert captured["ref_main_content"] == "<reference/>"
@@ -208,7 +208,7 @@ async def test_runner_skips_reference_when_not_provided(sandbox: Sandbox, tmp_pa
             return _make_turn()
 
         mock_agent.communicate.side_effect = capture_no_ref
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert captured["has_reference_dir"] == "False"
 
@@ -224,7 +224,7 @@ async def test_runner_starts_in_temp_copy_not_original(sandbox: Sandbox, tmp_pat
     )
     mock_agent = _make_mock_agent()
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     start_arg = mock_agent.start.call_args.args[0]
     assert start_arg != str(sandbox.sandbox_dir)
@@ -246,7 +246,7 @@ async def test_runner_cleans_up_on_success(sandbox: Sandbox) -> None:
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert captured["path"]
     assert not Path(captured["path"]).exists()
@@ -283,7 +283,7 @@ async def test_runner_cleans_up_when_cancelled_mid_communicate(sandbox: Sandbox)
     mock_agent.communicate.side_effect = hang_forever
 
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        task = asyncio.ensure_future(runner.run_async("grade", max_turns=10, turn_timeout=30.0))
+        task = asyncio.ensure_future(runner.run_async("grade", turn_timeout=30.0))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -334,7 +334,7 @@ async def test_runner_cleans_up_when_cancelled_mid_copytree(sandbox: Sandbox) ->
         patch("coder_eval.evaluation.sub_agent.shutil.copytree", side_effect=slow_copytree),
         patch("coder_eval.evaluation.sub_agent.tempfile.mkdtemp", side_effect=capture_mkdtemp),
     ):
-        task = asyncio.ensure_future(runner.run_async("grade", max_turns=10, turn_timeout=30.0))
+        task = asyncio.ensure_future(runner.run_async("grade", turn_timeout=30.0))
         while not copy_started.is_set():
             await asyncio.sleep(0.01)
         task.cancel()
@@ -365,7 +365,7 @@ async def test_runner_cleans_up_on_communicate_exception(sandbox: Sandbox) -> No
         patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
         pytest.raises(RuntimeError, match="boom"),
     ):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert not Path(captured["path"]).exists()
     mock_agent.kill.assert_awaited()
@@ -386,7 +386,7 @@ async def test_runner_cleans_up_on_start_failure(sandbox: Sandbox) -> None:
         patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
         pytest.raises(RuntimeError, match="claude binary not found"),
     ):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     mock_agent.kill.assert_awaited()
 
@@ -411,7 +411,7 @@ async def test_runner_propagates_turn_timeout(sandbox: Sandbox) -> None:
         patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
         pytest.raises(TurnTimeoutError),
     ):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert not Path(captured["path"]).exists()
 
@@ -514,7 +514,7 @@ async def test_runner_copytree_drops_top_level_symlinks(sandbox: Sandbox, tmp_pa
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert "real.txt" in captured["entries"]
     assert "leak" not in captured["entries"]
@@ -544,7 +544,7 @@ async def test_runner_copytree_drops_nested_symlinks(sandbox: Sandbox, tmp_path:
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert "keep.txt" in captured["sub_entries"]
     assert "nested_leak" not in captured["sub_entries"]
@@ -570,7 +570,7 @@ async def test_runner_copytree_honors_patterns(sandbox: Sandbox, tmp_path: Path)
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert captured["has_git"] == "False"
     assert captured["has_main"] == "True"
@@ -602,7 +602,7 @@ async def test_runner_excludes_nested_claude_and_mcp(sandbox: Sandbox, tmp_path:
 
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert ".claude" not in captured["sub_entries"]
     assert ".mcp.json" not in captured["sub_entries"]
@@ -656,7 +656,7 @@ async def test_runner_reference_dir_with_nested_underscore_reference_preserved(
             return _make_turn()
 
         mock_agent.communicate.side_effect = capture_state
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert captured["inner_present"] == "True"
     assert captured["inner_content"] == "CUSTOMER-CONTENT"
@@ -695,7 +695,7 @@ async def test_runner_reference_ignore_patterns_explicit(sandbox: Sandbox, tmp_p
             return _make_turn()
 
         mock_agent.communicate.side_effect = capture_state
-        await runner.run_async("grade", max_turns=10, turn_timeout=30.0)
+        await runner.run_async("grade", turn_timeout=30.0)
 
     assert captured["keep_present"] == "True"
     assert captured["log_present"] == "False"

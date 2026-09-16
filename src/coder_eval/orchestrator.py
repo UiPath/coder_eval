@@ -65,10 +65,11 @@ from .models import (
     resolve_evaluation_route,
     resolve_route,
 )
-from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
+from .orchestration.early_stop import early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
 from .orchestration.harness_contract import validate_harness_contract
 from .orchestration.run_limits import validate_run_limits
+from .orchestration.turn_monitor import TurnMonitor
 from .path_utils import (
     TASK_JSON_FILENAME,
     digest_tree,
@@ -471,9 +472,9 @@ class Orchestrator:
         # overwrite the reference and drive `reference_comparison` to 1.0.
         self._reference_digest: str | None = None
 
-        # Created in _setup only when armed; None otherwise, so the default path
-        # is entirely unaffected.
-        self._early_stop_watcher: EarlyStopWatcher | None = None
+        # Built once in _setup and handed to every communicate() call, so every
+        # count it answers the should_stop poll from is cumulative per task.
+        self._monitor: TurnMonitor | None = None
 
         # One-shot flag: emit the "cost budget configured but no cost data" warning
         # exactly once per task even if _check_run_limits fires every turn.
@@ -1428,24 +1429,21 @@ class Orchestrator:
                 + f"({current[:12]}...). Refusing to grade against a reference the agent may have written."
             )
 
-    def _arm_early_stop(self) -> None:
-        """Build the early-stop watcher, once, when the task arms one.
+    def _build_monitor(self) -> None:
+        """Build the task's ``TurnMonitor``, once.
 
-        Sits BEFORE `_setup`'s evaluate-only early return, so an armed
-        evaluate-only re-grade builds an inert (never-fed) watcher — harmless,
-        and keeps a single creation point.
+        Sits BEFORE `_setup`'s evaluate-only early return, so an evaluate-only
+        re-grade builds an inert (never-fed) monitor — harmless, and keeps a single
+        creation point.
         """
-        if not early_stop_active(self.task):
-            return
-        if self.grade:
-            self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
-            return
-        # Under `execute` there is no outcome to decide and the trajectory IS the
-        # deliverable, so an armed criterion must not truncate it.
-        logger.info(
-            "Grading disabled (execute mode): early-stop is armed but stays disabled; "
-            + "the full trajectory is the deliverable."
-        )
+        self._monitor = TurnMonitor.for_task(self.task, arm=self.grade)
+        if not self.grade and early_stop_active(self.task):
+            # Under `execute` there is no outcome to decide and the trajectory IS
+            # the deliverable, so an armed criterion must not truncate it.
+            logger.info(
+                "Grading disabled (execute mode): early-stop is armed but stays disabled; "
+                + "the full trajectory is the deliverable."
+            )
 
     def _restore_recorded_command_path(self) -> None:
         """Re-apply the graded run's own PATH before its criteria run.
@@ -1474,10 +1472,10 @@ class Orchestrator:
         self._warn_on_ineffective_task_timeout()
 
         # ONCE, up front, and BEFORE the evaluate-only early return: an armed
-        # evaluate-only re-grade builds an inert watcher, which is harmless and
+        # evaluate-only re-grade builds an inert monitor, which is harmless and
         # keeps a single creation point.
         # Rationale: .claude/notes/orchestration.md § Gate selection is fired-only
-        self._arm_early_stop()
+        self._build_monitor()
 
         # BEFORE either branch returns: judge criteria with include_reference
         # expect it populated in evaluate-only re-grades too.
@@ -1894,19 +1892,16 @@ class Orchestrator:
         result = self.result
         run_limits = self.task.run_limits
         turn_timeout = run_limits.turn_timeout if run_limits else None
-        max_turns = run_limits.max_turns if run_limits else None
-
-        agent_callback: StreamCallback | None = None
-        if self.stream_callback is not None:
-            agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
+        monitor = self._monitor
+        assert monitor is not None, "TurnMonitor not built"
 
         # The sole callback when --stream is off, else alongside the
-        # TaskScopedCallback. The same instance persists across retry attempts, so
-        # its counters and wall-clock origin accumulate.
-        watcher = self._early_stop_watcher
-        if watcher is not None:
-            agent_callback = (
-                CompositeStreamCallback([watcher, agent_callback]) if agent_callback is not None else watcher
+        # TaskScopedCallback. The same instance persists across retry attempts and
+        # dialog turns, so its counters and wall-clock origin accumulate.
+        agent_callback: StreamCallback = monitor
+        if self.stream_callback is not None:
+            agent_callback = CompositeStreamCallback(
+                [monitor, TaskScopedCallback(self.stream_callback, self._log_task_id)]
             )
 
         def _drain_pending_turn(*, attempt: int) -> None:
@@ -1951,8 +1946,7 @@ class Orchestrator:
                 prompt,
                 stream_callback=agent_callback,
                 timeout=turn_timeout,
-                max_turns=max_turns,
-                should_stop=watcher.should_stop if watcher is not None else None,
+                should_stop=monitor.should_stop,
             )
             if turn_timeout is None:
                 return await coro
@@ -2086,7 +2080,7 @@ class Orchestrator:
         """Apply the verdict gate to the criteria results already on ``self.result``.
 
         Gate selection is FIRED-ONLY: the weighted armed gate applies IFF the
-        watcher actually cut the run. BOTH single-shot grading paths must call
+        monitor actually cut the run. BOTH single-shot grading paths must call
         this — the live one and the evaluate-only one — or a re-graded
         early-stopped run is scored under the full-run gate and flips its verdict.
 
@@ -2112,9 +2106,9 @@ class Orchestrator:
             )
             return self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
 
-        if self._early_stop_watcher is not None:
-            if self._early_stop_watcher.disarmed:
-                logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
+        if self._monitor is not None and self._monitor.armed:
+            if self._monitor.disarmed:
+                logger.info("early-stop criteria disarmed fail-open (verdict error): gating on the full set.")
             else:
                 logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
         return self.result.all_criteria_passed(self.task.success_criteria)
@@ -2199,9 +2193,10 @@ class Orchestrator:
         self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
-        # Record early-stop info (if the watcher tripped) BEFORE check_all_async, so it
+        # Record early-stop info (if the monitor tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
-        self.result.early_stop = self._early_stop_watcher.info if self._early_stop_watcher is not None else None
+        assert self._monitor is not None
+        self.result.early_stop = self._monitor.info
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
@@ -2209,13 +2204,15 @@ class Orchestrator:
         # withholds the verdict, never the facts. Recording the fact is not
         # finalizing on it — the tool-call cap decides the status only when the criteria
         # fail, so under grade=False this is carried into task.json for the
-        # detached grade rather than turned into a terminal status.
+        # detached grade rather than turned into a terminal status. Read from the
+        # turn's end status, not the monitor's latch: a cap latched after the
+        # agent's last poll did not stop anything.
         # Rationale: .claude/notes/orchestration.md § The four grading sites
         if turn_record.tool_calls_exhausted:
             self.result.tool_calls_exhausted = True
             logger.warning(
-                "Agent exhausted max_turns (%s).",
-                self.task.run_limits.max_turns if self.task.run_limits else None,
+                "Agent reached the tool-call cap (%d resolved tool calls).",
+                self._monitor.tool_calls,
             )
         # Soft cumulative-turn check (logs once; never aborts).
         self._check_expected_tool_calls(iteration=iteration)

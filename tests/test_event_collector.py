@@ -747,7 +747,7 @@ class TestHarnessOverheadBuckets:
         assert rec.harness_startup_ms == pytest.approx(3000.0)
 
     def test_a_new_turn_clears_the_previous_turn_terminal_event(self):
-        """EarlyStopWatcher keeps ONE collector across retries. Left stale, the
+        """TurnMonitor keeps ONE collector across retries. Left stale, the
         next attempt's start pairs with the last attempt's end and the clamped
         inversion publishes as a measured 0.0."""
         t0 = datetime(2026, 1, 1, 12, 0, 0)
@@ -1132,7 +1132,7 @@ class TestTheToolUnionIsStored:
         assert parameter.default is inspect.Parameter.empty
 
     def test_two_builds_agree(self):
-        """`EarlyStopWatcher` holds one collector across a turn's rounds."""
+        """`TurnMonitor` holds one collector across a turn's rounds."""
         collector = EventCollector()
         _feed(
             collector,
@@ -1153,7 +1153,7 @@ class TestTheToolUnionIsStored:
 class TestBuildTurnRecordIsIdempotent:
     """Building the record twice must give the same numbers.
 
-    `EventCollector` is not built once and read once. `EarlyStopWatcher` holds
+    `EventCollector` is not built once and read once. `TurnMonitor` holds
     ONE across a turn's tool-call rounds and calls `build_turn_record()` on
     every one, and the crash path builds it again from `Agent._finalize`. The
     tool subtraction now happens inside that method, so a version of it that

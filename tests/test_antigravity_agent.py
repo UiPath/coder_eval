@@ -25,9 +25,11 @@ from coder_eval.agents.antigravity_agent import (
     _to_token_usage,
 )
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, AntigravityAgentConfig, AssistantMessage, parse_agent_config
+from coder_eval.models import AgentKind, AntigravityAgentConfig, AssistantMessage, RunLimits, parse_agent_config
+from coder_eval.orchestration.turn_monitor import TurnMonitor
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.pricing import calculate_cost
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason
 from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams._scrub import assert_reconciliation
 from tests._fixtures.golden_streams.antigravity_fixtures import (
@@ -983,10 +985,11 @@ async def test_communicate_respects_should_stop_during_poll(monkeypatch):
 
     call_count = 0
 
-    def should_stop() -> bool:
+    def should_stop() -> StopReason | None:
         nonlocal call_count
         call_count += 1
-        return call_count > 2  # False for batch1's 2 steps; True on the post-sleep check
+        # None for batch1's 2 steps; a reason on the post-sleep check
+        return StopReason.EARLY_CRITERION if call_count > 2 else None
 
     await agent.communicate("do it", should_stop=should_stop)
 
@@ -1077,7 +1080,7 @@ async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_
     agent.working_directory = Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
 
-    await agent.communicate("do it", should_stop=lambda: True)  # breaks after the first step
+    await agent.communicate("do it", should_stop=lambda: StopReason.EARLY_CRITERION)  # breaks after the first step
 
     # Without the retry, this second call raises AgentCrashError wrapping the
     # fake's RuntimeError (verified live before the fix landed). With it, the
@@ -1496,12 +1499,10 @@ def test_tool_names_cover_the_canonical_vocabulary():
     assert AntigravityAgent.tool_names.names["Bash"] == ("run_command",)
 
 
-# --- max_turns visible-turn cap -----------------------------------------------------
+# --- should_stop reasons -------------------------------------------------------------
 #
-# max_turns was accepted and never read on this backend, so a task capping turns ran
-# uncapped here while the same file capped on Claude Code. The cap counts VISIBLE
-# turns (tool calls — result_metrics.visible_turn_count's unit), enforced on the same
-# step-loop boundary as the cooperative stop.
+# The adapter owns no cap. A `should_stop` reason ends the step loop at that boundary,
+# and the reason picks the end status through `end_status_for`; the turn ends clean.
 
 
 def _tool_steps(count: int) -> list:
@@ -1515,54 +1516,63 @@ def _tool_steps(count: int) -> list:
     return steps
 
 
-async def test_max_turns_caps_visible_turns():
-    """The stream offers 5 tool calls; max_turns=2 keeps 2 and never pulls the rest."""
+class _EndCapture:
+    """Stream callback that keeps the ``AgentEndEvent``."""
+
+    def __init__(self) -> None:
+        self.end: AgentEndEvent | None = None
+
+    def on_event(self, event: object) -> None:
+        if isinstance(event, AgentEndEvent):
+            self.end = event
+
+
+@pytest.mark.parametrize(
+    ("reason", "status", "exhausted"),
+    [
+        (StopReason.TOOL_CALL_CAP, AgentEndStatus.TOOL_CALLS_EXHAUSTED, True),
+        (StopReason.TOKEN_BUDGET, AgentEndStatus.TOKEN_BUDGET_EXCEEDED, False),
+    ],
+)
+async def test_should_stop_reason_ends_the_turn_with_its_status(reason, status, exhausted):
+    """A reason after the first processed step ends the loop; nothing further is pulled."""
     agent = _agent_with_steps(_tool_steps(5))
+    capture = _EndCapture()
 
-    record = await agent.communicate("go", max_turns=2)
+    record = await agent.communicate("go", stream_callback=capture, should_stop=lambda: reason)
 
-    assert len(record.commands) == 2
-    assert record.tool_calls_exhausted is True
+    assert capture.end is not None
+    assert capture.end.status is status
+    assert record.crashed is False
+    assert record.tool_calls_exhausted is exhausted
+    assert len(record.commands) == 1
+    assert agent._sdk_agent.conversation.cancel_call_count == 1
 
 
-async def test_max_turns_keeps_the_deciding_step_whole():
-    """The tool call that reaches the cap is completed, not cut mid-flight."""
+async def test_stop_after_a_done_step_keeps_the_deciding_call_whole():
+    """A stop polled after the call's DONE step keeps its result."""
     agent = _agent_with_steps(_tool_steps(3))
+    polls = 0
 
-    record = await agent.communicate("go", max_turns=1)
+    def should_stop() -> StopReason | None:
+        nonlocal polls
+        polls += 1
+        return StopReason.TOOL_CALL_CAP if polls >= 2 else None
+
+    record = await agent.communicate("go", should_stop=should_stop)
 
     assert len(record.commands) == 1
     assert record.commands[0].result_status == "success"
     assert record.commands[0].result_summary == "0"
 
 
-async def test_under_the_cap_completes_normally():
-    agent = _agent_with_steps(_tool_steps(2))
-
-    record = await agent.communicate("go", max_turns=5)
-
-    assert len(record.commands) == 2
-    assert record.tool_calls_exhausted is False
-
-
-async def test_no_max_turns_is_uncapped():
-    """None must preserve the pre-existing behavior exactly."""
+async def test_no_reason_consumes_every_step():
     agent = _agent_with_steps(_tool_steps(4))
 
-    record = await agent.communicate("go")
+    record = await agent.communicate("go", should_stop=lambda: None)
 
     assert len(record.commands) == 4
     assert record.tool_calls_exhausted is False
-
-
-async def test_cooperative_stop_outranks_the_cap():
-    """Both firing on the same step reports STOPPED_EARLY — the more specific reason."""
-    agent = _agent_with_steps(_tool_steps(5))
-
-    record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
-
-    assert record.tool_calls_exhausted is False
-    assert len(record.commands) == 1
 
 
 async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
@@ -1581,8 +1591,7 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     batch1 = [_step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[bg])]
     # The re-drain kicks off a SECOND background job, then closes the first and runs
     # one more call — reaching the cap (2) with an orphan still ACTIVE. Both exit
-    # conditions are live at once, and the cap has to win: otherwise the loop keeps
-    # polling out a background job on a run that is already over.
+    # conditions are live at once, and the cap has to win.
     batch2 = [
         _step(
             "TOOL_CALL",
@@ -1603,9 +1612,11 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     batch3 = _tool_steps(2)  # must never be drained
     agent = _agent_with_steps([batch1, batch2, batch3])
     conv = agent._sdk_agent.conversation
+    monitor = TurnMonitor("t", [], limits=RunLimits(max_tool_calls=2))
 
-    record = await agent.communicate("go", max_turns=2)
+    record = await agent.communicate("go", stream_callback=monitor, should_stop=monitor.should_stop)
 
+    assert monitor.stop_reason is StopReason.TOOL_CALL_CAP
     assert record.tool_calls_exhausted is True
     # The cap counts RESOLVED calls. The still-open bg2 is force-closed and recorded
     # as unresolved rather than dropped, so the trajectory shows what was interrupted.

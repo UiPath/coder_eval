@@ -25,6 +25,10 @@ def test_flags_task_max_turns() -> None:
     assert _violations("x = task.max_turns")
 
 
+def test_flags_task_max_tool_calls() -> None:
+    assert _violations("x = task.max_tool_calls")
+
+
 def test_flags_self_task_max_turns() -> None:
     assert _violations("class C:\n    def m(self): x = self.task.max_turns")
 

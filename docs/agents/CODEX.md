@@ -203,7 +203,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 | **System prompt** | `system_prompt` appended to the default prompt (SDK `claude_code` preset) | `system_prompt` passed as `developer_instructions` on top of the Codex base prompt |
 | **Session Resume** | `--resume {session_id}` | Via thread ID |
 | **Permissions** | `permission_mode` + `allowed_tools` + `disallowed_tools` | Not supported; always full-access |
-| **`max_turns`** | Native SDK turn cap (assistant messages) | Visible-turn cap (tool calls), enforced on the notification pump |
+| **`max_tool_calls`** | TurnMonitor cap on resolved tool calls, polled between messages | Same TurnMonitor cap, polled after each streamed notification |
 | **Early stop** | Supported (cooperative `should_stop`, polled between messages) | Supported — polled after each streamed notification; the in-flight turn is interrupted best-effort |
 
 Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).

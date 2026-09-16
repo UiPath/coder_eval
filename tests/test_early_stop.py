@@ -14,9 +14,9 @@ post-stop-exception guard that prevents retry poisoning) is covered at the
 end of this file.
 
 Phase 3 (feature live): the ``EarlyStopReason`` / ``EarlyStopInfo`` models and
-the ``armed_criteria_passed`` gate; the ``EarlyStopWatcher`` runtime observer
+the ``armed_criteria_passed`` gate; the ``TurnMonitor`` runtime observer
 (stop rule, fail-open, latching, attribution); and the orchestrator wiring
-(watcher composed into the stream, ``result.early_stop`` populated, armed-subset
+(monitor composed into the stream, ``result.early_stop`` populated, armed-subset
 gate on an early-stopped run vs the full gate on a completed run).
 """
 
@@ -71,12 +71,12 @@ from coder_eval.models import (
 from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.early_stop import (
     EarlyStopConfigError,
-    EarlyStopWatcher,
     early_stop_active,
     validate_early_stop,
 )
 from coder_eval.orchestration.experiment import load_experiment, resolve_all_tasks
 from coder_eval.orchestration.harness_contract import HarnessContractError
+from coder_eval.orchestration.turn_monitor import TurnMonitor
 from coder_eval.orchestrator import Orchestrator, build_task_event
 from coder_eval.reports import ReportGenerator
 from coder_eval.reports.html import _render_criteria, _render_header
@@ -85,6 +85,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
@@ -140,7 +141,7 @@ def _task(
         agent=parse_agent_config(type=agent_type),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=criteria,
-        run_limits=RunLimits(stop_early=stop_early, max_turns=20, stop_early_gate_threshold=gate_threshold),
+        run_limits=RunLimits(stop_early=stop_early, max_tool_calls=20, stop_early_gate_threshold=gate_threshold),
         simulation=simulation,
     )
 
@@ -258,7 +259,7 @@ def _info(**overrides: Any) -> EarlyStopInfo:
         sdk_turn_index=1,
         tool_call_index=1,
         elapsed_seconds=1.0,
-        turns_remaining_at_stop=14,
+        tool_calls_remaining_at_stop=14,
     )
     base.update(overrides)
     return EarlyStopInfo(**base)
@@ -708,7 +709,7 @@ class TestValidateEarlyStop:
         # timeout is inert on it (its "undecided" is its success state). This
         # tolerance is what lets one dataset-fanned YAML line carry a timeout
         # for both positive rows (applies) and distractor rows (ignored). The
-        # runtime inertness itself is asserted in TestEarlyStopWatcher.
+        # runtime inertness itself is asserted in TestTurnMonitorEarlyStop.
         task = _task(
             criteria=[_skill_crit("weather-teller", "date-teller", stop_on_fail=True, max_steps_to_decide=3)],
         )
@@ -776,7 +777,7 @@ class TestValidateEarlyStop:
 
     def test_all_triggers_inert_still_accepted(self) -> None:
         # min_count=0, max_count=None decides NEITHER polarity — every trigger
-        # is inert, the run can never stop early, and the watcher just logs a
+        # is inert, the run can never stop early, and the monitor just logs a
         # debug breadcrumb. Accepted: on a fanned dataset some rows
         # legitimately end up with all-inert triggers.
         task = _task(criteria=[_cmd_crit(stop_on_pass=True, stop_on_fail=True, min_count=0, max_count=None)])
@@ -826,7 +827,7 @@ class TestValidateEarlyStop:
         validate_early_stop(task)  # no raise
 
     def test_unarmed_task_is_plain_noop(self) -> None:
-        # No blocks -> no watcher, byte-for-byte default behavior. The old
+        # No blocks -> no armed criteria, byte-for-byte default behavior. The old
         # "at least one criterion" guard is gone with the master arm: there is
         # nothing left to arm a task that has no blocks.
         task = _task(criteria=[_skill_crit("s", "s")])
@@ -934,7 +935,7 @@ def _write_task_yaml(tmp_path: Path, *, criterion_yaml: str, stop_early: bool | 
         + "sandbox:\n"
         + "  driver: tempdir\n"
         + "run_limits:\n"
-        + "  max_turns: 20\n"
+        + "  max_tool_calls: 20\n"
         + stop_early_line
         + "success_criteria:\n"
         + criterion_yaml
@@ -1013,7 +1014,7 @@ class TestGuardrailResolutionSurfaces:
             + "sandbox:\n"
             + "  driver: tempdir\n"
             + "run_limits:\n"
-            + "  max_turns: 20\n"
+            + "  max_tool_calls: 20\n"
             + "  stop_early_gate_threshold: 0.7\n"
             + "success_criteria:\n"
             + _ARMED_OBSERVABLE_CRITERION
@@ -1102,8 +1103,7 @@ class TestShippedEarlyStopExperiment:
 
 
 # --------------------------------------------------------------------------- #
-# Cooperative should_stop seam on ClaudeCodeAgent — still UNWIRED: the
-# orchestrator does not pass should_stop yet, so these drive the agent directly.
+# Cooperative should_stop seam on ClaudeCodeAgent, driven directly.
 # --------------------------------------------------------------------------- #
 
 
@@ -1136,25 +1136,25 @@ async def _run_claude_communicate(
     """Drive ``ClaudeCodeAgent.communicate`` over a mocked ``query`` yielding
     ``n_messages`` dummy messages.
 
-    ``stop_after``: build a should_stop that returns True once that many messages
-    have been pulled (checked after each dispatch). ``never``: pass an explicit
-    always-False should_stop. Neither: pass ``should_stop=None``. Returns
+    ``stop_after``: build a should_stop that returns ``EARLY_CRITERION`` once that
+    many messages have been pulled (checked after each dispatch). ``never``: pass
+    an explicit always-None should_stop. Neither: pass ``should_stop=None``. Returns
     ``(agent, record, sink, pulled_count)``.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
     pulled = {"n": 0}
 
-    should_stop: Callable[[], bool] | None
+    should_stop: Callable[[], StopReason | None] | None
     if stop_after is not None:
 
-        def should_stop() -> bool:
-            return pulled["n"] >= stop_after
+        def should_stop() -> StopReason | None:
+            return StopReason.EARLY_CRITERION if pulled["n"] >= stop_after else None
 
     elif never:
 
-        def should_stop() -> bool:
-            return False
+        def should_stop() -> StopReason | None:
+            return None
 
     else:
         should_stop = None
@@ -1192,7 +1192,7 @@ class _NoopWatchdog:
 
 async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink, BaseException | None]:
     """Drive ``communicate`` with a slow query (50ms) against a 10ms deadline AND
-    ``should_stop=True`` — the deadline guard must win. Returns
+    a should_stop returning ``EARLY_CRITERION`` — the deadline guard must win. Returns
     ``(agent, sink, raised_exception)``."""
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -1210,7 +1210,9 @@ async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink
             patch("coder_eval.agents.claude_code_agent.ThreadedWatchdog", _NoopWatchdog),
         ):
             try:
-                await agent.communicate("p", stream_callback=sink, timeout=0.01, should_stop=lambda: True)
+                await agent.communicate(
+                    "p", stream_callback=sink, timeout=0.01, should_stop=lambda: StopReason.EARLY_CRITERION
+                )
             except TurnTimeoutError as exc:
                 raised = exc
     return agent, sink, raised
@@ -1273,7 +1275,7 @@ class TestCooperativeStopSeam:
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.COMPLETED
 
-    async def test_should_stop_false_consumes_full_stream(self) -> None:
+    async def test_should_stop_returning_none_consumes_full_stream(self) -> None:
         _agent, _record, sink, pulled = await _run_claude_communicate(never=True, n_messages=3)
         assert pulled == 3
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
@@ -1315,7 +1317,7 @@ class TestEarlyStopModels:
             elapsed_seconds=1.5,
         )
         assert info.armed_criteria == []
-        assert info.turns_remaining_at_stop is None
+        assert info.tool_calls_remaining_at_stop is None
         assert info.gate_threshold == 1.0
 
     def test_gate_threshold_bounds_enforced(self) -> None:
@@ -1476,80 +1478,80 @@ class TestEarlyStopModels:
 
 
 # --------------------------------------------------------------------------- #
-# Phase 3: EarlyStopWatcher
+# Phase 3: TurnMonitor early stop
 # --------------------------------------------------------------------------- #
 
 
-def _watcher(criteria: list[Any], *, max_turns: int | None = 20, gate_threshold: float = 1.0) -> EarlyStopWatcher:
+def _monitor_for(criteria: list[Any], *, max_tool_calls: int | None = 20, gate_threshold: float = 1.0) -> TurnMonitor:
     task = _task(criteria=criteria)
     assert task.run_limits is not None
-    task.run_limits.max_turns = max_turns
+    task.run_limits.max_tool_calls = max_tool_calls
     task.run_limits.stop_early_gate_threshold = gate_threshold
-    return EarlyStopWatcher.for_task(task)
+    return TurnMonitor.for_task(task, arm=True)
 
 
-def _feed(watcher: EarlyStopWatcher, events: list[Any]) -> None:
+def _feed(monitor: TurnMonitor, events: list[Any]) -> None:
     for event in events:
-        watcher.on_event(event)
+        monitor.on_event(event)
 
 
-class TestEarlyStopWatcher:
+class TestTurnMonitorEarlyStop:
     def test_for_task_arms_only_stop_criteria(self) -> None:
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),
                 FileExistsCriterion(path="x", description="x must exist"),
             ]
         )
         # Only the armed criterion is tracked; the unarmed file_exists is ignored.
-        assert len(watcher._armed) == 1
+        assert len(monitor._armed) == 1
 
     def test_undecided_before_engagement_no_stop(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start(), _turn_start()])
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start(), _turn_start()])
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_pass_stop_fires_on_expected_skill(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_fail_stop_fires_on_distractor_skill(self) -> None:
         # A distractor criterion (its skill != the expected skill) fail-stops the
         # instant its skill is engaged — the per-skill precision signal.
-        watcher = _watcher([_skill_crit("weather-teller", "date-teller", stop_on_fail=True)])
-        _feed(watcher, _skill_events("weather-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        monitor = _monitor_for([_skill_crit("weather-teller", "date-teller", stop_on_fail=True)])
+        _feed(monitor, _skill_events("weather-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED
 
     def test_wrong_skill_does_not_stop_positive_row(self) -> None:
         # Item 1: a positive row (armed pass) engaging the WRONG skill must NOT
         # stop — the run keeps going so the expected skill can still load later.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, _skill_events("weather-teller"))
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, _skill_events("weather-teller"))
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_stacked_pass_stop_requires_all(self) -> None:
         # Pass-stop needs EVERY armed criterion to live-pass. Two positives for
         # different skills: engaging only the first does not stop; engaging the
         # second (both now passed) fires the pass-stop.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),
                 _skill_crit("weather-teller", "weather-teller", stop_on_pass=True),
             ]
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is False  # only one of two has passed
-        _feed(watcher, [_tool_end(_skill_cmd("weather-teller", tool_id="w"))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is None  # only one of two has passed
+        _feed(monitor, [_tool_end(_skill_cmd("weather-teller", tool_id="w"))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_stacked_wrong_skill_defers_fail_stop_until_positive_decides(self) -> None:
         # The recall guard: a positive (armed pass) + a distractor (armed fail).
@@ -1557,20 +1559,20 @@ class TestEarlyStopWatcher:
         # the would-be TP as an FN and deflate suite recall. The misfire is latched
         # by the criterion's monotone semantics, so once the expected skill engages
         # (no pass-armed criterion left undecided) the deferred fail-stop fires.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),
                 _skill_crit("weather-teller", "date-teller", stop_on_fail=True),
             ]
         )
-        _feed(watcher, _skill_events("weather-teller"))
-        assert watcher.should_stop() is False  # positive undecided -> fail deferred
-        assert watcher.info is None
-        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="d"))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
-        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+        _feed(monitor, _skill_events("weather-teller"))
+        assert monitor.should_stop() is None  # positive undecided -> fail deferred
+        assert monitor.info is None
+        _feed(monitor, [_tool_end(_skill_cmd("date-teller", tool_id="d"))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED
+        assert monitor.info.deciding_criterion_description == "weather-teller activation"
 
     def test_fail_stop_precedes_pass_stop_same_round(self) -> None:
         # Precedence pin (kills the block-swap mutation): ONE tool call engages
@@ -1578,7 +1580,7 @@ class TestEarlyStopWatcher:
         # live-passes and the distractor live-fails in the SAME evaluation round
         # with no pass-armed criterion left undecided. Fail-stop is evaluated
         # before pass-stop, so the round must record CRITERION_FAILED.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True),  # positive -> pass
                 _skill_crit(
@@ -1587,18 +1589,18 @@ class TestEarlyStopWatcher:
             ]
         )
         both = _cmd("Bash", {"command": "cat skills/date-teller/SKILL.md skills/weather-teller/SKILL.md"})
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(both)])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
-        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(both)])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED
+        assert monitor.info.deciding_criterion_description == "weather-teller activation"
 
     def test_auto_positive_row_misfire_alone_never_stops(self) -> None:
         # A positive row armed `auto` whose agent only ever touches wrong skills:
         # the fail-stop stays deferred for the whole run (the positive never
         # decides), so the run continues to the cap and full-trajectory scoring —
         # never a truncated FN.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True),  # positive -> pass
                 _skill_crit(
@@ -1606,19 +1608,19 @@ class TestEarlyStopWatcher:
                 ),  # distractor -> fail
             ]
         )
-        _feed(watcher, _skill_events("weather-teller"))
-        _feed(watcher, [_turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        _feed(monitor, _skill_events("weather-teller"))
+        _feed(monitor, [_turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_auto_positive_pass_stops(self) -> None:
         # `auto` on a positive resolves to pass-armed: engaging the expected skill
         # pass-stops, identically to an explicit stop_on_pass=True.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True)])
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True)])
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_auto_mixed_pass_stops_ignoring_undecided_distractors(self) -> None:
         # THE mixed-arming fix: one positive + two distractors, all armed `auto`.
@@ -1626,7 +1628,7 @@ class TestEarlyStopWatcher:
         # distractors are still "undecided" — fail-armed criteria are not required
         # to live-pass. (Under the old "every armed must pass" rule this could never
         # fire, since a distractor can never live-pass.)
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True),  # positive -> pass
                 _skill_crit(
@@ -1635,114 +1637,116 @@ class TestEarlyStopWatcher:
                 _skill_crit("news-teller", "date-teller", stop_on_pass=True, stop_on_fail=True),  # distractor -> fail
             ]
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
         # The deciding criterion is the positive that flipped to pass.
-        assert watcher.info.deciding_criterion_description == "date-teller activation"
+        assert monitor.info.deciding_criterion_description == "date-teller activation"
 
     def test_auto_negative_row_no_pass_stop_on_benign_call(self) -> None:
         # THE vacuous guard: a negative row (expected_skill == "") stacks only
         # distractors, so there are ZERO pass-armed criteria. A benign non-skill
         # tool call must NOT pass-stop on turn 0 (empty all() would be vacuously
         # True); the run continues to the cap as intended.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "", stop_on_pass=True, stop_on_fail=True),  # distractor -> fail
                 _skill_crit("weather-teller", "", stop_on_pass=True, stop_on_fail=True),  # distractor -> fail
             ]
         )
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_auto_negative_row_misfire_fail_stops(self) -> None:
         # The other half of the asymmetry: a negative row that DOES engage a skill
         # is a misfire and fail-stops (the precision signal), even though it can
         # never pass-stop.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "", stop_on_pass=True, stop_on_fail=True),  # distractor -> fail
                 _skill_crit("weather-teller", "", stop_on_pass=True, stop_on_fail=True),  # distractor -> fail
             ]
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED
 
     def test_mixed_static_arming_pass_stops_ignoring_fail_armed(self) -> None:
         # The pass-armed-subset rule is not `auto`-specific: an explicit
         # pass-positive + fail-distractor mix also pass-stops on the positive alone.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),  # pass-armed
                 _skill_crit("weather-teller", "date-teller", stop_on_fail=True),  # fail-armed
             ]
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_ceiling_bound_defers_fail_stop_below_default_gate_threshold(self) -> None:
         # The user's worked example on the trigger side: weights 0.8/0.2,
         # gate_threshold 0.7. The LOW-weight (0.2) criterion misfiring leaves a
         # ceiling of 0.8 (>= 0.7) — the gate could still pass if the high-weight
         # positive comes through, so the run must NOT stop yet.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True, weight=0.8),
                 _skill_crit("weather-teller", "date-teller", stop_on_pass=True, stop_on_fail=True, weight=0.2),
             ],
             gate_threshold=0.7,
         )
-        _feed(watcher, _skill_events("weather-teller"))
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        _feed(monitor, _skill_events("weather-teller"))
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_ceiling_bound_fires_fail_stop_when_high_weight_criterion_fails(self) -> None:
         # Mirror case: the HIGH-weight (0.8) positive misfiring as a distractor
         # leaves a ceiling of 0.2 (< 0.7) — the gate can never reach 0.7 no
         # matter what the low-weight criterion does, so the fail-stop must fire
         # even though it's the "small" criterion still undecided.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("weather-teller", "date-teller", stop_on_pass=True, stop_on_fail=True, weight=0.8),
                 _skill_crit("news-teller", "date-teller", stop_on_pass=True, stop_on_fail=True, weight=0.2),
             ],
             gate_threshold=0.7,
         )
-        _feed(watcher, _skill_events("weather-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        _feed(monitor, _skill_events("weather-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED
 
     def test_zero_armed_weight_fails_closed_instead_of_dividing_by_zero(self) -> None:
         """The model rejects weight=0 on an armed criterion; a copy that skips validation
-        must still not crash the watcher, and must agree with the final gate (closed)."""
+        must still not crash the monitor, and must agree with the final gate (closed)."""
         armed = _skill_crit("date-teller", "date-teller", stop_on_fail=True).model_copy(update={"weight": 0.0})
-        watcher = EarlyStopWatcher(
-            "t", [(armed, _watcher([_skill_crit("x", "x", stop_on_fail=True)])._armed[0][1])], max_turns=20
+        monitor = TurnMonitor(
+            "t",
+            [(armed, _monitor_for([_skill_crit("x", "x", stop_on_fail=True)])._armed[0][1])],
+            limits=RunLimits(max_tool_calls=20),
         )
-        assert watcher._ceiling(["undecided"]) == 0.0
+        assert monitor._ceiling(["undecided"]) == 0.0
 
     def test_default_gate_threshold_fires_fail_stop_on_any_weight(self) -> None:
         # At the default gate_threshold=1.0, even the low-weight criterion's
         # failure alone must still fire — byte-for-byte the pre-weighting rule.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, stop_on_fail=True, weight=0.8),
                 _skill_crit("weather-teller", "date-teller", stop_on_pass=True, stop_on_fail=True, weight=0.2),
             ]
         )
-        _feed(watcher, _skill_events("weather-teller"))
-        assert watcher.should_stop() is False  # deferred: positive still undecided
-        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="d"))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        _feed(monitor, _skill_events("weather-teller"))
+        assert monitor.should_stop() is None  # deferred: positive still undecided
+        _feed(monitor, [_tool_end(_skill_cmd("date-teller", tool_id="d"))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED
 
     def test_floor_bound_pass_stops_before_low_weight_distractor_decides(self) -> None:
         # Floor generalization on the pass side: a high-weight (0.9) positive
@@ -1750,45 +1754,45 @@ class TestEarlyStopWatcher:
         # there is no OTHER pass-armed criterion whose weight it needs to share
         # the floor with (fail-armed distractors are excluded from the
         # pass-armed floor by design either way).
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, weight=0.9),
             ],
             gate_threshold=0.7,
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_floor_bound_pass_stop_requires_full_pass_armed_subset_below_default(self) -> None:
         # Below the default threshold, a partially-decided pass-armed subset
         # (one of two passed) must NOT pass-stop yet if the still-undecided
         # one's weight share would drop the floor below the threshold.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, weight=0.5),
                 _skill_crit("weather-teller", "weather-teller", stop_on_pass=True, weight=0.5),
             ],
             gate_threshold=0.7,
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_decision_budget_exceeded_when_still_undecided(self) -> None:
         # An armed criterion capped at max_steps_to_decide=1 that is still
         # "undecided" after its first tool call forces a budget-exceeded stop.
         # Full-field EarlyStopInfo parity, matching every other stop-reason test.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
-        assert watcher.info.deciding_criterion_type == "skill_triggered"
-        assert watcher.info.deciding_criterion_description == "date-teller activation"
-        assert watcher.info.sdk_turn_index == 1
-        assert watcher.info.tool_call_index == 1
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert monitor.info.deciding_criterion_type == "skill_triggered"
+        assert monitor.info.deciding_criterion_description == "date-teller activation"
+        assert monitor.info.sdk_turn_index == 1
+        assert monitor.info.tool_call_index == 1
 
     def test_decision_budget_exceeded_names_the_right_criterion_among_several(self) -> None:
         # Two armed criteria; the first resolves (pass) on the very call that
@@ -1796,53 +1800,53 @@ class TestEarlyStopWatcher:
         # must be the one whose budget actually tripped — not just the first
         # armed criterion in list order — and the timeout-driven fail-stop
         # wins over the first criterion's pass (fail-stop is evaluated first).
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=5),
                 _skill_crit("weather-teller", "weather-teller", stop_on_pass=True, max_steps_to_decide=1),
             ]
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
-        assert watcher.info.deciding_criterion_description == "weather-teller activation"
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert monitor.info.deciding_criterion_description == "weather-teller activation"
 
     def test_decision_budget_exceeded_with_command_executed(self) -> None:
         # The other LiveSuccessCriterion subclass: a command_executed pass-armed
         # criterion (min_count=1, no upper bound) capped at max_steps_to_decide=1
         # that never sees a matching command force-fails identically.
-        watcher = _watcher([_cmd_crit(min_count=1, max_count=None, stop_on_pass=True, max_steps_to_decide=1)])
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
-        assert watcher.info.deciding_criterion_type == "command_executed"
+        monitor = _monitor_for([_cmd_crit(min_count=1, max_count=None, stop_on_pass=True, max_steps_to_decide=1)])
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert monitor.info.deciding_criterion_type == "command_executed"
 
     def test_decision_budget_not_exceeded_below_cap(self) -> None:
         # Same cap, but only reached on the FIRST tool call (index 1) — a cap of
         # 2 must not fire yet.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=2)])
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=2)])
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_real_decision_within_budget_wins_over_budget_check(self) -> None:
         # The criterion decides (pass-stops) on the SAME tool call that would
         # otherwise have tripped its budget — the real decision takes priority.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_decision_budget_ignored_when_unset(self) -> None:
         # No max_steps_to_decide -> no budget check, run continues indefinitely
-        # (up to run_limits.max_turns) while undecided.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        # (up to run_limits.max_tool_calls) while undecided.
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_timeout_only_arming_pass_within_budget_never_stops(self) -> None:
         # THE fail-fast-without-success-stop intent: max_steps_to_decide alone
@@ -1851,20 +1855,20 @@ class TestEarlyStopWatcher:
         # untouched: no pass-stop (not armed for one), and the timeout can
         # never fire again (the verdict is no longer undecided). Extra calls
         # beyond the budget prove the latch holds.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", max_steps_to_decide=3)])
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is False
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", max_steps_to_decide=3)])
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is None
         for i in range(4):  # sail past the budget — still no stop
-            watcher.on_event(_tool_end(_cmd("Bash", {"command": f"echo {i}"})))
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+            monitor.on_event(_tool_end(_cmd("Bash", {"command": f"echo {i}"})))
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_timeout_only_arming_undecided_past_budget_stops(self) -> None:
         # The other half of the same intent: not engaged within the budget →
         # effective fail → fail-stop (default gate threshold 1.0).
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", max_steps_to_decide=2)])
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", max_steps_to_decide=2)])
         _feed(
-            watcher,
+            monitor,
             [
                 _agent_start(),
                 _turn_start(),
@@ -1872,17 +1876,17 @@ class TestEarlyStopWatcher:
                 _tool_end(_cmd("Bash", {"command": "cat x"})),
             ],
         )
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
 
     def test_timeout_inert_on_fail_only_distractor(self) -> None:
         # A distractor (fail-only decidable) carrying a timeout — the fanned
         # line case. Its "undecided" is its success state: sailing past the
         # budget with no misfire must NOT stop the run.
-        watcher = _watcher([_skill_crit("weather-teller", "date-teller", stop_on_fail=True, max_steps_to_decide=1)])
+        monitor = _monitor_for([_skill_crit("weather-teller", "date-teller", stop_on_fail=True, max_steps_to_decide=1)])
         _feed(
-            watcher,
+            monitor,
             [
                 _agent_start(),
                 _turn_start(),
@@ -1890,8 +1894,8 @@ class TestEarlyStopWatcher:
                 _tool_end(_cmd("Bash", {"command": "cat x"})),
             ],
         )
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_low_weight_timeout_absorbed_below_threshold(self) -> None:
         # A timeout is an ORDINARY weighted fail: a low-weight (0.2) criterion
@@ -1899,38 +1903,38 @@ class TestEarlyStopWatcher:
         # so the run continues — the timeout is absorbed exactly like a
         # low-weight native fail. (The high-weight positive resolves first so
         # the deferral is not what's holding the stop.)
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, weight=0.8),
                 _skill_crit("todo-lister", "todo-lister", weight=0.2, max_steps_to_decide=1),
             ],
             gate_threshold=0.7,
         )
-        _feed(watcher, _skill_events("date-teller"))
+        _feed(monitor, _skill_events("date-teller"))
         # date-teller passed (0.8 locked in); todo-lister timed out (0.2 lost).
         # Ceiling = 0.8 >= 0.7 → no fail-stop. Pass-stop floor over the
         # stop_on_pass subset = 0.8/0.8 = 1.0 >= 0.7 → pass-stop fires instead.
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_low_weight_timeout_absorbed_no_pass_stop_continues(self) -> None:
         # Same absorption, but with no stop_on_pass anywhere (both criteria
         # armed via timeouts only): the low-weight timeout alone cannot doom
         # the 0.7 gate — ceiling 0.8/1.0 after the high-weight positive
         # latches pass — and nothing else can stop, so the run continues.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", weight=0.8, max_steps_to_decide=50),
                 _skill_crit("todo-lister", "todo-lister", weight=0.2, max_steps_to_decide=1),
             ],
             gate_threshold=0.7,
         )
-        _feed(watcher, _skill_events("date-teller"))
+        _feed(monitor, _skill_events("date-teller"))
         for i in range(3):
-            watcher.on_event(_tool_end(_cmd("Bash", {"command": f"echo {i}"})))
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+            monitor.on_event(_tool_end(_cmd("Bash", {"command": f"echo {i}"})))
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_pass_stop_deferred_while_outside_pass_capable_undecided(self) -> None:
         # Recall deferral on the PASS side (mixed arming): A (on_pass: stop)
@@ -1938,21 +1942,21 @@ class TestEarlyStopWatcher:
         # via decide_within — is still undecided and within budget. Firing the
         # pass-stop here would truncate B's expected signal out of the
         # trajectory, so the stop is HELD.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),
                 _skill_crit("todo-lister", "todo-lister", max_steps_to_decide=5),
             ]
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is False  # deferred: todo-lister undecided
-        assert watcher.info is None
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is None  # deferred: todo-lister undecided
+        assert monitor.info is None
         # Once B decides (pass), the on_pass=stop floor (over A alone) still
         # holds, so the deferred pass-stop fires on that round.
-        _feed(watcher, [_tool_end(_skill_cmd("todo-lister", tool_id="td"))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, [_tool_end(_skill_cmd("todo-lister", tool_id="td"))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_pass_stop_fires_after_outside_criterion_fails_below_threshold(self) -> None:
         # The other resolution of the deferral: B (0.2, decide_within=2) times
@@ -1960,57 +1964,57 @@ class TestEarlyStopWatcher:
         # the low-weight fail cannot doom the ceiling (0.8 >= 0.7), so no
         # fail-stop — and with B decided, the deferral clears and the floor
         # (1.0 over the on_pass=stop subset) fires the pass-stop.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True, weight=0.8),
                 _skill_crit("todo-lister", "todo-lister", weight=0.2, max_steps_to_decide=2),
             ],
             gate_threshold=0.7,
         )
-        _feed(watcher, _skill_events("date-teller"))  # call 1: A passes, B undecided (budget 2)
-        assert watcher.should_stop() is False  # deferred while B is in budget
-        watcher.on_event(_tool_end(_cmd("Bash", {"command": "ls"})))  # call 2: B's budget expires
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, _skill_events("date-teller"))  # call 1: A passes, B undecided (budget 2)
+        assert monitor.should_stop() is None  # deferred while B is in budget
+        monitor.on_event(_tool_end(_cmd("Bash", {"command": "ls"})))  # call 2: B's budget expires
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_decision_budget_exceeded_on_in_flight_call(self) -> None:
         # The budget expires on the in-flight round: an AgentStart + TurnStart +
         # a dispatched ToolStart with NO ToolEnd. The in-flight call reports as
         # tool call 1, which meets decide_within=1 — the timeout fail-stop must
         # fire on the call itself, before any result resolves.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=1)])
         start = ToolStartEvent(task_id="t", tool=_cmd("Bash", {"command": "echo hi"}))
-        _feed(watcher, [_agent_start(), _turn_start(), start])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
-        assert watcher.info.tool_call_index == 1
+        _feed(monitor, [_agent_start(), _turn_start(), start])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert monitor.info.tool_call_index == 1
 
     def test_timeout_fail_deferred_while_sibling_positive_in_budget(self) -> None:
         # Criterion B times out (budget 1) while criterion A — pass-capable,
         # no budget — is still undecided: the fail-stop is DEFERRED (recall
         # protection). It fires the moment A decides.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),
                 _skill_crit("todo-lister", "todo-lister", max_steps_to_decide=1),
             ]
         )
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "ls"}))])
-        assert watcher.should_stop() is False  # deferred: date-teller undecided
-        watcher.on_event(_tool_end(_skill_cmd("date-teller", tool_id="sk-9")))
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "ls"}))])
+        assert monitor.should_stop() is None  # deferred: date-teller undecided
+        monitor.on_event(_tool_end(_skill_cmd("date-teller", tool_id="sk-9")))
         # A resolved (pass) → deferral clears → B's latched timeout fail fires
         # (ceiling 0.5 < 1.0). Fail-stop precedes pass-stop in the same round.
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
 
     def test_verdicts_latch_and_are_not_repolled(self) -> None:
         # Once a criterion decides on a resolved round, its live_verdict is
         # never called again — count the checker's calls directly.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", max_steps_to_decide=10)])
-        checker = watcher._armed[0][1]
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", max_steps_to_decide=10)])
+        checker = monitor._armed[0][1]
         calls = {"n": 0}
         original = type(checker).live_verdict
 
@@ -2020,92 +2024,92 @@ class TestEarlyStopWatcher:
 
         type(checker).live_verdict = counting  # type: ignore[method-assign]
         try:
-            _feed(watcher, _skill_events("date-teller"))  # decides pass on call 1
+            _feed(monitor, _skill_events("date-teller"))  # decides pass on call 1
             decided_at = calls["n"]
             for i in range(5):
-                watcher.on_event(_tool_end(_cmd("Bash", {"command": f"echo {i}"})))
+                monitor.on_event(_tool_end(_cmd("Bash", {"command": f"echo {i}"})))
             assert calls["n"] == decided_at  # latched: zero further polls
         finally:
             type(checker).live_verdict = original  # type: ignore[method-assign]
-        assert watcher.should_stop() is False  # and still no stop (no stop_on_pass)
+        assert monitor.should_stop() is None  # and still no stop (no stop_on_pass)
 
     def test_pass_without_stop_on_pass_never_stops(self) -> None:
         # A stop_on_fail-armed positive... cannot exist (fail is inert on a
         # positive); the realistic shape is both-trigger fanning. On a positive
         # row with only stop_on_fail, NOTHING can ever fire — engaging the
         # skill latches pass silently and the run continues.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_fail=True)])
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_fail=True)])
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_records_turn_and_tool_index(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.info is not None
-        assert watcher.info.sdk_turn_index == 1
-        assert watcher.info.tool_call_index == 1
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.info is not None
+        assert monitor.info.sdk_turn_index == 1
+        assert monitor.info.tool_call_index == 1
 
-    def test_turns_remaining_from_max_turns(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)], max_turns=15)
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.info is not None
-        assert watcher.info.turns_remaining_at_stop == 14  # 15 - sdk_turn_index(1)
+    def test_tool_calls_remaining_from_max_tool_calls(self) -> None:
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)], max_tool_calls=15)
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.info is not None
+        assert monitor.info.tool_calls_remaining_at_stop == 14  # 15 - tool_call_index(1)
 
-    def test_turns_remaining_none_when_max_turns_unset(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)], max_turns=None)
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.info is not None
-        assert watcher.info.turns_remaining_at_stop is None
+    def test_tool_calls_remaining_none_when_max_tool_calls_unset(self) -> None:
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)], max_tool_calls=None)
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.info is not None
+        assert monitor.info.tool_calls_remaining_at_stop is None
 
     def test_fail_open_on_raising_verdict(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         with patch.object(SkillTriggeredChecker, "live_verdict", side_effect=RuntimeError("boom")):
-            _feed(watcher, _skill_events("date-teller"))
+            _feed(monitor, _skill_events("date-teller"))
         # Fail-open: disarmed, no false stop, degrades to a full run.
-        assert watcher.disarmed is True
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        assert monitor.disarmed is True
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_unresolved_tool_end_does_not_latch(self) -> None:
         # finalize() force-closes orphaned tools as UNRESOLVED AFTER the message
         # loop ends and the terminal status is chosen. Such an orphan Skill
         # engagement must NOT trip a stop, else a naturally-completed (or
         # timed-out / crashed) run gets recorded as early-stopped.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
-        assert watcher.should_stop() is False
-        assert watcher.info is None
-        assert watcher._tool_call_index == 0  # the unresolved end is not even counted
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        assert monitor.should_stop() is None
+        assert monitor.info is None
+        assert monitor._tool_call_index == 0  # the unresolved end is not even counted
 
     def test_resolved_after_unresolved_still_decides(self) -> None:
         # An UNRESOLVED end never evaluates, but a later RESOLVED engagement still
         # fires the stop (skipping orphan rounds never suppresses a real stop).
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
-        assert watcher.info is None
-        _feed(watcher, [_tool_end(_skill_cmd("date-teller", tool_id="sk-real"))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        assert monitor.info is None
+        _feed(monitor, [_tool_end(_skill_cmd("date-teller", tool_id="sk-real"))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_unresolved_end_recorded_for_trajectory_parity(self) -> None:
         # TRAJECTORY PARITY: the agent's EventCollector records force-closed
         # (UNRESOLVED) commands into the TurnRecord that check_all_async later
-        # scores — e.g. a crashed attempt's drained partial turn. The watcher
+        # scores — e.g. a crashed attempt's drained partial turn. The monitor
         # must reduce the SAME trajectory: the orphan is recorded (visible to
         # the next evaluation round), just never counted or evaluated on.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
-        assert watcher._tool_call_index == 0  # no round counted
-        assert watcher.info is None  # no stop fired on the orphan itself
-        record = watcher._collector.build_turn_record()
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        assert monitor._tool_call_index == 0  # no round counted
+        assert monitor.info is None  # no stop fired on the orphan itself
+        record = monitor._collector.build_turn_record()
         assert any(c.tool_name == "Skill" for c in record.commands)  # ...but it IS in the trajectory
         # The next real round evaluates over the parity trajectory: an unrelated
         # Bash call decides the criterion pass from the recorded orphan.
-        _feed(watcher, [_tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, [_tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_budget_timeout_not_latched_when_orphan_already_decided(self) -> None:
         # The verdict-preserving half of trajectory parity: a decide_within
@@ -2113,13 +2117,13 @@ class TestEarlyStopWatcher:
         # trajectory scores as a pass. The deciding engagement arrived as a
         # force-closed orphan (recorded, not evaluated); the budget expiring on
         # the next round must see it as a live-pass, not fabricate a fail.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", max_steps_to_decide=1)])
-        _feed(watcher, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", max_steps_to_decide=1)])
+        _feed(monitor, [_agent_start(), _turn_start(), _unresolved_skill_end("date-teller")])
         # Round 1 (tool_call_index == 1 >= decide_within): without parity this
         # would latch a synthetic fail and fire DECISION_BUDGET_EXCEEDED.
-        _feed(watcher, [_tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is False
-        assert watcher.info is None
+        _feed(monitor, [_tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is None
+        assert monitor.info is None
 
     def test_pass_stop_cuts_undecided_fail_only_sibling_documented_gap(self) -> None:
         # KNOWN one-sided trade, pinned so a future deferral redesign flips it
@@ -2131,120 +2135,120 @@ class TestEarlyStopWatcher:
         # minimum count is reached and the armed gate scores it 0. Documented
         # in TASK_DEFINITION_GUIDE.md § stop_early: authoritative scoring for
         # such combinations belongs on the kill-switched run.
-        watcher = _watcher(
+        monitor = _monitor_for(
             [
                 _skill_crit("date-teller", "date-teller", stop_on_pass=True),
                 _cmd_crit(min_count=1, max_count=3, stop_on_fail=True),
             ]
         )
-        _feed(watcher, _skill_events("date-teller"))
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, _skill_events("date-teller"))
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_fail_stop_reason_precedence_is_criteria_order_invariant(self) -> None:
         # A native live-fail (distractor misfire) and a decide_within timeout
         # resolving on the SAME round must report the same persisted/telemetry
         # reason in either YAML order: the native fail always wins.
-        def build(order: str) -> EarlyStopWatcher:
+        def build(order: str) -> TurnMonitor:
             distractor = _skill_crit("weather-teller", "date-teller", stop_on_fail=True)
             timed = _skill_crit("date-teller", "date-teller", max_steps_to_decide=1)
             criteria = [distractor, timed] if order == "distractor-first" else [timed, distractor]
-            return _watcher(criteria)
+            return _monitor_for(criteria)
 
         for order in ("distractor-first", "timed-first"):
-            watcher = build(order)
+            monitor = build(order)
             # One resolved misfire round: the distractor natively fails AND the
             # timed criterion's budget (1) expires on the same tool call.
-            _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_skill_cmd("weather-teller", tool_id="w1"))])
-            assert watcher.info is not None, order
-            assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED, order
+            _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_skill_cmd("weather-teller", tool_id="w1"))])
+            assert monitor.info is not None, order
+            assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED, order
 
     def test_decision_latched_after_fire(self) -> None:
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, _skill_events("date-teller"))
-        fired = watcher.info
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, _skill_events("date-teller"))
+        fired = monitor.info
         # A subsequent (wrong-skill) engagement must not overwrite the latched decision.
-        _feed(watcher, [_tool_end(_skill_cmd("weather-teller", tool_id="sk-2"))])
-        assert watcher.info is fired
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, [_tool_end(_skill_cmd("weather-teller", tool_id="sk-2"))])
+        assert monitor.info is fired
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_tool_call_fires_before_result(self) -> None:
         # The decision latches on the tool CALL (ToolStartEvent): a Skill call
         # whose result never arrives (a cut-short turn would strip it) still stops.
         # No ToolEndEvent is ever fed.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller")])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start(), _turn_start(), _skill_start("date-teller")])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
         # The in-flight call reports as the 1st tool call even without a ToolEnd.
-        assert watcher.info.tool_call_index == 1
+        assert monitor.info.tool_call_index == 1
 
     def test_tool_call_distractor_fail_fires(self) -> None:
         # A distractor (armed fail) fail-stops on the tool CALL that engages its
         # skill, before any result arrives.
-        watcher = _watcher([_skill_crit("weather-teller", "date-teller", stop_on_fail=True)])
-        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("weather-teller")])
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+        monitor = _monitor_for([_skill_crit("weather-teller", "date-teller", stop_on_fail=True)])
+        _feed(monitor, [_agent_start(), _turn_start(), _skill_start("weather-teller")])
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_FAILED
 
     def test_tool_call_latches_on_file_read_engagement(self) -> None:
         # Off-Claude agents (antigravity/codex) engage a skill by READING its files
-        # (skills/<name>/...), not via a Skill tool call. The watcher must latch on
+        # (skills/<name>/...), not via a Skill tool call. The monitor must latch on
         # that Read ToolStart — the file-path parameter carries the signal on the
         # call itself, so early-stop fires off-Claude just as it does for Claude.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         read = CommandTelemetry(
             tool_name="Read",
             tool_id="r1",
             timestamp=_TS,
             parameters={"file_path": "/repo/skills/date-teller/SKILL.md"},
         )
-        _feed(watcher, [_agent_start(), _turn_start(), ToolStartEvent(task_id="t", tool=read)])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.CRITERION_PASSED
+        _feed(monitor, [_agent_start(), _turn_start(), ToolStartEvent(task_id="t", tool=read)])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.CRITERION_PASSED
 
     def test_tool_call_latches_before_unresolved_end(self) -> None:
         # The call fires the stop in-loop; a later finalize() UNRESOLVED end for
         # the SAME call is short-circuited (decision already latched) — no relabel,
         # no double count.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start(), _turn_start(), _skill_start("date-teller", tool_id="sk-1")])
-        fired = watcher.info
-        _feed(watcher, [_unresolved_skill_end("date-teller", tool_id="sk-1")])
-        assert watcher.info is fired
-        assert watcher.info is not None
-        assert watcher.info.tool_call_index == 1
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start(), _turn_start(), _skill_start("date-teller", tool_id="sk-1")])
+        fired = monitor.info
+        _feed(monitor, [_unresolved_skill_end("date-teller", tool_id="sk-1")])
+        assert monitor.info is fired
+        assert monitor.info is not None
+        assert monitor.info.tool_call_index == 1
 
     def test_tool_call_index_counts_prior_resolved_calls(self) -> None:
         # A prior resolved, non-deciding tool is counted at its ToolEnd; the
         # deciding in-flight call is then reported as the next (2nd) call.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
         prior = _cmd("Bash", {"command": "ls"})  # not a skill engagement
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(prior)])
-        assert watcher.info is None
-        _feed(watcher, [_skill_start("date-teller", tool_id="sk-1", sequence_number=1)])
-        assert watcher.info is not None
-        assert watcher.info.tool_call_index == 2
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(prior)])
+        assert monitor.info is None
+        _feed(monitor, [_skill_start("date-teller", tool_id="sk-1", sequence_number=1)])
+        assert monitor.info is not None
+        assert monitor.info.tool_call_index == 2
 
     def test_second_agent_start_does_not_reset_origin(self) -> None:
         # The wall-clock origin is stamped at the FIRST AgentStartEvent only; a
         # retry's second AgentStart must NOT reset it (the documented no-op branch
         # in on_event). Exercised deterministically via _started_monotonic rather
         # than the time-based elapsed_seconds field.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
-        _feed(watcher, [_agent_start()])
-        origin = watcher._started_monotonic
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True)])
+        _feed(monitor, [_agent_start()])
+        origin = monitor._started_monotonic
         assert origin is not None
         # A second AgentStart (as on a retry) must leave the origin untouched.
-        _feed(watcher, [_agent_start(), _turn_start()])
-        assert watcher._started_monotonic == origin
+        _feed(monitor, [_agent_start(), _turn_start()])
+        assert monitor._started_monotonic == origin
         # The stop that follows anchors elapsed_seconds to that first origin.
-        _feed(watcher, [_skill_start("date-teller")])
-        assert watcher.info is not None
-        assert watcher.info.elapsed_seconds >= 0.0
+        _feed(monitor, [_skill_start("date-teller")])
+        assert monitor.info is not None
+        assert monitor.info.elapsed_seconds >= 0.0
 
     def test_decision_budget_accumulates_across_retry_attempts(self) -> None:
         # Pins the documented contract (max_steps_to_decide's field
@@ -2253,15 +2257,15 @@ class TestEarlyStopWatcher:
         # AgentStartEvent (as on a retry) must NOT reset tool_call_index. A
         # future per-attempt reset would silently change scoring with this
         # test catching it.
-        watcher = _watcher([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=2)])
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
-        assert watcher.should_stop() is False  # 1 call so far, budget is 2
+        monitor = _monitor_for([_skill_crit("date-teller", "date-teller", stop_on_pass=True, max_steps_to_decide=2)])
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))])
+        assert monitor.should_stop() is None  # 1 call so far, budget is 2
         # A retry: a second AgentStartEvent must not reset the counter.
-        _feed(watcher, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo bye"}))])
-        assert watcher.should_stop() is True
-        assert watcher.info is not None
-        assert watcher.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
-        assert watcher.info.tool_call_index == 2
+        _feed(monitor, [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo bye"}))])
+        assert monitor.should_stop() is StopReason.EARLY_CRITERION
+        assert monitor.info is not None
+        assert monitor.info.reason == EarlyStopReason.DECISION_BUDGET_EXCEEDED
+        assert monitor.info.tool_call_index == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -2271,7 +2275,7 @@ class TestEarlyStopWatcher:
 
 class _ScriptedAgent:
     """Duck-typed agent: replays scripted events through the callback, polling
-    ``should_stop`` after each and breaking when it flips (mirrors the real
+    ``should_stop`` after each and breaking on a reason (mirrors the real
     message-boundary cut). Returns a fixed ``TurnRecord``."""
 
     def __init__(self, events: list[Any], turn: TurnRecord) -> None:
@@ -2289,8 +2293,7 @@ class _ScriptedAgent:
         *,
         stream_callback: Any = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         for event in self._events:
             if stream_callback is not None:
@@ -2313,7 +2316,7 @@ async def _run_wiring(
     """Drive ``Orchestrator._evaluation_loop`` with a scripted agent + mock checker.
 
     ``scores`` are positional CriterionResult scores matching ``criteria``.
-    The early-stop watcher is built directly (_setup is not invoked here).
+    The turn monitor is built directly (_setup is not invoked here).
     """
     task = _task(criteria=criteria, agent_type=agent_type, gate_threshold=gate_threshold)
     run_dir = tmp_path / "run"
@@ -2340,8 +2343,7 @@ async def _run_wiring(
     )
     orch.success_checker = checker
 
-    if early_stop_active(task):
-        orch._early_stop_watcher = EarlyStopWatcher.for_task(task)
+    orch._monitor = TurnMonitor.for_task(task, arm=True)
 
     turn = TurnRecord(iteration=1, user_input="p", agent_output="done")
     agent = _ScriptedAgent(events, turn)
@@ -2372,7 +2374,7 @@ class TestOrchestratorEarlyStopWiring:
         ]
 
     async def test_default_off_full_gate_no_early_stop(self, tmp_path) -> None:
-        # Unarmed: no watcher, all criteria gate, advisory 0.0 drags to FAILURE.
+        # Unarmed: no armed criteria, all criteria gate, advisory 0.0 drags to FAILURE.
         result, agent, _success = await _run_wiring(
             criteria=self._criteria(armed=False),
             events=_skill_events(self._SKILL),
@@ -2380,7 +2382,7 @@ class TestOrchestratorEarlyStopWiring:
             tmp_path=tmp_path,
         )
         assert result.early_stop is None
-        assert agent.delivered == 3  # full stream consumed (should_stop=None)
+        assert agent.delivered == 3  # full stream consumed (should_stop never returns a reason)
 
     async def test_pass_stop_cuts_the_stream(self, tmp_path) -> None:
         # A trailing event AFTER the deciding ToolEnd proves the cut: delivered == 3.
@@ -2464,7 +2466,7 @@ class TestOrchestratorEarlyStopWiring:
         checker = MagicMock()
         checker.check_all_async = AsyncMock(return_value=[_crit_result(c.type, 1.0) for c in criteria])
         orch.success_checker = checker
-        orch._early_stop_watcher = EarlyStopWatcher.for_task(task)
+        orch._monitor = TurnMonitor.for_task(task, arm=True)
         turn = TurnRecord(iteration=1, user_input="p", agent_output="done")
         events = [_agent_start(), _turn_start(), _tool_end(_cmd("Bash", {"command": "echo hi"}))]
         agent = _ScriptedAgent(events, turn)
@@ -2521,7 +2523,7 @@ class TestOrchestratorEarlyStopWiring:
         # FIRED-ONLY gating, diverging in the other direction from the sibling
         # test below: two ARMED criteria (0.8 passing / 0.2 failing) under a
         # 0.7 threshold. The weighted armed gate WOULD pass (0.8 >= 0.7), but
-        # the run completed naturally (watcher never fired), so the strict
+        # the run completed naturally (monitor never fired), so the strict
         # full-set gate applies and the failing 0.2 criterion drags the run to
         # failure — proving the armed gate did not run.
         criteria = [
@@ -2530,7 +2532,7 @@ class TestOrchestratorEarlyStopWiring:
         ]
         result, agent, success = await _run_wiring(
             criteria=criteria,
-            events=[_agent_start(), _turn_start()],  # no skill engagement -> watcher never fires
+            events=[_agent_start(), _turn_start()],  # no skill engagement -> monitor never fires
             scores=[1.0, 0.0],
             tmp_path=tmp_path,
             gate_threshold=0.7,
@@ -2541,16 +2543,16 @@ class TestOrchestratorEarlyStopWiring:
         assert success is False  # the strict full-set gate is what decided this run
 
     async def test_completed_naturally_full_gate_applies_even_when_armed(self, tmp_path) -> None:
-        # FIRED-ONLY gating: an armed run whose watcher never fires (the agent
+        # FIRED-ONLY gating: an armed run whose monitor never fires (the agent
         # completed naturally) has a FULL trajectory, so the strict full-set
         # gate applies — the advisory 0.0 drags it to FAILURE exactly as it
         # would on an unarmed run. Arming a criterion (e.g. adding a
         # decide_within fail-fast timeout) must never change the verdict of a
         # run it didn't cut; the weighted armed gate is reserved for runs the
-        # watcher actually truncated.
+        # monitor actually truncated.
         result, agent, success = await _run_wiring(
             criteria=self._criteria(),
-            events=[_agent_start(), _turn_start()],  # no skill engagement -> watcher never fires
+            events=[_agent_start(), _turn_start()],  # no skill engagement -> monitor never fires
             scores=[1.0, 0.0],
             tmp_path=tmp_path,
         )
@@ -2563,7 +2565,7 @@ class TestOrchestratorEarlyStopWiring:
         # Mutation-resistant pin for the plumbing hop: YAML
         # stop_early_gate_threshold -> the final gate (orchestrator.py) ->
         # _evaluation_loop's real return value. Weighted criteria (0.8/0.2);
-        # the positive engages its skill so the watcher FIRES a pass-stop
+        # the positive engages its skill so the monitor FIRES a pass-stop
         # (fired-only gating means the armed gate only ever applies to a fired
         # run), and the mocked frozen-trajectory scores fail the low-weight
         # distractor — so the threshold alone decides the verdict.
@@ -2591,7 +2593,7 @@ class TestOrchestratorEarlyStopWiring:
         assert success_low is True  # 0.8 >= 0.7 — a mutation to a literal 1.0 would flip this
 
     async def test_gate_threshold_persisted_on_early_stop_info(self, tmp_path) -> None:
-        # The second plumbing hop: the fired watcher's own EarlyStopInfo
+        # The second plumbing hop: the fired monitor's own EarlyStopInfo
         # carries the threshold that was actually in effect.
         result, _agent, _success = await _run_wiring(
             criteria=self._criteria(),
@@ -2648,22 +2650,22 @@ class TestOrchestratorEarlyStopWiring:
 
 
 class TestOrchestratorSetupActivation:
-    """The REAL ``Orchestrator._setup`` builds (or withholds) the watcher.
+    """The REAL ``Orchestrator._setup`` builds the turn monitor and arms (or withholds) its criteria.
 
-    The wiring tests above inject the watcher by hand; these drive ``_setup``
+    The wiring tests above inject the monitor by hand; these drive ``_setup``
     itself on its evaluate-only path (sandbox pre-set, so no agent/sandbox
-    creation is reached) to pin the activation seam: armed -> watcher built,
-    kill-switched -> watcher stays None.
+    creation is reached) to pin the activation seam: armed -> criteria armed,
+    kill-switched or execute mode -> monitor built but unarmed.
     """
 
-    def _orchestrator(self, tmp_path: Path, *, stop_early: bool | None) -> Orchestrator:
+    def _orchestrator(self, tmp_path: Path, *, stop_early: bool | None, grade: bool = True) -> Orchestrator:
         task = _task(
             criteria=[_skill_crit("date-teller", "date-teller", stop_on_pass=True)],
             stop_early=stop_early,
         )
         run_dir = tmp_path / "run"
         run_dir.mkdir(parents=True)
-        orch = Orchestrator(task=task, run_dir=run_dir, variant_id="default")
+        orch = Orchestrator(task=task, run_dir=run_dir, variant_id="default", grade=grade)
         orch.result = EvaluationResult(
             task_id=task.task_id,
             task_description=task.description,
@@ -2680,18 +2682,32 @@ class TestOrchestratorSetupActivation:
         orch.sandbox = sandbox  # evaluate-only: _setup skips agent/sandbox creation
         return orch
 
-    async def test_setup_builds_watcher_when_armed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_setup_arms_monitor_when_armed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings, "api_backend", ApiBackend.DIRECT)
         orch = self._orchestrator(tmp_path, stop_early=None)
         await orch._setup()
-        assert orch._early_stop_watcher is not None
-        assert len(orch._early_stop_watcher._armed) == 1
+        assert orch._monitor is not None
+        assert orch._monitor.armed is True
+        assert len(orch._monitor._armed) == 1
 
-    async def test_setup_kill_switch_leaves_watcher_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_setup_kill_switch_builds_unarmed_monitor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(settings, "api_backend", ApiBackend.DIRECT)
         orch = self._orchestrator(tmp_path, stop_early=False)
         await orch._setup()
-        assert orch._early_stop_watcher is None
+        assert orch._monitor is not None
+        assert orch._monitor.armed is False
+
+    def test_build_monitor_execute_mode_leaves_criteria_unarmed(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        orch = self._orchestrator(tmp_path, stop_early=None, grade=False)
+        with caplog.at_level("INFO", logger="coder_eval.orchestrator"):
+            orch._build_monitor()
+        assert orch._monitor is not None
+        assert orch._monitor.armed is False
+        assert "execute mode" in caplog.text
 
 
 # --------------------------------------------------------------------------- #
@@ -2706,7 +2722,7 @@ def _stopped_result(
     criteria_results: list[CriterionResult] | None = None,
 ) -> EvaluationResult:
     result = _result(criteria_results=criteria_results)
-    result.early_stop = _info(reason=reason, turns_remaining_at_stop=turns_remaining)
+    result.early_stop = _info(reason=reason, tool_calls_remaining_at_stop=turns_remaining)
     return result
 
 
@@ -2732,14 +2748,14 @@ class TestEarlyStopReportSurfaces:
         d = eval_result_to_task_dict(_stopped_result())
         assert d["stopped_early"] is True
         assert d["early_stop_reason"] == "criterion_passed"
-        assert d["turns_remaining_at_stop"] == 14
+        assert d["tool_calls_remaining_at_stop"] == 14
         assert d["gate_threshold"] == 1.0
 
     def test_task_dict_keys_defaulted_when_not_early_stopped(self) -> None:
         d = eval_result_to_task_dict(_result())
         assert d["stopped_early"] is False
         assert d["early_stop_reason"] is None
-        assert d["turns_remaining_at_stop"] is None
+        assert d["tool_calls_remaining_at_stop"] is None
         assert d["gate_threshold"] is None
 
     def test_task_dict_reflects_decision_budget_exceeded(self) -> None:
@@ -2747,13 +2763,9 @@ class TestEarlyStopReportSurfaces:
         assert d["early_stop_reason"] == "decision_budget_exceeded"
 
     def test_runtime_note_omits_the_turns_avoided_claim(self) -> None:
-        """The note states the reason and the gate, and claims no turn saving.
+        """The note states the reason and the gate, and claims no saving.
 
-        It used to render ``<= N turn(s) avoided`` from ``max_turns - sdk_turn_index``.
-        On Codex and Antigravity one ``communicate()`` is a single SDK turn, so that
-        subtraction advertised the entire max_turns budget as saved when all that was
-        actually cut was a tool-call tail. ``turns_remaining_at_stop`` is still
-        persisted on ``EarlyStopInfo``, where its docstring calls it an upper bound.
+        ``tool_calls_remaining_at_stop`` is persisted on the row, not rendered.
         """
         lines = ReportGenerator._runtime_notes_lines(_run_summary([eval_result_to_task_dict(_stopped_result())]))
         blob = "\n".join(lines)
@@ -2761,7 +2773,7 @@ class TestEarlyStopReportSurfaces:
         assert "gated on armed criteria only; other criteria are advisory" in blob
         assert "avoided" not in blob
         # Still recorded on the row for anyone who wants the bound.
-        assert eval_result_to_task_dict(_stopped_result())["turns_remaining_at_stop"] == 14
+        assert eval_result_to_task_dict(_stopped_result())["tool_calls_remaining_at_stop"] == 14
 
     def test_runtime_note_for_decision_budget_exceeded_names_the_timeout(self) -> None:
         # The budget-exceeded reason is an effective fail gated through the
@@ -2903,20 +2915,20 @@ async def _run_codex_communicate(
 ) -> tuple[CodexAgent, TurnRecord, _EventSink, _FakeCodexStream, _FakeCodexTurnHandle]:
     """Drive ``CodexAgent.communicate`` over a fake notification stream.
 
-    ``stop_after``: should_stop returns True once that many notifications have
-    been pulled (checked after each dispatch). ``never``: an always-False
-    should_stop. Neither: ``should_stop=None``.
+    ``stop_after``: should_stop returns ``EARLY_CRITERION`` once that many
+    notifications have been pulled (checked after each dispatch). ``never``: an
+    always-None should_stop. Neither: ``should_stop=None``.
     """
     agent = _codex_agent()
     stream = _FakeCodexStream(notifications)
     handle = _FakeCodexTurnHandle(stream)
     agent.thread = SimpleNamespace(turn=lambda _prompt: handle)
 
-    should_stop: Callable[[], bool] | None
+    should_stop: Callable[[], StopReason | None] | None
     if stop_after is not None:
-        should_stop = lambda: stream.iter.pulled >= stop_after  # noqa: E731
+        should_stop = lambda: StopReason.EARLY_CRITERION if stream.iter.pulled >= stop_after else None  # noqa: E731
     elif never:
-        should_stop = lambda: False  # noqa: E731
+        should_stop = lambda: None  # noqa: E731
     else:
         should_stop = None
 
@@ -2951,7 +2963,7 @@ class TestCodexCooperativeStopSeam:
         assert record.crashed is False
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
 
-    async def test_should_stop_false_consumes_full_stream(self) -> None:
+    async def test_should_stop_returning_none_consumes_full_stream(self) -> None:
         notifications = [_codex_delta(0), _codex_delta(1), _codex_completed()]
         _agent, _record, sink, stream, _handle = await _run_codex_communicate(notifications=notifications, never=True)
         assert stream.iter.pulled == 3
@@ -2979,7 +2991,7 @@ class TestCodexCooperativeStopSeam:
 
     async def test_timeout_beats_stop_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Both signals in one turn: the watchdog fires (timeout_hit) AND should_stop
-        # is True. The post-pump timeout check must win — TIMEOUT, crashed=True.
+        # returns a reason. The post-pump timeout check must win — TIMEOUT, crashed=True.
         class _FiringWatchdog:
             def __init__(self, *, on_timeout: Callable[[], None], **_kwargs: Any) -> None:
                 self._on_timeout = on_timeout
@@ -2997,7 +3009,9 @@ class TestCodexCooperativeStopSeam:
         agent.thread = SimpleNamespace(turn=lambda _prompt: _FakeCodexTurnHandle(stream))
         sink = _EventSink()
         with pytest.raises(TurnTimeoutError):
-            await agent.communicate("prompt", stream_callback=sink, timeout=30.0, should_stop=lambda: True)
+            await agent.communicate(
+                "prompt", stream_callback=sink, timeout=30.0, should_stop=lambda: StopReason.EARLY_CRITERION
+            )
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.TIMEOUT
@@ -3010,7 +3024,7 @@ class TestCodexCooperativeStopSeam:
     async def test_post_stop_exception_stays_clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The retry-poisoning gap: an exception AFTER the cooperative break (here:
         # the pump's finally-side cleanup) must NOT crash-finalize the turn — a
-        # crash would trigger the orchestrator retry with the watcher's decision
+        # crash would trigger the orchestrator retry with the monitor's decision
         # still latched, stopping the retry at turn 0.
         def _boom(self: Any) -> None:
             raise RuntimeError("post-stop cleanup boom")
@@ -3062,8 +3076,12 @@ class TestCodexCooperativeStopSeam:
             patch.object(_CodexTurnState, "__init__", _capturing_init),
             patch.object(CodexAgent, "_recover_subagent_tool_calls", recover),
         ):
-            await agent.communicate("prompt", stream_callback=_EventSink(), should_stop=lambda: stream.iter.pulled >= 1)
-        assert captured["state"].stopped_early_hit is True
+            await agent.communicate(
+                "prompt",
+                stream_callback=_EventSink(),
+                should_stop=lambda: StopReason.EARLY_CRITERION if stream.iter.pulled >= 1 else None,
+            )
+        assert captured["state"].stop_reason is StopReason.EARLY_CRITERION
         recover.assert_not_awaited()
 
 
@@ -3133,11 +3151,11 @@ async def _run_antigravity_communicate(
     conversation = _CountingConversation([_ag_step(i) for i in range(n_steps)], cancel_raises=cancel_raises)
     agent = _antigravity_agent(conversation)
 
-    should_stop: Callable[[], bool] | None
+    should_stop: Callable[[], StopReason | None] | None
     if stop_after is not None:
-        should_stop = lambda: conversation.yielded >= stop_after  # noqa: E731
+        should_stop = lambda: StopReason.EARLY_CRITERION if conversation.yielded >= stop_after else None  # noqa: E731
     elif never:
-        should_stop = lambda: False  # noqa: E731
+        should_stop = lambda: None  # noqa: E731
     else:
         should_stop = None
 
@@ -3168,7 +3186,7 @@ class TestAntigravityCooperativeStopSeam:
         assert record.crashed is False
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
 
-    async def test_should_stop_false_consumes_full_stream(self) -> None:
+    async def test_should_stop_returning_none_consumes_full_stream(self) -> None:
         _agent, _record, sink, conversation = await _run_antigravity_communicate(never=True, n_steps=3)
         assert conversation.yielded == 3
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
@@ -3199,7 +3217,9 @@ class TestAntigravityCooperativeStopSeam:
         agent = _antigravity_agent(conversation)
         sink = _EventSink()
         with pytest.raises(TurnTimeoutError):
-            await agent.communicate("prompt", stream_callback=sink, timeout=30.0, should_stop=lambda: True)
+            await agent.communicate(
+                "prompt", stream_callback=sink, timeout=30.0, should_stop=lambda: StopReason.EARLY_CRITERION
+            )
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.TIMEOUT
@@ -3260,7 +3280,7 @@ class TestAntigravityCooperativeStopSeam:
 
 
 # --------------------------------------------------------------------------- #
-# Orchestrator-level wiring on a non-Claude agent type: the watcher, gating and
+# Orchestrator-level wiring on a non-Claude agent type: the monitor, gating and
 # report row are agent-agnostic — an armed codex task flows end to end.
 # --------------------------------------------------------------------------- #
 

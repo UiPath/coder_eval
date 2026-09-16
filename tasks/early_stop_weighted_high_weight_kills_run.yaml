@@ -12,7 +12,7 @@ description: >
   truncate recall) — with the prompt ordering curl before python app.py, the
   fail-stop actually fires as soon as the positive resolves (not
   "immediately" on the curl misfire itself), rather than burning the rest of
-  run_limits.max_turns on a doomed run. This is a NON-CI example task
+  run_limits.max_tool_calls on a doomed run. This is a NON-CI example task
   (deliberately untagged for smoke-pass/smoke-fail): whether the agent
   actually calls curl as instructed is not deterministic enough for a
   live-agent CI assertion — run it manually with `coder-eval run` to observe
@@ -30,7 +30,7 @@ agent:
   allowed_tools: ["Read", "Write", "Bash"]
 
 run_limits:
-  max_turns: 20
+  max_tool_calls: 20
   stop_early_gate_threshold: 0.7
 
 success_criteria:

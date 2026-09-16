@@ -43,7 +43,7 @@ for key in [
 _REMOVED_DEFAULT_KNOBS = {
     "DEFAULT_AGENT_MODEL": "agent.by_type.claude-code.model",
     "DEFAULT_PERMISSION_MODE": "agent.by_type.claude-code.permission_mode",
-    "DEFAULT_MAX_TURNS": "run_limits.max_turns",
+    "DEFAULT_MAX_TURNS": "run_limits.max_tool_calls",
 }
 
 

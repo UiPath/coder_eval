@@ -26,6 +26,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
@@ -74,8 +75,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Return an empty turn without contacting any model.
 

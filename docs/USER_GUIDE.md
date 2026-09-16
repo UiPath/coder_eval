@@ -36,7 +36,7 @@ coder-eval run tasks/hello_date.yaml --stream full  # live LLM output
 | `--max-parallel, -j` | Concurrent tasks (default: 1) |
 | `--preservation-mode` | Sandbox persistence: `NONE` / `MOVE_ON_WRITE` / `DIRECT_WRITE`. Default is driver-derived (docker → `DIRECT_WRITE`, else `MOVE_ON_WRITE`); explicit value always wins. |
 | `--run-dir` | Custom run directory (default: timestamped in `runs/`) |
-| `-D path=value` / `--set` | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_turns=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, turn/timeout limits, token/USD budget caps, tools, plugins, and SDK options. |
+| `-D path=value` / `--set` | Override any resolved task-config field (`agent`/`run_limits`/`sandbox` roots), e.g. `-D run_limits.max_tool_calls=30 -D agent.permission_mode=plan -D agent.sdk_options.effort=high`. Repeatable; schema-validated. This is the way to set permission mode, tool-call/timeout limits, token/USD budget caps, tools, plugins, and SDK options. |
 | `--model, -m` | Shorthand alias for `-D agent.model=…` (e.g., `claude-sonnet-5`) |
 | `--driver` | Shorthand alias for `-D sandbox.driver=…` (`tempdir` or `docker`) |
 | `--type, -T` | Override agent type for all tasks (`claude-code`, `codex`, `antigravity`, `opencode`, `pi`, or a plugin kind). |
@@ -81,8 +81,8 @@ you want to iterate on afterwards. Grade the results later with
 budget breach still reports `ERROR` / `TIMEOUT` / `TOKEN_BUDGET_EXCEEDED` and still
 exits non-zero, exactly as under `run`.
 
-Exhausting `max_turns` is the one fact that does *not* become a status here. Under
-`run` it decides the outcome only when the criteria fail — a max-turns trajectory
+Exhausting `max_tool_calls` is the one fact that does *not* become a status here. Under
+`run` it decides the outcome only when the criteria fail — a capped trajectory
 whose criteria pass is `SUCCESS` — so it is not knowable without grading. `execute`
 records `tool_calls_exhausted: true` on the row and finalizes `NOT_GRADED`; the later
 grade reads the flag and reaches exactly the status `run` would have. Rows like this
@@ -189,6 +189,9 @@ expansion are already baked into `resolved`, so re-loading the source would
 silently grade a *different* task. The run's trajectory is restored too, so
 criteria that read the agent's tool calls (`command_executed`, `skill_triggered`,
 judges with trajectory) score exactly as they would have during the run.
+A run recorded before `run_limits.max_turns` became `run_limits.max_tool_calls` carries
+the old key, which no longer validates, so `evaluate` re-grades it from the source task
+YAML and prints its fallback warning.
 
 It writes the verdict back into the run's `task.json` and keeps the pre-grade
 record beside it as `task.execute.json`. Writing back in place is what makes

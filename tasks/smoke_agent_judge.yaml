@@ -17,7 +17,7 @@ tags: [smoke, smoke-pass, judge]
 
 # Capped low; agent only needs to write one short file.
 run_limits:
-  max_turns: 3
+  max_tool_calls: 3
 
 agent:
   type: "claude-code"

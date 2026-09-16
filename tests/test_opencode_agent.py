@@ -40,6 +40,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
@@ -1219,7 +1220,7 @@ class TestZeroTelemetryIsLoud:
         stream = [json.dumps({"id": "evt_1", "type": "session.next.idle", "properties": {"sessionID": SESSION}})]
         proc = _RunningProcess(stream)
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert record.crashed is False
 
     @staticmethod
@@ -1278,7 +1279,7 @@ class TestZeroTelemetryIsLoud:
         a step's start and its `step_finish` is an intentional cut, not drift."""
         proc = _RunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"})])
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert record.crashed is False
 
     async def test_real_tokens_are_never_condemned(self, patch_exec, tmp_path):
@@ -1450,63 +1451,84 @@ class TestStderrIsDrainedConcurrently:
         assert record.crashed is False
 
 
+def _stop_after(calls: int, reason: StopReason):
+    """A ``should_stop`` that returns ``reason`` from its ``calls``-th check on (one check per dispatched line)."""
+    seen = 0
+
+    def should_stop() -> StopReason | None:
+        nonlocal seen
+        seen += 1
+        return reason if seen >= calls else None
+
+    return should_stop
+
+
 class TestCooperativeStop:
     def test_capability_flag_is_declared(self):
         assert OpenCodeAgent.contract.cooperative_stop is True
 
-    async def test_should_stop_ends_turn_cleanly(self, patch_exec, tmp_path):
+    async def test_early_criterion_ends_turn_stopped_early(self, patch_exec, tmp_path):
         """A live subprocess must be torn down, and the turn must not be a crash."""
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        recorder = _EventRecorder()
+        record = await _run(
+            _agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION, stream_callback=recorder
+        )
 
         assert record.crashed is False
         assert proc.terminated is True
         # Stopped at the first event boundary rather than draining the stream.
         assert record.assistant_turn_count < 2
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.STOPPED_EARLY]
 
-    async def test_max_turns_marks_exhausted(self, patch_exec, tmp_path):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=1)
+    async def test_tool_call_cap_ends_turn_tool_calls_exhausted(self, patch_exec, tmp_path):
+        proc = _RunningProcess(HAPPY_STREAM)
+        patch_exec(proc)
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP, stream_callback=recorder)
+
+        assert proc.terminated is True
+        assert record.crashed is False
         assert record.tool_calls_exhausted is True
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.TOOL_CALLS_EXHAUSTED]
 
-    async def test_a_cap_the_run_stays_under_is_not_exhausted(self, patch_exec, tmp_path):
-        """The OTHER direction, which decides `FinalStatus`.
+    async def test_token_budget_ends_turn_token_budget_exceeded(self, patch_exec, tmp_path):
+        proc = _RunningProcess(HAPPY_STREAM)
+        patch_exec(proc)
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET, stream_callback=recorder)
 
-        HAPPY_STREAM is exactly 2 steps, so `max_turns=2` is the boundary: an
-        off-by-one here (`>` becoming `>=`, or counting finished steps instead of
-        started ones) reports TOOL_CALLS_EXHAUSTED — orchestrator.py turns the flag
-        straight into `FinalStatus.TOOL_CALLS_EXHAUSTED` — for a run that finished
-        well inside its budget. A spurious exhaustion also suppresses the non-zero-
-        exit and zero-telemetry crash guards, which are both conditioned on it, so
-        the run would score silently instead of failing loudly.
-        """
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=2)
-
+        assert proc.terminated is True
+        assert record.crashed is False
         assert record.tool_calls_exhausted is False
-        assert record.assistant_turn_count == 2
-        # Both steps' telemetry is present — the cap did not truncate the stream.
-        assert record.token_usage is not None
-        assert record.token_usage.output_tokens == 57
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.TOKEN_BUDGET_EXCEEDED]
 
-    async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
+    async def test_no_stop_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        record = await _run(_agent(), tmp_path, should_stop=lambda: None)
         assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 2
 
     async def test_the_deciding_step_is_kept_whole(self, patch_exec, tmp_path):
-        """`max_turns=1` cuts at the START of step 2, so step 1 survives complete.
+        """A stop after step 1's `step_finish` keeps step 1 complete and never opens step 2.
 
         Asserting only the flag would let a cut that discards the step that earned
-        the budget pass — the run would report exhaustion with none of the
+        the stop pass — the run would report exhaustion with none of the
         telemetry that reached it.
         """
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=1)
+        patch_exec(_RunningProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        record = await _run(
+            _agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP), stream_callback=recorder
+        )
 
         assert record.tool_calls_exhausted is True
+        assert record.assistant_turn_count == 1
+        assert len([e for e in recorder.events if isinstance(e, TurnStartEvent)]) == 1
         assert len(record.commands) == 1  # step 1's tool call
         usage = record.token_usage
         assert usage is not None
@@ -1516,16 +1538,12 @@ class TestCooperativeStop:
         assert usage.cache_creation_input_tokens == 5
         assert usage.cache_read_input_tokens == 10
 
-    async def test_the_step_past_the_cap_is_never_admitted(self, patch_exec, tmp_path):
-        """The cap stops at the (N+1)th `step_start`, before it is counted or emitted."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
-
+    async def test_an_intentional_stop_is_exempt_from_a_non_zero_exit(self, patch_exec, tmp_path):
+        """Killing the CLI makes it exit non-zero; that must not crash an intentional stop."""
+        patch_exec(_RunningProcess(HAPPY_STREAM, returncode=-15, stderr=b"terminated"))
+        record = await _run(_agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP))
+        assert record.crashed is False
         assert record.tool_calls_exhausted is True
-        assert record.assistant_turn_count == 1
-        assert len([e for e in recorder.events if isinstance(e, TurnStartEvent)]) == 1
-        assert len([e for e in recorder.events if isinstance(e, TurnEndEvent)]) == 1
 
 
 class _HangingProcess(_FakeProcess):
@@ -1730,12 +1748,12 @@ class TestTurnEventsAreBalanced:
         assert self._pairs(recorder) == (1, 1)
 
     async def test_a_clean_cut_closes_the_open_step(self, patch_exec, tmp_path):
-        """should_stop and max_turns cut between a step's start and its finish too."""
+        """A should_stop cut between a step's start and its finish closes the step too."""
         proc = _RunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
         patch_exec(proc)
         recorder = _EventRecorder()
 
-        await _run(_agent(), tmp_path, should_stop=lambda: True, stream_callback=recorder)
+        await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION, stream_callback=recorder)
 
         assert self._pairs(recorder) == (1, 1)
         end = next(e for e in recorder.events if isinstance(e, TurnEndEvent))
@@ -1849,7 +1867,7 @@ class TestProcessGroupTeardown:
 
     async def test_cooperative_stop_sweeps_the_group_too(self, patch_exec, tmp_path):
         captured = patch_exec(_RunningProcess(HAPPY_STREAM))
-        await _run(_agent(), tmp_path, should_stop=lambda: True)
+        await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert (4242, signal.SIGKILL) in captured["killpg"]
 
     async def test_kill_sync_signals_pid_and_group(self, patch_exec, monkeypatch, tmp_path):

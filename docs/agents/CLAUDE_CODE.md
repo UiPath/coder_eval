@@ -109,9 +109,13 @@ agent:
 | `ignore_patterns` | `list[str] \| null` | Gitignore-style overrides for the workspace copy used by judge sub-agents (supports `!` negation). |
 
 > `sdk_options` is a deliberate escape hatch. Framework-owned keys (`model`,
-> `permission_mode`, `allowed_tools`, `mcp_servers`, `resume`, `max_turns`,
+> `permission_mode`, `allowed_tools`, `mcp_servers`, `resume`,
 > `setting_sources`, `include_partial_messages`, …) are rejected there — set those
 > through their typed fields or `-D run_limits.*`. MCP servers are not a YAML field.
+> `sdk_options.max_turns` is allowed: it is the SDK's own agent-loop cap, and when it
+> trips the turn ends `COMPLETED` with `result_summary.subtype == "error_max_turns"`,
+> while `run_limits.max_tool_calls` is the framework's cap on resolved tool calls
+> (the `TurnMonitor` enforces it, as on every harness); both apply.
 
 > **System-prompt reproducibility.** In `append` mode the preset's *dynamic
 > sections* (working directory, git status, auto-memory) are excluded so the system
@@ -205,7 +209,7 @@ Claude Code supports the cooperative early-stop seam, as do the
 carries a `stop_early:` block, a single-shot run ends cleanly at the next
 tool-call boundary once its **armed** criteria (those carrying a
 `stop_early:` block) are
-decided — so a raised `max_turns` isn't wasted on a smoke run. Early stop errors at
+decided — so a raised `max_tool_calls` isn't wasted on a smoke run. Early stop errors at
 resolution for any agent whose contract does not declare `cooperative_stop`. See the
 [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) for the full contract.
 
@@ -215,7 +219,10 @@ Claude Code produces the richest telemetry of the agents:
 
 - **Authoritative billing** comes from the SDK's cumulative `model_usage` on the
   terminal result message and reconciles to `total_cost_usd` — this already includes
-  sub-agent consumption that the per-message stream under-reports.
+  sub-agent consumption that the per-message stream under-reports. A turn that the
+  `TurnMonitor` stops (early stop, the tool-call cap) ends before that message
+  arrives, so its usage and cost come from the per-message stream and the rate card,
+  and can be slightly lower than the bill.
 - **Sub-agent accounting** is derived by grouping `parent_tool_use_id`-tagged
   assistant messages; there is no separate per-sub-agent field. The terminal
   sub-agent generation (delivered as the Agent tool result, never streamed) is

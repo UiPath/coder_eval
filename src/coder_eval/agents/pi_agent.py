@@ -11,7 +11,7 @@ Three grammar facts that are not obvious from the event names (``pi`` 0.84.4):
   transient provider error internally — and ``agent_end`` is therefore NOT
   terminal. ``agent_settled`` (or EOF) is; the single ``AgentEndEvent`` is
   emitted there.
-- ``turn_start`` is one per agent-loop step, and is the unit ``max_turns`` counts.
+- ``turn_start`` is one per agent-loop step (``num_turns`` on the record).
 - ``message_end`` is ignored for token accounting: ``turn_end`` echoes the same
   assistant usage once per step, so reading both would double-count.
 
@@ -67,6 +67,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     StreamEvent,
     TextChunkEvent,
     ToolEndEvent,
@@ -75,6 +76,7 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import TurnClock, close_window
 
@@ -239,7 +241,7 @@ class _PiTurnState:
         self.messages: list[TranscriptMessage] = []
         self.text_parts: list[str] = []
 
-        # Pi `turn_start` events counted; this is what max_turns caps.
+        # Pi `turn_start` events counted.
         self.turn_count = 0
         self.turn_id: str = ""
         # True between a step's `turn_start` and its `turn_end`. `finalize` needs
@@ -259,7 +261,6 @@ class _PiTurnState:
         self.sequence = 0
         self.stop_reason: str | None = None
         self.error_message: str | None = None
-        self.max_turns_exhausted = False
         # Guards the one-terminal-event rule; see finalize().
         self.finalized = False
         # Count of events matched against the recognized Pi vocabulary (drift check),
@@ -897,8 +898,7 @@ class PiAgent(Agent[PiAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         if self.working_directory is None:
             raise RuntimeError("PiAgent.start() must be called before communicate()")
@@ -935,7 +935,7 @@ class PiAgent(Agent[PiAgentConfig]):
         # Deadlines stay on `time.monotonic()`, deliberately NOT the turn clock:
         # a deadline must not move when the wall clock steps.
         deadline = None if timeout is None else time.monotonic() + timeout
-        stopped_early = False
+        requested_stop: StopReason | None = None
         stderr_drain: asyncio.Future[bytes] | None = None
         # Bound OUTSIDE the try so `finally` can tell "never spawned" from
         # "spawned and possibly still running".
@@ -994,13 +994,10 @@ class PiAgent(Agent[PiAgentConfig]):
                     if not line:
                         break
 
-                    self._handle_line(line, state, max_turns=max_turns)
+                    self._handle_line(line, state)
 
-                    if state.max_turns_exhausted:
-                        await self.kill()
-                        break
-                    if should_stop is not None and should_stop():
-                        stopped_early = True
+                    requested_stop = should_stop() if should_stop is not None else None
+                    if requested_stop is not None:
                         await self.kill()
                         break
             finally:
@@ -1013,7 +1010,7 @@ class PiAgent(Agent[PiAgentConfig]):
                 state,
                 collector,
                 stderr_drain,
-                stopped_early=stopped_early,
+                requested_stop=requested_stop,
                 deadline=deadline,
                 timeout=timeout,
             )
@@ -1063,7 +1060,7 @@ class PiAgent(Agent[PiAgentConfig]):
         collector: EventCollector,
         stderr_drain: asyncio.Future[bytes] | None,
         *,
-        stopped_early: bool,
+        requested_stop: StopReason | None,
         deadline: float | None,
         timeout: float | None,
     ) -> AgentEndStatus:
@@ -1095,17 +1092,17 @@ class PiAgent(Agent[PiAgentConfig]):
         # intentional cuts: a cut can fire before the clearing `turn_end` arrives,
         # leaving a stale error from a turn pi was still retrying.
         # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
-        if state.error_message is not None and not stopped_early and not state.max_turns_exhausted:
+        if state.error_message is not None and requested_stop is None:
             self._crash_turn(state, collector, f"Pi error: {state.error_message}")
 
         # A non-zero exit with no intentional cut means the turn died.
-        if proc.returncode not in (0, None) and not stopped_early and not state.max_turns_exhausted:
+        if proc.returncode not in (0, None) and requested_stop is None:
             detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
             self._crash_turn(state, collector, f"Pi exited non-zero: {detail}")
 
         # A clean exit that recognized NO events is vocabulary drift. Intentional
         # cuts are exempt: a stop can land before the first event.
-        if not stopped_early and not state.max_turns_exhausted and state.recognized_events == 0:
+        if requested_stop is None and state.recognized_events == 0:
             seen = ", ".join(sorted(state.unrecognized_types)) or "none (stdout carried no JSON events)"
             self._crash_turn(
                 state,
@@ -1115,11 +1112,7 @@ class PiAgent(Agent[PiAgentConfig]):
                 + "run from this CLI version.",
             )
 
-        if stopped_early:
-            return AgentEndStatus.STOPPED_EARLY
-        if state.max_turns_exhausted:
-            return AgentEndStatus.TOOL_CALLS_EXHAUSTED
-        return AgentEndStatus.COMPLETED
+        return end_status_for(requested_stop) if requested_stop is not None else AgentEndStatus.COMPLETED
 
     def _crash_turn(
         self,
@@ -1150,12 +1143,11 @@ class PiAgent(Agent[PiAgentConfig]):
         finally:
             self._capture_partial_turn(collector)
 
-    def _handle_line(self, line: bytes, state: _PiTurnState, *, max_turns: int | None = None) -> None:
+    def _handle_line(self, line: bytes, state: _PiTurnState) -> None:
         """Parse one nd-JSON line and dispatch it. Never raises on bad input.
 
         ``agent_end`` is NOT terminal — only ``agent_settled`` / stdout EOF is — so
-        it is recognized, ignored, and the read loop keeps going. A ``turn_start``
-        past ``max_turns`` sets ``state.max_turns_exhausted`` instead of opening a turn.
+        it is recognized, ignored, and the read loop keeps going.
         """
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
@@ -1176,9 +1168,7 @@ class PiAgent(Agent[PiAgentConfig]):
         elif len(state.unrecognized_types) < _MAX_UNRECOGNIZED_TYPES:
             state.unrecognized_types.add(event_type or "<missing type>")
 
-        if event_type == "turn_start" and max_turns is not None and state.turn_count >= max_turns:
-            state.max_turns_exhausted = True
-        elif event_type == "turn_start":
+        if event_type == "turn_start":
             state.on_turn_start()
         elif event_type == "message_update":
             state.on_message_update(obj)

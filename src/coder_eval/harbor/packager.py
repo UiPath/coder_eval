@@ -601,10 +601,10 @@ def _write_agent_phase_task_yaml(
         payload["pre_run"] = [c.model_dump(mode="json", exclude_none=True) for c in task.pre_run]
     if task.run_limits is not None:
         # `CoderEvalAgent.run()` invokes `coder-eval execute` against this
-        # file, which enforces `max_turns`/`turn_timeout`/`task_timeout`/the
+        # file, which enforces `max_tool_calls`/`turn_timeout`/`task_timeout`/the
         # token+USD budget caps during the agent phase itself -- dropping this
         # silently replaced a declared cap with the packaged default
-        # experiment's (`max_turns: 100`, `turn_timeout: 300`, no `max_usd` /
+        # experiment's (`max_tool_calls: 100`, `turn_timeout: 300`, no `max_usd` /
         # token ceiling at all).
         payload["run_limits"] = task.run_limits.model_dump(mode="json", exclude_none=True)
     (env_dir / "task.yaml").write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")

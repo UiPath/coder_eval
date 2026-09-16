@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 DEFAULT_STOP_EARLY_GATE_THRESHOLD: Final[float] = 1.0
 """Default ``stop_early_gate_threshold``: reproduces strict-AND gating exactly.
 
-Single-sourced here so the field default below, the watcher's ``for_task``
+Single-sourced here so the field default below, the monitor's ``for_task``
 fallback, and the orchestrator's finalize fallback can never drift apart.
 """
 
@@ -18,8 +18,9 @@ fallback, and the orchestrator's finalize fallback can never drift apart.
 class RunLimits(BaseModel):
     """Run-time caps on a task.
 
-    Unifies structural caps (max_turns, task_timeout, turn_timeout) and
-    budget caps (tokens, USD). Structural caps stop the task. Budget caps are
+    Unifies structural caps (max_tool_calls, task_timeout, turn_timeout) and
+    budget caps (tokens, USD). The tool-call cap stops the task at the agent's
+    next poll boundary and is cumulative across every turn. Budget caps are
     checked after each completed agent turn and are cumulative across all
     turns of a single task: a single-iteration task finishes and is then
     marked over budget, and a dialog stops after the turn that crossed the
@@ -31,10 +32,16 @@ class RunLimits(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_turns: int | None = Field(
+    max_tool_calls: int | None = Field(
         default=None,
         gt=0,
-        description="Max agent inner-loop turns per iteration. None = SDK default.",
+        description=(
+            "Hard cap on resolved tool calls across the whole task (every retry attempt and every "
+            "dialog turn). Enforced by the TurnMonitor at the agent's next poll boundary on every "
+            "harness: the round that reaches the cap is processed whole, so tool calls already in "
+            "flight can still land after it. The run finalizes cleanly as tool_calls_exhausted; "
+            "criteria are still checked. None = no cap."
+        ),
     )
     expected_tool_calls: int | None = Field(
         default=None,
@@ -42,7 +49,7 @@ class RunLimits(BaseModel):
         description=(
             "Soft target for cumulative visible tool calls across a task (each resolved tool call "
             "counts 1, plus 1 for the final reply when present). Exceeding it logs a one-shot warning "
-            "and badges the report; the run is NOT aborted (use max_turns for a hard cap)."
+            "and badges the report; the run is NOT aborted (use max_tool_calls for a hard cap)."
         ),
     )
     task_timeout: int | None = Field(
@@ -101,7 +108,7 @@ class RunLimits(BaseModel):
         description=(
             "Run-level early-stop KILL SWITCH — there is no run-level master arm. Arming is "
             "per-criterion: a live-observable criterion's stop_early: block alone activates "
-            "the run's early-stop watcher. None (default): armed criteria decide; the run may "
+            "the run's TurnMonitor. None (default): armed criteria decide; the run may "
             "end early once they resolve mid-run (pass-stop when the on_pass=stop subset's "
             "weighted score is GUARANTEED to reach stop_early_gate_threshold regardless of "
             "any criterion still undecided, fail-stop when the armed set's weighted score is "

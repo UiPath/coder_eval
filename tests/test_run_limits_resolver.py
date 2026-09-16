@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from coder_eval.models import (
@@ -45,14 +47,48 @@ class TestRunLimitsResolver:
         assert resolved.run_limits.max_usd == 1.0
         assert lineage["run_limits.max_usd"].source == "default"
 
-    def test_resolve_max_turns_from_default(self):
-        default_exp = _default_exp(RunLimits(max_turns=20))
+    def test_resolve_max_tool_calls_from_default(self):
+        default_exp = _default_exp(RunLimits(max_tool_calls=20))
         task = _make_task()
         exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
-        assert resolved.run_limits.max_turns == 20
-        assert lineage["run_limits.max_turns"].source == "default"
+        assert resolved.run_limits.max_tool_calls == 20
+        assert lineage["run_limits.max_tool_calls"].source == "default"
+
+    def test_max_tool_calls_merges_through_all_five_layers(self):
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import _apply_cli_overrides
+
+        def resolve(*, exp_default=None, task_value=None, variant_value=None, cli_value=None):
+            default_exp = _default_exp(RunLimits(max_tool_calls=100))
+            task = _make_task(run_limits={"max_tool_calls": task_value}) if task_value else _make_task()
+            exp = ExperimentDefinition(
+                experiment_id="e",
+                defaults=ExperimentDefaults(run_limits=RunLimits(max_tool_calls=exp_default)) if exp_default else None,
+                variants=[
+                    ExperimentVariant(
+                        variant_id="v",
+                        run_limits=RunLimits(max_tool_calls=variant_value) if variant_value else None,
+                    )
+                ],
+            )
+            resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+            if cli_value:
+                config = BatchRunConfig(run_dir=Path("runs/test"), overrides={"run_limits.max_tool_calls": cli_value})
+                _apply_cli_overrides(resolved, config, lineage=lineage)
+            assert resolved.run_limits is not None
+            return resolved.run_limits.max_tool_calls, lineage["run_limits.max_tool_calls"].source
+
+        assert resolve() == (100, "default")
+        assert resolve(exp_default=50) == (50, "experiment-defaults")
+        assert resolve(exp_default=50, task_value=20) == (20, "task")
+        assert resolve(exp_default=50, task_value=20, variant_value=10) == (10, "variant")
+        assert resolve(exp_default=50, task_value=20, variant_value=10, cli_value=3) == (3, "cli")
+
+    def test_max_turns_under_variant_run_limits_is_rejected(self):
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            ExperimentVariant.model_validate({"variant_id": "v", "run_limits": {"max_turns": 5}})
 
     def test_experiment_defaults_overrides_default(self):
         default_exp = _default_exp(RunLimits(max_usd=1.0))
@@ -82,12 +118,12 @@ class TestRunLimitsResolver:
 
     def test_task_run_limits_overrides_default_per_key(self):
         """Task setting one key keeps the default for other keys (field merge)."""
-        default_exp = _default_exp(RunLimits(max_turns=20, task_timeout=600))
-        task = _make_task(run_limits={"max_turns": 5})
+        default_exp = _default_exp(RunLimits(max_tool_calls=20, task_timeout=600))
+        task = _make_task(run_limits={"max_tool_calls": 5})
         exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
         resolved, _, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
-        assert resolved.run_limits.max_turns == 5
+        assert resolved.run_limits.max_tool_calls == 5
         assert resolved.run_limits.task_timeout == 600
 
     def test_variant_overrides_task(self):
@@ -105,17 +141,17 @@ class TestRunLimitsResolver:
     def test_variant_run_limits_field_merges_with_task(self):
         """Variant override of one key leaves other task-set keys intact (field-merge tell-tale)."""
         default_exp = _default_exp()
-        task = _make_task(run_limits={"max_turns": 5, "max_usd": 0.5})
+        task = _make_task(run_limits={"max_tool_calls": 5, "max_usd": 0.5})
         exp = ExperimentDefinition(
             experiment_id="e",
             variants=[ExperimentVariant(variant_id="v", run_limits=RunLimits(max_usd=1.0))],
         )
         resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
         assert resolved.run_limits is not None
-        # Variant only overrides max_usd; task's max_turns survives.
-        assert resolved.run_limits.max_turns == 5
+        # Variant only overrides max_usd; task's max_tool_calls survives.
+        assert resolved.run_limits.max_tool_calls == 5
         assert resolved.run_limits.max_usd == 1.0
-        assert lineage["run_limits.max_turns"].source == "task"
+        assert lineage["run_limits.max_tool_calls"].source == "task"
         assert lineage["run_limits.max_usd"].source == "variant"
 
     def test_variant_unset_does_not_clear_task_block(self):
@@ -158,13 +194,13 @@ class TestRunLimitsResolver:
         assert not any(k.startswith("run_limits") for k in lineage)
 
     def test_lineage_uses_dotted_keys(self):
-        """Lineage keys are dotted (run_limits.max_turns), not the bare 'max_turns'."""
+        """Lineage keys are dotted (run_limits.max_tool_calls), not the bare 'max_tool_calls'."""
         default_exp = _default_exp()
-        task = _make_task(run_limits={"max_turns": 5})
+        task = _make_task(run_limits={"max_tool_calls": 5})
         exp = ExperimentDefinition(experiment_id="e", variants=[ExperimentVariant(variant_id="v")])
         _, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
-        assert "run_limits.max_turns" in lineage
-        assert "max_turns" not in lineage
+        assert "run_limits.max_tool_calls" in lineage
+        assert "max_tool_calls" not in lineage
 
     def test_lineage_value_is_serializable(self):
         """lineage.value must be JSON-serializable (scalar from dotted key)."""
@@ -186,7 +222,7 @@ class TestRunLimitsResolver:
         that didn't mention the field leaves earlier values intact.
         """
         default_exp = _default_exp()
-        task = _make_task(run_limits={"count_cached_input": True, "max_turns": 10})
+        task = _make_task(run_limits={"count_cached_input": True, "max_tool_calls": 10})
         # Variant overrides ONLY max_usd — must not touch count_cached_input.
         exp = ExperimentDefinition(
             experiment_id="e",
@@ -197,7 +233,7 @@ class TestRunLimitsResolver:
         assert resolved.run_limits.count_cached_input is True, (
             "variant's default count_cached_input=False clobbered the task-level True"
         )
-        assert resolved.run_limits.max_turns == 10
+        assert resolved.run_limits.max_tool_calls == 10
         assert resolved.run_limits.max_usd == 1.0
         # Lineage should only credit fields the variant actually set.
         assert "run_limits.count_cached_input" not in lineage or (

@@ -49,7 +49,7 @@ initial_prompt: |
   this example primarily exercises the custom Docker build, not the agent.
 
 run_limits:
-  max_turns: 3
+  max_tool_calls: 3
   task_timeout: 300
   turn_timeout: 120
 

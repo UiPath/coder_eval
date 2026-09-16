@@ -60,7 +60,7 @@ class TestCliValidationErrors:
         assert "--model" in output
 
     def test_two_dash_d_collision_hard_errors(self):
-        result = runner.invoke(app, ["run", "-D", "run_limits.max_turns=30", "-D", "run_limits.max_turns=40"])
+        result = runner.invoke(app, ["run", "-D", "run_limits.max_tool_calls=30", "-D", "run_limits.max_tool_calls=40"])
         assert result.exit_code != 0
         assert "more than once" in _strip_ansi(result.output)
 
@@ -139,7 +139,7 @@ class TestBuildOverridesAliasParity:
 
     def test_dash_d_value_coercion(self):
         # YAML-typed values: int stays int, truthy-alias stays string.
-        assert _overrides(set_overrides=["run_limits.max_turns=30"])["run_limits.max_turns"] == 30
+        assert _overrides(set_overrides=["run_limits.max_tool_calls=30"])["run_limits.max_tool_calls"] == 30
         assert _overrides(set_overrides=["agent.model=on"])["agent.model"] == "on"
 
     def test_collision_with_model_alias(self):
@@ -170,14 +170,18 @@ class TestResolutionLevel:
         apply_overrides(task, _overrides(set_overrides=["agent.sdk_options.effort=high"]))
         assert task.agent.sdk_options == {"max_thinking_tokens": 1024, "effort": "high"}
 
-    def test_max_turns_leaves_task_timeout_intact(self):
+    def test_max_tool_calls_leaves_task_timeout_intact(self):
         from coder_eval.orchestration.overrides import apply_overrides
 
         task = self._task(run_limits={"task_timeout": 600})
-        apply_overrides(task, _overrides(set_overrides=["run_limits.max_turns=5"]))
+        apply_overrides(task, _overrides(set_overrides=["run_limits.max_tool_calls=5"]))
         assert task.run_limits is not None
-        assert task.run_limits.max_turns == 5
+        assert task.run_limits.max_tool_calls == 5
         assert task.run_limits.task_timeout == 600
+
+    def test_dash_d_run_limits_max_turns_is_rejected(self):
+        with pytest.raises(typer.BadParameter, match=r"unknown field 'max_turns' under 'run_limits'"):
+            _overrides(set_overrides=["run_limits.max_turns=5"])
 
     def test_docker_working_dir_override(self):
         from coder_eval.orchestration.overrides import apply_overrides
