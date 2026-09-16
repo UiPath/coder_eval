@@ -1,4 +1,4 @@
-# Coder Eval — evaluate and benchmark AI coding agents and their skills
+# Coder Eval — Playwright for coding agents — test that your skills, MCP servers, and CLIs actually work when an agent uses them.
 
 [![PyPI](https://img.shields.io/pypi/v/coder-eval.svg)](https://pypi.org/project/coder-eval/)
 [![GitHub Marketplace](https://img.shields.io/badge/marketplace-coder__eval-2ea44f.svg)](https://github.com/marketplace/actions/coder_eval)
@@ -9,40 +9,41 @@
 [![CI](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml/badge.svg)](https://github.com/UiPath/coder_eval/actions/workflows/pr-checks.yml)
 
 <p align="center">
-  <strong>Playwright for coding agents</strong> — one declarative test file, any agent
-  runtime, a real sandbox, and a pass/fail gate in CI.
+  Run it from the <strong>command line</strong>, in a <strong>sandbox</strong>, as an
+  <strong>A/B experiment</strong>, or as a <strong>CI gate</strong>.
 </p>
 
 **Coder Eval** (`pip install coder-eval` / `uv tool install coder-eval`) is an
-open-source, **agent-agnostic** framework for **evaluating and benchmarking AI coding
-agents and their skills** — built for benchmark authors, CLI builders, and skill
-builders — with sandboxing, reproducibility, and data-driven analysis. It runs a real
-agent — **Claude Code**, **OpenAI Codex**, **Google Antigravity (Gemini)**,
-**OpenCode**, or **Pi** — in a sandbox against declarative YAML tasks, then scores the files and
-commands it actually produced. Changing harness is one field (`agent.type`); the
-tasks, criteria, scoring, telemetry, and reports stay the same.
+open-source, **agent-agnostic** framework for evaluating and benchmarking AI coding
+agents and their skills — built for benchmark authors, CLI builders, and skill
+builders. It runs a real agent — **Claude Code**, **OpenAI Codex**, **Google
+Antigravity (Gemini)**, **OpenCode**, or **Pi** — in a sandbox against declarative
+YAML tasks, then scores the files and commands it actually produced. Changing harness
+is one field (`agent.type`). It is **not a fixed leaderboard**: unlike SWE-bench or
+SkillsBench, you bring the tasks and you bring the scoring — weighted 0.0–1.0
+criteria, a `skill_triggered` activation check, an A/B experiment layer, and per-tool
+cost telemetry. See [How it compares](https://coder-eval.com/docs/comparison).
 
-Reach for it when you want to **benchmark agents on your own domain tasks**,
-**test whether a skill triggers** in the agent you ship for, **A/B-test Claude Code
-vs. Codex vs. Gemini vs. OpenCode vs. Pi** (or model vs. model, prompt vs. prompt), or
-**gate CI on coding-agent quality**. It is **not a fixed leaderboard**: unlike
-SWE-bench or SkillsBench, which rank models on a shared task set, you bring the tasks
-and you bring the scoring — weighted 0.0–1.0 criteria, a `skill_triggered` activation
-check, an A/B experiment layer, and per-tool cost telemetry, over whatever work *you*
-care about. See [How it compares](https://coder-eval.com/docs/comparison).
-📚 **Full docs:** **[coder-eval.com/docs](https://coder-eval.com/docs)**.
+📚 **Full docs:** **[coder-eval.com/docs](https://coder-eval.com/docs)**
 
 <p align="center">
   <img src="docs/assets/hero.gif" alt="Coder Eval running the hello_date task: a sandboxed agent writes and runs a script from a YAML task, then the scored result is browsed in evalboard" width="100%">
 </p>
 
-- **Declarative YAML tasks** with pinned dependencies and clear success criteria
-- **Sandboxed execution** in isolated environments with resource limits
-- **Weighted, continuous scoring** (0.0–1.0) with fractional credit and thresholds
-- **Many criterion types** — from file checks to code similarity and LLM-graded rubrics
-- **Agent-agnostic by design** — Claude Code, OpenAI Codex, Antigravity (Gemini), OpenCode, and Pi today; add your own harness through the plugin SPI
-- **Experiment layer** — A/B agent configs (models, tools, prompts) side-by-side
+- **Declarative YAML tasks** — a prompt, a sandbox, and weighted 0.0–1.0 success criteria in one file
+- **Agent-agnostic by design** — Claude Code, OpenAI Codex, Antigravity (Gemini), OpenCode, and Pi today; swap harness with one field, or add your own through the plugin SPI
+- **Sandboxed execution** — isolated environments with resource limits, on a tempdir or a container
+- **Many criterion types** — from file and command checks to code similarity and LLM-graded rubrics
+- **Skill-activation testing** — verify an agent actually engages a target skill (`skill_triggered`), on whichever harness your users run
+- **A/B experiments** — model vs. model, tool-on vs. tool-off, prompt vs. prompt, side by side
 - **Full telemetry** — every tool call, token counts, and cost, with real-time streaming
+- **CI gate** — run the suite in GitHub Actions and fail the build on a regression
+- **Bring your own dataset** — fan one task out over many rows for larger benchmark suites
+
+> **Keeping skills fresh?** Run Coder Eval as a scheduled GitHub Actions job so your
+> skills are continuously re-evaluated against the latest model — a skill that quietly
+> stops triggering surfaces as a failing criterion before your users hit it. See
+> **[Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md)**.
 
 ## Watch the intro
 
@@ -59,26 +60,12 @@ care about. See [How it compares](https://coder-eval.com/docs/comparison).
 ▶ Also on YouTube: **[Coder Eval: UiPath open-source framework to test AI Coding Agents](https://www.youtube.com/watch?v=Iyq-5m1CnuI)**
 — what the framework does, and how a run works end to end.
 
-## What you can do with it
-
-- **Benchmark coding agents** — score an agent across a suite of tasks with weighted scoring and pass/fail thresholds
-- **Compare models & configs** — A/B-test Claude vs. Codex vs. Gemini vs. OpenCode vs. Pi, model vs. model, tool-on vs. tool-off, prompt vs. prompt
-- **Evaluate skills** — verify an agent actually engages a target skill (`skill_triggered`) and score skill-driven suites (SkillsBench-style), on whichever harness your users run
-- **Keep skills up to date in CI** — re-validate your skills on every change or on a schedule; catch silent regressions when models, prompts, or the skills themselves drift
-- **Gate CI on agent quality** — run the suite in GitHub Actions and fail the build on regressions
-- **Bring your own dataset** — fan one task out over many rows for larger benchmark suites
-
-> **Keeping skills fresh?** Run Coder Eval as a scheduled GitHub Actions job so your
-> skills are continuously re-evaluated against the latest model — a skill that quietly
-> stops triggering surfaces as a failing criterion before your users hit it. See
-> **[Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md)**.
-
 ## Quick Start
 
 **Prerequisites:** Python 3.13+, [uv](https://docs.astral.sh/uv/) 0.8+, and **the
 runtime of at least one coding agent** — plus that agent's own model credentials.
-Pick the agent you want to evaluate; two of the four ship with a Coder Eval extra,
-the other two are separate CLIs you install yourself:
+Pick the agent you want to evaluate; two of the five ship with a Coder Eval extra,
+the other three are separate CLIs you install yourself:
 
 | Agent | `agent.type` | Runtime | Guide |
 | --- | --- | --- | --- |
@@ -86,6 +73,7 @@ the other two are separate CLIs you install yourself:
 | OpenAI Codex | `codex` | `uv sync --extra codex` — the extra ships the Codex SDK + CLI | [Codex](docs/agents/CODEX.md) |
 | Google Antigravity (Gemini) | `antigravity` | `uv sync --extra antigravity` — the extra ships the harness binary | [Antigravity](docs/agents/ANTIGRAVITY.md) |
 | OpenCode (open-weight models) | `opencode` | `npm install -g opencode-ai` — separate CLI | [OpenCode](docs/agents/OPENCODE.md) |
+| Pi (open-weight models) | `pi` | `npm install -g @earendil-works/pi-coding-agent` — separate CLI | [Pi](docs/agents/PI.md) |
 
 The examples below use the default `claude-code` agent. Developed on macOS; CI runs on
 Linux.
@@ -130,6 +118,9 @@ so a harness upgrade can't silently move your results. (The example `tasks/`
 live in this repo — clone it or point the CLI at your own task files.) See
 [Tutorial 02 — Running Coder Eval in CI](docs/tutorials/02-ci-pipeline.md) for
 the full setup.
+
+> ⭐ **If this saved you an afternoon, star the repo** — it is how other people
+> evaluating coding agents find it.
 
 ## Use inside Claude Code
 
@@ -312,9 +303,9 @@ success_criteria:
     description: "Script must execute successfully"
 ```
 
-`agent.type` is the only harness-specific line: swap it for `codex`, `antigravity`, or
-`opencode` — or override it per run with `coder-eval run … -D agent.type=opencode` — and
-the same criteria score the same way. Tasks can omit the `agent` section entirely —
+`agent.type` is the only harness-specific line: swap it for `codex`, `antigravity`,
+`opencode`, or `pi` — or override it per run with `coder-eval run … -D agent.type=opencode`
+— and the same criteria score the same way. Tasks can omit the `agent` section entirely —
 defaults resolve from the experiment layer (`experiments/default.yaml`). For the full
 schema and every criterion type, see the
 [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md); for what each `run_limits` field
@@ -366,4 +357,4 @@ Built with [Pydantic](https://pydantic.dev/), [Typer](https://typer.tiangolo.com
 and [Rich](https://rich.readthedocs.io/), on top of the harnesses it drives — the
 [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk), the
 [Codex SDK](https://github.com/openai/codex), [Google Antigravity](https://antigravity.google/),
-and [OpenCode](https://opencode.ai).
+[OpenCode](https://opencode.ai), and [Pi](https://pi.dev/).
