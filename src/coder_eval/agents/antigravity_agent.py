@@ -1,17 +1,15 @@
 """Antigravity agent implementation using the official google-antigravity SDK.
 
-The backend drives Google's Antigravity agent *local harness* (the bundled
-``localharness`` binary shipped in the ``google-antigravity`` wheel) via the
-SDK's :class:`LocalAgentConfig`. It authenticates against the Gemini Developer
-API with ``GEMINI_API_KEY`` and runs entirely on the local machine, editing
-files inside the sandbox working directory — so coder_eval's on-disk success
-criteria see the agent's writes exactly as they do for Claude / Codex.
+Drives Google's Antigravity agent *local harness* (the bundled ``localharness``
+binary) via the SDK's :class:`LocalAgentConfig`, authenticating against the
+Gemini Developer API with ``GEMINI_API_KEY`` and running entirely on the local
+machine — so coder_eval's on-disk success criteria see the agent's writes exactly
+as they do for Claude and Codex.
 
-Why this surface (and not the branded ``agy`` CLI or the remote SDK): the
-standalone Antigravity CLI cannot authenticate headlessly with a Gemini API key
-(only interactive OAuth), and the Interactions API runs in a *remote* cloud
-sandbox whose edits never land in our local dir. The local harness is the only
-non-deprecated path that satisfies headless + GEMINI_API_KEY + local execution.
+It is the only non-deprecated surface that satisfies headless + GEMINI_API_KEY +
+local execution: the branded ``agy`` CLI cannot authenticate headlessly with an
+API key, and the Interactions API runs in a REMOTE sandbox whose edits never land
+in our dir.
 
 All SDK imports are lazy (inside ``start`` / helpers), mirroring CodexAgent, so
 this module imports cleanly when the optional ``[antigravity]`` extra is absent;
@@ -73,79 +71,40 @@ from coder_eval.utils import expand_env_vars
 
 logger = logging.getLogger(__name__)
 
-# Recommended Gemini coding model when a task pins no ``agent.model`` and neither
-# ``--model`` nor ``ANTIGRAVITY_MODEL`` is set. Gemini 3.5 Flash is Antigravity 2.0's
-# default coding model (2026-05) — it outperforms the older Gemini 3.1 Pro on coding /
-# agentic benchmarks while running faster; ``medium`` thinking is its daily-driver default.
+# Fallback when a task pins no ``agent.model`` and neither ``--model`` nor
+# ``ANTIGRAVITY_MODEL`` is set: Antigravity 2.0's own default coding model.
 _DEFAULT_MODEL = "gemini-3.5-flash"
 
 # How often to re-check for progress once an orphaned (backgrounded) tool call is
-# detected. receive_steps() returns instantly empty ONLY when the connection is
-# already idle with nothing queued -- which is exactly the state right after a
-# background job leaves the model idle, so the common re-check is cheap. (It CAN
-# still await indefinitely if called while genuinely non-idle work is in flight;
-# see the poll loop's own comment in communicate() for that case.)
-# Conversation.wait_for_wakeup() is an unimplemented stub on the Local harness
-# connection this agent uses (always returns False, regardless of pending state,
-# confirmed against the installed SDK's source) — so this file drives its own
-# sleep-and-retry poll instead. Not user-configurable: a tuning constant, not a
-# feature.
+# detected. `Conversation.wait_for_wakeup()` is an unimplemented stub on this
+# SDK's Local harness, so the agent polls itself. A tuning constant, not a knob.
+# Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
 _BACKGROUND_POLL_INTERVAL_SECONDS = 5.0
 
-# Bound on retrying a receive_steps() call that hits the SDK's re-entrancy guard
-# (see _drain()'s docstring) -- each retry yields one event-loop turn via
-# asyncio.sleep(0) for the prior drain's already-scheduled generator cleanup to
-# land. Confirmed live against the real SDK's generator-delegation shape that
-# this clears within 2 turns; this constant carries a 2.5x margin, not a
-# separately-tuned budget.
+# Retries for a receive_steps() call that hits the SDK's re-entrancy guard; each
+# yields one event-loop turn for the prior drain's cleanup to land. Confirmed live
+# to clear within 2 turns, so this is a 2.5x margin rather than a tuned budget.
+# Rationale: .claude/notes/agents.md § The receive_steps re-entrancy window
 _RECEIVE_STEPS_REENTRY_RETRIES = 5
 
-# Fraction of the turn's configured `timeout` the poll loop is allowed to spend
-# waiting on a backgrounded tool call, before giving up and finalizing through
-# its OWN graceful path (force-close the orphan as unresolved, grade normally)
-# instead of running into the ThreadedWatchdog's harder cutoff at `timeout`
-# itself. Deliberately a FRACTION of `timeout`, not `timeout` itself: a check
-# against the identical value the watchdog uses races it non-deterministically
-# for who fires first (the bug an earlier review round removed); a check
-# against a smaller fraction is a strictly earlier, non-racing internal
-# deadline whose whole purpose is to reliably win that race. 0.8 leaves the
-# watchdog a fifth of the turn's budget as margin for this loop's own exit
-# bookkeeping (the warning log, finalize()'s force-close/grade pass) to
-# complete before the harder cancellation would land anyway.
-#
-# This bound is what actually matters: without it, a tool call spuriously left
-# ACTIVE with no real background job behind it (observed live -- see the final
-# validation run) used to finalize immediately pre-fix and grade whatever the
-# agent had already produced. Bounding this loop only by a fixed cycle count
-# disconnected from `timeout` (as an earlier revision did: 120 * 5s = 600s,
-# double the framework's own default `turn_timeout: 300` in
-# experiments/default.yaml) makes the graceful path unreachable in practice --
-# the watchdog always wins first, and the SAME spurious-orphan turn now burns
-# the full turn timeout before crashing as TurnTimeoutError with zero criteria
-# evaluated, a strict regression for that input class.
+# Fraction of the turn's `timeout` the poll loop may spend waiting on a
+# backgrounded tool call before finalizing through its OWN graceful path
+# (force-close the orphan, grade normally). A FRACTION, never `timeout` itself: a
+# check against the identical value races the ThreadedWatchdog for who fires
+# first, while an earlier deadline reliably wins.
+# Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
 _POLL_DEADLINE_TIMEOUT_FRACTION = 0.8
 
-# Cap on poll *cycles* per turn -- the SOLE bound when a task sets no
-# run_limits.turn_timeout/task_timeout at all (timeout=None), since
-# _POLL_DEADLINE_TIMEOUT_FRACTION has nothing to multiply in that case. Also a
-# backstop against a very large configured timeout turning this loop into an
-# effectively unbounded wait: 120 * 5s = 10 minutes, ~2x the worst real
-# backgrounded-job duration observed in confirmed-broken tasks (60-300s).
-#
-# Deliberately NOT "break after N consecutive empty polls" instead: the real
-# SDK's receive_steps() returns identically empty whether a backgrounded job is
-# still genuinely running OR will never resolve at all (confirmed live against
-# the installed SDK) -- there is no signal that tells these two cases apart
-# except waiting. A consecutive-empty-count small enough to matter would also
-# abort real slow jobs (the confirmed cases needed up to ~60 consecutive 5s-
-# empty polls before succeeding); one large enough to be safe barely improves
-# over this flat cap. A flat, data-grounded cap is the honest option.
+# Cap on poll *cycles* -- the SOLE bound when a task sets no timeout at all, and
+# a backstop against a very large one. 120 * 5s = 10 minutes, ~2x the worst real
+# backgrounded-job duration observed (60-300s). Deliberately NOT "break after N
+# consecutive empty polls".
+# Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
 _MAX_BACKGROUND_POLLS = 120
 
-# Antigravity builtin tool name -> canonical Claude-ish tool name, so cross-agent
-# success criteria (command_executed / commands_efficiency / skill_triggered) and
-# reports key on the SAME tool names the Claude / Codex backends emit. Unmapped
-# tool names pass through unchanged.
+# Antigravity builtin tool name -> the canonical (Claude) vocabulary every
+# criterion is written against. Unmapped names pass through unchanged.
+# Rationale: .claude/notes/agents.md § Tool-name and argument normalization
 _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: dict[str, str] = {
     "run_command": "Bash",
     "create_file": "Write",
@@ -162,31 +121,23 @@ _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: dict[str, str] = {
 }
 
 # Tool-call arg keys the harness ADDS at completion (the result payload), not
-# model-supplied inputs — stripped from CommandTelemetry.parameters and mined for
-# the tool result instead. This is the STATIC backstop; the live mapping ALSO
-# strips any key that first appears at tool-DONE (see ``_params``), so tool-
-# specific result fields (LS ``results``, WebSearch ``summary``) never leak into
-# parameters — important because ``skill_triggered`` substring-searches every
-# parameter value and a leaked result could otherwise false-positive.
+# model-supplied inputs. The STATIC backstop; ``_params`` also strips any key
+# that first appears at DONE. A leaked result would false-positive
+# ``skill_triggered``, which substring-searches every parameter value.
 _RESULT_ARG_KEYS: frozenset[str] = frozenset(
     {"exit_code", "combined_output", "diff_block", "output", "stdout", "stderr", "result", "results", "summary"}
 )
 
-# Antigravity per-tool INPUT-arg key -> canonical (Claude-ish) key, so cross-agent
-# success criteria (command_executed keys on Bash ``parameters["command"]``; LS on
-# ``path``) and reports read the SAME parameter names the Claude/Codex backends
-# emit. Keyed by the canonical tool name (post tool-name mapping). Unlisted keys
-# pass through unchanged.
+# Antigravity per-tool INPUT-arg key -> canonical (Claude) key, keyed by the
+# canonical tool name (post tool-name mapping). Unlisted keys pass through.
 _ANTIGRAVITY_ARG_RENAME: dict[str, dict[str, str]] = {
     "Bash": {"command_line": "command"},
     "LS": {"directory_path": "path"},
 }
 
-# google.antigravity.types.Step{Status,Type,Source,Target} VALUES we branch on,
-# mirrored as plain strings so this module needs no SDK import (the SDK is an
-# optional extra; only ``start()`` touches it). Named constants — not bare string
-# literals — so an antigravity StepStatus.ERROR comparison is not mistaken for a
-# coder_eval FinalStatus member-name denylist (lint rule CE018).
+# Step{Status,Type,Source,Target} VALUES we branch on, mirrored as plain strings
+# so this module needs no SDK import. Named constants, not bare literals, so a
+# StepStatus.ERROR compare is not mistaken for a FinalStatus denylist (CE018).
 _STATUS_ACTIVE = "ACTIVE"
 _STATUS_DONE = "DONE"
 _STATUS_ERROR = "ERROR"
@@ -204,11 +155,11 @@ def _enum_value(x: Any) -> Any:
 def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
     """Map a ``google.antigravity.types.UsageMetadata`` to coder_eval ``TokenUsage``.
 
-    Gemini reports ``prompt`` (with ``cached`` as a subset), ``candidates`` (output
-    excluding thinking) and ``thoughts`` (reasoning). coder_eval's buckets:
-    uncached input = prompt - cached; cache_read = cached; cache_creation = 0
-    (Gemini bills no separate cache-write fee); output = candidates + thoughts
-    (Gemini bills thinking as output). Cost is rate-carded from the bare model id.
+    Gemini reports ``prompt`` (with ``cached`` a subset), ``candidates`` and
+    ``thoughts``; cache_creation is 0 because Gemini bills no cache-write fee, and
+    output folds in thinking because Gemini bills it as output.
+
+    Rationale: .claude/notes/agents.md § Token accounting, per harness
     """
     prompt = getattr(usage, "prompt_token_count", 0) or 0
     cached = getattr(usage, "cached_content_token_count", 0) or 0
@@ -230,13 +181,12 @@ def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
 class AntigravityAgent(Agent[AntigravityAgentConfig]):
     """Implementation of the Agent interface for Google Antigravity (Gemini)."""
 
-    # The step loop has a between-steps guard where the cooperative
-    # ``should_stop`` check runs, so this agent supports early-stop-on-criterion.
+    # The step loop has a between-steps guard where `should_stop` runs.
     supports_cooperative_stop: ClassVar[bool] = True
 
-    # Antigravity has always appended (TemplatedSystemInstructions wraps
-    # system_instructions around its own harness prompt), so its runs are
-    # comparable across the marker boundary.
+    # TemplatedSystemInstructions wraps system_instructions around the harness's
+    # own prompt, and always has — so runs ARE comparable across the marker.
+    # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
 
     def __init__(
@@ -257,17 +207,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         self.config = config
         self.route = route or DirectRoute()
         self.working_directory: Path | None = None
-        # The live SDK Agent session + its AsyncExitStack (entered in start(),
-        # closed in stop()). The exit-stack teardown terminates the localharness
-        # subprocess, so reaping it is what stop()/kill() rely on.
+        # The live SDK Agent session + its AsyncExitStack. The exit-stack teardown
+        # terminates the localharness subprocess, which is what stop()/kill() rely
+        # on.
         self._sdk_agent: Any = None
         self._exit_stack: AsyncExitStack | None = None
-        # Absolute dirs to prepend to PATH so sandbox mock CLIs shadow real ones
-        # for the harness's run_command tool — handed to the SDK's per-agent env
-        # seam at start() (see _harness_env).
+        # Dirs prepended to PATH so sandbox mock CLIs shadow real ones for the
+        # harness's run_command tool (see _harness_env).
         self._env_path_prepend: list[str] = []
-        # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
-        # bookkeeping lives on the Agent base class (shared defaults + helpers).
+        # Turn-lifecycle bookkeeping lives on the Agent base class.
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
 
     def _effective_model(self) -> str:
@@ -277,13 +225,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     def _resolve_skills_paths(self, plugin_tools_dir: str | None) -> list[str]:
         """Resolve skill search-path roots for the harness's native ``skills_paths``.
 
-        Mirrors the source resolution the Codex backend uses: collect ``type: local``
-        plugin paths from ``config.plugins`` (env-expanded) plus the runtime
-        ``plugin_tools_dir``. For each source, hand the harness the directory that
-        *directly* parents skill dirs — either ``<source>/skills`` (a plugin-marketplace
-        / repo root) or ``<source>`` itself (already a skills dir) — whichever actually
-        contains a ``<skill>/SKILL.md``. The harness auto-discovers skills under those
-        roots; no symlinking is needed (unlike Codex, Antigravity takes search paths).
+        For each ``type: local`` plugin path (env-expanded) plus the runtime
+        ``plugin_tools_dir``, hands the harness the directory that DIRECTLY parents
+        skill dirs — ``<source>/skills`` or ``<source>`` itself, whichever holds a
+        ``<skill>/SKILL.md``. Unlike Codex, Antigravity takes search paths, so no
+        symlinking is needed.
+
+        Rationale: .claude/notes/agents.md § Skills, per harness
         """
         sources: list[Path] = []
         for plugin in self.config.plugins or []:
@@ -297,8 +245,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             if path.is_dir():
                 sources.append(path)
             else:
-                # Loud: an unresolved env var (e.g. unset $SKILLS_REPO_PATH) or a
-                # missing dir silently drops the skills, so the agent runs blind.
+                # Loud: an unresolved env var or a missing dir drops the skills
+                # silently, so the agent runs blind.
                 hint = "env var likely unset" if "$" in expanded else "path does not exist"
                 self._log.warning("Plugin skills path did not resolve: %r → %r (%s)", raw, expanded, hint)
         if plugin_tools_dir and Path(plugin_tools_dir).is_dir():
@@ -330,12 +278,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """Workspace roots for the harness's ``workspace_only`` file-tool policy.
 
         The sandbox working directory (the write target) plus the resolved skill
-        roots. ``skills_paths`` only drives skill *discovery*; the file-tool
-        allowlist is governed solely by ``workspaces``, so the skill roots must
-        appear here too — otherwise the agent discovers a skill but every read of
-        its ``SKILL.md`` is denied as out-of-workspace. The roots are bind-mounted
-        into the sandbox at the same path by the shared docker plugin auto-mount,
-        mirroring how Claude reads skills from the mounted plugin path.
+        roots. ``skills_paths`` drives DISCOVERY only; the file-tool allowlist is
+        ``workspaces`` alone, so a skill root missing here is discovered and then
+        denied on every read of its ``SKILL.md``.
         """
         return [str(self.working_directory), *skills_paths]
 
@@ -343,16 +288,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """Per-agent environment for the localharness subprocess (``LocalAgentConfig.env``).
 
         Returns the mock-CLI PATH prepend as a one-key overlay, or ``None`` when no
-        mock dirs are configured (so the SDK spawns with a plain inherited env). The
-        SDK merges this over ``os.environ`` at spawn (``{**os.environ, **env}``), so
-        naming only ``PATH`` leaves every other inherited variable untouched. The
-        same overlay is handed to the harness as its ``run_command`` environment, so
-        mock CLIs shadow the real ones inside the agent's shell too.
+        mock dirs are configured. The SDK merges it over ``os.environ`` at spawn,
+        so naming only ``PATH`` leaves every other inherited variable untouched.
+        The same overlay becomes the harness's ``run_command`` environment.
         """
         if not self._env_path_prepend:
             return None
-        # Match the parent process's own casing (Windows exports ``Path``) so the
-        # merge overrides the inherited entry instead of adding a sibling key.
+        # Match the parent's own casing (Windows exports ``Path``) so the merge
+        # overrides the inherited entry instead of adding a sibling key.
         path_key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
         merged = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key) or ""])
         return {path_key: merged}
@@ -367,20 +310,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """Initialize and start the Antigravity agent's local harness session.
 
         Args:
-            working_directory: Path to the sandbox working directory. The primary
-                ``workspace`` so file writes (and run_command) operate there —
-                process-cwd-independent, so concurrent host-mode tasks don't race.
-                Resolved skill roots are added alongside it so the agent can read
-                skill files — see ``_resolve_workspaces``.
-            env_path_prepend: Absolute directories to prepend to PATH (typically the
-                resolved ``SandboxConfig.mock_path_dirs``) so mock CLIs shadow the real
-                ones for the harness's ``run_command`` tool — same mock-shadowing
-                contract as the Claude/Codex backends. Delivered through the SDK's
-                per-agent ``env`` seam (see ``_harness_env``), so concurrent tasks get
-                genuinely separate environments rather than a time-sliced global one.
-            plugin_tools_dir: A skills/plugin source root. Resolved (together with
-                ``config.plugins``) into the harness's native ``skills_paths`` so the
-                agent can discover and engage UiPath skills — see ``_resolve_skills_paths``.
+            working_directory: The sandbox dir, and the primary ``workspace`` so
+                writes and run_command operate there — process-cwd-independent, so
+                concurrent host-mode tasks don't race.
+            env_path_prepend: Dirs prepended to PATH so mock CLIs shadow the real
+                ones (the shared mock-shadowing contract), delivered through the
+                SDK's per-agent ``env`` seam so concurrent tasks get genuinely
+                separate environments rather than a time-sliced global one.
+            plugin_tools_dir: A skills/plugin source root, resolved together with
+                ``config.plugins`` into the harness's native ``skills_paths``.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
@@ -396,55 +334,41 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             ) from e
 
         try:
-            # GEMINI_API_KEY authenticates the harness. None lets the SDK read it
-            # from the environment itself (and raise a clear error if truly unset).
+            # None lets the SDK read GEMINI_API_KEY itself, and raise a clear
+            # error if truly unset.
             api_key = os.getenv("GEMINI_API_KEY") or None
             skills_paths = self._resolve_skills_paths(plugin_tools_dir)
             cfg = LocalAgentConfig(
                 model=self._effective_model(),
                 api_key=api_key,
                 # File tools are confined to ``workspaces`` by the auto-prepended
-                # workspace_only policy. Scope to the sandbox workdir (the write
-                # target — process-cwd-independent so concurrent host-mode tasks
-                # don't race) PLUS the resolved skill roots, so the agent can READ
-                # each SKILL.md. ``skills_paths`` only feeds discovery; the file-tool
-                # allowlist is ``workspaces`` alone, so without the roots here every
-                # skill read is denied as out-of-workspace. The roots are already
-                # bind-mounted into the sandbox at the same path by the shared
-                # docker plugin auto-mount (the path Claude reads skills from too).
+                # workspace_only policy — see _resolve_workspaces for why the skill
+                # roots must be in here and not only in ``skills_paths``.
                 workspaces=self._resolve_workspaces(skills_paths),
-                # Autonomous execution: approve every tool call (incl. run_command),
-                # which the default LocalAgentConfig policy would otherwise deny.
-                # ``permission_mode`` is deliberately NOT mapped onto these policies —
-                # it does not confine this agent, exactly as on Codex. coder_eval's
-                # isolation boundary is the driver (a docker container or an ephemeral
-                # per-task tempdir), so an in-agent approval policy is redundant, and
-                # the modes below bypassPermissions differ only in what they'd ask a
-                # human about — there is no human on a headless eval path. Declared as
-                # such in the parity table so it is visible rather than silent.
+                # Autonomous execution: approve every tool call, which the default
+                # policy would deny. ``permission_mode`` is deliberately NOT mapped
+                # here — it does not confine this agent, exactly as on Codex, and
+                # docs/agents/HARNESS_PARITY.md says so rather than leaving it
+                # silent. The isolation boundary is the driver.
                 policies=[policy.allow_all()],
                 system_instructions=self.config.system_prompt or None,
-                # Skill discovery: hand the harness the search-path roots that parent
-                # the UiPath skill dirs. Unlike Codex (which symlinks into
-                # .agents/skills/), Antigravity takes skill search paths natively.
+                # Skill discovery: the search-path roots that parent the skill dirs.
                 skills_paths=skills_paths,
-                # Mock-CLI PATH shadowing, per agent. The SDK merges this over the
-                # inherited os.environ when it spawns the localharness, so two
-                # concurrent tasks never see each other's mock dirs.
+                # Mock-CLI PATH shadowing, per agent: two concurrent tasks never
+                # see each other's mock dirs.
                 env=self._harness_env(),
             )
-            # Attach the configured thinking level (reasoning effort) onto every
-            # resolved model's Gemini endpoint. The SDK validates the model list in
-            # a model_validator; we set options on the resolved targets after build.
+            # Thinking level onto every resolved model's endpoint. The SDK
+            # validates the model list in a model_validator, so options are set on
+            # the resolved targets after build.
             level = types.ThinkingLevel(self.config.thinking_level)
             for target in cfg.models or []:
                 endpoint = getattr(target, "endpoint", None)
                 if isinstance(endpoint, types.GeminiAPIEndpoint):
                     endpoint.options = types.GeminiModelOptions(thinking_level=level)
 
-            # Enter the SDK Agent context (boots the localharness subprocess +
-            # opens the conversation). Held open across communicate() calls and
-            # closed in stop().
+            # Boots the localharness subprocess + opens the conversation. Held
+            # open across communicate() calls, closed in stop().
             self._exit_stack = AsyncExitStack()
             self._sdk_agent = await self._exit_stack.enter_async_context(SdkAgent(cfg))
             self._log.debug("Antigravity local harness started (model=%s)", self._effective_model())
@@ -460,31 +384,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     ) -> None:
         """Consume one ``receive_steps()`` cycle onto ``state``, honoring a
         cooperative stop mid-stream. Shared by the initial drain and each poll
-        cycle's re-drain in ``communicate`` so this shape lives in one place.
+        cycle's re-drain, so this shape lives in one place.
 
-        ``receive_steps()`` is actually TWO nested async generators: the public
-        ``Conversation.receive_steps()`` we call here delegates internally
-        (``async for step in self._connection.receive_steps(): yield step``) to
-        the connection layer, which guards re-entrancy with an ``_is_receiving``
-        flag cleared only in its OWN ``finally``. ``aclosing`` on the outer
-        generator closes IT deterministically, but a ``GeneratorExit`` thrown
-        into a delegating generator does not synchronously propagate into the
-        inner one it was mid-iterating -- confirmed live: the inner ``finally``
-        only ran after the outer's frame was unwound AND the event loop had
-        processed the abandoned inner generator's async-gen finalizer, i.e. on a
-        LATER event-loop turn, not within the ``aclosing`` block itself. So a
-        cooperative-stop ``break`` here can still leave the connection
-        "receiving" for a short, bounded window afterward, and the NEXT
-        ``receive_steps()`` call (the next poll cycle, or the next turn in a
-        multi-turn dialog) can raise ``RuntimeError`` during that window. The
-        retry below -- yielding via ``asyncio.sleep(0)`` and trying again --
-        gives that already-scheduled finalizer a turn to run, mirroring the
-        SDK's OWN handling of this exact ``RuntimeError`` in
-        ``Conversation.send()`` (falls back to ``wait_for_idle()``); retrying
-        the drain itself is preferred here over that fallback since
-        ``wait_for_idle()`` discards any steps already queued, which would
-        silently drop real content instead of just retrying past a transient
-        window.
+        A cooperative-stop ``break`` can leave the SDK connection "receiving" for
+        a short bounded window, and the NEXT ``receive_steps()`` call raises
+        ``RuntimeError`` inside it. The retry below yields an event-loop turn for
+        the already-scheduled generator finalizer to run.
+
+        Rationale: .claude/notes/agents.md § The receive_steps re-entrancy window
         """
         for attempt in range(_RECEIVE_STEPS_REENTRY_RETRIES):
             try:
@@ -495,10 +402,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             state.stopped_early_hit = True
                             self._log.debug("Cooperative stop requested; ending step loop at this boundary")
                             break
-                        # The turn cap shares this boundary: the step that reached the
-                        # cap is kept whole, the next is never pulled. Checked after
-                        # the cooperative stop so an armed early-stop still reports as
-                        # STOPPED_EARLY when both would fire on the same step.
+                        # The turn cap shares this boundary: the step that reached
+                        # the cap is kept whole, the next is never pulled. After the
+                        # cooperative stop, so an armed early-stop wins a tie.
                         if state.max_turns_reached():
                             state.max_turns_hit = True
                             self._log.debug(
@@ -532,16 +438,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         conversation is cancelled (best-effort) and the turn finalizes cleanly as
         ``STOPPED_EARLY`` (``crashed=False``).
 
-        ``max_turns`` caps VISIBLE turns — tool calls, the unit
-        ``reports_stats.visible_turn_count`` counts — enforced in-stream on the same
-        step-loop boundary as the cooperative stop. Claude Code's native SDK cap
-        counts assistant messages instead; one ``communicate()`` here is a single SDK
-        turn, so a native counter would cap at 1 and mean nothing. See
-        docs/agents/HARNESS_PARITY.md.
+        ``max_turns`` caps VISIBLE turns — resolved tool calls — enforced in-stream
+        on the same boundary as the cooperative stop: one ``communicate()`` here is
+        a single SDK turn, so a native counter would cap at 1 and mean nothing.
+        See docs/agents/HARNESS_PARITY.md.
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
-        ``receive_steps()`` until the turn goes idle, mapping the Gemini step
-        stream onto the standardized event protocol.
+        ``receive_steps()`` until the turn goes idle.
 
         Raises:
             RuntimeError: If the agent is not started.
@@ -554,14 +457,12 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         assert self.config.type is not None, "AntigravityAgent requires AgentConfig.type before communicate()"
 
         self._begin_turn()
-        # Raw monotonic, and deliberately not the turn clock: this seeds the
-        # poll deadline below and `duration_seconds`, neither of which may move
-        # when the wall clock steps. `TurnClock` is for the RECORDED stamps.
+        # Raw monotonic, deliberately NOT the turn clock: this seeds the poll
+        # deadline and `duration_seconds`, neither of which may move when the wall
+        # clock steps. `TurnClock` is for the RECORDED stamps.
         turn_start_time = time.monotonic()
-        # ONE clock per turn. This is the (monotonic, wall) pair the reducer
-        # already captured here and then failed to use for its later stamps —
-        # which is why its window span was monotonic while its tool intervals
-        # were wall, and why the two could disagree.
+        # ONE clock per turn, so the window bounds and the tool intervals
+        # subtracted from them share a basis.
         clock = TurnClock()
         task_id = str(self.config.type)
         model = self._effective_model()
@@ -584,15 +485,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         )
 
         try:
-            # `timestamp` from the TURN CLOCK, not the event model's raw
-            # `datetime.now()` default: this bound is subtracted against window
-            # bounds the same clock produced (`decompose_turn`), and two bases
-            # in one subtraction is what `TurnClock` exists to remove. Measured
-            # HERE: this harness's tail came out at -0.017 ms — an end stamped
-            # 17 us before its own last message finished — which clamped to the
-            # `0.0` that means "measured, and instant" (CE058). It holds its
-            # process across turns, so its true tail is ~0.1 ms, which is the
-            # only scale at which the drift between two clocks can flip a sign.
+            # From the TURN CLOCK, not the model's raw `datetime.now()` default:
+            # this bound is subtracted against window bounds the same clock
+            # produced, and two bases in one subtraction clamped this harness's
+            # -0.017 ms tail to a measured 0.0 (CE058).
             emit.on_event(
                 AgentStartEvent(
                     task_id=task_id,
@@ -615,34 +511,21 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=model))
                 conversation = self._sdk_agent.conversation
                 poll_count = 0
-                # Bound the poll loop's OWN exit by a fraction of `timeout` so its
-                # graceful path (force-close the orphan, grade normally) reliably
-                # wins the race against the ThreadedWatchdog's harder cutoff at
-                # `timeout` itself, instead of the watchdog always firing first —
-                # see _POLL_DEADLINE_TIMEOUT_FRACTION's comment for why a FRACTION
-                # of `timeout` doesn't race it the way an identical value would.
-                # `timeout=None` has nothing to derive a fraction from, so the
-                # cycle-based _MAX_BACKGROUND_POLLS is the sole bound in that case.
+                # Bound the poll loop's OWN exit earlier than the watchdog's, so
+                # its graceful path reliably wins that race. `timeout=None` has
+                # nothing to take a fraction of, so the cycle cap is the sole bound.
                 poll_deadline = turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
                 try:
                     await conversation.send(user_input)
-                    # The cooperative should_stop poll runs AFTER process_step (the
-                    # emission that lets the watcher latch on the deciding tool
-                    # call) and BEFORE the next step is pulled — the deciding step
-                    # is kept, the next is not. No-op when should_stop is None.
+                    # should_stop runs AFTER process_step (the emission the watcher
+                    # latches on) and BEFORE the next step is pulled.
                     await self._drain(conversation, state, should_stop)
 
-                    # The model may have kicked off a run_command as a background
-                    # task and gone idle without waiting for it — receive_steps()
-                    # then exhausts with that tool call still open (never reached
-                    # DONE/ERROR). Conversation.wait_for_wakeup() is an unimplemented
-                    # stub on this SDK's Local harness (always returns False,
-                    # regardless of pending state — confirmed against the installed
-                    # source and live-tested), so poll for progress ourselves
-                    # instead, gated on that orphaned-tool signal so a normal turn
-                    # (which always closes its tool calls before the stream
-                    # exhausts) takes this branch zero times and finalizes exactly
-                    # as fast as today.
+                    # The model may background a run_command and go idle, so
+                    # receive_steps() exhausts with that call still open. Gated on
+                    # the orphaned-tool signal, so a normal turn takes this branch
+                    # zero times.
+                    # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
                     while (
                         not state.stopped_early_hit
                         and not state.max_turns_hit
@@ -658,19 +541,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
                         await asyncio.sleep(_BACKGROUND_POLL_INTERVAL_SECONDS)
                         if state.timeout_hit or (poll_deadline is not None and time.monotonic() >= poll_deadline):
-                            # The watchdog decided to fire during the sleep above, or
-                            # this loop's own (earlier) deadline just passed: skip the
-                            # re-drain (which could itself await indefinitely on
-                            # genuinely non-idle work) rather than waiting for the
-                            # loop's own head check to catch it next cycle.
+                            # Skip the re-drain, which could itself await
+                            # indefinitely on genuinely non-idle work.
                             break
                         if should_stop is not None and should_stop():
                             state.stopped_early_hit = True
                             break
-                        # A re-drain honors the turn cap the same way the initial one
-                        # does (the check lives in _drain), so a poll cycle can also
-                        # be the cycle that reaches it; the loop head above then
-                        # stops polling instead of waiting out the background work.
+                        # A re-drain honors the turn cap too (the check lives in
+                        # _drain), so a poll cycle can be the one that reaches it.
                         await self._drain(conversation, state, should_stop)
 
                     if (
@@ -679,10 +557,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         and not state.max_turns_hit
                         and not state.timeout_hit
                     ):
-                        # Exited via this loop's own bound (poll_deadline or the
-                        # cycle cap), not an external stop/timeout -- the tool call
-                        # is force-closed as unresolved in finalize() below and the
-                        # turn is still graded normally on everything else.
+                        # Exited via this loop's OWN bound, not an external
+                        # stop/timeout: the call is force-closed as unresolved and
+                        # the turn is still graded normally on everything else.
                         bound = (
                             f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
                             if poll_deadline is not None
@@ -692,10 +569,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         self._log.warning(msg, bound, poll_count)
 
                     if state.stopped_early_hit or state.max_turns_hit:
-                        # Best-effort server-side cancel, mirrors kill(); a raising
-                        # cancel() lands in the guarded handler below. Single check
-                        # point covers a stop from either the initial drain or any
-                        # poll cycle, so cancel() fires exactly once either way.
+                        # Best-effort server-side cancel. One check point, so it
+                        # fires exactly once whichever drain stopped.
                         with contextlib.suppress(Exception):
                             await conversation.cancel()
                 except asyncio.CancelledError:
@@ -706,12 +581,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     if state.timeout_hit:
                         self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
                     if state.ended_cleanly:
-                        # The turn already stopped cleanly (e.g. the generator's
-                        # aclose() raised on the break); escalating to a crash
-                        # would trigger the orchestrator's retry with the watcher's
-                        # decision still latched → immediate stop-at-turn-0 on the
-                        # retry (wasted spend). A cap-break is the same shape: the
-                        # retry would burn the budget again and re-hit the cap.
+                        # Already stopped on purpose — do not escalate.
+                        # Rationale: .claude/notes/agents.md § Why a post-stop exception is not a crash
                         self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
                     else:
                         self._finalize_and_raise_crash(
@@ -730,9 +601,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             raise
         except Exception as e:
             if state.ended_cleanly and not state.timeout_hit:
-                # Same retry-poisoning guard as the inner handler: the turn already
-                # ended cleanly (cooperative stop or turn cap), so finalize instead
-                # of crashing.
+                # Same retry-poisoning guard as the inner handler.
                 self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
             else:
                 self._finalize_and_raise_crash(
@@ -741,10 +610,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
-        # Precedence matches Claude: timeout (raised above) > stopped_early >
-        # max_turns_exhausted > completed. stopped_early outranks the cap because an
-        # armed criterion deciding the outcome is the more specific reason to have
-        # cut the run, and the step loop checks it first.
+        # Precedence: timeout (raised above) > stopped_early > max_turns > done.
+        # Rationale: .claude/notes/agents.md § Shared turn lifecycle
         if state.stopped_early_hit:
             status = AgentEndStatus.STOPPED_EARLY
         elif state.max_turns_hit:
@@ -771,9 +638,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """Best-effort synchronous abort for the watchdog thread (cannot await).
 
         Antigravity's cancel/disconnect are async-only, so the genuine teardown
-        happens via the asyncio-task cancel the watchdog also delivers (which
-        unwinds ``receive_steps``) and the subsequent ``stop()`` exit-stack close.
-        This hook only records intent.
+        happens via the watchdog's asyncio-task cancel and the subsequent
+        ``stop()`` exit-stack close. This hook only records intent.
         """
         self._state = AgentState.ERROR
 
@@ -815,7 +681,7 @@ class _AntigravityTurnState:
     repeatedly through ACTIVE -> DONE transitions; ``usage_metadata`` lands once
     per generation on a DONE/terminal step (summing them == the turn total); a
     tool call carries a stable ``id`` and its result is folded into expanded
-    ``args`` (``exit_code`` / ``combined_output`` / ``diff_block``) at DONE.
+    ``args`` at DONE.
     """
 
     def __init__(
@@ -842,10 +708,8 @@ class _AntigravityTurnState:
         self.iteration = iteration
         self.model = model
         self.turn_start_time = turn_start_time
-        # Every wall stamp below derives from this, so the tool spans and the
-        # window bounds they are subtracted from share one basis. Injected, not
-        # read from a module global, so a test supplies a fake instead of
-        # monkeypatching `datetime` out from under the reducer.
+        # Injected, not read from a module global, so a test supplies a fake
+        # instead of monkeypatching `datetime` out from under the reducer.
         self.clock = clock
 
         self.max_turns = max_turns
@@ -860,28 +724,21 @@ class _AntigravityTurnState:
         self._output_parts: list[str] = []
         self._assistant_turns = 0
 
-        # Tool tracking: emit ToolStart on first sight of an id; ToolEnd at DONE.
+        # ToolStart on first sight of an id; ToolEnd at DONE.
         self._next_seq = 0
         self._seen_tools: set[str] = set()
         self._closed_tools: set[str] = set()
         self._open_tools: dict[str, CommandTelemetry] = {}
-        # Raw arg keys present when a tool was first seen (its model-supplied
-        # inputs). Used at DONE to distinguish inputs from harness-appended
-        # result fields, whatever they're named for that tool.
+        # Arg keys present when a tool was first seen (its model-supplied
+        # inputs), used at DONE to tell them from harness-appended result fields.
         self._tool_input_keys: dict[str, set[str]] = {}
-        # Most recently seen StepStatus per tool id, for has_orphaned_tool_call
-        # below — deliberately separate from _closed_tools, which only tracks
-        # the DONE/ERROR terminal states relevant to result reporting.
+        # Most recently seen StepStatus per tool id, for has_orphaned_tool_call.
+        # Separate from _closed_tools, which tracks only DONE/ERROR.
         self._tool_last_status: dict[str, Any] = {}
         # Content blocks accumulated since the last per-generation flush.
         self._blocks: list[ContentBlock] = []
-        # Generation-window mark: where the CURRENT generation started. Set to
-        # the turn's own start so the first window includes prompt submission
-        # and connection setup — real time the model call cost, and the same
-        # choice Claude makes (its mark is also the turn start). Both stamps
-        # come from the SAME instant, captured by communicate(), so the
-        # recorded bounds and the measured duration describe one span.
-        # Advanced only by a flush that actually emitted a message.
+        # Where the CURRENT generation started, advanced only by a flush that
+        # actually emitted a message.
         self._gen_mark_wall: datetime = clock.now()
         # Re-seeded ONCE, at the first observed Step. See
         # `_seed_first_generation_window`.
@@ -891,69 +748,35 @@ class _AntigravityTurnState:
     def ended_cleanly(self) -> bool:
         """True once the loop broke on purpose (cooperative stop or the turn cap).
 
-        Both are non-crash terminations, so a stray exception raised while unwinding
-        the step generator afterwards must not be escalated into a retry.
+        Both are non-crash terminations, so a stray exception raised while
+        unwinding the step generator afterwards must not be escalated.
         """
         return self.stopped_early_hit or self.max_turns_hit
 
     def max_turns_reached(self) -> bool:
         """True once this turn has produced ``max_turns`` visible turns.
 
-        Delegates the count to the collector (``EventCollector.visible_turn_count``)
-        — the single agent-agnostic capture path, so one ``max_turns`` value means
-        the same thing here and on Codex. It counts RESOLVED tool calls (the end
-        event), which also means the call that reaches the cap keeps its result
-        instead of being force-closed as unresolved.
+        Delegates to ``EventCollector.visible_turn_count``, the single
+        agent-agnostic capture path, so one ``max_turns`` means the same thing here
+        and on Codex. It counts RESOLVED tool calls, so the call that reaches the
+        cap keeps its result instead of being force-closed as unresolved.
         """
         return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
 
     def _seed_first_generation_window(self, source: Any) -> None:
         """Move the first window's mark to the first observed MODEL output.
 
-        ``harness_startup_ms`` is defined as the wall clock from the turn
-        starting until the harness first observed model output, and that instant
-        is also where the first generation window opens — which is what keeps
-        the head and the generation disjoint so the four-bucket identity still
-        closes.
+        GATED ON ``source``, because ``harness_startup_ms`` is defined as model
+        output and the SDK streams Steps that are not: a turn can legitimately open
+        with a SYSTEM or USER Step, and seeding on one would put the mark BEFORE
+        the model spoke. The same gate guards text streaming below.
 
-        Without this ``_gen_mark_wall`` is stamped when the turn state is built,
-        BEFORE ``AgentStartEvent`` is emitted, so the head is a small negative
-        that ``decompose_turn`` clamps to ``0.0`` — a clamped inversion
-        published as "measured, and instant", which is the exact confusion CE058
-        exists to prevent everywhere else. Everything before the first ``Step``
-        — dispatch and time to first token — was booked as the first
-        generation instead: ~4.7 s per turn on this harness, measured against a
-        later-window median of 3.3 s.
+        ONCE PER TURN, and that is the whole contract: re-seeding would stop the
+        windows tiling. The flag needs no reset — a fresh turn state is built per
+        ``communicate()``. A turn that streams no MODEL Step keeps the turn-entry
+        mark and clamps to ``0.0``, which is the correct degradation.
 
-        What differs from claude-code is not in-process versus subprocess —
-        this harness spawns a ``localharness`` binary too. It is spawned ONCE,
-        in ``start()``, and held across every ``communicate()``, so there is no
-        boot inside a turn for the head to contain: it is dispatch plus time to
-        first token. claude-code spawns a fresh CLI per turn and so fuses that
-        boot in. The head means the same thing on both; only its COMPOSITION
-        differs, which is a real property of the harness rather than a
-        measurement artifact.
-
-        GATED ON ``source``, because the field is defined as model output and
-        the SDK streams Steps that are not. ``StepSource`` carries ``SYSTEM``
-        and ``USER`` besides ``MODEL``, and ``StepType`` carries
-        ``SYSTEM_MESSAGE`` / ``COMPACTION`` / ``FINISH``; the SDK's event
-        processor queues every ``step_update`` verbatim, so a turn can
-        legitimately open with one. Seeding on such a Step would put the mark
-        BEFORE the model spoke and hand the remainder back to msg0's
-        generation, which is the defect this method exists to remove. The same
-        gate guards text streaming a few lines below, for the same reason.
-
-        ONCE PER TURN, and that is the whole contract. ``process_step`` runs for
-        every Step in the turn; re-seeding on each would stop the windows tiling
-        and drop the gap before the next emission into no bucket at all, which
-        is the defect pi shipped with. The flag needs no reset: a fresh turn
-        state (and a fresh ``TurnClock``) is built per ``communicate()``, so it
-        is per-attempt by construction.
-
-        A turn that streams no MODEL Step at all never latches, keeps the
-        turn-entry mark and clamps to ``0.0`` exactly as before — the same
-        fail-safe degradation as an unrecognized source.
+        Rationale: .claude/notes/agents.md § First-generation window seeding
         """
         if self._first_output_seen or _enum_value(source) != _SOURCE_MODEL:
             return
@@ -993,20 +816,10 @@ class _AntigravityTurnState:
 
     def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
         raw_name = _enum_value(call.name)
-        # call.id is usually present ("a tool call carries a stable id" per this
-        # class's docstring), but the SDK types it as optional. The fallback must
-        # be BOTH stable across a step's own ACTIVE -> DONE re-emissions (same
-        # step_index) -- so an id-less call's DONE step closes the SAME cid its
-        # ACTIVE step opened, rather than minting a fresh id from a counter that
-        # already advanced, which would strand the ACTIVE entry as a permanent,
-        # never-closing "orphan" and stall the poll loop for its full budget --
-        # AND unique across trajectories: the SDK keys its own step tracking on
-        # (trajectory_id, step_index), since a sub-agent trajectory can reuse the
-        # same low step_index values as the main one. Mirrors the SDK's own
-        # `trajectory_id:step_index` id scheme (falling back to bare step_index
-        # when trajectory_id is empty, e.g. no sub-agent involved) rather than
-        # inventing a separate one; call_index further disambiguates multiple
-        # id-less tool calls within the same step, which the SDK's scheme does not.
+        # call.id is usually present but the SDK types it optional. The fallback
+        # mirrors the SDK's own `trajectory_id:step_index` scheme; call_index
+        # further disambiguates multiple id-less calls within one step.
+        # Rationale: .claude/notes/agents.md § Why the tool-call id falls back the way it does
         trajectory_id = getattr(step, "trajectory_id", "") or ""
         step_key = f"{trajectory_id}:{step.step_index}" if trajectory_id else str(step.step_index)
         cid = call.id or f"{raw_name}_{step_key}_{call_index}"
@@ -1071,12 +884,10 @@ class _AntigravityTurnState:
     def _params(tool_name: str, args: dict[str, Any], input_keys: set[str] | None) -> dict[str, Any]:
         """Model-supplied inputs only, renamed to canonical cross-agent keys.
 
-        A key is treated as a (dropped) result field when it is in the static
-        ``_RESULT_ARG_KEYS`` backstop OR — given the input-key snapshot taken at
-        tool start — it first appeared at DONE (harness-appended output, whatever
-        the tool names it). Surviving input keys are renamed via
-        ``_ANTIGRAVITY_ARG_RENAME`` so ``command_executed`` / reports key on the
-        same names (``command`` / ``path``) the Claude/Codex backends emit.
+        A key is a (dropped) result field when it is in the static
+        ``_RESULT_ARG_KEYS`` backstop OR first appeared at DONE, given the
+        input-key snapshot taken at tool start. Survivors are renamed to the
+        canonical vocabulary.
         """
         rename = _ANTIGRAVITY_ARG_RENAME.get(tool_name, {})
         out: dict[str, Any] = {}
@@ -1091,35 +902,18 @@ class _AntigravityTurnState:
     def _flush_generation(self, gen: TokenUsage, reasoning_tokens: int) -> None:
         """Cut accumulated blocks into one AssistantMessage carrying this gen's tokens.
 
-        Keeping per-message token buckets summing to the turn total means the
-        EventCollector's reconciliation step books a zero residual.
+        Keeping the per-message buckets summing to the turn total means the
+        collector's reconciliation books a zero residual.
         """
         if not self._blocks and gen.is_empty():
             return
         now_wall = self.clock.now()
-        # Do NOT "simplify" this to resetting the mark when a tool ends. That
-        # loses real model time: measured on run 2026-09-09_04-18-50, task
-        # skill-rpa-uia-google-search, a harness-local Read closed 8 ms after
-        # it opened while 6.4 s of model time separated the two flushes around
-        # it — a reset would have reported 8 ms and dropped the 6.4 s.
-        # Publishing the RAW window and letting the collector subtract the tool
-        # union handles that case AND its opposite (a 43 s Bash, where the
-        # model time really is the flush-to-DONE remainder).
-        #
-        # This harness interleaves a tool INTO a window rather than tiling
-        # around it, so the window legitimately contains time that is not model
-        # time. `timing.subtract_tool_time` clips the union to these
-        # bounds and takes it out. Measured here before any of that existed: a
-        # Bash opening 1.7 ms before the flush drove Sum(generation) +
-        # Sum(command) 0.26 ms PAST the turn wall, on a turn whose whole
-        # headroom was 1.4 ms.
-        #
-        # The span used to be read off `time.monotonic()` while these intervals
-        # were wall, and subtracting one from the other is the only reason this
-        # window could go negative — a clamp that was indistinguishable from a
-        # real instant generation. Both bounds now derive from `self.clock`, so
-        # the disagreement is unrepresentable and the branch that hid it is
-        # gone.
+        # Do NOT "simplify" this to resetting the mark when a tool ends: this
+        # harness interleaves a tool INTO a window rather than tiling around it,
+        # so the RAW window legitimately contains time that is not model time and
+        # the collector clips the tool union out of it. Resetting instead drops
+        # the model time around a fast tool.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
         _, generation_ms = close_window(mark=self._gen_mark_wall, now=now_wall)
         for i, block in enumerate(self._blocks):
             block.sequence = i
@@ -1137,16 +931,14 @@ class _AntigravityTurnState:
                 reasoning_tokens=reasoning_tokens,
                 model=self.model,
                 # The Step stream carries no message id, and the evalboard's
-                # SAME_EMISSION_GAP_MS fallback cannot split this harness's
-                # contiguous windows — see docs/agents/HARNESS_PARITY.md.
+                # gap fallback cannot split contiguous windows.
                 message_id=f"{self.turn_id}-msg-{self._assistant_turns}",
             )
         )
         self._assistant_turns += 1
         self._blocks = []
-        # Advance the mark ONLY after a message was actually appended. The
-        # early return above means a no-op flush leaves the window open, so a
-        # later real generation still measures from where it began.
+        # Advance ONLY after a message was appended: a no-op flush leaves the
+        # window open, so a later real generation still measures from its start.
         self._gen_mark_wall = now_wall
 
     def _agent_output(self) -> str:
@@ -1161,17 +953,12 @@ class _AntigravityTurnState:
         ACTIVE — the structural signature of a backgrounded task the model went
         idle on without waiting for. See ``communicate``'s poll loop.
 
-        Deliberately an ALLOWLIST on ACTIVE, not a denylist on "not yet closed
-        via _closed_tools" alone: the SDK's StepStatus also has WAITING_FOR_USER
-        (the harness is blocked on a question that will never be answered in
-        this headless eval), CANCELED, and UNKNOWN — none of which _closed_tools
-        ever marks done (that set only tracks DONE/ERROR, the states relevant to
-        result reporting), but none of which the poll loop should ever wait out
-        either, since they will never become DONE on their own. Checking the
-        allowlisted ACTIVE status is what tells these apart from a genuine
-        in-flight background job. The `not in _closed_tools` guard is layered on
-        top (not a substitute) purely as a monotonicity backstop, in case a
-        closed id's last-seen entry were ever left at ACTIVE by a re-emission.
+        An ALLOWLIST on ACTIVE, never a denylist on "not yet closed": the SDK also
+        has WAITING_FOR_USER, CANCELED and UNKNOWN, none of which the poll loop
+        should wait out. The `not in _closed_tools` guard is layered on top as a
+        monotonicity backstop, not a substitute.
+
+        Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
         """
         return any(cid not in self._closed_tools and s == _STATUS_ACTIVE for cid, s in self._tool_last_status.items())
 
@@ -1203,9 +990,8 @@ class _AntigravityTurnState:
         if self._blocks:
             self._flush_generation(TokenUsage(), 0)
 
-        # AgentEndStatus and TurnEndStatus are parallel by value; convert directly
-        # (mirrors the Codex sibling) so an unmapped future member raises loudly
-        # instead of silently bucketing to COMPLETED.
+        # Parallel by value, so an unmapped future member raises loudly instead
+        # of silently bucketing to COMPLETED.
         turn_status = TurnEndStatus(status.value)
 
         self.emit.on_event(
@@ -1232,8 +1018,7 @@ class _AntigravityTurnState:
                 crash_reason=crash_reason,
                 max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
-                # One basis with the window bounds — see the AgentStartEvent
-                # site in `communicate`.
+                # One basis with the window bounds — see the AgentStartEvent site.
                 timestamp=self.clock.now(),
             )
         )

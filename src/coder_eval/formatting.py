@@ -96,11 +96,8 @@ def format_messages(
             continue
 
         type_name = type(msg).__name__
-        # Known, non-transcript SDK types: StreamEvent carries token deltas
-        # (captured elsewhere) and RateLimitEvent is an out-of-band throttling
-        # notice the SDK interleaves into the stream. Neither is transcript
-        # content, so skip both rather than surfacing an "unhandled" warning.
-        # Matched by name (not import) to stay robust across SDK versions.
+        # Known non-transcript SDK types, skipped rather than warned about as
+        # "unhandled". Matched by NAME, not import, to survive an SDK version bump.
         if type_name in ("StreamEvent", "RateLimitEvent"):
             continue
         if type_name not in warned_unknown_types:

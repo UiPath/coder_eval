@@ -1,61 +1,24 @@
 """Pi agent implementation (the ``pi`` Node coding agent — https://pi.dev/).
 
-Drives the ``pi`` CLI in JSON print mode::
+Drives the ``pi`` CLI in JSON print mode, which streams newline-delimited JSON
+events on stdout, and reduces that stream into the standardized coder_eval event
+protocol so :class:`EventCollector` builds the ``TurnRecord``. The design mirrors
+:mod:`coder_eval.agents.opencode_agent`.
 
-    pi -p --mode json --no-context-files --no-approve \
-        --session-dir <D> --session-id <ID> [--model provider/id] \
-        [--thinking L] [--append-system-prompt S] -- <prompt>
+Three grammar facts that are not obvious from the event names (``pi`` 0.84.4):
 
-which streams **newline-delimited JSON events** on stdout. Each line is one
-event; this module reduces that stream into the standardized coder_eval event
-protocol (``AgentStart`` / ``TurnStart`` / ``ToolStart`` / ``ToolEnd`` /
-``TurnEnd`` / ``AgentEnd``) and lets :class:`EventCollector` build the
-``TurnRecord`` — so no telemetry is assembled by hand here. The design mirrors
-:mod:`coder_eval.agents.opencode_agent` almost verbatim; the differences are
-noted inline.
+- ``agent_start`` can appear MORE THAN ONCE per invocation — Pi auto-retries a
+  transient provider error internally — and ``agent_end`` is therefore NOT
+  terminal. ``agent_settled`` (or EOF) is; the single ``AgentEndEvent`` is
+  emitted there.
+- ``turn_start`` is one per agent-loop step, and is the unit ``max_turns`` counts.
+- ``message_end`` is ignored for token accounting: ``turn_end`` echoes the same
+  assistant usage once per step, so reading both would double-count.
 
-Event grammar (captured from ``pi`` 0.84.4)
--------------------------------------------
-- ``{"type": "session", ...}`` — always line 1 (cwd/id/version).
-- ``{"type": "agent_start"}`` — bare; **can appear more than once** per
-  invocation (Pi auto-retries a transient/provider error internally).
-- ``{"type": "turn_start"}`` — bare; one per agent-loop step. This is the unit
-  ``max_turns`` counts.
-- ``{"type": "message_update", "assistantMessageEvent": {...}}`` — streaming
-  deltas (text/thinking/toolcall). Text deltas drive ``TextChunkEvent``.
-- ``{"type": "message_end", "message": {...}}`` — a complete message. Ignored
-  for token accounting: ``turn_end`` echoes the same assistant usage once per
-  step, and reading both would double-count.
-- ``{"type": "tool_execution_start", "toolCallId": ..., "toolName": ...,
-  "args": {...}}`` / ``{"type": "tool_execution_end", "toolCallId": ...,
-  "result": ..., "isError": ...}``.
-- ``{"type": "turn_end", "message": {...assistant...}, "toolResults": [...]}``
-  — ``message.usage`` is that step's OWN usage (per-generation), summed across
-  steps for the turn total.
-- ``{"type": "agent_end", "messages": [...], "willRetry": <bool>}`` —
-  ``willRetry: true`` means another retry cycle follows in the SAME invocation.
-- ``{"type": "agent_settled"}`` — the true terminal event (after all retries);
-  emit the single ``AgentEndEvent`` here / at EOF, NOT on the first
-  ``agent_end``.
+A per-agent ``--session-dir`` + stable ``--session-id``, replayed on every
+``communicate()``, are what make dialog mode work across CLI invocations.
 
-Token semantics
----------------
-Per-generation, **SUM** (identical to OpenCode; NOT cumulative). Each
-``turn_end.message.usage`` carries ``{input, output, cacheRead, cacheWrite,
-[reasoning], totalTokens, cost:{...,total}}`` for that step, where
-``totalTokens == input + output + cacheRead + cacheWrite``. Unlike OpenCode,
-Pi's ``input`` IS the fresh slice already (no flat/nested arbitration needed),
-so it maps straight to ``uncached_input_tokens``. ``reasoning`` bills at the
-output rate. ``cost.total`` per step is summed into
-``token_usage.total_cost_usd`` (the rate card is only a fallback when the
-stream omits cost).
-
-Session continuity
-------------------
-A per-agent ``--session-dir`` + stable ``--session-id`` are assigned in
-``start()`` and replayed on every ``communicate()`` — create-if-missing on the
-first call, resume after — which is what makes multi-turn (dialog-mode)
-evaluation work across separate CLI invocations.
+Rationale: .claude/notes/agents.md § Pi
 """
 
 from __future__ import annotations
@@ -117,12 +80,9 @@ from .registry import AgentRegistry
 logger = logging.getLogger(__name__)
 
 # Grace period between SIGTERM and SIGKILL when tearing down the CLI subprocess.
-# Doubles as the post-EOF exit grace in _settle_turn when no turn deadline is
-# configured. Re-declared here at the same value as OpenCode's rather than shared:
-# the full nd-JSON-CLI driver hoist that would unify the two harnesses' teardown
-# constants and reducers is a tracked follow-up; the shared plugin->skills resolver
-# already lives in `agents/_skills.py`. STDOUT_LINE_LIMIT_BYTES, which IS canonical,
-# is imported above.
+# Doubles as the post-EOF exit grace in _settle_turn when no turn deadline is set.
+# Re-declared at OpenCode's value rather than shared — see the notes.
+# Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
 _TERM_GRACE_SECONDS = 5.0
 
 # SIGKILL does not exist on Windows (where the process-group sweep is a no-op
@@ -130,9 +90,9 @@ _TERM_GRACE_SECONDS = 5.0
 # platform, falling back to SIGTERM for the direct-pid kill_sync path.
 _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
 
-# How long to keep draining stdout/stderr after the CLI process has been reaped.
-# A print-mode CLI may leave an inherited pipe open, so every post-exit read
-# must be bounded.
+# How long to keep draining stdout/stderr after the CLI has been reaped: a
+# print-mode CLI may leave an inherited pipe open, so every post-exit read is
+# bounded.
 _DRAIN_SECONDS = 2.0
 
 # How many distinct unrecognized event-type strings to retain for the crash
@@ -140,9 +100,8 @@ _DRAIN_SECONDS = 2.0
 _MAX_UNRECOGNIZED_TYPES = 8
 
 # pi's native tool names -> the canonical (Claude) vocabulary every criterion is
-# written against. Mirrors opencode_agent._TOOL_NAME_MAP: without it a
-# `command_executed` with `tool_name: Bash` matches nothing on a Pi run. Unknown
-# tools pass through unchanged.
+# written against. Unknown tools pass through unchanged.
+# Rationale: .claude/notes/agents.md § Tool-name and argument normalization
 _TOOL_NAME_MAP: dict[str, str] = {
     "bash": "Bash",
     "read": "Read",
@@ -150,9 +109,7 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "edit": "Edit",
     "patch": "Edit",
     "multiedit": "Edit",
-    # Pi's search tool is `find` (glob-by-pattern), NOT `glob` — mapping it to the
-    # canonical `Glob` keeps command_executed / commands_efficiency criteria
-    # comparable across harnesses. There is no `glob` tool in Pi's built-in set.
+    # Pi's search tool is `find` (glob-by-pattern); there is no `glob` in its set.
     "find": "Glob",
     "grep": "Grep",
     "list": "LS",
@@ -163,11 +120,9 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "task": "Agent",
 }
 
-# pi per-tool INPUT-arg key -> canonical (Claude) key. Mirrors
-# opencode_agent._OPENCODE_ARG_RENAME. The spike's write/read tools used `path`,
-# so map it to `file_path` for Read/Write/Edit (the search tools keep `path`,
-# which is already Claude's key). Keyed by the canonical tool name (post
-# _TOOL_NAME_MAP); unlisted keys pass through.
+# pi per-tool INPUT-arg key -> canonical (Claude) key, keyed by the canonical
+# tool name (post _TOOL_NAME_MAP). The search tools keep `path`, which is already
+# Claude's key. Unlisted keys pass through.
 _PI_ARG_RENAME: dict[str, dict[str, str]] = {
     "Read": {"path": "file_path"},
     "Write": {"path": "file_path"},
@@ -179,26 +134,24 @@ _PI_ARG_RENAME: dict[str, dict[str, str]] = {
     },
 }
 
-# Config fields the Pi CLI has no equivalent knob for (v1), OR that cannot be
-# safely forwarded. `experiments/default.yaml` sets `permission_mode` and
-# `allowed_tools` on every task, so warn once at start() rather than let a task
-# believe it constrained the agent. NOTE `system_prompt` IS supported (mapped to
-# --append-system-prompt) and `plugins` IS supported (each resolved skills dir is
-# mapped to a `--skill <dir>` argument), so neither is here.
+# Config fields Pi does NOT enforce. `experiments/default.yaml` sets
+# `permission_mode` and `allowed_tools` on every task, so start() warns once
+# rather than letting a task believe it constrained the agent. `system_prompt`
+# and `plugins` ARE supported, so neither is here. Per-harness table:
+# docs/agents/HARNESS_PARITY.md.
 _UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
     "permission_mode",
     "system_prompt_file",
-    # Pi's built-in tool names are lowercase (bash/read/write/edit/grep/find/ls)
-    # and do not match the Claude-namespaced default (Bash/Read/Write/...), so
-    # forwarding them to --tools would allowlist nonexistent tools and strip the
-    # agent of ALL tools. Ignored like OpenCode/Codex/Antigravity do.
+    # Forwarding these to --tools would allowlist nonexistent tools and strip the
+    # agent of ALL tools: Pi's built-ins are lowercase.
+    # Rationale: .claude/notes/agents.md § Harness run-limit parity
     "allowed_tools",
     "disallowed_tools",
 )
 
 # The full recognized Pi vocabulary (from `pi` 0.84.4). A clean exit that
-# recognized NOTHING from this set is vocabulary drift and is crashed rather than
-# scored as a silent empty success (see _settle_turn).
+# recognized NOTHING from this set is vocabulary drift and is crashed, not scored.
+# Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
 _RECOGNIZED_EVENTS = frozenset(
     {
         "session",
@@ -276,12 +229,10 @@ class _PiTurnState:
         self.user_input = user_input
         self.model = model
 
-        # ONE clock per turn, and every wall stamp below derives from it, so
-        # the tool spans and the window bounds they are subtracted from cannot
-        # end up on different bases. Injectable so a test can supply a fake
-        # rather than monkeypatching this module's `datetime` global — which a
-        # derived stamp would silently escape, leaving the test passing against
-        # the real clock instead of failing.
+        # ONE clock per turn, so the tool spans and the window bounds they are
+        # subtracted from share a basis. Injectable so a test supplies a fake
+        # rather than monkeypatching this module's `datetime` global, which a
+        # derived stamp would silently escape.
         self.clock = clock or TurnClock()
         self.started_at = time.monotonic()
         self.thread_id: str | None = None
@@ -304,14 +255,9 @@ class _PiTurnState:
         self.turn_text_parts: list[str] = []
         self.turn_tool_ids: list[str] = []
         # Where the NEXT generation window starts: the previous turn's end.
-        # Pi was the only harness measuring from its own `turn_start`, so the
-        # wall clock between one `turn_end` and the next `turn_start` — the
-        # model time that PRODUCED that turn — fell into no bucket at all.
-        #
-        # None until the first turn finishes, and deliberately so: the first
-        # window keeps its own `turn_start`, because everything before it is
-        # CLI process spawn, not model time. Same shape as OpenCode's
-        # `gen_mark` and Codex's `gen_mark_ms`.
+        # None until the first turn finishes, and deliberately so — everything
+        # before the first `turn_start` is CLI process spawn, not model time.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
         self.gen_mark: datetime | None = None
 
         # toolCallId -> telemetry for tools awaiting a result.
@@ -327,12 +273,9 @@ class _PiTurnState:
         # message can name what it actually saw.
         self.recognized_events = 0
         self.unrecognized_types: set[str] = set()
-        # Warn-once guard for token-accounting drift. The event-vocabulary check
-        # catches renamed EVENT types, but not a renamed/absent `usage` field or a
-        # bucket whose type changed — those silently coerce to 0 (see `_as_int`) and
-        # would zero out the run's tokens/cost, blinding max_total_tokens / max_usd
-        # gates. Mirrors OpenCode's `_warn_token_shape` (its escape hatch shipped
-        # with this warning; Pi's earlier cut kept the hatch but dropped the warn).
+        # Warn-once guard for token-accounting drift: the event-vocabulary check
+        # cannot see inside `usage`.
+        # Rationale: .claude/notes/agents.md § Why token-shape drift warns instead of raising
         self.warned_token_shape = False
 
         self._emit: Callable[[StreamEvent], None] = lambda _e: None
@@ -351,11 +294,9 @@ class _PiTurnState:
 
     def on_turn_start(self) -> None:
         # A prior step's `turn_start` with no `turn_end` — a generation aborted
-        # mid-turn (the defining willRetry case: a provider error before the
-        # assistant message completed). Close its dangling TurnStartEvent before
-        # opening the next, or the stream carries N starts and N-1 ends, breaking
-        # the one-pair-per-inner-turn contract renderers depend on. `finalize`
-        # closes only the LAST open turn, so it cannot cover this.
+        # mid-turn (the willRetry case). Close its dangling TurnStartEvent, or the
+        # stream carries N starts and N-1 ends and breaks the one-pair-per-inner-turn
+        # contract. `finalize` closes only the LAST open turn, so it cannot cover this.
         if self.turn_open:
             self.turn_open = False
             self.emit(
@@ -373,10 +314,8 @@ class _PiTurnState:
         self.turn_started_at = self.clock.now()
         self.turn_text_parts = []
         self.turn_tool_ids = []
-        # No per-turn span list to reset here any more — see the identical note
-        # in `opencode_agent.on_step_start`. The collector subtracts from final
-        # bounds with every span known, so nothing has to remember a call that
-        # closed in the gap before this `turn_start`.
+        # No per-turn span list to reset here any more: the collector subtracts
+        # from final bounds with every span known.
         self.emit(
             TurnStartEvent(
                 task_id=self.task_id,
@@ -427,10 +366,9 @@ class _PiTurnState:
         is_error = bool(obj.get("isError"))
         if is_error:
             message = summary or "tool failed"
-            # Best-effort: Pi does not tag permission denials distinctly, so infer
-            # from the result text. The persisted tri-state folds both to "error"
-            # (see _RESULT_STATUS), so a misclassified legit "permission denied" in
-            # output is cosmetic. Mirrors opencode_agent.
+            # Best-effort: Pi does not tag permission denials, so infer from the
+            # text. The persisted tri-state folds both to "error", so a
+            # misclassification is cosmetic.
             denied = "permission" in message.lower() or "denied" in message.lower()
             status = ToolEndStatus.PERMISSION_DENIED if denied else ToolEndStatus.ERROR
         else:
@@ -457,20 +395,11 @@ class _PiTurnState:
                 timestamp=self.clock.now(),
                 sequence_number=self.sequence,
             )
-        # Only a RESOLVED tool is timed. An orphan force-closed by
-        # `close_open_tools` was never observed finishing, so the instant the
-        # sweep runs is not a completion — stamping it manufactures both an
-        # `execution_completed_at` and the `duration_ms` derived from it, and
-        # the pair then reads as a measured span that
-        # `timing.subtract_tool_time` takes back out of a generation
-        # window it never actually occupied. `execution_started_at` IS kept:
-        # the CLI really did emit that start, and one bound alone forms no
-        # span (`main_thread_tool_spans` requires both). This is the guard the
-        # old comment here claimed and the code did not have — it tested
-        # `execution_started_at is not None`, which an orphan passes.
-        # claude-code's `_finalize_commands` leaves the same field `None` for
-        # the same reason: unknown status and unknown duration are one fact
-        # (CE058).
+        # Only a RESOLVED tool is timed: an orphan was never observed finishing,
+        # so stamping it would manufacture a span the central subtraction then
+        # takes out of a window it never occupied. `execution_started_at` IS
+        # kept — one bound alone forms no span (CE058).
+        # Rationale: .claude/notes/agents.md § Why only a RESOLVED tool is timed
         if status is not ToolEndStatus.UNRESOLVED:
             completed = self.clock.now()
             telemetry.execution_completed_at = completed
@@ -500,14 +429,12 @@ class _PiTurnState:
     def _as_int(self, value: Any) -> int:
         """Coerce one stream-supplied token count; count a non-number as 0.
 
-        A bare ``int()`` would raise on a non-numeric value, which
-        ``communicate``'s ``except Exception`` turns into an ``AgentCrashError``
-        (categorized ``AGENT_CRASH``, ``max_retries=2``), burning three attempts
-        on one mistyped bucket. A bool is never a token count (``int(True) == 1``).
+        A bool is never a token count (``int(True) == 1``).
 
         ``None`` is a legitimately-absent bucket (silent). Any OTHER unparseable
-        value is a schema drift and warns once — otherwise a changed bucket type
-        would silently zero the turn's tokens and cost.
+        value is schema drift and warns once.
+
+        Rationale: .claude/notes/agents.md § Why token-shape drift warns instead of raising
         """
         if value is None:
             return 0
@@ -532,9 +459,8 @@ class _PiTurnState:
         message = message if isinstance(message, dict) else {}
         raw_usage = message.get("usage")
         if not isinstance(raw_usage, dict) or not raw_usage:
-            # A completed step that booked no usage object at all — a renamed or
-            # absent `usage` (which the event-vocabulary check cannot see). Its
-            # tokens/cost silently resolve to 0; say so once.
+            # A completed step that booked no usage object at all: its tokens and
+            # cost silently resolve to 0, so say so once.
             self._warn_token_shape("turn_end carried no usage object; this step's tokens/cost counted as 0")
         usage = raw_usage if isinstance(raw_usage, dict) else {}
 
@@ -547,12 +473,8 @@ class _PiTurnState:
         # fold it into the turn total (the per-message record keeps it separately).
         step_out = raw_out + step_reasoning
 
-        # A turn_end that DID carry a usage object but whose every bucket resolves
-        # to 0 is the drift shape the whole-object check above cannot see: keys
-        # renamed by a CLI upgrade each coerce to 0 (see `_as_int`), tokens and cost
-        # silently vanish, and `max_usd` / `max_total_tokens` can never trip. Warn
-        # once (score, don't crash — the documented Pi policy). OpenCode guards the
-        # same gap with `steps_finished > 0 and usage.is_empty()`.
+        # A usage object whose every bucket resolves to 0 is the drift shape the
+        # whole-object check cannot see. Warn once; score, don't crash.
         if raw_usage and step_in == raw_out == step_reasoning == step_cw == step_cr == 0:
             self._warn_token_shape("turn_end usage object had all-zero token buckets; this step booked 0 tokens/cost")
 
@@ -562,18 +484,13 @@ class _PiTurnState:
             cache_creation_input_tokens=self.usage.cache_creation_input_tokens + step_cw,
             cache_read_input_tokens=self.usage.cache_read_input_tokens + step_cr,
         )
-        # Cross-check the stream's OWN `totalTokens` against the buckets we summed.
+        # Cross-check the stream's OWN `totalTokens` against the summed buckets.
         # Pi's invariant is totalTokens == input + output + cacheRead + cacheWrite
-        # (reasoning is billed at the output rate but excluded from this field, so
-        # compare against raw_out, not step_out). A mismatch means a bucket was
-        # renamed or its meaning moved under a CLI upgrade — exactly the drift the
-        # per-bucket `_as_int` coercion would otherwise absorb silently, blinding
-        # max_total_tokens / max_usd. Warn once, mirroring OpenCode's `tokens.total`
-        # guard; only when the field is actually present (older streams omit it).
+        # — reasoning bills at the output rate but is EXCLUDED from this field, so
+        # compare against raw_out, not step_out. Only when the field is present.
         reported_total = usage.get("totalTokens")
-        # Accept int OR float (a `123.0`-shaped total is itself a plausible drift and
-        # _as_int accepts floats for the buckets); the numeric compare below is
-        # exact for whole values (123.0 == 123).
+        # int OR float: a `123.0`-shaped total is itself a plausible drift, and
+        # the compare below is exact for whole values.
         if isinstance(reported_total, int | float) and not isinstance(reported_total, bool):
             expected_total = step_in + raw_out + step_cw + step_cr
             if reported_total != expected_total:
@@ -612,9 +529,7 @@ class _PiTurnState:
         for i, tool_id in enumerate(self.turn_tool_ids, start=len(blocks)):
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
-        # Tile from the previous turn's end. The RAW window only —
-        # `timing.subtract_tool_time` takes the tool union back out of
-        # it, once, for every harness.
+        # Tile from the previous turn's end. The RAW window only.
         turn_start = self.turn_started_at if self.turn_started_at is not None else completed
         started, generation_ms = close_window(
             mark=self.gen_mark if self.gen_mark is not None else turn_start,
@@ -638,26 +553,15 @@ class _PiTurnState:
                 message_id=str(message.get("responseId") or "") or None,
             )
         )
-        # A message was appended, so the next window starts where this one
-        # ended. Only a finished turn advances the mark: one that never
-        # finished published nothing, so tiling past it would attribute its
-        # time to whichever turn finishes next. There is no span list to clear
-        # alongside it any more — see `on_turn_start`.
+        # A message was appended, so the next window starts where this one ended.
+        # Only a FINISHED turn advances the mark.
         self.gen_mark = completed
-        # And so is this turn's own start stamp, because it has now been SPENT.
-        # It is passed to `close_window` as `item_start`, whose `min()` pulls
-        # the window open to cover it; left in place, a second `turn_end` with
-        # no intervening `turn_start` — a duplicate or replayed line, which
-        # this reducer promises to survive — would reopen the next window back
-        # at the previous turn's start and publish that whole span a second
-        # time. Reproduced: 3000 ms of generation for a 2000 ms turn.
+        # SPENT state, reset HERE and not only in `on_turn_start`: a second
+        # `turn_end` with no intervening start — a duplicate or replayed line,
+        # which this reducer promises to survive — would otherwise republish this
+        # turn's span, text and tool ids as the next turn's.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
         self.turn_started_at = None
-        # The CONTENT half of the same reset, and the same argument: both
-        # lists have now been SPENT into the message appended above.
-        # Cleared only in `on_turn_start`, a second `turn_end` with no
-        # intervening start re-emitted the previous turn's text as its own
-        # assistant message and re-listed the same `tool_use_ids`, so one
-        # tool call appeared to belong to two generations.
         self.turn_text_parts = []
         self.turn_tool_ids = []
         self.emit(
@@ -689,15 +593,11 @@ class _PiTurnState:
     def _resolve_cost(self) -> float | None:
         """Decide the turn's cost: the stream's own accounting vs the rate card.
 
-        Pi reports a real per-call ``cost.total`` (spike-verified), which wins for
-        any nonzero total. Two conservative fallbacks to the rate card:
-        - the stream reported no cost field at all (``saw_cost`` False), or
-        - it reported a cost field but the turn total came out exactly ``$0`` on a
-          model the rate card DOES price. A true $0 (free/promo response) and a
-          provider whose cost field is present-but-always-zero are indistinguishable
-          from the stream alone, so we prefer the rate card: understating cost would
-          silently defeat ``max_usd`` budget gates, which is the worse failure. A
-          genuinely free model (no rate-card entry) still resolves to the stream's 0.
+        Pi reports a real per-call ``cost.total``, which wins for any nonzero
+        total. It falls back to the rate card when the stream reported no cost at
+        all, or reported exactly ``$0`` on a model the rate card DOES price.
+
+        Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
         """
         rate = self._rate_card_cost()
         if not self.saw_cost:
@@ -732,8 +632,8 @@ class _PiTurnState:
         cost = self._resolve_cost()
         if cost is not None:
             usage = usage.model_copy(update={"total_cost_usd": cost})
-        # A turn still open here never received its `turn_end` — close its
-        # TurnStartEvent or the one-pair-per-inner-turn contract breaks.
+        # A turn still open never received its `turn_end`; close it or the
+        # one-pair-per-inner-turn contract breaks.
         if self.turn_open:
             self.turn_open = False
             self.emit(
@@ -779,13 +679,11 @@ class _PiTurnState:
 class PiAgent(Agent[PiAgentConfig]):
     """Runs the ``pi`` CLI as a subprocess, one invocation per turn."""
 
-    # `should_stop` is polled at every event boundary — i.e. tool-call
-    # granularity — and honored by terminating the CLI subprocess cleanly.
+    # `should_stop` is polled at every event boundary (tool-call granularity).
     supports_cooperative_stop: ClassVar[bool] = True
 
-    # Pi maps `system_prompt` to `--append-system-prompt`, so it appends to (does
-    # not replace) the CLI's default prompt. Declared explicitly (mirrors Codex /
-    # Antigravity, NOT OpenCode's `"unknown"`).
+    # `--append-system-prompt` appends to, never replaces, the CLI's own prompt.
+    # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
 
     def __init__(
@@ -797,14 +695,11 @@ class PiAgent(Agent[PiAgentConfig]):
     ) -> None:
         """Every parameter the agent factory can pass is DECLARED, not absorbed.
 
-        ``create_agent`` calls ``agent_class(config, route=route, **kwargs)``
-        through a ``cast(Any, ...)``, so a ``**_`` sink would mean nothing checks
-        the kwargs at runtime either — a mis-gated kwarg must be loud here rather
-        than silently dropped.
-
         ``route`` is accepted for factory parity and deliberately unused: the CLI
-        owns its own provider configuration. ``task_id`` only labels the emitted
-        event stream.
+        owns its own provider configuration. ``task_id`` only labels the event
+        stream.
+
+        Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         """
         self.config = config
         self.route = route
@@ -815,11 +710,9 @@ class PiAgent(Agent[PiAgentConfig]):
         # Skills-parent dirs resolved from `agent.plugins`, passed to `pi --skill`
         # (Pi discovers `<name>/SKILL.md` recursively). Assigned in start().
         self._skill_dirs: list[str] = []
-        # Per-agent session, reused across communicate() calls for multi-turn /
-        # simulation continuity (assigned in start(), removed in stop() — NOT in
-        # kill(), which the orchestrator's mid-turn backstop calls; dropping the
-        # dir there would break resume across a retried turn. _cleanup always
-        # calls stop() after any kill(), so the tempdir is still reclaimed).
+        # Per-agent session, reused across communicate() calls for multi-turn
+        # continuity. Removed in stop(), deliberately NOT in kill().
+        # Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
         self._session_id: str | None = None
         self._session_dir: str | None = None
         self._process: asyncio.subprocess.Process | None = None
@@ -865,16 +758,13 @@ class PiAgent(Agent[PiAgentConfig]):
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
         # A stable pre-assigned id (create-if-missing on turn 1, resume after).
-        # The tempdir lives OUTSIDE the sandbox working dir and staged reference
-        # dir, so it never pollutes graded files or trips reference-integrity.
-        # Drop any session dir from a prior start() first so re-starting the same
-        # agent instance cannot leak a tempdir.
+        # The tempdir lives OUTSIDE the sandbox and staged reference dir, so it
+        # never pollutes graded files. Drop a prior start()'s dir so re-starting
+        # the same instance cannot leak one.
         self._cleanup_session_dir()
-        # Sanitize task_id before it reaches pi's `--session-id`: dataset-row tasks
-        # have path-shaped ids ("suite/row_3", set in task_loader) and pi derives
-        # its session file from the id under `--session-dir`, so a raw '/' would
-        # resolve to a non-existent subdir and fail the row before any work. Keep
-        # only the safe id charset (mirrors sandbox.py's flatten, but stricter).
+        # Sanitize task_id before it reaches pi's `--session-id`: a dataset row's
+        # path-shaped id would resolve to a non-existent subdir under
+        # `--session-dir` and fail the row before any work.
         safe_task_id = re.sub(r"[^A-Za-z0-9._-]", "_", self.task_id)
         self._session_id = f"coder-eval-{safe_task_id}-{uuid4().hex[:8]}"
         self._session_dir = tempfile.mkdtemp(prefix="pi-session-")
@@ -913,10 +803,8 @@ class PiAgent(Agent[PiAgentConfig]):
     def _sweep_process_groups(self) -> None:
         """SIGKILL every process group this agent spawned (POSIX only).
 
-        Each invocation runs in its own session (``start_new_session``), so its
-        pgid is the CLI's pid and the group contains ONLY what that invocation
-        spawned — a lingering child included, a shared daemon we did not start
-        excluded.
+        Each invocation runs in its own session, so its pgid is the CLI's pid and
+        the group holds ONLY what that invocation spawned.
         """
         if os.name != "posix":
             return
@@ -945,12 +833,9 @@ class PiAgent(Agent[PiAgentConfig]):
 
     def _build_argv(self, user_input: str) -> list[str]:
         # -p exits after the run; --no-context-files + --no-approve isolate the
-        # sandbox from host AGENTS.md/CLAUDE.md and project-local trust (analogue
-        # of OpenCode --pure / Claude setting_sources: []). --session-dir +
-        # --session-id give cross-communicate() continuity (simulation mode) —
-        # reused every call, created on turn 1, resumed after. NOT --no-session
-        # (that would defeat continuity). All spike-verified. No --dir flag: the
-        # working dir is set via the subprocess `cwd`.
+        # sandbox from host AGENTS.md/CLAUDE.md and project-local trust.
+        # --session-dir + --session-id give cross-communicate() continuity — NOT
+        # --no-session, which would defeat it. No --dir: the working dir is `cwd`.
         assert self._session_dir is not None and self._session_id is not None
         argv = [
             "pi",
@@ -969,19 +854,11 @@ class PiAgent(Agent[PiAgentConfig]):
         if self.config.thinking_level:
             argv += ["--thinking", self.config.thinking_level]
         for skill_dir in self._skill_dirs:
-            # Additive skill load (from agent.plugins). Pi lists each skill's
-            # name+description in the system prompt and the agent `read`s the full
-            # SKILL.md on demand — the OpenCode/Codex `plugins` mechanism, Pi-native.
+            # Additive skill load (from agent.plugins): Pi lists each skill's
+            # name+description in the system prompt and reads SKILL.md on demand.
             argv += ["--skill", skill_dir]
-        # allowed_tools / disallowed_tools are NOT forwarded. The shared config
-        # default (experiments/default.yaml) sets Claude-namespaced tool names
-        # (Bash/Read/Write/Edit/Glob/Grep/Skill), but Pi's built-in tools are
-        # lowercase and differently named (bash/read/write/edit/grep/find/ls).
-        # Passing the PascalCase names to `--tools` allowlists tools that do not
-        # exist in Pi, leaving the agent with ZERO tools ("I don't have tool
-        # access"). So, like OpenCode/Codex/Antigravity, these fields are treated
-        # as unenforced (see _UNSUPPORTED_CONFIG_FIELDS) and Pi runs with its full
-        # native toolset. Warned at start().
+        # allowed_tools / disallowed_tools are NOT forwarded — see
+        # _UNSUPPORTED_CONFIG_FIELDS. Pi runs with its full native toolset.
         if self.config.system_prompt:
             argv += ["--append-system-prompt", self.config.system_prompt]
         # user_input is a distinct argv element after `--` (never shell-interpolated).
@@ -994,8 +871,8 @@ class PiAgent(Agent[PiAgentConfig]):
         The PATH prepend is the mock-shadowing contract (``Agent.start``): the
         sandbox's mock CLI directories must resolve BEFORE the real binaries.
         ``PLUGIN_TOOLS_DIR`` is advisory and never overrides an inherited value.
-        Returns the WHOLE environment (seeded from ``os.environ``) so the CLI
-        keeps the host's provider credentials (``OPENROUTER_API_KEY``, ...).
+        Returns the WHOLE environment so the CLI keeps the host's provider
+        credentials.
         """
         env = dict(os.environ)
         if self._env_path_prepend:
@@ -1040,24 +917,20 @@ class PiAgent(Agent[PiAgentConfig]):
                 prompt=user_input,
                 iteration=self._iteration,
                 model=self.config.model,
-                # One basis with the window bounds this is subtracted
-                # against — see `timing.TurnClock`. The event model's raw
-                # `datetime.now()` default put two clocks inside one
-                # `decompose_turn` subtraction, which clamped a -0.017 ms tail
-                # to the `0.0` that means "measured, and instant" (CE058).
+                # One basis with the window bounds this is subtracted against;
+                # the model's raw `datetime.now()` default put two clocks inside
+                # one subtraction (CE058).
                 timestamp=state.clock.now(),
             )
         )
 
-        # Deadlines stay on `time.monotonic()` and are deliberately NOT routed
-        # through the turn clock: a deadline must not move when the wall clock
-        # steps. `TurnClock` exists to give the RECORDED stamps one basis; this
-        # is the one place a raw monotonic reading is the right answer.
+        # Deadlines stay on `time.monotonic()`, deliberately NOT the turn clock:
+        # a deadline must not move when the wall clock steps.
         deadline = None if timeout is None else time.monotonic() + timeout
         stopped_early = False
         stderr_drain: asyncio.Future[bytes] | None = None
-        # Bound OUTSIDE the try so the teardown in `finally` can tell "never
-        # spawned" from "spawned and possibly still running".
+        # Bound OUTSIDE the try so `finally` can tell "never spawned" from
+        # "spawned and possibly still running".
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1066,11 +939,10 @@ class PiAgent(Agent[PiAgentConfig]):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.working_directory,
                 env=self._build_env(),
-                # A single nd-JSON event can carry a whole tool result, which blows
-                # past StreamReader's default 64 KiB line cap and would raise
-                # ValueError mid-stream, killing the read loop.
+                # One nd-JSON event can carry a whole tool result, past
+                # StreamReader's default 64 KiB cap.
                 limit=STDOUT_LINE_LIMIT_BYTES,
-                # Own session/process group, so teardown can killpg any lingering
+                # Own session/process group, so teardown can killpg a lingering
                 # child without touching anything this invocation didn't spawn.
                 start_new_session=os.name == "posix",
             )
@@ -1079,16 +951,14 @@ class PiAgent(Agent[PiAgentConfig]):
                 self._spawned_pgids.append(proc.pid)
             assert proc.stdout is not None
 
-            # Drain stderr CONCURRENTLY: a child that fills the ~64 KiB stderr pipe
-            # blocks on write, stops emitting stdout, and never exits — hanging the
-            # turn to its deadline. It gets its own reader so the nd-JSON on stdout
-            # stays clean.
+            # Drain stderr CONCURRENTLY, or a child that fills the pipe blocks on
+            # write and hangs the turn to its deadline.
+            # Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
             if proc.stderr is not None:
                 stderr_drain = asyncio.ensure_future(proc.stderr.read())
 
-            # A print-mode CLI may leave an inherited pipe open, so readline() can
-            # block on an EOF that never comes. Race each read against process
-            # exit; once the process is gone a bounded drain collects the tail.
+            # An inherited pipe may never reach EOF, so race each read against
+            # process exit; a bounded drain then collects the tail.
             exit_waiter = asyncio.ensure_future(proc.wait())
             read_task: asyncio.Future[bytes] | None = None
             try:
@@ -1142,8 +1012,7 @@ class PiAgent(Agent[PiAgentConfig]):
             )
             state.finalize(status)
             # Build BEFORE marking the turn clean: a failure in the reduction is a
-            # failed turn, and `_end_turn_ok` would clear the rollback flag that
-            # `discard_pending_turn` needs.
+            # failed turn, and `_end_turn_ok` clears the rollback flag.
             record = collector.build_turn_record()
             self._end_turn_ok()
             return record
@@ -1156,9 +1025,8 @@ class PiAgent(Agent[PiAgentConfig]):
             self._capture_partial_turn(collector)
             raise
         except Exception as e:
-            # A spawn failure (OSError), a StreamReader ValueError past `limit`, a
-            # malformed-payload error in a handler, a pydantic error assembling
-            # telemetry. Funnel to the pending-turn contract like the siblings.
+            # A spawn failure, a StreamReader ValueError past `limit`, a malformed
+            # payload, a pydantic error. Funnel to the pending-turn contract.
             self._crash_turn(state, collector, f"Pi turn failed: {e!s}", cause=e)
             raise  # unreachable (_crash_turn is NoReturn) — makes the no-fall-through explicit
         finally:
@@ -1170,12 +1038,10 @@ class PiAgent(Agent[PiAgentConfig]):
     def _reap_orphaned_cli(self, proc: asyncio.subprocess.Process | None) -> None:
         """Kill a CLI still running as the turn unwinds. No-op otherwise.
 
-        The ``except Exception`` crash and an external cancellation both reach the
-        ``finally`` with the child possibly alive — neither passes through the
-        graceful ``kill()``. Abandoning it is not merely a leak: ``AgentCrashError``
-        is retried, so attempt 2 would spawn a SECOND ``pi`` editing the very files
-        the criteria are about to score. Synchronous (no await) so it survives a
-        ``CancelledError`` in flight. ``proc`` is ``None`` when the spawn failed.
+        Synchronous (no await) so it survives a ``CancelledError`` in flight.
+        ``proc`` is ``None`` when the spawn failed.
+
+        Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
         """
         if proc is None or proc.returncode is not None:
             return
@@ -1217,21 +1083,11 @@ class PiAgent(Agent[PiAgentConfig]):
             with contextlib.suppress(TimeoutError):
                 stderr_bytes = await asyncio.wait_for(asyncio.shield(stderr_drain), timeout=_DRAIN_SECONDS)
 
-        # A terminal provider error (stopReason=error that survived pi's internal
-        # retries) is infrastructure failure, not an agent failure. `pi -p` exits 0
-        # after exhausting retries, so without this the turn books as a clean
-        # COMPLETED (FinalStatus.FAILURE, category "failed") — silently depressing
-        # the measured pass rate. Crashing routes it through _communicate_with_retry
-        # and, if unrecovered, to FinalStatus.ERROR (category "error", excluded from
-        # outcomes). Mirrors opencode_agent._settle_turn.
-        #
-        # Gated on intentional cuts like the two crash arms below: `error_message`
-        # is set at an error `turn_end` and cleared only by a LATER non-error
-        # `turn_end`, but a `max_turns` / `should_stop` cut can fire at the next
-        # `turn_start` (before that clearing `turn_end` ever arrives), leaving a
-        # stale error from a turn pi was still retrying. Without the guard that
-        # clean, budget-exhausted cut would crash + burn retries, contradicting the
-        # documented "finalizes cleanly as max_turns_exhausted, no crash" contract.
+        # A terminal provider error is infrastructure failure, not an agent
+        # failure, and `pi -p` exits 0 after exhausting retries. GATED on
+        # intentional cuts: a cut can fire before the clearing `turn_end` arrives,
+        # leaving a stale error from a turn pi was still retrying.
+        # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
         if state.error_message is not None and not stopped_early and not state.max_turns_exhausted:
             self._crash_turn(state, collector, f"Pi error: {state.error_message}")
 
@@ -1240,10 +1096,8 @@ class PiAgent(Agent[PiAgentConfig]):
             detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
             self._crash_turn(state, collector, f"Pi exited non-zero: {detail}")
 
-        # A clean exit that recognized NO events is vocabulary drift — the CLI's
-        # schema moved, and scoring a silent empty success would be indistinguishable
-        # from a real pass in every aggregate. Intentional cuts are exempt (a stop
-        # can land before the first event).
+        # A clean exit that recognized NO events is vocabulary drift. Intentional
+        # cuts are exempt: a stop can land before the first event.
         if not stopped_early and not state.max_turns_exhausted and state.recognized_events == 0:
             seen = ", ".join(sorted(state.unrecognized_types)) or "none (stdout carried no JSON events)"
             self._crash_turn(
@@ -1292,10 +1146,8 @@ class PiAgent(Agent[PiAgentConfig]):
     def _handle_line(self, line: bytes, state: _PiTurnState) -> None:
         """Parse one nd-JSON line and dispatch it. Never raises on bad input.
 
-        Pi may emit multiple ``agent_start``/``turn_*``/``agent_end`` cycles in one
-        invocation (auto-retry). ``agent_end`` is NOT terminal — only
-        ``agent_settled`` / stdout EOF is — so it is recognized and otherwise
-        ignored, and the read loop keeps going.
+        ``agent_end`` is NOT terminal — only ``agent_settled`` / stdout EOF is — so
+        it is recognized, ignored, and the read loop keeps going.
         """
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
@@ -1309,9 +1161,8 @@ class PiAgent(Agent[PiAgentConfig]):
             return
 
         event_type = str(obj.get("type") or "")
-        # `session` is line 1 (cwd/id); `message_start`/`message_end`/`agent_end`/
-        # `agent_settled` carry no state we accumulate (usage is read from
-        # `turn_end`, not the echoing `message_end`). All are recognized vocabulary.
+        # `session`, `message_start`, `message_end`, `agent_end` and
+        # `agent_settled` carry no state we accumulate, but are all recognized.
         if event_type in _RECOGNIZED_EVENTS:
             state.recognized_events += 1
         elif len(state.unrecognized_types) < _MAX_UNRECOGNIZED_TYPES:

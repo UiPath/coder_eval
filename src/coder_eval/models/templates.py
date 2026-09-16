@@ -27,11 +27,9 @@ class BaseTemplateSource(BaseModel, ABC):
     model_config = ConfigDict(extra="forbid")
 
     def model_post_init(self, context: Any, /) -> None:
-        # Pin the discriminator tag into model_fields_set so it survives
-        # model_dump(exclude_unset=True) → model_validate() round-trips (the
-        # sandbox layer merge dumps with exclude_unset) even for
-        # directly-constructed sources, where the tag comes from the Literal
-        # default rather than the caller.
+        # Pin the tag into model_fields_set so it survives a
+        # model_dump(exclude_unset=True) -> model_validate() round trip even for
+        # directly-constructed sources.
         self.__pydantic_fields_set__.add("type")
 
 
@@ -98,10 +96,9 @@ class RepoSource(BaseTemplateSource):
     commit: str | None = Field(default=None, description="Specific commit SHA to checkout")
 
 
-# Discriminated union of template sources. The `type` tag is REQUIRED in
-# dict/YAML input — a missing or unknown tag raises one crisp discriminator
-# error instead of smart-union coercion. Per-variant Literal defaults remain
-# for direct construction and serialization.
+# The `type` tag is REQUIRED in dict/YAML input: a missing or unknown one raises a
+# crisp discriminator error instead of smart-union coercion. Per-variant Literal
+# defaults remain for direct construction and serialization.
 TemplateSource = Annotated[
     TemplateDirSource | StarterFilesSource | RepoSource,
     Field(discriminator="type"),

@@ -1,0 +1,66 @@
+# Architecture notes
+
+Design rationale moved out of `CLAUDE.md` and out of `src/` docstrings, so both stay
+working references rather than changelogs. Nothing here is deleted history.
+
+**These notes are NOT auto-loaded into context.** Read the file for a subsystem when you
+touch it — each entry explains *why* the design is shaped the way it is, and most of them
+are written around a specific shipped defect.
+
+Authoritative sources, when a note and the code disagree: the code wins, then the lint
+rule docstrings in `tests/lint/rules/`, then the guides under `docs/`.
+
+## Contents
+
+- [agents.md](agents.md) — agent adapters, the turn lifecycle, token reconciliation, harness parity
+- [contracts.md](contracts.md) — criteria, datasets, aggregation, judging
+- [isolation.md](isolation.md) — the docker driver, the sandbox, detached grading
+- [orchestration.md](orchestration.md) — config merge, resume, early stop, execute vs. run
+- [permissions.md](permissions.md) — the chmod window and the reference anti-cheat
+- [persistence.md](persistence.md) — atomic writes and judge persistence
+- [reporting.md](reporting.md) — reports, pricing, harbor, telemetry, the plugin and Action
+- [timing.md](timing.md) — the turn clock and the single subtraction seam
+
+## What belongs here, and what stays in the source
+
+Every paragraph in a docstring or comment sorts into exactly one bucket:
+
+| Bucket | Test | Action |
+|---|---|---|
+| **CONTRACT** | A caller must know it to call correctly: what it returns, what it mutates, what it raises, an invariant they must maintain. | **Keep** in the source, compressed to its claim. |
+| **HAZARD** | A future editor breaks something if they do not know it. Reads as "do not X without Y" — a coupling between two distant places. | **Keep** in the source, 1–3 lines, stating the coupling only. |
+| **RATIONALE** | Why the design is this shape; what was considered and cut; what defect motivated it; what was verified experimentally. | **Move** here, to `<subsystem>.md`. |
+| **HISTORY** | "used to", "no longer", "previously", "an earlier revision", "shipped once as". | **Delete.** Git holds it. |
+| **CROSS-MODULE CLAIM** | Asserts a current property of a different module or harness. | **Delete**, replaced by a link to that module's SSOT. |
+
+## The pointer line
+
+Moved rationale leaves exactly one line behind, at the end of the docstring or comment
+block it came from:
+
+```
+Rationale: .claude/notes/timing.md § subtract_tool_time
+```
+
+Path relative to the repo root, then `§`, then the target `##` heading text verbatim.
+There is no other accepted form: `tests/lint/prose_budget.py` parses this one and fails
+`make docs-budget` when the file or the heading does not exist.
+
+## The prose budget is one number, not a lint rule
+
+`make docs-budget` reports the standing total and fails when it grows. It is deliberately
+**not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants one AST at a time,
+while this is a single whole-tree total. Making it a rule would mean a rule class, a rule
+test and a catalogue entry to enforce one integer — enlarging the harness the budget
+exists to shrink. Do not "fix" this by promoting it.
+
+Nothing here states how many `CE` rules exist. `tests/lint/rules/` owns that count, and a
+number written down anywhere else is a second declaration that will be wrong.
+
+## Where a CE rule's rationale lives
+
+Each rule's authoritative rationale is its own module docstring under
+`tests/lint/rules/` — or, for the doc-surface and whole-tree rules, the corresponding
+`@pytest.mark.lint` class in `tests/test_custom_lint.py`. Read that before editing,
+suppressing or widening a rule. No prose summary is kept here: a second copy is a second
+declaration, and it is the one that goes stale.

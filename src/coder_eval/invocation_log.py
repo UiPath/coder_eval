@@ -25,9 +25,8 @@ from importlib import resources
 from coder_eval.models import RECORD_CLI_LOG_NAME, SIDECAR_MODULES, RecordedCli
 
 
-# The shim imports exactly one of them -- the argv matcher. A second sidecar
-# would need its own import line, so this unpacks rather than indexing: adding
-# one is then a loud failure here instead of a silently un-imported file.
+# Unpacks rather than indexing, so adding a second sidecar is a loud failure here
+# instead of a silently un-imported file.
 (_SIDECAR_MODULE,) = SIDECAR_MODULES
 _SIDECAR_MODULE_STEM = _SIDECAR_MODULE.removesuffix(".py")
 
@@ -175,13 +174,10 @@ if __name__ == "__main__":
 '''
 
 
-# Rendered into the shim only when the entry declares rules. Every line of the
-# comment is addressed at whoever opens a generated shim inside a sandbox, which
-# is why the reasoning lives in the emitted text rather than only here.
-#
-# The module name is derived from SIDECAR_MODULES rather than written out, so
-# renaming the sidecar cannot leave this import pointing at a file that no
-# longer exists -- the one failure the write side would not catch.
+# Rendered into the shim only when the entry declares rules; the reasoning lives in
+# the EMITTED text because its reader opens the shim inside a sandbox. The module
+# name is derived from SIDECAR_MODULES, so renaming the sidecar cannot leave this
+# import pointing at a file that no longer exists.
 _SIDECAR_IMPORT = f"""\
 # {_SIDECAR_MODULE} is written beside this shim by coder_eval SandboxConfig.record_cli.
 # Loaded by ABSOLUTE PATH, not by name: a plain `import {_SIDECAR_MODULE_STEM}` resolves

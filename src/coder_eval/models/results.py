@@ -234,19 +234,12 @@ class JudgeCriterionResult(CriterionResult):
     )
 
 
-# Criterion types whose results are ``JudgeCriterionResult`` / ``ClassificationCriterionResult``.
-# Used by ``_criterion_result_discriminator`` to type-infer legacy ``task.json`` records that
-# lack the ``result_kind`` field. Listed here (not on each criterion class) because
-# ``model_validate_json`` runs without the criteria registry loaded — consumers that import
-# ``coder_eval.models`` to deserialize ``task.json`` (e.g. ``coder-eval report``) do NOT
-# import ``coder_eval.criteria.*`` (which is where checkers self-register). Putting the
-# inference rule on criterion classes would force importing every checker just to deserialize
-# a row record, and would create a circular dependency since ``criteria/*.py`` already imports
-# from this module.
+# Type-infers legacy ``task.json`` records that lack ``result_kind``. Listed HERE, not
+# on each criterion class: deserializing a row must not require importing every checker
+# (and ``criteria/*.py`` already imports from this module).
 #
-# Convention: when a new criterion type needs a non-``"basic"`` result class, add its
-# ``criterion_type`` value to the matching frozenset in the same PR that introduces the
-# criterion.
+# CONVENTION: a new criterion type needing a non-``"basic"`` result class adds its
+# ``criterion_type`` to the matching frozenset in the same PR.
 _JUDGE_CRITERION_TYPES = frozenset({"llm_judge", "agent_judge"})
 _CLASSIFICATION_CRITERION_TYPES = frozenset({"classification_match", "skill_triggered"})
 
@@ -660,9 +653,8 @@ class EvaluationResult(BaseModel):
         default_factory=dict, description="Version information and environment details"
     )
 
-    # Agent configuration. ResolvedAgentConfig (base-typed + SerializeAsAny + registry
-    # coercion) so a plugin kind's subclass-only fields survive the dump to task.json
-    # and reload — the same round-trip guarantee TaskDefinition.agent has.
+    # ResolvedAgentConfig so a plugin kind's subclass-only fields survive the dump to
+    # task.json and reload -- the round-trip guarantee TaskDefinition.agent has.
     agent_config: ResolvedAgentConfig | None = Field(
         default=None,
         description="Agent configuration used for the evaluation (from task YAML)",
@@ -788,34 +780,19 @@ class EvaluationResult(BaseModel):
     def armed_criteria_passed(
         self, criteria: list[SuccessCriterion], gate_threshold: float = DEFAULT_STOP_EARLY_GATE_THRESHOLD
     ) -> bool:
-        """True iff the ARMED subset's weighted score meets ``gate_threshold``.
+        """True iff the ARMED subset meets ``gate_threshold``.
 
-        The early-stop gate: on an early-stopped run only the armed subset gates
-        ``final_status`` (non-armed criteria are advisory — recorded but never
-        decisive), so a smoke flavor is not dragged to FAILURE by criteria whose
-        work it deliberately skipped. Shares the same results/criteria length
-        pre-check as ``all_criteria_passed`` so the gate logic stays
-        single-sourced. Raises ``ValueError`` on an empty armed set — unreachable
-        when a stop actually fired (a stop requires an armed criterion), so this
-        is a defensive guard against misuse. No ``is_gating`` filter is needed
-        here: ``BaseSuccessCriterion`` rejects ``weight: 0`` together with any
-        early-stop trigger, so every armed criterion is gating by construction.
+        NOT ``calculate_weighted_score``'s quantity: each armed criterion is
+        BINARISED against its own ``pass_threshold`` first, then weighted. That is
+        what makes ``gate_threshold=1.0`` an EXACT equivalence with the strict-AND
+        ``all_criteria_passed``, rather than an approximation of it.
 
-        Each armed criterion's OWN ``pass_threshold`` still decides whether it
-        individually passed — ``r.score`` is converted to a binary 1.0/0.0 via
-        ``r.score >= c.pass_threshold`` before weighting, exactly mirroring
-        ``all_criteria_passed``'s per-criterion comparison. Only the
-        combination rule changes: ``all_criteria_passed`` ANDs those binary
-        outcomes, this weights and averages them against ``gate_threshold``.
-        This is what makes the ``gate_threshold=1.0`` default an EXACT
-        equivalence with the pre-weighting ``all(...)`` rule, not merely an
-        approximation that happens to hold for binary-scoring criteria: a
-        weighted average of 1.0 requires every armed criterion's binary
-        outcome to be 1.0, i.e. every one to have individually passed its own
-        ``pass_threshold`` — identical to ``all(...)`` regardless of what
-        ``r.score`` itself was. Callers pass
-        ``run_limits.stop_early_gate_threshold`` to opt into a genuine
-        weighted average below 1.0.
+        Raises:
+            ValueError: ``criteria`` does not correspond 1:1 with
+                ``success_criteria_results``, or no criterion is armed — the
+                caller must check ``early_stop is not None`` first.
+
+        Rationale: .claude/notes/orchestration.md § The armed gate is not the watcher's bounds
         """
         if len(self.success_criteria_results) != len(criteria):
             raise ValueError(
@@ -830,14 +807,9 @@ class EvaluationResult(BaseModel):
             )
         total_weight = sum(c.weight for _, c in armed)
         if total_weight <= 0.0:
-            # Unreachable today (weight=0 + a stop trigger is rejected at the model
-            # layer, so every armed criterion carries weight > 0) — but a
-            # defensive guard on a pass/fail gate must fail CLOSED, not open,
-            # against a future criterion subclass that bypasses that
-            # validator. Mirrors EarlyStopWatcher._ceiling's lack of an
-            # equivalent guard: that one would raise ZeroDivisionError instead
-            # (fails by crashing, not by silently passing) rather than diverge
-            # toward a false pass.
+            # HAZARD: unreachable today, but a defensive guard on a pass/fail gate
+            # must fail CLOSED against a future subclass that bypasses the
+            # weight=0 validator.
             return False
         weighted_score = sum((1.0 if r.score >= c.pass_threshold else 0.0) * c.weight for r, c in armed) / total_weight
         return weighted_score >= gate_threshold
@@ -968,9 +940,7 @@ class SuiteRollup(BaseModel):
     rows_passed: int
     rows_failed: int
     rows_error: int
-    # The fourth bucket, matching RunSummary.tasks_not_graded and
-    # VariantAggregate.tasks_not_graded. Defaulted so a suite.json written before
-    # `execute` existed still parses.
+    # The fourth bucket. Defaulted so a suite.json predating `execute` still parses.
     rows_not_graded: int = Field(default=0, ge=0)
     pass_rate: float | None = Field(
         default=None,
@@ -1071,24 +1041,13 @@ def row_cost_incomplete(row: Mapping[str, Any]) -> bool:
 def nothing_was_measured(*, not_graded: int, measured: int) -> bool:
     """True when a run/variant/suite has ungraded rows and NO row produced a verdict.
 
-    The one definition of "this rate has no numerator to be a fraction of",
-    shared by ``RunSummary``, ``VariantAggregate`` and ``SuiteRollup`` because
-    three copies of a published rate is how one surface reports ``n/a`` and
-    another reports ``0.0%`` for the same run. That already happened: the guard
-    shipped on ``RunSummary`` only, so a 10-task ``execute`` run with one crash
-    rendered ``Pass Rate: n/a`` in ``run.md`` and ``Pass Rate: 0.0%`` in
-    ``experiment.md``.
+    The one definition of "this rate has no numerator to be a fraction of", shared by
+    ``RunSummary``, ``VariantAggregate`` and ``SuiteRollup``.
 
-    ``measured`` is COUNTED EVIDENCE — rows that actually carry a criteria
-    verdict — not a bucket count. The first version of this test used
-    ``tasks_succeeded + tasks_failed == 0`` and was wrong for the same reason
-    the bug it fixed was wrong: ``TIMEOUT`` and the two budget stops are
-    category ``failed`` and reachable under ``execute`` (``_check_run_limits``
-    still runs on the ungraded branch), so ONE timed-out row in a 100-task
-    ungraded night read as "something was measured" and published
-    ``pass_rate: 0.0`` — a real 0% point on the evalboard trend for a run that
-    graded nothing. A bucket is where a row landed; only the verdict says
-    whether a criterion ever ran.
+    ``measured`` is COUNTED EVIDENCE -- rows that actually carry a criteria verdict --
+    not a bucket count.
+
+    Rationale: .claude/notes/orchestration.md § Rates need verdict evidence, not bucket counts
     """
     return not_graded > 0 and measured == 0
 
@@ -1199,8 +1158,7 @@ class RunSummary(BaseModel):
     tasks_failed: int = Field(description="Number of tasks that failed")
     tasks_error: int = Field(description="Number of tasks that encountered errors")
     # Part of the task_count invariant (a fourth bucket, not a sub-counter), but
-    # defaulted so run.json written before `coder-eval execute` existed — where
-    # no task can be ungraded — still deserialises.
+    # defaulted so run.json predating `execute` still deserialises.
     tasks_not_graded: int = Field(
         default=0,
         ge=0,
@@ -1210,13 +1168,9 @@ class RunSummary(BaseModel):
         ),
     )
 
-    # Verdict evidence, NOT a bucket and NOT part of the invariant: how many
-    # rows actually carry a weighted_score. `pass_rate` / `error_share` need it
-    # because the four category buckets cannot tell a graded FAILURE from a
-    # TIMEOUT that no criterion ever saw. Symmetric with
-    # VariantAggregate.tasks_measured so the three published rates read the same
-    # input. Defaulted for old run.json, where tasks_not_graded is 0 and the
-    # gate is therefore inert.
+    # Verdict evidence, NOT a bucket and NOT part of the invariant. Symmetric with
+    # VariantAggregate.tasks_measured so the three published rates read one input.
+    # Rationale: .claude/notes/orchestration.md § Rates need verdict evidence, not bucket counts
     tasks_measured: int = Field(
         default=0,
         ge=0,
@@ -1226,9 +1180,7 @@ class RunSummary(BaseModel):
         ),
     )
 
-    # Informational sub-counters: subsets of tasks_failed (NOT part of the
-    # task_count invariant). Default 0 so old serialized RunSummary JSON
-    # without these fields deserialises cleanly.
+    # Informational sub-counters: subsets of tasks_failed, NOT part of the invariant.
     tasks_token_budget_exceeded: int = Field(
         default=0,
         ge=0,
@@ -1240,10 +1192,8 @@ class RunSummary(BaseModel):
         description="Subset of tasks_failed where run_limits cost cap tripped.",
     )
 
-    # Tasks excluded at resolution time — either load failures (YAML / schema
-    # errors) or intentional opt-outs (``skip: true``). Distinct from
-    # tasks_error: these never reached the orchestrator. Empty for runs
-    # where every task YAML loaded cleanly and none opted out.
+    # Excluded at resolution time (load failure or `skip: true`). Distinct from
+    # tasks_error: these never reached the orchestrator.
     skipped_tasks: list[SkippedTask] = Field(
         default_factory=list,
         description=(
@@ -1312,10 +1262,9 @@ class RunSummary(BaseModel):
         """
         return nothing_was_measured(not_graded=self.tasks_not_graded, measured=self.tasks_measured)
 
-    # Derived run metrics: computed_fields over the stored counts and
-    # ``task_results``, so they serialize into run.json while staying impossible to
-    # set to something the rows disagree with. Consumers should read these rather
-    # than re-derive them.
+    # computed_fields over the stored counts, so they serialize into run.json while
+    # staying impossible to set to something the rows disagree with. Read these
+    # rather than re-deriving them.
 
     @computed_field  # type: ignore[prop-decorator]
     @property

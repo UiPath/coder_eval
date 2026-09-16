@@ -244,16 +244,10 @@ def _pass_rate_lines(summary: RunSummary) -> list[str]:
     An ungraded run (``coder-eval execute``) has no pass rate at all, so it says
     so rather than rendering ``0.0% (0/N)`` — which reads as a total failure.
     """
-    # Only an ungraded run gets the explanatory line. An ordinary EMPTY run keeps
-    # its original "n/a (0/0)" rendering — the two are different facts.
-    #
-    # `pass_rate is None` rather than `not tasks_graded`: an execute night with a
-    # crashed row has tasks_graded > 0 (an ERROR row is category `error`, not
-    # `ungraded`, so it stays in the denominator) while still having measured
-    # nothing — and this line then rendered `0.0% (0/5)` plus `Error Share:
-    # 100.0%`, exactly the total-failure reading the guard exists to prevent.
-    # Deferring to the model keeps one rule for run.md, run.json and the
-    # evalboard instead of three.
+    # `pass_rate is None`, not `not tasks_graded`: an execute night with a crashed
+    # row has tasks_graded > 0 while still having measured nothing. An ordinary
+    # EMPTY run keeps its "n/a (0/0)" rendering -- a different fact.
+    # Rationale: .claude/notes/reporting.md § The ungraded row in every surface
     if summary.tasks_not_graded and summary.pass_rate is None:
         return [f"- **Pass Rate**: n/a — {summary.tasks_not_graded} task(s) executed without grading"]
     lines = [f"- **Pass Rate**: {_fmt_rate(summary.pass_rate)} ({summary.tasks_succeeded}/{summary.tasks_graded})"]
@@ -296,11 +290,10 @@ class ReportGenerator:
                 pct = count / total * 100 if total > 0 else 0
                 lines.append(f"| {tool} | {count} | {pct:.1f}% |")
 
-        # `is not None`, not truthiness. `analysis.py` returns `None` when
-        # nothing was timed and a float otherwise, so a genuine measured `0.0`
-        # average — every command resolving faster than the clock's resolution —
-        # used to suppress the whole section. The distinction the producer makes
-        # has to survive to the surface that renders it.
+        # `is not None`, not truthiness: a genuine measured `0.0` average used to
+        # suppress the whole section. The distinction the producer makes has to
+        # survive to the surface that renders it.
+        # Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
         if stats.avg_command_time_ms is not None:
             lines.extend(
                 [
@@ -366,12 +359,10 @@ class ReportGenerator:
             else:
                 avg_turn_str = "N/A"
 
-            # READ, never summed here. The four values are computed once by
-            # `reports_stats.turn_time_buckets` and carried on the row by
-            # `reports_experiment.eval_result_to_task_dict`; `iterations` above
-            # is a 6-key projection that cannot support the arithmetic anyway.
-            # `.get()` because a `run.json` written before this phase has none
-            # of the four — which then renders as a dash, not as `0ms`.
+            # READ, never summed here -- computed once by `turn_time_buckets`.
+            # `.get()` because an older `run.json` has none of the four, which then
+            # renders as a dash, not as `0ms`.
+            # Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
             buckets = " | ".join(
                 format_ms(task.get(key)) for key in ("startup_ms", "generation_ms", "tool_ms", "teardown_ms")
             )
@@ -542,12 +533,10 @@ class ReportGenerator:
                 )
             if t.get("stopped_early"):
                 reason = t.get("early_stop_reason") or "unknown"
-                # No "N turn(s) avoided" claim here. It derived from
-                # ``max_turns - sdk_turn_index``, and on Codex and Antigravity one
-                # ``communicate()`` is a single SDK turn — so an early-stopped row
-                # advertised dozens of avoided turns when all that was cut was a
-                # tool-call tail. ``turns_remaining_at_stop`` is still persisted on
-                # EarlyStopInfo, labelled there as the upper bound it is.
+                # No "N turn(s) avoided" claim: on harnesses where one
+                # `communicate()` is a single SDK turn it advertised dozens when all
+                # that was cut was a tool-call tail. The bound is still persisted.
+                # Rationale: .claude/notes/reporting.md § The claims the reports do NOT make
                 notes.append(f"> **NOTE:** [{task_id}] stopped early ({reason}); {early_stop_gate_note(reason)}")
         if not notes:
             return []
@@ -664,10 +653,9 @@ class ReportGenerator:
         total_tokens = sum(t["total_tokens"] for t in tasks_with_tokens)
         agent_cost = sum_costs(*(t.get("agent_cost_usd") for t in tasks_with_tokens))
 
-        # Same helpers RunSummary uses, so the report and run.json cannot disagree
-        # about the bill. Worded cause-agnostically ("spend missing") because an
-        # unpriced turn and a hard kill reach the same conclusion and the report
-        # cannot always tell which applied.
+        # The same helpers RunSummary uses, so the report and run.json cannot
+        # disagree about the bill. Worded cause-agnostically: an unpriced turn and a
+        # hard kill reach the same conclusion.
         incomplete = [t for t in task_results if row_cost_incomplete(t)]
         overhead = eval_overhead_cost(task_results)
         total_cost = sum_costs(*(t.get("total_cost_usd") for t in task_results))
@@ -675,10 +663,9 @@ class ReportGenerator:
         lines.append(f"**Total Tokens**: {total_tokens:,} (input: {total_input:,}, output: {total_output:,})")
         if total_cache_write > 0 or total_cache_read > 0:
             lines.append(f"**Cache Tokens**: write: {total_cache_write:,}, read: {total_cache_read:,}")
-        # The agent bill is broken out separately only when there is overhead to
-        # distinguish it from: judge spend is a property of the suite's criteria and
-        # identical across harnesses, so comparing harnesses means comparing the
-        # agent line. **Total Cost** always means the whole bill.
+        # Broken out only when there is overhead to distinguish it from. **Total
+        # Cost** always means the whole bill.
+        # Rationale: .claude/notes/reporting.md § Per-instance aggregation, and what it buys
         if overhead is not None:
             if agent_cost is not None:
                 lines.append(f"**Agent Cost**: ${agent_cost:.4f}")
@@ -795,9 +782,7 @@ class ReportGenerator:
         if run_dir.is_symlink():
             run_dir = run_dir.resolve()
 
-        # Check for reports in order of preference:
-        # 1. experiment.md/json (written by ExperimentReportGenerator)
-        # 2. run.md/json (written by batch-level _generate_run_summary)
+        # In order of preference: experiment.md/json, then run.md/json.
         for md_name, json_name in [("experiment.md", "experiment.json"), ("run.md", "run.json")]:
             report_md_path = run_dir / md_name
             summary_json_path = run_dir / json_name
@@ -901,9 +886,8 @@ def _compute_suite_rollup(
     rows_graded = rows_total - rows_not_graded
 
     scored = [r.result.weighted_score for r in rows if r.result.weighted_score is not None]
-    # Verdict evidence, distinct from `rows_graded` (a bucket complement): the
-    # gate `nothing_was_measured` needs, since a TIMEOUT counts as graded while
-    # no criterion ever ran on it.
+    # Verdict evidence, distinct from `rows_graded` (a bucket complement): a
+    # TIMEOUT counts as graded while no criterion ever ran on it.
     rows_measured = len(scored)
     average_weighted_score = sum(scored) / len(scored) if scored else None
 
@@ -926,16 +910,9 @@ def _compute_suite_rollup(
         for ctype, scores in sorted(by_type.items())
     ]
 
-    # Drive each criterion's aggregate() + evaluate suite_thresholds. Per-row
-    # results are sliced per criterion INSTANCE by position: SuccessChecker.
-    # check_all_async appends one CriterionResult per criterion in declared order
-    # (evaluation/checker.py), so row.success_criteria_results[i] belongs to
-    # task_criteria[i]. Aggregating per-instance (not pooled by type) is what
-    # lets a task stack many criteria of the SAME type — e.g. activation's
-    # per-skill skill_triggered criteria — and get a distinct aggregate
-    # (per-skill recall / F1) for each, instead of one type-pooled number
-    # repeated once per instance. The aggregate carries the criterion's
-    # description so the stacked instances stay distinguishable downstream.
+    # Sliced per criterion INSTANCE by position: the checker appends one result per
+    # criterion in declared order, so `results[i]` belongs to `criteria[i]`.
+    # Rationale: .claude/notes/reporting.md § Per-instance aggregation, and what it buys
     criterion_aggregates: list[CriterionAggregate] = []
     if task_criteria is not None:
         init_criteria(validate=False)
@@ -960,9 +937,8 @@ def _compute_suite_rollup(
                     # Thresholds declared but nothing produced — fail loudly.
                     stub = _build_missing_aggregator(ctype, suite_thresholds, description)
                     stub = _attach_row_accounting(stub, rows_total, len(per_rows))
-                    # completion_rate is now a real value in metrics; refresh the
-                    # threshold checks so the rendered actual matches it, but keep
-                    # the aggregate failed because the real metrics are absent.
+                    # Refresh the threshold checks so the rendered actual matches,
+                    # but keep the aggregate failed: the real metrics are absent.
                     stub = _evaluate_thresholds(stub, suite_thresholds).model_copy(update={"passed": False})
                     criterion_aggregates.append(stub)
                 continue
@@ -975,11 +951,9 @@ def _compute_suite_rollup(
     # Sample up to K failed/errored rows for error analysis
     failed_samples: list[FailedRowSummary] = []
     for row in rows:
-        # "succeeded" is not the only non-failure. An UNGRADED row was never
-        # measured, so it has no failure reasons to report and listing it here
-        # (in a field documented as failed/errored rows) contradicts the same
-        # function's own rule two blocks up, where it leaves both sides of the
-        # pass rate.
+        # "succeeded" is not the only non-failure: an UNGRADED row was never
+        # measured, so it has no failure reason and this field documents failed and
+        # errored rows.
         if row.result.final_status.category in ("succeeded", "ungraded"):
             continue
         if len(failed_samples) >= _FAILED_SAMPLE_LIMIT:
@@ -1026,11 +1000,10 @@ def _compute_suite_rollup(
         rows_failed=rows_failed,
         rows_error=rows_error,
         rows_not_graded=rows_not_graded,
-        # None, never 0.0: a suite where nothing was graded has no pass rate,
-        # and 0.0 renders as "0.0%" beside a full set of rows. Routed through
-        # the SAME helper as RunSummary and VariantAggregate — this site was
-        # the third copy of the formula and had no ungraded guard at all, so a
-        # suite whose only non-ungraded row was a TIMEOUT published 0.0%.
+        # None, never 0.0, and routed through the SAME helper as RunSummary and
+        # VariantAggregate -- this site was the third copy of the formula and had no
+        # ungraded guard at all.
+        # Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
         pass_rate=(
             None
             if nothing_was_measured(not_graded=rows_not_graded, measured=rows_measured)
@@ -1103,10 +1076,8 @@ def _render_suite_markdown(rollup: SuiteRollup) -> str:
                 lines.append(f"- error: {s.error_message[:_FAILURE_REASON_MAX_LEN]}")
             for r in s.failure_reasons:
                 lines.append(f"- {r}")
-            # Strip the leading variant segment so the link resolves from the
-            # suite dir where suite.md lives. PurePosixPath keeps the separator
-            # POSIX on Windows too. Fall back to the raw relpath if it isn't
-            # prefixed with the variant (e.g. serialized from a legacy shape).
+            # Strip the leading variant segment so the link resolves from the suite
+            # dir. PurePosixPath keeps the separator POSIX on Windows.
             rel_path = PurePosixPath(s.task_json_relpath)
             try:
                 suite_rel: PurePosixPath = rel_path.relative_to(rollup.variant_id)

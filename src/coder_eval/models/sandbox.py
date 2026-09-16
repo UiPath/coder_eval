@@ -223,51 +223,38 @@ class DockerDriverConfig(BaseModel):
             "AWS_BEARER_TOKEN_BEDROCK",
             "AWS_REGION",
             "BEDROCK_MODEL",
-            # Claude Code SDK Bedrock toggle + optional model override; required
-            # alongside AWS_BEARER_TOKEN_BEDROCK to route the in-container SDK
-            # through Bedrock instead of falling back to ~/.claude OAuth.
+            # Required alongside AWS_BEARER_TOKEN_BEDROCK to route the in-container
+            # SDK through Bedrock instead of ~/.claude OAuth.
             "CLAUDE_CODE_USE_BEDROCK",
             "ANTHROPIC_MODEL",
-            # LiteLLM (Anthropic-compatible) open-weight backend. The proxy runs on
-            # the HOST, so LITELLM_BASE_URL is rewritten to host.docker.internal at
-            # the container boundary (see docker_runner); the rest forward verbatim.
-            # Without these the in-container Settings sees API_BACKEND=litellm with no
-            # creds and _validate_litellm_settings raises a hard ValueError.
+            # The proxy runs on the HOST, so LITELLM_BASE_URL is rewritten at the
+            # container boundary; the rest forward verbatim.
+            # Rationale: .claude/notes/isolation.md § Environment forwarding
             "LITELLM_BASE_URL",
             "LITELLM_AUTH_TOKEN",
             "LITELLM_MODEL",
             "LITELLM_SMALL_MODEL",
-            # Path to the proxy's per-call cost log for the actual-cost join. NOTE:
-            # forwarding the var is necessary but not sufficient under --driver docker
-            # — the log file itself must also be bind-mounted into the container for
-            # the join to see it (follow-up); without the mount, docker runs keep
-            # static pricing while local runs get real cost.
+            # HAZARD: forwarding the var is necessary but not sufficient under
+            # --driver docker -- the log file must also be bind-mounted.
             "LITELLM_COST_LOG",
-            # Codex agent auth/routing — without these the in-container codex
-            # binary falls back to a ChatGPT login that doesn't exist in the
-            # container and auth fails. CODEX_API_KEY drives login_api_key;
-            # CODEX_BASE_URL routes to a custom endpoint (e.g. gateway);
-            # CODEX_MODEL selects the model when agent.model is unset.
+            # Without these the in-container codex binary falls back to a ChatGPT
+            # login that does not exist there. CODEX_MODEL applies when agent.model
+            # is unset.
             "CODEX_API_KEY",
             "CODEX_BASE_URL",
             "CODEX_MODEL",
-            # Antigravity agent auth/routing — the google-antigravity local harness
-            # authenticates against the Gemini API with GEMINI_API_KEY; without it
-            # the in-container harness has no credential and fails. ANTIGRAVITY_MODEL
-            # selects the Gemini model when agent.model is unset.
+            # The Antigravity harness authenticates with GEMINI_API_KEY; without it
+            # the in-container harness has no credential. ANTIGRAVITY_MODEL applies
+            # when agent.model is unset.
             "GEMINI_API_KEY",
             "ANTIGRAVITY_MODEL",
-            # Pi agent provider credential — Pi addresses models as `provider/id`
-            # and reads OpenRouter's key from the env. The baked pi CLI + this
-            # passthrough make `--driver docker --type pi` work; without it the
-            # in-container pi has no credential and every turn fails auth.
+            # Pi addresses models as `provider/id` and reads OpenRouter's key from
+            # the env; without it every in-container turn fails auth.
             "OPENROUTER_API_KEY",
-            # User HOME used to keep ~/.claude resolution symmetric with the host.
-            # See docs/DOCKER_ISOLATION.md "HOME is forwarded by default" for the
-            # contract. tl;dr: Path.home() inside the container returns the
-            # host's HOME (the dir is auto-created by the ~/.claude bind mount);
-            # writes outside ~/.claude land in the container's ephemeral rootfs.
-            # Remove this entry if you don't want host HOME leakage.
+            # HAZARD: keeps ~/.claude resolution symmetric with the host, so
+            # Path.home() in the container returns the host's HOME. Remove this
+            # entry if you do not want that leakage. Contract:
+            # docs/DOCKER_ISOLATION.md § `HOME` is forwarded by default
             "HOME",
         ],
         description=(
@@ -313,24 +300,20 @@ class DockerDriverConfig(BaseModel):
         return v
 
 
-# Sandbox-relative location of the generated CLI recorders and their shared log.
-# Not dot-prefixed on purpose: CI artifact upload (actions/upload-artifact) skips
-# hidden files, and the log is primary evidence for every `cli_called` criterion,
-# so it must survive into the run artifact.
+# Not dot-prefixed on purpose: CI artifact upload skips hidden files, and the log is
+# primary evidence for every `cli_called` criterion.
+# Rationale: .claude/notes/contracts.md § What the shim is, and is not
 RECORD_CLI_DIR = "cli_mocks"
 RECORD_CLI_LOG_NAME = "calls.jsonl"
 RECORD_CLI_LOG = f"{RECORD_CLI_DIR}/{RECORD_CLI_LOG_NAME}"
 
-# Modules copied into the recorder directory beside each shim that declares
-# response rules. The shim imports them as siblings, so they must be
-# stdlib-only (lint rule CE057) -- they run where coder_eval is not installed.
+# Copied beside each shim that declares response rules and imported as siblings, so
+# they must be stdlib-only (CE057) -- they run where coder_eval is not installed.
 SIDECAR_MODULES: tuple[str, ...] = ("argv_match.py",)
 
-# Shadowing any of these breaks the harness rather than the tool under test: the
-# shim is a script run by an interpreter, and its directory goes FIRST on a PATH
-# the orchestrator also reuses for run_command criteria. `tool: python3` made the
-# shim re-resolve its own interpreter to itself -- an exec loop that spins to the
-# task timeout, since tempdir enforces no pid cap.
+# HAZARD: shadowing an interpreter breaks the harness rather than the tool under
+# test -- `tool: python3` made the shim re-resolve its interpreter to itself.
+# Rationale: .claude/notes/contracts.md § What the shim is, and is not
 RECORD_CLI_RESERVED_TOOLS = frozenset(
     {"python", "python3", "py", "env", "sh", "bash", "zsh", "cmd", "node", "uv", "git"}
 )
@@ -373,23 +356,17 @@ class CliResponse(BaseModel):
 class RecordedCli(BaseModel):
     """One executable to shadow with a generated recording shim.
 
-    The shim records the invocation, writes the configured output, and exits —
-    nothing is executed, so there is no network, no auth, and no side effect. Each
+    The shim records the invocation, writes the configured output, and exits --
+    nothing is executed, so there is no network, no auth and no side effect. Each
     invocation becomes a JSON Lines record in :data:`RECORD_CLI_LOG`, the log the
-    ``cli_called`` criterion reads by default, so a task asserts on what actually
-    ran without hand-rolling a mock and without the record shape being a contract
-    between two repositories.
+    ``cli_called`` criterion reads by default.
 
     The fields below are what every invocation gets; ``responses`` overrides them
-    per invocation, so one shadowed ``uip`` can answer ``ixp dummy1`` and
-    ``ixp dummy2`` differently — what an agent needs when its next step depends on
-    what the tool just told it.
+    per invocation, so one shadowed ``uip`` can answer two verbs differently.
 
-    It stubs a tool; it does not proxy one. A test that needs a REAL executable's
-    behavior recorded on the way through still supplies its own wrapper under
-    ``mock_path_dirs`` — that depends on the tool being installed, on PATH order,
-    and usually on live credentials, which is a different problem with different
-    failure modes.
+    It stubs a tool; it does not proxy one.
+
+    Rationale: .claude/notes/contracts.md § What the shim is, and is not
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -419,10 +396,8 @@ class RecordedCli(BaseModel):
             "would, so an agent reads a plausible error rather than silence"
         ),
     )
-    # Plain Field, not MergeField: `RecordedCli` is never a merge root. The
-    # enclosing `SandboxConfig.record_cli` is a `replace` list, so a later layer
-    # substitutes the whole list of entries and no per-entry strategy is ever
-    # consulted. A strategy annotation here would read as a knob and be inert.
+    # Plain Field, not MergeField: `RecordedCli` is never a merge root, so a
+    # strategy annotation here would read as a knob and be inert.
     responses: list[CliResponse] = Field(
         default_factory=list,
         description=(
@@ -456,13 +431,9 @@ class RecordedCli(BaseModel):
                 elif (
                     prior["positional"] is None
                     and prior["flags"] is None
-                    # BOTH sides free of flag predicates, not just the earlier
-                    # one: a predicate makes its flag known and value-bearing in
-                    # that rule's parse only. `--profile prod ixp projects get`
-                    # leaves `prod` positional for a verb-only `ixp projects`,
-                    # which therefore does NOT match, while a later
-                    # `ixp projects get` + `flags: {profile: prod}` does -- so the
-                    # later rule is reachable and rejecting it was wrong.
+                    # BOTH sides free of flag predicates: a predicate makes its
+                    # flag known and value-bearing in that rule's parse only, so a
+                    # later rule declaring one is genuinely reachable.
                     and spec["flags"] is None
                     and prior["value_flags"] == spec["value_flags"]
                     and prior["ignore_flags"] == spec["ignore_flags"]
@@ -504,10 +475,9 @@ class RecordedCli(BaseModel):
 
         if not self.responses:
             return self
-        # Building the probe argvs reads the same spec the matcher will, so it sits
-        # INSIDE the guard: a spec malformed enough to break this loop is exactly
-        # the kind that must surface as a clean authoring error, not a TypeError
-        # escaping a validator.
+        # INSIDE the guard: building the probes reads the same spec the matcher
+        # will, and a spec malformed enough to break it must surface as a clean
+        # authoring error rather than a TypeError escaping a validator.
         try:
             rules = [
                 {"when": response.when.match_spec, "exit": response.exit_code, "stdout": "", "stderr": ""}
@@ -550,15 +520,12 @@ class RecordedCli(BaseModel):
                 + f"Reserved: {reserved}"
             )
             raise ValueError(msg)
-        # Folded for the same reason as the reserved set: on a case-insensitive
-        # filesystem `CALLS.JSONL` is the seeded log, and the shim write would hit
-        # it -- reported as a confusing duplicate-filename error at setup instead.
+        # Case-folded: on a case-insensitive filesystem `CALLS.JSONL` is the
+        # seeded log.
         if v.lower() == RECORD_CLI_LOG_NAME:
             raise ValueError(f"record_cli tool {v!r} would overwrite the invocation log criteria read")
-        # Case-folded like the reserved check above: APFS and NTFS are
-        # case-insensitive, so `ARGV_MATCH.PY` names the same inode as the
-        # sidecar. The sidecar write would then clobber the agent's shim without
-        # `_generate_cli_recorders`' per-tool exists() guard ever firing.
+        # Case-folded: on APFS and NTFS `ARGV_MATCH.PY` names the sidecar's own
+        # inode, so the sidecar write would clobber the agent's shim.
         if v.lower() in {module.lower() for module in SIDECAR_MODULES}:
             names = ", ".join(sorted(SIDECAR_MODULES))
             msg = (

@@ -71,12 +71,9 @@ async def invoke_bedrock_judge_async(
         JudgeInfrastructureError: no bearer token configured; retries exhausted;
             non-retryable HTTP failure (e.g. 400/401/403); or a non-dict JSON body.
     """
-    # Raise (not assert): this call runs inside LLMJudgeChecker's
-    # handle_criterion_errors(_async) wrapper, which catches plain Exception
-    # (including AssertionError) and downgrades it to a scored 0.0 — the
-    # opposite of the intended "internal-contract violation escalates to
-    # FinalStatus.ERROR" behavior. JudgeInfrastructureError is in
-    # _ESCALATING_EXCEPTIONS, so it propagates instead of being scored.
+    # Raise, not assert: the wrapper around this call catches plain Exception
+    # (AssertionError included) and downgrades it to a scored 0.0.
+    # Rationale: .claude/notes/contracts.md § What escalates instead of scoring 0.0
     if settings.aws_bearer_token_bedrock is None:
         raise JudgeInfrastructureError("Bedrock requires aws_bearer_token_bedrock")
     qualified = to_bedrock_model(model, route.region)

@@ -53,13 +53,13 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
             Result with binary score (1.0 when the match count is within
             [min_count, max_count], 0.0 otherwise)
         """
-        # No pre-flight re.compile here: `FlagMatch` compiles the pattern at
-        # validation, so an uncompilable one never reaches a checker -- and it has
-        # to be caught there, because the response-rule surface that shares this
-        # model cannot report an error at all.
+        # No pre-flight re.compile: `FlagMatch` compiles at validation, which is
+        # where it has to happen -- the response-rule surface cannot report.
         if not sandbox.file_exists(criterion.log):
-            # Harness fault, not agent behaviour. Failing stops a max_count: 0
-            # guard passing vacuously against a log that never existed.
+            # Scored 0.0, never raised: an agent can `rm` the log, so escalating
+            # would hand it a way to turn a failing run into an ERROR. Failing
+            # stops a max_count: 0 guard passing vacuously against a log that
+            # never existed. See the five uniform refuse-to-score paths below.
             return CriterionResult(
                 criterion_type=criterion.type,
                 description=criterion.description,
@@ -86,20 +86,14 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
 
         usable, unusable = parse_log(content)
 
-        # Both fault checks below are scoped to the records this criterion is about.
-        # One log serves every shadowed tool, so a `uip` shim that could not import
-        # its matcher must not fail a `tool: curl` guard that has nothing to do with
-        # response dispatch -- and whose error message would not explain why.
+        # Scoped to the records this criterion is about: one log serves every
+        # shadowed tool.
         mine = [record for _, record in usable if criterion.tool is None or record.get("tool") == criterion.tool]
 
-        # Booked on every record when the shim could not IMPORT its matcher, so
-        # no rule was ever tried and the agent saw the entry defaults throughout.
-        # Scored 0.0 rather than raised, unlike `rule_error` below: the sidecar
-        # lives in the agent-writable recorder directory, so an agent can cause
-        # this, and escalating would hand it a way to turn a failing run into an
-        # ERROR. The records themselves are still trustworthy -- the shim keeps
-        # logging -- which is what stops a `max_count: 0` guard passing on a
-        # forbidden call that would otherwise have gone unrecorded entirely.
+        # The shim could not IMPORT its matcher, so no rule was ever tried and the
+        # agent saw the entry defaults throughout. Scored 0.0, never raised -- the
+        # RECORDS stay trustworthy (the shim keeps logging), which is what stops a
+        # `max_count: 0` guard passing on a call that went unrecorded.
         broken = [record for record in mine if record.get("sidecar_error") is not None]
         if broken:
             return CriterionResult(
@@ -113,32 +107,14 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
                 ),
             )
 
-        # The shim books this when its own rule evaluation RAISED. If it fires, the
-        # responses the agent saw were not the ones the task described, so no verdict
-        # over this log means anything.
+        # Booked when the shim's own rule evaluation RAISED: the responses the agent
+        # saw were not the ones the task described, so no verdict over this log
+        # means anything.
         #
-        # ALL FIVE of this checker's refuse-to-score paths are uniform at a gating
-        # 0.0, and that uniformity is the point:
-        #
-        #   missing log        an agent can `rm` it
-        #   write sentinel     an agent can fill the disk or chmod the dir
-        #   sidecar_error      an agent can delete the matcher beside the shim
-        #   unusable records   an agent can append garbage to the log
-        #   rule_error         an agent can append a crafted record, or edit the shim
-        #
-        # EVERY one is agent-REACHABLE, because the whole recorder directory lives
-        # inside the sandbox the agent writes to. So none of them may raise: an
-        # escalation here is a `FinalStatus.ERROR`, which is normally read as "harness
-        # broken, discard this data point", and that is a strictly better outcome for
-        # a failing agent than FAILED. An earlier revision raised `CheckerMisuseError`
-        # on `rule_error` believing only a task author could cause it; appending one
-        # line to `calls.jsonl` disproved that.
-        #
-        # The legitimate concern that motivated the escalation -- a task author's
-        # unevaluable response spec must not be booked as an agent failure -- is
-        # handled where the agent cannot reach it instead: `RecordedCli` proves every
-        # rule is evaluable at LOAD time (see `_validate_responses_are_evaluable`), so
-        # an authoring mistake is a validation error before the sandbox even exists.
+        # HAZARD: all five of this checker's refuse-to-score paths are uniform at a
+        # gating 0.0 and NONE may raise -- every one is agent-reachable, and an
+        # escalation to ERROR is a better outcome for a failing agent than FAILED.
+        # Rationale: .claude/notes/contracts.md § The five refuse-to-score paths are uniform at a gating 0.0
         faults = [record for record in mine if record.get("rule_error") is not None]
         if faults:
             return CriterionResult(

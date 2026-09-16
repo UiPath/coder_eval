@@ -402,28 +402,22 @@ def resolve_task_for_variant(
     Returns:
         Tuple of (resolved TaskDefinition, config lineage dict, effective_repeats).
     """
-    # Layer 1-4 raw agent dicts. Experiment-side dicts are dict[str, Any] (passed
-    # through verbatim); the task agent is dumped with exclude_unset so Pydantic
-    # defaults don't leak into the merge. Timing (max_turns/turn_timeout) belongs
-    # under run_limits — a legacy max_turns under agent: now fails loudly via the
-    # agent model's extra="forbid" rather than being silently hoisted.
+    # Experiment-side dicts pass through verbatim; the task agent is dumped with
+    # exclude_unset so Pydantic defaults don't leak into the merge. Timing belongs
+    # under run_limits — a legacy `max_turns` under `agent:` fails loudly.
     default_agent = default_experiment.defaults.agent if default_experiment.defaults else None
     exp_defaults_agent = experiment.defaults.agent if experiment.defaults else None
     variant_agent_clean = variant.agent
     task_agent = task.agent.model_dump(exclude_unset=True) if task.agent else None
 
-    # Resolve all three `-D`-reachable roots through the SAME generic resolver
-    # the CLI layer uses (config_merge.resolve_root) — one merge implementation,
-    # one set of per-field strategies, lineage emitted as a side effect into the
-    # shared `lineage` dict. Type is enforced after CLI overrides (layer 5) so
-    # `--type` can satisfy the contract for tasks that omit `agent.type`.
+    # All three `-D`-reachable roots through the SAME generic resolver the CLI
+    # layer uses, with lineage emitted as a side effect. Type is enforced AFTER
+    # CLI overrides, so `--type` can satisfy the contract for tasks that omit it.
+    # Rationale: .claude/notes/orchestration.md § Config merging and CLI overrides
     lineage: dict[str, ConfigLineageEntry] = {}
 
     # --- agent: layers default -> exp-defaults -> task -> variant ---
-    # No-op (agent: {type: none}) tasks need no special-casing here: `type` is a
-    # replace-scalar, so a task-level `type: none` wins over a baseline coding
-    # agent injected by the default experiment, and the merged config validates
-    # as NoneAgentConfig. The orchestrator then dispatches to NoOpAgent.
+    # Rationale: .claude/notes/orchestration.md § No-op tasks need no special case anywhere
     resolved_agent: AgentConfig | BaseAgentConfig | None
     agent_layers: list[Layer] = []
     agent_specs: list[tuple[ConfigSource, dict[str, Any] | None]] = [
@@ -465,10 +459,9 @@ def resolve_task_for_variant(
     # task's own (default) sandbox so resolved_task.sandbox is never None.
     resolved_sandbox = resolve_root("sandbox", sandbox_layers, lineage=lineage) or task.sandbox
 
-    # Resolve pre_run / post_run through the same engine via their declared append
-    # strategies: pre_run appends in layer order (exp-defaults setup first, then the
-    # task's); post_run uses append_order="reverse" (the task's commands first, then
-    # experiment-defaults cleanup-last). Only exp-defaults + task contribute.
+    # Through the same engine via their declared append strategies: pre_run
+    # appends in layer order, post_run uses append_order="reverse" so the task's
+    # commands run first and experiment-defaults cleanup last.
     prepost_layers: list[Layer] = []
     exp_patch: dict[str, Any] = {}
     if experiment.defaults and experiment.defaults.pre_run:
@@ -488,9 +481,8 @@ def resolve_task_for_variant(
     resolved_pre_run = prepost.get("pre_run", [])
     resolved_post_run = prepost.get("post_run", [])
 
-    # Resolve simulation: shallow-merge across default → experiment-defaults → task → variant.
-    # Mirrors agent merge semantics — a later layer's keys overwrite earlier ones, and
-    # the final dict is validated by building a SimulationConfig from it.
+    # Shallow-merge across all four layers, mirroring agent merge semantics; the
+    # final dict is validated by building a SimulationConfig from it.
     resolved_simulation = _resolve_simulation(default_experiment, experiment, task, variant, lineage)
     resolved_checker_context = _resolve_checker_context(default_experiment, experiment, task, variant, lineage)
 
@@ -511,9 +503,8 @@ def resolve_task_for_variant(
     _config = config if config is not None else BatchRunConfig(run_dir=Path("."))
     effective_repeats = _resolve_repeats(default_experiment, experiment, variant, _config, lineage)
 
-    # When no config was supplied (direct callers / tests), enforce the agent.type
-    # contract here — _apply_cli_overrides won't run to do it later. A no-op task's
-    # `type: none` satisfies it (type is set), so only a truly type-less agent trips.
+    # Direct callers / tests: enforce the agent.type contract here, since
+    # _apply_cli_overrides won't run to do it later.
     if config is None and resolved_agent is not None and resolved_agent.type is None:
         raise ValueError(
             "Agent 'type' is required but was not set by any layer (default experiment, "
@@ -542,11 +533,7 @@ def _apply_cli_overrides(
     """
     from .overrides import apply_overrides
 
-    # No-op (agent: {type: none}) tasks need no special-casing: the resolved agent
-    # is a NoneAgentConfig, so a suite-wide `--model` / `-D agent.*` lands on it
-    # harmlessly (NoOpAgent ignores them) and the `type: none` already satisfies the
-    # agent.type contract. An explicit `--type <x>` is highest precedence and, as for
-    # any task, replaces the type — turning the no-op task into that agent.
+    # Rationale: .claude/notes/orchestration.md § No-op tasks need no special case anywhere
     assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
 
     apply_overrides(task, config.overrides, agent_type=config.agent_type, lineage=lineage)
@@ -572,9 +559,8 @@ def resolve_task_files(
     """
     exp_dir = experiment_file.parent if experiment_file is not None else task_file.parent
 
-    # Resolve system_prompt_file (may be injected by variant as relative or absolute path).
-    # Rebind: the resolver returns a new config so the prompt/file swap is atomic
-    # (see resolve_agent_system_prompt).
+    # REBIND: the resolver returns a new config, so the prompt/file swap is
+    # atomic.
     task.agent = resolve_agent_system_prompt(task.agent, exp_dir)
 
     # Resolve relative template_sources paths
@@ -591,40 +577,25 @@ def resolve_all_tasks(
 ) -> tuple[list[ResolvedTask], list[SkippedTask]]:
     """Resolve all (task x variant) combinations into typed, run-ready entries.
 
-    Applies all 5 config layers in one place:
-        1. default experiment base
-        2. task YAML
-        3. experiment base
-        4. variant overrides
-        5. CLI overrides
+    Dataset fan-out runs BEFORE variant resolution, so a variant cannot override
+    the dataset. Per-task resolution failures are demoted to ``skipped`` — unless
+    EVERY task that reached resolution failed, which is re-raised so the CLI
+    aborts rather than producing an empty run.
 
-    Also handles tag filtering and unique task ID validation.
-
-    Task YAMLs that fail to load (YAML parse error, Pydantic validation,
-    dataset expansion error) are recorded in the returned ``skipped`` list and
-    excluded from the resolved set rather than aborting the suite.
-
-    Per-task config-resolution failures (a task whose own YAML is incompatible
-    with the resolved run — e.g. Claude-only ``sdk_options`` surviving a
-    ``--type codex`` override, which ``CodexAgentConfig`` forbids) are likewise
-    demoted to ``skipped`` — but only when other tasks resolve. If EVERY task
-    that reaches resolution fails, the cause is a global invocation error (a bad
-    ``--type`` / ``-D`` value, repeats over the cap) rather than a per-task
-    incompatibility, so it is re-raised and aborts the run. Early-stop arming
-    errors always propagate. The caller surfaces ``skipped`` in the run summary
-    so per-task failures are loud but recoverable.
+    Rationale: .claude/notes/orchestration.md § Experiment resolution
 
     Args:
-        task_files: Paths to task YAML files.
-        experiment: The active experiment definition.
-        default_experiment: The default experiment (experiments/default.yaml).
-        config: Batch run configuration (provides CLI overrides, tags, run_dir).
-        experiment_file: Path to the experiment YAML file. Used to resolve
-            relative paths injected by experiment variants. Falls back to task
-            file directory when None.
+        task_files: Task YAML paths to resolve.
+        experiment: The experiment supplying variants and defaults.
+        default_experiment: The baseline experiment merged under it.
+        config: Run config, carrying the layer-5 ``-D`` overrides.
+        experiment_file: The experiment YAML's own path, used to resolve
+            experiment-relative paths. Falls back to each task file's directory
+            when None.
 
     Returns:
-        Tuple of (resolved tasks ready for run_batch, skipped task records).
+        ``(resolved, skipped)`` — every runnable (task x variant) entry, and the
+        tasks excluded by ``skip:`` or a per-task resolution failure.
 
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
@@ -633,12 +604,8 @@ def resolve_all_tasks(
 
     resolved: list[ResolvedTask] = []
     skipped: list[SkippedTask] = []
-    # Per-task config-resolution failures are collected here rather than raised
-    # inline. After the loop they are demoted to ``skipped`` — UNLESS every task
-    # that reached resolution failed, which signals a global invocation error
-    # (bad --type, an invalid -D value, repeats over the cap) that trips every
-    # task identically rather than a per-task incompatibility; that case is
-    # re-raised so the CLI aborts cleanly instead of producing an empty run.
+    # Collected rather than raised inline, and decided after the loop.
+    # Rationale: .claude/notes/orchestration.md § Experiment resolution
     resolution_errors: list[tuple[Path, Exception]] = []
     attempted = 0
 
@@ -656,47 +623,32 @@ def resolve_all_tasks(
     for task_file in task_files:
         try:
             task, source_yaml = load_task(task_file)
-            # Honor `skip: true` before dataset expansion — quarantined tasks
-            # skip row fan-out, variant resolution, and any further I/O. The
-            # task is reported in RunSummary.skipped_tasks so the suite shows
-            # which YAMLs were intentionally excluded vs. failed to load.
-            # Bypassed by --include-skipped (config.include_skipped) so on-demand /
-            # local runs can execute quarantined or opt-in tasks; the nightly/CI
-            # leave the flag off and keep excluding them.
+            # BEFORE dataset expansion, so a quarantined task skips row fan-out,
+            # variant resolution and any further I/O. Still reported in
+            # RunSummary.skipped_tasks. Bypassed by --include-skipped.
             if task.skip and not config.include_skipped:
                 reason = f"skip: true (task_id={task.task_id!r})"
                 logger.info("Skipping task %s — skip: true in YAML", task.task_id)
                 skipped.append(SkippedTask(path=str(task_file), reason=reason))
                 continue
-            # Dataset fan-out BEFORE variant resolution: one task per row, each
-            # treated as an independent task for the 4-layer merge below. This
-            # locks the invariant that variants cannot override the dataset.
+            # BEFORE variant resolution, which locks the invariant that a variant
+            # cannot override the dataset.
             expanded_tasks = expand_dataset(
                 task,
                 task_file.parent,
                 max_rows=config.max_rows,
                 sample_per_stratum=config.sample_per_stratum,
             )
-        # Narrow set: real load failures only. We deliberately don't catch
-        # AttributeError / TypeError / ImportError — those signal a regression
-        # in load_task / expand_dataset and should crash loudly rather than
-        # silently demote every task to "skipped". Pydantic ValidationError
-        # is a ValueError subclass in v2, so it's covered.
+        # NARROW: real load failures only. AttributeError / TypeError /
+        # ImportError signal a regression and must crash loudly.
         except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
             reason = f"{type(exc).__name__}: {exc}"[:500]
             logger.warning("Skipping task file %s — %s", task_file, reason)
             skipped.append(SkippedTask(path=str(task_file), reason=reason))
             continue
 
-        # Isolate layer 1-5 config resolution per task file. A task whose own
-        # YAML config is incompatible with the resolved run — e.g. Claude-only
-        # agent fields (`sdk_options`) surviving a `--type codex` override, which
-        # `CodexAgentConfig` forbids (`extra="forbid"`) — raises here. Without
-        # isolation that single task aborts the entire coder-eval run. Buffer the
-        # file's resolved tasks and commit them only once the whole file
-        # resolves, so a mid-file failure discards this file's fan-out as a unit
-        # (mirroring the load/expand isolation above) rather than leaving a
-        # partial, lopsided fan-out behind.
+        # Isolated per task file, and the file's tasks are buffered so a mid-file
+        # failure discards its fan-out as a UNIT.
         attempted += 1
         file_resolved: list[ResolvedTask] = []
         try:
@@ -716,9 +668,8 @@ def resolve_all_tasks(
                     # Apply layer 5 (CLI overrides)
                     _apply_cli_overrides(resolved_task, config, lineage)
 
-                    # Early-stop guardrails: run once the task is fully resolved (all 5
-                    # layers merged, incl. the -D run_limits.stop_early kill switch). No-op unless armed;
-                    # a bad arming raises EarlyStopConfigError (a ValueError).
+                    # Once the task is fully resolved, so the -D kill switch is
+                    # already merged. No-op unless armed.
                     validate_early_stop(resolved_task)
 
                     # Fan-out: simulation n_trials takes precedence over experiment repeats
@@ -743,34 +694,20 @@ def resolve_all_tasks(
                                 config_lineage=dict(lineage),
                             )
                         )
-        # Early-stop arming errors are a deliberate hard stop: they always
-        # propagate (never demoted to skipped) so a misconfigured run fails loudly
-        # instead of quietly shrinking the suite.
+        # A deliberate hard stop: never demoted to skipped, so a misconfigured
+        # run fails loudly instead of quietly shrinking the suite.
         except EarlyStopConfigError:
             raise
-        # Narrow set, matching the load/expand block above: config-resolution
-        # and IO failures are collected (decided after the loop, below);
-        # AttributeError / TypeError / ImportError still crash loudly as
-        # regressions. Pydantic ValidationError is a ValueError subclass in v2,
-        # so it's covered.
+        # NARROW, matching the load/expand block above.
         except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
             resolution_errors.append((task_file, exc))
             continue
 
         resolved.extend(file_resolved)
 
-    # Decide the fate of collected per-task resolution failures. If EVERY task
-    # that reached resolution failed, refusing to proceed (rather than producing
-    # an empty run) is the right call. We surface the first task's own error —
-    # not a synthesized "global misconfig" message — because we can't actually
-    # tell a genuine global cause (a bad --type / -D value that trips every task
-    # identically) from N tasks each independently incompatible for the same
-    # per-task reason. A ValueError (incl. Pydantic ValidationError and the "no
-    # agent registered" guard) is re-raised verbatim so its message stays clean;
-    # only a non-ValueError (FileNotFoundError/OSError/yaml.YAMLError — e.g. a
-    # missing system_prompt_file) is normalized to ValueError so it still lands
-    # in the caller's `except ValueError` (clean typer.BadParameter) instead of
-    # escaping as a raw traceback.
+    # If EVERY task that reached resolution failed, refuse rather than produce an
+    # empty run, surfacing the FIRST task's own error.
+    # Rationale: .claude/notes/orchestration.md § Experiment resolution
     if resolution_errors and len(resolution_errors) == attempted:
         first_exc = resolution_errors[0][1]
         if isinstance(first_exc, ValueError):
@@ -790,9 +727,8 @@ def resolve_all_tasks(
         filtered_ids = {t.task_id for _, t in filtered}
         resolved = [rt for rt in resolved if rt.task.task_id in filtered_ids]
 
-    # Validate no duplicate (task_id, variant_id, replicate_index) combinations.
-    # Simulation replicates legitimately share (task_id, variant_id); the tuple
-    # is only a duplicate when the replicate_index also matches.
+    # Simulation replicates legitimately share (task_id, variant_id), so the
+    # replicate_index is part of the key.
     seen: dict[tuple[str, str, int], list[Path]] = {}
     for rt in resolved:
         key = (rt.task.task_id, rt.variant_id, rt.replicate_index)
@@ -805,9 +741,8 @@ def resolve_all_tasks(
         ]
         raise ValueError("Duplicate task IDs found:\n" + "\n".join(lines))
 
-    # Sort so tasks run interleaved: replicate 0 of every (task, variant) first,
-    # then replicate 1, etc. Within the same replicate, preserve original
-    # task-file and variant declaration order.
+    # INTERLEAVED: replicate 0 of every (task, variant) first. Declaration order
+    # is preserved within a replicate.
     task_order = {tf: i for i, tf in enumerate(dict.fromkeys(rt.task_file for rt in resolved))}
     variant_order = {v.variant_id: i for i, v in enumerate(experiment.variants)}
     resolved.sort(key=lambda rt: (rt.replicate_index, task_order[rt.task_file], variant_order[rt.variant_id]))
@@ -832,15 +767,9 @@ def _pick_worst_status(statuses: list[FinalStatus]) -> FinalStatus:
     while its sibling is not, and the ordering above is what keeps that from
     absorbing an unmeasured replicate into a pass.
     """
-    # Annotated with the SAME Literal `FinalStatus.category` returns, and indexed
-    # directly rather than via `.get(..., -1)`. Adding the fourth `ungraded`
-    # bucket here was a manual step no checker could verify — an untyped
-    # `dict[str, int]` proves neither that every category is present nor that no
-    # stray key is — while the `-1` default it leaned on was already unreachable
-    # (the `assert set(_STATUS_CATEGORIES) == set(FinalStatus)` in models/enums.py
-    # makes `category` total). Worse, that default was documented as
-    # "fail-closed", but -1 sorts BELOW error, so a fifth category would have
-    # silently outranked ERROR as the worst status.
+    # The SAME Literal `FinalStatus.category` returns, indexed directly rather
+    # than via `.get(..., -1)`.
+    # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
     priority: dict[Literal["succeeded", "failed", "error", "ungraded"], int] = {
         "error": 0,
         "failed": 1,
@@ -896,9 +825,8 @@ def _fold_replicates(task_id: str, variant_id: str, reps: list[TaskResult]) -> V
     Extracted from ``aggregate_results``, which was already the largest function
     in the module before the ungraded bucket added another filter to it.
     """
-    # Ungraded replicates — and ONLY those — drop out entirely rather than
-    # contributing 0.0: `or 0.0` would average a clean `execute` run down to a
-    # real-looking zero, while dropping an errored one would pay it a bonus.
+    # Ungraded replicates — and ONLY those — drop out rather than contributing
+    # 0.0.
     scores = _measured_scores(reps)
     non_errored = [r for r in reps if r.result.final_status.category != "error"]
     durations = [r.result.duration_seconds for r in non_errored]
@@ -962,15 +890,9 @@ def aggregate_results(
     # Build task summaries
     task_summaries: list[TaskExperimentSummary] = []
     for task_id, variants in task_variants.items():
-        # Only graded variants can win or set a spread. Including ungraded ones
-        # at 0.0 would name an arbitrary "best" among scores that do not exist.
-        #
-        # When NOTHING was scored there is no winner, and the fallback must not
-        # invent one: `variants[0]` is whichever arm the input happened to list
-        # first, so swapping the two inputs flipped the reported winner — with
-        # `is_tie=False` asserting it was a real result. Sort by variant_id (so
-        # the field is at least deterministic) and mark it a tie among all arms,
-        # which is what "no arm outscored another" actually means.
+        # Only GRADED variants can win or set a spread, and when nothing was
+        # scored the fallback must not invent a winner.
+        # Rationale: .claude/notes/orchestration.md § Aggregation drops ungraded rows rather than zeroing them
         scored = [(v, v.weighted_score) for v in variants if v.weighted_score is not None]
         if scored:
             best = max(scored, key=lambda pair: (pair[1], pair[0].variant_id))[0]
@@ -1018,13 +940,10 @@ def aggregate_results(
             tasks_not_graded=sum(1 for v in vr_list if v.final_status.category == "ungraded"),
             tasks_token_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.TOKEN_BUDGET_EXCEEDED),
             tasks_cost_budget_exceeded=sum(1 for v in vr_list if v.final_status == FinalStatus.COST_BUDGET_EXCEEDED),
-            # Verdict evidence for pass_rate. A TIMEOUT lands in the `failed`
-            # bucket without any criterion having run, so the buckets alone
-            # cannot answer "was this variant measured at all".
+            # Verdict evidence: a TIMEOUT lands in `failed` with no criterion
+            # having run, so the buckets alone cannot answer this.
             tasks_measured=sum(1 for v in vr_list if v.weighted_score is not None),
-            # Mean over GRADED rows only, and None when there are none: a clean
-            # execute run has no average score, and reporting 0.000 next to
-            # "Pass Rate: n/a" is a number indistinguishable from "scored zero".
+            # GRADED rows only, and None when there are none.
             average_score=_mean_graded_score(vr_list),
             average_duration=sum(v.duration_seconds / v.replicate_count for v in vr_list) / len(vr_list),
             total_tokens=total_tokens,

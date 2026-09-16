@@ -35,19 +35,14 @@ def calculate_command_statistics(turns: list[TurnRecord]) -> CommandStatistics:
     # Use `is not None` to include valid 0.0ms durations
     total_time = sum(cmd.duration_ms for cmd in all_commands if cmd.duration_ms is not None)
     timed_count = sum(1 for cmd in all_commands if cmd.duration_ms is not None)
-    # None, not 0, when NOTHING was timed: `avg_command_time_ms` is
-    # `float | None` precisely so it can say "no measurement" instead of
-    # publishing "measured, and instant". A 0 here rendered "0ms average
-    # command time" for a turn whose only tool call was force-closed and
-    # never timed at all. The `is not None` tests above are deliberately
-    # unchanged — a real 0.0ms duration IS a measurement and still counts.
+    # None, not 0, when NOTHING was timed. The `is not None` tests above are
+    # deliberately unchanged: a real 0.0ms duration IS a measurement.
+    # Rationale: .claude/notes/reporting.md § An unmeasured value is never zero
     avg_time = total_time / timed_count if timed_count > 0 else None
 
-    # Find slowest commands (type-safe using SlowestCommandInfo model). Only
-    # timed commands are eligible, and the duration travels alongside its
-    # command so it stays a float the whole way — an untimed command has no
-    # place in a "slowest" ranking, and coalescing it to 0.0 would only have
-    # hidden that.
+    # Only TIMED commands are eligible, and the duration travels alongside its
+    # command so it stays a float: an untimed one has no place in a "slowest"
+    # ranking, and coalescing it to 0.0 would only hide that.
     timed = [(c.duration_ms, c) for c in all_commands if c.duration_ms is not None]
     slowest_info = [
         SlowestCommandInfo(

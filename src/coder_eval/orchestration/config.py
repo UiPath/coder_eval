@@ -55,14 +55,12 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Agent type override stays a dedicated field: it requires re-parsing the
-    # discriminated union (not a simple field-merge), so it is injected into the
-    # generic agent patch by apply_overrides rather than living in `overrides`.
+    # A dedicated field because it requires re-parsing the discriminated union,
+    # not a simple field-merge; apply_overrides injects it into the agent patch.
     agent_type: str | None = Field(default=None, description="Override agent type for all tasks (e.g., 'claude-code')")
 
-    # Generic layer-5 task-config overrides. Built from -D/--set and the surviving
-    # flag aliases (--model, --driver) in run_command, then applied to the resolved
-    # TaskDefinition by orchestration.overrides.
+    # Layer-5 overrides, built from -D/--set plus the surviving flag aliases.
+    # Rationale: .claude/notes/orchestration.md § Config merging and CLI overrides
     overrides: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -71,7 +69,6 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Dataset sampling (for cheap smoke runs on dataset-backed tasks)
     max_rows: int | None = Field(
         default=None,
         ge=1,
@@ -87,19 +84,16 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Replicate count override
     repeats: int | None = Field(
         default=None,
         ge=1,
         description="CLI override for replicates per (task, variant). None = defer to experiment layers.",
     )
 
-    # Grading switch: `coder-eval run` (True) vs `coder-eval execute` (False).
-    # It lives HERE and nowhere else on purpose — it is deliberately NOT part of
-    # the 5-layer task merge, so there is no `-D grade=...` path and no
-    # MergeField (CE014 does not apply to a scalar bool outside the merged
-    # roots). A task YAML must never be able to declare itself ungraded; only
-    # the invoking command decides.
+    # HERE and nowhere else on purpose: deliberately NOT part of the 5-layer task
+    # merge, so there is no `-D grade=...` path. A task YAML must never be able to
+    # declare itself ungraded; only the invoking command decides.
+    # Rationale: .claude/notes/orchestration.md § Execute vs. run: the grading switch
     grade: bool = Field(
         default=True,
         description=(
@@ -108,17 +102,12 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # Logging
     verbose: bool = Field(default=False, description="Enable verbose (DEBUG level) logging for Docker output")
 
-    # Docker WORKDIR alignment for the non-docker-driver dispatch path (host
-    # process, or already inside a container someone else built — e.g. a Harbor
-    # trial container running `coder-eval execute` as its agent). Mirrors what
-    # `DockerRunner`/`_run-task-internal` already do for `sandbox.driver: docker`
-    # (see `Orchestrator.workspace_dir`'s docstring); this is the same mechanism,
-    # exposed publicly for the case where coder-eval's OWN docker driver isn't
-    # the one building the container. Only meaningful for a single resolved task
-    # — `run_batch` raises if more than one task would collide on it.
+    # Docker WORKDIR alignment for the NON-docker-driver dispatch path — a host
+    # process, or a container someone else built. The same mechanism the docker
+    # driver already uses, exposed for when coder-eval's own driver is not the one
+    # building the container. Only meaningful for a single resolved task.
     workspace_dir: Path | None = Field(
         default=None,
         description=(
@@ -129,15 +118,8 @@ class BatchRunConfig(BaseModel):
         ),
     )
 
-    # TODO(container-death-diagnostics): consider a run-level default resource
-    # cap. Containers run uncapped today (sandbox.limits.{max_memory_mb,
-    # max_cpus,max_pids} default to None -> _build_argv emits no --memory/
-    # --cpus/--pids-limit), so at --max-parallel=20 a single runaway task can
-    # pressure the whole host. An opt-in default cap is already expressible
-    # via the EXISTING layered sandbox config -- defaults.sandbox.limits.
-    # max_memory_mb in the experiment YAML, or `-D sandbox.limits.
-    # max_memory_mb=N` on `coder-eval run` -- both flow through
-    # resolve_all_tasks and are overridden by per-task limits. If a dedicated
-    # CLI knob is ever wanted, add it as the FIRST (lowest-priority) layer in
-    # _build_sandbox_layers so per-task limits win, and do NOT default it to
-    # a non-None value (would change behavior for existing configs).
+    # TODO(container-death-diagnostics): containers run uncapped today, so at a
+    # high --max-parallel one runaway task can pressure the host. An opt-in
+    # default is already expressible through the layered sandbox config; a
+    # dedicated CLI knob would go in as the LOWEST-priority layer, never
+    # defaulted to a value (that would change existing configs).

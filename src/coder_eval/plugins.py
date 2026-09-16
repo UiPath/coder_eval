@@ -28,9 +28,8 @@ logger = logging.getLogger(__name__)
 
 PLUGIN_ENTRY_POINT_GROUP = "coder_eval.plugins"
 
-# coder-eval's own built-in agents register through this same entry point. A
-# failure registering it is a real breakage (empty registry), NOT a skippable
-# third-party plugin error — so it is fatal rather than logged-and-skipped.
+# The built-in agents register through this same entry point, so a failure here is
+# a real breakage (empty registry), not a skippable third-party plugin error.
 BUILTIN_PLUGIN_NAME = "coder_eval"
 
 _loaded = False
@@ -57,9 +56,8 @@ def load_plugins(*, force: bool = False) -> None:
             register = ep.load()
             register(AgentRegistry)
         except Exception:
-            # Built-in registration failing leaves the registry empty and would
-            # surface later as a misleading "No agent registered for 'claude-code'".
-            # Keep it fatal so the real (import/registration) cause fails loudly.
+            # Fatal: otherwise it surfaces later as a misleading "No agent
+            # registered for 'claude-code'" instead of the real cause.
             if ep.name == BUILTIN_PLUGIN_NAME:
                 # Clear the flag so a caller that catches and retries re-runs the
                 # scan instead of getting a no-op against an empty registry.

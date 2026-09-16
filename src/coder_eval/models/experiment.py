@@ -190,10 +190,8 @@ class VariantResult(BaseModel):  # noqa: CE009 -- persisted result model; round-
 
     variant_id: str
     task_id: str
-    # None when nothing was graded (`coder-eval execute`), mirroring
-    # EvaluationResult.weighted_score. A plain float here would launder the
-    # ungraded None into 0.000, which renders as — and is picked as a best
-    # variant against — a real score of zero.
+    # None when nothing was graded. A plain float would launder that into 0.000.
+    # Rationale: .claude/notes/orchestration.md § Rates need verdict evidence, not bucket counts
     weighted_score: float | None = None
     final_status: FinalStatus
     duration_seconds: float
@@ -234,9 +232,8 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
         ge=0,
         description="Tasks executed without grading (`coder-eval execute`). Excluded from pass_rate entirely.",
     )
-    # None when nothing in this variant was graded (`coder-eval execute`).
-    # A 0.0 here is indistinguishable from "measured and scored zero" — the same
-    # reason EvaluationResult.weighted_score is Optional.
+    # None when nothing in this variant was graded: a 0.0 is indistinguishable from
+    # "measured and scored zero".
     average_score: float | None
     average_duration: float
     total_tokens: int | None = None
@@ -256,11 +253,8 @@ class VariantAggregate(BaseModel):  # noqa: CE009 -- persisted result model; rou
         ge=0,
         description="Subset of tasks_failed where run_limits cost cap tripped.",
     )
-    # Verdict evidence, NOT a bucket: how many rows actually carry a
-    # weighted_score. `pass_rate` needs it because the four category buckets
-    # cannot tell a graded FAILURE from a TIMEOUT that no criterion ever saw.
-    # Defaulted so an experiment.json written before this field still parses —
-    # and inert on those, since they predate the ungraded bucket entirely.
+    # Verdict evidence, NOT a bucket. Defaulted so an older experiment.json still
+    # parses, and inert on those.
     tasks_measured: int = Field(
         default=0,
         ge=0,

@@ -34,19 +34,11 @@ from .resources import get_ignore_patterns, should_ignore_path
 logger = logging.getLogger(__name__)
 
 
-# Entries excluded from Sandbox.capture_to (docker WORKDIR-alignment).
-# Two classes of exclusion:
-#
-#   1. SECURITY denylist: credential files/dirs that must never leak into
-#      captured artifacts (which get uploaded). Defense-in-depth -- the eval
-#      images don't bake credentials, but any future image that does should
-#      not silently expose them.
-#
-#   2. NOISE suppression: sandbox-created bulk and home-dir infrastructure
-#      written by tools (uv, pip, npm, shell) when WORKDIR overlaps HOME
-#      (e.g. /root). These are never task deliverables.
-#
-# Matched by basename at every level via shutil.ignore_patterns.
+# Entries excluded from Sandbox.capture_to (docker WORKDIR-alignment): a SECURITY
+# denylist of credential stores that must never reach uploaded artifacts, plus NOISE
+# written by uv/pip/npm/shell when WORKDIR overlaps HOME. Matched by basename at
+# every level via shutil.ignore_patterns.
+# Rationale: .claude/notes/isolation.md § preserve_to, capture_to, and the capture denylist
 _WORKSPACE_CAPTURE_IGNORE = (
     # --- Security: credential stores ---
     ".claude",  # RW lean copy of host ~/.claude (carries .credentials.json)
@@ -78,9 +70,8 @@ _WORKSPACE_CAPTURE_IGNORE = (
 # not automatic: `Sandbox.resolve_files` tries the literal path first.
 _GLOB_METACHARACTERS = "*?["
 
-# Cap on how many matches an ambiguity error enumerates. The message is
-# persisted to task.json and injected into judge prompts, so an unbounded
-# listing over a wide pattern is a real payload.
+# HAZARD: the message is persisted to task.json and injected into judge prompts,
+# so an unbounded listing over a wide pattern is a real payload.
 _MAX_LISTED_MATCHES = 10
 
 
@@ -169,9 +160,8 @@ class Sandbox:
         self._cleanup_on_exit = True
         # True once adopt() takes over an existing workspace. Read by the
         # Orchestrator to suppress every step that would MUTATE the tree it was
-        # asked to grade (pre_run/post_run above all — several in-tree tasks
-        # copy fixtures over the workspace there) and to keep sandbox_path in
-        # the result, since an adopted directory outlives cleanup().
+        # asked to grade, and to keep sandbox_path in the result.
+        # Rationale: .claude/notes/isolation.md § Why pre_run and post_run each run exactly once
         self.was_adopted = False
         self.installed_tool_versions: dict[str, str] = {}
         self._command_base_path: str | None = None
@@ -183,23 +173,22 @@ class Sandbox:
     def enforces_permission_windows(self) -> bool:
         """Whether a chmod window is a real, safe control in this sandbox.
 
-        True only inside a ``driver: docker`` container, where the filesystem is
-        private to this one task: chmod-ing the reference and task directories
-        there affects nothing else, and the container drops ``DAC_OVERRIDE`` /
-        ``DAC_READ_SEARCH`` so the mode actually binds against its root user.
+        True only inside a ``driver: docker`` container. SAFE because the
+        filesystem is private to this one task; REAL because that container drops
+        ``DAC_OVERRIDE`` / ``DAC_READ_SEARCH``, without which a mode-000 directory
+        is still readable by container root and the window is a silent no-op.
+        COUNTERPART to ``docker_runner._build_argv``'s cap drops.
 
-        On the host (``driver: tempdir``) it is a deliberate no-op. Parallel
-        tasks in one batch share the checked-out ``tasks/<name>/`` tree, so
-        chmod-ing it is a cross-task side effect on the user's own working copy
-        for no isolation benefit -- there is no boundary to enforce when the
-        agent is just another process with the same uid.
+        On the host (``driver: tempdir``) it is a deliberate no-op: parallel tasks
+        share the checked-out ``tasks/<name>/`` tree, so enforcing would chmod the
+        user's own working copy across tasks.
 
         NOTE the predicate is the ``CODER_EVAL_IN_CONTAINER`` env var, NOT
-        ``config.driver``. The in-container entry point rewrites
-        ``driver: docker`` to ``tempdir`` before constructing the Orchestrator
-        (nested docker is impossible in the image), so keying on the driver
-        would read "tempdir" inside the container and silently disable the
-        anti-cheat window on exactly the path that needs it.
+        ``config.driver``: the in-container entry point rewrites ``driver: docker``
+        to ``tempdir`` before constructing the Orchestrator, so keying on the
+        driver would silently disable the window on the path that needs it.
+
+        Rationale: .claude/notes/isolation.md § Capability drops and the anti-cheat window
         """
         return os.environ.get(IN_CONTAINER_ENV) == "1"
 
@@ -266,10 +255,9 @@ class Sandbox:
         if self.config.driver == "tempdir":
             return self._setup_tempdir(target_dir=target_dir)
         if self.config.driver == "docker":
-            # Docker isolation is dispatched at the orchestrator-entry boundary
-            # (coder_eval.isolation.docker_runner). Inside the container, the
-            # task is re-run with driver=tempdir, so this branch is never
-            # reached on a correctly routed call.
+            # Dispatched at the orchestrator-entry boundary; inside the container
+            # the task is re-run with driver=tempdir, so this is unreachable on a
+            # correctly routed call.
             raise RuntimeError(
                 "Sandbox.setup() called with driver='docker' -- Docker tasks must be "
                 + "dispatched via DockerRunner from the host. This indicates a routing bug."
@@ -279,38 +267,22 @@ class Sandbox:
     def adopt(self, workspace: Path) -> Path:
         """Use ``workspace`` **as** the sandbox, materializing nothing into it.
 
-        The grade-in-place counterpart to :meth:`setup`. ``setup`` builds a
-        workspace: it copies template sources in, generates ``record_cli`` shims,
-        creates a venv, installs packages. ``adopt`` takes a workspace that
-        already exists — an ``execute`` run's artifacts, or a verifier's ``/app``
-        — and only derives the *environment* the criteria need to run against it
-        (mock-dir ``+x``, venv discovery, the plugin-tools pin).
+        The grade-in-place counterpart to :meth:`setup`: it takes a workspace that
+        already exists -- an ``execute`` run's artifacts, or a verifier's ``/app``
+        -- and derives only the *environment* the criteria need (mock-dir ``+x``,
+        venv discovery, the plugin-tools pin). In-place is more CORRECT here, not
+        merely faster.
 
-        Why not ``setup(target_dir=workspace)``: that already adopts a
-        caller-supplied directory and sets ``_cleanup_on_exit=False``, but it
-        then runs ``_setup_template()``, which would write over the very files
-        it was asked to grade.
-
-        In-place is more CORRECT here, not merely faster:
-
-        * ``_setup_template`` filters what it copies through
-          ``_should_ignore_template_file`` — ``node_modules``, ``dist``,
-          ``build``, ``venv``, ``.git`` and friends are dropped. A criterion like
-          ``test -f dist/bundle.js`` therefore fails as a *copying artifact*
-          rather than as a verdict on the agent's work.
-        * ``run_command`` criteria execute with ``cwd = sandbox_dir``, so on the
-          copy path they see the copy's paths, not the ones the agent worked at.
-        * Copying a real workspace costs minutes.
-
-        "Materializing nothing" means it writes no FILES. It does still chmod
-        ``+x`` over the task's declared mock-PATH directories inside the tree —
-        a mode change the criteria need in order to resolve the same shimmed
-        binaries the agent did.
+        "Materializing nothing" means it writes no FILES; it does still chmod
+        ``+x`` over the task's declared mock-PATH directories, a mode change the
+        criteria need to resolve the same shimmed binaries the agent did.
 
         The caller keeps ownership: ``_cleanup_on_exit`` stays False, so
         ``cleanup()`` never deletes an adopted directory. Criteria CAN still
-        mutate it (a ``run_command`` that writes), which is why the copy path
-        remains the default for a bare user-supplied work dir.
+        mutate the tree (a ``run_command`` that writes), which is why the copy
+        path stays the default for a bare user-supplied work dir.
+
+        Rationale: .claude/notes/isolation.md § Detached grading and `Sandbox.adopt`
 
         Args:
             workspace: An existing directory to grade in place.
@@ -335,28 +307,17 @@ class Sandbox:
         self._cleanup_on_exit = False
         self.was_adopted = True
 
-        # Only NON-materializing steps below. Deliberately skipped, and why:
-        #   _setup_template            would overwrite the workspace being graded
-        #   _generate_cli_recorders    writes shims into it
-        #   _setup_virtualenv /
-        #     _install_*_packages      the execute phase already provisioned these;
-        #                              re-running mutates the graded tree
-        #   _maybe_remediate_home_plugins_pollution
-        #                              destructive on $HOME, and it is remediation
-        #                              rather than derivation — the execute phase
-        #                              already ran it if it was enabled
+        # Only NON-materializing steps below. Deliberately skipped:
+        # _setup_template (overwrites the tree being graded),
+        # _generate_cli_recorders (writes shims into it), _setup_virtualenv /
+        # _install_*_packages (the execute phase provisioned these), and
+        # _maybe_remediate_home_plugins_pollution (destructive on $HOME, and
+        # remediation rather than derivation).
         self._prepare_mock_path_dirs()
 
-        # Discover an existing venv instead of creating one, so `run_command`
-        # criteria get the same VIRTUAL_ENV/PATH the agent had. Absent venv ->
-        # None, exactly as for a task with no python config.
-        #
-        # Gated on `config.python` for the same reason `setup` is: venv_dir
-        # prepends the venv's bin/ to PATH and exports VIRTUAL_ENV for every
-        # criterion subprocess, so discovering one a task never asked for grades
-        # it under a PATH it never ran under — the exact divergence the
-        # command_base_path round trip exists to close. It would also let an
-        # agent shadow binaries by writing `.venv/bin/` into its own workspace.
+        # DISCOVER rather than create, so criteria get the same VIRTUAL_ENV/PATH
+        # the agent had. Gated on `config.python` for the same reason `setup` is.
+        # Rationale: .claude/notes/isolation.md § Why the venv gets system site packages
         if self.config.python:
             candidate = self.sandbox_dir / VENV_DIRNAME
             if candidate.is_dir():
@@ -387,10 +348,9 @@ class Sandbox:
             # "parent/row" -- flatten path separators so they don't become subdirectories
             # under /tmp (mkdtemp does not auto-create parent dirs).
             safe_task_id = self.task_id.replace("/", "_").replace("\\", "_")
-            # On Windows root off the home dir, not the user temp tree: the agent's Git Bash
-            # mounts /tmp onto the base temp dir while Python's mkdtemp honors %TEMP% (a CI-set
-            # subdir), so a temp-rooted sandbox gets a divergent /tmp twin the grader never reads.
-            # POSIX has one namespace (dir=None keeps the system temp, unchanged for driver:docker).
+            # On Windows, root off the home dir: Git Bash mounts /tmp onto the base
+            # temp dir while mkdtemp honors %TEMP%, giving the sandbox a divergent
+            # /tmp twin the grader never reads. POSIX has one namespace.
             self.sandbox_dir = Path(
                 tempfile.mkdtemp(prefix=f"coder_eval_{safe_task_id}_", dir=Path.home() if os.name == "nt" else None)
             )
@@ -406,9 +366,8 @@ class Sandbox:
             # Mark mock binaries executable so the agent's PATH can shadow real CLIs
             self._prepare_mock_path_dirs()
 
-            # Set up Python virtual environment (only if python config is provided).
-            # The venv is created with system site packages -- see _setup_virtualenv
-            # for why an isolated one was actively harmful.
+            # With system site packages -- see _setup_virtualenv for why an
+            # isolated venv was actively harmful.
             if self.config.python:
                 self._setup_virtualenv()
 
@@ -428,11 +387,9 @@ class Sandbox:
             # Cache canonical @uipath dir for PLUGIN_TOOLS_DIR pin; no-op if `uip` absent.
             self._refresh_plugin_tools_dir()
         except Exception:
-            # Clean up on failure -- but ONLY a temp dir we created ourselves.
-            # For a caller-supplied target_dir (DIRECT_WRITE persistent mode) we
-            # must not rmtree it: it may be a pre-existing artifacts dir, and the
-            # mode's contract is to never clear it. A self-created tempdir always
-            # has _cleanup_on_exit=True at this point; target_dir flips it False.
+            # ONLY a temp dir we created ourselves: a caller-supplied target_dir
+            # (DIRECT_WRITE) may be a pre-existing artifacts dir whose contract is
+            # never to be cleared.
             if self._cleanup_on_exit:
                 shutil.rmtree(self.sandbox_dir, ignore_errors=True)
                 self.sandbox_dir = None
@@ -456,12 +413,10 @@ class Sandbox:
         assert self.sandbox_dir is not None, "Sandbox directory not initialized"
 
         repo_dir = self.sandbox_dir / "repo"
-        # `--` before the URL: it is argv position 2, so without the separator a
-        # value beginning with `-` is parsed by git as an OPTION rather than a
-        # repository (`--upload-pack=…` runs a command of the caller's choosing).
-        # That URL is task-authored, and since `evaluate <run_dir>` rebuilds the
-        # task from a shareable run directory it is no longer necessarily the
-        # operator's own string.
+        # HAZARD: `--` before the URL. Without it a value beginning with `-` parses
+        # as an OPTION (`--upload-pack=...` runs a command of the caller's
+        # choosing), and that URL is task-authored.
+        # Rationale: .claude/notes/isolation.md § Materializing a template into the sandbox
         cmd = ["git", "clone", "--", source.url, str(repo_dir)]
 
         try:
@@ -554,10 +509,8 @@ class Sandbox:
         for item in template_path.rglob("*"):
             # Calculate relative path
             rel_path = item.relative_to(template_path)
-            # Match ignore patterns against the template-relative path only —
-            # checking the absolute path would let an ancestor directory named
-            # `dist`, `build`, `env`, `venv`, or `node_modules` filter out the
-            # entire template (e.g. if the repo is cloned under ~/build/…).
+            # Template-RELATIVE, not absolute: an ancestor named `dist`, `build`,
+            # `env`, `venv` or `node_modules` would filter out the whole template.
             if self._should_ignore_template_file(rel_path) and not self._matches_template_include_pattern(
                 rel_path, source.include_patterns
             ):
@@ -565,38 +518,25 @@ class Sandbox:
 
             dest_path = mount_root / rel_path
 
-            # is_symlink() must come first — is_dir() / is_file() follow
-            # symlinks, so a `tools/node_modules/fil-compiler -> ../fil`
-            # link would look like a directory and we'd create an empty
-            # dir at the destination, breaking npm workspace resolution.
+            # is_symlink() first -- is_dir()/is_file() follow symlinks, so a link
+            # to a dir would produce an empty dir at the destination.
+            # Rationale: .claude/notes/isolation.md § Materializing a template into the sandbox
             if item.is_symlink():
-                # `is_symlink()` before `exists()` because `exists()` follows
-                # the link; a *broken* symlink at dest is still an overwrite
-                # we need to clear.
+                # `is_symlink()` before `exists()`, which follows the link: a
+                # BROKEN symlink at dest is still an overwrite to clear.
                 if dest_path.is_symlink() or dest_path.exists():
-                    # Only a real directory needs rmtree; symlinks-to-dir,
-                    # symlinks-to-file, and regular files all clear with
-                    # unlink() (which removes the link, not its target).
+                    # Only a real directory needs rmtree; unlink() removes the
+                    # link rather than its target.
                     if dest_path.is_dir() and not dest_path.is_symlink():
                         shutil.rmtree(dest_path)
                     else:
                         dest_path.unlink()
                     overwrites.add(str(rel_path))
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
-                # `item.is_dir()` follows the symlink, so it tells us
-                # whether the target is a directory. On Windows
-                # `os.symlink` needs `target_is_directory=True` for
-                # directory targets — without it Windows creates a
-                # file-symlink that can't be traversed. POSIX ignores
-                # the flag.
-                #
-                # We preserve `os.readlink(item)` verbatim — both
-                # relative (npm workspaces, e.g. `node_modules/foo
-                # -> ../foo`) and absolute targets. Absolute targets
-                # remain live links into the host filesystem inside
-                # the sandbox; template authors are trusted infra
-                # (see `templates/` in this repo), so this is the
-                # intended behavior, not a defense boundary.
+                # Windows `os.symlink` needs `target_is_directory=True` for
+                # directory targets; POSIX ignores it. Targets are preserved
+                # verbatim, absolute ones included -- template authors are trusted
+                # infra, so this is intended, not a defense boundary.
                 os.symlink(
                     os.readlink(item),
                     dest_path,
@@ -654,10 +594,9 @@ class Sandbox:
         if self.sandbox_dir is None:
             return []
         resolved: list[Path] = []
-        # Generated recorders go FIRST: `_generate_cli_recorders` refuses to
-        # generate a shim whose name a user mock dir already provides, so this
-        # order can never silently shadow a task's own mock — it only fixes which
-        # directory wins for names the harness itself owns.
+        # Generated recorders go FIRST, and refuse to generate a shim whose name a
+        # user mock dir already provides, so this can never shadow a task's own mock.
+        # Rationale: .claude/notes/isolation.md § The criterion environment, layer by layer
         if self.config.record_cli:
             generated = self._resolve_within_sandbox(RECORD_CLI_DIR, field="record_cli directory")
             if generated.is_dir():
@@ -696,9 +635,8 @@ class Sandbox:
             if not user_dir.is_dir():
                 continue
             for spec in self.config.record_cli:
-                # Every name this feature generates, not just the bare one: on
-                # Windows PATHEXT resolves `uip` to the generated `uip.cmd` ahead of
-                # the task's own `mocks/uip.cmd`, silently changing what runs.
+                # Every generated name, not just the bare one: Windows PATHEXT
+                # resolves `uip` to `uip.cmd` ahead of the task's own mock.
                 clash = next(
                     (
                         user_dir / name
@@ -717,17 +655,14 @@ class Sandbox:
                     raise RuntimeError(msg)
 
         recorder_dir = self._resolve_within_sandbox(RECORD_CLI_DIR, field="record_cli directory")
-        # Wipe rather than reuse: DIRECT_WRITE (the docker default) does not clear the
-        # target dir, so a reused --run-dir would leave a previous run's log to be
-        # scored as this run's, and stale shims for tools no longer declared on PATH.
+        # Wipe rather than reuse: DIRECT_WRITE does not clear the target dir, so a
+        # reused --run-dir would leave a previous run's log to be scored as this one's.
         if recorder_dir.exists():
             shutil.rmtree(recorder_dir, ignore_errors=True)
         recorder_dir.mkdir(parents=True, exist_ok=True)
 
-        # Seed the log so it always exists: `cli_called` treats a MISSING log as a
-        # harness fault (score 0 even for a negative guard), which is right when a
-        # mock never ran, but wrong for a correct run that legitimately called
-        # nothing. An empty file distinguishes the two.
+        # Seeded so it always exists: `cli_called` reads a MISSING log as a harness
+        # fault, which is wrong for a run that legitimately called nothing.
         log_path = self.sandbox_dir / RECORD_CLI_LOG
         log_path.write_text("", encoding="utf-8")
 
@@ -741,9 +676,8 @@ class Sandbox:
                 )
                 raise RuntimeError(msg)
             shim.write_text(render_recorder(spec, interpreter), encoding="utf-8", newline="\n")
-            # +x here rather than relying on _prepare_mock_path_dirs: that pass is
-            # what makes the bit real for PATH lookup, but the shim must be
-            # executable even if the recorder dir is consumed some other way.
+            # Not left to _prepare_mock_path_dirs: the shim must be executable
+            # even if the recorder dir is consumed some other way.
             shim.chmod(shim.stat().st_mode | 0o111)
             # `python "%~dp0<tool>" %*` — the extensionless script beside this file.
             cmd_lines = [
@@ -758,10 +692,8 @@ class Sandbox:
                 newline="",
             )
 
-        # Once for the whole directory, not once per entry: every rules-bearing shim
-        # imports the same sidecar, so writing it inside the loop above just rewrote
-        # identical bytes N times. Skipped entirely when no entry declares rules --
-        # such a shim never consults the matcher and needs no sibling file.
+        # Once for the directory, not per entry: every rules-bearing shim imports
+        # the same sidecar. Skipped when no entry declares rules.
         sidecars = sorted(SIDECAR_MODULES) if any(spec.responses for spec in self.config.record_cli) else []
         for module in sidecars:
             (recorder_dir / module).write_text(sidecar_source(module), encoding="utf-8", newline="\n")
@@ -790,9 +722,9 @@ class Sandbox:
         overwrites: set[str] = set()
 
         for starter_file in source.files:
-            # Reject path traversal before any filesystem write; the helper allows
-            # the resolved path to equal sandbox_root, which is harmless for files
-            # because subsequent mkdir/write_text would fail on an empty path anyway.
+            # HAZARD: reject path traversal before any filesystem write. The helper
+            # allows the resolved path to EQUAL sandbox_root, harmless for a file
+            # because the mkdir/write_text below fails on an empty name anyway.
             file_path = self._resolve_within_sandbox(starter_file.path, field="starter_files path")
 
             # Track overwrites
@@ -839,26 +771,17 @@ class Sandbox:
     def _setup_virtualenv(self) -> None:
         """Create a Python virtual environment in the sandbox, with system site packages.
 
-        ``--system-site-packages`` is load-bearing, not a convenience. An ISOLATED
-        venv here shadows the interpreter while providing nothing: the sandbox venv
-        goes on the criterion PATH (``_build_run_command_env``, which governs every
-        ``run_command`` criterion plus ``pre_run``/``post_run``), so inside a task
-        image that provisions packages globally, ``python`` resolved to the empty
-        venv and could not import them while ``pip`` -- which ``uv venv`` does not
-        place in the venv at all -- fell through to the image's global pip and
-        reported them present. Measured in a task image: ``import langchain`` raised
-        ``ModuleNotFoundError`` while ``pip list`` showed ``langchain 1.3.14``. An
-        agent that tried to verify its own work chased that contradiction for ten
-        turns and ran out of budget before finishing.
+        ``--system-site-packages`` is load-bearing, not a convenience: an ISOLATED
+        venv on the criterion PATH shadows the interpreter while providing nothing,
+        so inside a task image that provisions packages globally ``python`` could
+        not import what ``pip`` reported present. System site packages keeps both
+        halves -- the image's globals stay importable and installs still land in
+        the venv, so a task's ``env_packages`` cannot leak into the image.
 
-        Note the venv is NOT on the agent's own PATH -- the orchestrator prepends
-        only ``resolved_mock_path_dirs`` there -- so the contradiction above is a
+        Note the venv is NOT on the agent's own PATH, so the contradiction is a
         property of criterion and pre/post-run subprocesses.
 
-        System site packages fixes it in the direction that keeps both halves: the
-        image's globals stay importable, ``python`` and ``pip`` agree, and installs
-        still land in the venv (``sys.prefix`` remains the sandbox), so a task's
-        ``env_packages`` cannot leak into the image.
+        Rationale: .claude/notes/isolation.md § Why the venv gets system site packages
         """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox directory not initialized")
@@ -873,9 +796,8 @@ class Sandbox:
             cmd = ["uv", "venv", "--system-site-packages", str(self.venv_dir)]
             subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=60)
         except (subprocess.CalledProcessError, FileNotFoundError):
-            # Fallback to standard venv if uv is not available. The two paths do not
-            # produce the same artifact -- this one seeds pip, `uv venv` does not --
-            # so say which shape this host got rather than leaving it to be inferred.
+            # The two paths do not produce the same artifact -- this one seeds pip,
+            # `uv venv` does not -- so say which shape this host got.
             import venv
 
             logger.warning("uv unavailable; created %s with stdlib venv (pip seeded)", self.venv_dir)
@@ -1115,10 +1037,8 @@ class Sandbox:
         target = Path(home) / "node_modules" / "@uipath"
         if not target.is_dir():
             return None
-        # Refuse to touch anything outside the configured HOME — if HOME
-        # somehow points at root or a system dir, bail out loudly rather
-        # than rm-rf'ing it. The check is belt-and-suspenders: the path
-        # construction above already anchors at $HOME.
+        # HAZARD: refuse to touch anything outside the configured HOME. The path
+        # construction above already anchors there; this is belt-and-suspenders.
         try:
             resolved_target = target.resolve(strict=True)
             resolved_home = Path(home).resolve(strict=True)
@@ -1160,34 +1080,14 @@ class Sandbox:
     def _build_run_command_env(self) -> dict[str, str]:
         """Build the environment for ``run_command``.
 
-        Each layer is independent — none breaks if another is absent:
+        Each layer is independent -- none breaks if another is absent: the parent
+        env, the agent's captured SDK PATH (PREPENDED, so system binaries stay
+        reachable), the sandbox venv, ``<sandbox>/node_modules/.bin``,
+        ``NODE_PATH=""``, a sandbox-scoped ``NPM_CONFIG_PREFIX``, ``TASK_DIR``,
+        ``REFERENCE_DIR``, and ``PLUGIN_TOOLS_DIR`` (which defers to an inherited
+        value).
 
-        1. Inherit parent env (so agent tools / credentials remain reachable).
-        2. (MST-9265) If the orchestrator has captured the agent's SDK PATH
-           via :meth:`set_command_base_path`, **prepend** it ahead of the
-           host PATH (not replace) — the agent's PATH only needs to win
-           the lookup race for its bundled toolchain, but system binaries
-           (``python``, ``node``, ``/usr/bin/*``) must remain reachable to
-           criteria. Prepend semantics also stay symmetric with the venv /
-           node_bin prepends below.
-        3. Activate the sandbox virtualenv (if present). First-hit-wins:
-           if the agent's PATH already contains the venv scripts dir
-           (likely, since the agent inherits this process's env), this
-           prepend duplicates the entry. Harmless on every OS we target;
-           left explicit so the order stays independent of what the agent
-           SDK happens to inject.
-        4. Prepend ``<sandbox>/node_modules/.bin`` to PATH (if present).
-        5. (MST-9674) Pin ``NODE_PATH=""`` so Node's fallback search paths
-           cannot pick up contaminated parent-dir installs. Note: this
-           does NOT disable parent-walking from cwd — that is hard-wired
-           in Node — but it eliminates ``NODE_PATH``-mediated leaks.
-        6. (MST-9674) Pin ``NPM_CONFIG_PREFIX`` to a sandbox-scoped
-           directory so any ``npm install`` / ``bun add`` from inside the
-           sandbox writes into the sandbox, not into
-           ``$HOME/node_modules`` where concurrent sandboxes would shadow
-           each other.
-        7. Expose ``TASK_DIR`` for criterion scripts.
-        8. Expose ``REFERENCE_DIR`` (staged reference copy) for criterion scripts.
+        Rationale: .claude/notes/isolation.md § The criterion environment, layer by layer
         """
         assert self.sandbox_dir is not None
         env = os.environ.copy()
@@ -1209,11 +1109,9 @@ class Sandbox:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         if self.task_dir:
             env["TASK_DIR"] = str(self.task_dir)
-        # 8. Expose ``REFERENCE_DIR`` (the per-run staged copy of the reference
-        #    solution) for criterion scripts. Set by the orchestrator once the
-        #    reference is staged; absent for tasks with no `reference:` block.
-        #    Safe to expose here because `run_command` criteria execute AFTER the
-        #    agent's turn, outside the mode-000 anti-cheat window.
+        # Safe to expose: `run_command` criteria execute AFTER the agent's turn,
+        # outside the mode-000 anti-cheat window. Absent for tasks with no
+        # `reference:` block.
         if self.reference_dir:
             env["REFERENCE_DIR"] = str(self.reference_dir)
         return env
@@ -1222,23 +1120,12 @@ class Sandbox:
         """Walk up from ``sandbox_dir`` and report any ancestor that has a
         populated ``node_modules/`` directory.
 
-        Concurrent tasks (or anything else on the host that runs
-        ``cd <ancestor> && npm install ... --save``) drop packages into
-        shared parent dirs. Node's parent-walking module resolver finds
-        those before the sandbox-local install, which is the proximate
-        cause of MST-9674's ``unknown command 'run'`` failure — but the
-        failure mode is generic to Node module resolution, not specific
-        to any one npm scope. The check therefore stays
-        scope-agnostic: ``coder_eval`` is a generic evaluation framework
-        and should not single out one ecosystem's namespace. Operators
-        read the logged entry list to decide whether the contamination
-        actually matters for their agent's toolchain.
+        Detection only: it logs one warning per directory and returns the list.
+        Auto-remediation is intentionally avoided -- those dirs may legitimately
+        belong to the user. The check stays scope-agnostic because the failure mode
+        is generic to Node module resolution.
 
-        This is a *detection-only* helper. It returns the list of
-        ancestor ``node_modules`` dirs found and logs a single warning
-        per dir. Auto-remediation is intentionally avoided — those dirs
-        may legitimately belong to the user and silently deleting them
-        would be destructive.
+        Rationale: .claude/notes/isolation.md § The criterion environment, layer by layer
         """
         if self.sandbox_dir is None:
             return []
@@ -1254,9 +1141,8 @@ class Sandbox:
             if not node_modules_dir.is_dir():
                 continue
             try:
-                # Skip dot-entries (``.bin``, ``.cache``, …) — they are
-                # package-manager bookkeeping, not installed packages
-                # that would shadow a sandbox-local install.
+                # Dot-entries are package-manager bookkeeping, not installed
+                # packages that would shadow a sandbox-local install.
                 entries = sorted(p.name for p in node_modules_dir.iterdir() if not p.name.startswith("."))
             except OSError:
                 # Permission denied / race-with-delete — skip silently.
@@ -1300,11 +1186,9 @@ class Sandbox:
         env = self._build_run_command_env()
 
         try:
-            # Shell execution is intentional for sandbox - allows pipes, redirects, and complex commands.
-            # Decode stdout/stderr as UTF-8 with replacement on bad bytes so an agent that emits
-            # non-UTF-8 output (e.g. raw binary, locale-encoded compiler errors on Windows) does not
-            # kill the run with UnicodeDecodeError. Downstream callers (e.g. json_check) only need
-            # JSON-parseable strings; a replacement char is preferable to a crash.
+            # Shell execution is intentional here: pipes, redirects and compound
+            # commands. Decoded with `errors="replace"` so an agent emitting
+            # non-UTF-8 output does not kill the run with UnicodeDecodeError.
             result = subprocess.run(
                 command,
                 shell=True,  # nosec B602 - Required for sandbox command execution
@@ -1337,36 +1221,25 @@ class Sandbox:
             logger.warning(error_msg)
             return -1, "", error_msg
 
-    # NOTE: get_file_content, file_exists, and list_files intentionally do NOT validate
-    # path traversal. The sandbox is a trusted execution environment where the agent
-    # needs filesystem access beyond the sandbox root (e.g., reading installed packages,
-    # system headers). Path traversal protection is handled at the agent permission level.
+    # HAZARD: only ``list_files`` skips containment -- it joins and rglobs directly.
+    # ``get_file_content`` and ``file_exists`` go through ``resolve_files``, hence
+    # ``_within_sandbox`` and ``_reject_escaped``. Do not read this as "containment
+    # lives elsewhere": for a criterion path it lives HERE.
+    # Rationale: .claude/notes/isolation.md § Criterion paths are contained, quietly
 
     def _within_sandbox(self, candidate: Path) -> bool:
         """Whether a resolved criterion path stays inside the sandbox.
 
         The read-side twin of :meth:`_resolve_within_sandbox`, which every OTHER
-        task-authored path already goes through. Criterion paths were the one
-        consumer that skipped it, and ``Path('/tmp/sandbox') / '/etc/passwd'`` is
-        ``/etc/passwd`` — pathlib discards the prefix on an absolute right
-        operand — so ``file_contains`` / ``file_check`` / ``file_matches_regex``
-        were a pass-fail oracle over any file the grading user could read, and
-        ``json_check`` could surface parsed values in ``details``.
-
-        That was defensible while a task YAML was operator-supplied. It stopped
-        being so when ``evaluate <run_dir>`` began rebuilding the criteria list
-        from a shareable run directory.
+        task-authored path already goes through.
 
         Returns False rather than raising: an out-of-sandbox path is
-        indistinguishable to the criterion from a file that is not there, which
-        is the same answer the template and mock-dir paths give, and raising
-        here would book a config error as an agent crash (CE039).
+        indistinguishable to the criterion from a file that is not there, and
+        raising would book a config error as an agent crash (CE039). Silent by
+        design -- :meth:`resolve_files` reports the escape ONCE per criterion,
+        naming the pattern the task author actually wrote.
 
-        Silent by design — :meth:`resolve_files` reports the escape ONCE per
-        criterion, naming the pattern the task author actually wrote. Logging
-        here instead named a resolved absolute path (uninformative: it is the
-        author's own string joined onto a tempdir) once per rejected glob
-        match, so a wide pattern produced a burst of near-identical warnings.
+        Rationale: .claude/notes/isolation.md § Criterion paths are contained, quietly
         """
         assert self.sandbox_dir is not None
         root = self.sandbox_dir.resolve()
@@ -1393,21 +1266,14 @@ class Sandbox:
     def _reject_escaped(self, path: str, candidate: Path) -> None:
         """Refuse a criterion path that names an existing file OUTSIDE the sandbox.
 
-        Returning ``[]`` here booked an eval-CONFIG error as an agent failure:
-        the criterion scored a gating 0.0 with "file does not exist" for a file
-        that plainly does exist, and the only other signal was a WARNING in the
-        task log. `tasks/byod_smoke_test.yaml` was broken exactly that way — it
-        checks `/opt/byod_marker`, baked into the BYOD image, and joining an
-        absolute path discards the sandbox prefix, so containment dropped it and
-        the suite reported a 0.0 nobody could explain from the score alone.
-
         No agent behaviour can ever satisfy such a path, so it is not a verdict
-        about the agent. That is precisely the distinction CE039 exists to
-        enforce, and `CheckerMisuseError` is its prescribed signal.
+        about the agent -- precisely the distinction CE039 enforces, with
+        ``CheckerMisuseError`` as its prescribed signal.
 
-        Note the guard fires only when the escaping path EXISTS. A criterion
-        naming a merely-absent absolute path still resolves to "no match", which
-        is an ordinary failing verdict, not a misconfiguration.
+        Note the guard fires only when the escaping path EXISTS. A merely-absent
+        absolute path still resolves to "no match", an ordinary failing verdict.
+
+        Rationale: .claude/notes/isolation.md § Criterion paths are contained, quietly
         """
         raise CheckerMisuseError(
             f"Criterion path {path!r} resolves to {candidate}, outside the sandbox ({self.sandbox_dir}). "
@@ -1419,24 +1285,14 @@ class Sandbox:
     def resolve_files(self, path: str) -> list[Path]:
         """Resolve a criterion ``path`` to the sandbox files it addresses.
 
-        A path that names an existing file or directory resolves to itself,
-        **even when it contains a glob metacharacter** — a real file called
-        ``report[2024].json`` is graded as itself rather than reinterpreted as
-        a character class that would silently match ``report2.json``. Only when
-        the literal does not exist is a path containing ``*``, ``?`` or ``[``
-        expanded against the sandbox root, so a criterion can address a file
-        whose exact location the task prompt does not pin — e.g. ``**/*.flow``
-        matches a scaffolded wrapper directory the agent was free to name.
+        A path that names an existing file or directory resolves to itself, **even
+        when it contains a glob metacharacter**. Only when the literal does not
+        exist is it expanded against the sandbox root, filtered through the
+        sandbox's ignore patterns -- and only for segments the glob *discovered*,
+        so ``dist/**/*.js`` is an explicit opt-in that survives. Matches are sorted
+        for determinism and directories dropped.
 
-        Glob matches are filtered through the sandbox's ignore patterns
-        (``.venv``, ``node_modules``, ``dist``, … — see
-        :func:`~coder_eval.resources.get_ignore_patterns`), because the sandbox
-        root holds harness-created content the agent never authored and
-        grading off it is neither fair nor deterministic. Only path segments
-        the glob *discovered* are filtered: a segment the pattern names
-        literally (``dist/**/*.js``) is an explicit opt-in and survives.
-        Matches are sorted so grading is deterministic, and directories are
-        dropped so a glob cannot resolve to something unreadable.
+        Rationale: .claude/notes/isolation.md § Criterion paths are contained, quietly
 
         Args:
             path: Relative path or glob pattern
@@ -1610,28 +1466,22 @@ class Sandbox:
         old_sandbox_dir = self.sandbox_dir
         shutil.move(str(old_sandbox_dir), str(preserve_path))
 
-        # mkdtemp creates the sandbox root at 0700. Under driver:docker the
-        # container runs as root, so the preserved tree lands on the host
-        # bind-mount owned by root with that 0700 top dir -- the host user
-        # (a different uid) then can't traverse it, so the blob upload and any
-        # `ls` see an empty dir and silently skip the artifacts. Grant a+rX on
-        # the preserved tree so artifacts are readable across the uid boundary.
-        # No-op-ish on the host path, where the sandbox is already owner-readable.
+        # mkdtemp creates the sandbox root at 0700, and under driver:docker the
+        # tree lands owned by container root -- the host user (a different uid)
+        # then cannot traverse it and silently sees no artifacts.
+        # Rationale: .claude/notes/isolation.md § preserve_to, capture_to, and the capture denylist
         _grant_read_traverse(preserve_path)
 
-        # Sandbox now lives at the artifact path -- redirect pointers so that a
-        # subsequent cleanup() is a no-op. Venv absolute paths inside the venv
-        # are not rewritten (same behaviour as the prior copy-based code).
+        # Repoint so a subsequent cleanup() is a no-op. Absolute paths inside the
+        # venv are not rewritten (same as the prior copy-based code).
         self.sandbox_dir = preserve_path
         if self.venv_dir is not None:
             try:
                 rel = self.venv_dir.relative_to(old_sandbox_dir)
                 self.venv_dir = preserve_path / rel
             except ValueError:
-                # Defensive: venv_dir is currently always created under
-                # sandbox_dir (see _setup_virtualenv), so relative_to should
-                # always succeed. If a future code path places it elsewhere,
-                # leave the pointer untouched -- the move did not relocate it.
+                # Defensive: venv_dir is always created under sandbox_dir today.
+                # If that changes, leave the pointer untouched.
                 pass
         self._cleanup_on_exit = False
         return preserve_path
@@ -1640,27 +1490,19 @@ class Sandbox:
         """Copy an in-place workspace out to ``artifact_dir/<task_id>`` (docker WORKDIR mode).
 
         Sibling to :meth:`preserve_to`, but COPIES instead of ``shutil.move``: the
-        sandbox here is the container's own WORKDIR (e.g. ``/root``), which is
-        discarded with ``--rm``, and the orchestrator's own cwd may sit under it --
-        so a copy is safe and non-destructive. ``symlinks=True`` +
-        ``ignore_dangling_symlinks=True`` makes a dangling symlink a no-op rather
-        than a failure (the exact breakage the old ``cp -a "$PWD/." "/root/"``
-        reconciliation prelude hit). Grants cross-uid read on the COPY, since that
-        is the artifact the host reads (mirrors preserve_to's grant on its dest).
+        sandbox here is the container's own WORKDIR, discarded with ``--rm``, and
+        the orchestrator's own cwd may sit under it. Excludes the credential and
+        noise entries in :data:`_WORKSPACE_CAPTURE_IGNORE`, because the WORKDIR can
+        BE ``$HOME``.
 
-        Because the WORKDIR can be HOME (``/root``) or otherwise overlap
-        framework mounts, we exclude framework/sensitive entries via
-        :data:`_WORKSPACE_CAPTURE_IGNORE` -- most importantly ``.claude`` (the
-        RW lean copy of the host ``~/.claude`` carries ``.credentials.json``;
-        without this a ``/root`` WORKDIR would leak it into artifacts), plus
-        ``.venv``/``node_modules``/``.npm-prefix`` (sandbox-created bulk), and
-        Linux home-directory noise (``.cache``, ``.config``, ``.npm``,
-        ``.local``, shell dotfiles) written by tools like uv/pip/npm when
-        HOME == WORKDIR.
+        HAZARD: ``symlinks=True`` + ``ignore_dangling_symlinks=True`` are both
+        required -- without the second, one dangling link raises ``shutil.Error``
+        and fails artifact capture for the whole task.
 
         Returns the destination path; unlike preserve_to it does NOT repoint
-        ``self.sandbox_dir`` -- the workspace persists in-container and is reaped
-        with the container, and ``_cleanup_on_exit`` is already False (run-in-place).
+        ``self.sandbox_dir``.
+
+        Rationale: .claude/notes/isolation.md § preserve_to, capture_to, and the capture denylist
         """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox not set up")

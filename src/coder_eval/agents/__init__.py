@@ -23,10 +23,9 @@ def register_builtins(registry: type[AgentRegistry]) -> None:
     # Reference the imported classes so the registration side effect is explicit
     # and a future refactor that drops the top-level imports fails loudly here.
     _ = (ClaudeCodeAgent, CodexAgent, AntigravityAgent, OpenCodeAgent, PiAgent, NoOpAgent)
-    # Rot-protection: the decorators fire on import, but assert the built-ins are
-    # actually registered so a future lazy-import refactor (which would leave the
-    # import-cached modules' decorators un-run) fails loudly instead of silently
-    # registering nothing.
+    # The decorators fire on import, but assert anyway: a lazy-import refactor
+    # would leave the import-cached modules' decorators un-run, and this fails
+    # loudly instead of registering nothing.
     for kind in (
         AgentKind.CLAUDE_CODE,
         AgentKind.CODEX,
