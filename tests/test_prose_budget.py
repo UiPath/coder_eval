@@ -103,9 +103,9 @@ class TestTyperExemption:
         failure CE057's membership test exists to catch."""
         import ast
 
-        package = Path(__file__).resolve().parents[1] / "src" / "coder_eval"
+        repo_root = Path(__file__).resolve().parents[1]
         for rel, name in sorted(prose_budget._TYPER_COMMANDS):
-            path = package / rel
+            path = repo_root / rel
             assert path.is_file(), f"_TYPER_COMMANDS names {rel}, which does not exist"
             tree = ast.parse(path.read_text(encoding="utf-8"))
             top_level = {node.name for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
