@@ -9,7 +9,6 @@ keywords = [
 ]
 
 [environment]
-workdir = "/app"
 memory_mb = 1024
 cpus = 2
 network_mode = "no-network"

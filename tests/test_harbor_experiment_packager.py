@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from coder_eval.harbor import packager
 from coder_eval.harbor.experiment_packager import export_experiment
 
 
@@ -30,12 +29,6 @@ _BASE_TASK: dict[str, object] = {
         {"type": "file_exists", "path": "greeting.txt", "description": "exists"},
     ],
 }
-
-
-@pytest.fixture(autouse=True)
-def _no_real_docker_inspection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same hermeticity guard as test_harbor_packager.py -- never shell out to real docker."""
-    monkeypatch.setattr(packager, "_inspect_image_workdir", lambda image: None)
 
 
 def _write_task(tmp_path: Path, overrides: dict[str, object] | None = None, name: str = "task.yaml") -> Path:
