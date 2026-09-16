@@ -50,16 +50,22 @@ There is no other accepted form: `tests/lint/prose_budget.py` parses this one an
 ## The prose budget is not a lint rule
 
 `make docs-budget` runs `tests/lint/prose_budget.py` over `src/coder_eval` and `tests`.
-It enforces two bars with no baseline to maintain: no docstring over 150 prose words (an
-`@abstractmethod` and the Typer commands are exempt), and no own-line comment run over 8
-lines. It also fails when a `Rationale:` pointer does not resolve or is not the last prose
-line of its block.
+It enforces three rules with no baseline to maintain: no docstring over 150 prose words
+(an `@abstractmethod` and the Typer commands are exempt), no own-line comment run over 8
+lines, and a file's own-line comments within `MAX(20, 0.15 × lines)`. It also fails when a
+`Rationale:` pointer does not resolve or is not the last prose line of its block.
 
-Neither bar grants a per-file allowance, and that is the point. The run cap replaced a
-`MAX(20, 0.15 × lines)` budget on a file's TOTAL comment lines, which was inverted: it
-blocked `isolation/docker_runner.py` at 229/229 for carrying 62 short annotations, while a
-16-line essay in `tests/test_regrade.py` sat at 29% of its budget. Four files had settled
-at exactly 100% of the cap — the budget had stopped being a ceiling and become a target.
+The run cap is the primary rule and the file total is the backstop under it. The order
+matters, because the total alone was inverted: it blocked `isolation/docker_runner.py` at
+229/229 for carrying 62 short annotations pinned to the lines they explain, while a 16-line
+essay in `tests/test_regrade.py` sat at 29% of its budget. Four files had settled at exactly
+100% of the cap — a budget with an allowance becomes a target. The run cap has no allowance
+and catches the shape the total could not see; the total still catches a file that is mostly
+commentary however it is broken up.
+
+Measured when the cap was chosen: 78.5% of comment runs in the tree are 1-2 lines, 2.5% are
+6 or more, and the longest was 16. The four files above still sit at 100% of their total
+budget, so a comment added to one of them has to be paid for by deleting another.
 
 It is deliberately **not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants
 one AST at a time, while this measures prose across whole trees. Making it a rule would
