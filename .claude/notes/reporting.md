@@ -350,6 +350,9 @@ Dockerfile line either, because `[environment].workdir` is what Harbor passes as
 Dockerfile-less shape is a real choice rather than a null-vs-set distinction:
 `docker_cfg.image` always has a value (`default_factory=get_default_docker_image_tag`).
 
+A bind mount also removes a hazard the `COPY` approach had: it never walks the export's
+own `-o` directory, so a plugin source that contains it cannot self-nest.
+
 Nothing is `COPY`'d into the image any more. `environment/task.yaml`, each `type: local`
 plugin, each `TemplateDirSource` and each `extra_mounts` entry are bind-mounted at their
 own host path, mirroring `docker_runner.py`'s auto-mount — which is why the export warns

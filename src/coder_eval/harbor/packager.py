@@ -10,14 +10,9 @@ Emitted layout::
     ├── task.toml
     ├── instruction.md       # placeholder -- the real prompt is in environment/task.yaml
     ├── environment/
-    │   ├── Dockerfile          # ONLY when sandbox.docker.dockerfile_path is set;
-    │   │                       # otherwise absent, and task.toml's
-    │   │                       # [environment].docker_image names the image directly
+    │   ├── Dockerfile          # only when sandbox.docker.dockerfile_path is set
     │   ├── task.yaml           # criteria-free copy for the CoderEvalAgent embed
-    │   └── docker-compose.yaml # ALWAYS written. Read-only mounts: task.yaml itself,
-    │                           # each `type: local` agent.plugins[] entry, each
-    │                           # TemplateDirSource; sandbox.docker.extra_mounts keep
-    │                           # their own ro/rw mode. Nothing is COPY'd into the image.
+    │   └── docker-compose.yaml # always written; every input is bind-mounted, never COPY'd
     └── tests/
         ├── test.sh          # the two-line shim
         ├── task.yaml        # the criteria, as authored
@@ -460,23 +455,19 @@ def _template_volume_specs(task: TaskDefinition, warnings: list[str]) -> list[st
 def _plugin_volume_specs(task: TaskDefinition) -> list[str]:
     """Return one ``src:src:ro`` compose volume spec per ``type: local`` ``agent.plugins[]``.
 
-    Mounted at its own host path, unmodified — exactly mirroring ``docker_runner.py``'s
-    own auto-mount for non-Harbor runs (``-v {target}:{target}:ro``) — so
-    ``environment/task.yaml``'s ``agent.plugins[].path`` needs no rewriting: the path is
-    identical inside and outside the container. This also means a bind mount never
-    touches this export's own output directory (unlike an earlier ``COPY``-based
-    approach, which had to guard against the plugin source containing the export's
-    ``-o`` directory) — there's nothing to walk or copy, so no self-nesting hazard here.
+    Mounted at its own host path, unmodified, mirroring ``docker_runner.py``'s auto-mount
+    (``-v {target}:{target}:ro``), so ``environment/task.yaml``'s ``agent.plugins[].path``
+    needs no rewriting -- the path is identical inside and outside the container.
 
-    Forced read-only (``:ro``), unconditionally: this mounts the skill/plugin content
-    an agent reads, never writable state, and the same host path may be mounted into
-    unrelated concurrent containers.
+    Always ``:ro``: this carries skill/plugin content an agent reads, never writable
+    state, and the same host path may be mounted into unrelated concurrent containers.
 
-    Unlike ``TemplateDirSource.path`` (already resolved to an absolute host path by
-    ``load_task``), a plugin's ``path`` is carried unexpanded (e.g. literal
-    ``"$SKILLS_REPO_PATH"``) — ``docker_runner.py``'s own auto-mount expands it the same
-    way (``os.path.expandvars`` + ``os.path.expanduser``) at container-launch time, so this
-    mirrors that rather than requiring the export-time environment to already have it resolved.
+    HAZARD: a plugin ``path`` is carried UNEXPANDED (a literal ``"$SKILLS_REPO_PATH"``
+    reaches the spec), unlike ``TemplateDirSource.path``, which ``load_task`` has already
+    resolved. ``docker_runner.py`` expands it at container-launch time; changing either
+    side alone breaks the mirror.
+
+    Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
     """
     plugins = (task.agent.plugins if task.agent is not None else None) or []
     local_plugins = [p for p in plugins if isinstance(p, dict) and p.get("type") == "local"]
