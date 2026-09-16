@@ -2271,54 +2271,6 @@ class TestCE066NoReportImportsInCore:
 
 
 @pytest.mark.lint
-class TestCE067ClaudeMdTreeParity:
-    """CE067 — CLAUDE.md's directory tree must name every top-level package member.
-
-    The tree is the map an assistant reads before touching this package, so a
-    missing entry is a module nobody is told exists. It had drifted in BOTH
-    directions and only one was ever checked: a `optimize/` row survived for a
-    directory that lives solely on an unmerged branch, and the audit that removed
-    it walked entries -> filesystem, so it could not see that `errors/` and
-    `plugins.py` were absent — the second of which is the plugin SPI the
-    "Adding a New Agent" section tells you to use.
-
-    Reasons over Markdown rather than one Python AST, so it lives here rather
-    than in the AST runner, alongside CE028/CE033/CE065.
-
-    Only the TOP level is checked. Nested rows (`models/enums.py` and friends)
-    are illustrative rather than exhaustive, and pinning them would turn every
-    new sibling module into a docs edit for no reader benefit.
-    """
-
-    # Not modules a reader navigates to: the build marker, the typing marker, the
-    # export-hygiene rule file, and a 3-line `__init__` holding only `__version__`.
-    IGNORED = frozenset({"__pycache__", "py.typed", ".gitattributes", "__init__.py"})
-
-    @staticmethod
-    def _documented() -> set[str]:
-        """The tree's TOP-LEVEL rows only — anchored, so an indented `│   ├──`
-        row for a nested module is not mistaken for a package member."""
-        text = (SRC.parent / "CLAUDE.md").read_text(encoding="utf-8")
-        tree = re.search(r"^```\ncoder_eval/\n(.*?)^```", text, re.S | re.M)
-        assert tree is not None, "CLAUDE.md no longer opens a fenced `coder_eval/` tree block"
-        rows = set(re.findall(r"^[├└]── (\S+?)/?\s", tree.group(1), re.M))
-        assert rows, "the tree block parsed to zero top-level rows — the box-drawing shape changed"
-        return rows
-
-    def test_every_top_level_member_is_in_the_tree(self):
-        actual = {p.name for p in (SRC / "coder_eval").iterdir() if p.name not in self.IGNORED}
-        missing = sorted(actual - self._documented())
-        assert not missing, f"add to CLAUDE.md's directory tree: {missing}"
-
-    def test_no_tree_row_names_a_deleted_member(self):
-        """The direction the `optimize/` audit did run — kept so a removal is
-        caught as loudly as an addition."""
-        actual = {p.name for p in (SRC / "coder_eval").iterdir()}
-        phantom = sorted(self._documented() - actual)
-        assert not phantom, f"CLAUDE.md's directory tree names members that do not exist: {phantom}"
-
-
-@pytest.mark.lint
 class TestCoreLayerMembership:
     """`_layers` is the single definition of where a file sits, for CE004 and CE066.
 

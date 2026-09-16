@@ -49,9 +49,9 @@ def turn_time_buckets(result: EvaluationResult) -> TurnTimeBuckets:
     """Sum the four timing buckets across a run's turns, and the residual.
 
     The arithmetic lives HERE rather than in the renderer because this module is
-    the ONE canonical summation: the orchestrator's telemetry, the evalboard, the
+    the designated home for shared report statistics: the evalboard, the
     markdown report and the HTML report must not each grow their own version.
-    Every renderer formats what this returns and decides nothing.
+    ``reports_html`` formats what this returns and decides nothing.
 
     ``unaccounted`` is measured against ``EvaluationResult.duration_seconds`` —
     the TASK's wall clock, which is what the card's existing Total Latency uses
@@ -110,25 +110,15 @@ def _sum_measured(values: Iterable[float | None]) -> float | None:
 def _turn_tool_union_ms(turn: TurnRecord) -> float | None:
     """One turn's tool execution — the UNION of its main-thread command spans.
 
-    PREFERS THE STORED VALUE. ``EventCollector.build_turn_record`` writes
-    ``TurnRecord.tool_union_ms`` from the single span set it measures all four
-    buckets against, so reading it is how this surface and the collector are
-    guaranteed to agree rather than merely observed to. The derivation below is
-    the LEGACY path: a ``task.json`` written before that field existed carries
-    neither it nor any way to recover it except by recomputing, and every such
-    run must stay renderable.
+    PREFERS THE STORED ``TurnRecord.tool_union_ms``, which the collector writes from
+    the single span set it measures all four buckets against, so this surface and the
+    collector are guaranteed to agree rather than merely observed to. The derivation
+    is the LEGACY path for a ``task.json`` written before that field existed.
 
-    Note the two paths cannot be distinguished by value — both return ``None``
-    for a turn with no bounded span and a float otherwise — which is why the
-    stored one is checked with ``is not None`` rather than by truthiness: a
-    stored ``0.0`` is a measurement (spans were recorded and occupied no
-    measurable time) and must not fall through to a re-derivation.
+    The stored value is checked with ``is not None``, never truthiness: a stored
+    ``0.0`` is a MEASUREMENT and must not fall through to a re-derivation.
 
-    The span SELECTION is ``timing.main_thread_tool_spans``, not a
-    copy of it. That rule (which commands count, and the sub-agent exclusion)
-    is what the collector measures the generation subtraction and the head and
-    tail against, so a second typed implementation here is how two surfaces
-    come to publish two different tool totals for one run.
+    Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
     """
     if turn.tool_union_ms is not None:
         return turn.tool_union_ms

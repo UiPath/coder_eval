@@ -953,3 +953,12 @@ re-derive from scratch.
   CE004 goes back to the core predicate; `test_the_reports_package_itself_stays_exempt`
   pins that CE066's scope did not widen with it. — caught in the reports-consolidation
   review fixes, Phase 1 quality review.
+
+- [ ] **A CLAUDE.md Directory Structure bullet naming a path that no longer exists.**
+  Shipped briefly as CE067 over the fenced `coder_eval/` tree, then removed when that
+  tree was replaced by `ls` plus selective bullets — the exhaustive half of the rule
+  became false by design. The surviving half is still real: the bullets name modules
+  (`result_metrics.py`, `reports/html.py`, `models/container_paths.py`) and a rename
+  leaves them stale with nothing failing. Needs a backtick-path extractor scoped to
+  one section, which is the narrow case of the prose-path candidate above. — caught
+  during the reports consolidation rebase.
