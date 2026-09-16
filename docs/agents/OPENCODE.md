@@ -89,7 +89,7 @@ agent:
   type: "opencode"
   # provider/model, exactly as `opencode models` prints it.
   model: "openrouter/deepseek/deepseek-v4-pro"
-  permission_mode: "acceptEdits"
+  permission_mode: "bypassPermissions"
   variant: "high"   # optional: provider reasoning effort
   pure: true        # optional (default): run with --pure, no host plugins
 ```
@@ -183,6 +183,9 @@ our keys win):
 | `allowed_tools` | `"*": "deny"`, `"allow"` for `external_directory` and `doom_loop`, then `"allow"` for each mapped key |
 | `disallowed_tools` | `"deny"` for each mapped key (a deny always wins) |
 | `permission_mode: plan` | `edit: "deny"`, `bash: "deny"` (read-only) |
+| `permission_mode: bypassPermissions` | no rule; `--auto` approves every permitted tool |
+
+`default` and `acceptEdits` have no OpenCode meaning and are rejected at resolution.
 
 Claude tool names map to permission keys by inverting the telemetry map. OpenCode's
 keys are coarser than its tools: `edit` governs `write`, `edit`, `patch`,

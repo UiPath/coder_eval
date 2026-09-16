@@ -144,6 +144,9 @@ The uniform fields become SDK tool-call policies (`google.antigravity.hooks.poli
 | `allowed_tools` | `deny_all()`, then `allow(tool)` for each mapped tool and for `finish` |
 | `disallowed_tools` | `deny(tool)` for each mapped tool |
 | `permission_mode: plan` | `deny` on `create_file`, `edit_file` and `run_command` (read-only) |
+| `permission_mode: bypassPermissions` | no extra rule |
+
+`default` and `acceptEdits` have no Antigravity meaning and are rejected at resolution.
 
 Claude tool names map to harness tools by inverting the telemetry map (`Bash` →
 `run_command`, `Write` → `create_file`, `Edit` → `edit_file`, `Read` → `view_file`,

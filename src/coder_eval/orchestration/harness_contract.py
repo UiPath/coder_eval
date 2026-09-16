@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
+import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from coder_eval.models import Enforcement
+from coder_eval.models import CANONICAL_TOOL_NAMES, Enforcement, HarnessContract, PermissionMode, ToolNameMap
 
 
 if TYPE_CHECKING:
@@ -19,6 +22,11 @@ class TaskResolutionError(ValueError):
 class HarnessContractError(TaskResolutionError):
     """The task's agent config sets a field its harness declares unsupported, or names no registered harness."""
 
+
+# `mcp__<server>` (every tool of a server) or `mcp__<server>__<tool>`.
+_MCP_NAME = re.compile(r"mcp__[^_]\S*")
+# A Claude Code permission rule: `Bash(git status:*)`, `Read(./src/**)`.
+_RULE_SPECIFIER = re.compile(r"(?P<tool>[A-Za-z]+)\(.*\)")
 
 # BaseAgentConfig field -> the HarnessContract row that gates it.
 _GATED: dict[str, str] = {
@@ -61,31 +69,77 @@ def registration_for(task: TaskDefinition, *, requirement: str, hint: str = "") 
 
 
 def validate_harness_contract(task: TaskDefinition) -> None:
-    """Reject a gated agent field that is set on a harness whose contract marks it unsupported.
+    """Reject agent config the task's harness cannot honor with its documented meaning.
 
-    A field is set when a config layer wrote it and its value is not None. A task
-    without an agent type returns silently; the layer-5 type guard reports that.
+    Three checks, in order: a gated field set on a harness whose contract marks it
+    unsupported; a ``permission_mode`` value outside the contract's
+    ``permission_modes``; a tool-list name outside ``CANONICAL_TOOL_NAMES`` (or an
+    ``mcp__`` name the harness cannot address). A field is set when a config layer
+    wrote it and its value is not None. A task without an agent type returns
+    silently; the layer-5 type guard reports that.
 
     Raises:
-        HarnessContractError: on the first unsupported field that is set, or an unregistered kind.
+        HarnessContractError: on the first violation, or an unregistered kind.
     """
     if task.agent is None or task.agent.type is None:
         return
-    from coder_eval.agents.registry import AgentRegistry
-
-    contract = registration_for(task, requirement="The harness contract check").agent_class.contract
+    registration = registration_for(task, requirement="The harness contract check")
+    contract = registration.agent_class.contract
     kind = str(task.agent.type)
-    for field, row in _GATED.items():
-        is_set = field in task.agent.model_fields_set and getattr(task.agent, field) is not None
-        if is_set and getattr(contract, row) is Enforcement.UNSUPPORTED:
-            honoring = [
-                k
-                for k in AgentRegistry.list_kinds()
-                if (reg := AgentRegistry.get(k)) is not None
-                and getattr(reg.agent_class.contract, row) is Enforcement.ENFORCED
-            ]
+    set_fields = [
+        field for field in _GATED if field in task.agent.model_fields_set and getattr(task.agent, field) is not None
+    ]
+    for field in set_fields:
+        row = _GATED[field]
+        if getattr(contract, row) is Enforcement.UNSUPPORTED:
+            honoring = _honoring_kinds(lambda c, row=row: getattr(c, row) is Enforcement.ENFORCED)
             raise HarnessContractError(
                 f"agent.{field} is set but the {kind!r} harness does not support it "
-                + "(see docs/agents/HARNESS_PARITY.md). Remove the field, or move it under "
-                + f"by_type.<kind> in the experiment for a harness that honors it ({', '.join(honoring) or 'none'})."
+                + "(see docs/agents/HARNESS_PARITY.md). Remove the field, or move it under by_type.<kind> "
+                + f"in the experiment for a harness that honors it ({honoring})."
             )
+    if "permission_mode" in set_fields:
+        _check_permission_value(task.agent.permission_mode, contract.permission_modes or frozenset(), kind)
+    tool_names = registration.agent_class.tool_names
+    for field in ("allowed_tools", "disallowed_tools"):
+        if field in set_fields and tool_names is not None:
+            _check_tool_names(field, getattr(task.agent, field), tool_names, kind)
+
+
+def _honoring_kinds(honors: Callable[[HarnessContract], bool]) -> str:
+    from coder_eval.agents.registry import AgentRegistry
+
+    kinds = [
+        k for k in AgentRegistry.list_kinds() if (reg := AgentRegistry.get(k)) and honors(reg.agent_class.contract)
+    ]
+    return ", ".join(kinds) or "none"
+
+
+def _check_permission_value(value: PermissionMode, honored: frozenset[PermissionMode], kind: str) -> None:
+    if value not in honored:
+        raise HarnessContractError(
+            f"agent.permission_mode={str(value)!r} has no documented meaning on the {kind!r} harness, which "
+            + f"honors {sorted(str(m) for m in honored)} (see docs/agents/HARNESS_PARITY.md). Use one of those, "
+            + "or move the value under by_type.<kind> for a harness that honors it "
+            + f"({_honoring_kinds(lambda c: value in (c.permission_modes or frozenset()))})."
+        )
+
+
+def _check_tool_names(field: str, names: list[str], tool_names: ToolNameMap, kind: str) -> None:
+    def accepted(name: str) -> bool:
+        if tool_names.mcp_names and _MCP_NAME.fullmatch(name):
+            return True
+        rule = _RULE_SPECIFIER.fullmatch(name)
+        # A permission rule reaches only a harness that speaks canonical names natively.
+        base = rule["tool"] if rule and tool_names.names.get(rule["tool"]) == (rule["tool"],) else name
+        return base in CANONICAL_TOOL_NAMES
+
+    unknown = sorted(name for name in set(names) if not accepted(name))
+    if unknown:
+        hints = {name: difflib.get_close_matches(name, CANONICAL_TOOL_NAMES, n=1) for name in unknown}
+        did_you_mean = "; ".join(f"{name!r} -> did you mean {hint[0]!r}?" for name, hint in hints.items() if hint)
+        raise HarnessContractError(
+            f"agent.{field} names unknown tool(s) {unknown} for the {kind!r} harness. Accepted names: "
+            + f"{sorted(CANONICAL_TOOL_NAMES)} (see docs/agents/HARNESS_PARITY.md)."
+            + (f" {did_you_mean}" if did_you_mean else "")
+        )

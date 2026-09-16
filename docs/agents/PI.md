@@ -78,7 +78,7 @@ agent:
   type: "pi"
   # provider-prefixed model id; no separate --provider needed.
   model: "openrouter/moonshotai/kimi-k3"
-  permission_mode: "acceptEdits"
+  permission_mode: "bypassPermissions"
   thinking_level: "medium"   # optional: reasoning effort (see below)
 ```
 
@@ -129,8 +129,10 @@ Claude Code.
 ## Permissions
 
 `permission_mode: plan` is read-only: the Write, Edit and Bash equivalents are
-denied. Every other mode runs autonomously. Pi headless print mode auto-runs
-tools, and Coder Eval always passes `--no-approve` so the run never blocks.
+denied. `permission_mode: bypassPermissions` runs every permitted tool without
+approval. `default` and `acceptEdits` have no Pi meaning and are rejected at
+resolution. Pi headless print mode auto-runs tools, and Coder Eval always passes
+`--no-approve` so the run never blocks.
 
 ## Multi-turn and simulation
 

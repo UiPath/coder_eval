@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Literal
@@ -9,6 +10,7 @@ from typing import Any, Literal
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from coder_eval.agents.pi_agent import PiAgent
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import (
     CANONICAL_TOOL_NAMES,
@@ -332,6 +334,71 @@ class TestValidateHarnessContract:
         AgentRegistry._registry.pop(KIND)
         with pytest.raises(HarnessContractError, match="not registered"):
             validate_harness_contract(task)
+
+
+_NON_CLAUDE_ENFORCING = [AgentKind.PI, AgentKind.OPENCODE, AgentKind.ANTIGRAVITY]
+
+
+class TestValueChecks:
+    @pytest.mark.parametrize("kind", _NON_CLAUDE_ENFORCING)
+    @pytest.mark.parametrize("mode", ["acceptEdits", "default"])
+    def test_claude_only_modes_are_rejected(self, kind: AgentKind, mode: str) -> None:
+        with pytest.raises(HarnessContractError) as exc:
+            validate_harness_contract(_task(kind, permission_mode=mode))
+        message = str(exc.value)
+        assert f"agent.permission_mode={mode!r}" in message
+        assert "['bypassPermissions', 'plan']" in message
+        assert "claude-code" in message.split("honors it", 1)[1]
+
+    @pytest.mark.parametrize("kind", _NON_CLAUDE_ENFORCING)
+    @pytest.mark.parametrize("mode", ["plan", "bypassPermissions"])
+    def test_declared_modes_are_accepted(self, kind: AgentKind, mode: str) -> None:
+        validate_harness_contract(_task(kind, permission_mode=mode))
+
+    @pytest.mark.parametrize("mode", list(PermissionMode))
+    def test_claude_code_accepts_every_mode(self, mode: PermissionMode) -> None:
+        validate_harness_contract(_task(AgentKind.CLAUDE_CODE, permission_mode=mode))
+
+    @pytest.mark.parametrize("field", ["allowed_tools", "disallowed_tools"])
+    def test_unknown_tool_name_is_rejected_with_a_suggestion(self, field: str) -> None:
+        with pytest.raises(HarnessContractError) as exc:
+            validate_harness_contract(_task(AgentKind.PI, **{field: ["Read", "Bassh"]}))
+        message = str(exc.value)
+        assert f"agent.{field} names unknown tool(s) ['Bassh']" in message
+        assert "did you mean 'Bash'?" in message
+
+    @pytest.mark.parametrize("name", ["mcp__github__create_issue", "mcp__my_server__do_it", "mcp__n8n-mcp"])
+    def test_mcp_name_is_accepted_only_where_the_harness_addresses_it(self, name: str) -> None:
+        validate_harness_contract(_task(AgentKind.CLAUDE_CODE, allowed_tools=[name]))
+        with pytest.raises(HarnessContractError, match=re.escape(name)):
+            validate_harness_contract(_task(AgentKind.PI, allowed_tools=[name]))
+
+    def test_malformed_mcp_name_is_rejected(self) -> None:
+        with pytest.raises(HarnessContractError, match="mcp____x"):
+            validate_harness_contract(_task(AgentKind.CLAUDE_CODE, allowed_tools=["mcp____x"]))
+
+    @pytest.mark.parametrize("rule", ["Bash(git status:*)", "Read(./src/**)"])
+    def test_permission_rule_syntax_is_accepted_only_on_claude_code(self, rule: str) -> None:
+        validate_harness_contract(_task(AgentKind.CLAUDE_CODE, allowed_tools=[rule]))
+        with pytest.raises(HarnessContractError, match="unknown tool"):
+            validate_harness_contract(_task(AgentKind.PI, allowed_tools=[rule]))
+
+    @pytest.mark.parametrize("kind", [AgentKind.OPENCODE, AgentKind.ANTIGRAVITY, AgentKind.CLAUDE_CODE])
+    def test_unknown_name_is_rejected_on_every_enforcing_harness(self, kind: AgentKind) -> None:
+        with pytest.raises(HarnessContractError, match=r"unknown tool\(s\) \['LS'\]"):
+            validate_harness_contract(_task(kind, disallowed_tools=["LS"]))
+
+    def test_a_name_the_harness_lacks_is_accepted(self) -> None:
+        assert PiAgent.tool_names is not None and PiAgent.tool_names.names["Skill"] == ()
+        validate_harness_contract(_task(AgentKind.PI, allowed_tools=["Skill"]))
+
+    def test_an_unset_default_mode_is_not_checked(self) -> None:
+        validate_harness_contract(_task(AgentKind.PI))
+
+    def test_a_task_level_claude_mode_is_rejected_under_a_cli_kind(self) -> None:
+        resolved, _ = _resolve(_default_experiment(), _bare_task(permission_mode="acceptEdits"), agent_type="pi")
+        with pytest.raises(HarnessContractError, match="permission_mode='acceptEdits'"):
+            validate_harness_contract(resolved)
 
 
 def _default_experiment(**by_type: dict[str, Any]) -> ExperimentDefinition:

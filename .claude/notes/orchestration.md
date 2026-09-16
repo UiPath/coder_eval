@@ -39,7 +39,10 @@
   early stop. Both raise a `TaskResolutionError`, which `resolve_all_tasks` re-raises
   instead of demoting to a skipped task and `plan` turns into a non-zero exit. A field
   counts as SET only if a layer wrote it with a non-null value, so a model default and
-  the default experiment's `plugins: null` never trip it. A `-D
+  the default experiment's `plugins: null` never trip it. For a set field on an enforcing
+  harness it also checks the VALUE: a `permission_mode` outside `contract.permission_modes`
+  and a tool name outside `CANONICAL_TOOL_NAMES` are rejected, because the adapters index
+  their total `ToolNameMap` and would otherwise meet the name mid-run. A `-D
   agent.system_prompt_file` is inlined against `Path.cwd()` after layer 5, so no adapter
   and no container mount ever sees a prompt file.
 

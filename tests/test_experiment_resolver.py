@@ -1165,6 +1165,20 @@ class TestHarnessContractAtResolution:
         with pytest.raises(HarnessContractError, match=r"agent\.permission_mode.*'codex'"):
             _resolve_all(tmp_path, task_file)
 
+    def test_undeclared_permission_value_aborts(self, tmp_path):
+        from coder_eval.orchestration.harness_contract import HarnessContractError
+
+        task_file = _write_task(tmp_path, "agent:\n  type: pi\n  permission_mode: acceptEdits\n")
+        with pytest.raises(HarnessContractError, match=r"permission_mode='acceptEdits'.*'pi'"):
+            _resolve_all(tmp_path, task_file)
+
+    def test_unknown_tool_name_aborts(self, tmp_path):
+        from coder_eval.orchestration.harness_contract import HarnessContractError
+
+        task_file = _write_task(tmp_path, "agent:\n  type: opencode\n  allowed_tools: [Bassh]\n")
+        with pytest.raises(HarnessContractError, match="did you mean 'Bash'"):
+            _resolve_all(tmp_path, task_file)
+
     def test_cli_prompt_file_is_inlined_after_layer_five(self, tmp_path, monkeypatch):
         (tmp_path / "prompt.md").write_text("be terse\n")
         monkeypatch.chdir(tmp_path)

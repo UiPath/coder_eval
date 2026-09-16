@@ -193,7 +193,16 @@ an error.
 `disallowed_tools` it honors. A task that sets one of them on a harness that marks
 it unsupported fails at resolution, and `coder-eval plan` exits non-zero. A field
 that only a lower layer's default sets does not count, and neither does a value of
-`null`. Put harness-specific values under `by_type` in the experiment (see
+`null`. Values are checked too: a `permission_mode` value the harness does not
+honor (for example `acceptEdits` on Pi, OpenCode or Antigravity, which honor only
+`plan` and `bypassPermissions`) is rejected, and every `allowed_tools` /
+`disallowed_tools` name must be a canonical tool name (`Agent`, `Bash`, `Edit`,
+`Glob`, `Grep`, `NotebookEdit`, `Read`, `Skill`, `Task`, `TodoWrite`, `ToolSearch`,
+`WebFetch`, `WebSearch`, `Write`). Claude Code alone also accepts `mcp__<server>` /
+`mcp__<server>__<tool>` names and permission rules such as `Bash(git status:*)`.
+A task that sets `permission_mode: acceptEdits` for Claude Code is therefore rejected
+when run with `--type pi`; move the value under `by_type.claude-code` instead.
+Put harness-specific values under `by_type` in the experiment (see
 [A/B Experiments](AB_EXPERIMENTS.md#per-kind-defaults-with-by_type)). Per-harness table:
 [Harness Parity](agents/HARNESS_PARITY.md).
 

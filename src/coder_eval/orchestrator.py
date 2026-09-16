@@ -67,6 +67,7 @@ from .models import (
 )
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
+from .orchestration.harness_contract import validate_harness_contract
 from .orchestration.run_limits import validate_run_limits
 from .path_utils import (
     TASK_JSON_FILENAME,
@@ -1495,6 +1496,10 @@ class Orchestrator:
             self._resolve_routes()
             self._record_route_environment_info()
             return
+
+        # After the evaluate-only return: a re-grade builds no agent, so a recorded
+        # config from before the contract existed stays gradable.
+        validate_harness_contract(self.task)
 
         # validate_api_keys exempts the no-op agent internally — it makes no API
         # call, so it needs no agent keys.
