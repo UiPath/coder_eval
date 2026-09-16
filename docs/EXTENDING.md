@@ -40,10 +40,15 @@ and skipped; only a failing *built-in* registration is fatal.
 
 ### The `register` hook
 
+Import everything from `coder_eval.spi`, the stable plugin surface, and check its
+version in the hook. `SPI_VERSION` changes whenever an exported name changes its
+signature.
+
 ```python
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.spi import SPI_VERSION, AgentRegistry
 
 def register(registry: type[AgentRegistry]) -> None:
+    assert SPI_VERSION == 1, f"my-agent supports coder_eval SPI 1, not {SPI_VERSION}"
     # Bind type string → config class → agent class.
     registry.register("my-agent", MyAgentConfig)(MyAgent)
     # Optionally contribute pricing here too (see §3):
@@ -59,6 +64,11 @@ class MyAgent(Agent[MyAgentConfig]):
     ...
 ```
 
+Registration validates the pair and raises `TypeError` if the agent class declares no
+`contract`, if its `tool_names` presence does not match its contract, or if the config
+class is not a `BaseAgentConfig` with `extra="forbid"` whose `type` Literal names the
+kind.
+
 Registration is **anti-shadow**: re-registering the same `(agent_class,
 config_class)` pair is a no-op, but claiming an existing `agent.type` with a
 *different* implementation raises `ValueError`. Two plugins can never silently fight
@@ -70,7 +80,7 @@ Subclass `BaseAgentConfig` with your own `type` discriminator:
 
 ```python
 from typing import Literal
-from coder_eval.models import BaseAgentConfig   # importable from coder_eval.models
+from coder_eval.spi import BaseAgentConfig
 
 class MyAgentConfig(BaseAgentConfig):
     type: Literal["my-agent"] = "my-agent"
@@ -80,7 +90,53 @@ class MyAgentConfig(BaseAgentConfig):
 The factory `create_agent(kind, config, …)` raises `TypeError` if the passed config
 isn't an instance of the registered `config_class`, so keep them paired.
 
+### The harness contract
+
+Every agent class declares which uniform `BaseAgentConfig` fields reach its harness.
+A task that sets a field the contract marks `UNSUPPORTED`, a `permission_mode` value
+outside `permission_modes`, or a tool name outside `CANONICAL_TOOL_NAMES` is rejected
+at resolution, so `coder-eval plan` fails before any run. This is a JSONL CLI agent
+that appends a system prompt and honors `plan` and tool lists natively:
+
+```python
+from coder_eval.spi import Agent, Enforcement, HarnessContract, PermissionMode, ToolNameMap
+
+# native tool name -> canonical (Claude) name; also used for telemetry
+_TOOL_NAME_MAP = {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "task": "Agent"}
+
+class MyAgent(Agent[MyAgentConfig]):
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.UNSUPPORTED,
+        permission_mode=Enforcement.ENFORCED,
+        permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
+        allowed_tools=Enforcement.ENFORCED,
+        disallowed_tools=Enforcement.ENFORCED,
+        cooperative_stop=True,
+    )
+    tool_names = ToolNameMap.from_inverse(
+        _TOOL_NAME_MAP,
+        no_equivalent=frozenset({"Glob", "Grep", "NotebookEdit", "Skill", "TodoWrite", "ToolSearch", "WebFetch", "WebSearch"}),
+    )
+```
+
+- `system_prompt_semantics` `append` / `replace` mean the text reaches the model through
+  the system or developer instruction channel. A harness that can only prefix the user
+  turn declares `system_prompt=UNSUPPORTED`.
+- Declare a `permission_modes` value only if the harness gives it the Claude Code
+  meaning (`plan` is read-only, `bypassPermissions` runs every permitted tool).
+- `tool_names` is required exactly when a tool-list row is `ENFORCED`. It must map every
+  canonical name; list a name your harness has no tool for in `no_equivalent`.
+- Set `cooperative_stop=True` only if your `communicate()` honors `should_stop`
+  (needed for criterion-level `stop_early:` arming). `False` means early stop is
+  rejected at resolution for your agent.
+
 ### The `Agent` ABC — implementation checklist
+
+Call `super().__init__(config, route, cost_log_tags=cost_log_tags)` first in your
+`__init__`, and declare `cost_log_tags` as a keyword-only parameter: the factory passes
+it on every LiteLLM route.
 
 Implement these three abstract methods:
 
@@ -107,11 +163,6 @@ Emit the standardized event protocol (you are the **sole emitter**): one
 turn, and `ToolStart`/`ToolEnd` per tool call (close orphaned tools with
 `status=unresolved`). Fan events through an internal `EventCollector` — it builds the
 returned `TurnRecord`, the single agent-agnostic capture path.
-
-Set `cooperative_stop=True` in your agent's `contract` only if your `communicate()`
-actually honors `should_stop` (needed for criterion-level `stop_early:` arming). Setting it
-`False` means early stop is rejected at resolution for your agent — which is correct
-if you can't stop cooperatively.
 
 ### Worked example
 

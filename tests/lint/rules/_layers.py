@@ -1,4 +1,4 @@
-"""The package-layer predicates, declared once and shared by CE004 and CE066.
+"""The package-layer predicates, declared once and shared by CE004, CE066 and CE068.
 
 Both rules ask where a file sits in ``src/coder_eval/``, and a second copy of
 the answer is how a package added to one regex silently escapes the other. So
@@ -53,6 +53,7 @@ import re
 _PKG = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]")
 _CLI = re.compile(_PKG.pattern + r"cli[/\\]")
 _REPORTS = re.compile(_PKG.pattern + r"reports[/\\]")
+_KERNEL = re.compile(_PKG.pattern + r"(?:orchestration[/\\]|streaming[/\\]|timing\.py$)")
 
 
 def is_package_path(filepath: str) -> bool:
@@ -68,6 +69,11 @@ def is_cli_path(filepath: str) -> bool:
 def is_core_path(filepath: str) -> bool:
     """Whether ``filepath`` is in CE066's core: the package minus ``cli/`` and ``reports/``."""
     return is_package_path(filepath) and not is_cli_path(filepath) and not _REPORTS.search(filepath)
+
+
+def is_kernel_path(filepath: str) -> bool:
+    """Whether ``filepath`` is in CE068's agent-agnostic kernel: ``orchestration/``, ``streaming/``, ``timing.py``."""
+    return bool(_KERNEL.search(filepath))
 
 
 def _containing_package(filepath: str) -> list[str] | None:

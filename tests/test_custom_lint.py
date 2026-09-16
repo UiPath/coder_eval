@@ -2163,6 +2163,58 @@ class TestCE004CatchesBothImportSpellings:
 
 
 @pytest.mark.lint
+class TestCE068NoKindNamesInKernel:
+    """CE068 — orchestration/, streaming/ and timing.py name no concrete agent kind."""
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce068_no_kind_names_in_kernel import NoKindNamesInKernel
+
+        return list(NoKindNamesInKernel(filepath).check(ast.parse(source)))
+
+    ORCHESTRATION = "/repo/src/coder_eval/orchestration/x.py"
+    STREAMING = "/repo/src/coder_eval/streaming/x.py"
+    TIMING = "/repo/src/coder_eval/timing.py"
+
+    def test_a_concrete_config_import_in_orchestration_violates(self):
+        found = self._violations("from coder_eval.models import ClaudeCodeAgentConfig", self.ORCHESTRATION)
+        assert len(found) == 1
+        assert "registry" in found[0].message
+
+    def test_the_relative_spelling_violates_too(self):
+        assert self._violations("from ..models import CodexAgentConfig", self.ORCHESTRATION)
+
+    @pytest.mark.parametrize("path", [STREAMING, TIMING])
+    def test_a_kind_member_read_violates(self, path: str):
+        assert self._violations("x = AgentKind.CLAUDE_CODE", path)
+
+    def test_the_unknown_sentinel_is_allowed(self):
+        assert not self._violations("x = AgentKind.UNKNOWN", self.ORCHESTRATION)
+
+    def test_the_base_config_and_the_union_alias_are_allowed(self):
+        assert not self._violations("from coder_eval.models import AgentConfig, BaseAgentConfig", self.ORCHESTRATION)
+
+    def test_bare_agent_kind_use_is_allowed(self):
+        assert not self._violations("ok = isinstance(x, AgentKind)", self.ORCHESTRATION)
+
+    @pytest.mark.parametrize("path", ["/repo/src/coder_eval/agents/x.py", "/repo/src/coder_eval/cli/x.py"])
+    def test_outside_the_kernel_is_allowed(self, path: str):
+        assert not self._violations("from coder_eval.models import ClaudeCodeAgentConfig\nx = AgentKind.PI", path)
+
+    def test_the_config_class_set_is_derived_from_the_union(self):
+        import typing
+
+        from coder_eval.models import AgentConfig
+        from tests.lint.rules.ce068_no_kind_names_in_kernel import CONFIG_CLASS_NAMES
+
+        members = typing.get_args(typing.get_args(AgentConfig.__value__)[0])
+        assert {cls.__name__ for cls in members} == CONFIG_CLASS_NAMES
+        assert "PiAgentConfig" in CONFIG_CLASS_NAMES
+
+
+@pytest.mark.lint
 class TestCE066NoReportImportsInCore:
     """CE066 — core may import only the reports package's public writers.
 
