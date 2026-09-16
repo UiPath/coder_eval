@@ -4,13 +4,58 @@
 
 ## Config merging and CLI overrides
 
-- **Single declarative merge resolver**: All five config layers merge through ONE engine (`orchestration/config_merge.py::resolve_root`) for the three `-D`-reachable roots (`agent`/`run_limits`/`sandbox`). Each field declares *how it merges* once, on the model, via `MergeField(strategy="deep"|"append"|"replace")` (or a type-aware default: nested `BaseModel`/free-form `dict` → `deep`; `list`/scalar → `replace`). `resolve_task_for_variant` (layers 1–4) and `apply_overrides` (layer 5) build `Layer` lists and call the same `resolve_root`, so a field merges identically regardless of which layer supplied it (the unification invariant, enforced by `tests/test_merge_unification.py`). Lint rule CE014 forces every list field to declare its strategy explicitly.
+- **Single declarative merge resolver**: All five config layers merge through ONE engine
+  (`orchestration/config_merge.py::resolve_root`) for the three `-D`-reachable roots
+  (`agent`/`run_limits`/`sandbox`). Each field declares *how it merges* once, on the
+  model, via `MergeField(strategy="deep"|"append"|"replace")` (or a type-aware default:
+  nested `BaseModel`/free-form `dict` → `deep`; `list`/scalar → `replace`).
+  `resolve_task_for_variant` (layers 1–4) and `apply_overrides` (layer 5) build `Layer`
+  lists and call the same `resolve_root`, so a field merges identically regardless of
+  which layer supplied it (the unification invariant, enforced by
+  `tests/test_merge_unification.py`). Lint rule CE014 forces every list field to declare
+  its strategy explicitly.
 
-- **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`) survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D` targeting the same path is a hard error. `--type` (→ `agent.type`) is a separate, lighter alias that does NOT route through that collision check — `--type` and `-D agent.type=…` last-win rather than hard-error (the `-D` value wins). Tools, plugins, and SDK options are `-D`-only.
+- **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper
+  (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D
+  agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved
+  `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with
+  did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`)
+  survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D`
+  targeting the same path is a hard error. `--type` (→ `agent.type`) is a separate,
+  lighter alias that does NOT route through that collision check — `--type` and `-D
+  agent.type=…` last-win rather than hard-error (the `-D` value wins). Tools, plugins,
+  and SDK options are `-D`-only.
 
 ## Execute vs. run: the grading switch
 
-- **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run` with grading removed — the agent runs and the full trajectory is captured, but no criterion is checked, `weighted_score` is `None` (never `0.0`, which would be indistinguishable from "graded and scored zero"), and the row finalizes as **`FinalStatus.NOT_GRADED`**, whose `category` is a **fourth** bucket, `"ungraded"`. Ungraded rows leave BOTH sides of every rate: `RunSummary.pass_rate` / `error_share` and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run - tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run` invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it** — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are facts about the *run*, not about grading, and still apply (so `execute` still exits non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)` → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog check, and post-failure diagnostics); it crosses the docker boundary in `context.json` (defaulting to `True` in-container, so a host predating `execute` keeps grading). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because a task YAML must never declare itself ungraded; only the invoking command decides. `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in that flag, so there is no third code path. Three things are refused rather than degraded: `--junit-xml` (a report of verdicts, and there are none — though `reports_junit` still emits `<skipped>` for an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades nothing), and simulation tasks (their turn-continuation logic reads criteria results, so an ungraded dialog would silently change its own stopping behavior). `stop_early:` blocks are inert under `execute` for the same reason the kill switch exists: the full trajectory is the deliverable. Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and grades with its own tests.
+- **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run`
+  with grading removed — the agent runs and the full trajectory is captured, but no
+  criterion is checked, `weighted_score` is `None` (never `0.0`, which would be
+  indistinguishable from "graded and scored zero"), and the row finalizes as
+  **`FinalStatus.NOT_GRADED`**, whose `category` is a **fourth** bucket, `"ungraded"`.
+  Ungraded rows leave BOTH sides of every rate: `RunSummary.pass_rate` / `error_share`
+  and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run -
+  tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run`
+  invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it**
+  — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are
+  facts about the *run*, not about grading, and still apply (so `execute` still exits
+  non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)`
+  → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog
+  check, and post-failure diagnostics); it crosses the docker boundary in `context.json`
+  (defaulting to `True` in-container, so a host predating `execute` keeps grading). It
+  is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because
+  a task YAML must never declare itself ungraded; only the invoking command decides.
+  `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in
+  that flag, so there is no third code path. Three things are refused rather than
+  degraded: `--junit-xml` (a report of verdicts, and there are none — though
+  `reports_junit` still emits `<skipped>` for an ungraded row it encounters),
+  `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades
+  nothing), and simulation tasks (their turn-continuation logic reads criteria results,
+  so an ungraded dialog would silently change its own stopping behavior). `stop_early:`
+  blocks are inert under `execute` for the same reason the kill switch exists: the full
+  trajectory is the deliverable. Motivating consumer: an external harness (Harbor /
+  Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and
+  grades with its own tests.
 
 ### The terminal-status chain
 
@@ -137,7 +182,54 @@ differently from what `run` would have produced.
 
 ## `--resume` is command-relative
 
-- **`--resume` is command-relative**: `partition_for_resume(tasks, *, grade)` returns a four-way `ResumePartition` (`to_run` / `to_grade` / `prior_results` / `prior_resolved`), because **"finished" is not absolute — it depends on what the resuming command still owes the task**. A `NOT_GRADED` row carries a final status, so the original "has any final status" test called it complete: right for `execute --resume` (it finished executing), and wrong for `run --resume`, which was asked to grade and would instead report "already complete", grade nothing, and **exit 0**. The routing test is the row's **evidence** (`weighted_score is None and not success_criteria_results`), not its category: keying on `category == "ungraded"` missed every `execute` row that ALSO carries an execution fact — a TIMEOUT or budget stop aborts before grading, so it lands unscored with category `error`/`failed`, and resume filed it as complete while `evaluate <run_dir>` graded the identical bytes happily. Under `grade=True` those rows route to `to_grade`, where `_grade_resumed_tasks` runs the criteria against the trajectory and workspace already on disk via `orchestration/regrade.py::regrade_in_place` — reusing the agent spend, which is the entire reason `execute` and `run` are separate. The carve-out is **only** for `NOT_GRADED`: `FAILURE`/`ERROR` stay complete under both commands (resume has never retried failures — delete the task.json), and `clear_rerun_artifacts` deliberately skips `to_grade`, whose artifacts are the very thing being graded. A per-task grading failure is warned, STAMPED onto the folded-back row's `error_message` (the console line alone is not durable), and folded back in with its ORIGINAL ungraded result, so one bad row neither aborts the resume nor vanishes from run.json — and the exit gate counts `tasks_not_graded` **when `grade` is True**, so a `run` that graded nothing exits non-zero instead of telling CI the suite is fine. Under `execute` an ungraded row is the expected outcome and never fails the command. A row is owed a grade only when it was **executed** AND is unscored: evidence of "no verdict" alone routed every dead container and failed image build (`_write_synthetic_task_json` writes those with no verdict either) into grading, where the fold-back replaced the real diagnostic with a wrong-cause grading error and left `task.json` and `run.json` disagreeing about the same row — so the test is `final_status is NOT_GRADED or iteration_count > 0`, and that fold-back now APPENDS to `error_message` instead of replacing it. A re-grade also writes its log to **`grade.log`**, never `task.log`: `task_log_handler` opens `mode="w"`, so grading into the row's own directory truncated the agent trajectory log the run had already paid for — contradicting `_apply_resume`'s own "to_grade is deliberately NOT cleared" contract. `grade` is in `_FINGERPRINT_DIFF_EXEMPT` because `execute` → `run --resume` is a supported flow, not config drift — and the warning's "already-finalized tasks keep their original-config results" text is actively wrong for it. **`orchestration/regrade.py` is the single implementation** shared by that path and `evaluate`'s run-dir mode, which DELEGATES to `regrade_in_place` rather than restating it (it originally hand-built its own Sandbox + Orchestrator and had already drifted — hardcoding `replicate_index=0`, so every replicate but the first was relabelled — which is exactly how two copies become two verdicts for the same run); it raises plain `RegradeError`, which the CLI wraps, since `orchestration/` must not import the CLI layer (CE004). One fidelity rule it enforces: a re-graded row keeps the **agent run's** `started_at`/`duration_seconds`, not the grading pass's — a 10-minute run re-graded in 2s would otherwise report 2s into `average_duration`, the report tables and the evalboard; the grading cost is preserved separately as `environment_info["grading_duration_seconds"]`.
+- **`--resume` is command-relative**: `partition_for_resume(tasks, *, grade)` returns a
+  four-way `ResumePartition` (`to_run` / `to_grade` / `prior_results` /
+  `prior_resolved`), because **"finished" is not absolute — it depends on what the
+  resuming command still owes the task**. A `NOT_GRADED` row carries a final status, so
+  the original "has any final status" test called it complete: right for `execute
+  --resume` (it finished executing), and wrong for `run --resume`, which was asked to
+  grade and would instead report "already complete", grade nothing, and **exit 0**. The
+  routing test is the row's **evidence** (`weighted_score is None and not
+  success_criteria_results`), not its category: keying on `category == "ungraded"`
+  missed every `execute` row that ALSO carries an execution fact — a TIMEOUT or budget
+  stop aborts before grading, so it lands unscored with category `error`/`failed`, and
+  resume filed it as complete while `evaluate <run_dir>` graded the identical bytes
+  happily. Under `grade=True` those rows route to `to_grade`, where
+  `_grade_resumed_tasks` runs the criteria against the trajectory and workspace already
+  on disk via `orchestration/regrade.py::regrade_in_place` — reusing the agent spend,
+  which is the entire reason `execute` and `run` are separate. The carve-out is **only**
+  for `NOT_GRADED`: `FAILURE`/`ERROR` stay complete under both commands (resume has
+  never retried failures — delete the task.json), and `clear_rerun_artifacts`
+  deliberately skips `to_grade`, whose artifacts are the very thing being graded. A
+  per-task grading failure is warned, STAMPED onto the folded-back row's `error_message`
+  (the console line alone is not durable), and folded back in with its ORIGINAL ungraded
+  result, so one bad row neither aborts the resume nor vanishes from run.json — and the
+  exit gate counts `tasks_not_graded` **when `grade` is True**, so a `run` that graded
+  nothing exits non-zero instead of telling CI the suite is fine. Under `execute` an
+  ungraded row is the expected outcome and never fails the command. A row is owed a
+  grade only when it was **executed** AND is unscored: evidence of "no verdict" alone
+  routed every dead container and failed image build (`_write_synthetic_task_json`
+  writes those with no verdict either) into grading, where the fold-back replaced the
+  real diagnostic with a wrong-cause grading error and left `task.json` and `run.json`
+  disagreeing about the same row — so the test is `final_status is NOT_GRADED or
+  iteration_count > 0`, and that fold-back now APPENDS to `error_message` instead of
+  replacing it. A re-grade also writes its log to **`grade.log`**, never `task.log`:
+  `task_log_handler` opens `mode="w"`, so grading into the row's own directory truncated
+  the agent trajectory log the run had already paid for — contradicting
+  `_apply_resume`'s own "to_grade is deliberately NOT cleared" contract. `grade` is in
+  `_FINGERPRINT_DIFF_EXEMPT` because `execute` → `run --resume` is a supported flow, not
+  config drift — and the warning's "already-finalized tasks keep their original-config
+  results" text is actively wrong for it. **`orchestration/regrade.py` is the single
+  implementation** shared by that path and `evaluate`'s run-dir mode, which DELEGATES to
+  `regrade_in_place` rather than restating it (it originally hand-built its own Sandbox +
+  Orchestrator and had already drifted — hardcoding `replicate_index=0`, so every
+  replicate but the first was relabelled — which is exactly how two copies become two
+  verdicts for the same run); it raises plain `RegradeError`, which the CLI wraps, since
+  `orchestration/` must not import the CLI layer (CE004). One fidelity rule it enforces:
+  a re-graded row keeps the **agent run's** `started_at`/`duration_seconds`, not the
+  grading pass's — a 10-minute run re-graded in 2s would otherwise report 2s into
+  `average_duration`, the report tables and the evalboard; the grading cost is preserved
+  separately as `environment_info["grading_duration_seconds"]`.
 
 ### When a resumed grade crashes
 
@@ -165,7 +257,61 @@ silent. A missing stamp (a run predating the feature) is tolerated.
 
 ## Early stop on criterion
 
-- **Early stop on criterion (opt-in, per-criterion arming)**: a `stop_early:` block (`StopEarlyPolicy`) on a criterion ends a single-shot run early once the run's **armed** criteria decide the outcome, so a raised `max_turns` isn't wasted on the smoke flavor. The block's PRESENCE is the arming and alone activates the watcher — there is **no run-level master switch**: `run_limits.stop_early: false` is the run-level KILL SWITCH that force-disarms every block (the one-line experiment-variant/`-D` override for an authoritative full run), and `run_limits.stop_early: true` (the removed master arm) is a hard `EarlyStopConfigError` at resolution. The block exists on `LiveSuccessCriterion` only (currently `skill_triggered`, `command_executed` — so arming an unobservable criterion is unrepresentable, a pydantic extra-forbid error). Arming carries one implicit trigger (a native live-fail may fail-stop the run); its keys refine it: `on_pass: stop` (pass-stop the moment the criterion live-passes; default `continue` just latches) and `decide_within: N` (still undecided after N tool-call steps latches an **effective fail**, fed through the same fail-stop rule, reported as `decision_budget_exceeded` — an ordinary weighted fail, NOT a gate-bypassing force-fail; cumulative across retry attempts of the same turn). A trigger whose polarity the instance can't decide (per the abstract, checker-independent `live_decidable_polarities()`, a pure function of the criterion's own fields, paired with the checker's `live_verdict` override by lint rule CE025, a registry-based whole-tree check) is **inert by design** — one dataset-fanned YAML line serves both positive rows (pass/timeout live) and distractor rows (fail live). Verdicts **latch**: once a criterion decides, its `live_verdict` is never polled again. Stop rule is weighted, not strict-boolean: `run_limits.stop_early_gate_threshold` (default `1.0`, reproducing strict-AND behavior exactly) is the minimum weighted score (`Σ weight·score / Σ weight` over the armed subset) required to pass; a fail-stop fires once the armed set's **ceiling** (best case for everything still undecided) can no longer reach the threshold — so a low-weight fail or timeout that can't doom the gate is absorbed and the run continues — and is **deferred while any pass-capable armed criterion is undecided** (a distractor misfire never truncates a positive row's recall signal); a pass-stop fires once the `on_pass: stop` subset's **floor** (worst case) already meets the threshold, and is symmetrically **deferred while any pass-capable armed criterion outside the `on_pass: stop` subset is undecided** (so an early pass never freezes a sibling `on_pass: continue` criterion's signal out of the trajectory). A fail-stop is therefore verdict-preserving; a pass-stop can miss a *later* distractor misfire, so authoritative P/R/F1 comes from a kill-switched (`stop_early: false`) run. Driven by `orchestration/early_stop.py::EarlyStopWatcher` (built when `early_stop_active(task)`: ≥1 armed criterion, kill switch not thrown) through the agent's cooperative `should_stop` seam (tool-call granularity, no SIGKILL); live verdicts only *trigger* the stop — the standard `check_all_async` on the frozen trajectory is authoritative. Gating is **FIRED-ONLY**: a run the watcher actually cut gates on the **armed subset** via the weighted `EvaluationResult.armed_criteria_passed`; a run that completes naturally — armed or not — gates strict-AND via `all_criteria_passed`, so adding a block never changes the verdict of a run it didn't cut. Note the gate keys on the watcher having FIRED (`result.early_stop is not None`), not on confirmed truncation — an agent that ignores `should_stop`, or a stop firing on the final message, still gates armed-only. Every resolution-time guardrail violation is a hard error at resolution (plan *and* run); the one load-time case — a `stop_early:` block on a non-live criterion — is a pydantic schema error at task load, which the run surface reports as a skipped task like any other malformed task. A runtime verdict bug **fails open** to a full run. Surfaces: `EarlyStopInfo` (incl. `gate_threshold` at stop time), report notes/badges, `stopped_early` run.json rows, `EarlyStopped`/`EarlyStopReason` telemetry dims. Worked rationale: docs/TASK_DEFINITION_GUIDE.md § `stop_early`. No blocks anywhere ⇒ behavior byte-for-byte unchanged.
+- **Early stop on criterion (opt-in, per-criterion arming)**: a `stop_early:` block
+  (`StopEarlyPolicy`) on a criterion ends a single-shot run early once the run's
+  **armed** criteria decide the outcome, so a raised `max_turns` isn't wasted on the
+  smoke flavor. The block's PRESENCE is the arming and alone activates the watcher —
+  there is **no run-level master switch**: `run_limits.stop_early: false` is the
+  run-level KILL SWITCH that force-disarms every block (the one-line
+  experiment-variant/`-D` override for an authoritative full run), and
+  `run_limits.stop_early: true` (the removed master arm) is a hard
+  `EarlyStopConfigError` at resolution. The block exists on `LiveSuccessCriterion` only
+  (currently `skill_triggered`, `command_executed` — so arming an unobservable criterion
+  is unrepresentable, a pydantic extra-forbid error). Arming carries one implicit
+  trigger (a native live-fail may fail-stop the run); its keys refine it: `on_pass:
+  stop` (pass-stop the moment the criterion live-passes; default `continue` just
+  latches) and `decide_within: N` (still undecided after N tool-call steps latches an
+  **effective fail**, fed through the same fail-stop rule, reported as
+  `decision_budget_exceeded` — an ordinary weighted fail, NOT a gate-bypassing
+  force-fail; cumulative across retry attempts of the same turn). A trigger whose
+  polarity the instance can't decide (per the abstract, checker-independent
+  `live_decidable_polarities()`, a pure function of the criterion's own fields, paired
+  with the checker's `live_verdict` override by lint rule CE025, a registry-based
+  whole-tree check) is **inert by design** — one dataset-fanned YAML line serves both
+  positive rows (pass/timeout live) and distractor rows (fail live). Verdicts **latch**:
+  once a criterion decides, its `live_verdict` is never polled again. Stop rule is
+  weighted, not strict-boolean: `run_limits.stop_early_gate_threshold` (default `1.0`,
+  reproducing strict-AND behavior exactly) is the minimum weighted score (`Σ
+  weight·score / Σ weight` over the armed subset) required to pass; a fail-stop fires
+  once the armed set's **ceiling** (best case for everything still undecided) can no
+  longer reach the threshold — so a low-weight fail or timeout that can't doom the gate
+  is absorbed and the run continues — and is **deferred while any pass-capable armed
+  criterion is undecided** (a distractor misfire never truncates a positive row's recall
+  signal); a pass-stop fires once the `on_pass: stop` subset's **floor** (worst case)
+  already meets the threshold, and is symmetrically **deferred while any pass-capable
+  armed criterion outside the `on_pass: stop` subset is undecided** (so an early pass
+  never freezes a sibling `on_pass: continue` criterion's signal out of the trajectory).
+  A fail-stop is therefore verdict-preserving; a pass-stop can miss a *later* distractor
+  misfire, so authoritative P/R/F1 comes from a kill-switched (`stop_early: false`) run.
+  Driven by `orchestration/early_stop.py::EarlyStopWatcher` (built when
+  `early_stop_active(task)`: ≥1 armed criterion, kill switch not thrown) through the
+  agent's cooperative `should_stop` seam (tool-call granularity, no SIGKILL); live
+  verdicts only *trigger* the stop — the standard `check_all_async` on the frozen
+  trajectory is authoritative. Gating is **FIRED-ONLY**: a run the watcher actually cut
+  gates on the **armed subset** via the weighted
+  `EvaluationResult.armed_criteria_passed`; a run that completes naturally — armed or
+  not — gates strict-AND via `all_criteria_passed`, so adding a block never changes the
+  verdict of a run it didn't cut. Note the gate keys on the watcher having FIRED
+  (`result.early_stop is not None`), not on confirmed truncation — an agent that ignores
+  `should_stop`, or a stop firing on the final message, still gates armed-only. Every
+  resolution-time guardrail violation is a hard error at resolution (plan *and* run);
+  the one load-time case — a `stop_early:` block on a non-live criterion — is a pydantic
+  schema error at task load, which the run surface reports as a skipped task like any
+  other malformed task. A runtime verdict bug **fails open** to a full run. Surfaces:
+  `EarlyStopInfo` (incl. `gate_threshold` at stop time), report notes/badges,
+  `stopped_early` run.json rows, `EarlyStopped`/`EarlyStopReason` telemetry dims. Worked
+  rationale: docs/TASK_DEFINITION_GUIDE.md § `stop_early`. No blocks anywhere ⇒ behavior
+  byte-for-byte unchanged.
 
 ### Gate selection is fired-only
 

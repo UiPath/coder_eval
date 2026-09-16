@@ -4,9 +4,44 @@
 
 ## Token accounting and the reconciliation message
 
-- **Sub-agent token accounting**: There is NO separate per-sub-agent field. Every sub-agent generation is captured as a `parent_tool_use_id`-tagged `AssistantMessage` in the turn transcript, so per-sub-agent usage is derived by grouping those messages on that id (the evalboard's `aggregateSubAgentUsage` does exactly this). Claude bubbles its sub-agent's intermediate generations into the parent stream natively, and the **terminal** generation (delivered as the Agent tool result, never streamed) is synthesized into one via `_synthesize_subagent_terminal_message` from `tool_use_result.usage`. Codex reconstructs all child generations from the child rollout; both harnesses' turn totals already include sub-agent cost. `CommandTelemetry.result_summary` is stored **untruncated** (no 200-char cap) so sub-agent returns are preserved whole. Set `CODER_EVAL_RAW_SDK_LOG=1` to dump every raw SDK event to the task log for inspection.
+- **Sub-agent token accounting**: There is NO separate per-sub-agent field. Every
+  sub-agent generation is captured as a `parent_tool_use_id`-tagged `AssistantMessage`
+  in the turn transcript, so per-sub-agent usage is derived by grouping those messages
+  on that id (the evalboard's `aggregateSubAgentUsage` does exactly this). Claude
+  bubbles its sub-agent's intermediate generations into the parent stream natively, and
+  the **terminal** generation (delivered as the Agent tool result, never streamed) is
+  synthesized into one via `_synthesize_subagent_terminal_message` from
+  `tool_use_result.usage`. Codex reconstructs all child generations from the child
+  rollout; both harnesses' turn totals already include sub-agent cost.
+  `CommandTelemetry.result_summary` is stored **untruncated** (no 200-char cap) so
+  sub-agent returns are preserved whole. Set `CODER_EVAL_RAW_SDK_LOG=1` to dump every
+  raw SDK event to the task log for inspection.
 
-- **Reconciliation message (stream self-reconciles to the turn total)**: The per-message stream consistently under-reports the authoritative turn total — a fixed prompt slice (~512 input tokens on Claude) is billed on no SDK-emitted message, and sub-agent input/cache only partially bubbles up. So `EventCollector.build_turn_record` appends one synthetic `ReconciliationMessage` (`role="reconciliation"`, in the `TranscriptMessage` union) per turn, carrying the per-bucket residual = `token_usage` − Σ(assistant message buckets). The invariant: **summing the four token buckets across `TurnRecord.messages` (assistant + reconciliation) equals `token_usage` exactly**, for both Claude and Codex (Codex's stream is already complete after `_recover_subagent_tool_calls`, so its residual is usually 0 and no entry is emitted). This is what lets the evalboard SUM the message stream as the source of truth instead of reading a separate aggregate ("agent tokens"): `selectTokenTotals` returns the stream sum whenever a reconciliation entry is present, and the timeline renders it as its own row. It is agent-agnostic (booked at the single `EventCollector` seam), carries no cost (cost stays on `token_usage`), and is excluded from generation/turn counts and the cost simulator. The LiteLLM open-weight actual-cost join (`litellm_cost.apply_actual_cost`) deliberately writes cost at the TURN level only (`token_usage.total_cost_usd` = the real OpenRouter bill) plus the per-call `TurnRecord.provider_call_costs` audit record; it does NOT touch the message token buckets, so `EventCollector` stays the single writer and this invariant holds on every backend. The Python `token_usage`/`total_token_usage` aggregate is unchanged and still authoritative for budget/judges/reports. The residual is almost always positive; a NEGATIVE one means the captured generations over-report some bucket, which is why the note's wording is branched — a `-512` entry must not read as "billed but not surfaced".
+- **Reconciliation message (stream self-reconciles to the turn total)**: The per-message
+  stream consistently under-reports the authoritative turn total — a fixed prompt slice
+  (~512 input tokens on Claude) is billed on no SDK-emitted message, and sub-agent
+  input/cache only partially bubbles up. So `EventCollector.build_turn_record` appends
+  one synthetic `ReconciliationMessage` (`role="reconciliation"`, in the
+  `TranscriptMessage` union) per turn, carrying the per-bucket residual = `token_usage`
+  − Σ(assistant message buckets). The invariant: **summing the four token buckets across
+  `TurnRecord.messages` (assistant + reconciliation) equals `token_usage` exactly**, for
+  both Claude and Codex (Codex's stream is already complete after
+  `_recover_subagent_tool_calls`, so its residual is usually 0 and no entry is emitted).
+  This is what lets the evalboard SUM the message stream as the source of truth instead
+  of reading a separate aggregate ("agent tokens"): `selectTokenTotals` returns the
+  stream sum whenever a reconciliation entry is present, and the timeline renders it as
+  its own row. It is agent-agnostic (booked at the single `EventCollector` seam),
+  carries no cost (cost stays on `token_usage`), and is excluded from generation/turn
+  counts and the cost simulator. The LiteLLM open-weight actual-cost join
+  (`litellm_cost.apply_actual_cost`) deliberately writes cost at the TURN level only
+  (`token_usage.total_cost_usd` = the real OpenRouter bill) plus the per-call
+  `TurnRecord.provider_call_costs` audit record; it does NOT touch the message token
+  buckets, so `EventCollector` stays the single writer and this invariant holds on every
+  backend. The Python `token_usage`/`total_token_usage` aggregate is unchanged and still
+  authoritative for budget/judges/reports. The residual is almost always positive; a
+  NEGATIVE one means the captured generations over-report some bucket, which is why the
+  note's wording is branched — a `-512` entry must not read as "billed but not
+  surfaced".
 
 ### The result_tokens measure and CE043
 
@@ -24,9 +59,28 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
 
 ## Harness run-limit parity
 
-- **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same thing on every backend, so a divergence is either fixed or documented — never silent. **`run_limits.max_turns` on Codex/Antigravity counts VISIBLE turns** (resolved tool calls, read live off the shared `EventCollector.visible_turn_count`, the same list `TurnRecord.commands` holds) because one `communicate()` is a single SDK turn on both, so a native counter would clamp at 1; claude-code keeps its native SDK cap, whose unit (an agent-loop turn) absorbs arbitrarily many parallel calls — the same number is NOT the same budget across harnesses. OpenCode and Pi each keep a native unit too, because their CLIs stream a real multi-step loop per `communicate()` (`step_start`/`step_finish`, `turn_start`/`turn_end`). The cap is enforced on the same loop boundary as the cooperative early stop and finalizes cleanly as `max_turns_exhausted` (no crash, no retry); on Antigravity that boundary lives in `_drain()`, so the background-work poll loop honors it too.
+- **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same
+  thing on every backend, so a divergence is either fixed or documented — never silent.
+  **`run_limits.max_turns` on Codex/Antigravity counts VISIBLE turns** (resolved tool
+  calls, read live off the shared `EventCollector.visible_turn_count`, the same list
+  `TurnRecord.commands` holds) because one `communicate()` is a single SDK turn on both,
+  so a native counter would clamp at 1; claude-code keeps its native SDK cap, whose unit
+  (an agent-loop turn) absorbs arbitrarily many parallel calls — the same number is NOT
+  the same budget across harnesses. OpenCode and Pi each keep a native unit too, because
+  their CLIs stream a real multi-step loop per `communicate()`
+  (`step_start`/`step_finish`, `turn_start`/`turn_end`). The cap is enforced on the same
+  loop boundary as the cooperative early stop and finalizes cleanly as
+  `max_turns_exhausted` (no crash, no retry); on Antigravity that boundary lives in
+  `_drain()`, so the background-work poll loop honors it too.
 
-  The **known unfixed divergences** — which config fields each harness does and does not enforce, and the per-harness `agent.plugins[].path` depth (claude-code REQUIRES a plugin root holding `skills/` and silently loads NOTHING from a bare skills directory, which is the costly direction: no error, every positive row of an activation suite scores 0, and the suite reports recall 0.0, reading exactly like a skill that never triggers; held to the plugin-root shape for `SKILL_SOURCE_PATH` by CE045) — are the table's to state, not this file's. Full table + rationale: docs/agents/HARNESS_PARITY.md.
+  The **known unfixed divergences** — which config fields each harness does and does not
+  enforce, and the per-harness `agent.plugins[].path` depth (claude-code REQUIRES a
+  plugin root holding `skills/` and silently loads NOTHING from a bare skills directory,
+  which is the costly direction: no error, every positive row of an activation suite
+  scores 0, and the suite reports recall 0.0, reading exactly like a skill that never
+  triggers; held to the plugin-root shape for `SKILL_SOURCE_PATH` by CE045) — are the
+  table's to state, not this file's. Full table + rationale:
+  docs/agents/HARNESS_PARITY.md.
 
 ## Shared turn lifecycle
 
