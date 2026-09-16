@@ -676,6 +676,16 @@ never `source_yaml`, because the raw on-disk text predates `--model` and `-D` mu
 container must see. `source_yaml` is forwarded separately so `task.json`'s audit trail
 matches the in-process driver's.
 
+### Plugin staging under docker
+
+The in-container orchestrator stages `agent.plugins` itself, under `/work/output`, which is
+the host run dir bind-mounted. Each `plugins[].path` is dumped into the container's
+`task.yaml` as the absolute host path (best-effort: a path that does not resolve on the
+dumping host is left as authored, because a detached grade never uses it), and that
+path is auto-mounted read-only at the same absolute path, together with any staged
+skill whose resolved source sits outside every plugin root. So the stage's symlinks
+resolve inside the container and, afterwards, on the host.
+
 ## Trusting what the container sends back
 
 ### The stdout line limit

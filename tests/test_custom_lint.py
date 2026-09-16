@@ -2176,12 +2176,40 @@ class TestCE069HarnessParityTable:
             "to regenerate:\n\n" + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
         )
 
-    def test_both_marker_pairs_exist(self):
-        from tests.lint.harness_parity import CONTRACT_END, CONTRACT_START, TOOLS_END, TOOLS_START
+    def test_all_three_marker_pairs_exist(self):
+        from tests.lint.harness_parity import (
+            CONTRACT_END,
+            CONTRACT_START,
+            RUN_LIMITS_END,
+            RUN_LIMITS_START,
+            TOOLS_END,
+            TOOLS_START,
+        )
 
         text = (self.REPO_ROOT / "docs/agents/HARNESS_PARITY.md").read_text(encoding="utf-8")
-        for marker in (CONTRACT_START, CONTRACT_END, TOOLS_START, TOOLS_END):
+        for marker in (CONTRACT_START, CONTRACT_END, TOOLS_START, TOOLS_END, RUN_LIMITS_START, RUN_LIMITS_END):
             assert marker in text
+
+    def test_run_limits_render_pins_the_header_and_the_noop_cap_cell(self):
+        from tests.lint.harness_parity import render_run_limits_table
+
+        lines = render_run_limits_table().splitlines()
+        assert lines[0] == "| limit | claude-code | codex | antigravity | opencode | pi | none |"
+        cap = next(line for line in lines if line.startswith("| `max_tool_calls` |"))
+        assert cap.endswith("| not polled (never fires) |")
+
+    def test_a_run_limits_field_without_a_cell_rule_fails_the_render(self):
+        from tests.lint.harness_parity import render_run_limits_table
+
+        with pytest.raises(KeyError, match="max_wall_clock"):
+            render_run_limits_table(["max_tool_calls", "max_wall_clock"])
+
+    def test_every_run_limits_field_has_a_row(self):
+        from coder_eval.models import RunLimits
+        from tests.lint.harness_parity import render_run_limits_table
+
+        text = render_run_limits_table()
+        assert all(f"| `{field}` |" in text for field in RunLimits.model_fields)
 
     def test_render_pins_the_header_and_a_known_cell(self):
         from tests.lint.harness_parity import render_table
@@ -2244,6 +2272,61 @@ class TestCE068NoKindNamesInKernel:
         members = typing.get_args(typing.get_args(AgentConfig.__value__)[0])
         assert {cls.__name__ for cls in members} == CONFIG_CLASS_NAMES
         assert "PiAgentConfig" in CONFIG_CLASS_NAMES
+
+
+@pytest.mark.lint
+class TestCE070NoCapOrSkillScanInAdapters:
+    """CE070 — agent adapters neither count run caps nor scan for skills."""
+
+    AGENT = "/repo/src/coder_eval/agents/x_agent.py"
+    ORCHESTRATION = "/repo/src/coder_eval/orchestration/plugin_staging.py"
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce070_no_cap_or_skill_scan_in_adapters import NoCapOrSkillScanInAdapters
+
+        return list(NoCapOrSkillScanInAdapters(filepath).check(ast.parse(source)))
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "n = self.max_tool_calls",
+            "state.max_turns_hit = True",
+            "limits: RunLimits | None = None",
+            "from coder_eval.utils import expand_env_vars",
+            "def communicate(self, max_turns=None): ...",
+            "agent.communicate('p', max_turns=3)",
+            "record.tool_calls_exhausted = True",
+            "p = root / 'skills' / name / 'SKILL.md'",
+        ],
+    )
+    def test_a_cap_counter_or_a_skill_scan_in_an_adapter_violates(self, source: str):
+        found = self._violations(source, self.AGENT)
+        assert found
+        assert "TurnMonitor" in found[0].message
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "ok = self._is_max_turns_result(summary)",
+            "hit = summary.subtype == 'error_max_turns'",
+            "doc = 'reads SKILL.md on demand'",
+        ],
+    )
+    def test_substrings_and_longer_strings_are_allowed(self, source: str):
+        assert not self._violations(source, self.AGENT)
+
+    def test_the_same_code_outside_agents_is_allowed(self):
+        source = "from coder_eval.utils import expand_env_vars\nn = limits.max_tool_calls\nf = 'SKILL.md'"
+        assert not self._violations(source, self.ORCHESTRATION)
+
+    def test_the_rule_is_wired_into_the_runner(self):
+        from tests.lint.rules.ce070_no_cap_or_skill_scan_in_adapters import NoCapOrSkillScanInAdapters
+        from tests.lint.runner import ALL_RULES
+
+        assert NoCapOrSkillScanInAdapters in ALL_RULES
 
 
 @pytest.mark.lint

@@ -1,22 +1,44 @@
 # Run-Limit Parity
 
-One task file, run on any harness, must be the same task. The old
-`run_limits.max_turns` was the field that broke that promise hardest: Claude Code
-enforced it, and Codex and Antigravity accepted it and never read it, so
-`max_turns: 6` ran capped on one backend and unbounded on the other two. Its
-replacement, `run_limits.max_tool_calls`, is enforced centrally.
+One task file, run on any harness, must be the same task. `max_turns` broke that
+promise hardest: Claude Code enforced it, and Codex and Antigravity accepted it and
+never read it, so `max_turns: 6` ran capped on one backend and unbounded on the other
+two. It is now `max_tool_calls`, one counter on every harness.
 
 This page is the contract for what each run limit means per harness, plus what each
-shared `agent` field means on each harness.
+shared `agent` field means on each harness. Both tables are generated.
 
-## The table
+## Run limits
 
-| Limit | claude-code | codex | antigravity | opencode | pi |
-|---|---|---|---|---|---|
-| `run_limits.max_tool_calls` | TurnMonitor cap (resolved tool calls) via `should_stop` | TurnMonitor cap (resolved tool calls) via `should_stop` | TurnMonitor cap (resolved tool calls) via `should_stop` | TurnMonitor cap (resolved tool calls) via `should_stop` | TurnMonitor cap (resolved tool calls) via `should_stop` |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
-| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
+Every structural cap and budget is one `TurnMonitor` answer on the `should_stop`
+channel. Generated from `RunLimits` and each agent's `contract` by `make parity-table`;
+CE069 fails the build on drift.
+
+<!-- harness-run-limits:start -->
+| limit | claude-code | codex | antigravity | opencode | pi | none |
+| --- | --- | --- | --- | --- | --- | --- |
+| `max_tool_calls` | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | not polled (never fires) |
+| `expected_tool_calls` | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only |
+| `task_timeout` | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic |
+| `turn_timeout` | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) |
+| `max_input_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_output_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_total_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `count_cached_input` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
+| `count_cache_creation` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
+| `stop_early` | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | rejected at resolution |
+| `stop_early_gate_threshold` | armed gate | armed gate | armed gate | armed gate | armed gate | armed gate |
+<!-- harness-run-limits:end -->
+
+A capped run is an ordinary end of run, never `ERROR` and never retried:
+
+- Criteria are still checked. A capped run that meets them finishes `SUCCESS`; one that
+  does not finishes `TOOL_CALLS_EXHAUSTED` (category `failed`, icon `C`).
+- `tool_calls_exhausted: true` is on the task record.
+- Calls of the round that reached the cap can still resolve after it. A call in flight
+  is recorded with `result_status: unknown`, and a Codex sub-agent's recovered calls still
+  reach the record.
 
 ## Agent-field contract
 
@@ -586,38 +608,19 @@ needed to drive it.
 All three are deliberately deferred; see `c/time-bugs-audit.md` for the
 measurements.
 
-## `max_tool_calls` is the TurnMonitor's cap on every harness
+## Timeouts
 
-`run_limits.max_tool_calls` counts resolved tool calls, cumulative across every retry
-attempt and every dialog turn of a task. No adapter counts or caps anything itself. The
-orchestrator's `TurnMonitor` reads the event stream, and when the resolved tool calls
-reach the cap, its `should_stop` poll returns `tool_call_cap`. Each harness stops at its
-next poll boundary: the round that reaches the cap is processed whole, and the next one
-is never pulled. A run cut this way finalizes cleanly as `tool_calls_exhausted`. It is
-not a crash, and it is not retried. One number therefore means the same budget on
-every harness.
+How each harness enforces `run_limits.turn_timeout` (the meaning is the same everywhere):
 
-### What a capped run looks like
+| harness | mechanism |
+|---|---|
+| claude-code | watchdog, SIGKILL on the CLI subprocess |
+| codex | watchdog + cooperative interrupt |
+| antigravity | watchdog, plus an earlier internal poll deadline at 80% of it (see below) |
+| opencode | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
+| pi | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
 
-The signals a capped run leaves behind, on every backend:
-
-- Criteria are still checked against whatever the agent produced, because the cap is
-  an ordinary end-of-run rather than an error. So a capped run that nonetheless
-  satisfies its criteria finishes as `SUCCESS`; one that does not finishes as
-  `TOOL_CALLS_EXHAUSTED` (reporting category `failed`, icon `C`). Never `ERROR`,
-  and never retried.
-- `tool_calls_exhausted: true` on the task record.
-- The count of *resolved* tool calls the model itself issued reaches the cap. Calls of
-  the round that reached it can still resolve after it. Two things can add a further *recorded* command, and
-  neither means the cap leaked:
-    - A tool call already in flight when the cap fires is force-closed and recorded
-      with `result_status: unknown` rather than dropped, so the trajectory shows what
-      was interrupted.
-    - On Codex, a sub-agent's inner tool calls are recovered from its rollout after
-      the pump stops, so the child's work and its tokens still reach the record. The
-      cap bounds what the model was allowed to do, not what the record may explain.
-
-## What a timeout looks like
+### What a timeout looks like
 
 On Claude Code and Codex a `turn_timeout` breach is a *failure*: the watchdog fires
 at the deadline, the partial turn is preserved on `pending_turn`, and the turn is
@@ -625,7 +628,7 @@ marked `crashed`.
 
 Antigravity stops earlier and more gently, for the reason in the next section.
 
-## Antigravity backgrounds anything over 10 seconds
+### Antigravity backgrounds anything over 10 seconds
 
 The Antigravity localharness has a **10-second maximum synchronous wait** for shell
 commands. Past it, the harness moves the command to a background task and hands the
@@ -648,7 +651,7 @@ a long `npm install` or build runs to completion here the way it does on the oth
 two, but a command that never finishes reads as an ordinary low score rather than a
 timeout.
 
-## Timeouts are not tool-call caps
+### Timeouts are not tool-call caps
 
 A timeout is a *failure* (partial turn captured, error status); the tool-call cap is a
 *clean stop*. Conflating them is the mistake this page exists to prevent: a task

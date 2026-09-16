@@ -39,7 +39,7 @@ plugin-reference:  ## Regenerate the plugin's bundled criteria reference from th
 pricing-mirror:  ## Regenerate the evalboard's rate table from pricing.py (SSOT)
 	uv run python -m tests.lint.pricing_mirror
 
-parity-table:  ## Regenerate the agent-field contract table from the agent classes (SSOT)
+parity-table:  ## Regenerate the agent-field, tool-name and run-limit tables (SSOT)
 	uv run python -m tests.lint.harness_parity
 
 docs-budget:  ## Report the docstring/comment prose budget and check it against the baseline

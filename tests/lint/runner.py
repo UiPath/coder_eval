@@ -43,6 +43,7 @@ from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
 from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
 from tests.lint.rules.ce066_no_report_imports_in_core import NoReportImportsInCore
 from tests.lint.rules.ce068_no_kind_names_in_kernel import NoKindNamesInKernel
+from tests.lint.rules.ce070_no_cap_or_skill_scan_in_adapters import NoCapOrSkillScanInAdapters
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -65,7 +66,7 @@ from tests.lint.violation import Violation
 # comment carrying 062 in an older branch, review or commit message must never
 # start meaning something new.
 #
-# Claim 070 next (069 is TestCE069HarnessParityTable). NOTE 065 IS TAKEN and is
+# Claim 071 next (069 is TestCE069HarnessParityTable, 070 is NoCapOrSkillScanInAdapters). NOTE 065 IS TAKEN and is
 # not in ALL_RULES: doc-surface and
 # whole-tree rules are `@pytest.mark.lint` classes in tests/test_custom_lint.py
 # rather than BaseRules, so the `_rule_ids` uniqueness assert below cannot see
@@ -124,6 +125,7 @@ ALL_RULES: list[RuleClass] = [
     TurnBracketOnTheClock,
     NoReportImportsInCore,
     NoKindNamesInKernel,
+    NoCapOrSkillScanInAdapters,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

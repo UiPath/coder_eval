@@ -59,22 +59,11 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
 
 ## Harness run-limit parity
 
-- **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same
-  thing on every backend, so a divergence is either fixed or documented — never silent.
-  **`run_limits.max_tool_calls` is the `TurnMonitor`'s cap, in resolved tool calls, on
-  every harness**: no adapter counts it; each stops at its next `should_stop` poll and
-  finalizes cleanly as `tool_calls_exhausted` (no crash, no retry).
-
-  The **known unfixed divergences** — which config fields each harness does and does not
-  enforce — are the table's to state, not this file's. Full table + rationale:
-  docs/agents/HARNESS_PARITY.md. The per-harness `agent.plugins[].path` depth is no longer
-  a divergence: staging hands every harness one layout (§ Skills, per harness).
-
-  The agent-field half of parity is now the `HarnessContract` each agent class declares:
-  a field, `permission_mode` value or tool name a harness cannot honor is a resolution
-  error, and `make parity-table` renders the contract (CE069 checks it), so the page can no
-  longer drift from the adapters. The run-limit half is still the hand-written table above;
-  Plan 2 moves it onto the contract.
+A shared field must mean the same thing on every backend. Both halves are generated
+tables in docs/agents/HARNESS_PARITY.md (`make parity-table`, CE069): `run_limits` from
+`RunLimits` and each agent's `HarnessContract`, the agent fields from the contract. Every
+cap and budget is the `TurnMonitor`'s (orchestration.md § The watcher became the
+TurnMonitor); CE070 keeps adapters from counting one again.
 
 ## Shared turn lifecycle
 

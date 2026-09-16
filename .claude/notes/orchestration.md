@@ -458,6 +458,23 @@ the pass-stop each round — and if none ever decides, the run simply continues 
 A row with zero pass-capable armed criteria (a negative row stacking only distractors) has
 nothing to defer for and fail-stops on the first misfire.
 
+### The watcher became the TurnMonitor
+
+`EarlyStopWatcher` answered one question on the `should_stop` channel. Every harness
+also counted its own turn cap in its own unit, and the budgets were checked by the
+orchestrator after a turn had already spent the money. `TurnMonitor` answers all four
+reasons (`EARLY_CRITERION`, `TOOL_CALL_CAP`, `TOKEN_BUDGET`, `USD_BUDGET`) from ONE
+collector, so a cap means the same number of resolved tool calls on every harness and a
+budget stops the agent at its next poll. It is cumulative because one instance serves
+every retry attempt and every dialog turn of a task: the cap, the budgets and
+`expected_tool_calls` all measure the task, not an attempt. On one round the armed stop
+wins, then the cap, then the token budgets, then USD, and the first latched reason is
+final, so the status an adapter finalizes with cannot flip after the fact. Fail-open
+covers only the armed criteria: a raising `live_verdict` is agent-output-dependent code,
+while the cap and budgets read counters and must keep running on a run that has lost its
+criteria. `result.tool_calls_exhausted` still comes from the turn's end status, not the
+latch, because a cap latched after the agent's last poll stopped nothing.
+
 ### Inert triggers are by design, and the watcher fails open
 
 A trigger whose polarity an instance can never decide is INERT, not an error — one
