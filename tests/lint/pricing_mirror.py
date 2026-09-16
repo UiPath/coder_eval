@@ -1,36 +1,19 @@
 """CE065 — the evalboard's rate table is generated from ``coder_eval.pricing``.
 
-``evalboard/lib/pricing.ts`` used to carry a hand-copied mirror of the Python
-rate card. Keeping a hand-copy honest needed five layers of bookkeeping: a
-regex parser that re-read ``pricing.py`` at test time, a meta-guard against that
-regex silently narrowing, a ``DELIBERATELY_UNMIRRORED`` exemption set, a
-staleness guard for the exemption set, and a comment begging the next reader to
-keep the set honest. It still shipped a real bug — ``claude-sonnet-5``,
-``gpt-5.6-sol``, ``gpt-5.6-terra`` and ``gpt-5.6-luna`` sat in the exemption set
-under "the evalboard never runs them" while appearing tens of thousands of times
-in the run corpus, so every one of those runs rendered "—" for cost with nothing
-failing.
+``render_pricing()`` renders ``evalboard/lib/pricing.generated.ts`` from
+``pricing.builtin_rates()``; ``make pricing-mirror`` calls ``write()``, and CE065
+(``check()``) re-renders and diffs against disk. There is deliberately **no ``--check`` mode
+and no arg parser** — CE065 *is* the checker, the rule ``plugin_reference.py`` states.
 
-If a *test* can read the table, a *generator* can emit it. So the table is no
-longer copied: ``render_pricing()`` renders
-``evalboard/lib/pricing.generated.ts`` from ``pricing.builtin_rates()``, ``make
-pricing-mirror`` calls ``write()``, and CE065 (``check()``) re-renders and diffs
-against disk. There is deliberately **no ``--check`` mode and no arg parser** —
-CE065 *is* the checker, the same rule ``plugin_reference.py`` states.
+Two sets stay off the board. A rate flagged ``ModelPricing.per_request_billing`` is omitted
+because the provider bills per request, so the board shows the captured actual cost.
+``DELIBERATELY_UNMIRRORED`` is a property of the FRONTEND, not of the rate, and carries a
+stale-membership guard.
 
-The exemption set encoded TWO different things, and they survive differently.
-That three OpenRouter models must stay unpriced so ``runs.ts``'s apportionment of
-the provider's real bill still fires is a property of the RATE, so it is now data
-on the rate itself (``ModelPricing.per_request_billing``), beside the rate it
-qualifies; nothing has to remember it. That four heavy frontier variants are not
-priced on the frontend is a property of the FRONTEND, not of the rate, so it
-stays here as ``DELIBERATELY_UNMIRRORED`` — an explicit list with the same
-stale-membership guard the deleted test carried, because an exemption nobody
-re-reads is what shipped the bug above.
+Like CE028 and CE033 this is not a ``BaseRule`` in the AST runner: it reasons over generated
+text, so it is wired as a ``@pytest.mark.lint`` class in ``tests/test_custom_lint.py``.
 
-Like CE028 and CE033 this is not a ``BaseRule`` in the AST runner: it reasons
-over generated text rather than one Python AST, so it is wired as a
-``@pytest.mark.lint`` class in ``tests/test_custom_lint.py``.
+Rationale: .claude/notes/lint-rules.md § CE065
 """
 
 from __future__ import annotations

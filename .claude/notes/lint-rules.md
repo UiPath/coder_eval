@@ -4,6 +4,22 @@
 
 A rule's module docstring (or, for a doc-surface or whole-tree rule, its `@pytest.mark.lint` class in `tests/test_custom_lint.py`) states the invariant, the scope and the blind spots, and it wins on those. This file holds why each rule exists: the defect that caused it and the measurements behind it.
 
+## CE004
+
+CE004 once borrowed CE066's core predicate whole and inherited its `reports/` exemption.
+The reports package runs without the CLI — the orchestrator writes a task report mid-run —
+so a `cli` import there closes a `cli -> orchestration -> reports -> cli` cycle. Nothing
+had imported `cli` from `reports/` yet, so the hole was latent rather than live; CE004's
+scope is now the package minus `cli/` itself, and re-enumerating the packages in the rule
+is what let that list rot in the first place.
+
+`harbor/` is in scope for the same reason `orchestration/` is: its reward writer raises a
+plain exception (`RewardWriteSkippedError`, or the re-exported `RegradeError`) and lets the
+CLI wrap it into an exit code — the `orchestration/regrade.py` -> `evaluate` shape.
+
+This is the cheap version: one narrow rule, no upward imports into `cli`. A fully layered
+import graph is what import-linter / grimp are for.
+
 ## CE009
 
 Without `extra='forbid'` a misspelled key, for example `directry: foo/` for `directory:
@@ -804,6 +820,73 @@ resolution that both `datetime` and `time.monotonic()` have on Linux, macOS and 
 That is the magnitude the clamped defect hid, which is why `>= 0.0` is not an acceptable
 relaxation.
 
+## CE065
+
+`evalboard/lib/pricing.ts` used to carry a hand-copied mirror of the Python rate card.
+Keeping a hand-copy honest needed five layers of bookkeeping: a regex parser that re-read
+`pricing.py` at test time, a meta-guard against that regex silently narrowing, a
+`DELIBERATELY_UNMIRRORED` exemption set, a staleness guard for the exemption set, and a
+comment begging the next reader to keep the set honest. It still shipped a real bug —
+`claude-sonnet-5`, `gpt-5.6-sol`, `gpt-5.6-terra` and `gpt-5.6-luna` sat in the exemption
+set under "the evalboard never runs them" while appearing tens of thousands of times in the
+run corpus, so every one of those runs rendered `—` for cost with nothing failing.
+
+If a *test* can read the table, a *generator* can emit it. `render_pricing()` now renders
+`evalboard/lib/pricing.generated.ts` from `pricing.builtin_rates()`, `make pricing-mirror`
+calls `write()`, and CE065 (`check()`) re-renders and diffs against disk. There is
+deliberately no `--check` mode and no arg parser — CE065 *is* the checker, the rule
+`plugin_reference.py` states.
+
+The old exemption set encoded TWO different things, and they survive differently. That
+three OpenRouter models must stay unpriced so `runs.ts`'s apportionment of the provider's
+real bill still fires is a property of the RATE, so it is now data on the rate itself
+(`ModelPricing.per_request_billing`), beside the rate it qualifies; nothing has to remember
+it. That four heavy frontier variants are not priced on the frontend is a property of the
+FRONTEND, so it stays as `DELIBERATELY_UNMIRRORED` with the same stale-membership guard the
+deleted test carried — an exemption nobody re-reads is what shipped the bug above.
+
+## CE066
+
+The invariant is not "core must not import reports": core legitimately *writes* reports —
+`orchestrator.py` writes the per-task HTML and `orchestration/batch.py` drives
+`ReportGenerator`. What must not happen is core reaching into the reports layer for a
+metric, a statistic, a serializer or a formatter, because that is how a number the
+evaluation loop needs comes to live in a rendering module.
+
+Before the split that was the actual shape of the code: the orchestrator imported
+`turn_time_buckets` and `visible_turn_count` from `reports_stats`, and
+`orchestration/batch.py` imported the run.json row serializer from `reports_experiment`.
+Those names now live in `result_metrics.py`, `stats.py` and `run_record.py`.
+
+An ALLOWLIST, not a denylist — the CE018 rationale. The list is purely writers;
+`eval_result_to_task_dict` is deliberately absent, because carrying a serializer on it
+would be the rule documenting a wart instead of the wart being removed.
+
+Both the ABSOLUTE and the RELATIVE spelling are checked, and that is not a detail. The
+relative form is the local idiom — both surviving edges are `from .reports import
+write_task_html` and `from ..reports import ReportGenerator` — and an earlier draft matched
+only `node.module`, which for a relative import holds `"reports"` with the dots in
+`node.level`. It fired on nothing the codebase actually writes, and its own tests passed
+because they used the absolute form. An unrun assertion is documentation, not enforcement.
+
+## TestRuffExternalCoversEveryRule
+
+`[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid rule code" for a
+suppression it does not own. It was hand-maintained and had fallen ~14 ids behind —
+including CE054 and CE048, whose own docstrings advertise `# noqa: CE054` / `# noqa: CE048`
+as the supported escape hatch. The first person to use the documented exemption got a red
+`make check` for doing exactly what the rule told them to.
+
+The list then drifted a SECOND time, and this class is why it drifted quietly: it read
+`ALL_RULES` alone, so it could not see a rule that is a `@pytest.mark.lint` class rather
+than a `BaseRule`. CE044 and CE065 are both such rules, both were missing, and only CE065
+was noticed — by a human reading a diff. `_known()` now unions both registries. Nothing was
+red for want of those two entries (no `# noqa: CE044` or `# noqa: CE065` exists in the
+tree), so the fix was pre-emptive.
+
+Both directions are asserted. A declared id for a deleted rule is the exemption-set rot that
+the generated pricing table exists to remove.
+
 ## TestRunRecordFieldVocabulary
 
 `jq` returns `null` for a key that does not exist instead of failing, so a wrong field
@@ -818,6 +901,31 @@ Only the head of each dotted path is checked because `task_config` is a free-for
 run-level and criterion-level models instead of tracking each expression's scope is a
 weakening that still catches every one of the six shipped names, since none of them exists
 on any of those models.
+
+## _layers
+
+A second copy of "where does this file sit in the package" is how a package added to one
+regex silently escapes the other, so the package anchor and the `cli/` boundary are spelled
+once. The two rules do NOT share an exemption set, because they do not ask the same
+question — see [CE004](#ce004) for the cycle that inheriting one opened.
+
+Both scopes are ALLOWLISTS of what is exempt, because the denylist form left holes twice
+over. An earlier draft named only `orchestrator.py` as the top-level core module, which
+exempted `result_metrics.py` — the very module CE066's fix message tells a violator to move
+their metric into — along with `run_record.py`, `stats.py` and `timing.py`. Its successor
+listed ten core directories and `isolation/` was not one of them, so
+`isolation/docker_runner.py`, the `driver: docker` evaluation path, could import anything
+with both rules silent.
+
+The package regex is anchored on `src/` because the unanchored form made a repo-root file
+core: this project's own checkout directory is named `coder_eval`, so
+`…/coder_eval/conftest.py` matched the package. Anchoring narrows that trap without closing
+it — a clone under a parent directory literally named `src` still matches, and so does that
+clone's `tests/` tree. No path substring separates the package from a checkout laid out like
+it; closing it properly means relativising every rule's path against the repo root. It is
+unreachable today: CE004 and CE066 are only ever handed paths under the runner's `SRC`, and
+`_ALSO_SCAN_TESTS` is `{"CE048"}`, which uses neither predicate. `TestCoreLayerMembership`
+pins the residual so nobody reads the anchoring as a complete fix.
 
 ## _model_ctor
 

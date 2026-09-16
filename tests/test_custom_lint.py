@@ -4411,30 +4411,16 @@ class TestCE061WindowViaCloseWindow:
 class TestRuffExternalCoversEveryRule:
     """Every CE rule's documented `# noqa` must be accepted by ruff.
 
-    `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid
-    rule code" for a suppression it does not own. It was hand-maintained and had
-    fallen ~14 ids behind — including CE054 and CE048, whose own docstrings
-    advertise `# noqa: CE054` / `# noqa: CE048` as the supported escape hatch. So
-    the first person to use the documented exemption got a red `make check`
-    instead, for doing exactly what the rule told them to.
-
-    The list then drifted a SECOND time, and this class is why it drifted
-    quietly: it read `ALL_RULES` alone, so it could not see a rule that is a
-    `@pytest.mark.lint` class here rather than a `BaseRule`. CE044 and CE065 are
-    both such rules, both were missing, and only CE065 was noticed — by a human
-    reading a diff. `_known()` now unions both registries.
-
-    Both directions are asserted. A declared id for a deleted rule is the
-    exemption-set rot that the generated pricing table exists to remove.
+    `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid rule
+    code" for a suppression it does not own. `_known()` unions both registries —
+    `ALL_RULES` and the `@pytest.mark.lint` classes here — and both directions are
+    asserted: a missing id, and a declared id for a rule that no longer exists.
 
     Blind spot: the `@pytest.mark.lint` half of `_known()` discovers ids by the
-    `class TestCE\\d{3}` naming convention, which every such class follows today
-    but nothing enforces. A class named otherwise is invisible here, and its id
-    can go undeclared exactly as CE044 did.
+    `class TestCE\\d{3}` naming convention, which every such class follows
+    today but nothing enforces. A class named otherwise is invisible here.
 
-    Nothing is red today for want of these two entries — no `# noqa: CE044` or
-    `# noqa: CE065` exists in the tree — so this is pre-emptive rather than the
-    fix for a broken build.
+    Rationale: .claude/notes/lint-rules.md § TestRuffExternalCoversEveryRule
     """
 
     @staticmethod

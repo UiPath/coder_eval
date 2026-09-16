@@ -1,30 +1,18 @@
-"""CE004: core layers must not import from coder_eval.cli.
+"""CE004: core layers must not import from ``coder_eval.cli``.
 
-The rule's scope is everything under src/coder_eval/ except the cli/ package
-itself. Importing from coder_eval.cli creates an upward dependency that breaks
-testability in isolation. The package anchor and the cli/ boundary live in
-``_layers`` so CE004 and CE066 cannot drift apart about where either is;
-re-enumerating the packages here is how that list rots.
+An upward dependency on ``coder_eval.cli`` breaks testability in isolation. Scope is
+everything under ``src/coder_eval/`` except ``cli/`` itself, via ``_layers`` so CE004 and
+CE066 cannot drift apart about where the boundary is.
 
-``reports/`` is in scope, unlike under CE066. The reports package runs without
-the CLI — the orchestrator writes a task report mid-run — so a ``cli`` import
-there closes a cli -> orchestration -> reports -> cli cycle. CE004 once borrowed
-CE066's core predicate whole and inherited its ``reports/`` exemption; nothing
-had imported ``cli`` from there yet, so the hole was latent rather than live.
+``reports/`` is in scope, unlike under CE066: it runs without the CLI, so a ``cli`` import
+there closes a ``cli -> orchestration -> reports -> cli`` cycle. ``harbor/`` is in scope for
+the same reason ``orchestration/`` is. Both the absolute and the RELATIVE spelling are
+checked; see ``_layers.imports_package``.
 
-``harbor/`` is in scope for the same reason ``orchestration/`` is:
-its reward writer wants to raise a plain exception (``RewardWriteSkippedError``,
-or the re-exported ``RegradeError``) and let the CLI wrap it into an exit
-code — exactly the ``orchestration/regrade.py`` -> ``evaluate`` shape.
+BLIND SPOT: one narrow rule, not a layered import graph. For that, evaluate import-linter /
+grimp.
 
-Both the absolute and the RELATIVE spelling are checked — see
-``_layers.imports_package`` for why that distinction is load-bearing rather than
-pedantic.
-
-Note: this is a single, narrow rule (no upward imports into cli). For a
-fully layered import graph (no upward imports between any layers), evaluate
-import-linter / grimp — purpose-built for that. CE004 is the cheap version
-that catches the one mistake we have actually seen.
+Rationale: .claude/notes/lint-rules.md § CE004
 """
 
 import ast
