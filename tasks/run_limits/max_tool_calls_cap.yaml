@@ -29,9 +29,6 @@ run_limits:
   turn_timeout: 300
   task_timeout: 600
 
-agent:
-  permission_mode: bypassPermissions
-
 success_criteria:
   # The early files prove the agent really was working when the cap cut it off,
   # which distinguishes "capped" from "never started".

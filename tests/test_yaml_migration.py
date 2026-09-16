@@ -66,7 +66,7 @@ def test_migrated_smoke_tasks_load() -> None:
     from coder_eval.orchestration.task_loader import load_task
 
     samples = [
-        ("tasks/smoke_task_timeout.yaml", {"max_tool_calls": 2, "task_timeout": 30}),
+        ("tasks/smoke_task_timeout.yaml", {"max_tool_calls": 10, "task_timeout": 30}),
         ("tasks/smoke_cost_budget_exceeded.yaml", {"max_tool_calls": 2, "max_usd": 0.0001}),
     ]
     with warnings.catch_warnings():

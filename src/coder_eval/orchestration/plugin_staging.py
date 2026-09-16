@@ -133,12 +133,14 @@ def link_or_copy(source: Path, target: Path) -> None:
 def stage_plugins(plugins: Sequence[LocalPluginConfig], staging_dir: Path) -> StagedPlugins:
     """Write ``<staging_dir>/.claude-plugin/plugin.json`` and ``<staging_dir>/skills/<name>``.
 
-    An existing ``staging_dir`` is removed first, so a re-executed row starts clean.
+    The returned root is absolute: every harness runs with the sandbox as its cwd. An
+    existing ``staging_dir`` is removed first, so a re-executed row starts clean.
 
     Raises:
         PluginStagingError: see ``scan_plugin_skills``.
     """
     skills = scan_plugin_skills(plugins)
+    staging_dir = staging_dir.absolute()
     if staging_dir.is_symlink() or staging_dir.is_file():
         staging_dir.unlink()
     elif staging_dir.exists():

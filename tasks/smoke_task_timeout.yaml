@@ -14,8 +14,10 @@ initial_prompt: |
 # constitute a misuse warning at load time. Wall-clock cost in CI is ~30s.
 # Sleep is 300s (10× task_timeout) so a regression that lets the agent run
 # through but kills it on the SDK-level turn timeout would also miscount.
+# max_tool_calls stays out of reach: a retried or backgrounded `sleep` must not
+# end the run on the cap before the watchdog fires.
 run_limits:
-  max_tool_calls: 2
+  max_tool_calls: 10
   task_timeout: 30
 
 tags: [smoke-fail]

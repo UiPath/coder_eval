@@ -19,9 +19,6 @@ run_limits:
   turn_timeout: 45
   task_timeout: 180
 
-agent:
-  permission_mode: bypassPermissions
-
 success_criteria:
   - type: file_exists
     path: "never-created.txt"

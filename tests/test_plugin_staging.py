@@ -149,6 +149,14 @@ class TestStaging:
             p.name for p in (two.root / "skills").iterdir()
         )
 
+    def test_the_staged_root_is_absolute_for_a_relative_staging_dir(self, tmp_path: Path, monkeypatch) -> None:
+        """Every harness runs with the sandbox as cwd, so a relative root would name nothing there."""
+        _skill(tmp_path / "plugin" / "skills", "alpha")
+        monkeypatch.chdir(tmp_path)
+        staged = stage_plugins([_local("plugin")], Path("runs") / "t" / "plugin_root")
+        assert staged.root.is_absolute()
+        assert staged.root == (tmp_path / "runs" / "t" / "plugin_root").resolve()
+
     def test_re_staging_replaces_an_existing_root(self, tmp_path: Path) -> None:
         _skill(tmp_path / "plugin" / "skills", "alpha")
         staging_dir = tmp_path / "run" / "plugin_root"

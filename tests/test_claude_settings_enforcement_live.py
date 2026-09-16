@@ -97,11 +97,12 @@ async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict
         # to short-circuit settings-level permissions.deny in the CLI.
         model=_model_for_env(),
         claude_settings=claude_settings,
+        sdk_options={"max_turns": 3},
     )
     agent = ClaudeCodeAgent(config, route=_route_from_env())
     await agent.start(str(sandbox_dir))
     try:
-        turn = await agent.communicate(prompt, timeout=60.0, max_turns=3)
+        turn = await agent.communicate(prompt, timeout=60.0)
     finally:
         await agent.stop()
     return agent, turn

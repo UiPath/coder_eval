@@ -8,9 +8,6 @@ tags:
   - skills
 
 agent:
-  type: claude-code
-  setting_sources: []
-  allowed_tools: [Skill]
   plugins:
     - type: local
       path: tasks/skills/probe_plugin

@@ -107,10 +107,10 @@ async def test_codex_live_edits_file_and_records_telemetry(tmp_path):
 
 @_live
 async def test_codex_live_cooperative_stop_ends_turn_promptly(tmp_path):
-    """A ``should_stop`` that flips True after the first ToolStart ends the turn
+    """A ``should_stop`` that returns a reason after the first ToolStart ends the turn
     cleanly as STOPPED_EARLY instead of running the multi-step task out — the
     only automated check of real ``handle.interrupt()`` behavior."""
-    from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, ToolStartEvent
+    from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason, ToolStartEvent
 
     class _Sink:
         def __init__(self):
@@ -132,7 +132,7 @@ async def test_codex_live_cooperative_stop_ends_turn_promptly(tmp_path):
             "then create three files a.txt, b.txt and c.txt.",
             timeout=180,
             stream_callback=sink,
-            should_stop=lambda: sink.tool_started,
+            should_stop=lambda: StopReason.EARLY_CRITERION if sink.tool_started else None,
         )
     finally:
         await agent.stop()
