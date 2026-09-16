@@ -664,7 +664,8 @@ skills directory (`<path>/<name>/SKILL.md`). Both layouts work on every harness.
 agent starts, coder-eval stages the skills into one root, `<run_dir>/plugin_root`: a
 `.claude-plugin/plugin.json` that names `coder-eval-plugins`, and one `skills/<name>` symlink
 per skill. Each harness receives that root in its native way. Only skills are staged: a
-plugin's `agents/`, `commands/` and `hooks/` do not reach any harness, Claude Code included.
+plugin's `agents/`, `commands/`, `hooks/` and `.mcp.json` do not reach any harness, Claude Code
+included. Claude Code names staged skills `coder-eval-plugins:<skill>`, not `<plugin>:<skill>`.
 Files beside the skills also stay behind: a skill that reads `${CLAUDE_PLUGIN_ROOT}/scripts/`
 or a shared `references/` directory at the plugin root cannot find it. Keep a skill's files
 inside its own `<name>/` directory.

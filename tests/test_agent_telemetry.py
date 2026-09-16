@@ -1358,6 +1358,36 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
         )
 
 
+class TestClaudeTurnTokensAreDeltas:
+    """A message id that resumes after another id's emission reports only its new tokens.
+
+    The ``TurnMonitor`` sums ``TurnEndEvent.tokens`` mid-turn, so a re-reported
+    generation would latch a budget on usage the agent never spent.
+    """
+
+    def test_interleaved_message_ids_never_report_the_same_tokens_twice(self, monkeypatch):
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.events import AgentEndStatus, TurnEndEvent
+
+        clock, state = TestClaudeFirstWindowReseed()._state(monkeypatch)
+        ends: list[TurnEndEvent] = []
+
+        class _Sink:
+            def on_event(self, event):
+                if isinstance(event, TurnEndEvent):
+                    ends.append(event)
+
+        state.emit = CompositeStreamCallback([state.collector, _Sink()])
+        for mid in ("x", "y", "x", "y"):
+            clock.at_ms += 100
+            state.on_assistant_message(TestClaudeFirstWindowReseed._assistant(mid))
+        state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
+
+        reported = sum((end.tokens.output_tokens for end in ends if end.tokens is not None), 0)
+        recorded = sum(rec.output_tokens for records in state.emissions_by_id.values() for rec in records)
+        assert reported == recorded
+
+
 class TestClaudeFirstWindowReseed:
     """The first `message_start` moves the window mark; a later one must not.
 

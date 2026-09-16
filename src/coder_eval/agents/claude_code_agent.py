@@ -279,6 +279,9 @@ class _ClaudeTurnState:
 
         # Turn/tool bracketing (self-describing event tree).
         self.current_turn_id: str | None = None
+        # Tokens each message id already reported on a TurnEndEvent: an id can
+        # resume after another id's emission, and must report only what is new.
+        self.reported_tokens_by_id: dict[str, TokenUsage] = {}
         self.tool_turn_ids: dict[str, str] = {}  # tool_id -> spawning turn_id
         self.emitted_tool_ends: set[str] = set()  # tool_ids already closed
         self.finalized = False
@@ -297,6 +300,22 @@ class _ClaudeTurnState:
                 cache_read_input_tokens=rec.cache_read_tokens,
             )
         return total
+
+    def unreported_turn_tokens(self, turn_id: str) -> TokenUsage | None:
+        """The part of ``turn_tokens`` no earlier ``TurnEndEvent`` for this id reported."""
+        total = self.turn_tokens(turn_id)
+        if total is None:
+            return None
+        previous = self.reported_tokens_by_id.get(turn_id)
+        self.reported_tokens_by_id[turn_id] = total
+        if previous is None:
+            return total
+        return TokenUsage(
+            uncached_input_tokens=total.uncached_input_tokens - previous.uncached_input_tokens,
+            output_tokens=total.output_tokens - previous.output_tokens,
+            cache_creation_input_tokens=total.cache_creation_input_tokens - previous.cache_creation_input_tokens,
+            cache_read_input_tokens=total.cache_read_input_tokens - previous.cache_read_input_tokens,
+        )
 
     def dispatch(self, message: Message) -> None:
         """Record the raw message and route it to its per-kind handler.
@@ -340,7 +359,7 @@ class _ClaudeTurnState:
                         task_id=self.task_id,
                         turn_id=self.current_turn_id,
                         status=TurnEndStatus.COMPLETED,
-                        tokens=self.turn_tokens(self.current_turn_id),
+                        tokens=self.unreported_turn_tokens(self.current_turn_id),
                     )
                 )
             self.current_turn_id = turn_id
@@ -644,7 +663,7 @@ class _ClaudeTurnState:
                     task_id=self.task_id,
                     turn_id=self.current_turn_id,
                     status=TurnEndStatus(status.value),
-                    tokens=self.turn_tokens(self.current_turn_id),
+                    tokens=self.unreported_turn_tokens(self.current_turn_id),
                 )
             )
             self.current_turn_id = None

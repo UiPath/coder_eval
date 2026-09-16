@@ -124,8 +124,9 @@ After each exchange the driver evaluates the stop conditions **in this order**, 
    `end_of_dialog` is rejected at load time, since there would be nothing to check against.
 3. **`max_turns`** (`max_turns`) — the hard cap on exchanges. The agent reaching
    [`run_limits.max_tool_calls`](TASK_DEFINITION_GUIDE.md#run-limits) mid-exchange ends the dialog
-   with its own reason, `tool_call_cap`. That cap is cumulative across every dialog turn: it counts
-   the agent's resolved tool calls over the whole dialog, not per exchange.
+   with its own reason, `tool_call_cap`, which wins over `max_turns`, the budget and the stop token
+   on that turn (only a criteria pass outranks it). That cap is cumulative across every dialog turn:
+   it counts the agent's resolved tool calls over the whole dialog, not per exchange.
 4. **`max_total_tokens`** (`budget`) — the dialog-wide budget across simulator **and** agent. The
    dialog ends and the task is **still scored** — unlike
    [`run_limits.max_total_tokens`](TASK_DEFINITION_GUIDE.md#run-limits), which covers the subject

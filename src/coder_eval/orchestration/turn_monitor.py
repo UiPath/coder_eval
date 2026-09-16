@@ -122,6 +122,7 @@ class TurnMonitor:
             logger.warning("[%s] all armed stop triggers are inert for this row; run cannot stop early", task_id)
         self._limits = limits
         self._model = model
+        self._start_model: str | None = None
         self._reported_model: str | None = None
         self._collector = EventCollector()
         self._resolved_tool_ids: set[str] = set()
@@ -197,7 +198,7 @@ class TurnMonitor:
             if self._started_monotonic is None:
                 self._started_monotonic = time.monotonic()
             self._in_flight = TokenUsage()
-            self._reported_model = event.model or self._reported_model
+            self._start_model = event.model or self._start_model
         elif isinstance(event, TurnStartEvent):
             self._sdk_turn_index += 1
             self._reported_model = event.model or self._reported_model
@@ -260,8 +261,9 @@ class TurnMonitor:
     def cost_usd(self) -> float | None:
         """Cumulative USD: every finished turn priced on its own, plus the priceable in-flight deltas.
 
-        A turn is priced from its reported cost, else from the rate card for the model
-        the harness reported, else for ``agent.model``; a turn with no usage costs 0.
+        A turn is priced from its reported cost, else from the rate card for the first
+        priced model of ``agent.model``, the model the agent resolved at start, and the
+        last model a message reported; a turn with no usage costs 0.
         ``None`` once any finished turn could be priced none of these ways.
         """
         if self._unpriced_turn:
@@ -302,7 +304,7 @@ class TurnMonitor:
             return usage.total_cost_usd if math.isfinite(usage.total_cost_usd) else None
         if usage.is_empty():
             return 0.0
-        for model in (self._reported_model, self._model):
+        for model in (self._model, self._start_model, self._reported_model):
             if model is None:
                 continue
             cost = calculate_cost(

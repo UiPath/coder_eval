@@ -2534,29 +2534,28 @@ class Orchestrator:
                         await self._run_dialog_criteria_check(judge_usage_accum)
                     raise
 
+                # Soft check (logs once, never aborts), then the cap fact, both BEFORE
+                # any stop decision, so a turn that also ends the dialog keeps them.
+                self._check_expected_tool_calls(iteration=turns_completed)
+                if turn_record.tool_calls_exhausted:
+                    self.result.tool_calls_exhausted = True
+
                 stop_decision = evaluate_stop(
                     config=sim_config,
                     turns_completed=turns_completed,
                     total_tokens_used=total_tokens_used,
                     criteria_all_passed=all_passed,
                 )
-                if stop_decision.stop:
-                    assert stop_decision.reason is not None
-                    stop_reason = stop_decision.reason
-                    break
-
-                # Soft check (logs once, never aborts). BEFORE the cap break, so a
-                # turn tripping both still emits the expected_tool_calls warning
-                # before the dialog terminates.
-                self._check_expected_tool_calls(iteration=turns_completed)
-
-                if turn_record.tool_calls_exhausted:
-                    self.result.tool_calls_exhausted = True
+                if turn_record.tool_calls_exhausted and stop_decision.reason is not DialogStopReason.CRITERIA_PASSED:
                     stop_reason = DialogStopReason.TOOL_CALL_CAP
                     logger.warning(
                         "Agent reached the tool-call cap during simulation turn %s; ending dialog.",
                         turns_completed,
                     )
+                    break
+                if stop_decision.stop:
+                    assert stop_decision.reason is not None
+                    stop_reason = stop_decision.reason
                     break
 
                 solicited = await self._solicit_user_message(

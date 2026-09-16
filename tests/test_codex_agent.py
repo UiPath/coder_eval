@@ -965,6 +965,64 @@ class TestCommunicateCrashTokenFallback:
         assert tu.output_tokens == 40
 
 
+class TestFoldSubagentTokensCost:
+    """A turn total carries a cost only when every part of it could be priced."""
+
+    @staticmethod
+    def _child(model: str):
+        from datetime import datetime
+
+        from coder_eval.models import AssistantMessage
+
+        now = datetime.now()
+        return AssistantMessage(
+            started_at=now,
+            completed_at=now,
+            generation_duration_ms=1.0,
+            input_tokens=1000,
+            output_tokens=10,
+            model=model,
+            parent_tool_use_id="spawn-1",
+        )
+
+    def test_an_unpriced_parent_leaves_the_folded_total_unpriced(self, monkeypatch):
+        from coder_eval.models import TokenUsage
+
+        monkeypatch.setattr(CodexAgent, "_effective_model", lambda self: None)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        parent = TokenUsage(uncached_input_tokens=5000, output_tokens=50, total_cost_usd=None)
+
+        folded = agent._fold_subagent_tokens(parent, [self._child("gpt-5.5")])
+
+        assert folded is not None
+        assert folded.total_cost_usd is None
+
+    def test_an_unpriced_child_leaves_the_folded_total_unpriced(self):
+        from coder_eval.models import TokenUsage
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        parent = TokenUsage(uncached_input_tokens=5000, output_tokens=50, total_cost_usd=0.01)
+
+        folded = agent._fold_subagent_tokens(parent, [self._child("no-such-model-on-the-card")])
+
+        assert folded is not None
+        assert folded.total_cost_usd is None
+
+    def test_priced_parent_and_children_sum(self):
+        from coder_eval.models import TokenUsage
+        from coder_eval.pricing import calculate_cost
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        parent = TokenUsage(uncached_input_tokens=5000, output_tokens=50, total_cost_usd=0.01)
+
+        folded = agent._fold_subagent_tokens(parent, [self._child("gpt-5.5")])
+
+        child = calculate_cost("gpt-5.5", uncached_input_tokens=1000, output_tokens=10)
+        assert child is not None
+        assert folded is not None
+        assert folded.total_cost_usd == pytest.approx(0.01 + child)
+
+
 class TestTokenUsageFromMessages:
     """Direct unit test of the crash-path token fallback summation."""
 

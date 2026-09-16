@@ -30,6 +30,7 @@ from coder_eval.streaming.events import (
     ToolEndStatus,
     ToolStartEvent,
     TurnEndEvent,
+    TurnStartEvent,
 )
 from tests._fixtures.live_criteria import FROZEN_TS
 
@@ -384,6 +385,23 @@ class TestUsdBudget:
             ],
         )
         assert monitor.should_stop() is StopReason.USD_BUDGET
+
+    def test_a_sub_agent_model_on_the_stream_does_not_reprice_the_configured_model(self) -> None:
+        task = _task(limits=RunLimits(max_usd=100.0), model="claude-sonnet-4-6")
+        monitor = TurnMonitor.for_task(task, arm=True)
+        _feed(
+            monitor,
+            [
+                AgentStartEvent(task_id="t", model="claude-sonnet-4-6"),
+                TurnStartEvent(task_id="t", model="claude-haiku-4-5"),
+                AgentEndEvent(
+                    task_id="t", usage=TokenUsage(uncached_input_tokens=1_000_000), model_used="claude-haiku-4-5"
+                ),
+            ],
+        )
+        from coder_eval.pricing import calculate_cost
+
+        assert monitor.cost_usd() == pytest.approx(calculate_cost("claude-sonnet-4-6", 1_000_000, 0))
 
     def test_a_non_finite_reported_cost_is_unpriceable(self) -> None:
         monitor = TurnMonitor.for_task(_task(limits=RunLimits(max_usd=0.10)), arm=True)

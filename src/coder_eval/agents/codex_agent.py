@@ -2132,26 +2132,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return parent
         base = parent or TokenUsage()
 
-        # Each child generation on its own model, then sum.
-        child_cost = 0.0
-        for m in children:
-            child_cost += (
-                calculate_cost(
-                    m.model or self._effective_model() or "",
-                    uncached_input_tokens=_message_uncached_input(m),
-                    output_tokens=m.output_tokens,
-                    cache_read_tokens=m.cache_read_tokens,
-                )
-                or 0.0
+        # Each child generation on its own model, then sum. The total is unpriced
+        # when any priced-from-tokens part is: a partial sum would read as the bill.
+        child_costs = [
+            calculate_cost(
+                m.model or self._effective_model() or "",
+                uncached_input_tokens=_message_uncached_input(m),
+                output_tokens=m.output_tokens,
+                cache_read_tokens=m.cache_read_tokens,
             )
-
+            for m in children
+        ]
         base_cost = base.total_cost_usd
+        unpriced = any(c is None for c in child_costs) or (base_cost is None and not base.is_empty())
         return TokenUsage(
             uncached_input_tokens=base.uncached_input_tokens + sum(_message_uncached_input(m) for m in children),
             output_tokens=base.output_tokens + sum(m.output_tokens for m in children),
             cache_creation_input_tokens=base.cache_creation_input_tokens,
             cache_read_input_tokens=base.cache_read_input_tokens + sum(m.cache_read_tokens for m in children),
-            total_cost_usd=(base_cost or 0.0) + child_cost if (base_cost is not None or child_cost) else None,
+            total_cost_usd=None if unpriced else (base_cost or 0.0) + sum(c or 0.0 for c in child_costs),
         )
 
     def _token_usage_from_messages(self, messages: list[TranscriptMessage]) -> TokenUsage | None:

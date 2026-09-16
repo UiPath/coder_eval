@@ -141,13 +141,19 @@ it on every LiteLLM route.
 
 Implement these three abstract methods:
 
-- [ ] `async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None) -> None`
+- [ ] `async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root: Path | None = None) -> None`
 - [ ] `async def communicate(self, user_input, *, stream_callback=None, timeout=None, should_stop: Callable[[], StopReason | None] | None = None) -> TurnRecord`
 - [ ] `async def stop(self) -> None`
 
+`plugin_root` is the staged plugin root (`<root>/skills/<name>/SKILL.md`), or `None` when
+the task sets no plugins. Deliver it the harness's native way; do not scan for skills.
+
 `should_stop` is the run's single stop poll. The `TurnMonitor` owns it: it reads your
-event stream and decides every stop (armed criteria, the tool-call cap). Your agent
-does not count or cap anything. With `cooperative_stop=True`:
+event stream and decides every stop (armed criteria, the tool-call cap, the token and USD
+budgets). Your agent does not count or cap anything. The budgets read
+`TurnEndEvent.tokens` as a per-report DELTA and `AgentEndEvent.usage` as the attempt's
+authoritative total, so never report cumulative tokens on a `TurnEndEvent`. Declare how
+often you report them as `usage_granularity`. With `cooperative_stop=True`:
 
 - [ ] Call `should_stop()` at each safe boundary (for example, after each resolved
       tool call, before you pull the next unit of work).

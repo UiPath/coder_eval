@@ -145,8 +145,8 @@ class BaseSuccessCriterion(BaseModel, ABC):
         Always ``False`` on the base: only live-observable criteria
         (``LiveSuccessCriterion`` subclasses) carry stop triggers, so arming an
         unobservable criterion is unrepresentable rather than a validation
-        error. The armed set drives both the runtime TurnMonitor
-        (``TurnMonitor``) and the weighted armed gate
+        error. The armed set drives both the runtime
+        ``TurnMonitor`` and the weighted armed gate
         (``EvaluationResult.armed_criteria_passed``).
         """
         return False

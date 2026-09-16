@@ -31,7 +31,7 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
 
 - [ ] CE-rule: the early-stop watcher stop rule must decide polarity via the
   resolved `_armed_polarities`, never a raw `criterion.stop_when` comparison —
-  forbid `.stop_when` attribute reads inside `EarlyStopWatcher._evaluate` /
+  forbid `.stop_when` attribute reads inside `TurnMonitor._evaluate_impl` /
   `_resolve_armed_polarities`'s callers in `orchestration/early_stop.py`. This
   diff *was* the fix for exactly that class of bug (the old rule compared
   `stop_when in ("pass","decided")` and so vetoed every mixed `auto` pass-stop).
@@ -744,7 +744,7 @@ divergences, so the deferred-work record is one place. Measurements in
   `AgentStartEvent`**, which resets only `_agent_end`. Pre-existing and NOT
   introduced by the timing work. Blast radius is narrower than it first looks:
   the persisted record, the reports and `max_turns` all read the AGENT's
-  collector, which is fresh per `communicate()`. Only `EarlyStopWatcher`'s
+  collector, which is fresh per `communicate()`. Only `TurnMonitor`'s
   long-lived collector accumulates — where carrying a turn's whole engagement
   across retry attempts is arguably what a live "did it engage the skill"
   verdict wants, and `_check_round`'s docstring already reasons about crashed
