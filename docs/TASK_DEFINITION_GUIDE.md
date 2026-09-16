@@ -107,9 +107,9 @@ sandbox, no API call. Use it to park a task that is blocked on something outside
 (an upstream bug, a missing service) without deleting the YAML and losing its history.
 
 ```yaml
-task_id: "codex_disallowed_tools_test"
-# Blocked: the Codex SDK doesn't enforce disallowed_tools via config. Re-enable
-# once upstream ships the fix.
+task_id: "flaky_upstream_service"
+# Blocked: the mocked service times out under CI load (issue #123). Re-enable
+# once the mock is fixed.
 skip: true
 ```
 

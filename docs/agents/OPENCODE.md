@@ -170,10 +170,32 @@ skills under test otherwise looks entirely normal.
 
 ## Permissions
 
-Every `permission_mode` except `plan` passes `--auto`, auto-approving tool use.
-This is required for unattended evaluation — without it OpenCode blocks on an
-interactive approval prompt and the turn runs to its timeout. Use
-`permission_mode: plan` when you explicitly want approvals withheld.
+Every run passes `--auto`, which auto-approves each permission that is not
+explicitly denied. Without it OpenCode blocks on an interactive approval prompt and
+the turn runs to its timeout.
+
+The uniform fields become OpenCode `permission` rules, merged into
+`OPENCODE_CONFIG_CONTENT` beside `skills.paths` (an inherited value is merged, and
+our keys win):
+
+| Field | `permission` rules |
+|---|---|
+| `allowed_tools` | `"*": "deny"`, `"allow"` for `external_directory` and `doom_loop`, then `"allow"` for each mapped key |
+| `disallowed_tools` | `"deny"` for each mapped key (a deny always wins) |
+| `permission_mode: plan` | `edit: "deny"`, `bash: "deny"` (read-only) |
+
+Claude tool names map to permission keys by inverting the telemetry map. OpenCode's
+keys are coarser than its tools: `edit` governs `write`, `edit`, `patch`,
+`multiedit` and `apply_patch`, so `Write` and `Edit` restrict together. A name with
+no OpenCode equivalent restricts nothing; an allowlist of only such names denies
+every tool. An empty `allowed_tools: []` restricts nothing, as on Claude Code. Our
+rules are placed after every inherited rule, because OpenCode applies the last
+matching rule. A string rule such as `read: "allow"` replaces the CLI's default
+`.env` read deny, which is acceptable inside a sandbox.
+
+`system_prompt` is written to a temporary file outside the sandbox and listed in
+`instructions`, which OpenCode appends to its own system messages (semantics
+`append`). The file is removed at `stop()`.
 
 ## Telemetry
 
@@ -310,11 +332,8 @@ any other provider credential can be added via `sandbox.env_passthrough_extra`.
 
 ## Known limitations
 
-- **`allowed_tools` / `disallowed_tools` / `system_prompt` / `system_prompt_file`
-  are not enforced.** The CLI exposes no equivalent knob, so these are
-  dropped — `start()` logs a warning naming each one it saw (`experiments/default.yaml`
-  sets `allowed_tools` on every task, so expect it on a default run). Do not rely on
-  them as a boundary here.
+- **Tool restrictions are not a confinement boundary.** They limit which tools the
+  model may call, not what a permitted `bash` call can do.
 - **Only the *skills* half of a `plugins:` entry is honored** (see below). A Claude
   plugin's agents, hooks, commands and MCP servers have no OpenCode equivalent and
   are still dropped.

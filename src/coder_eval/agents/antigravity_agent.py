@@ -38,6 +38,7 @@ from coder_eval.errors import (
     truncate_crash_message,
 )
 from coder_eval.models import (
+    READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AntigravityAgentConfig,
     ApiRoute,
@@ -47,6 +48,7 @@ from coder_eval.models import (
     DirectRoute,
     Enforcement,
     HarnessContract,
+    PermissionMode,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -114,12 +116,22 @@ _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: dict[str, str] = {
     "search_directory": "Grep",
     "find_file": "Glob",
     "list_directory": "LS",
-    "start_subagent": "Task",
+    "start_subagent": "Agent",
     "search_web": "WebSearch",
+    "read_url_content": "WebFetch",
     "generate_image": "GenerateImage",
     "ask_question": "AskUser",
     "finish": "Finish",
 }
+
+# Inverse of _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: each Claude name -> its harness tools.
+_CLAUDE_TO_ANTIGRAVITY_TOOLS: dict[str, tuple[str, ...]] = {
+    claude: tuple(sorted(tool for tool, name in _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.items() if name == claude))
+    for claude in set(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.values())
+}
+
+# The harness ends a turn by calling `finish`, so an allowlist never denies it.
+_TURN_END_TOOL = "finish"
 
 # Tool-call arg keys the harness ADDS at completion (the result payload), not
 # model-supplied inputs. The STATIC backstop; ``_params`` also strips any key
@@ -190,9 +202,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         system_prompt=Enforcement.ENFORCED,
         system_prompt_semantics="append",
         plugin_skills=Enforcement.ENFORCED,
-        permission_mode=Enforcement.UNSUPPORTED,
-        allowed_tools=Enforcement.UNSUPPORTED,
-        disallowed_tools=Enforcement.UNSUPPORTED,
+        permission_mode=Enforcement.ENFORCED,
+        allowed_tools=Enforcement.ENFORCED,
+        disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
     )
 
@@ -308,6 +320,24 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         merged = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key) or ""])
         return {path_key: merged}
 
+    def _policies(self, policy: Any) -> list[Any]:
+        """Tool-call policies from the uniform tool fields, built with the SDK's ``policy`` module.
+
+        No allowlist approves every call (autonomous execution; the SDK default
+        would deny ``run_command``). A specific deny outranks a specific allow in
+        the SDK, so a denied or ``plan``-denied tool stays denied.
+        """
+        if not self.config.allowed_tools:
+            policies = [policy.allow_all()]
+        else:
+            allowed = {t for name in self.config.allowed_tools for t in _CLAUDE_TO_ANTIGRAVITY_TOOLS.get(name, ())}
+            policies = [policy.deny_all(), *(policy.allow(t) for t in sorted(allowed | {_TURN_END_TOOL}))]
+        deny_names = list(self.config.disallowed_tools or [])
+        if self.config.permission_mode is PermissionMode.PLAN:
+            deny_names += READ_ONLY_DENIED_TOOLS
+        denied = {t for name in deny_names for t in _CLAUDE_TO_ANTIGRAVITY_TOOLS.get(name, ())} - {_TURN_END_TOOL}
+        return policies + [policy.deny(t) for t in sorted(denied)]
+
     async def start(
         self,
         working_directory: str,
@@ -353,12 +383,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # workspace_only policy — see _resolve_workspaces for why the skill
                 # roots must be in here and not only in ``skills_paths``.
                 workspaces=self._resolve_workspaces(skills_paths),
-                # Autonomous execution: approve every tool call, which the default
-                # policy would deny. ``permission_mode`` is deliberately NOT mapped
-                # here — it does not confine this agent, exactly as on Codex, and
-                # docs/agents/HARNESS_PARITY.md says so rather than leaving it
-                # silent. The isolation boundary is the driver.
-                policies=[policy.allow_all()],
+                policies=self._policies(policy),
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: the search-path roots that parent the skill dirs.
                 skills_paths=skills_paths,

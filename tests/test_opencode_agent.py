@@ -20,6 +20,7 @@ import json
 import os
 import signal
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -829,18 +830,15 @@ class TestSkillInjection:
             await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
 
         assert _injected_skill_paths(captured) == [str(root / "skills")]
-        assert "replacing it with the injected skill paths" in caplog.text
+        assert "replacing it with the injected config" in caplog.text
 
 
 class TestUnsupportedConfigIsAnnounced:
-    async def test_start_warns_about_unenforced_fields(self, patch_exec, tmp_path, caplog):
-        """`experiments/default.yaml` sets allowed_tools on every task; the CLI has no
-        equivalent knob, so silence would let a task believe it was constrained."""
+    async def test_enforced_fields_do_not_warn(self, patch_exec, tmp_path, caplog):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         with caplog.at_level("WARNING"):
             await _agent(allowed_tools=["Bash"], system_prompt="be terse").start(str(tmp_path))
-        assert "allowed_tools" in caplog.text
-        assert "system_prompt" in caplog.text
+        assert "NOT enforced" not in caplog.text
 
     async def test_no_warning_when_nothing_is_dropped(self, patch_exec, tmp_path, caplog):
         patch_exec(_FakeProcess(HAPPY_STREAM))
@@ -861,10 +859,114 @@ class TestArgvConstruction:
         assert argv[argv.index("-m") + 1] == "deepseek/deepseek-v4-pro"
         assert argv[-1] == "do the thing"
 
-    async def test_plan_mode_withholds_auto(self, patch_exec, tmp_path):
+    async def test_plan_mode_keeps_auto_and_denies_writes(self, patch_exec, tmp_path):
+        """`plan` is explicit denies, so the run stays unattended instead of hanging."""
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(permission_mode=PermissionMode.PLAN), tmp_path)
-        assert "--auto" not in captured["argv"]
+        assert "--auto" in captured["argv"]
+        config = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["permission"] == {"edit": "deny", "bash": "deny"}
+
+
+_NON_TOOL_ALLOWS = {"external_directory": "allow", "doom_loop": "allow"}
+
+
+class TestPermissionConfig:
+    @pytest.mark.parametrize(
+        ("cfg", "expected"),
+        [
+            ({}, None),
+            ({"allowed_tools": []}, None),
+            ({"allowed_tools": ["Bash"]}, {"*": "deny", **_NON_TOOL_ALLOWS, "bash": "allow"}),
+            ({"disallowed_tools": ["Bash"]}, {"bash": "deny"}),
+            ({"permission_mode": "plan"}, {"edit": "deny", "bash": "deny"}),
+            ({"allowed_tools": ["TodoWrite", "NotATool"]}, {"*": "deny", **_NON_TOOL_ALLOWS, "todowrite": "allow"}),
+            ({"allowed_tools": ["NotATool"]}, {"*": "deny", **_NON_TOOL_ALLOWS}),
+            (
+                {"allowed_tools": ["Bash", "Write"], "disallowed_tools": ["Bash"]},
+                {"*": "deny", **_NON_TOOL_ALLOWS, "bash": "deny", "edit": "allow"},
+            ),
+            (
+                {"allowed_tools": ["Bash", "Read"], "permission_mode": "plan"},
+                {"*": "deny", **_NON_TOOL_ALLOWS, "bash": "deny", "read": "allow", "edit": "deny"},
+            ),
+        ],
+    )
+    def test_shapes(self, cfg: dict[str, Any], expected: dict[str, str] | None):
+        assert _agent(**cfg)._permission_config() == expected
+
+    def test_inverse_map_covers_every_claude_name(self):
+        assert set(agent_module._CLAUDE_TO_OPENCODE_PERMISSION) == set(agent_module._TOOL_NAME_MAP.values())
+
+    def test_wildcard_deny_comes_first(self):
+        assert next(iter(_agent(allowed_tools=["Read"])._permission_config() or {})) == "*"
+
+    def test_write_shaped_tools_share_the_edit_key(self):
+        assert agent_module._CLAUDE_TO_OPENCODE_PERMISSION["Write"] == ("edit",)
+        assert agent_module._CLAUDE_TO_OPENCODE_PERMISSION["Edit"] == ("edit",)
+
+
+class TestSystemPromptInstructions:
+    async def test_prompt_reaches_the_cli_as_an_instructions_file(self, patch_exec, tmp_path):
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent(system_prompt="be terse")
+        await _run(agent, tmp_path / "sandbox")
+        try:
+            (prompt_file,) = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])["instructions"]
+            assert Path(prompt_file).read_text(encoding="utf-8") == "be terse"
+            assert not prompt_file.startswith(str(tmp_path / "sandbox"))
+        finally:
+            await agent.stop()
+
+    async def test_stop_removes_the_prompt_dir(self, patch_exec, tmp_path):
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent(system_prompt="be terse")
+        await agent.start(str(tmp_path))
+        prompt_dir = agent._prompt_dir
+        assert prompt_dir is not None and os.path.isdir(prompt_dir)
+        await agent.stop()
+        assert not os.path.exists(prompt_dir)
+        assert agent._prompt_dir is None
+
+    async def test_inherited_wildcard_allow_cannot_outrank_our_allowlist(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"permission": {"*": "allow", "webfetch": "allow"}}))
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(allowed_tools=["Read"]), tmp_path)
+        rules = list(json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])["permission"].items())
+        assert rules[0] == ("webfetch", "allow")
+        assert rules[1] == ("*", "deny")
+
+    async def test_no_prompt_writes_no_file(self, patch_exec, tmp_path):
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent()
+        await _run(agent, tmp_path)
+        assert agent._prompt_dir is None
+        assert "OPENCODE_CONFIG_CONTENT" not in captured["kwargs"]["env"]
+
+    async def test_inherited_config_merges_all_three_keys(self, patch_exec, tmp_path, monkeypatch):
+        root = _skill_repo(tmp_path / "plug")
+        monkeypatch.setenv(
+            "OPENCODE_CONFIG_CONTENT",
+            json.dumps(
+                {
+                    "skills": {"paths": ["/host/skills"]},
+                    "instructions": ["/host/AGENTS.md"],
+                    "permission": {"read": "deny", "bash": "allow", "webfetch": "deny"},
+                }
+            ),
+        )
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        agent = _agent(
+            plugins=[{"type": "local", "path": str(root)}], system_prompt="be terse", disallowed_tools=["Bash"]
+        )
+        await _run(agent, tmp_path / "sandbox")
+        await agent.stop()
+
+        config = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["skills"]["paths"] == ["/host/skills", str(root / "skills")]
+        assert config["instructions"][0] == "/host/AGENTS.md"
+        assert config["instructions"][-1].endswith("system_prompt.md")
+        assert list(config["permission"].items()) == [("read", "deny"), ("webfetch", "deny"), ("bash", "deny")]
 
     async def test_variant_and_pure_off(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
@@ -904,10 +1006,10 @@ class TestSessionContinuity:
 class TestEnvironmentInfo:
     def test_carries_the_system_prompt_semantics_marker(self):
         """The base contract: every agent's env-info records the regime, so a run
-        is never mis-bucketed as pre-marker. OpenCode cannot touch the system
-        prompt, so the honest value is `unknown`."""
+        is never mis-bucketed as pre-marker. OpenCode appends the system prompt
+        as an `instructions` file."""
         info = _agent().get_environment_info()
-        assert info["system_prompt_semantics"] == "unknown"
+        assert info["system_prompt_semantics"] == "append"
         assert info["harness_contract"] == OpenCodeAgent.contract.model_dump(mode="json")
         assert info["opencode_model"] == "deepseek/deepseek-v4-pro"
         assert info["opencode_pure"] is True

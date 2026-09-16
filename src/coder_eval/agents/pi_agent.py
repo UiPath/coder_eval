@@ -43,6 +43,7 @@ from coder_eval.agents._skills import _plugin_skill_dirs  # shared plugin->skill
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
+    READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AgentState,
     ApiRoute,
@@ -51,6 +52,7 @@ from coder_eval.models import (
     ContentBlock,
     Enforcement,
     HarnessContract,
+    PermissionMode,
     PiAgentConfig,
     ResultSummary,
     TokenUsage,
@@ -135,20 +137,14 @@ _PI_ARG_RENAME: dict[str, dict[str, str]] = {
     },
 }
 
-# Config fields Pi does NOT enforce. `experiments/default.yaml` sets
-# `permission_mode` and `allowed_tools` on every task, so start() warns once
-# rather than letting a task believe it constrained the agent. `system_prompt`
-# and `plugins` ARE supported, so neither is here. Per-harness table:
-# docs/agents/HARNESS_PARITY.md.
-_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
-    "permission_mode",
-    "system_prompt_file",
-    # Forwarding these to --tools would allowlist nonexistent tools and strip the
-    # agent of ALL tools: Pi's built-ins are lowercase.
-    # Rationale: .claude/notes/agents.md § Harness run-limit parity
-    "allowed_tools",
-    "disallowed_tools",
-)
+# Inverse of _TOOL_NAME_MAP: each Claude name -> every Pi tool it stands for.
+_CLAUDE_TO_PI_TOOLS: dict[str, tuple[str, ...]] = {
+    claude: tuple(sorted(pi for pi, name in _TOOL_NAME_MAP.items() if name == claude))
+    for claude in set(_TOOL_NAME_MAP.values())
+}
+
+# `system_prompt_file` is inlined into `system_prompt` before the agent runs.
+_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = ("system_prompt_file",)
 
 # The full recognized Pi vocabulary (from `pi` 0.84.4). A clean exit that
 # recognized NOTHING from this set is vocabulary drift and is crashed, not scored.
@@ -687,9 +683,9 @@ class PiAgent(Agent[PiAgentConfig]):
         system_prompt=Enforcement.ENFORCED,
         system_prompt_semantics="append",
         plugin_skills=Enforcement.ENFORCED,
-        permission_mode=Enforcement.UNSUPPORTED,
-        allowed_tools=Enforcement.UNSUPPORTED,
-        disallowed_tools=Enforcement.UNSUPPORTED,
+        permission_mode=Enforcement.ENFORCED,
+        allowed_tools=Enforcement.ENFORCED,
+        disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
     )
 
@@ -864,13 +860,27 @@ class PiAgent(Agent[PiAgentConfig]):
             # Additive skill load (from agent.plugins): Pi lists each skill's
             # name+description in the system prompt and reads SKILL.md on demand.
             argv += ["--skill", skill_dir]
-        # allowed_tools / disallowed_tools are NOT forwarded — see
-        # _UNSUPPORTED_CONFIG_FIELDS. Pi runs with its full native toolset.
+        argv += self._tool_flags()
         if self.config.system_prompt:
             argv += ["--append-system-prompt", self.config.system_prompt]
         # user_input is a distinct argv element after `--` (never shell-interpolated).
         argv += ["--", user_input]
         return argv
+
+    def _tool_flags(self) -> list[str]:
+        """``--tools`` / ``--no-tools`` / ``--exclude-tools`` from the uniform tool fields.
+
+        A deny always wins: denied names are subtracted from the allowlist, and
+        ``permission_mode: plan`` denies the Write, Edit and Bash equivalents.
+        """
+        deny_names = list(self.config.disallowed_tools or [])
+        if self.config.permission_mode is PermissionMode.PLAN:
+            deny_names += READ_ONLY_DENIED_TOOLS
+        deny = {pi for name in deny_names for pi in _CLAUDE_TO_PI_TOOLS.get(name, ())}
+        if self.config.allowed_tools:
+            allow = {pi for name in self.config.allowed_tools for pi in _CLAUDE_TO_PI_TOOLS.get(name, ())} - deny
+            return ["--tools", ",".join(sorted(allow))] if allow else ["--no-tools"]
+        return ["--exclude-tools", ",".join(sorted(deny))] if deny else []
 
     def _build_env(self) -> dict[str, str]:
         """The CLI's full environment: the host's, plus the sandbox's contributions.

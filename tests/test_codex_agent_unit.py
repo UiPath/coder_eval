@@ -1,8 +1,7 @@
 """SDK-independent unit tests for CodexAgent.
 
-These tests exercise pure-logic seams of ``codex_agent.py`` — the static
-Claude→Codex tool-name map and the per-turn ``_CodexTurnState`` list-mutation
-contract — that need NO Codex SDK. ``codex_agent`` imports ``openai_codex``
+These tests exercise pure-logic seams of ``codex_agent.py`` — the per-turn
+``_CodexTurnState`` list-mutation contract — that need NO Codex SDK. ``codex_agent`` imports ``openai_codex``
 only lazily (inside ``start`` / ``_build_thread_options`` / the turn-completed
 handler), so the module imports cleanly without the extra and these tests run
 in the base Quality Gate.
@@ -20,39 +19,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from coder_eval.agents.codex_agent import _CLAUDE_TO_CODEX_TOOL_MAP, CodexAgent
+from coder_eval.agents.codex_agent import CodexAgent
 from coder_eval.models import AgentKind, parse_agent_config
 
 
 def _item_notification(method: str, root: SimpleNamespace) -> SimpleNamespace:
     return SimpleNamespace(method=method, payload=SimpleNamespace(item=SimpleNamespace(root=root)))
-
-
-class TestToolNameMapping:
-    """The static Claude→Codex tool-name map (pure dict, no SDK)."""
-
-    def test_bash_maps_to_shell(self):
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Bash"] == "shell"
-
-    def test_write_maps_to_apply_patch(self):
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Write"] == "apply_patch"
-
-    def test_edit_maps_to_apply_patch(self):
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Edit"] == "apply_patch"
-
-    def test_read_maps_to_shell(self):
-        """Read maps to shell in Codex (no dedicated read tool)."""
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Read"] == "shell"
-
-    def test_grep_maps_to_shell(self):
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Grep"] == "shell"
-
-    def test_glob_maps_to_shell(self):
-        assert _CLAUDE_TO_CODEX_TOOL_MAP["Glob"] == "shell"
-
-    def test_all_tools_mapped(self):
-        expected_tools = {"Bash", "Write", "Edit", "Read", "Grep", "Glob"}
-        assert expected_tools.issubset(set(_CLAUDE_TO_CODEX_TOOL_MAP.keys()))
 
 
 class TestCodexTurnState:

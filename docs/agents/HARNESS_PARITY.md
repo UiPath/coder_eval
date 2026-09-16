@@ -704,29 +704,12 @@ both via the same `_plugin_skill_dirs` resolver — so both **can** run activati
 suites. A plugin's non-skill assets (agents/hooks/commands/MCP servers) are dropped on
 both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
 
-## Pi enforces `system_prompt` but not the tool allowlists
+## Agent fields per harness
 
-- **`system_prompt` is ENFORCED** (`--append-system-prompt`, semantics `append`) — a
-  small win over OpenCode, which drops it.
-- **`allowed_tools` / `disallowed_tools` are NOT enforced.** Pi's built-in tools are
-  lowercase (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`), but the shared config
-  default (`experiments/default.yaml`) sets Claude-namespaced names
-  (`Bash`/`Read`/`Write`/…). Forwarding those to `--tools` would allowlist tools that
-  do not exist in Pi and strip the agent of ALL tools — so, like OpenCode (drops them),
-  Codex (forwards `disallowed_tools` without SDK enforcement), and Antigravity (does not
-  read them), Pi ignores them and runs with its full native toolset. A task that needs a
-  restricted Pi toolset would have to name Pi's lowercase tools — a documented follow-up.
-- **`permission_mode` is NOT enforced** — Pi headless print mode auto-runs tools and
-  exposes only project-file trust (`--approve` / `--no-approve`), no tool-approval
-  mode; the sandbox driver is the isolation boundary (same as Codex/Antigravity).
-- **`system_prompt_file` is NOT read** (use inline `system_prompt`), matching
-  Codex/Antigravity.
-- **Built-in auto-retry.** Pi retries a transient/provider error *internally* (another
-  `agent_start` cycle in the same invocation, flagged `willRetry: true`), which the
-  harness folds into one turn. The internal retry is bounded by
-  `turn_timeout` / `task_timeout`.
-
-Full detail: [Pi](PI.md).
+Claude Code, Pi, OpenCode and Antigravity honor `system_prompt`, `permission_mode`,
+`allowed_tools` and `disallowed_tools` natively. Codex honors `system_prompt` only. See
+each harness page for the mechanism: [Pi](PI.md#config-fields-and-their-pi-flags),
+[OpenCode](OPENCODE.md#permissions), [Antigravity](ANTIGRAVITY.md), [Codex](CODEX.md).
 
 ## Reproducing
 

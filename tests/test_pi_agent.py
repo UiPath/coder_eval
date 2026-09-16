@@ -251,19 +251,12 @@ class TestArgvConstruction:
         assert argv[-2] == "--"
         assert argv[-1] == "do the thing"
 
-    async def test_tools_are_not_forwarded_but_system_prompt_is(self, patch_exec, tmp_path):
-        """allowed_tools/disallowed_tools are NOT forwarded: the shared config default
-        sets Claude-namespaced tool names (Bash/Read/...) that do not exist in Pi
-        (lowercase bash/read/...), so `--tools` would strip the agent of ALL tools.
-        Only `system_prompt` (a free-text string with no namespace) is forwarded."""
+    async def test_tool_flags_and_system_prompt_are_forwarded(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(
-            _agent(allowed_tools=["Read", "Write"], disallowed_tools=["Bash"], system_prompt="be terse"),
-            tmp_path,
-        )
+        await _run(_agent(allowed_tools=["Read", "Bash"], system_prompt="be terse"), tmp_path)
         argv = captured["argv"]
-        assert "--tools" not in argv
-        assert "--exclude-tools" not in argv
+        assert argv[argv.index("--tools") + 1] == "bash,read"
+        assert argv.index("--tools") > argv.index("--thinking")
         assert argv[argv.index("--append-system-prompt") + 1] == "be terse"
 
     async def test_user_input_is_a_post_dashdash_argv_element(self, patch_exec, tmp_path):
@@ -278,6 +271,40 @@ class TestArgvConstruction:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert captured["kwargs"]["limit"] > 64 * 1024
+
+
+class TestToolFlags:
+    def test_allowlist_maps_claude_names_to_pi_tools(self):
+        assert _agent(allowed_tools=["Bash", "Read"])._tool_flags() == ["--tools", "bash,read"]
+
+    def test_denylist_expands_to_every_equivalent(self):
+        assert _agent(disallowed_tools=["Edit"])._tool_flags() == ["--exclude-tools", "edit,multiedit,patch"]
+
+    def test_plan_denies_write_edit_and_bash(self):
+        assert _agent(permission_mode="plan")._tool_flags() == [
+            "--exclude-tools",
+            "bash,edit,multiedit,patch,write",
+        ]
+
+    def test_allowlist_with_no_pi_equivalent_disables_every_tool(self):
+        assert _agent(allowed_tools=["Skill"])._tool_flags() == ["--no-tools"]
+
+    def test_deny_wins_over_allow_without_a_separate_exclude(self):
+        assert _agent(allowed_tools=["Bash", "Read"], disallowed_tools=["Bash"])._tool_flags() == ["--tools", "read"]
+
+    def test_plan_wins_over_an_allowed_bash(self):
+        assert _agent(allowed_tools=["Bash", "Read"], permission_mode="plan")._tool_flags() == ["--tools", "read"]
+
+    def test_no_fields_emit_no_flags(self):
+        assert _agent()._tool_flags() == []
+
+    def test_empty_allowlist_restricts_nothing(self):
+        assert _agent(allowed_tools=[])._tool_flags() == []
+
+    def test_inverse_map_covers_every_claude_name(self):
+        from coder_eval.agents.pi_agent import _CLAUDE_TO_PI_TOOLS, _TOOL_NAME_MAP
+
+        assert set(_CLAUDE_TO_PI_TOOLS) == set(_TOOL_NAME_MAP.values())
 
 
 class TestSessionContinuity:
@@ -371,8 +398,8 @@ class TestUnsupportedConfigIsAnnounced:
     async def test_start_warns_about_unenforced_fields(self, patch_exec, tmp_path, caplog):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         with caplog.at_level("WARNING"):
-            await _agent(permission_mode="plan").start(str(tmp_path))
-        assert "permission_mode" in caplog.text
+            await _agent(system_prompt_file="prompt.md").start(str(tmp_path))
+        assert "system_prompt_file" in caplog.text
         assert "NOT enforced" in caplog.text
 
     async def test_plugins_that_do_not_resolve_warn_loudly(self, patch_exec, tmp_path, caplog):
@@ -385,19 +412,13 @@ class TestUnsupportedConfigIsAnnounced:
         # plugins is no longer named in the "NOT enforced" warning.
         assert "plugins" not in "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
 
-    async def test_unenforced_fields_warn_but_system_prompt_does_not(self, patch_exec, tmp_path, caplog):
-        """allowed_tools/disallowed_tools are unenforced (Claude-namespaced default cannot
-        map to Pi's lowercase toolset) and MUST warn when set. `system_prompt` IS enforced
-        (--append-system-prompt) and must never appear in the unenforced-fields warning."""
+    async def test_enforced_fields_do_not_warn(self, patch_exec, tmp_path, caplog):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         with caplog.at_level("WARNING"):
             await _agent(allowed_tools=["Read"], disallowed_tools=["Bash"], system_prompt="be terse").start(
                 str(tmp_path)
             )
-        warning = "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
-        assert "allowed_tools" in warning
-        assert "disallowed_tools" in warning
-        assert "system_prompt" not in warning  # the enforced field is never named
+        assert "NOT enforced" not in caplog.text
 
 
 class TestAutoRetry:

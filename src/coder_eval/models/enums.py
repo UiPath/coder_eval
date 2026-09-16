@@ -1,7 +1,7 @@
 """Enumeration types for coder_eval."""
 
 from enum import StrEnum
-from typing import Literal
+from typing import Final, Literal
 
 
 class FinalStatus(StrEnum):
@@ -117,6 +117,10 @@ class PermissionMode(StrEnum):
     ACCEPT_EDITS = "acceptEdits"
     PLAN = "plan"
     BYPASS_PERMISSIONS = "bypassPermissions"
+
+
+READ_ONLY_DENIED_TOOLS: Final[tuple[str, ...]] = ("Write", "Edit", "Bash")
+"""The Claude tool names every harness that maps ``permission_mode: plan`` denies."""
 
 
 class PreservationMode(StrEnum):

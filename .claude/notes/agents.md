@@ -474,6 +474,9 @@ shell-aware `parameters["command"]` extraction in `criteria/command_executed.py`
 to raw-JSON matching — so the same task scores differently per harness. Unknown names pass
 through unchanged.
 
+The Claude-to-native maps the uniform tool fields use are derived by inverting these, never
+written twice.
+
 Three cases are worth knowing:
 
 - **OpenCode's tool set varies by MODEL within the one harness.** A live 174-task run
@@ -494,6 +497,35 @@ any key that FIRST appears at DONE is treated as a result — which matters beca
 `skill_triggered` substring-searches every parameter value, so a leaked result could
 false-positive.
 
+## The uniform fields, per harness
+
+`permission_mode`, `allowed_tools` and `disallowed_tools` stay on `BaseAgentConfig` as one
+interface, and each harness honors them where the pinned CLI or SDK has a verified mechanism
+(spike of 2026-09-16). Their meaning is the same everywhere: an allowlist permits only the
+named tools, a deny always wins, and `plan` denies the Write, Edit and Bash equivalents
+(`READ_ONLY_DENIED_TOOLS`, one declaration for every adapter). An empty `allowed_tools: []`
+restricts nothing, because Claude Code passes `[]` as "no `--allowedTools` flag"; the same
+YAML must not mean "all tools" on one harness and "no tools" on the others.
+
+- **Pi** (0.85.1): `--tools <csv>` is an allowlist and `--exclude-tools <csv>` a denylist over
+  the lowercase built-ins. The denied set is subtracted before `--tools` is emitted, and an
+  allowlist that maps to nothing becomes `--no-tools`.
+- **OpenCode** (1.18.30): the `permission` config accepts `"*": "deny"` plus per-key
+  `allow` / `deny`, and `--auto` approves only what is not explicitly denied — so `plan` is
+  explicit denies and `--auto` is passed on every run. `instructions` files are read by
+  `session/instruction.ts::system()` and spread into the SYSTEM messages, so
+  `system_prompt` is a temp file listed there (append). The file lives outside the sandbox
+  for the same reason as the skill paths below. The permission keys are coarser than tool
+  names (`edit` governs every write-shaped tool); that four-entry table is the one literal.
+  `"*"` also matches non-tool permissions (`external_directory`, `doom_loop`), which the CLI
+  merges before config rules and `--auto` used to approve, so an allowlist re-allows them.
+  OpenCode applies the LAST matching rule, so our rules are placed after inherited ones.
+- **Antigravity** (0.1.8): `hooks/policy.py` buckets specific rules above wildcard ones and
+  deny above allow, so rule order does not matter. `finish` is always allowed under an
+  allowlist because the harness ends a turn with it; whether `deny_all()` reaches it could
+  not be probed offline, and allowing it is the safe direction.
+- **Codex**: no mechanism (next section), so all three rows are unsupported.
+
 ## Codex runs full-access on every permission mode
 
 `coder_eval` owns the isolation boundary either way — a docker container or an ephemeral
@@ -509,6 +541,11 @@ The consequence is stated loudly at `start()` for EVERY mode, not just
 `bypassPermissions`, so operators are not misled that plan/acceptEdits/default confine
 Codex — none of them do. Adversarial or untrusted evals belong on the docker driver; the
 tempdir/host driver is a working directory, not a confinement boundary.
+
+Tool restriction is not available either. `strings` on the pinned codex-cli 0.39.0 binary
+shows `enabled_tools` / `disabled_tools` only inside `RawMcpServerConfig` (beside
+`bearer_token_env_var`, `startup_timeout_sec`); there is no top-level key. The adapter's old
+top-level `config.enabled_tools` forward therefore never restricted a tool, and was deleted.
 
 Approval mode is `deny_all` on every permission mode too. The SDK offers only two:
 `auto_review`, which puts a SERVER-SIDE reviewer in the loop that can spuriously return

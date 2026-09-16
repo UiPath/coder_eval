@@ -70,6 +70,7 @@ from coder_eval.models.criteria import (
     UiPathEvalCriterion,
 )
 from coder_eval.models.enums import (
+    READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AgentState,
     ApiBackend,
@@ -257,6 +258,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "FinalStatus",
     "PermissionMode",
     "PreservationMode",
+    "READ_ONLY_DENIED_TOOLS",
     # Criteria
     "BaseSuccessCriterion",
     "ClassificationMatchCriterion",

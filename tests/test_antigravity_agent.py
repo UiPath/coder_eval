@@ -490,6 +490,7 @@ def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
     hooks = ModuleType("google.antigravity.hooks")
     hooks.policy = SimpleNamespace(
         allow_all=lambda: SimpleNamespace(kind="allow_all"),
+        deny_all=lambda: SimpleNamespace(kind="deny_all"),
         deny=lambda tool, **kw: SimpleNamespace(kind="deny", tool=tool),
         allow=lambda tool, **kw: SimpleNamespace(kind="allow", tool=tool),
     )
@@ -1329,26 +1330,58 @@ async def test_start_omits_env_when_no_mock_dirs(monkeypatch, tmp_path):
     assert configs[0].env is None
 
 
-# --- permission_mode ----------------------------------------------------------------
-#
-# The local harness has one mode: policies are hardcoded to allow_all, so no
-# permission_mode confines it. These pin that as intended behavior rather than an
-# oversight — the write boundary is the sandbox driver, and a headless eval has
-# nobody to approve anything.
+# --- permission_mode and tool fields --------------------------------------------------
 
 
 def _agent(**cfg) -> AntigravityAgent:
     return AntigravityAgent(parse_agent_config(type="antigravity", **cfg))
 
 
-@pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
-async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path, mode: str):
-    """permission_mode is not honored here: every mode stays fully autonomous.
+def _policy_pairs(**cfg) -> list[tuple[str, str | None]]:
+    policy = SimpleNamespace(
+        allow_all=lambda: SimpleNamespace(kind="allow_all"),
+        deny_all=lambda: SimpleNamespace(kind="deny_all"),
+        deny=lambda tool: SimpleNamespace(kind="deny", tool=tool),
+        allow=lambda tool: SimpleNamespace(kind="allow", tool=tool),
+    )
+    return [(p.kind, getattr(p, "tool", None)) for p in _agent(**cfg)._policies(policy)]
 
-    coder_eval's write boundary is the driver (docker container / ephemeral tempdir),
-    not the agent — same deliberate stance as Codex. A mode that silently switched the
-    policy list would make an A/B across harnesses incomparable.
-    """
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        ({}, [("allow_all", None)]),
+        ({"allowed_tools": ["Bash"]}, [("deny_all", None), ("allow", "finish"), ("allow", "run_command")]),
+        ({"disallowed_tools": ["Bash"]}, [("allow_all", None), ("deny", "run_command")]),
+        (
+            {"permission_mode": "plan"},
+            [("allow_all", None), ("deny", "create_file"), ("deny", "edit_file"), ("deny", "run_command")],
+        ),
+        ({"allowed_tools": ["Skill"]}, [("deny_all", None), ("allow", "finish")]),
+        ({"allowed_tools": []}, [("allow_all", None)]),
+        (
+            {"allowed_tools": ["Read"], "disallowed_tools": ["Finish"]},
+            [("deny_all", None), ("allow", "finish"), ("allow", "view_file")],
+        ),
+        (
+            {"allowed_tools": ["Bash", "Read"], "disallowed_tools": ["Bash"]},
+            [
+                ("deny_all", None),
+                ("allow", "finish"),
+                ("allow", "run_command"),
+                ("allow", "view_file"),
+                ("deny", "run_command"),
+            ],
+        ),
+    ],
+)
+def test_policies_map_the_uniform_fields(cfg: dict[str, Any], expected: list[tuple[str, str | None]]):
+    assert _policy_pairs(**cfg) == expected
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "bypassPermissions"])
+async def test_non_plan_modes_stay_autonomous(monkeypatch, tmp_path, mode: str):
+    """Only `plan` confines the harness; every other mode approves every call."""
     configs: list[Any] = []
 
     class _FakeSdkAgent:
@@ -1366,6 +1399,39 @@ async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path,
     await _agent(permission_mode=mode).start(str(tmp_path))
 
     assert [p.kind for p in configs[0].policies] == ["allow_all"]
+
+
+async def test_start_hands_the_policies_to_the_sdk(monkeypatch, tmp_path):
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(allowed_tools=["Bash"], permission_mode="plan").start(str(tmp_path))
+
+    assert [(p.kind, getattr(p, "tool", None)) for p in configs[0].policies] == [
+        ("deny_all", None),
+        ("allow", "finish"),
+        ("allow", "run_command"),
+        ("deny", "create_file"),
+        ("deny", "edit_file"),
+        ("deny", "run_command"),
+    ]
+
+
+def test_inverse_tool_map_covers_every_claude_name():
+    from coder_eval.agents.antigravity_agent import _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP, _CLAUDE_TO_ANTIGRAVITY_TOOLS
+
+    assert set(_CLAUDE_TO_ANTIGRAVITY_TOOLS) == set(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.values())
 
 
 # --- max_turns visible-turn cap -----------------------------------------------------

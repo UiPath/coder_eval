@@ -60,16 +60,6 @@ from coder_eval.utils import expand_env_vars
 
 logger = logging.getLogger(__name__)
 
-# Tool name mapping: Claude Code SDK names → Codex SDK names
-_CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
-    "Bash": "shell",
-    "Write": "apply_patch",
-    "Edit": "apply_patch",
-    "Read": "shell",
-    "Grep": "shell",
-    "Glob": "shell",
-}
-
 # Approval mode — the SAME for every permission mode. Despite the name this is
 # the "run autonomously, never prompt, no reviewer" mode: in-sandbox operations
 # execute directly, and only escalations BEYOND the sandbox are refused. The
@@ -1400,23 +1390,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
         self._log.debug(f"Permission mode {permission_mode} → sandbox={sandbox_name}, approval_mode={approval_name}")
 
-        # Build config dict for tool enforcement
         tool_config: dict[str, Any] = {}
-
-        if self.config.allowed_tools:
-            enabled_tools = [_CLAUDE_TO_CODEX_TOOL_MAP.get(tool, tool) for tool in self.config.allowed_tools]
-            tool_config["enabled_tools"] = enabled_tools
-            normalized = ", ".join(enabled_tools)
-            self._log.debug(f"Allowed tools (normalized): {normalized}")
-
-        if self.config.disallowed_tools:
-            disabled_tools = [_CLAUDE_TO_CODEX_TOOL_MAP.get(tool, tool) for tool in self.config.disallowed_tools]
-            tool_config["disabled_tools"] = disabled_tools
-            normalized = ", ".join(disabled_tools)
-            self._log.warning(
-                f"disallowed_tools ({normalized}) is passed to Codex but NOT enforced by the SDK; "
-                + "do not rely on it as a security boundary."
-            )
 
         # The codex binary has no base-URL env var: a model provider must be
         # defined in config and selected, with env_key naming the key's variable.

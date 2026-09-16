@@ -16,10 +16,6 @@ agent:
   type: codex
   model: gpt-5.5
   permission_mode: acceptEdits
-  allowed_tools:
-    - Bash
-    - Read
-    - Write
 
 initial_prompt: |
   Run these two independent commands IN PARALLEL — issue them together as two
