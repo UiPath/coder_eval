@@ -305,9 +305,9 @@ class TestValidateHarnessContract:
         assert "permission_mode" not in task.agent.model_fields_set  # type: ignore[union-attr]
         validate_harness_contract(task)
 
-    def test_explicit_empty_allowlist_is_set(self) -> None:
-        with pytest.raises(HarnessContractError, match=r"agent\.allowed_tools"):
-            validate_harness_contract(_task(AgentKind.CODEX, allowed_tools=[]))
+    @pytest.mark.parametrize("field", ["allowed_tools", "disallowed_tools"])
+    def test_an_empty_tool_list_restricts_nothing_so_it_is_not_set(self, field: str) -> None:
+        validate_harness_contract(_task(AgentKind.CODEX, **{field: []}))
 
     def test_null_plugins_from_default_is_not_set(self) -> None:
         default = ExperimentDefinition(

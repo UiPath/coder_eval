@@ -164,7 +164,7 @@ _PERMISSION_KEY_FOR_TOOL: dict[str, str] = {
 }
 
 # Permissions `"*"` also matches that are not tools. An allowlist re-allows them, so it
-# restricts tools only; `--auto` approved them before.
+# restricts tools only.
 _NON_TOOL_PERMISSIONS: tuple[str, ...] = ("external_directory", "doom_loop")
 
 # The canonical tool names OpenCode has no tool for.
@@ -1012,13 +1012,11 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             ]
         if permission:
             # OpenCode applies the LAST matching rule, so ours go after every inherited one.
+            # A host rule for a non-tool key is kept: a tool allowlist must not loosen it.
             inherited_rules = config.get("permission")
-            kept = (
-                {k: v for k, v in inherited_rules.items() if k not in permission}
-                if isinstance(inherited_rules, dict)
-                else {}
-            )
-            config["permission"] = {**kept, **permission}
+            inherited = inherited_rules if isinstance(inherited_rules, dict) else {}
+            ours = {k: v for k, v in permission.items() if not (k in _NON_TOOL_PERMISSIONS and k in inherited)}
+            config["permission"] = {**{k: v for k, v in inherited.items() if k not in ours}, **ours}
         env[_CONFIG_CONTENT_ENV] = json.dumps(config)
 
     # --- the turn ----------------------------------------------------------

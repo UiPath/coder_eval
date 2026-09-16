@@ -72,7 +72,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
 
     # Which uniform config fields this harness honors. No default: registration
     # rejects a class that does not declare one.
-    # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
+    # Rationale: .claude/notes/agents.md § The uniform fields, per harness
     contract: ClassVar[HarnessContract]
 
     # Canonical tool name -> native tools. Registration requires one exactly when the

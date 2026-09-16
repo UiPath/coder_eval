@@ -701,7 +701,12 @@ class DockerRunner:
         task_yaml_in = input_dir / "task.yaml"
 
         def _dump_task_yaml() -> str:
-            return yaml.safe_dump(self.rt.task.model_dump(mode="json"), sort_keys=False)
+            payload = self.rt.task.model_dump(mode="json")
+            if self.rt.task.agent is not None:
+                # Only the fields a layer wrote: the reloaded task must not claim a
+                # model default (e.g. permission_mode) the harness contract rejects.
+                payload["agent"] = self.rt.task.agent.model_dump(mode="json", exclude_unset=True)
+            return yaml.safe_dump(payload, sort_keys=False)
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
         await asyncio.to_thread(task_yaml_in.write_text, task_yaml_text, encoding="utf-8")

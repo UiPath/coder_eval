@@ -555,10 +555,10 @@ and scores 0 with no loud error. Dropping to full-access matches claude-code and
 Antigravity, which run with no in-agent OS sandbox; it also keeps network on, so tool
 installs work without extra sandbox config.
 
-The consequence is stated loudly at `start()` for EVERY mode, not just
-`bypassPermissions`, so operators are not misled that plan/acceptEdits/default confine
-Codex — none of them do. Adversarial or untrusted evals belong on the docker driver; the
-tempdir/host driver is a working directory, not a confinement boundary.
+Codex's contract therefore marks `permission_mode` unsupported, so a Codex task that sets
+any mode is rejected at resolution rather than believing plan/acceptEdits/default confine
+it. Adversarial or untrusted evals belong on the docker driver; the tempdir/host driver is
+a working directory, not a confinement boundary.
 
 Tool restriction is not available either. `strings` on the pinned codex-cli 0.39.0 binary
 shows `enabled_tools` / `disabled_tools` only inside `RawMcpServerConfig` (beside

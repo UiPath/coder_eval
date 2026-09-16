@@ -3,10 +3,6 @@ description: A canonical task exercising every C2 mapping row at once (golden fi
   — do not edit casually).
 agent:
   type: claude-code
-  permission_mode: acceptEdits
-  ignore_patterns: []
-  system_prompt_mode: append
-  sdk_options: {}
 sandbox:
   driver: tempdir
   python:

@@ -185,15 +185,15 @@ an error.
 **Permission Modes:**
 - `default` — Default permission handling
 - `acceptEdits` — Auto-accept file edits (recommended for evaluations)
-- `plan` — Agent proposes changes, waits for approval
+- `plan` — Read-only: the Write, Edit and Bash tools are denied
 - `bypassPermissions` — No permission checks (use with caution)
 
 **Fields a harness cannot honor are rejected.** Every agent declares which of
 `system_prompt`, `plugins`, `permission_mode`, `allowed_tools` and
 `disallowed_tools` it honors. A task that sets one of them on a harness that marks
 it unsupported fails at resolution, and `coder-eval plan` exits non-zero. A field
-that only a lower layer's default sets does not count, and neither does a value of
-`null`. Values are checked too: a `permission_mode` value the harness does not
+whose value is the schema default counts only if a layer wrote it; `null` and an empty
+tool list never count. Values are checked too: a `permission_mode` value the harness does not
 honor (for example `acceptEdits` on Pi, OpenCode or Antigravity, which honor only
 `plan` and `bypassPermissions`) is rejected, and every `allowed_tools` /
 `disallowed_tools` name must be a canonical tool name (`Agent`, `Bash`, `Edit`,

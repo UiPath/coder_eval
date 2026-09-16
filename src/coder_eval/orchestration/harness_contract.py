@@ -7,7 +7,14 @@ import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from coder_eval.models import CANONICAL_TOOL_NAMES, Enforcement, HarnessContract, PermissionMode, ToolNameMap
+from coder_eval.models import (
+    CANONICAL_TOOL_NAMES,
+    BaseAgentConfig,
+    Enforcement,
+    HarnessContract,
+    PermissionMode,
+    ToolNameMap,
+)
 
 
 if TYPE_CHECKING:
@@ -75,7 +82,8 @@ def validate_harness_contract(task: TaskDefinition) -> None:
     unsupported; a ``permission_mode`` value outside the contract's
     ``permission_modes``; a tool-list name outside ``CANONICAL_TOOL_NAMES`` (or an
     ``mcp__`` name the harness cannot address). A field is set when a config layer
-    wrote it and its value is not None. A task without an agent type returns
+    wrote it with a value other than None or an empty tool list (which restricts
+    nothing). A task without an agent type returns
     silently; the layer-5 type guard reports that.
 
     Raises:
@@ -86,9 +94,7 @@ def validate_harness_contract(task: TaskDefinition) -> None:
     registration = registration_for(task, requirement="The harness contract check")
     contract = registration.agent_class.contract
     kind = str(task.agent.type)
-    set_fields = [
-        field for field in _GATED if field in task.agent.model_fields_set and getattr(task.agent, field) is not None
-    ]
+    set_fields = [field for field in _GATED if _is_set(task.agent, field)]
     for field in set_fields:
         row = _GATED[field]
         if getattr(contract, row) is Enforcement.UNSUPPORTED:
@@ -104,6 +110,12 @@ def validate_harness_contract(task: TaskDefinition) -> None:
     for field in ("allowed_tools", "disallowed_tools"):
         if field in set_fields and tool_names is not None:
             _check_tool_names(field, getattr(task.agent, field), tool_names, kind)
+
+
+def _is_set(agent: BaseAgentConfig, field: str) -> bool:
+    """A layer wrote the field with a value that means something: not None, and not an empty tool list."""
+    value = getattr(agent, field)
+    return field in agent.model_fields_set and value is not None and value != []
 
 
 def _honoring_kinds(honors: Callable[[HarnessContract], bool]) -> str:

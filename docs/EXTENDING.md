@@ -301,7 +301,7 @@ Plugins that run their own models contribute USD rates through `register_pricing
 there is **no** separate entry-point group; call it from the same `register()` hook.
 
 ```python
-from coder_eval.pricing import ModelPricing, register_pricing
+from coder_eval.spi import ModelPricing, register_pricing
 
 # Rates are per MILLION tokens: (input, output, cache_write, cache_read)
 MY_RATES = {

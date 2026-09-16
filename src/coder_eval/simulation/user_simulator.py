@@ -114,8 +114,8 @@ For context, the task the agent has been given was described (internally, to the
 _OPENER_NUDGE = "Begin the conversation now: send your opening message as the user to the coding agent."
 
 
-# SECURITY: ``allowed_tools=[]`` is the primary safeguard; this list pins the
-# property against a future SDK change that reinterprets an empty allow-list.
+# SECURITY: this deny list is the safeguard. ``allowed_tools=[]`` restricts nothing on
+# Claude Code (no ``--allowedTools`` flag is sent), so it cannot be relied on.
 _SIMULATOR_DISALLOWED_TOOLS: list[str] = [
     "Bash",
     "Read",
@@ -192,8 +192,8 @@ class UserSimulator:
         # BEDROCK_MODEL decide who the simulated user was, so an A/B varying the
         # subject model silently varied the interlocutor too.
         self._model = self._resolve_model(config.model, route)
-        # SECURITY: allowed_tools=[] is the primary guarantee that the simulator
-        # cannot touch files or run commands; the deny list is the backstop.
+        # SECURITY: _SIMULATOR_DISALLOWED_TOOLS is what keeps the simulator off files
+        # and commands; allowed_tools=[] restricts nothing on Claude Code.
         from coder_eval.models import ClaudeCodeAgentConfig
 
         agent_config = parse_agent_config(

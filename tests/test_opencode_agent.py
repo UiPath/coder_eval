@@ -921,6 +921,15 @@ class TestSystemPromptInstructions:
         assert rules[0] == ("webfetch", "allow")
         assert rules[1] == ("*", "deny")
 
+    async def test_an_allowlist_keeps_a_host_rule_for_a_non_tool_permission(self, patch_exec, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"permission": {"external_directory": "deny"}}))
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(allowed_tools=["Read"]), tmp_path)
+        rules = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])["permission"]
+        assert rules["external_directory"] == "deny"
+        assert rules["doom_loop"] == "allow"
+        assert next(iter(rules)) == "external_directory"
+
     async def test_no_prompt_writes_no_file(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()

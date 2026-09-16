@@ -123,9 +123,9 @@ Per-field contract and tool names (generated): [Harness Parity § Agent-field co
 | `plugins` | `--skill <dir>` per resolved skills dir |
 
 Claude tool names map to Pi's lowercase built-ins by inverting the telemetry map
-(`Bash` → `bash`, `Edit` → `edit,multiedit,patch`, `Glob` → `find`, `LS` →
-`list,ls`, …). A name with no Pi equivalent restricts nothing; an allowlist of only
-such names disables every tool. An empty `allowed_tools: []` restricts nothing, as on
+(`Bash` → `bash`, `Edit` → `edit,multiedit,patch`, `Glob` → `find`, …). A canonical
+name with no Pi equivalent restricts nothing; an allowlist of only such names disables
+every tool. Pi's `ls` has no canonical name, so any allowlist denies it. An empty `allowed_tools: []` restricts nothing, as on
 Claude Code.
 
 ## Permissions
