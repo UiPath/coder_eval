@@ -1,4 +1,4 @@
-"""Unit tests for the disk-driven JUnit XML writer (``reports_junit``).
+"""Unit tests for the disk-driven JUnit XML writer (``reports/junit.py``).
 
 All tests are hermetic: the run directory is built by hand under ``tmp_path``
 (no agents, no API). Test-side XML parsing uses ``defusedxml`` as
@@ -17,7 +17,7 @@ import pytest
 from defusedxml.ElementTree import fromstring
 
 from coder_eval.models import SuiteRollup, ThresholdCheck
-from coder_eval.reports_junit import generate_junit_xml, write_junit_xml
+from coder_eval.reports import generate_junit_xml, write_junit_xml
 
 
 def _props(case: Any) -> dict[str, str]:
@@ -672,7 +672,7 @@ def test_nested_task_id_with_dotdot_still_cannot_escape(write_run_json: Callable
 def test_informational_criterion_not_rendered_as_failure(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
     """A non-gating (informational) criterion below its threshold must render as
     [INFO], never [FAIL] — it is excluded from the score/gate, so it cannot be
-    the failure cause (mirrors reports.py's `if not cr.gating`)."""
+    the failure cause (mirrors reports/markdown.py's `if not cr.gating`)."""
     run_dir = tmp_path / "run"
     rows = [_row("t_fail", "FAILURE", variant_id="v1", replicate_index=0)]
     write_run_json(run_dir, rows)
@@ -724,7 +724,7 @@ def test_parity_real_producer_output_through_writer(write_run_json: Callable[...
 
     Every other test builds rows via the synthetic ``_row`` helper, which
     hand-copies the keys the writer reads. This one runs the actual producer
-    (``reports_experiment.eval_result_to_task_dict``, the batch.py path) so a
+    (``run_record.eval_result_to_task_dict``, the batch.py path) so a
     producer-side rename of ``status`` / ``task_path`` / ``total_cost_usd`` /
     ``model_used`` / ``total_tokens`` / ``visible_turns`` / ``weighted_score``
     (RunSummary.task_results is an untyped ``list[dict[str, Any]]``) can no longer
@@ -734,7 +734,7 @@ def test_parity_real_producer_output_through_writer(write_run_json: Callable[...
     from datetime import datetime
 
     from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TokenUsage
-    from coder_eval.reports_experiment import eval_result_to_task_dict
+    from coder_eval.run_record import eval_result_to_task_dict
 
     result = EvaluationResult(
         task_id="mytask",

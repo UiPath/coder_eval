@@ -328,7 +328,7 @@ class TestCostDataAvailableFlag:
         # The report_path lives under tmp_path so the write_text call lands
         # in a real (test-scoped) file and we don't need to mock pathlib.
         with (
-            _patch("coder_eval.reports_html.write_task_html", return_value=None),
+            _patch("coder_eval.reports.write_task_html", return_value=None),
             _patch("coder_eval.evaluation.judge_persistence.spill_judge_transcripts", return_value=None),
         ):
             orch._finalize_result(_time.time())

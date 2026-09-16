@@ -331,7 +331,7 @@ async def test_standalone_turn_records_the_simulator_call_duration(tmp_path, mon
 
     ``TurnRecord.duration_seconds`` defaults to 0.0 and no caller passed it, so
     this turn reported 0s for a simulator call that really took seconds — and
-    ``reports_html`` divides by the turn count, halving ``avg_turn`` for every
+    ``reports/html.py`` divides by the turn count, halving ``avg_turn`` for every
     simulation task.
     """
     _install_fake_agent(monkeypatch, scenario="success")

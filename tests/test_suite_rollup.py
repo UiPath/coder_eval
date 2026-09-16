@@ -20,12 +20,12 @@ from coder_eval.models import (
     SuiteRollup,
     TaskResult,
 )
-from coder_eval.reports import (
+from coder_eval.reports import write_suite_rollups
+from coder_eval.reports.markdown import (
     _attach_row_accounting,
     _compute_suite_rollup,
     _render_criterion_aggregate,
     _render_suite_markdown,
-    write_suite_rollups,
 )
 
 
@@ -308,7 +308,7 @@ class TestWriteSuiteRollups:
 
     def test_failed_samples_capped(self, tmp_path: Path) -> None:
         # Generate more failed rows than the cap to confirm truncation.
-        from coder_eval.reports import _FAILED_SAMPLE_LIMIT
+        from coder_eval.reports.markdown import _FAILED_SAMPLE_LIMIT
 
         rows = [
             _make_row(

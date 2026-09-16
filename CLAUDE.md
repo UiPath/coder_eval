@@ -39,9 +39,16 @@ data-driven analysis.
 - **`path_utils.py`** owns run ids, atomic writes and tree digests — and every run-record
   filename literal (CE053).
 - **`models/container_paths.py`** owns `IN_CONTAINER_ENV` (CE056).
-- **`pricing.py`** is hand-mirrored by `evalboard/lib/pricing.ts`; a parity test fails on
-  drift either way.
-- **`reports_html.py`** is the evalboard's static twin.
+- **`pricing.py`** is the rate SSOT; `evalboard/lib/pricing.generated.ts` is generated
+  from it by `make pricing-mirror`, and CE065 fails the build on drift.
+- **`reports/`** is a LEAF rendering layer (markdown, html, experiment, junit +
+  helpers): it may import anywhere, and core may import only its public writers
+  (CE066). `reports/html.py` is the evalboard's static twin.
+- **`result_metrics.py`** holds `EvaluationResult` metrics the ORCHESTRATOR reads
+  mid-run; **`stats.py`** is distribution-free statistics, dependency-free by
+  contract; **`run_record.py`** is the `run.json` task-row serializer, not a report.
+- **`durations.py`** is `format_ms`, split from `formatting.py` so the reports layer
+  does not reach through an SDK-shaped module for it.
 - **`isolation/`** is `driver: docker`, one container per task.
 - **`streaming/`** is the event protocol and `EventCollector`.
 
@@ -154,13 +161,20 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 # Regenerate a generated surface — never hand-edit the output
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
+make pricing-mirror    # the evalboard's rate table from pricing.py (CE065)
 
 make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
 ```
 
-Editing `src/coder_eval/pricing.py` means editing `evalboard/lib/pricing.ts` too — it is
-a hand-copied mirror, and `evalboard/lib/__tests__/pricing-parity.test.ts` fails the
-build on drift in either direction.
+`src/coder_eval/pricing.py` is the single source of truth for rates on both halves of
+the repo. The evalboard's table (`evalboard/lib/pricing.generated.ts`) is generated from
+it by `make pricing-mirror` — regenerate and commit after a reprice; **CE065** fails the
+build on drift. Never hand-edit the generated file. Two sets are omitted from the mirror:
+a rate flagged `per_request_billing` (the provider bills per request, so the board shows
+the captured actual per-call cost instead of a static estimate), and the ids in
+`DELIBERATELY_UNMIRRORED` (`tests/lint/pricing_mirror.py`), which are priced in Python
+for the `max_usd` pre-flight but not worth pricing on the board. Adding to that second
+set needs a corpus grep first — a stale entry hides a live bug.
 
 ## Custom Lint Rules (CE000+)
 
@@ -194,6 +208,13 @@ A few rules constrain routine edits, so they are worth knowing before you start:
   Renaming an action input means updating that skill too — the user-facing contract is
   [CI Gate: GitHub Action & JUnit reports](docs/CI_GATE.md).
 - **CE047** requires every onboarding surface to name every built-in `AgentKind`.
+- **CE065** diffs `evalboard/lib/pricing.generated.ts` against `pricing.py`; the table was
+  a hand-copy whose exemption set let four heavily-used models render `—` for cost.
+  Regenerate with `make pricing-mirror`; never hand-edit the generated file.
+- **CE066** lets the core layer import only the `reports/` package's public *writers*. A
+  metric, statistic or serializer pulled out of `reports*` is what put `turn_time_buckets`
+  and the run.json serializer in a rendering module; they now live in `result_metrics.py`,
+  `stats.py` and `run_record.py`.
 
 **Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
 source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go

@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra evalboard-verify clean run lint docs-indexes plugin-reference docs-budget docker-image docker-image-full coder-eval-runtime docker-images
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra evalboard-verify clean run lint docs-indexes plugin-reference pricing-mirror docs-budget docker-image docker-image-full coder-eval-runtime docker-images
 
 # Single source of the installed coder-eval version (used to tag the docker
 # images). Referenced lazily inside the docker recipes, so it doesn't run on
@@ -35,6 +35,9 @@ docs-indexes:  ## Regenerate README/docs indexes from the mkdocs nav (SSOT)
 
 plugin-reference:  ## Regenerate the plugin's bundled criteria reference from the models (SSOT)
 	uv run python -m tests.lint.plugin_reference
+
+pricing-mirror:  ## Regenerate the evalboard's rate table from pricing.py (SSOT)
+	uv run python -m tests.lint.pricing_mirror
 
 docs-budget:  ## Report the docstring/comment prose budget and check it against the baseline
 	uv run python -m tests.lint.prose_budget
@@ -76,8 +79,10 @@ evalboard-verify:  ## Run the evalboard (Next.js dashboard) checks: tsc + vitest
 	# The JS half of the repo. Not folded into `make verify` because it needs a
 	# Node/pnpm toolchain a Python-only contributor may not have — but it IS
 	# gated in CI by the `evalboard` job, so a red run here is a red PR.
-	# Includes the pricing drift guard: a reprice in src/coder_eval/pricing.py
-	# without the matching edit to evalboard/lib/pricing.ts fails right here.
+	# The rate table is generated (`make pricing-mirror`), so drift between the
+	# two halves is caught by CE065 in `make lint`, not here. What this gates is
+	# CONSUMPTION: pricing-generated.test.ts fails if the generated file is
+	# missing, empty or narrow.
 	cd evalboard && pnpm install --frozen-lockfile && pnpm verify
 
 verify-noextra:  ## Verify the framework works without the optional [uipath] extra

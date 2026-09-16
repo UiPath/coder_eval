@@ -1,4 +1,4 @@
-"""Tests for HTML report generation (coder_eval.reports_html)."""
+"""Tests for HTML report generation (coder_eval.reports.html)."""
 
 from __future__ import annotations
 
@@ -28,14 +28,14 @@ from coder_eval.models import (
     VariantResult,
     parse_agent_config,
 )
-from coder_eval.reports_html import (
+from coder_eval.reports import (
     HTMLReportGenerator,
-    _status_badge,
     safe_write,
     write_experiment_html,
     write_task_html,
     write_variant_html,
 )
+from coder_eval.reports.html import _status_badge
 
 
 # "ungraded" is the one category whose badge is legitimately neutral: the row
@@ -776,7 +776,7 @@ def test_write_experiment_html_uses_safe_write(tmp_path: Path):
 def test_write_task_html_returns_none_on_render_failure(tmp_path: Path, monkeypatch):
     """When the renderer blows up, write_task_html returns None rather than raising —
     so the orchestrator-side emission path cannot mask the run outcome."""
-    from coder_eval import reports_html
+    from coder_eval.reports import html as reports_html
 
     def _boom(result):
         raise RuntimeError("render failed")
@@ -1343,10 +1343,11 @@ class TestUngradedRenderingInHtml:
 class TestGenerationMetricsBuckets:
     """The offline report carries the same four buckets as the evalboard.
 
-    `reports_html` is described in CLAUDE.md as the evalboard's static twin, and
+    `reports/html.py` is a self-contained offline snapshot of a run — no parity
+    guarantee against the evalboard, and
     it rendered only Total Latency / Turns / Avg Turn Latency — so anyone
     reading the artifact rather than the dashboard got none of the wall-clock
-    accounting. The arithmetic lives in `reports_stats.turn_time_buckets`; this
+    accounting. The arithmetic lives in `result_metrics.turn_time_buckets`; this
     asserts the rendering AND, through it, that arithmetic.
     """
 
@@ -1429,7 +1430,7 @@ class TestGenerationMetricsBuckets:
         )
 
     def test_each_bucket_is_summed_across_turns(self):
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[
@@ -1469,7 +1470,7 @@ class TestGenerationMetricsBuckets:
         CE058 enforces in `src/`, and the reason the evalboard's `sumMeasured`
         returns null.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=None, teardown=None, generations=[(500, 1500, 800.0)])])
         buckets = turn_time_buckets(result)
@@ -1486,7 +1487,7 @@ class TestGenerationMetricsBuckets:
         Asserted through the RENDERER, not just the arithmetic — the dash is a
         rendering decision, so its counterexample has to be one too.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=0.0, teardown=0.0, generations=[(500, 1500, 800.0)])])
         assert turn_time_buckets(result).startup_ms == 0.0
@@ -1502,7 +1503,7 @@ class TestGenerationMetricsBuckets:
         missing time surfaces in Unaccounted rather than vanishing. That is the
         rule `scripts/timing/decompose_run.py::_turn_buckets` already applies.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=None, teardown=None, generations=[(500, 1500, 800.0)])])
         # 90s task, 800ms of generation, nothing else measured.
@@ -1517,7 +1518,7 @@ class TestGenerationMetricsBuckets:
         past the task's own wall clock, which is what overlapping looks like in
         the buckets.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[self._turn(startup=0.0, teardown=0.0, generations=[(0, 60_000, 60_000.0)], tools=(0, 60_000))]
@@ -1536,7 +1537,7 @@ class TestGenerationMetricsBuckets:
         The spawning Agent call's own interval already spans the child's run,
         so counting either books it twice.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[
@@ -1561,7 +1562,7 @@ class TestGenerationMetricsBuckets:
         path — which every run recorded from now on takes — reaches the same
         cell.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         kwargs = {"startup": 500.0, "teardown": 100.0, "generations": [(500, 1500, 800.0)], "tools": (600, 800)}
         legacy = _make_result(iterations=[self._turn(**kwargs)])
@@ -1579,7 +1580,7 @@ class TestGenerationMetricsBuckets:
         so reading the stored value with truthiness instead of `is not None`
         would silently replace a measurement with a re-derivation.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(
             iterations=[
@@ -1607,7 +1608,7 @@ class TestGenerationMetricsBuckets:
         restored = TurnRecord.model_validate(raw)
         assert restored.tool_union_ms is None
 
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         assert turn_time_buckets(_make_result(iterations=[restored])).tool_ms == pytest.approx(200.0)
 
@@ -1624,7 +1625,7 @@ class TestGenerationMetricsBuckets:
         from one that ran none, so the presence of a SPAN decides — the same
         None-vs-0 distinction CE058 enforces in `src/`.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])
         assert turn_time_buckets(result).tool_ms is None
@@ -1637,7 +1638,7 @@ class TestGenerationMetricsBuckets:
         be on the value. The evalboard keeps its own residual null for exactly
         this case.
         """
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         result = _make_result(iterations=[self._turn(startup=500.0, teardown=100.0, generations=[(500, 1500, 800.0)])])
         result.duration_seconds = 0.0
@@ -1645,9 +1646,113 @@ class TestGenerationMetricsBuckets:
         assert self._stat(HTMLReportGenerator().generate_task_html(result), "Unaccounted") == "—"
 
     def test_a_run_with_no_turns_does_not_raise(self):
-        from coder_eval.reports_stats import turn_time_buckets
+        from coder_eval.result_metrics import turn_time_buckets
 
         buckets = turn_time_buckets(_make_result(iterations=[]))
         assert buckets.generation_ms is None
         assert buckets.tool_ms is None
         HTMLReportGenerator().generate_task_html(_make_result(iterations=[]))
+
+
+class TestVariantTokenUsageTotal:
+    """The variant Token Usage card's Total is TokenUsage.total_tokens, summed.
+
+    It used to re-derive the formula inline (input + output + cacheWrite +
+    cacheRead) — a fourth home for arithmetic the model already owns. Cache
+    buckets are non-zero here, which is the case where a wrong formula diverges.
+    """
+
+    @staticmethod
+    def _results() -> list:
+        from datetime import datetime
+
+        from coder_eval.models import AgentKind, EvaluationResult, FinalStatus, TokenUsage
+
+        usages = [
+            TokenUsage(
+                uncached_input_tokens=100,
+                output_tokens=200,
+                cache_creation_input_tokens=300,
+                cache_read_input_tokens=400,
+            ),
+            TokenUsage(
+                uncached_input_tokens=7,
+                output_tokens=11,
+                cache_creation_input_tokens=13,
+                cache_read_input_tokens=17,
+            ),
+        ]
+        return [
+            EvaluationResult(
+                task_id=f"t{i}",
+                task_description="d",
+                agent_type=AgentKind.NONE,
+                started_at=datetime(2026, 1, 1),
+                final_status=FinalStatus.SUCCESS,
+                iteration_count=1,
+                total_token_usage=u,
+            )
+            for i, u in enumerate(usages)
+        ]
+
+    def test_total_equals_the_sum_of_total_tokens(self):
+        from coder_eval.reports.html import _render_variant_token_usage
+
+        results = self._results()
+        expected = sum(r.total_token_usage.total_tokens for r in results)
+        # 100+200+300+400 + 7+11+13+17 — every bucket contributes.
+        assert expected == 1048
+        assert f'<div class="value">{expected:,}</div>' in _render_variant_token_usage(results)
+
+    def test_no_usages_renders_nothing(self):
+        from coder_eval.reports.html import _render_variant_token_usage
+
+        assert _render_variant_token_usage([]) == ""
+
+
+class TestSlowestCommandsTruncationHtml:
+    """The HTML renderer truncates `parameters` at SLOW_PARAMS_PREVIEW_CHARS.
+
+    The markdown twin got both a truncation and a boundary test when the
+    constant was introduced; the HTML side got neither, so the `+= "..."`
+    branch was the one uncovered line in the renderer.
+    """
+
+    @staticmethod
+    def _params_cell(param_len: int) -> str:
+        import re
+        from html import unescape
+
+        from coder_eval.reports.html import _render_command_stats
+
+        # `parameters` renders via str(dict), so pad the VALUE until the rendered
+        # string reaches the wanted length rather than guessing the dict overhead.
+        overhead = len(str({"cmd": ""}))
+        stats = CommandStatistics(
+            total_commands=1,
+            successful_commands=1,
+            slowest_commands=[
+                SlowestCommandInfo(tool="Bash", duration_ms=1234.0, parameters={"cmd": "x" * (param_len - overhead)})
+            ],
+        )
+        cell = re.search(r"<td class='mono dim'>(.*?)</td>", _render_command_stats(stats))
+        assert cell is not None, "the slowest-commands row did not render"
+        # `str(dict)` emits single quotes, which _esc renders as &#x27; — so the
+        # raw cell is longer than the preview. Measure the unescaped text.
+        return unescape(cell.group(1))
+
+    def test_longer_than_the_cap_is_truncated_with_an_ellipsis(self):
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
+
+        cell = self._params_cell(SLOW_PARAMS_PREVIEW_CHARS + 40)
+        assert cell.endswith("...")
+        assert len(cell) == SLOW_PARAMS_PREVIEW_CHARS + len("...")
+
+    def test_exactly_the_cap_is_not_truncated(self):
+        """The predicate is `>`, so the boundary must NOT gain an ellipsis —
+        this is the case that catches a `>=` typo."""
+        from coder_eval.reports.markdown import SLOW_PARAMS_PREVIEW_CHARS
+
+        cell = self._params_cell(SLOW_PARAMS_PREVIEW_CHARS)
+        assert "..." not in cell
+        assert len(cell) == SLOW_PARAMS_PREVIEW_CHARS

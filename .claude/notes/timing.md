@@ -144,7 +144,7 @@ per-harness composition.
 
 The span set the generation subtraction, the head and the tail are all measured against,
 so they cannot disagree about which calls exist. Shared with
-`reports_stats.turn_time_buckets`, which answers the same question about a finished
+`result_metrics.turn_time_buckets`, which answers the same question about a finished
 `TurnRecord` — a second typed copy of this rule is how two report surfaces come to publish
 two different tool totals for one run. (`scripts/timing/decompose_run.py` keeps its own,
 over raw `task.json` dicts rather than models; that is the sanctioned third reader, and

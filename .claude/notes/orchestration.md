@@ -48,7 +48,7 @@
   `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in
   that flag, so there is no third code path. Three things are refused rather than
   degraded: `--junit-xml` (a report of verdicts, and there are none — though
-  `reports_junit` still emits `<skipped>` for an ungraded row it encounters),
+  `reports/junit.py` still emits `<skipped>` for an ungraded row it encounters),
   `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades
   nothing), and simulation tasks (their turn-continuation logic reads criteria results,
   so an ungraded dialog would silently change its own stopping behavior). `stop_early:`

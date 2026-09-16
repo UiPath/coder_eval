@@ -536,7 +536,7 @@ measurements.
 ## `max_turns` counts visible turns on Codex and Antigravity
 
 A "visible turn" is one entry in the run's timeline: one resolved tool call. It is
-the unit `reports_stats.visible_turn_count` reports and the unit that lands in
+the unit `result_metrics.visible_turn_count` reports and the unit that lands in
 `TurnRecord.commands`. Both backends count it live off the shared
 `EventCollector.visible_turn_count`, so one `max_turns` value means one thing on
 both.

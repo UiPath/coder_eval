@@ -60,7 +60,7 @@ class JudgeVerdict(BaseModel):
         if not isinstance(v, str):
             raise ValueError(f"rationale must be a string, got {type(v).__name__}")
         # Collapsed to single spaces because two consumers parse this by LINE:
-        # ``format_details`` writes it on one, and the HTML report grabs only the
+        # ``format_details`` writes it on one, and ``reports.html`` grabs only the
         # first "rationale: " line. The schema asks for a 1-2 sentence headline.
         collapsed = " ".join(v.split())
         if not collapsed:

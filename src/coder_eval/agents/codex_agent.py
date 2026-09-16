@@ -874,7 +874,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds
             max_turns: Hard cap on VISIBLE turns — tool calls, the unit
-                ``reports_stats.visible_turn_count`` counts — enforced in-stream on
+                ``result_metrics.visible_turn_count`` counts — enforced in-stream on
                 the same pump boundary as the cooperative stop. Codex delivers one
                 SDK turn per ``communicate()``, so a native turn counter would cap
                 at 1; see docs/agents/HARNESS_PARITY.md.

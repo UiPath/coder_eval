@@ -450,7 +450,7 @@ with the two `action.yml` items above — one considered change to the action's 
   `verify-published-action.yml` reads `task_results[*].status` / `weighted_score` /
   `total_tokens`, and `action.yml`'s score gate reads `weighted_score` / `task_id`.
   These are string keys in shell/YAML that no test or type-checker binds to
-  `eval_result_to_task_dict` (`reports_experiment.py`), so renaming a key there
+  `eval_result_to_task_dict` (`run_record.py`), so renaming a key there
   silently turns an external gate into a no-op — a reviewer here proposed
   `final_status`, which does not exist in `run.json` and would have made a new
   assertion dead on arrival. Guard: assert the key set that non-Python consumers
@@ -859,7 +859,7 @@ re-derive from scratch.
   an existing form. Caught in: the turn-timing consolidation, Phase 5 review.
 
 - [ ] **Pre-existing, surfaced by the turn-timing final review:
-  `reports_stats.regularized_incomplete_beta` clamps an out-of-domain `x`
+  `stats.regularized_incomplete_beta` clamps an out-of-domain `x`
   instead of raising.** Its docstring says "Raises ValueError outside that
   domain — returning NaN would let a bad input render as a real-looking
   statistic downstream", and it does raise for a non-finite `a`/`b`/`x` and for
@@ -916,3 +916,49 @@ re-derive from scratch.
   (AST-comparing every `ClassDef` first line against a base ref) was written
   and used throughout Phase 6 and is the thing to promote if that access
   appears. Caught in: prose mass reduction, Phase 6.
+
+- [ ] A generated surface (`*.generated.*`) has no mechanical guard against being hand-edited
+  — CE065/CE033/CE028 all catch *drift* (source changed, output not regenerated) but an edit
+  to BOTH passes cleanly. Guarding it needs a checksum or a git-attribute gate, not a diff,
+  so it is a different shape of sensor. — caught during the reports consolidation (CE065).
+- [ ] No rule resolves file paths named in PROSE (comments, docstrings, Markdown) across
+  `src/`, `evalboard/`, `litellm/` and `.github/`. That consolidation hand-fixed ~25 stale
+  module references across five phases, and two reviewers each found more the greps missed.
+  The plan's Open Questions measured and declined the CLAUDE.md-only variant (its stale refs
+  live in an ASCII tree, not backticks); a wider variant has the same parsing problem plus
+  legitimate non-resolving refs (container paths, plugin-relative paths). Recorded because
+  the recurrence is now the argument, not the idea. — caught during the reports consolidation.
+- [ ] The anchored package regex `(?:^|[/\\])src[/\\]coder_eval[/\\]` is compiled
+  independently across the rule tree — `ce050_no_union_getattr_probe.py:101`,
+  `ce051_no_driver_override.py:60`, `ce052_process_lethal_must_be_container_gated.py:78`,
+  `ce053_run_record_filename_literal.py:65`, `ce054_env_info_key_round_trip.py:66`,
+  `ce056_no_container_env_literal.py:51` and `ce058_no_timing_literal.py:116` — seven
+  rule modules, to which `_layers.py` adds one more (its `_CLI` and `_REPORTS` derive from it), with the
+  `agents/`-suffixed variant of the same idiom in
+  `_model_ctor.py:28` and `ce059_generation_window_is_two_reads.py:45`, plus a near-variant
+  in `ce037_no_dead_private_helper.py:61` and a `cli/`-suffixed one in
+  `ce048_no_in_process_typer_command_call.py:68`. `_layers.py` is the designated shared rule-helper
+  module, though `_model_ctor.py` is an equal peer and a generic src-path regex arguably
+  belongs in a neutrally named helper rather than one named `_layers`. Not hoisted here
+  because retargeting seven unrelated rules needs a per-rule verification that its scope
+  did not shift — a second refactor inside a review-fix plan. The new copies were written
+  in the established *spelling* deliberately: the defect being fixed was a regex that
+  disagreed with its siblings, so a new variant would be that defect again. — caught during the reports-consolidation review fixes, Phase 1.
+- [x] ~~**CE004 inherits CE066's `reports/` exemption because the two rules share one
+  predicate.**~~ **DONE.** `_layers.py` now shares the package anchor and the `cli/`
+  boundary (`is_package_path`, `is_cli_path`) rather than one exemption set. CE066 keeps
+  `is_core_path` (`{cli, reports}` exempt); CE004's scope is the package minus `cli/`.
+  Widening CE004 to `reports/` found 0 violations. `test_the_reports_package_is_in_scope`
+  and `TestCoreLayerMembership.test_ce004_scope_is_every_module_outside_cli` both fail if
+  CE004 goes back to the core predicate; `test_the_reports_package_itself_stays_exempt`
+  pins that CE066's scope did not widen with it. — caught in the reports-consolidation
+  review fixes, Phase 1 quality review.
+
+- [ ] **A CLAUDE.md Directory Structure bullet naming a path that no longer exists.**
+  Shipped briefly as CE067 over the fenced `coder_eval/` tree, then removed when that
+  tree was replaced by `ls` plus selective bullets — the exhaustive half of the rule
+  became false by design. The surviving half is still real: the bullets name modules
+  (`result_metrics.py`, `reports/html.py`, `models/container_paths.py`) and a rename
+  leaves them stale with nothing failing. Needs a backtick-path extractor scoped to
+  one section, which is the narrow case of the prose-path candidate above. — caught
+  during the reports consolidation rebase.

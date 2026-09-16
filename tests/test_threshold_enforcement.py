@@ -200,7 +200,7 @@ class TestInformationalDisplayParity:
 
     def test_html_report_labels_informational_and_excludes_it_from_the_count(self):
         """The HTML header counts gating criteria only, and the row says why."""
-        from coder_eval.reports_html import _render_criteria
+        from coder_eval.reports.html import _render_criteria
 
         html = _render_criteria(
             [

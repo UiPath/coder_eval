@@ -8,25 +8,29 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
-from .formatting import format_ms
-from .models import (
+from ..analysis import calculate_command_statistics
+from ..durations import format_ms
+from ..models import (
     CriterionAggregate,
     CriterionStats,
     EarlyStopReason,
+    EvaluationResult,
     FailedRowSummary,
+    RunSummary,
     SuiteRollup,
     TaskResult,
     ThresholdCheck,
+    TurnRecord,
     eval_overhead_cost,
     nothing_was_measured,
     row_cost_incomplete,
     sum_costs,
 )
-from .path_utils import TASK_JSON_FILENAME, build_task_run_dir
+from ..path_utils import TASK_JSON_FILENAME, build_task_run_dir
 
 
 if TYPE_CHECKING:
-    from .models import CommandStatistics, RunSummary
+    from ..models import CommandStatistics
 
 logger = logging.getLogger(__name__)
 
@@ -310,8 +314,9 @@ class ReportGenerator:
                 ["", "### Slowest Commands", "", "| Tool | Duration | Parameters |", "|------|----------|------------|"]
             )
             for cmd in stats.slowest_commands:
-                params_str = str(cmd.parameters)[:50]
-                if len(str(cmd.parameters)) > 50:
+                params_full = str(cmd.parameters)
+                params_str = params_full[:SLOW_PARAMS_PREVIEW_CHARS]
+                if len(params_full) > SLOW_PARAMS_PREVIEW_CHARS:
                     params_str += "..."
                 lines.append(f"| {cmd.tool} | {cmd.duration_ms:.0f}ms | {params_str} |")
 
@@ -359,9 +364,9 @@ class ReportGenerator:
             else:
                 avg_turn_str = "N/A"
 
-            # READ, never summed here -- computed once by `turn_time_buckets`.
-            # `.get()` because an older `run.json` has none of the four, which then
-            # renders as a dash, not as `0ms`.
+            # READ, never summed here -- computed once by
+            # `result_metrics.turn_time_buckets`. `.get()` because an older
+            # `run.json` has none of the four, which then renders as a dash, not `0ms`.
             # Rationale: .claude/notes/reporting.md § Read the stored value, do not re-derive it
             buckets = " | ".join(
                 format_ms(task.get(key)) for key in ("startup_ms", "generation_ms", "tool_ms", "teardown_ms")
@@ -742,9 +747,6 @@ class ReportGenerator:
         Returns:
             Aggregated CommandStatistics or None if no stats available
         """
-        from .analysis import calculate_command_statistics
-        from .models import EvaluationResult, TurnRecord
-
         all_turns: list[TurnRecord] = []
 
         # Find all task.json files recursively to handle both flat and nested (experiment) layouts
@@ -791,8 +793,6 @@ class ReportGenerator:
                 return report_md_path.read_text(encoding="utf-8"), report_md_path
 
             if summary_json_path.exists():
-                from .models import RunSummary
-
                 summary = RunSummary.model_validate_json(summary_json_path.read_text(encoding="utf-8"))
                 report_md = ReportGenerator.generate_markdown(summary, run_dir=run_dir)
                 return report_md, summary_json_path
@@ -874,7 +874,9 @@ def _compute_suite_rollup(
     ``suite_thresholds`` evaluation. Pass None when unavailable — per-criterion
     stats still compute but no aggregate/threshold gating happens.
     """
-    from .criteria import CriterionRegistry, init_criteria
+    # Deferred on purpose: importing coder_eval.criteria runs pkgutil auto-discovery
+    # with registry side effects, which would land on every `import coder_eval.reports`.
+    from ..criteria import CriterionRegistry, init_criteria
 
     rows_total = len(rows)
     rows_passed = sum(1 for r in rows if r.result.final_status.category == "succeeded")

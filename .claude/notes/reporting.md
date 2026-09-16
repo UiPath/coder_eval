@@ -184,11 +184,80 @@ malformed record — which raises while building the per-call breakdown — abor
 with the run untouched, matching the caller's "keeping static pricing" contract. Spend
 tagged with an iteration no turn has is surfaced rather than silently dropped.
 
+## The reports package
+
+`reports/` is a **leaf**: it may import from anywhere in `coder_eval`, and the core layers
+may import only its public *writer* entry points. That asymmetry is the whole point, and
+**CE066** enforces it. The invariant is not "core must not import reports" — core
+legitimately *writes* reports (`orchestrator.py` writes the per-task HTML,
+`orchestration/batch.py` drives `ReportGenerator`). It is that a **metric, a statistic, a
+serializer or a formatter** must never be reached out of the rendering layer.
+
+That was the actual shape of the code before the split. `reports_stats.py` was three
+unrelated modules sharing a file, and the orchestrator imported `turn_time_buckets` and
+`visible_turn_count` from it *during a run* — a number the evaluation loop needs, living in
+a reporting module. The three pieces now sit where their consumers are:
+
+- **`stats.py`** — distribution-free statistics, **dependency-free by contract**: stdlib
+  only, no `coder_eval` import, direct or relative. A unit test parses its AST and asserts
+  that, rather than leaving it to convention, because being reasonable-about-in-isolation is
+  the only reason it is a separate module. Display formatters (`fmt_mean_sd`, `fmt_p`) stay
+  in `reports/helpers.py`: they return `"N/A"`, `"—"` and `"<0.001"`, which is presentation.
+- **`result_metrics.py`** — metrics derived from a finished `EvaluationResult`, consumed by
+  the orchestrator mid-run as well as by the reporters. Deliberately **not** folded into
+  `timing.py`, which has no `EvaluationResult` dependency and is imported by every agent
+  adapter; adding one would widen that surface for everyone.
+- **`run_record.py`** — the `run.json` task-row serializer. It is a run-record serializer,
+  not a report, and its old home inside the experiment reporter was the *only* reason
+  `orchestration/batch.py` reached into the reports layer at all. Moving it is what lets
+  CE066's allowlist be purely writers; carrying a serializer on that list would be the rule
+  documenting a wart instead of the wart being removed.
+
+**CE066 checks both the absolute and the relative import spelling.** Its first draft matched
+only `node.module`, which for `from ..reports import X` holds `"reports"` with the dots in
+`node.level` — so it fired on neither of the two real edges in the tree, and its own tests
+passed because they used the absolute form. The layer predicates live in
+`tests/lint/rules/_layers.py` so CE004 and CE066 cannot drift about where the package or its
+`cli/` boundary is. Each rule's scope is an allowlist of what is *exempt*, so a new subpackage
+is in scope by default: CE066's core is *everything under `src/coder_eval/` except `cli/` and
+`reports/`*, and CE004's scope is *everything except `cli/`*. The two sets differ on purpose —
+the reports package runs without the CLI, so it must not import `cli`, but it may reach into
+itself. CE004 first borrowed CE066's predicate whole and so inherited the `reports/`
+exemption. Both denylist forms before that also leaked: naming only `orchestrator.py` left
+`result_metrics.py` exempt (the module CE066's own fix message points at), and its
+ten-directory successor never named `isolation/`, leaving the `driver: docker` evaluation path
+invisible to both rules.
+
+**`format_ms` lives in `durations.py`, not `formatting.py`.** `formatting.py` imports
+`claude_agent_sdk` for the payload formatters, and the reports package should not reach
+through an SDK-shaped module for a 14-line duration formatter. This does *not* make the
+package SDK-free — `models/agent_config.py` imports `ClaudeAgentOptions` and every report
+module needs `models` — so the tests assert what is true: `durations.py` is SDK-free, and
+`reports` no longer imports `coder_eval.formatting`.
+
+### Rejected: a shared section-data layer
+
+The markdown and HTML reporters render four "duplicated" sections. All four pairs were read
+in full before deciding, and **only one shares an input shape** (command statistics, both
+taking `CommandStatistics`); the others take a `list[dict]` row, a `TokenUsage`, an
+`EvaluationResult` and a `list[EvaluationResult]` across three different scopes. The
+remaining differences are legitimate per-surface presentation, not drift: `:.1f%` vs `:.0f%`,
+and an unmeasured average **hidden** in markdown versus **dashed** in HTML — two valid
+renderings of the same `None`. Building the adapter would mean normalizing dict-row and
+live-model inputs across three scopes, touching the `run.json` contract, to remove about
+twenty lines. Rejected on KISS/YAGNI. The two things in those pairs that *were* real — a
+literal `50` beside its own `SLOW_PARAMS_PREVIEW_CHARS`, and a hand-rolled
+`TokenUsage.total_tokens` — were simply fixed.
+
+`analysis.py` and `formatting.py` stay top-level on purpose: they are not report modules,
+and moving them in would give the package an SDK dependency and force CE066 to exempt the
+orchestrator's `analysis` import.
+
 ## Report rollups and the HTML twin
 
-`reports_html.py` is the evalboard's STATIC TWIN: the two render the same run and must
+`reports/html.py` is the evalboard's STATIC TWIN: the two render the same run and must
 agree, so a rule implemented on one side belongs on the other. The arithmetic itself lives
-in `reports_stats.py` and the renderers only format it.
+in `result_metrics.py` and `stats.py`; the renderers only format it.
 
 ### An unmeasured value is never zero
 
