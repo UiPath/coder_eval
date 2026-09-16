@@ -405,6 +405,9 @@ def own_comment_runs(source: str) -> list[tuple[int, int]]:
     does not read as several short comments. Code between two comments always ends
     the run. A trailing ``# noqa`` never starts one: it is a directive, not
     commentary.
+
+    Blind spot: at module scope ruff format keeps two blank lines, so a paragraph split
+    on two blank lines there reads as two runs.
     """
     lines = source.split("\n")
     try:
@@ -583,7 +586,14 @@ def assert_code_unchanged(repo_root: Path, ref: str) -> list[str]:
 
 def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parents[2]
+    try:
+        return _run(repo_root, argv)
+    except FileNotFoundError as error:
+        print(error, file=sys.stderr)
+        return 1
 
+
+def _run(repo_root: Path, argv: list[str]) -> int:
     if argv[:1] == ["--assert-code-unchanged"]:
         if len(argv) != 2:
             print("usage: --assert-code-unchanged <git-ref>", file=sys.stderr)

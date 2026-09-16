@@ -489,6 +489,13 @@ class TestRoots:
         with pytest.raises(FileNotFoundError, match="nope"):
             prose_budget.measure(tmp_path)
 
+    def test_a_missing_root_fails_the_gate_without_a_traceback(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(prose_budget, "_ROOTS", (Path("nope"),))
+        assert prose_budget.main([]) == 1
+        assert capsys.readouterr().err == "prose budget root does not exist: nope\n"
+
     def test_two_roots_are_both_measured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         root = _write(tmp_path, {"src/coder_eval/a.py": _ESSAY, "tests/b.py": _ESSAY})
         monkeypatch.setattr(prose_budget, "_ROOTS", (Path("src/coder_eval"), Path("tests")))

@@ -310,8 +310,8 @@ bandit, pre-commit, mcp
   it correctly. Why the design is this shape belongs in `.claude/notes/`; what it used to
   be belongs in git. `make docs-budget` applies three self-adjusting rules to `src/` and
   `tests/`: no own-line comment RUN may exceed 8 lines (a run reads through one blank line,
-  so splitting a paragraph does not duck it), a file's own-line comments may not exceed
-  `MAX(20, 0.15 × its length)` in total, and no docstring may exceed 150 words of PROSE (an
+  so a paragraph split on one blank line does not duck it), a file's own-line comments may
+  not exceed `MAX(20, 0.15 × its length)` in total, and no docstring may exceed 150 words of PROSE (an
   `Args:`/`Returns:`/`Raises:` block is structure, not prose; an `@abstractmethod` is exempt
   because its docstring IS the interface contract). The run cap governs the SHAPE of any one
   comment — put the paragraph in `.claude/notes/` behind a `Rationale:` pointer — and the
