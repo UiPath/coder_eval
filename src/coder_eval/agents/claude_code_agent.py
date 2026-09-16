@@ -43,6 +43,7 @@ from coder_eval.errors import (
 )
 from coder_eval.formatting import format_messages, format_payload
 from coder_eval.models import (
+    CANONICAL_TOOL_NAMES,
     AgentKind,
     ApiRoute,
     BedrockRoute,
@@ -53,9 +54,11 @@ from coder_eval.models import (
     Enforcement,
     HarnessContract,
     LiteLLMRoute,
+    PermissionMode,
     ResultSummary,
     SystemPromptSemantics,
     TokenUsage,
+    ToolNameMap,
     TranscriptMessage,
     TurnRecord,
     to_bedrock_inference_profile,
@@ -701,7 +704,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        permission_modes=frozenset(PermissionMode),
     )
+    tool_names = ToolNameMap(names={name: (name,) for name in CANONICAL_TOOL_NAMES}, mcp_names=True)
 
     # One warning per agent for a replace-mode config with no prompt: the resolver
     # runs on every query, and a per-turn repeat would bury the rest of task.log.

@@ -507,6 +507,18 @@ named tools, a deny always wins, and `plan` denies the Write, Edit and Bash equi
 restricts nothing, because Claude Code passes `[]` as "no `--allowedTools` flag"; the same
 YAML must not mean "all tools" on one harness and "no tools" on the others.
 
+One meaning per field is not enough; each VALUE needs one too (`c/harness-architecture-comparison.md`
+§ 6, P0-1 and P0-2). Two defects made that concrete. The inverse tool maps were read with
+`.get(name, ())`, so a typo or a name the harness lacks silently restricted nothing. And
+`permission_mode: default` meant "ask for approval" on Claude Code but "run autonomously" on the
+other harnesses. So the contract lists the `permission_modes` a harness honors, and `tool_names` is a
+`ToolNameMap` that is total and closed over `CANONICAL_TOOL_NAMES`: a canonical name the harness has
+no tool for maps to `()` explicitly, and a missing row fails at adapter import. `Task` and `Agent` both
+name the subagent tool (`TOOL_NAME_ALIASES`), so `from_inverse` gives `Task` the natives of `Agent`;
+otherwise the older spelling, which the corpus still uses, would restrict nothing. Pi, OpenCode and
+Antigravity honor only `plan` and `bypassPermissions` until a native mechanism with the Claude Code
+meaning of `default` / `acceptEdits` is verified.
+
 - **Pi** (0.85.1): `--tools <csv>` is an allowlist and `--exclude-tools <csv>` a denylist over
   the lowercase built-ins. The denied set is subtracted before `--tools` is emitted, and an
   allowlist that maps to nothing becomes `--no-tools`.

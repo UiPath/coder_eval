@@ -70,6 +70,7 @@ from coder_eval.models.criteria import (
     UiPathEvalCriterion,
 )
 from coder_eval.models.enums import (
+    CANONICAL_TOOL_NAMES,
     READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AgentState,
@@ -93,7 +94,7 @@ from coder_eval.models.experiment import (
 )
 
 # Harness contract
-from coder_eval.models.harness_contract import Enforcement, HarnessContract
+from coder_eval.models.harness_contract import Enforcement, HarnessContract, ToolNameMap
 
 # Judge
 from coder_eval.models.judge import JudgeVerdict
@@ -251,6 +252,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     # Harness contract
     "Enforcement",
     "HarnessContract",
+    "ToolNameMap",
     # Enums
     "AgentKind",
     "AgentState",
@@ -258,6 +260,7 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "FinalStatus",
     "PermissionMode",
     "PreservationMode",
+    "CANONICAL_TOOL_NAMES",
     "READ_ONLY_DENIED_TOOLS",
     # Criteria
     "BaseSuccessCriterion",

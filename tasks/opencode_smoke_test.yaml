@@ -21,7 +21,7 @@ agent:
   # step_finish event and the harness folds it into token_usage.total_cost_usd
   # (falling back to the rate card when the stream omits or zeroes it).
   model: "openrouter/deepseek/deepseek-v4-pro"
-  permission_mode: "acceptEdits"
+  permission_mode: "bypassPermissions"
 
 success_criteria:
   - type: "file_exists"

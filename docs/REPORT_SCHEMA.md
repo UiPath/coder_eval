@@ -156,7 +156,8 @@ those two the boundary is a reporting change, not a behavioral one.
 `environment_info.harness_contract` is the agent class's declared contract: for
 each of `system_prompt`, `plugin_skills`, `permission_mode`, `allowed_tools` and
 `disallowed_tools`, `"enforced"` or `"unsupported"`, plus
-`system_prompt_semantics` (the class default) and `cooperative_stop`.
+`system_prompt_semantics` (the class default), `cooperative_stop`, and
+`permission_modes` (the sorted `permission_mode` values the harness honors, or `null`).
 `sdk_options.system_prompt` is a `SystemPromptPreset` dict
 (`{type: "preset", preset: "claude_code", exclude_dynamic_sections: true, append?: str}`)
 on append-mode Claude Code runs and a plain string only in replace mode — it is

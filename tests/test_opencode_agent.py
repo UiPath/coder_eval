@@ -859,8 +859,8 @@ class TestPermissionConfig:
             ({"allowed_tools": ["Bash"]}, {"*": "deny", **_NON_TOOL_ALLOWS, "bash": "allow"}),
             ({"disallowed_tools": ["Bash"]}, {"bash": "deny"}),
             ({"permission_mode": "plan"}, {"edit": "deny", "bash": "deny"}),
-            ({"allowed_tools": ["TodoWrite", "NotATool"]}, {"*": "deny", **_NON_TOOL_ALLOWS, "todowrite": "allow"}),
-            ({"allowed_tools": ["NotATool"]}, {"*": "deny", **_NON_TOOL_ALLOWS}),
+            ({"allowed_tools": ["TodoWrite", "NotebookEdit"]}, {"*": "deny", **_NON_TOOL_ALLOWS, "todowrite": "allow"}),
+            ({"allowed_tools": ["NotebookEdit"]}, {"*": "deny", **_NON_TOOL_ALLOWS}),
             (
                 {"allowed_tools": ["Bash", "Write"], "disallowed_tools": ["Bash"]},
                 {"*": "deny", **_NON_TOOL_ALLOWS, "bash": "deny", "edit": "allow"},
@@ -874,8 +874,14 @@ class TestPermissionConfig:
     def test_shapes(self, cfg: dict[str, Any], expected: dict[str, str] | None):
         assert _agent(**cfg)._permission_config() == expected
 
-    def test_inverse_map_covers_every_claude_name(self):
-        assert set(agent_module._CLAUDE_TO_OPENCODE_PERMISSION) == set(agent_module._TOOL_NAME_MAP.values())
+    def test_permission_map_covers_the_canonical_vocabulary(self):
+        from coder_eval.models import CANONICAL_TOOL_NAMES
+
+        assert OpenCodeAgent.tool_names is not None
+        assert set(OpenCodeAgent.tool_names.names) == CANONICAL_TOOL_NAMES
+        assert set(agent_module._CLAUDE_TO_OPENCODE_PERMISSION) == CANONICAL_TOOL_NAMES
+        assert agent_module._CLAUDE_TO_OPENCODE_PERMISSION["NotebookEdit"] == ()
+        assert agent_module._CLAUDE_TO_OPENCODE_PERMISSION["Task"] == ("task",)
 
     def test_wildcard_deny_comes_first(self):
         assert next(iter(_agent(allowed_tools=["Read"])._permission_config() or {})) == "*"

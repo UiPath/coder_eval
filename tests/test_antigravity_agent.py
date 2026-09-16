@@ -1360,10 +1360,6 @@ def _policy_pairs(**cfg) -> list[tuple[str, str | None]]:
         ({"allowed_tools": ["Skill"]}, [("deny_all", None), ("allow", "finish")]),
         ({"allowed_tools": []}, [("allow_all", None)]),
         (
-            {"allowed_tools": ["Read"], "disallowed_tools": ["Finish"]},
-            [("deny_all", None), ("allow", "finish"), ("allow", "view_file")],
-        ),
-        (
             {"allowed_tools": ["Bash", "Read"], "disallowed_tools": ["Bash"]},
             [
                 ("deny_all", None),
@@ -1428,10 +1424,13 @@ async def test_start_hands_the_policies_to_the_sdk(monkeypatch, tmp_path):
     ]
 
 
-def test_inverse_tool_map_covers_every_claude_name():
-    from coder_eval.agents.antigravity_agent import _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP, _CLAUDE_TO_ANTIGRAVITY_TOOLS
+def test_tool_names_cover_the_canonical_vocabulary():
+    from coder_eval.models import CANONICAL_TOOL_NAMES
 
-    assert set(_CLAUDE_TO_ANTIGRAVITY_TOOLS) == set(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.values())
+    assert AntigravityAgent.tool_names is not None
+    assert set(AntigravityAgent.tool_names.names) == CANONICAL_TOOL_NAMES
+    assert "Finish" not in AntigravityAgent.tool_names.names
+    assert AntigravityAgent.tool_names.names["Bash"] == ("run_command",)
 
 
 # --- max_turns visible-turn cap -----------------------------------------------------

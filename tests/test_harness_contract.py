@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import (
+    CANONICAL_TOOL_NAMES,
+    READ_ONLY_DENIED_TOOLS,
     AgentKind,
     BaseAgentConfig,
     ClaudeCodeAgentConfig,
@@ -20,8 +22,10 @@ from coder_eval.models import (
     ExperimentVariant,
     FileExistsCriterion,
     HarnessContract,
+    PermissionMode,
     SandboxConfig,
     TaskDefinition,
+    ToolNameMap,
     parse_agent_config,
 )
 from coder_eval.orchestration.config import BatchRunConfig
@@ -79,6 +83,89 @@ class TestModel:
             HarnessContract(**{**stub_contract().model_dump(), "timing_basis": "wall"})
 
 
+class TestPermissionModes:
+    def _contract(self, **fields: Any) -> HarnessContract:
+        return HarnessContract(**{**stub_contract().model_dump(), **fields})
+
+    def test_enforced_permission_mode_requires_a_value_set(self) -> None:
+        with pytest.raises(ValidationError, match="permission_modes"):
+            self._contract(permission_mode="enforced")
+
+    def test_unsupported_permission_mode_rejects_a_value_set(self) -> None:
+        with pytest.raises(ValidationError, match="permission_modes"):
+            self._contract(permission_modes={PermissionMode.PLAN})
+
+    def test_empty_value_set_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="permission_modes"):
+            self._contract(permission_mode="enforced", permission_modes=set())
+
+    def test_value_set_dumps_sorted(self) -> None:
+        contract = self._contract(
+            permission_mode="enforced", permission_modes={PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}
+        )
+        assert contract.model_dump(mode="json")["permission_modes"] == ["bypassPermissions", "plan"]
+
+    def test_only_claude_code_honors_default_or_accept_edits(self) -> None:
+        ensure_plugins_loaded()
+        for kind in (k for k in AgentKind if k is not AgentKind.UNKNOWN):
+            registration = AgentRegistry.get(kind)
+            assert registration is not None
+            modes = registration.agent_class.contract.permission_modes or frozenset()
+            if kind is not AgentKind.CLAUDE_CODE:
+                assert not modes & {PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS}, kind
+
+
+def _identity_names() -> dict[str, tuple[str, ...]]:
+    return {name: (name,) for name in CANONICAL_TOOL_NAMES}
+
+
+class TestToolNameMap:
+    def test_missing_canonical_name_is_rejected(self) -> None:
+        names = _identity_names()
+        del names["Bash"]
+        with pytest.raises(ValidationError, match="missing=\\['Bash'\\]"):
+            ToolNameMap(names=names)
+
+    def test_extra_name_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="extra=\\['LS'\\]"):
+            ToolNameMap(names={**_identity_names(), "LS": ("ls",)})
+
+    def test_from_inverse_rejects_a_name_both_mapped_and_absent(self) -> None:
+        forward = {name.lower(): name for name in CANONICAL_TOOL_NAMES}
+        with pytest.raises(ValueError, match="in both: \\['Bash'\\]"):
+            ToolNameMap.from_inverse(forward, no_equivalent=frozenset({"Bash"}))
+
+    def test_from_inverse_rejects_a_gap(self) -> None:
+        forward = {name.lower(): name for name in CANONICAL_TOOL_NAMES - {"Skill"}}
+        with pytest.raises(ValueError, match="in neither: \\['Skill'\\]"):
+            ToolNameMap.from_inverse(forward, no_equivalent=frozenset())
+
+    def test_from_inverse_drops_telemetry_only_names_and_groups_natives(self) -> None:
+        forward = {name.lower(): name for name in CANONICAL_TOOL_NAMES - {"Edit"}}
+        forward |= {"patch": "Edit", "edit": "Edit", "ls": "LS"}
+        tool_names = ToolNameMap.from_inverse(forward, no_equivalent=frozenset())
+        assert tool_names.names["Edit"] == ("edit", "patch")
+        assert "LS" not in tool_names.names
+
+    def test_no_equivalent_maps_to_an_empty_tuple(self) -> None:
+        forward = {name.lower(): name for name in CANONICAL_TOOL_NAMES - {"Skill"}}
+        assert ToolNameMap.from_inverse(forward, no_equivalent=frozenset({"Skill"})).names["Skill"] == ()
+
+    def test_an_alias_shares_its_targets_natives(self) -> None:
+        forward = {name.lower(): name for name in CANONICAL_TOOL_NAMES - {"Task"}}
+        assert ToolNameMap.from_inverse(forward, no_equivalent=frozenset()).names["Task"] == ("agent",)
+
+    def test_claude_code_honors_every_mode_and_names_tools_natively(self) -> None:
+        from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
+
+        assert ClaudeCodeAgent.contract.permission_modes == frozenset(PermissionMode)
+        assert ClaudeCodeAgent.tool_names is not None and ClaudeCodeAgent.tool_names.mcp_names is True
+        assert all(natives == (name,) for name, natives in ClaudeCodeAgent.tool_names.names.items())
+
+    def test_read_only_denied_tools_are_canonical(self) -> None:
+        assert set(READ_ONLY_DENIED_TOOLS) <= CANONICAL_TOOL_NAMES
+
+
 class _ContractAgent:
     contract = stub_contract()
 
@@ -126,6 +213,21 @@ class TestRegistryValidation:
         AgentRegistry.register(KIND, TwoKindConfig)(_ContractAgent)
         AgentRegistry.register("other-kind", TwoKindConfig)(_ContractAgent)
         assert AgentRegistry.get("other-kind") is not None
+
+    def test_enforced_tool_lists_require_tool_names(self, restored_registry: None) -> None:
+        class NoMapAgent:
+            contract = HarnessContract(**{**stub_contract().model_dump(), "allowed_tools": "enforced"})
+
+        with pytest.raises(TypeError, match=rf"{KIND}.*NoMapAgent.*tool_names"):
+            AgentRegistry.register(KIND, config_for_kind(KIND))(NoMapAgent)
+
+    def test_unsupported_tool_lists_reject_tool_names(self, restored_registry: None) -> None:
+        class StrayMapAgent:
+            contract = stub_contract()
+            tool_names = ToolNameMap(names=_identity_names())
+
+        with pytest.raises(TypeError, match=rf"{KIND}.*StrayMapAgent.*tool_names"):
+            AgentRegistry.register(KIND, config_for_kind(KIND))(StrayMapAgent)
 
     def test_valid_pair_registers_idempotently(self, restored_registry: None) -> None:
         config = config_for_kind(KIND)

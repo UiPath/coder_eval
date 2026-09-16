@@ -22,7 +22,7 @@ agent:
   # rate card only when the stream omits it). Spike-verified working model;
   # swappable to any Pi-addressable provider/id.
   model: "openrouter/moonshotai/kimi-k3"
-  permission_mode: "acceptEdits"
+  permission_mode: "bypassPermissions"
 
 success_criteria:
   - type: "file_exists"

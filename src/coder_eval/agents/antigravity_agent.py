@@ -50,6 +50,7 @@ from coder_eval.models import (
     HarnessContract,
     PermissionMode,
     TokenUsage,
+    ToolNameMap,
     TranscriptMessage,
     TurnRecord,
 )
@@ -124,11 +125,10 @@ _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: dict[str, str] = {
     "finish": "Finish",
 }
 
-# Inverse of _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: each Claude name -> its harness tools.
-_CLAUDE_TO_ANTIGRAVITY_TOOLS: dict[str, tuple[str, ...]] = {
-    claude: tuple(sorted(tool for tool, name in _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.items() if name == claude))
-    for claude in set(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.values())
-}
+# The canonical tool names Antigravity has no tool for.
+_ANTIGRAVITY_NO_EQUIVALENT: frozenset[str] = frozenset({"NotebookEdit", "Skill", "TodoWrite", "ToolSearch"})
+
+_TOOL_NAMES = ToolNameMap.from_inverse(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP, no_equivalent=_ANTIGRAVITY_NO_EQUIVALENT)
 
 # The harness ends a turn by calling `finish`, so an allowlist never denies it.
 _TURN_END_TOOL = "finish"
@@ -206,7 +206,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
+    tool_names = _TOOL_NAMES
 
     def __init__(
         self,
@@ -330,12 +332,12 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         if not self.config.allowed_tools:
             policies = [policy.allow_all()]
         else:
-            allowed = {t for name in self.config.allowed_tools for t in _CLAUDE_TO_ANTIGRAVITY_TOOLS.get(name, ())}
+            allowed = {t for name in self.config.allowed_tools for t in _TOOL_NAMES.names[name]}
             policies = [policy.deny_all(), *(policy.allow(t) for t in sorted(allowed | {_TURN_END_TOOL}))]
         deny_names = list(self.config.disallowed_tools or [])
         if self.config.permission_mode is PermissionMode.PLAN:
             deny_names += READ_ONLY_DENIED_TOOLS
-        denied = {t for name in deny_names for t in _CLAUDE_TO_ANTIGRAVITY_TOOLS.get(name, ())} - {_TURN_END_TOOL}
+        denied = {t for name in deny_names for t in _TOOL_NAMES.names[name]} - {_TURN_END_TOOL}
         return policies + [policy.deny(t) for t in sorted(denied)]
 
     async def start(

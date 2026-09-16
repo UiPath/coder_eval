@@ -10,14 +10,14 @@ from coder_eval.models import BaseAgentConfig, Enforcement, HarnessContract
 
 
 def stub_contract(*, cooperative_stop: bool = True) -> HarnessContract:
-    """A contract that honors every uniform field."""
+    """A contract that honors the system prompt and skills only, so it needs no ``tool_names``."""
     return HarnessContract(
         system_prompt=Enforcement.ENFORCED,
         system_prompt_semantics="append",
         plugin_skills=Enforcement.ENFORCED,
-        permission_mode=Enforcement.ENFORCED,
-        allowed_tools=Enforcement.ENFORCED,
-        disallowed_tools=Enforcement.ENFORCED,
+        permission_mode=Enforcement.UNSUPPORTED,
+        allowed_tools=Enforcement.UNSUPPORTED,
+        disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=cooperative_stop,
     )
 

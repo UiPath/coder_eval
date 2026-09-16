@@ -25,18 +25,28 @@ def _validate_registration(kind: str, agent_cls: type, config_class: type) -> No
     """Reject an ``(agent class, config class)`` pair the resolver cannot trust.
 
     Raises:
-        TypeError: the agent class declares no ``HarnessContract``, or the config
+        TypeError: the agent class declares no ``HarnessContract``, its ``tool_names``
+            presence does not match the contract's tool-list rows, or the config
             class is not a ``BaseAgentConfig`` with ``extra="forbid"`` whose ``type``
             Literal names ``kind``.
     """
-    from coder_eval.models import BaseAgentConfig, HarnessContract
+    from coder_eval.models import BaseAgentConfig, Enforcement, HarnessContract, ToolNameMap
 
     agent_name = agent_cls.__name__
     config_name = config_class.__name__
-    if not isinstance(getattr(agent_cls, "contract", None), HarnessContract):
+    contract = getattr(agent_cls, "contract", None)
+    if not isinstance(contract, HarnessContract):
         raise TypeError(
             f"Agent kind {kind!r}: {agent_name} must declare `contract = HarnessContract(...)` "
             + "as a class attribute, so the resolver knows which agent fields the harness honors."
+        )
+    lists_enforced = Enforcement.ENFORCED in (contract.allowed_tools, contract.disallowed_tools)
+    tool_names = getattr(agent_cls, "tool_names", None)
+    has_map = isinstance(tool_names, ToolNameMap) if lists_enforced else tool_names is None
+    if not has_map:
+        raise TypeError(
+            f"Agent kind {kind!r}: {agent_name} must declare `tool_names = ToolNameMap(...)` exactly when its "
+            + "contract enforces allowed_tools or disallowed_tools, and leave it None otherwise."
         )
     if not issubclass(config_class, BaseAgentConfig):
         raise TypeError(f"Agent kind {kind!r}: config class {config_name} must subclass BaseAgentConfig.")

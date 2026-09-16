@@ -301,10 +301,13 @@ class TestToolFlags:
     def test_empty_allowlist_restricts_nothing(self):
         assert _agent(allowed_tools=[])._tool_flags() == []
 
-    def test_inverse_map_covers_every_claude_name(self):
-        from coder_eval.agents.pi_agent import _CLAUDE_TO_PI_TOOLS, _TOOL_NAME_MAP
+    def test_tool_names_cover_the_canonical_vocabulary(self):
+        from coder_eval.models import CANONICAL_TOOL_NAMES
 
-        assert set(_CLAUDE_TO_PI_TOOLS) == set(_TOOL_NAME_MAP.values())
+        assert PiAgent.tool_names is not None
+        assert set(PiAgent.tool_names.names) == CANONICAL_TOOL_NAMES
+        assert PiAgent.tool_names.names["Edit"] == ("edit", "multiedit", "patch")
+        assert PiAgent.tool_names.names["Skill"] == ()
 
 
 class TestSessionContinuity:

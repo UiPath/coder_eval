@@ -48,6 +48,7 @@ from coder_eval.models import (
     PermissionMode,
     ResultSummary,
     TokenUsage,
+    ToolNameMap,
     TranscriptMessage,
     TurnRecord,
 )
@@ -122,6 +123,7 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "grep": "Grep",
     "list": "LS",
     "webfetch": "WebFetch",
+    "websearch": "WebSearch",
     "todowrite": "TodoWrite",
     "todoread": "TodoRead",
     "task": "Agent",
@@ -165,12 +167,15 @@ _PERMISSION_KEY_FOR_TOOL: dict[str, str] = {
 # restricts tools only; `--auto` approved them before.
 _NON_TOOL_PERMISSIONS: tuple[str, ...] = ("external_directory", "doom_loop")
 
-# Inverse of _TOOL_NAME_MAP: each Claude name -> the permission keys that govern it.
+# The canonical tool names OpenCode has no tool for.
+_OPENCODE_NO_EQUIVALENT: frozenset[str] = frozenset({"NotebookEdit", "ToolSearch"})
+
+_TOOL_NAMES = ToolNameMap.from_inverse(_TOOL_NAME_MAP, no_equivalent=_OPENCODE_NO_EQUIVALENT)
+
+# Each canonical tool name -> the permission keys that govern its OpenCode tools.
 _CLAUDE_TO_OPENCODE_PERMISSION: dict[str, tuple[str, ...]] = {
-    claude: tuple(
-        sorted({_PERMISSION_KEY_FOR_TOOL.get(tool, tool) for tool, name in _TOOL_NAME_MAP.items() if name == claude})
-    )
-    for claude in set(_TOOL_NAME_MAP.values())
+    canonical: tuple(sorted({_PERMISSION_KEY_FOR_TOOL.get(tool, tool) for tool in natives}))
+    for canonical, natives in _TOOL_NAMES.names.items()
 }
 
 # Skill paths, the system-prompt `instructions` file and tool `permission` rules are
@@ -757,7 +762,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
+    tool_names = _TOOL_NAMES
 
     def __init__(
         self,
@@ -957,9 +964,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             permission["*"] = "deny"
             permission.update(dict.fromkeys(_NON_TOOL_PERMISSIONS, "allow"))
             for name in self.config.allowed_tools:
-                permission.update(dict.fromkeys(_CLAUDE_TO_OPENCODE_PERMISSION.get(name, ()), "allow"))
+                permission.update(dict.fromkeys(_CLAUDE_TO_OPENCODE_PERMISSION[name], "allow"))
         for name in deny_names:
-            permission.update(dict.fromkeys(_CLAUDE_TO_OPENCODE_PERMISSION.get(name, ()), "deny"))
+            permission.update(dict.fromkeys(_CLAUDE_TO_OPENCODE_PERMISSION[name], "deny"))
         return permission or None
 
     def _inject_config_content(self, env: dict[str, str]) -> None:

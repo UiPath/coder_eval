@@ -11,7 +11,7 @@ from typing import Any, ClassVar, NoReturn, Protocol
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
 from .models import AgentState as AgentState
-from .models import ApiRoute, BaseAgentConfig, HarnessContract, TurnRecord
+from .models import ApiRoute, BaseAgentConfig, HarnessContract, ToolNameMap, TurnRecord
 from .streaming.callbacks import StreamCallback
 from .streaming.collector import EventCollector
 from .streaming.events import AgentEndStatus
@@ -74,6 +74,10 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     # rejects a class that does not declare one.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     contract: ClassVar[HarnessContract]
+
+    # Canonical tool name -> native tools. Registration requires one exactly when the
+    # contract enforces allowed_tools or disallowed_tools.
+    tool_names: ClassVar[ToolNameMap | None] = None
 
     def __init__(
         self, config: ConfigT, route: ApiRoute | None = None, *, cost_log_tags: dict[str, str] | None = None

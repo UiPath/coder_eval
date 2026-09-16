@@ -56,6 +56,7 @@ from coder_eval.models import (
     PiAgentConfig,
     ResultSummary,
     TokenUsage,
+    ToolNameMap,
     TranscriptMessage,
     TurnRecord,
 )
@@ -137,11 +138,10 @@ _PI_ARG_RENAME: dict[str, dict[str, str]] = {
     },
 }
 
-# Inverse of _TOOL_NAME_MAP: each Claude name -> every Pi tool it stands for.
-_CLAUDE_TO_PI_TOOLS: dict[str, tuple[str, ...]] = {
-    claude: tuple(sorted(pi for pi, name in _TOOL_NAME_MAP.items() if name == claude))
-    for claude in set(_TOOL_NAME_MAP.values())
-}
+# The canonical tool names Pi has no tool for.
+_PI_NO_EQUIVALENT: frozenset[str] = frozenset({"NotebookEdit", "Skill", "ToolSearch", "WebSearch"})
+
+_TOOL_NAMES = ToolNameMap.from_inverse(_TOOL_NAME_MAP, no_equivalent=_PI_NO_EQUIVALENT)
 
 # The full recognized Pi vocabulary (from `pi` 0.84.4). A clean exit that
 # recognized NOTHING from this set is vocabulary drift and is crashed, not scored.
@@ -684,7 +684,9 @@ class PiAgent(Agent[PiAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
+    tool_names = _TOOL_NAMES
 
     def __init__(
         self,
@@ -866,9 +868,9 @@ class PiAgent(Agent[PiAgentConfig]):
         deny_names = list(self.config.disallowed_tools or [])
         if self.config.permission_mode is PermissionMode.PLAN:
             deny_names += READ_ONLY_DENIED_TOOLS
-        deny = {pi for name in deny_names for pi in _CLAUDE_TO_PI_TOOLS.get(name, ())}
+        deny = {pi for name in deny_names for pi in _TOOL_NAMES.names[name]}
         if self.config.allowed_tools:
-            allow = {pi for name in self.config.allowed_tools for pi in _CLAUDE_TO_PI_TOOLS.get(name, ())} - deny
+            allow = {pi for name in self.config.allowed_tools for pi in _TOOL_NAMES.names[name]} - deny
             return ["--tools", ",".join(sorted(allow))] if allow else ["--no-tools"]
         return ["--exclude-tools", ",".join(sorted(deny))] if deny else []
 
