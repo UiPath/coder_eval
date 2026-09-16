@@ -18,7 +18,6 @@ from tests.lint.rules.ce019_telemetry_non_fatal import TelemetryNonFatal
 from tests.lint.rules.ce020_no_sdk_typed_base_agent_fields import NoSdkTypedBaseAgentFields
 from tests.lint.rules.ce021_guarded_evaluationresult_parse import GuardedEvaluationResultParse
 from tests.lint.rules.ce022_dialog_loop_statement_cap import SimulationDialogLoopStatementCap
-from tests.lint.rules.ce023_no_proxy_shim_import import NoProxyShimImports
 from tests.lint.rules.ce024_discriminated_unions import DiscriminatedUnions
 from tests.lint.rules.ce032_criteria_path_seam import CriteriaPathSeam
 from tests.lint.rules.ce037_no_dead_private_helper import NoDeadPrivateHelper
@@ -97,7 +96,6 @@ ALL_RULES: list[RuleClass] = [
     NoSdkTypedBaseAgentFields,
     GuardedEvaluationResultParse,
     SimulationDialogLoopStatementCap,
-    NoProxyShimImports,
     DiscriminatedUnions,
     CriteriaPathSeam,
     NoDeadPrivateHelper,

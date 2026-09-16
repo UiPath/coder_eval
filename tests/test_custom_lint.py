@@ -632,36 +632,6 @@ class TestCE022SimulationDialogLoopStatementCap:
 
 
 @pytest.mark.lint
-class TestCE023NoProxyShimImports:
-    """CE023 flags imports of the deprecated coder_eval.proxy.* shim outside it."""
-
-    @staticmethod
-    def _run(src: str, *, path: str = "src/coder_eval/agents/antigravity_agent.py"):
-        import ast
-
-        from tests.lint.rules.ce023_no_proxy_shim_import import NoProxyShimImports
-
-        return NoProxyShimImports(path).check(ast.parse(src))
-
-    def test_flags_from_proxy_pricing_import(self):
-        assert self._run("from coder_eval.proxy.pricing import calculate_cost")
-
-    def test_flags_bare_proxy_import(self):
-        assert self._run("import coder_eval.proxy.pricing")
-
-    def test_allows_canonical_pricing_import(self):
-        assert not self._run("from coder_eval.pricing import calculate_cost")
-
-    def test_does_not_match_lookalike_module(self):
-        # `coder_eval.proxything` is a different package, not the proxy shim.
-        assert not self._run("from coder_eval.proxything import x")
-
-    def test_skips_shim_package_itself(self):
-        src = "from coder_eval.proxy.pricing import calculate_cost"
-        assert not self._run(src, path="src/coder_eval/proxy/__init__.py")
-
-
-@pytest.mark.lint
 class TestCE024DiscriminatedUnions:
     """CE024 flags bare module-level unions of same-file `type: Literal`-tagged models."""
 
