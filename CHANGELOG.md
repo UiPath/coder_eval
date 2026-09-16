@@ -2,6 +2,411 @@
 
 <!-- version list -->
 
+## v0.12.2 (2026-09-16)
+
+### Bug Fixes
+
+- Code review fixes for antigravity-message-id
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- Code review fixes for the reports consolidation
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- Code review fixes for the reports-consolidation review fixes
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- Code review fixes for timing-architecture-standardization
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- Code review fixes for turn head/tail timing
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- Code review fixes for turn-timing-consolidation
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- Code review fixes for turn-timing-p0-p3 ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- Reconcile the reports split with main's docs restructure
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- Review pass B — the tool bucket's dash survives the language boundary
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **antigravity**: 1/3 — give every generation a message_id
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **claude-code**: Subtract tool execution from the generation windows
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **docs**: Restore contracts the prose refactor lost or misstated
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **docs**: Restore the qualifier that made each absolute true
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **docs**: Stop asserting a tmpfs mask that no longer exists
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **evalboard**: 3/8 — an unbounded tool call contributes to no bucket
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **lint**: 1/4 — is_core_path covers the whole core layer
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: 2/4 — declare CE044 and CE065 to ruff, and pin the id space
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: CE004 checks reports/ — stop borrowing CE066's exemption set
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: CE004 never fired on the relative import spelling
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: Let CE045 globs reach .claude/*.md surfaces
+  ([#174](https://github.com/UiPath/coder_eval/pull/174),
+  [`9af3db3`](https://github.com/UiPath/coder_eval/commit/9af3db3dfa04c82d49e4340eabfd220b47383639))
+
+- **lint**: Resolve a relative import against the importing file
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: Stop the prose budget penalising usage examples
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **pricing**: Carry the exemption set into the generated mirror
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **timing**: 2/8 — a published window must match its own bounds
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 3/6 — a tool that closes between two windows is not model time
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 3/7 — a naive/aware mix names the pair that disagreed
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 5/6 — one clock basis per turn on antigravity and pi
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: A TurnClock for claude-code, and pi's two captured defects
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: Bracket the head and tail on the main thread only
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: Claude-code's windows tile across a tool result
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: Setup_ms marks from the task's start, not from _setup()
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: Stamp the turn bracket off the turn clock (CE064)
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: The bracket fixture's anchor cannot expire, and the tail is checked
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+### Chores
+
+- Record two deferred harness candidates from the reports consolidation
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **timing**: Decompose_run's dead datetime import
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+### Documentation
+
+- 2/7 — move timing and permissions rationale into .claude/notes
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- 3/7 — move agent-adapter rationale into .claude/notes
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- 4/4 — retarget prose that names deleted report modules
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- 4/7 — move orchestration rationale into .claude/notes
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- 5/5 — retarget every reports_* reference and record the rationale
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- 5/7 — move isolation, sandbox and CLI rationale into .claude/notes
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- 6/7 — move criteria, routing and judging rationale into .claude/notes
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- 7/7 — move reporting, harbor and telemetry rationale into .claude/notes
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- Move design rationale out of src/ into .claude/notes, and gate it
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- Record the four harness gaps the prose run did not close
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- Restore the self-containment clause on reports_html
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- Slim CLAUDE.md and split long-form rationale into .claude
+  ([#174](https://github.com/UiPath/coder_eval/pull/174),
+  [`9af3db3`](https://github.com/UiPath/coder_eval/commit/9af3db3dfa04c82d49e4340eabfd220b47383639))
+
+- Slim CLAUDE.md, and drop a directory that never existed
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- Update CLAUDE.md with communication style and development command clarifications
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **harbor**: Apply the branch's prose rules to the bind-mount rewrite
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **harness**: 3/3 — message_id is what splits the timeline
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: 4/8 — say what each harness's clock basis actually is
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: 6/6 — the timing architecture as it now stands
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Claude-code's generation windows are not tool-subtracted
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Record three guards the head/tail review could not close
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Register that the golden corpus cannot see a timing value move
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Register the message_id gaps the final review surfaced
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Register what the turn-timing run could not guard
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Widen the measured head/tail figures to six turns per harness
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **notes**: Cut the duplicated catalogue and the unbuilt design
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **timing**: Every harness subtracts tool time now, not two
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+### Features
+
+- **evalboard**: 3/4 — name the harness head and tail in the timeline strip
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harbor**: Bind-mount task.yaml/plugins/templates/extra_mounts instead of COPY, skip Dockerfile
+  when unneeded, translate pre_run ([#175](https://github.com/UiPath/coder_eval/pull/175),
+  [`7bf8966`](https://github.com/UiPath/coder_eval/commit/7bf896614edb58ef39492e3864847691c3c19dce))
+
+- **lint**: 1/7 — prose budget ratchet and one home for rationale
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **lint**: CE067 — CLAUDE.md's tree must name every top-level package member
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: Replace the prose baseline with two self-adjusting rules
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **pricing**: 1/5 — generate the evalboard rate table from pricing.py
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **reports**: 6-7/7 — the offline report carries the buckets; a TS None-vs-0 guard
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **reports**: 7/8 — the buckets reach every surface through one function
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 1/6 — a two-sided residual gate for the four-bucket identity
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 1/7 — a committed, ms-exact magnitude sensor
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 4/4 — assert the buckets in replay, and record what they contain
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 4/7 — one meaning for harness_startup_ms, on all five
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: Book each turn's head and tail as their own buckets
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: Name the setup and grading phases; union a row's tool time
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+### Refactoring
+
+- **opencode**: 8/8 — one duplicate parse ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **reports**: 2/5 — two DRY fixes and hoist 18 function-local imports
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **reports**: 3/5 — split reports_stats.py into stats, result_metrics and helpers
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **reports**: 4/5 — reports/ package, durations.py, and CE066
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **reports**: Generate the pricing mirror and split the reports layer
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **timing**: 2/6 — one close_window() for the tiling reducers
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 5/7 — one tool-subtraction, at the collector seam
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 5/8 — one home for the rules, and a stored tool union
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: 6/8 — the two sensors share one selection rule
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+### Testing
+
+- **harness**: 2/7 — OpenCode and Pi get a corpus worth replaying
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: No test may read the pinned timing corpus
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Pin why claude-code's zero head is left as a clamp
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **harness**: Stamp the two codex fixtures that timed themselves with now()
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **lint**: 2/3 — CE060, an AssistantMessage must declare its message_id
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **lint**: 2/4 — widen CE058 to the turn head/tail buckets
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **lint**: 4/6 — CE061, a window must come from the shared helper
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **lint**: CE058 form 6 — the zero its guard does not vouch for
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **lint**: Drop a personal path and de-duplicate the isolation pin
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: Drop two function-local json imports that shadow the module one
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **lint**: Guard the Rationale pointer's placement, not just its target
+  ([#177](https://github.com/UiPath/coder_eval/pull/177),
+  [`30f78f4`](https://github.com/UiPath/coder_eval/commit/30f78f4e15cee2da7e0e707f6b3390094256160d))
+
+- **reports**: 3/4 — cover the HTML slowest-commands truncation branch
+  ([#176](https://github.com/UiPath/coder_eval/pull/176),
+  [`396c22c`](https://github.com/UiPath/coder_eval/commit/396c22ccaa7e4e77421acd8537483cf3adfa7d22))
+
+- **timing**: 1/8 — the bracket's SOURCE, not just its presence
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+- **timing**: Unify the fixture clocks and assert the four-bucket identity
+  ([#165](https://github.com/UiPath/coder_eval/pull/165),
+  [`6166b1e`](https://github.com/UiPath/coder_eval/commit/6166b1e714057c576fbbb1e4b2db6cb8dfd94cb9))
+
+
 ## v0.12.1 (2026-09-12)
 
 ### Bug Fixes
