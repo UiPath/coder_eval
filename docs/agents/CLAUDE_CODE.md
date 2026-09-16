@@ -70,7 +70,8 @@ auto-qualified to a regional inference profile (`eu.` / `us.` / `apac.` / `globa
 ## Agent config surface
 
 All fields live under `agent:` in a task (or an experiment variant). Only `type` is
-required; everything else has a default.
+required; everything else has a default. What each uniform field means on every
+harness (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract).
 
 ```yaml
 agent:

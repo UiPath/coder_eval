@@ -170,6 +170,8 @@ skills under test otherwise looks entirely normal.
 
 ## Permissions
 
+Per-field contract and tool names (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract).
+
 Every run passes `--auto`, which auto-approves each permission that is not
 explicitly denied. Without it OpenCode blocks on an interactive approval prompt and
 the turn runs to its timeout.

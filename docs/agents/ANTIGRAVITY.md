@@ -136,6 +136,8 @@ can't be resolved or if zero skills are discovered.
 
 ## Permissions & tools — important differences
 
+Per-field contract and tool names (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract).
+
 The uniform fields become SDK tool-call policies (`google.antigravity.hooks.policy`):
 
 | Field | Policies |

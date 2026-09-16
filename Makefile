@@ -1,4 +1,4 @@
-.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra evalboard-verify clean run lint docs-indexes plugin-reference pricing-mirror docs-budget docker-image docker-image-full coder-eval-runtime docker-images
+.PHONY: help install format check typecheck test test-live test-smoke verify verify-noextra evalboard-verify clean run lint docs-indexes plugin-reference pricing-mirror parity-table docs-budget docker-image docker-image-full coder-eval-runtime docker-images
 
 # Single source of the installed coder-eval version (used to tag the docker
 # images). Referenced lazily inside the docker recipes, so it doesn't run on
@@ -38,6 +38,9 @@ plugin-reference:  ## Regenerate the plugin's bundled criteria reference from th
 
 pricing-mirror:  ## Regenerate the evalboard's rate table from pricing.py (SSOT)
 	uv run python -m tests.lint.pricing_mirror
+
+parity-table:  ## Regenerate the agent-field contract table from the agent classes (SSOT)
+	uv run python -m tests.lint.harness_parity
 
 docs-budget:  ## Report the docstring/comment prose budget and check it against the baseline
 	uv run python -m tests.lint.prose_budget

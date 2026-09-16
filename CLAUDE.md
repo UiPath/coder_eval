@@ -86,8 +86,10 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
   Defense-in-depth, not a boundary — the known gaps are documented in the notes.
   Authoring reference: [Reference Solutions](docs/TASK_DEFINITION_GUIDE.md#reference-solutions).
 - **Harness run-limit parity**: a shared config field must mean the same thing on every
-  backend, or the divergence is documented. Table:
-  [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Caps are authored under
+  backend, or the divergence is documented. Every agent declares a `HarnessContract`; a
+  base field the harness marks unsupported is rejected at resolution. Table:
+  [Run-Limit Parity](docs/agents/HARNESS_PARITY.md) § Agent-field contract
+  (generated). Caps are authored under
   [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
 - **Execute vs. run**: `execute` is `run` with grading off — rows finalize as
   `NOT_GRADED` and leave both sides of every rate. Per-command behaviour:
@@ -162,6 +164,7 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
 make pricing-mirror    # the evalboard's rate table from pricing.py (CE065)
+make parity-table      # the agent-field contract tables from the agent classes (CE069)
 
 make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
 ```
@@ -215,6 +218,10 @@ A few rules constrain routine edits, so they are worth knowing before you start:
   metric, statistic or serializer pulled out of `reports*` is what put `turn_time_buckets`
   and the run.json serializer in a rendering module; they now live in `result_metrics.py`,
   `stats.py` and `run_record.py`.
+- **CE068** keeps `orchestration/`, `streaming/` and `timing.py` free of concrete agent
+  config classes and `AgentKind` members (except `UNKNOWN`); ask the registry instead.
+- **CE069** diffs the generated contract tables in `docs/agents/HARNESS_PARITY.md` against
+  the agent classes. Regenerate with `make parity-table`.
 
 **Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
 source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go
@@ -252,8 +259,9 @@ A live criterion also needs `ContractCase`s (CE036) and `make plugin-reference`.
 
 **A new agent**: agents register through the plugin SPI (entry-point group
 `coder_eval.plugins`) — there is no closed enum or dispatch to edit, and in-tree and
-third-party agents take the same path. A new agent must be named on every onboarding
-surface CE047 tracks, and its run-limit behaviour recorded in
+third-party agents take the same path. It declares a `HarnessContract` (registration
+fails without one) and imports from `coder_eval.spi`. A new agent must be named on every
+onboarding surface CE047 tracks, and its run-limit behaviour recorded in
 [Run-Limit Parity](docs/agents/HARNESS_PARITY.md).
 
 **Model pricing**: `register_pricing(YOUR_RATES)` from the same `register(registry)`

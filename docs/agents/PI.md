@@ -110,6 +110,8 @@ superset of the Antigravity `thinking_level`), defaulting to `medium`.
 
 ### Config fields and their Pi flags
 
+Per-field contract and tool names (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract).
+
 | Field | Pi flag |
 |---|---|
 | `system_prompt` | `--append-system-prompt <text>` (appended, semantics `append`) |

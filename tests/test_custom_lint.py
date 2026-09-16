@@ -2163,6 +2163,37 @@ class TestCE004CatchesBothImportSpellings:
 
 
 @pytest.mark.lint
+class TestCE069HarnessParityTable:
+    """CE069 — the agent-field contract tables are generated from the agent classes."""
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_repo_tables_match_generated_output(self):
+        from tests.lint.harness_parity import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, (
+            "\nThe agent-field contract tables drifted from the agent classes — run `make parity-table` "
+            "to regenerate:\n\n" + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
+        )
+
+    def test_both_marker_pairs_exist(self):
+        from tests.lint.harness_parity import CONTRACT_END, CONTRACT_START, TOOLS_END, TOOLS_START
+
+        text = (self.REPO_ROOT / "docs/agents/HARNESS_PARITY.md").read_text(encoding="utf-8")
+        for marker in (CONTRACT_START, CONTRACT_END, TOOLS_START, TOOLS_END):
+            assert marker in text
+
+    def test_render_pins_the_header_and_a_known_cell(self):
+        from tests.lint.harness_parity import render_table
+
+        lines = render_table().splitlines()
+        assert lines[0] == "| field | claude-code | codex | antigravity | opencode | pi | none |"
+        system_prompt = next(line for line in lines if line.startswith("| `system_prompt` |"))
+        assert system_prompt.split(" | ")[5] == "enforced"
+
+
+@pytest.mark.lint
 class TestCE068NoKindNamesInKernel:
     """CE068 — orchestration/, streaming/ and timing.py name no concrete agent kind."""
 

@@ -170,6 +170,9 @@ On failure, the agent:
 
 ### Permission and Tool Mapping
 
+Per-field contract (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract). `permission_mode`, `allowed_tools` and
+`disallowed_tools` are rejected at load on Codex.
+
 Codex runs with `sandbox: full-access` and `approval_mode: deny_all` on every run. Its own OS sandbox fails silently on the hosts Coder Eval runs on, so the isolation boundary is the task's driver: use `driver: docker` for untrusted evals.
 
 `deny_all` means *run autonomously, never prompt, no server-side reviewer*. Coder Eval uses it because the alternative (`auto_review`) adds a server-side reviewer that can spuriously return `declined` under gateway load.
@@ -209,7 +212,7 @@ Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).
 
 1. **Tool-name collapse** - Codex reports shell tools (`Read`/`Grep`/`Bash`) all as shell commands, surfaced as `Bash` telemetry; name-keyed criteria that distinguish these tools aren't meaningful across agents.
 2. **`skill_triggered` criterion** - Codex has no distinct `Skill` tool (it engages a skill by reading its files via shell), so the criterion detects Codex engagement from that file-read signal (a command referencing `skills/<name>/`) instead of a `Skill` tool call. The file-read signal is weaker than Claude's explicit invocation.
-3. **`disallowed_tools`** - passed to the SDK but not enforced; not a security boundary.
+3. **`permission_mode`, `allowed_tools`, `disallowed_tools`** - Codex honors none of them; a Codex task that sets any of them is rejected at load.
 4. **Authentication** - Requires `CODEX_API_KEY` in the environment (point it at whichever endpoint's key you use — OpenAI, gateway, or Azure); the agent calls `login_api_key` when a key is present. `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` are NOT read.
 5. **Model field** - `TurnRecord.model_used` reflects the pinned `agent.model`; the Codex `Turn` payload itself doesn't carry the resolved model.
 6. **Skills with Windows paths** - Symlink creation may fail on Windows; agent falls back to copying (slower).

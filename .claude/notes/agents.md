@@ -82,6 +82,12 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
   table's to state, not this file's. Full table + rationale:
   docs/agents/HARNESS_PARITY.md.
 
+  The agent-field half of parity is now the `HarnessContract` each agent class declares:
+  a field, `permission_mode` value or tool name a harness cannot honor is a resolution
+  error, and `make parity-table` renders the contract (CE069 checks it), so the page can no
+  longer drift from the adapters. The run-limit half is still the hand-written table above;
+  Plan 2 moves it onto the contract.
+
 ## Shared turn lifecycle
 
 Every adapter drives the same skeleton, on the base class: `_begin_turn()` resets the

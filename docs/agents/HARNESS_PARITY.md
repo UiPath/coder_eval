@@ -5,8 +5,8 @@ was the field that broke that promise hardest: Claude Code enforced it, and Code
 Antigravity accepted it and never read it, so `max_turns: 6` ran capped on one
 backend and unbounded on the other two.
 
-This page is the contract for what each run limit means per harness, plus the shared
-`agent` fields whose meaning still differs across them.
+This page is the contract for what each run limit means per harness, plus what each
+shared `agent` field means on each harness.
 
 ## The table
 
@@ -16,6 +16,54 @@ This page is the contract for what each run limit means per harness, plus the sh
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
+
+## Agent-field contract
+
+Generated from each agent class's `contract` by `make parity-table`; CE069 fails the build on drift.
+
+<!-- harness-contract:start -->
+| field | claude-code | codex | antigravity | opencode | pi | none |
+| --- | --- | --- | --- | --- | --- | --- |
+| `system_prompt` | enforced | enforced | enforced | enforced | enforced | unsupported |
+| `system_prompt_semantics` | append | append | append | append | append | — |
+| `plugin_skills` | enforced | enforced | enforced | enforced | enforced | unsupported |
+| `permission_mode` | enforced | unsupported | enforced | enforced | enforced | unsupported |
+| `allowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
+| `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
+| `cooperative_stop` | yes | yes | yes | yes | yes | no |
+| `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
+<!-- harness-contract:end -->
+
+A task that sets a field a harness marks `unsupported`, or a `permission_mode` value
+outside that harness's `permission_modes`, is rejected at resolution and `coder-eval plan`
+exits non-zero. `system_prompt_semantics` `append` / `replace` mean the system or
+developer instruction channel of the model request, never the user turn.
+
+### Tool names
+
+Every `allowed_tools` / `disallowed_tools` name must be one of these canonical names.
+Each cell is the native tool the name restricts on that harness; `none` means the
+harness has no such tool, so the name permits or denies nothing there. Generated from
+each agent class's `tool_names` by `make parity-table`.
+
+<!-- harness-tools:start -->
+| tool | claude-code | antigravity | opencode | pi |
+| --- | --- | --- | --- | --- |
+| `Agent` | `Agent` | `start_subagent` | `task` | `task` |
+| `Bash` | `Bash` | `run_command` | `bash` | `bash` |
+| `Edit` | `Edit` | `edit_file` | `edit`, `multiedit`, `patch` | `edit`, `multiedit`, `patch` |
+| `Glob` | `Glob` | `find_file` | `glob` | `find` |
+| `Grep` | `Grep` | `search_directory` | `grep` | `grep` |
+| `NotebookEdit` | `NotebookEdit` | none | none | none |
+| `Read` | `Read` | `view_file` | `read` | `read` |
+| `Skill` | `Skill` | none | `skill` | none |
+| `Task` | `Task` | `start_subagent` | `task` | `task` |
+| `TodoWrite` | `TodoWrite` | none | `todowrite` | `todowrite` |
+| `ToolSearch` | `ToolSearch` | none | none | none |
+| `WebFetch` | `WebFetch` | `read_url_content` | `webfetch` | `webfetch` |
+| `WebSearch` | `WebSearch` | `search_web` | `websearch` | none |
+| `Write` | `Write` | `create_file` | `apply_patch`, `write` | `write` |
+<!-- harness-tools:end -->
 
 ## Timing capture
 
@@ -703,13 +751,6 @@ local plugin root to its `skills.paths`; Pi maps each to a `--skill <dir>` argum
 both via the same `_plugin_skill_dirs` resolver — so both **can** run activation
 suites. A plugin's non-skill assets (agents/hooks/commands/MCP servers) are dropped on
 both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
-
-## Agent fields per harness
-
-Claude Code, Pi, OpenCode and Antigravity honor `system_prompt`, `permission_mode`,
-`allowed_tools` and `disallowed_tools` natively. Codex honors `system_prompt` only. See
-each harness page for the mechanism: [Pi](PI.md#config-fields-and-their-pi-flags),
-[OpenCode](OPENCODE.md#permissions), [Antigravity](ANTIGRAVITY.md), [Codex](CODEX.md).
 
 ## Reproducing
 
