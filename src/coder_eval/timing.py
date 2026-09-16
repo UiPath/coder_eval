@@ -282,7 +282,6 @@ def subtract_tool_time(
         raw_total = sum(raw for _, raw in members)
         # Nothing to apportion, and the loop below divides by it — a group already
         # at zero stays at zero.
-        #
         # ORDER IS LOAD-BEARING: this skip runs BEFORE the equality check below,
         # because `close_window` clamps an inverted window to 0.0 while its bounds
         # still say `completed_at < started_at` — a measured inversion the check

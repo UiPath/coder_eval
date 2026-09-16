@@ -1,38 +1,20 @@
 """CE050: no untyped ``getattr`` probe for a field of a discriminated union.
 
-``getattr(criterion, "command", None)`` reads as "the members that have a
-command". It is not: it is a string the type checker cannot see. Rename
-``RunCommandCriterion.command`` and pyright reports nothing, ruff reports
-nothing, and the probe silently returns ``None`` forever — the guard it powers
-becomes a permanent no-op with every gate green.
-
-``models/tasks.py`` already states the rule in prose, verbatim: "isinstance
-narrowing, NOT getattr(c, 'files'/'command'): with an untyped string probe,
-renaming ... turns this load-time guard into a silent no-op that pyright cannot
-see." This promotes that convention to a gate.
-
-The motivating bug: ``orchestration/regrade.warn_on_embedded_commands`` — the
-only disclosure of what shell a rebuilt, untrusted run config would execute on
-the grader's host — probed with ``getattr(c, "command", None)``. Besides being
-rename-fragile it structurally could not name ``agent_judge``, the criterion
-that spawns a tool-using agent and therefore has the widest blast radius of all.
-
 Fires on ``getattr(<obj>, "<literal>", ...)`` in ``src/coder_eval/`` where the
-literal is a field name declared by a member of one of the tracked discriminated
-unions AND ``<obj>`` is named like a criterion / template source / route. The
-field list is derived from the models at collection time, so it tracks renames
-instead of going stale.
+literal is a field declared by a member of ``SuccessCriterion``,
+``TemplateSource`` or ``ApiRoute`` (derived from the models at collection time,
+minus common names such as ``type``) AND ``<obj>`` is named like a criterion,
+template source or route. Pyright cannot see the string, so a rename turns the
+probe into a permanent ``None``.
 
-The receiver-name filter is deliberate, and it is the rule's known limit. Field
-names like ``command``, ``tool`` and ``prompt`` are far too common to flag on
-their own — the agents legitimately probe raw SDK event objects for exactly those
-— so a name-only rule would fire a dozen times on code that has nothing to do
-with these unions and would be turned off within a week. Scoping to the
-receiver's name catches the real shape (``for c in task.success_criteria: ...
-getattr(c, "command", None)``) and leaves an unusual receiver name uncovered.
+Known limit, deliberate: ``command``/``tool``/``prompt`` are too common to flag
+alone (agents probe SDK event objects for them), so the rule scopes to
+criterion-shaped receiver names and an unusual receiver name is uncovered.
 
-The fix is ``isinstance`` narrowing. ``# noqa: CE050`` for a probe that really is
+Fix with ``isinstance`` narrowing; ``# noqa: CE050`` for a probe that really is
 duck-typed across unrelated objects.
+
+Rationale: .claude/notes/lint-rules.md § CE050
 """
 
 import ast

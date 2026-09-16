@@ -140,6 +140,91 @@ marker between those parts. Naming these for the interval they MEASURE rather th
 what they contain is the whole point; `docs/agents/HARNESS_PARITY.md` holds the
 per-harness composition.
 
+### The golden-stream timing sensor
+
+`tests/_fixtures/golden_streams/_scrub.py::assert_timing_captured` is a replay-based sensor
+for what an AST rule cannot see, such as an SDK that returned `0.0`. It runs on the
+UNSCRUBBED dump because `scrub()` keeps `None` and masks every other value: a scrubbed
+snapshot shows that a field was set, never that it was set to something meaningful. A
+force-closed `"unknown"` orphan is exempt from the command check because it was never
+timed, and saying so is the honest record. A scenario that resolves no command passes that
+check vacuously, which is correct rather than weak.
+
+The bounds half of the generation check is not redundant. A reducer computes the duration
+and the two bounds in separate expressions, so it can report a healthy duration beside two
+stamps that collapsed to one instant. CE059 catches that
+statically only when both bounds are the same `ast.Name`; two different names holding the
+same value pass CE059, and this check catches them.
+
+The head/tail check is keyed on assistant messages with a MEASURABLE window, because that
+is what the collector measures the head and tail against. Both halves of that key are
+load-bearing. The `expect_generation_window` flag is the wrong key: `codex_e_orphan_tool`
+streams a generation whose window subtracts to zero, so it clears the flag while still
+having a head and a tail to report. "Any assistant message" is too weak:
+`codex_g_items_rebuild` rebuilds its transcript from the rollout after the turn ended, with
+`generation_duration_ms=None` and placeholder `now()` bounds, so there is nothing to measure
+an end against and `None` for both is the honest answer.
+
+The head/tail check asserts PRESENCE only, which is all the fixtures support: the replays
+run in ~0.3 ms of synthetic wall clock, so head and tail are microseconds and any bound or
+ordering check is noise. A `>= 0` check is worse than noise — `decompose_turn` clamps with
+`max(..., 0.0)`, so it would restate the implementation and could never fail.
+
+The four-bucket identity is the one assertion here that catches a DOUBLE-COUNT rather than
+an absence (the orphaned-tool case under § decompose_turn). It is off for the
+`FICTIONAL_DURATIONS` scenarios, which inject integer-millisecond SDK item durations of
+17-900 ms while the replay takes ~0.3 ms of real wall clock, so no rebasing can make the
+two commensurable.
+
+Before the identity, the stored `tool_union_ms` is compared with a union that
+`_tool_union_ms` recomputes. That helper validates the dump into a `TurnRecord` and calls
+the collector's own `main_thread_tool_spans` and `union_ms`, so it cannot drift on the
+selection rule (the sub-agent-id derivation, the stamp parse, the `end >= start` filter).
+It still builds its own span set and union — the bookkeeping where the per-reducer defects
+lived (lint-rules.md § CE063) — so it verifies the producer's bookkeeping instead of
+reading the producer's answer.
+
+It is a scenario-level floor, not a per-entry rule, because no per-entry form works against
+the real snapshots. `claude_d_subagent_terminal` holds two content-bearing assistant
+messages of which exactly one is legitimately `None` (the synthesized sub-agent generation,
+delivered as a tool result and never streamed), so no scenario-level flag can say "this one
+but not that one". "Never exactly 0.0" conflicts with the clamps that legitimately produce a
+measured zero. The per-message contract lives in each agent's own unit tests; this is the
+cross-harness floor.
+
+### Why the ms-exact identity contract exists
+
+`tests/test_timing_identity_contract.py` is the committed MAGNITUDE sensor for the
+four-bucket identity, because nothing else in the suite is one. The golden corpus masks
+every timing value and its identity check is one-sided (see The golden-stream timing
+sensor above), so an UNDERCOUNT, which is the defect class this area keeps producing,
+passes it silently. `scripts/timing/decompose_run.py --max-residual-pct` IS two-sided, but
+needs live `task.json` files.
+
+Magnitudes are only real where a scripted clock makes them real, so each case drives the
+harness's own reducer with a hand-moved clock and feeds its output through a real
+`EventCollector`, the seam production uses to compute the head and the tail. The module
+reuses the three clock-injection idioms the per-harness suites already use rather than
+inventing a fourth: an injected `TurnClock` stand-in (pi, antigravity, claude-code), a
+`datetime` subclass patched onto the module (opencode), and scripted SDK epoch-millisecond
+stamps (codex). OpenCode needs a `datetime` SUBCLASS rather than a stub because the
+reducer also calls `datetime.fromtimestamp` through the same module global to convert the
+CLI's epoch stamps (see `tests/test_opencode_agent.py`'s `_SteppedClock`). claude-code
+needs `time.monotonic` patched on top of the injected clock because `turn_start_time`, the
+turn deadline and measured tool durations still read it; scripting only the clock leaves
+the tool span a monotonic duration subtracted off a scripted reading. Codex takes its
+stamps from SDK epoch milliseconds rather than any host clock, so its case scripts those
+stamps directly.
+
+End-to-end tests that run on the REAL clock assert no RELATIVE lower bound on the four
+buckets — only that each is measured and that their sum does not exceed the turn.
+A relative lower bound (`>= share * turn_ms`) is a scheduler-noise detector: under parallel
+load the turn's `duration_seconds` inflates while the measured buckets do not. It was one —
+a `>= 0.5 *` bound in `tests/test_antigravity_agent.py::test_generation_and_tool_time_account_for_the_turn`
+survived only while the sum excluded the head, and failed under `-n auto` once the head
+joined it. The exact share belongs in `tests/test_timing_identity_contract.py`, on a
+scripted clock.
+
 ## main_thread_tool_spans
 
 The span set the generation subtraction, the head and the tail are all measured against,
@@ -268,6 +353,19 @@ a sub-agent message therefore shrinks the head or the tail by time no other buck
 and Codex's recovered child messages carry the CHILD's clock, so the bracket can move
 either way.
 
+### Why the query build sits outside all four buckets
+
+claude-code's `_build_claude_query` runs inside `communicate` before `AgentStartEvent` is
+emitted, so it precedes the head's own start stamp: its cost is inside `duration_seconds`
+but outside all four buckets, as unexplained residual. Measured at 0.03 ms bare and
+0.10 ms with four plugin roots, which is noise, and
+`tests/test_agent_telemetry.py::TestClaudeHeadIsMeasuredAtFirstOutput` keeps it that way
+with a 50 ms budget, so the gap between the buckets and the turn stays the harness's
+rather than ours.
+
+Why the head starts at the first observed model output:
+[agents.md § First-generation window seeding](agents.md).
+
 ## Why the subtraction and the head/tail may run in either order
 
 `EventCollector.build_turn_record` calls `subtract_tool_time` before `_overhead_ms`, and
@@ -308,3 +406,18 @@ the message, and Codex, whose `_flush_message` window extends to the last item's
 `completed_at_ms`) while the other three tile the turn contiguously, so a call open at a
 boundary runs inside two windows. Central subtraction handles both without either reducer
 knowing which it is.
+
+### Why a coincident tool result cannot catch an un-tiled window
+
+The claude-code mark-reset defect (measured numbers in
+[agents.md § Per-harness generation marks](agents.md)) survived its own identity case.
+`_claude_turn` scripts the tool result at the instant the tool ends, so the interval the
+reset discarded and the tool's own span were the SAME milliseconds: `subtract_tool_time`
+removed them either way and the identity closed with or without the bug. Live probes had
+the same blind spot from the other direction: three concurrent `sleep 3` calls make the
+tool union so large that the round trip rounds away (measured: 0.05% residual).
+
+`_claude_slow_result_turn` separates the two: a 20 ms tool whose result arrives through
+two user messages ~2 s apart, the shape traced off `tasks/dataset_example.yaml`. Reverting
+the fix fails that case and leaves every other case in the file green. `_claude_turn`
+deliberately keeps the coincident shape so the two read as a pair.

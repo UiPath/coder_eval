@@ -158,6 +158,23 @@ interpreter and its directory goes FIRST on a PATH the orchestrator also reuses 
 `run_command`, so `tool: python3` made the shim re-resolve its own interpreter to itself —
 an exec loop that spins to the task timeout.
 
+### Why the record_cli probe reads a real shim log
+
+The `tasks/record_cli_responses.yaml` probe needs a detector that proves per-invocation
+response dispatch, and most of its signals cannot. `cli_called` matches argv only, so it
+passes whether a response rule answered or the entry fallback did. The agent can
+transcribe `captured.txt`, because the task YAML is serialised to `/work/input` and mounted
+at `/work/task_dir`, and both are readable. A codegen regression that renders `RULES = []`
+raises nothing, so neither `rule_error` nor `sidecar_error` is booked. Only the
+`"rule": N` key in the log catches it.
+
+`tests/test_tags.py::TestRecordCliProbeIntegrity` therefore does not compare the YAML
+against itself. It runs each stubbed command through a real shim and matches the task's
+regexes against the lines the shim wrote. The needle's spelling (`"rule": 0`, with the
+space) comes from the default `json.dumps` separators in `invocation_log.record`. A test
+that copied the needle would stay green after a switch to compact separators, while the
+blocking CI probe failed.
+
 ## The checker base class
 
 ### Exactly one of _check_impl or _check_impl_async

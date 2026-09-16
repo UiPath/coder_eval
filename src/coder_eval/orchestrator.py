@@ -1982,13 +1982,11 @@ class Orchestrator:
                     iteration=iteration,
                 ) from None
 
-        # ANTI-CHEAT WINDOW. Both the reference and the task dir sit at mode 000
-        # for the whole of every communicate attempt — retries included, since this
-        # wrapper is outside execute_with_retry — and are restored on every exit
-        # path. Routed through the SANDBOX, which owns whether a chmod window means
-        # anything for its driver. It does NOT hide the task DEFINITION: task.yaml
-        # is also staged at /work/input, and hiding the criteria from the agent is
-        # a separate, unsolved problem.
+        # ANTI-CHEAT WINDOW. The reference and the task dir sit at mode 000 for every
+        # communicate attempt, retries included (this wrapper is outside
+        # execute_with_retry), and are restored on every exit path. The SANDBOX owns
+        # whether a chmod window means anything for its driver. It does NOT hide the
+        # task DEFINITION: task.yaml is also staged at /work/input, an unsolved gap.
         # Rationale: .claude/notes/permissions.md § Reference solutions and the anti-cheat window
         assert self.sandbox is not None
         async with self.sandbox.set_permissions([self._reference_dir, self.sandbox.task_dir]):
@@ -2997,15 +2995,10 @@ class Orchestrator:
 
         # Deliberately NOT preserved into run_dir/artifacts: run directories get
         # archived, uploaded and shared, and the reference must not ride along.
-        #
         # Keyed on the staging root recorded BEFORE the copy — NOT on
-        # `_reference_dir.parent`, which is only set once the copy succeeds. The
-        # field is None under docker, where the reference is the host-owned bind
-        # mount: that one is NOT OURS TO DELETE, and rmtree'ing its parent would
-        # take `/work` with it.
-        #
-        # rmtree_restrictive, because a run killed mid-turn leaves the tree at
-        # mode 000, where plain rmtree silently declines.
+        # `_reference_dir.parent`, which is set only once the copy succeeds, and is
+        # None under docker where the reference is a host-owned bind mount that is
+        # NOT OURS TO DELETE.
         # Rationale: .claude/notes/persistence.md § rmtree_restrictive
         staging_root = self._reference_staging_root
         self._reference_dir = None

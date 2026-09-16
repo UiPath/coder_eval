@@ -327,22 +327,13 @@ def test_a_sandbox_path_outside_the_run_dir_is_refused(tmp_path: Path) -> None:
         default_workspace(run_dir, _result(sandbox_path=str(outside)))
 
 
-# --------------------------------------------------------------------------
-# Grading a `driver: docker` row — inside a container of its own image
-#
-# Such a task's criteria address the IMAGE's paths and toolchain, so grading
-# them on the host answers a different question. Demonstrated on
-# `tasks/byod_smoke_test.yaml`, whose criterion is `test -f /opt/byod_marker`
-# (baked into the BYOD image): the identical row scores SUCCESS 1.000 graded in
-# a container and FAILURE 0.000 graded on the host. That is not a flaky
-# difference — it is the host answering "is the marker on THIS machine", which
-# nobody asked.
-#
-# So the docker row is now DISPATCHED to a grading container rather than
-# refused. `--allow-host-grading` keeps its old meaning: grade here anyway (no
-# docker available, or criteria known to be host-portable), and wear the
-# `graded_on_host` stamp.
-# --------------------------------------------------------------------------
+# Grading a `driver: docker` row — inside a container of its own image. Such a task's
+# criteria address the IMAGE's paths and toolchain, so grading them on the host answers
+# a different question: on `tasks/byod_smoke_test.yaml` the identical row scores SUCCESS
+# 1.000 in a container and FAILURE 0.000 on the host. The row is therefore DISPATCHED to
+# a grading container rather than refused, and `--allow-host-grading` keeps its old
+# meaning: grade here anyway, and wear the `graded_on_host` stamp.
+# Rationale: .claude/notes/isolation.md § Grading a docker row inside a container
 
 
 class _RunnerDouble:
@@ -875,13 +866,11 @@ class TestOperatorBaselineFailsClosed:
 
 
 class TestEvaluateDispatchesADockerRow:
-    """The reordering in `evaluate_command` is the fix; nothing pinned it.
+    """A docker row reaches the container dispatch from `evaluate`.
 
-    `delegates_to_regrade` exists solely because `grading_sandbox_config` --
-    whose job is to REFUSE `driver: docker` -- was being called BEFORE the branch
-    that no longer needs it, so no docker row could ever reach the container
-    dispatch. Revert the hoist and every docker detached grade becomes a hard
-    refusal again, with the suite still green.
+    Hazard: `grading_sandbox_config` REFUSES `driver: docker`, so `evaluate_command`
+    must take the in-place `regrade_in_place` branch BEFORE building a sandbox
+    config. Build it first and every docker detached grade becomes a hard refusal.
     """
 
     @staticmethod
@@ -953,9 +942,8 @@ class TestContainerFailureKeepsItsEvidence:
     `_grade_in_container` runs the whole dispatch inside a `TemporaryDirectory`,
     and every DockerRunner diagnostic — the container's merged stdout+stderr, the
     captured build log, the in-container FATAL guards — is written into it.
-    Folding out only on SUCCESS destroyed precisely the evidence, while
-    DockerRunError's own text says `See {log_path} for container output`, naming
-    a path that no longer existed by the time it was printed.
+    Pins: the log is folded out of it on failure as well as on success, and the
+    error names the rescued path, which still exists when it is printed.
     """
 
     async def test_the_container_log_survives_a_failed_grade(

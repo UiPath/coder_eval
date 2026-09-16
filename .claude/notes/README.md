@@ -15,6 +15,7 @@ rule docstrings in `tests/lint/rules/`, then the guides under `docs/`.
 - [agents.md](agents.md) — agent adapters, the turn lifecycle, token reconciliation, harness parity
 - [contracts.md](contracts.md) — criteria, datasets, aggregation, judging
 - [isolation.md](isolation.md) — the docker driver, the sandbox, detached grading
+- [lint-rules.md](lint-rules.md) — why each CE lint rule exists
 - [orchestration.md](orchestration.md) — config merge, resume, early stop, execute vs. run
 - [permissions.md](permissions.md) — the chmod window and the reference anti-cheat
 - [persistence.md](persistence.md) — atomic writes and judge persistence
@@ -46,12 +47,31 @@ Path relative to the repo root, then `§`, then the target `##` heading text ver
 There is no other accepted form: `tests/lint/prose_budget.py` parses this one and fails
 `make docs-budget` when the file or the heading does not exist.
 
-## The prose budget is one number, not a lint rule
+## The prose budget is not a lint rule
 
-`make docs-budget` reports the standing total and fails when it grows. It is deliberately
-**not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants one AST at a time,
-while this is a single whole-tree total. Making it a rule would mean a rule class, a rule
-test and a catalogue entry to enforce one integer — enlarging the harness the budget
+`make docs-budget` runs `tests/lint/prose_budget.py` over `src/coder_eval` and `tests`.
+It enforces three rules with no baseline to maintain: no docstring over 150 prose words
+(an `@abstractmethod` and the Typer commands are exempt), no own-line comment run over 8
+lines, and a file's own-line comments within `MAX(20, 0.15 × lines)`. It also fails when a
+`Rationale:` pointer does not resolve or is not the last prose line of its block.
+
+The run cap is the primary rule and the file total is the backstop under it. The order
+matters, because the total alone was inverted: it blocked `isolation/docker_runner.py` at
+229/229 for carrying 62 short annotations pinned to the lines they explain, while a 16-line
+essay in `tests/test_regrade.py` sat at 29% of its budget. Four files had settled at exactly
+100% of the cap — a budget with an allowance becomes a target. The run cap has no allowance
+and catches the shape the total could not see; the total still catches a file that is mostly
+commentary however it is broken up.
+
+Measured when the cap was chosen: 78.5% of comment runs in the tree are 1-2 lines, 2.5% are
+6 or more, and the longest was 16. After the essays moved out, 21 runs sat at exactly 8
+lines. They were cut to 7 or fewer so that no run starts at the cap, and an ordinary edit
+to one of them does not fail the gate. The four files above still sit at 100% of their total
+budget, so a comment added to one of them has to be paid for by deleting another.
+
+It is deliberately **not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants
+one AST at a time, while this measures prose across whole trees. Making it a rule would
+mean a rule class, a rule test and a catalogue entry — enlarging the harness the budget
 exists to shrink. Do not "fix" this by promoting it.
 
 Nothing here states how many `CE` rules exist. `tests/lint/rules/` owns that count, and a
@@ -59,8 +79,8 @@ number written down anywhere else is a second declaration that will be wrong.
 
 ## Where a CE rule's rationale lives
 
-Each rule's authoritative rationale is its own module docstring under
-`tests/lint/rules/` — or, for the doc-surface and whole-tree rules, the corresponding
-`@pytest.mark.lint` class in `tests/test_custom_lint.py`. Read that before editing,
-suppressing or widening a rule. No prose summary is kept here: a second copy is a second
-declaration, and it is the one that goes stale.
+A rule's invariant, scope and blind spots live in its rule file under `tests/lint/rules/`
+(or its `@pytest.mark.lint` class in `tests/test_custom_lint.py`). Read that before you
+edit, suppress or widen a rule. The defect that motivated it lives in
+[lint-rules.md](lint-rules.md), under the rule's id. That file does not repeat the
+invariant, scope or blind spots.

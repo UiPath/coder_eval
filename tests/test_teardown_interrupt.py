@@ -3,12 +3,12 @@
 The task-timeout watchdog cancels the asyncio task via
 ``loop.call_soon_threadsafe(task.cancel)``, delivering a ``CancelledError`` at
 the next await. When that await is inside ``_run_post_run_commands`` (post-run
-commands do awaited I/O), the cancellation used to land in ``run()``'s
-``finally`` block and abort it wholesale — skipping ``_cleanup()`` (tempdir
-leaked; workspace never preserved) AND ``_finalize_result()`` (task.json lost,
-so the task silently vanished from the run). These tests pin that a post-run
-interrupt — cancellation or a plain exception — still runs the full teardown
-(cleanup + finalize) and then re-raises the original exception unchanged.
+commands do awaited I/O), the cancellation lands in ``run()``'s ``finally``
+block. These tests pin that a post-run interrupt — cancellation or a plain
+exception — still runs the full teardown (``_cleanup()`` + ``_finalize_result()``)
+and then re-raises the original exception unchanged.
+
+Rationale: .claude/notes/orchestration.md § Teardown must be interrupt-proof
 """
 
 import asyncio

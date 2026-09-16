@@ -1134,8 +1134,10 @@ class TestPerMessageTokenCapture:
 
     @pytest.mark.asyncio
     async def test_result_fallback_backfills_when_no_message_id(self, tmp_path):
-        """Legacy SDK / mock-stream path: AssistantMessages without message_id carry zeros,
-        and the ResultMessage usage backfills the last AssistantMessage (pre-fix behavior)."""
+        """With no message_id, the ResultMessage usage backfills the last AssistantMessage.
+
+        Legacy SDK / mock-stream path: AssistantMessages without message_id carry zeros.
+        """
         _tool_use_block_cls, assistant_message_cls, _user_message_cls, text_block_cls, _, result_message_cls = (
             create_mock_sdk_messages()
         )
@@ -1286,33 +1288,16 @@ class TestPerMessageTokenCapture:
 class TestClaudeHeadIsMeasuredAtFirstOutput:
     """claude-code's head is the wall clock up to the first observed model output.
 
-    `_ClaudeTurnState.__init__` stamps `last_event_wall`, and
-    `_seed_first_generation_window` re-stamps it at the first `message_start`.
-    So the first window opens where the model first spoke, and the CLI spawn,
-    provider resolution and time to first token before it are the head.
+    `_seed_first_generation_window` re-stamps `last_event_wall` at the first
+    `message_start`, so the CLI spawn, provider resolution and time to first
+    token before it are the head.
 
-    `_build_claude_query` is NOT in the head: it runs at `communicate`'s
-    `:1095`, before `AgentStartEvent` is emitted at `:1106`, so it precedes the
-    head's own start stamp. It used to sit inside msg0's generation window
-    (`last_event_wall` was stamped at state construction, ahead of the build);
-    it now sits inside `duration_seconds` but outside all four buckets, as
-    unexplained residual. That is why the budget below still matters and why it
-    is not the same guard it was: at 0.03-0.10 ms the residual is noise, and
-    the two tests keep it that way.
+    Pins: `_build_claude_query` stays cheap. It runs in `communicate` before
+    `AgentStartEvent` is emitted, so its cost is inside `duration_seconds` but
+    outside all four buckets, as unexplained residual; these budget tests keep
+    that residual noise.
 
-    It used to be `0.0`, and that was a CLAMPED NEGATIVE rather than a
-    measurement: both marks were stamped before `AgentStartEvent` was emitted,
-    so `decompose_turn`'s `max(..., 0.0)` produced it. The rejection rested on
-    claude-code running the model in-process. It does not — `claude-agent-sdk`
-    spawns the `claude` CLI over `anyio.open_process` and `_pump_messages`
-    calls `query()` once per `communicate()`, a fresh CLI per turn.
-
-    The two budget tests below survive the rewrite with their meaning INVERTED.
-    `_build_claude_query`'s cost now lands in the head rather than inside msg0's
-    generation, so they no longer guard "the build is cheap enough to leave
-    hidden by the clamp" — they guard "our own setup is a negligible part of a
-    head that is now published", which is what makes the head readable as the
-    harness's latency rather than as ours.
+    Rationale: .claude/notes/timing.md § Why the query build sits outside all four buckets
     """
 
     # Measured at 0.03 ms bare and 0.10 ms with four plugin roots. The bound is

@@ -177,7 +177,7 @@ class TestSimulatorRouteDecoupledFromCheckerContext:
             simulation=SimulationConfig(enabled=True, persona="p", goal="g"),
             api_route=self._litellm_api_route(),
         )
-        orchestrator._resolve_routes()  # no raise -- this used to be rejected
+        orchestrator._resolve_routes()  # no raise
         assert isinstance(orchestrator.eval_route, LiteLLMRoute)
         assert not isinstance(orchestrator.simulator_route, LiteLLMRoute)
 
@@ -2343,9 +2343,8 @@ async def test_evaluation_loop_evaluate_only_loads_reference(tmp_path):
     """Evaluate-only branch (agent is None) must still stage the reference and
     forward it to SuccessChecker.check_all_async.
 
-    Regression: previously this branch called check_all without the reference,
-    so judge-style criteria (llm_judge / agent_judge) silently saw no
-    reference even when task.reference was set — surfaced as
+    Without it, judge-style criteria (llm_judge / agent_judge) silently see no
+    reference even when task.reference is set, logged as
     "include_reference=True but reference not set" in the judge_context log.
     """
     from datetime import datetime

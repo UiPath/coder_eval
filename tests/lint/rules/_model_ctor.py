@@ -1,21 +1,16 @@
 """Resolve `coder_eval.models` constructor calls inside one module's AST.
 
-CE060 and CE061 ask the same first question — *is this call building an
-`AssistantMessage`?* — and answering it takes more than matching a name: a
-module may bind the class under any alias, reach it through a relative import,
-or never bind it at all and spell it `models.AssistantMessage(...)`. CE060
-worked that out once; duplicating it into CE061 would mean a model rename or a
-new import spelling needs two fixes in two rules, and the second one is the one
-that gets missed. So it lives here and both rules consume it.
-
-The class name is taken from the model itself rather than written as a string,
-the way CE056 imports `IN_CONTAINER_ENV` and CE057 derives its target set from
-`SIDECAR_MODULES`: renaming the model moves both rules with it.
+CE060, CE061 and CE064 consume it to ask whether a call builds a given class
+under any alias, a relative import, or the `models.AssistantMessage(...)`
+spelling. A new import spelling is fixed here, once. The class name comes from
+the model itself, so renaming the model moves every consumer.
 
 BLIND SPOT, inherited by every consumer: a re-export through an intermediate
 module (`from .sibling import AssistantMessage`) is invisible, because
 resolving it means following imports across files and no rule in this package
 does that.
+
+Rationale: .claude/notes/lint-rules.md § _model_ctor
 """
 
 import ast
@@ -45,14 +40,12 @@ def reaches_module(node: ast.ImportFrom, module_path: str) -> bool:
         return True
     if not node.level:
         return False
-    # A relative spelling carries only a TRAILING SLICE of the absolute path,
-    # and how much of it depends on the dot count: `from ..timing import` gives
-    # "timing", `from ..streaming.events import` gives "streaming.events". So
-    # match any suffix of the target, segment-wise, allowing the import to
-    # continue on into a submodule below it (`..models.criteria`). Comparing a
-    # single `rpartition` tail was right only while every target was
-    # one segment deep; it silently missed `coder_eval.streaming.events`
-    # entirely, which is a rule blind for a whole file rather than a near miss.
+    # A relative spelling carries only a TRAILING SLICE of the absolute path, and its
+    # length depends on the dot count: `from ..timing import` gives "timing",
+    # `from ..streaming.events import` gives "streaming.events". So match any suffix of
+    # the target, segment-wise, allowing the import to continue into a submodule below
+    # it (`..models.criteria`). A single `rpartition` tail missed a multi-segment target
+    # such as `coder_eval.streaming.events` entirely.
     segments = module_path.split(".")
     spelled = module.split(".")
     return any(spelled[: len(segments) - i] == segments[i:] for i in range(1, len(segments)))
@@ -89,7 +82,7 @@ def local_bindings(tree: ast.AST, class_name: str) -> set[str]:
 
 
 def constructor_name(func: ast.expr, names: set[str], class_name: str) -> str | None:
-    """The spelling this call used to name the model, or None if it did not.
+    """The spelling this call names the model with, or None if it does not name it.
 
     A bare name has to be bound in this module to be ours; the attribute
     spelling is matched on the attribute alone, since the module binding it

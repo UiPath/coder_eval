@@ -110,7 +110,6 @@ class CliCalledChecker(BaseCriterion[CliCalledCriterion]):
         # Booked when the shim's own rule evaluation RAISED: the responses the agent
         # saw were not the ones the task described, so no verdict over this log
         # means anything.
-        #
         # HAZARD: all five of this checker's refuse-to-score paths are uniform at a
         # gating 0.0 and NONE may raise -- every one is agent-reachable, and an
         # escalation to ERROR is a better outcome for a failing agent than FAILED.

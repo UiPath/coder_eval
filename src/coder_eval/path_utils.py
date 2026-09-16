@@ -30,13 +30,11 @@ PRE_GRADE_JSON_FILENAME = "task.execute.json"
 # container's read-only input mount. Never written by a run.
 PRIOR_RESULT_FILENAME = "prior.json"
 
-# The container's own stdout+stderr transcript, and the name it is folded back
-# under after a GRADING container. Named for the PHASE because on the
-# ``run --resume`` path ``docker.log`` is already taken by the executed
-# container's log -- folding a grading log back under it repeats the
-# task.log/grade.log truncation bug one layer down. Constants, not literals
-# (CE053): the fold-back is guarded by ``is_file()``, so a rename on the
-# producing side would degrade the copy to a silent no-op.
+# The container's stdout+stderr transcript, and its fold-back name after a GRADING
+# container. Named for the PHASE: on ``run --resume`` ``docker.log`` already holds the
+# executed container's log, and reusing it repeats the task.log/grade.log truncation bug.
+# Constants, not literals (CE053): the fold-back is guarded by ``is_file()``, so a
+# rename on the producing side would silently skip the copy.
 # Rationale: .claude/notes/persistence.md § Run-directory filename constants
 DOCKER_LOG_FILENAME = "docker.log"
 GRADE_DOCKER_LOG_FILENAME = "grade.docker.log"

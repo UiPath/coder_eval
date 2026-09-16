@@ -86,9 +86,9 @@ async def test_discard_pending_turn_rolls_back_when_partial_build_failed():
     """If _set_pending swallowed an exception and left pending_turn=None, discard
     must still roll back the iteration counter.
 
-    Regression: previously the rollback gated on (pending_turn is not None), so
-    a swallowed partial-build exception caused _iteration to drift permanently
-    higher on every double-failure.
+    Pins: the rollback fires on ``_iteration_was_incremented`` even when
+    ``pending_turn`` is None (the two signals are OR'd), so a swallowed
+    partial-build exception cannot drift ``_iteration`` higher on every double-failure.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -781,8 +781,8 @@ def test_claude_agent_message_formatting_edge_cases():
     assert "[TOOL USE] Read" in formatted
 
     # Test 5: Non-tool_use event of the same shape — falls through to the
-    # unknown-tag branch (was previously filtered; now we surface "an
-    # unknown message type appeared" via its class name).
+    # unknown-tag branch, which surfaces "an unknown message type appeared"
+    # via its class name.
     class _ThinkingEvent:
         type = "thinking"
 
@@ -857,35 +857,15 @@ def test_claude_agent_message_formatting_edge_cases():
 
 
 def test_format_messages_system_message_subclasses_are_filtered():
-    """Regression: SystemMessage SUBCLASSES (TaskStartedMessage, etc.) must
-    be filtered out the same way SystemMessage itself is.
+    """SystemMessage SUBCLASSES (TaskStartedMessage, etc.) are filtered like SystemMessage itself.
 
-    claude-agent-sdk 0.1.x added ``TaskStartedMessage``,
-    ``TaskNotificationMessage``, and ``TaskProgressMessage`` for sub-agent
-    lifecycle reporting. Each is declared as a subclass of
-    ``SystemMessage`` with an explicit drop-in contract:
+    Pins: ``_format_messages`` drops a real SDK ``TaskStartedMessage`` (not a
+    name-collision mock) without emitting a tag, and a verdict-shaped JSON
+    literal in a sibling ``AssistantMessage`` survives intact.
 
-        "Subclass of SystemMessage: existing ``isinstance(msg,
-        SystemMessage)`` and ``case SystemMessage()`` checks continue to
-        match."
-
-    An earlier version of ``_format_messages`` compared the exact
-    ``type(msg).__name__`` string against ``"SystemMessage"``, which
-    defeated the SDK's drop-in design — the subclasses fell through to
-    an "unknown message type" branch that ran ``str(msg)[:100]`` and
-    emitted a truncated Python-repr containing nested ``data={...}``
-    dict literals. Even though the typed verdict tool channel has
-    since obviated the brace-walking verdict parser that originally
-    motivated this fix, the underlying ``isinstance``-vs-name-equality
-    contract is still worth pinning.
-
-    This test exercises the real SDK ``TaskStartedMessage`` instance
-    (not a name-collision mock) and asserts:
-
-      1. The lifecycle message is silently filtered (not emitted as a
-         tag, exactly as ``SystemMessage`` itself would be).
-      2. A verdict-shaped JSON literal in a sibling ``AssistantMessage``
-         survives intact in the formatter output.
+    HAZARD: the SDK declares its task lifecycle messages as drop-in
+    ``SystemMessage`` subclasses, so the filter must use ``isinstance``; a
+    ``type(msg).__name__`` comparison sends them to the unknown-type branch.
     """
     from claude_agent_sdk import (
         AssistantMessage,
@@ -957,8 +937,8 @@ def test_format_messages_system_message_subclasses_are_filtered():
     assert formatted.count("{") == formatted.count("}")
 
     # Formatter contract: verdict JSON survives intact in the textual transcript
-    # used for log auditing. The judge no longer parses this output — it's
-    # purely a human-readable artifact now — but a regression that drops or
+    # used for log auditing. The judge does not parse this output — it is
+    # purely a human-readable artifact — but a regression that drops or
     # truncates the verdict text would still mask debugging signal.
     assert verdict_json in formatted
 

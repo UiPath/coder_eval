@@ -80,6 +80,12 @@ unscored. Nothing is lost by deferring: the fact lives on `result.max_turns_exha
 which the seeding carries. The statuses that ARE execution facts differ in kind — they
 abort the run before a verdict is reachable, so preserving them overturns nothing.
 
+The `FinalStatus.is_execution_fact` table must agree with this order:
+`_EXECUTION_FACT_STATUSES` maps MAX_TURNS_EXHAUSTED to `False` (the defect a disagreement
+produces is under isolation.md § Detached grading and `Sandbox.adopt`).
+`tests/test_seed_from_prior_result.py` pins the status in a test of its own, apart from
+the loop over the real execution facts.
+
 ### The four grading sites
 
 `grade=False` is checked in exactly four places, and they do not behave alike:
@@ -821,5 +827,3 @@ bucket was a manual step no checker could verify — an untyped `dict[str, int]`
 neither that every category is present nor that no stray key is — while the `-1` default it
 leaned on was already unreachable, and, though documented as "fail-closed", sorted BELOW
 error, so a fifth category would have silently outranked ERROR as the worst status.
-
-

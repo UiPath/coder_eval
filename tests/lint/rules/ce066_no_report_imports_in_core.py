@@ -1,37 +1,20 @@
 """CE066: core may import only the reports package's public WRITERS.
 
-The invariant is not "core must not import reports" — core legitimately *writes*
-reports: ``orchestrator.py`` writes the per-task HTML and ``orchestration/batch.py``
-drives ``ReportGenerator``. What must not happen is core reaching into the reports
-layer for a **metric, a statistic, a serializer or a formatter**, because that is
-how a number the evaluation loop needs comes to live in a rendering module.
+The invariant is not "core must not import reports" — core legitimately *writes* reports.
+What must not happen is core reaching into the reports layer for a **metric, a statistic, a
+serializer or a formatter**, because that is how a number the evaluation loop needs comes to
+live in a rendering module. Those names live in ``result_metrics.py``, ``stats.py`` and
+``run_record.py``.
 
-Before the split that was the actual shape of the code: the orchestrator imported
-``turn_time_buckets`` and ``visible_turn_count`` from ``reports_stats``, and
-``orchestration/batch.py`` imported the run.json row serializer from
-``reports_experiment``. Those names now live in ``result_metrics.py``, ``stats.py``
-and ``run_record.py``, and this rule is what stops the next one drifting back.
+Scope: ``_layers.is_core_path`` (the package, minus ``cli/`` and ``reports/``). The
+permitted set is an ALLOWLIST of writers, so a newly added report helper is banned from core
+by default. Both the ABSOLUTE and the RELATIVE spelling are checked; the relative form is
+the local idiom.
 
-An ALLOWLIST, not a denylist — the CE018 rationale. A newly added report helper is
-banned from core by default rather than after someone notices. The list is purely
-writers; ``eval_result_to_task_dict`` is deliberately absent, because carrying a
-serializer on it would be the rule documenting a wart instead of the wart being
-removed.
+BLIND SPOT: the rule checks the imported NAME, not what is done with it. Importing
+``ReportGenerator`` and then reaching through the class for a private helper is invisible.
 
-Both the ABSOLUTE and the RELATIVE spelling are checked. That is not a detail:
-the relative form is the local idiom — both surviving edges in the tree are
-``from .reports import write_task_html`` (orchestrator.py) and ``from ..reports
-import ReportGenerator`` (orchestration/batch.py) — and an earlier draft of this
-rule matched only ``node.module``, which for a relative import holds
-``"reports"`` with the dots in ``node.level``. It therefore fired on nothing the
-codebase actually writes, and its own tests passed because they used the
-absolute form. An unrun assertion is documentation, not enforcement.
-
-**Blind spot, stated deliberately:** the rule checks the imported NAME, not what
-is done with it. ``from coder_eval.reports import ReportGenerator`` followed by
-reaching through the class for a private helper is invisible here. That is the
-cheap version, consistent with CE004's own "catches the one mistake we have
-actually seen" note.
+Rationale: .claude/notes/lint-rules.md § CE066
 """
 
 import ast

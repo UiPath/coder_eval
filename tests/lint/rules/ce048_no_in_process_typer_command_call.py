@@ -1,23 +1,21 @@
 """CE048: never call a Typer command function in process.
 
-Typer builds a command's parser from its signature, so every parameter's default
-is an ``OptionInfo`` / ``ArgumentInfo`` sentinel, not the value it stands for.
-Click substitutes the real defaults when it *invokes* the command; a direct
-Python call does not — every unspecified argument arrives as a truthy sentinel
-object.
+A Typer command's parameter defaults are ``OptionInfo`` / ``ArgumentInfo``
+sentinels. Click substitutes the real defaults only when it *invokes* the
+command; a direct Python call passes a truthy sentinel for every unspecified
+argument, and the wrong branch runs silently.
 
-The failure is silent, which is what makes it worth a rule. ``evaluate``'s
-``in_place: bool | None = typer.Option(None, "--in-place/--copy")`` reads as "no
-preference" and selects copy-vs-in-place from the target shape; called
-in-process, ``in_place`` was an ``OptionInfo``, which is truthy, so the tests
-silently graded in place and the default they meant to cover was never
-exercised. Nothing failed — the wrong branch simply ran.
+Call the plain-function body with real Python defaults (``run_pipeline``,
+``run_evaluation``), or drive the command through ``typer.testing.CliRunner``.
 
-The fix is the one already applied to ``run`` / ``execute`` / ``evaluate``: keep
-the Typer signature as a thin wrapper and put the body in a plain function with
-real Python defaults (``run_pipeline``, ``run_evaluation``). Call THAT.
+Scope: ``src/`` and ALSO ``tests/``, where this defect occurs;
+``cli/__init__.py`` is exempt. A call fires only on a name imported from a
+``coder_eval.cli`` module whose parameters carry a ``typer.Option`` /
+``typer.Argument`` default.
 
 Use ``# noqa: CE048`` only where the sentinel behavior is itself under test.
+
+Rationale: .claude/notes/lint-rules.md § CE048
 """
 
 import ast

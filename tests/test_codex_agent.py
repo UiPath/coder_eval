@@ -314,7 +314,7 @@ class TestCustomProviderRouting:
         """wire_api is always 'responses' — the pinned codex binary dropped 'chat'
         support, so it's a fixed constant, not an operator knob."""
         monkeypatch.setenv("CODEX_BASE_URL", "https://my-res.openai.azure.com/openai")
-        monkeypatch.setenv("CODEX_WIRE_API", "chat")  # ignored — no longer a knob
+        monkeypatch.setenv("CODEX_WIRE_API", "chat")  # ignored — not a knob
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="dep"))
         provider = agent._build_thread_options()["config"]["model_providers"]["custom"]
         assert provider["wire_api"] == "responses"
@@ -1523,9 +1523,8 @@ class _ImmediateTimeoutWatchdog:
 class TestCommunicatePostWatchdogTimeoutRace:
     """Regression for the post-watchdog timeout race: when the watchdog fires but
     the pump completes before the cancel lands, the trailing `if timeout_hit`
-    block must set _state=ERROR (consistent with every other timeout/crash path).
-    Previously this path left _state unchanged — a latent inconsistency now fixed
-    by routing it through the shared _finalize_and_raise_timeout kernel."""
+    block must set _state=ERROR (consistent with every other timeout/crash path),
+    via the shared _finalize_and_raise_timeout kernel."""
 
     async def test_post_watchdog_timeout_sets_error_state_and_partial(self, monkeypatch):
         notifications = [_delta("done"), _turn_completed()]
@@ -2411,8 +2410,7 @@ class TestFlushMessageWindowBounds:
     The end-to-end cases above all describe a stream whose stamps advance, so
     they cannot reach the awkward case the reducer still hands `close_window`:
     the emission's own first stamp (`item_start`), whose `min()` against the
-    mark is the backwards-clock defence. The tool-span arguments this class
-    also used to cover are gone — the subtraction moved to
+    mark is the backwards-clock defence. Tool-span subtraction belongs to
     `timing.subtract_tool_time`, and
     `tests/test_event_collector.py::TestSubtractToolTime` pins it there.
     """
@@ -2470,8 +2468,7 @@ class TestFlushMessageWindowBounds:
     def test_the_published_window_is_raw_and_ignores_a_call_still_open(self):
         """The reducer publishes the RAW span; the collector subtracts.
 
-        It used to bound a still-open call at the window's end and take that
-        slice out here. `timing.subtract_tool_time` sees every span at
+        `timing.subtract_tool_time` sees every span at
         once, so a call is subtracted from the windows its REAL interval
         overlaps once it resolves — no boundary approximation, and nothing for
         this reducer to remember. A call that never resolves has no
@@ -2499,10 +2496,9 @@ class TestFlushMessageWindowBounds:
 class TestFlushMessageGenTimeSplit:
     """`gen_ms` is apportioned across sub-messages by their output share.
 
-    It used to land entirely on the FIRST spec, so a thinking+action
-    generation reported the thinking row as the whole generation and the
-    action row as instant — 98.5% of Codex generation time booked to
-    thinking. Billing tokens still travel with the first spec only; time is a
+    Booking it all on the FIRST spec would report a thinking+action
+    generation's thinking row as the whole generation and its action row as
+    instant. Billing tokens still travel with the first spec only; time is a
     property of the content, not of the call.
     """
 
@@ -2562,8 +2558,6 @@ class TestFlushMessageGenTimeSplit:
 
     def test_billing_tokens_stay_on_the_first_sub_message_only(self):
         # Time is split; input/cache are per-CALL figures and must not be.
-        # The comment this phase edited previously claimed the two travelled
-        # together, so assert them apart explicitly.
         msgs = self._flush(gen_ms=1000, think_out=800, action_out=200)
         assert len(msgs) == 2
         assert msgs[0].input_tokens == 500 - 200  # fresh slice

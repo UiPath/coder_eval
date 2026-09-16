@@ -632,36 +632,6 @@ class TestCE022SimulationDialogLoopStatementCap:
 
 
 @pytest.mark.lint
-class TestCE023NoProxyShimImports:
-    """CE023 flags imports of the deprecated coder_eval.proxy.* shim outside it."""
-
-    @staticmethod
-    def _run(src: str, *, path: str = "src/coder_eval/agents/antigravity_agent.py"):
-        import ast
-
-        from tests.lint.rules.ce023_no_proxy_shim_import import NoProxyShimImports
-
-        return NoProxyShimImports(path).check(ast.parse(src))
-
-    def test_flags_from_proxy_pricing_import(self):
-        assert self._run("from coder_eval.proxy.pricing import calculate_cost")
-
-    def test_flags_bare_proxy_import(self):
-        assert self._run("import coder_eval.proxy.pricing")
-
-    def test_allows_canonical_pricing_import(self):
-        assert not self._run("from coder_eval.pricing import calculate_cost")
-
-    def test_does_not_match_lookalike_module(self):
-        # `coder_eval.proxything` is a different package, not the proxy shim.
-        assert not self._run("from coder_eval.proxything import x")
-
-    def test_skips_shim_package_itself(self):
-        src = "from coder_eval.proxy.pricing import calculate_cost"
-        assert not self._run(src, path="src/coder_eval/proxy/__init__.py")
-
-
-@pytest.mark.lint
 class TestCE024DiscriminatedUnions:
     """CE024 flags bare module-level unions of same-file `type: Literal`-tagged models."""
 
@@ -975,10 +945,9 @@ class TestCE027DocEnvVarParity:
 class TestCE029DocYamlExamples:
     """CE029 — self-contained YAML examples in the docs must validate.
 
-    A published snippet that raises when copy-pasted reads as a broken feature.
-    The motivating bug: the `prompt_mutations` recipe used `text:` where the
-    field is `content:`, and every mutation model sets `extra="forbid"`. Scans
-    real Markdown, so it lives here rather than in the AST-only runner.
+    Scans real Markdown, so it lives here rather than in the AST-only runner.
+
+    Rationale: .claude/notes/lint-rules.md § CE029
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -1401,18 +1370,11 @@ SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task"}
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
 # Whether each skill must locate a repository's eval tree before it can do anything.
-# All six currently must, and each for its own reason: `analyze` needs the run store,
-# `init` and `check-skill` must know where tasks already live before writing beside
-# them, `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob
-# into the workflow it emits. Every one of them used to carry its own hardcoded guess
-# (`runs/latest`, `tasks/`), which is wrong in any repository that names the tree
-# something else or nests it — so the policy is declared once in
-# reference/repo-layout.md and a reader that stops pointing at it has forked it.
-#
-# A mapping rather than a set, mirroring SKILL_DISABLE_MODEL_INVOCATION: a SEVENTH skill
-# then has to state whether it needs discovery instead of silently defaulting to "no"
-# and quietly reintroducing a hardcoded path. `False` is a legitimate answer — a skill
-# that touches no task or run tree — but it has to be written down.
+# A hardcoded guess (`runs/latest`, `tasks/`) is wrong in any repository that names or
+# nests the tree differently, so the policy lives once in reference/repo-layout.md. A
+# mapping rather than a set, mirroring SKILL_DISABLE_MODEL_INVOCATION: a new skill has
+# to state whether it needs discovery instead of defaulting to "no". `False` is a
+# legitimate answer, but it has to be written down.
 SKILL_NEEDS_EVAL_ROOT_DISCOVERY = {
     "analyze": True,
     "ci": True,
@@ -1448,15 +1410,13 @@ SKILL_DISABLE_MODEL_INVOCATION = {
 # undocumented. Adding a surface is one edit here.
 SKILL_DOC_SURFACES = ("plugins/coder-eval/README.md", "docs/PLUGIN.md", "README.md", "CLAUDE.md")
 
-# Claude Code loads a listing of every skill's name and description into context.
-# The listing's character budget scales at ~1% of the model's context window and is
-# SHARED with every other skill the user has installed; when it overflows,
-# descriptions are dropped starting with the least-invoked skills. So a plugin that
-# grows its descriptions without bound quietly evicts the user's own skills. This
-# ceiling makes growth a reviewed decision: raising it is allowed, in a commit that
-# says why — which is exactly what a silent drift would not be. Asserted on the SUM,
-# not per skill: the longest single description is ~300 against a 1,536 per-entry
-# truncation limit, so a per-skill cap would guard nothing.
+# Claude Code loads a listing of every skill's name and description into context. The
+# budget scales at ~1% of the model's context window and is SHARED with every other
+# skill the user has installed; on overflow, descriptions are dropped starting with
+# the least-invoked. A plugin that grows its descriptions without bound quietly evicts
+# the user's own skills, so this ceiling makes growth a reviewed decision. Asserted on
+# the SUM, not per skill: the longest single description is ~300 against a 1,536
+# per-entry truncation limit, so a per-skill cap would guard nothing.
 SKILL_LISTING_BUDGET_CHARS = 1_600
 
 # Tokens that name THIS repository's files. An installed plugin is copied to
@@ -1676,16 +1636,13 @@ class TestPluginArtifacts:
         )
 
     def test_lint_tasks_skill_is_read_only(self):
-        # Assert BOTH keys, because neither alone carries the contract: `allowed-tools` names
-        # the tools this skill expects to use, `disallowed-tools` removes the write tools from
-        # the pool. Assert only the allowlist and a denylist regression passes; assert only the
-        # denylist and a widened allowlist (say `Bash`) passes.
-        #
-        # Neither key is the real guarantee, which is why the skill body carries a STANDING
-        # prohibition too: per the skills spec, `disallowed-tools` "clears when you send your
-        # next message", and this skill's step 1 deliberately asks the user one before linting a
-        # whole directory. So the frontmatter covers the first turn and the prose covers the
-        # rest — `test_lint_tasks_read_only_rule_survives_the_next_turn` guards that half.
+        # Assert BOTH keys: assert only the allowlist and a denylist regression passes;
+        # assert only the denylist and a widened allowlist (say `Bash`) passes. Neither
+        # is the real guarantee, which is why the skill body carries a STANDING
+        # prohibition too — per the skills spec `disallowed-tools` "clears when you send
+        # your next message", and this skill's step 1 asks the user one. The frontmatter
+        # covers the first turn, the prose the rest;
+        # `test_lint_tasks_read_only_rule_survives_the_next_turn` guards that half.
         meta = _skill_frontmatter(PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md")
 
         # `and allowed` first: an ABSENT allowed-tools is the weakest state, not the
@@ -1774,16 +1731,13 @@ class TestPluginArtifacts:
         assert not missing, f"{name} is not documented in {missing} — a shipped skill nobody can discover"
 
     def test_skill_docs_surfaces_state_the_right_count(self):
-        # The companion to the test above, which only checks that each NAME appears. These
-        # surfaces also state the count in prose, and adding the sixth skill meant hand-editing
-        # seven such sites across four files. Without this, a seventh ships with every count
-        # silently wrong — the exact drift that repair was. Derived from disk: no count is
-        # written down here.
-        #
-        # Three phrasings are in use and all three are covered: "<word> skills" / "<word> slash
-        # commands" (both READMEs, docs/PLUGIN.md), "x <digit>" (CLAUDE.md's `SKILL.md` x 6),
-        # and "The other <word>" (the model-invokable subset, which is the skill count minus
-        # the explicit-invocation-only ones).
+        # The companion to the test above, which only checks that each NAME appears.
+        # These surfaces also state the count in prose. Derived from disk: no count is
+        # written down here. Three phrasings are in use and all three are covered:
+        # "<word> skills" / "<word> slash commands" (both READMEs, docs/PLUGIN.md),
+        # "x <digit>" (CLAUDE.md's `SKILL.md` x 6), and "The other <word>" (the
+        # model-invokable subset, the skill count minus the explicit-invocation-only
+        # ones).
         words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
         count = len(PLUGIN_SKILLS)
         assert count in words, f"{count} skills — extend `words` to cover the new count"
@@ -1838,16 +1792,12 @@ class TestPluginArtifacts:
         ids=[str(p.relative_to(PLUGIN_ROOT)) for p in PLUGIN_TEXT_FILES if p.suffix == ".md"],
     )
     def test_bundled_markdown_fences_balance(self, doc: Path):
-        # A skill body is an instruction document; an unbalanced fence silently swallows
-        # everything after it. `analyze` shipped a ```markdown block containing a ```diff
-        # block, and because a closing fence may not carry an info string, the inner
-        # opener closed the outer block early and the next bare ``` opened one that never
-        # closed — burying 32 lines including the whole Principles section. Nothing caught
-        # it, because it is still valid YAML frontmatter and valid-ish Markdown.
-        #
-        # CommonMark rule applied here: a fence closes only on a run of backticks at least
-        # as long as the opener AND carrying no info string. Nesting therefore requires the
-        # OUTER fence to be longer (````markdown wrapping ```diff).
+        # An unbalanced fence silently swallows everything after it. `analyze` shipped a
+        # ```markdown block containing a ```diff block; a closing fence may not carry an
+        # info string, so the inner opener closed the outer block early and buried 32
+        # lines. CommonMark: a fence closes only on a backtick run at least as long as the
+        # opener AND with no info string, so nesting needs a longer OUTER fence
+        # (````markdown wrapping ```diff).
         open_len = 0
         for n, raw in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             line = raw.strip()
@@ -2014,9 +1964,9 @@ class TestPluginArtifacts:
         )
 
     def test_cli_setup_conditions_the_upgrade_suggestion_on_a_pin(self):
-        # "Version skew" used to terminate in "suggest upgrading", full stop. Against a
-        # pinned repository that is the single most destructive thing these skills could
-        # recommend, so the upgrade advice must now sit BEHIND the pin question.
+        # An unconditional "suggest upgrading" is, against a pinned repository, the single
+        # most destructive thing these skills could recommend, so the upgrade advice in
+        # "Version skew" must sit BEHIND the pin question.
         section = (
             (PLUGIN_ROOT / "reference" / "cli-setup.md").read_text(encoding="utf-8").partition("## Version skew")[2]
         )
@@ -2699,12 +2649,10 @@ class TestCE031DeadConfigFields:
 class TestCE026ActionDocSurfaces:
     """CE026 — the Action's onboarding surfaces must be truthful and self-sufficient.
 
-    The motivating bug: docs/CI_GATE.md said "there is nothing to install" above a
-    copy-pasteable `uses:` step with no agent runtime, while the correcting
-    prerequisite note sat 11 lines below and the tutorial's sibling snippet *did*
-    show the steps. An integrator who copied it got a run that dies on a missing
-    `claude` binary. Reasons over Markdown + YAML, so it lives here rather than in
-    the AST-only runner (precedent: CE027-CE031).
+    Reasons over Markdown + YAML, so it lives here rather than in the AST-only runner
+    (precedent: CE027-CE031).
+
+    Rationale: .claude/notes/lint-rules.md § CE026
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -2979,30 +2927,16 @@ class TestCE032CriteriaPathSeam:
 class TestCE034ArmedPositiveRequiresSuccess:
     """CE034 — an armed, live-passable `command_executed` must require success.
 
-    `require_success` defaults to False, so a criterion counts an invocation that
-    CRASHED. On an unarmed criterion that is merely generous. On an armed one it
-    corrupts the run's verdict, because three behaviours compose:
+    `require_success` defaults to False, so a crashed invocation counts. On an armed
+    positive criterion (`min_count > 0`, no `max_count`) that call live-PASSES,
+    `stop_early.on_pass: stop` ends the run, and FIRED-ONLY gating consults only the
+    armed subset — so the run reports SUCCESS past every unarmed criterion.
 
-    1. `live_verdict` and `_check_impl` share `_matching_commands`, so a failed
-       invocation live-PASSES a positive criterion (`min_count > 0`, no
-       `max_count`) the moment it is observed;
-    2. `stop_early.on_pass: stop` ends the run on that pass — and
-       `decide_within` latches it, so the timeout never fires either;
-    3. gating is FIRED-ONLY: a run the watcher cut gates on the ARMED SUBSET
-       (`armed_criteria_passed`), so unarmed criteria are never consulted.
+    Scope: pass-capable instances only, read off the model's own
+    `live_decidable_polarities()`. A fail-only negative (`min_count: 0, max_count: 0`)
+    must NOT set `require_success`: a forbidden call that failed is still a call.
 
-    Net effect on `tasks/early_stop_weighted_low_weight_absorbed.yaml` before this
-    rule existed: an agent that ran `python app.py` BEFORE creating app.py scored a
-    weighted 1.0 over the armed subset and reported SUCCESS — with no app.py and a
-    crashed script — because the unarmed `file_exists` was bypassed. Found by
-    running the plugin's own `lint-tasks` skill against this repository's tasks.
-
-    Only *pass-capable* instances are constrained, read off the model's own
-    `live_decidable_polarities()` rather than re-deriving the shape here. A
-    negative assertion (`min_count: 0, max_count: 0`, i.e. "must NOT call curl")
-    is fail-only and must NOT set `require_success`: a curl that failed is still a
-    curl that was called, and requiring success there would blind the criterion to
-    exactly the calls it exists to forbid.
+    Rationale: .claude/notes/lint-rules.md § CE034
     """
 
     ROOT = Path(__file__).parent.parent
@@ -3125,12 +3059,10 @@ _PATH_HEAD = re.compile(r"(?<![A-Za-z0-9_)\]])\.([A-Za-z_][A-Za-z0-9_]*)")
 
 # `analyze` carries a `| Current runs | Older runs | Where |` table, because a run written
 # before the rename spells two of these differently. The third cell is load-bearing: only
-# a TOP-LEVEL key is a model field with a `validation_alias`, so only those rows can be
-# checked against the schema. `max_iterations` is a key inside the free-form `task_config`
-# dict and appears in no `AliasChoices` at all — a guard that swept the whole table would
-# be unsatisfiable against the very prose it guards, and would get "fixed" by deleting the
-# row. Keeping the scoping visible in the shipped table rather than hidden in this file is
-# the point: an author adding a row has to say which kind of key it is.
+# a TOP-LEVEL key is a model field with a `validation_alias`. `max_iterations` is a key in
+# the free-form `task_config` dict and in no `AliasChoices`, so a guard over the whole table
+# would be unsatisfiable and get "fixed" by deleting the row. The shipped table keeps the
+# scoping visible: an author adding a row has to say which kind of key it is.
 _TOP_LEVEL_CELL = "top-level record key"
 
 
@@ -3166,21 +3098,16 @@ def _record_fields_referenced(block: str) -> set[str]:
 class TestRunRecordFieldVocabulary:
     """Every task.json field the run-analysis surfaces name must exist on the models.
 
-    `jq` returns `null` for a key that does not exist instead of failing, so a wrong
-    field name does not surface as an error — it produces a table of nulls that reads
-    like a run with nothing in it. Both surfaces shipped six such names at once
-    (`turns`, `total_tokens`, `assistant_turn_count`, `max_turns`, `criteria_count`,
-    `all_criteria_perfect`), and the failure is worst exactly where the instruction
-    applies: the >20-task path, where the agent is explicitly told NOT to fall back to
-    reading whole files.
+    `jq` yields `null` for a missing key instead of failing, so a wrong field name
+    ships as a table of nulls, not an error.
 
-    Scoped deliberately: only the fenced blocks that mention `success_criteria_results`
-    (the summary-extraction programs), and only the HEAD of each dotted path. Deeper
-    segments are not checked because `task_config` is a free-form dict, so
-    `.task_config.resolved.run_limits.max_turns` is unverifiable from the schema. The
-    allowed set unions the run-level and criterion-level models rather than tracking
-    which scope each expression sits in — a weakening that still catches every name
-    above, since none of them exists on either model.
+    Scope: only fenced blocks that mention `success_criteria_results`, and only the
+    HEAD of each dotted path — `task_config` is a free-form dict, so deeper segments
+    are unverifiable. The allowed set unions the run-level and criterion-level models
+    instead of tracking each expression's scope, so a name valid on only one of those
+    models passes in any scope.
+
+    Rationale: .claude/notes/lint-rules.md § TestRunRecordFieldVocabulary
     """
 
     @staticmethod
@@ -3258,11 +3185,11 @@ class TestRunRecordFieldVocabulary:
         )
 
     def test_analyze_does_not_deny_the_legacy_key_absolutely(self):
-        # The skill used to say flatly "There is no top-level `turns`", which is true of
-        # current runs and false of anything written before the rename — so an agent
-        # reading a real older run was told its correct extraction was wrong. The four
-        # OTHER names in that sentence were never top-level in any generation and were
-        # denied on purpose; rewriting the sentence must not take them with it.
+        # A flat "There is no top-level `turns`" is true of current runs and false of
+        # anything written before the rename — it tells an agent reading a real older run
+        # that its correct extraction is wrong. The four OTHER names in that sentence were
+        # never top-level in any generation and are denied on purpose; rewriting the
+        # sentence must not take them with it.
         text = " ".join((PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md").read_text(encoding="utf-8").split())
         assert "There is no top-level `turns`" not in text, (
             "analyze denies the legacy `turns` key absolutely again — it is what runs "
@@ -3338,14 +3265,9 @@ class TestCE035WorkflowOutputParity:
     """CE035 — a `steps.<id>.outputs.<key>` / `needs.<job>.outputs.<key>` reference must
     resolve to a key its writer actually produces.
 
-    The motivating bug: `verify-published-action.yml` read
-    `steps.parity.outputs.version` twice, but that step writes `pin`/`newest`/`lagging`
-    (the shell *variable* was `VERSION`, the output *key* was `newest`). GitHub expands an
-    unwritten output to '', so `TAG_REF: v${{ … }}` became the bare `v`, `git show
-    "v:action.yml"` exited 128 under `set -euo pipefail`, and the preflight job was red on
-    100% of triggers — taking the paid e2e tier (`needs: preflight`) with it. Invisible to
-    ruff/pyright/pytest, and actionlint models `steps.*.outputs` as an open string map.
     Reasons over workflow YAML + embedded shell, so it lives here, not in the AST runner.
+
+    Rationale: .claude/notes/lint-rules.md § CE035
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -3494,10 +3416,10 @@ class TestCE035WorkflowOutputParity:
         assert "['promote', 'release']" in findings[0].message
 
     def test_a_dynamic_printf_writer_is_unreadable_not_a_bogus_key(self, tmp_path: Path):
-        """Regression: the writer scan used to capture the conversion letter out of a
-        format string (`printf "%s=%s\\n"` -> the key `s`). That non-empty-but-wrong set
-        defeats the "no readable key => skip" contract and false-FAILS a correct workflow,
-        which is the one direction the docstring promises the rule can never take."""
+        """The writer scan reads no key from a format string, never its conversion letter.
+
+        `printf "%s=%s\\n"` must not yield the key `s`: a wrong non-empty set defeats "no readable key => skip"
+        and false-FAILS a correct workflow, the one direction the docstring promises the rule never takes."""
         from tests.lint.workflow_outputs import _written_keys, find_unresolved_output_refs
 
         assert _written_keys({"run": 'printf "%s=%s\\n" "$K" "$V" >> "$GITHUB_OUTPUT"'}) is None
@@ -3540,14 +3462,11 @@ class TestCE035WorkflowOutputParity:
 @pytest.mark.lint
 class TestCE036LiveVerdictContract:
     """CE036 — every live-observable criterion's `live_verdict` must be deterministic
-    and monotonic (GitHub issue #61 item 2).
+    and monotonic.
 
     `EarlyStopWatcher` latches verdicts, defers the fail-stop, and attributes pass-stop
     flips against the previous round — all correct only while `live_verdict` never
-    contradicts an earlier decision and never varies for identical input. That contract
-    was documented on `LiveVerdict`/`BaseCriterion.live_verdict` but unenforced: a third
-    criterion implementing it non-monotonically would type-check, pass CE025, and
-    silently corrupt the stop logic.
+    contradicts an earlier decision and never varies for identical input.
 
     Monotonicity over arbitrary Python is undecidable, so there is no sound static rule
     to write. This replays each criterion against every prefix of a recorded trajectory
@@ -3557,6 +3476,8 @@ class TestCE036LiveVerdictContract:
 
     Honest limit (documented on the helper module too): this proves the contract on the
     trajectories an author supplied, not in general.
+
+    Rationale: .claude/notes/lint-rules.md § CE036
     """
 
     def test_real_criteria_honor_the_contract(self):
@@ -3682,7 +3603,7 @@ class TestCE036LiveVerdictContract:
         assert "RAISED" in violations[0] and "prefix length 2" in violations[0], violations
 
     def test_detects_a_fixture_that_stopped_exercising_its_decision_path(self):
-        """Fixture rot: the case claims a decision the trajectory no longer reaches."""
+        """Fixture rot: the case claims a decision the trajectory does not reach."""
         from tests.lint.live_verdict_contract import contract_violations
 
         checker = self._checker(lambda _records: "undecided")
@@ -3808,19 +3729,13 @@ class TestCE036LiveVerdictContract:
 class TestCE044PluginManifestParity:
     """CE044 — the marketplace entry and the plugin manifest it points at are one surface.
 
-    Eight fields are byte-identical duplicates across the two manifests and nothing
-    compared them: the only test that read ``plugin.json`` at all was
-    ``test_action_version_pin.py``, and only its ``version``. A one-sided edit ships
-    two different one-liners — one in the ``/plugin`` browser, one in the installed copy.
-
-    The second half is the motivating defect: the marketplace schema allows both
-    ``keywords`` and a near-synonymous ``tags``, while the plugin-manifest schema has no
-    ``tags`` property at all, so discovery strings parked there are dropped from an
-    installed user's manifest and a future editor has no rule for where a new term goes.
-    An extra key on the entry now fails unless ``MARKETPLACE_ONLY`` records why.
+    Every field the two manifests share must be identical, and an extra key on the
+    marketplace entry fails unless ``MARKETPLACE_ONLY`` records why.
 
     Reasons over JSON files and a ``source`` path, so it is wired here rather than as a
     ``BaseRule`` in the AST runner.
+
+    Rationale: .claude/notes/lint-rules.md § CE044
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -3884,45 +3799,27 @@ class TestCE044PluginManifestParity:
 class TestCE045PluginPathIsAPluginRoot:
     """CE045 — a claude-code local plugin path must name a plugin ROOT, not a skills dir.
 
-    `agent.plugins: [{type: local, path: X}]` reaches the Claude Code SDK as a plugin
-    directory, so a skill is found at `X/skills/<name>/SKILL.md`. Point X one level
-    deeper — at the directory that holds the skill directories — and NOTHING loads.
-    Probed against the real CLI, from a cwd that is not the skill's own repo (project
-    discovery would otherwise find it regardless of `--plugin-dir`, and the namespace
-    prefix is the real signal):
+    `agent.plugins: [{type: local, path: X}]` reaches the SDK as a plugin directory, so
+    a skill resolves at `X/skills/<name>/SKILL.md`; one level deeper loads nothing and
+    every activation suite reports recall 0.0. The unit under test is the VALUE: a path
+    whose last segment is `skills` cannot be a plugin root. `KNOWN_BAD_LINES` is the
+    incident record.
 
-        claude --plugin-dir <root>/skills  ->  nothing
-        claude --plugin-dir <root>         ->  `root:probe-beta`
+    SCOPE: `SKILL_SOURCE_PATH` assignments, plus literal local `path:` values in
+    `tasks/` and `experiments/`. That is a limit, not a license: `$PLUGIN_PATH` (feeds
+    `experiments/plugin-comparison.yaml`) is unlinted. The guard that reaches users is
+    the runtime warning in `utils.process_plugins`; this rule keeps only this repo's
+    shipped strings honest.
 
-    The cost is invisible and total: every activation suite the plugin generated
-    reported recall 0.0, which the bundled template's own comment calls "reads exactly
-    like a broken skill", and `ci` wrote the same path into users' SCHEDULED workflows,
-    where it renders as a permanent red indistinguishable from the drift the schedule
-    exists to detect.
-
-    INCIDENT RECORD — the corpus below is that record, not this prose. Six wrong-value
-    lines across five files shipped at once: docs/PLUGIN.md, tutorial 07,
-    activation.yaml (comment and example), check-skill, and ci. Nothing held them in
-    agreement, which is why they drifted together.
-
-    The unit under test is the VALUE, not the sentence around it: a path whose last
-    segment is `skills` cannot be a plugin root, whatever the prose claims.
-
-    SCOPE. The rule keys on `SKILL_SOURCE_PATH`, the variable the plugin emits. That is
-    a limit, NOT a statement that other variables may use the deeper form — `$PLUGIN_PATH`
-    feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code, and
-    is unlinted. The guard that reaches every user, including the repos where
-    `/coder-eval:check-skill` actually writes suites, is the runtime warning in
-    `utils.process_plugins`; this rule only keeps THIS repo's shipped strings honest.
+    Rationale: .claude/notes/lint-rules.md § CE045
     """
 
     REPO_ROOT = Path(__file__).parent.parent
 
-    # Verbatim pre-fix lines, one per surface that shipped the wrong value. The mutation
-    # guard replays these through the FULL extract-then-predicate pipeline. An earlier
-    # revision asserted the predicate against hand-written strings the matcher could
-    # never produce, which is how the Actions form below stayed unreachable while the
-    # rule looked covered.
+    # Verbatim lines that shipped the wrong value, one per surface. The mutation guard
+    # replays these through the FULL extract-then-predicate pipeline: a predicate checked
+    # against hand-written strings the matcher can never produce leaves a form (like the
+    # Actions one below) unreachable while the rule looks covered.
     KNOWN_BAD_LINES = (
         'export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"',
         "#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills",
@@ -4463,30 +4360,16 @@ class TestCE061WindowViaCloseWindow:
 class TestRuffExternalCoversEveryRule:
     """Every CE rule's documented `# noqa` must be accepted by ruff.
 
-    `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid
-    rule code" for a suppression it does not own. It was hand-maintained and had
-    fallen ~14 ids behind — including CE054 and CE048, whose own docstrings
-    advertise `# noqa: CE054` / `# noqa: CE048` as the supported escape hatch. So
-    the first person to use the documented exemption got a red `make check`
-    instead, for doing exactly what the rule told them to.
-
-    The list then drifted a SECOND time, and this class is why it drifted
-    quietly: it read `ALL_RULES` alone, so it could not see a rule that is a
-    `@pytest.mark.lint` class here rather than a `BaseRule`. CE044 and CE065 are
-    both such rules, both were missing, and only CE065 was noticed — by a human
-    reading a diff. `_known()` now unions both registries.
-
-    Both directions are asserted. A declared id for a deleted rule is the
-    exemption-set rot that the generated pricing table exists to remove.
+    `[tool.ruff.lint] external` is what stops ruff reporting RUF102 "Invalid rule
+    code" for a suppression it does not own. `_known()` unions both registries —
+    `ALL_RULES` and the `@pytest.mark.lint` classes here — and both directions are
+    asserted: a missing id, and a declared id for a rule that no longer exists.
 
     Blind spot: the `@pytest.mark.lint` half of `_known()` discovers ids by the
-    `class TestCE\\d{3}` naming convention, which every such class follows today
-    but nothing enforces. A class named otherwise is invisible here, and its id
-    can go undeclared exactly as CE044 did.
+    `class TestCE\\d{3}` naming convention, which every such class follows
+    today but nothing enforces. A class named otherwise is invisible here.
 
-    Nothing is red today for want of these two entries — no `# noqa: CE044` or
-    `# noqa: CE065` exists in the tree — so this is pre-emptive rather than the
-    fix for a broken build.
+    Rationale: .claude/notes/lint-rules.md § TestRuffExternalCoversEveryRule
     """
 
     @staticmethod
@@ -4520,11 +4403,10 @@ class TestRuffExternalCoversEveryRule:
 class TestCE056NoContainerEnvLiteral:
     """CE056 flags a bare `CODER_EVAL_IN_CONTAINER` outside container_paths.
 
-    The motivating miss: every READER of the gate was migrated to
-    `IN_CONTAINER_ENV` and the single WRITER (`docker_runner`'s
-    `--env CODER_EVAL_IN_CONTAINER=1`) was not, so a rename would have disarmed
-    four gates at once, all silently. CE052 cannot see it -- that rule inspects
-    `if` guards, and the writer is not one.
+    Readers and writers alike must use `IN_CONTAINER_ENV`. CE052 does not overlap:
+    that rule inspects `if` guards, and a writer is not one.
+
+    Rationale: .claude/notes/lint-rules.md § CE056
     """
 
     @staticmethod
@@ -4704,31 +4586,16 @@ class TestCE047AgentRosterParity:
 class TestCE055NoAbsoluteCriterionPath:
     """CE055 — a criterion `path:` in `tasks/` must be sandbox-relative.
 
-    Criterion paths are joined onto the sandbox root, and joining an ABSOLUTE
-    path discards that root: `Path(sandbox) / "/opt/marker"` is `/opt/marker`.
-    Containment then refuses it, so the criterion can never match no matter what
-    the agent does.
+    Joining an ABSOLUTE path onto the sandbox root discards the root
+    (`Path(sandbox) / "/opt/marker"` is `/opt/marker`), so containment refuses it and
+    the criterion can never match. This rule reads the YAML, so it also covers tasks
+    no CI bucket runs, where the runtime guard is never reached.
 
-    Two in-tree tasks were broken this way, and the failure mode is why a static
-    rule earns its place on top of the runtime guard:
+    Never fix a violation by relaxing containment. An absolute path is a claim about
+    the container IMAGE: use `run_command` (`test -f /opt/marker`), which stays inside
+    the trust gate for recorded shell on the detached grading path.
 
-    * `tasks/byod_smoke_test.yaml` checked `/opt/byod_marker`. It IS in a CI
-      bucket, and CI reported `Results: 7/8 succeeded` with a gating 0.0 reading
-      "file does not exist" for a file that plainly existed. The real cause sat
-      in a warning inside a task log.
-    * `tasks/dockerfile_build_example/dockerfile_build_example.yaml` checked
-      `/opt/greeting.txt` and `/opt/secret_check.txt`. It is in NO bucket, so
-      nothing ran it at all — the runtime guard, however loud, is never reached.
-
-    That second case is the argument: a runtime error only fires for tasks
-    somebody runs, and this repo ships example tasks that CI does not. This rule
-    reads the YAML.
-
-    The fix is never "make containment allow it". An absolute path here is a
-    claim about the container IMAGE rather than about anything the agent produced
-    in its workspace, and `run_command` (`test -f /opt/marker`) states that
-    directly — while staying inside the trust gate that governs recorded shell on
-    the detached grading path.
+    Rationale: .claude/notes/lint-rules.md § CE055
     """
 
     ROOT = Path(__file__).parent.parent

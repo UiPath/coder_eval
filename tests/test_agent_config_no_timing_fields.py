@@ -1,5 +1,6 @@
-"""Phase-2 regression: ``max_turns`` and ``turn_timeout`` are no longer fields on
-``AgentConfig``. They live on ``TaskDefinition`` (top-level) and on
+"""``AgentConfig`` has no ``max_turns`` or ``turn_timeout`` field.
+
+They live under ``TaskDefinition.run_limits`` and, for ``max_turns``, on
 ``Agent.communicate(max_turns=...)`` per-call.
 """
 

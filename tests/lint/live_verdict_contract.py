@@ -1,72 +1,24 @@
 """CE036 — every live-observable criterion must honor the ``live_verdict`` contract.
 
-``EarlyStopWatcher``'s deferred fail-stop, verdict latching, and ``_prev_verdicts``
-flip-attribution (``orchestration/early_stop.py``) are correct ONLY because every
-armed criterion's ``live_verdict`` is:
+``EarlyStopWatcher`` (``orchestration/early_stop.py``) is correct only if every armed
+criterion's ``live_verdict`` is:
 
-* **deterministic** — a pure function of the ``turn_records`` prefix handed in, with
-  no wall-clock, randomness, or hidden instance state; and
-* **monotonic** — once it returns ``"pass"``/``"fail"`` for some trajectory prefix it
-  returns that SAME verdict for every longer prefix. ``"undecided"`` is the only
-  verdict allowed to change.
+* **deterministic** — a pure function of the ``turn_records`` prefix handed in; and
+* **monotonic** — once it returns ``"pass"``/``"fail"`` for a prefix, it returns that
+  verdict for every longer prefix. Only ``"undecided"`` may change.
 
-That contract is documented on ``LiveVerdict`` / ``BaseCriterion.live_verdict``
-(``criteria/base.py``) but, until this rule, nothing enforced it: a third criterion
-(in-tree or third-party plugin) implementing ``live_verdict`` non-monotonically would
-type-check, pass CE025, and silently corrupt the stop logic — latching a verdict the
-run then contradicts. See GitHub issue #61 item 2.
+``contract_violations`` replays each ``CASES`` fixture prefix by prefix;
+``permuted_violations`` repeats that over seeded reorderings; ``missing_case_types`` and
+``polarity_gaps`` fail a live type with no cases, or a claimed polarity no case reaches.
 
-Design choices, each load-bearing:
+**Honest limits.** (1) Proves the contract only on the supplied trajectories.
+(2) In-tree ``SuccessCriterion`` union only; plugins copy the replay pattern
+(docs/EXTENDING.md). (3) The determinism probe is two back-to-back calls, so it rarely
+catches a slowly-varying wall-clock read.
 
-* **Replay, not static analysis.** Monotonicity over arbitrary Python is undecidable,
-  so there is no sound *static* check to write. What IS mechanical is replaying a
-  criterion against every prefix of a recorded trajectory and asserting the property
-  directly. That is what ``contract_violations`` does.
-* **Seeded permutations widen the walk.** ``permuted_violations`` re-runs the
-  determinism + monotonicity walk over seeded reorderings of each case's commands —
-  an order-sensitive bug (verdict read off the *latest* command instead of the
-  accumulated set) can look perfectly monotone on the one ordering the author wrote
-  and flip on a reordering. Each shuffle is RENUMBERED (``sequence_number`` reassigned
-  in the new order) so it stays a trajectory the watcher could actually hand over — it
-  sorts by that field before calling ``live_verdict`` — which also keeps the layer
-  effective for a checker that sorts by it too. The terminal-verdict and polarity
-  checks stay authored-ordering-only, where they are sound.
-* **Fixtures are mandatory, and the registry says so.** A property test over random
-  trajectories would return ``"undecided"`` almost always and pass *vacuously*,
-  proving nothing. So each live criterion type must supply cases in ``CASES``, and
-  ``missing_case_types`` — driven by the ``SuccessCriterion`` union, exactly like
-  CE025 — fails when a newly added ``LiveSuccessCriterion`` has none. Adding a live
-  criterion now forces the author to demonstrate the contract in the same change.
-* **Each case declares what it reaches.** ``ContractCase.reaches`` pins the verdict on
-  the FULL trajectory, so a fixture that quietly stops exercising its decision path
-  (a renamed tool, a changed regex) fails loudly instead of degrading into another
-  vacuous all-``undecided`` replay.
-* **Polarity honesty is checked too.** ``live_decidable_polarities`` (on the model) is
-  documented as a subset of what the checker's ``live_verdict`` can emit for that
-  instance. A case that terminally decides a polarity the instance does NOT claim is a
-  real bug — the watcher would treat that trigger as inert while the checker decides
-  it — so ``contract_violations`` reports it.
+Wired as ``tests/test_custom_lint.py::TestCE036LiveVerdictContract``.
 
-**Honest limits.** (1) This proves the contract holds *on the trajectories the author
-supplied*, not in general. A careless implementation with an agreeable fixture still
-passes. The rule raises the cost of the bug and puts the contract in front of the next
-implementer; it does not close the hole. Nothing short of a proof would. (2) It covers
-the in-tree ``SuccessCriterion`` union only — an out-of-tree plugin criterion never
-appears in ``live_criterion_types``, and this module lives under ``tests/`` (not shipped
-in the wheel), so a plugin shipping a live criterion should copy the replay pattern —
-a ``ContractCase``-style fixture plus the prefix walk — into its own test suite, with
-this module as the reference implementation (docs/EXTENDING.md says so where plugin
-authors will read it). (3) The determinism probe is two
-back-to-back calls on identical input: it catches RNG and per-call mutable state, but
-two calls microseconds apart will rarely disagree on a *wall-clock* read, so a
-slowly-varying ``datetime.now()`` dependency largely escapes it (the monotonicity
-replay is the likelier tripwire for one, and only if the fixture happens to straddle
-the flip).
-
-Like CE025/CE030, this is intentionally NOT a ``BaseRule`` registered in
-``tests/lint/runner.py`` (that runner is AST-only, one ``.py`` file at a time); it
-reasons over the criteria registry and executes checkers, and is wired as
-``tests/test_custom_lint.py::TestCE036LiveVerdictContract``.
+Rationale: .claude/notes/lint-rules.md § CE036
 """
 
 from __future__ import annotations
@@ -356,26 +308,18 @@ def _walk_prefixes(
 ) -> tuple[list[str], LiveVerdict | None]:
     """Prefix-by-prefix determinism + monotonicity walk over ONE command ordering.
 
-    The shared core of both replay modes: ``contract_violations`` walks the
-    fixture's authored ordering (and layers the terminal-verdict/polarity checks
-    on top), ``permuted_violations`` walks seeded reorderings (where those extra
-    checks would be unsound — see its docstring). Returns the breach list and the
-    full-trajectory verdict — or ``None`` for that verdict when the TERMINAL prefix
-    raised, since there is then no verdict to compare against and the stale value
-    from the previous prefix would stack a bogus breach on the real one.
+    Shared core of ``contract_violations`` (authored ordering) and
+    ``permuted_violations`` (seeded reorderings). Per prefix it reports:
 
-    1. **Determinism** — ``live_verdict`` called twice on an identical prefix must
-       agree. Catches RNG and per-call mutable state; NOT a reliable wall-clock
-       tripwire — the two calls land microseconds apart (module docstring, honest
-       limit 3).
-    2. **Monotonicity** — once a prefix decides, every longer prefix returns that
-       same verdict.
-    3. **No raising** — an exception from ``live_verdict`` is reported as a labeled
-       violation (case + prefix length) rather than crashing the walk; the remaining
-       prefixes still replay so one bad prefix does not mask breaches elsewhere. The
-       watcher runs mid-turn where a raise would take down the stop logic, and the
-       shape ``command_executed`` pins for a malformed regex — degrade to
-       ``"undecided"``, never raise — is the contract for every implementation.
+    1. **Determinism** — two calls on an identical prefix disagree. NOT a reliable
+       wall-clock tripwire (module docstring, honest limit 3).
+    2. **Monotonicity** — a decided verdict changes on a longer prefix.
+    3. **No raising** — any exception, as a labeled violation; the walk continues.
+
+    Returns the breach list and the full-trajectory verdict, or ``None`` for that
+    verdict when the terminal prefix raised.
+
+    Rationale: .claude/notes/lint-rules.md § CE036
     """
     violations: list[str] = []
     decided: LiveVerdict | None = None
@@ -468,27 +412,16 @@ def permuted_violations(
 ) -> list[str]:
     """Determinism + monotonicity under seeded reorderings of the case's commands.
 
-    ``contract_violations`` walks ONE ordering — the one the fixture author wrote.
-    But the contract quantifies over ANY trajectory, and the orderings an author
-    does not think of are exactly where an order-sensitive bug (e.g. a verdict
-    computed from the *latest* command instead of the accumulated set) hides:
-    such a checker can look perfectly monotone on the authored ordering and flip
-    on a reordering. Seeded shuffles probe those orderings essentially for free.
+    Runs ``_walk_prefixes`` over ``shuffles`` seeded shuffles, each RENUMBERED
+    (``sequence_number`` reassigned 0..N-1 in the new order) so it is a trajectory
+    the watcher could produce. Do not drop the renumber: without it, a checker that
+    sorts by ``sequence_number`` silently replays the authored ordering.
 
-    Each shuffle is RENUMBERED (``sequence_number`` reassigned 0..N-1 in the new
-    order) so the permuted trajectory is one the runtime could actually produce:
-    ``EarlyStopWatcher._collect_verdicts`` keeps its partial trajectory sorted by
-    ``sequence_number``, so ``live_verdict`` never sees a list whose order
-    contradicts those numbers. Without the renumber this layer would (a) report
-    breaches on inputs the watcher cannot construct, and (b) degrade to a silent
-    no-op for any future checker that sorts by ``sequence_number`` itself — the
-    shuffle would just sort straight back to the authored ordering.
+    Does NOT check ``case.reaches`` or polarity honesty: a reordering may
+    legitimately change the terminal verdict, so both are unsound here and stay
+    enforced on the authored ordering by ``contract_violations``.
 
-    Deliberately NOT checked here: ``case.reaches`` and polarity honesty. A
-    reordering may legitimately change the terminal verdict for a criterion whose
-    semantics are order-sensitive, so pinning either would make this layer
-    unsound for exactly the criteria it exists to probe. Both stay enforced on
-    the authored ordering by ``contract_violations``.
+    Rationale: .claude/notes/lint-rules.md § CE036
     """
     rng = random.Random(seed)
     violations: list[str] = []

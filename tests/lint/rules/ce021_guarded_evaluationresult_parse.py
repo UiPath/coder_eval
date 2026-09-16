@@ -1,30 +1,20 @@
 """CE021: ``EvaluationResult.model_validate_json(...)`` must be inside a guarding try.
 
-``task.json`` is the harness's always-produce/always-consume artifact: the only
-thing that crosses the container boundary, and the per-task record every
-dashboard/timeline reads. Parsing it with a bare
-``EvaluationResult.model_validate_json(text)`` means a present-but-malformed file
-— a schema skew between a stale ``:latest`` image and the host (the docker
-version checks only warn), or a truncated/torn write — surfaces as an uncaught
-``pydantic.ValidationError`` / ``json.JSONDecodeError`` (both subclass
-``ValueError``) that crashes the run. That was a real incident at
-``docker_runner.py`` (the parse re-bucketed the task to a non-persisted in-memory
-ERROR with no per-task report). The fix is to degrade: catch ``ValueError`` and
-persist a synthetic ERROR record — see ``batch.py::_load_completed_result`` /
-``recover_task_results`` and ``docker_runner.py::_handle_malformed_task_json``.
+A malformed ``task.json`` raises ``ValidationError`` / ``JSONDecodeError`` (both
+``ValueError``); the caller must degrade to a persisted synthetic ERROR record,
+not crash. Pattern: ``batch.py::_load_completed_result``.
 
-This rule mechanically enforces that: every ``EvaluationResult.model_validate_json``
-call must be lexically nested inside a ``try`` whose ``except`` handlers catch
-``ValueError`` (or the broader ``Exception`` / ``BaseException``, or a bare
-``except``). A handler catching only an unrelated type (e.g. ``except OSError``)
-does NOT guard. Note ``recover_task_results`` uses ``except (OSError, ValueError)``
-— the ``ValueError`` tuple member counts as guarding.
+The call must sit lexically inside a ``try`` BODY whose handlers catch
+``ValueError``, ``Exception``, ``BaseException``, or bare ``except``; a tuple
+naming one of them counts. An unrelated type (``except OSError``) does not
+guard, and neither do the ``else`` / ``except`` / ``finally`` bodies.
 
-Scope is intentionally narrow to ``EvaluationResult`` (the always-produce/consume
-contract). Other models' ``model_validate_json`` calls are not matched.
+Scope: ``EvaluationResult.model_validate_json`` spelled on that bare name only;
+other models are not matched.
 
-Add ``# noqa: CE021`` on the call line only if a caller genuinely must not catch
-(honored automatically by the runner's suppression logic — no rule-side work).
+Add ``# noqa: CE021`` on the call line only if a caller genuinely must not catch.
+
+Rationale: .claude/notes/lint-rules.md § CE021
 """
 
 import ast
