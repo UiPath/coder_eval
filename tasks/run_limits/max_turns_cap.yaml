@@ -4,7 +4,7 @@ description: >-
   sequential tool calls than the cap allows, so every harness must stop at the
   cap rather than running the prompt to completion. Run it with --type
   claude-code / codex / antigravity and compare: the cap must produce a CLEAN
-  stop (max_turns_exhausted, criteria still checked), never a crash.
+  stop (tool_calls_exhausted, criteria still checked), never a crash.
 
 tags:
   - run-limits

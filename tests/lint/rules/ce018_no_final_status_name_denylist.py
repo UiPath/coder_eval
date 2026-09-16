@@ -32,7 +32,7 @@ _FINAL_STATUS_NAMES = frozenset(
         "ERROR",
         "BUILD_FAILED",
         "TIMEOUT",
-        "MAX_TURNS_EXHAUSTED",
+        "TOOL_CALLS_EXHAUSTED",
         "TOKEN_BUDGET_EXCEEDED",
         "COST_BUDGET_EXCEEDED",
         "NOT_GRADED",

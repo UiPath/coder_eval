@@ -136,12 +136,12 @@ async def test_error_log_tail_populated_on_failure(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_error_log_tail_none_on_max_turns_exhausted(tmp_path):
+async def test_error_log_tail_none_on_tool_calls_exhausted(tmp_path):
     orch = _build_orchestrator(tmp_path)
 
     async def fake_loop() -> bool:
         assert orch.result is not None
-        orch.result.max_turns_exhausted = True
+        orch.result.tool_calls_exhausted = True
         return False
 
     with (
@@ -153,7 +153,7 @@ async def test_error_log_tail_none_on_max_turns_exhausted(tmp_path):
     ):
         result = await orch.run()
 
-    assert result.final_status == FinalStatus.MAX_TURNS_EXHAUSTED
+    assert result.final_status == FinalStatus.TOOL_CALLS_EXHAUSTED
     assert result.error_log_tail is None
 
 

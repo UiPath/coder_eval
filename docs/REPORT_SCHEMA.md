@@ -83,11 +83,20 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `judge_cost_usd` / `simulator_cost_usd` slices and the `cost_complete` flag),
 `expected_commands`,
 `actual_commands`, `commands_efficiency`, `agent_config`, `sdk_options`,
-`installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_turns`,
-`max_turns_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
+`installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_tool_calls`,
+`expected_tool_calls_overage`, `tool_calls_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
 `early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
 crashed, crash_reason}`) — the full transcript is in `task.json`.
+
+> **Historical spellings.** Runs written before the tool-call rename carry
+> `max_turns_exhausted`, `expected_turns`, `expected_turns_overage` and the status
+> `MAX_TURNS_EXHAUSTED` instead of `tool_calls_exhausted`, `expected_tool_calls`,
+> `expected_tool_calls_overage` and `TOOL_CALLS_EXHAUSTED`. The evalboard reads both.
+> The Python side does not: there is no alias. A `task.json` with the old flag loads with
+> the fact `false`; one whose `final_status` is `MAX_TURNS_EXHAUSTED`, or whose recorded
+> config sets `run_limits.expected_turns`, does not load. `run --resume` then runs that
+> row again, and `evaluate <run_dir>` cannot re-grade it from its recorded config.
 
 ### Missing cost is never fatal
 
@@ -128,7 +137,7 @@ The authoritative per-replicate record.
 | --- | --- | --- |
 | `final_status` | [`FinalStatus`](#finalstatus) | Terminal status. |
 | `weighted_score` | `float \| null` | Weighted average of criterion scores, 0.0–1.0. |
-| `max_turns_exhausted` | `bool` | Ran out of turns. |
+| `tool_calls_exhausted` | `bool` | The tool-call cap ended an iteration before the agent completed on its own. |
 | `iteration_count` | `int` | Number of turns. |
 | `success_criteria_results` | `list[CriterionResult]` | Per-criterion results — see [below](#criterionresult). |
 | `post_failure_criteria_results` | `list[CriterionResult]` | Diagnostic artifact evidence collected after a terminal agent failure. It does not affect `final_status`, `weighted_score`, gating, or suite aggregation. |
@@ -211,7 +220,7 @@ canonical score remains 0.0.
 (`list[ProviderCallCost]` — one row per real upstream call with its ACTUAL cost +
 cache buckets, captured proxy-side on the LiteLLM open-weight backend and rendered
 by the evalboard as a per-call table; empty on every other
-backend), `num_turns`, `max_turns_exhausted`,
+backend), `num_turns`, `tool_calls_exhausted`,
 `result_summary` (`{is_error, subtype, stop_reason, result}`), `crashed`,
 `crash_reason`.
 
@@ -320,7 +329,7 @@ String enum values and their reporting category:
 | `SUCCESS` | succeeded | `+` |
 | `FAILURE` | failed | `-` |
 | `TIMEOUT` | failed | `T` |
-| `MAX_TURNS_EXHAUSTED` | failed | `M` |
+| `TOOL_CALLS_EXHAUSTED` | failed | `C` |
 | `TOKEN_BUDGET_EXCEEDED` | failed | `#` |
 | `COST_BUDGET_EXCEEDED` | failed | `$` |
 | `ERROR` | error | `!` |

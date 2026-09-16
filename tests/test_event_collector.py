@@ -211,6 +211,8 @@ class TestFullFieldParity:
         "token_usage",
         "timestamp",
         "provider_call_costs",
+        # Derived from end.status: the end status is the one source of truth.
+        "tool_calls_exhausted",
         # Measured by the collector between the agent's own start/end event
         # stamps and the first/last generation window — not carried on
         # AgentEndEvent, because no agent computes them.
@@ -241,7 +243,6 @@ class TestFullFieldParity:
             assistant_turn_count=3,
             messages=[msg],
             num_turns=3,
-            max_turns_exhausted=True,
             result_summary=ResultSummary(is_error=False, subtype="success", result="all done"),
             crashed=True,
             crash_reason="boom",
@@ -284,6 +285,22 @@ class TestFullFieldParity:
                 assert record_value == list(event_value), f"{name} did not round-trip"
             else:
                 assert record_value == event_value, f"{name}: record={record_value!r} event={event_value!r}"
+
+    @pytest.mark.parametrize(
+        ("status", "exhausted"),
+        [
+            (AgentEndStatus.TOOL_CALLS_EXHAUSTED, True),
+            (AgentEndStatus.COMPLETED, False),
+            (AgentEndStatus.STOPPED_EARLY, False),
+        ],
+    )
+    def test_tool_calls_exhausted_is_derived_from_the_end_status(self, status, exhausted):
+        collector = EventCollector()
+        _feed(
+            collector,
+            [AgentStartEvent(task_id=TASK_ID, prompt="p", iteration=1), AgentEndEvent(task_id=TASK_ID, status=status)],
+        )
+        assert collector.build_turn_record().tool_calls_exhausted is exhausted
 
 
 _GEN_BASE = datetime(2026, 9, 11, 9, 0, 0)

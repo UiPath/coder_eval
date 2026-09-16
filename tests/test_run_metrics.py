@@ -86,7 +86,7 @@ class TestPassRateDenominator:
             [
                 _row(FinalStatus.SUCCESS),
                 _row(FinalStatus.TIMEOUT),
-                _row(FinalStatus.MAX_TURNS_EXHAUSTED),
+                _row(FinalStatus.TOOL_CALLS_EXHAUSTED),
                 _row(FinalStatus.TOKEN_BUDGET_EXCEEDED),
                 _row(FinalStatus.COST_BUDGET_EXCEEDED),
             ]

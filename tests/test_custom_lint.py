@@ -316,7 +316,7 @@ class TestCE018NoFinalStatusNameDenylist:
             '"ERROR" == s',  # reversed
             's in ("FAILURE", "TIMEOUT")',
             's not in ("TOKEN_BUDGET_EXCEEDED", "COST_BUDGET_EXCEEDED")',
-            's in ("succeeded", "MAX_TURNS_EXHAUSTED")',  # tuple mixes a member name in
+            's in ("succeeded", "TOOL_CALLS_EXHAUSTED")',  # tuple mixes a member name in
             's in ["SUCCESS", "FAILURE"]',  # list literal
             's in {"ERROR"}',  # set literal
         ],

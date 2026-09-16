@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ..analysis import calculate_command_statistics
 from ..durations import format_ms
 from ..models import FinalStatus, eval_result_total_cost, sum_costs
-from ..result_metrics import expected_turns_overage, turn_time_buckets
+from ..result_metrics import expected_tool_calls_overage, turn_time_buckets
 from ..stats import stddev, welch_t_test
 from .helpers import (
     collect_variant_series,
@@ -349,11 +349,13 @@ def _render_header(result: EvaluationResult) -> str:
     task_cost = eval_result_total_cost(result)
     if task_cost is not None:
         cost_badge = f'<span class="badge neutral">${task_cost:.4f}</span>'
-    expected_turns_badge = ""
-    overage = expected_turns_overage(result)
+    expected_tool_calls_badge = ""
+    overage = expected_tool_calls_overage(result)
     if overage is not None:
         actual, expected = overage
-        expected_turns_badge = f'<span class="badge warning">expected_turns exceeded ({actual}/{expected})</span>'
+        expected_tool_calls_badge = (
+            f'<span class="badge warning">expected_tool_calls exceeded ({actual}/{expected})</span>'
+        )
     early_stop_badge = ""
     if result.early_stop is not None:
         title = early_stop_gate_note(result.early_stop.reason.value)
@@ -373,7 +375,7 @@ def _render_header(result: EvaluationResult) -> str:
     <span class="badge neutral">{agent_type} · {model}</span>
     <span class="badge neutral">{_esc(duration)}</span>
     {cost_badge}
-    {expected_turns_badge}
+    {expected_tool_calls_badge}
     {early_stop_badge}
     <span class="nav-toggle" onclick="toggleTheme()">Toggle theme</span>
   </div>
@@ -766,7 +768,7 @@ def _render_turn(
             f"</span>"
         )
     duration_label = f'<span class="badge neutral">{_esc(_format_duration(turn.duration_seconds))}</span>'
-    exhausted = '<span class="badge failure">max_turns exhausted</span>' if turn.max_turns_exhausted else ""
+    exhausted = '<span class="badge failure">tool-call cap reached</span>' if turn.tool_calls_exhausted else ""
     response_block = (
         f"""
   <details>
@@ -1069,6 +1071,7 @@ _SIMULATION_STOP_REASON_LABELS = {
     "criteria_passed": ("success", "criteria passed"),
     "stop_token": ("neutral", "simulator ended dialog"),
     "max_turns": ("failure", "turn cap reached"),
+    "tool_call_cap": ("failure", "tool-call cap reached"),
     "budget": ("failure", "token budget exhausted"),
     "error": ("failure", "simulator error"),
 }

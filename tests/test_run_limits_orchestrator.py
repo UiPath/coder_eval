@@ -421,82 +421,82 @@ class TestSimulationBudgetAbort:
 
 
 class TestCheckExpectedTurnsUnit:
-    """Direct unit tests of Orchestrator._check_expected_turns."""
+    """Direct unit tests of Orchestrator._check_expected_tool_calls."""
 
     def test_noop_when_run_limits_is_none(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(), tmp_path)
         orch.result.iterations.append(_make_turn(commands=100))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=1)
-        assert "expected_turns" not in caplog.text.lower()
-        assert orch._expected_turns_warning_emitted is False
+            orch._check_expected_tool_calls(iteration=1)
+        assert "expected_tool_calls" not in caplog.text.lower()
+        assert orch._expected_tool_calls_warning_emitted is False
 
-    def test_noop_when_expected_turns_unset(self, tmp_path, caplog):
+    def test_noop_when_expected_tool_calls_unset(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_turns=10)), tmp_path)
         orch.result.iterations.append(_make_turn(commands=20))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=1)
-        assert "expected_turns" not in caplog.text.lower()
-        assert orch._expected_turns_warning_emitted is False
+            orch._check_expected_tool_calls(iteration=1)
+        assert "expected_tool_calls" not in caplog.text.lower()
+        assert orch._expected_tool_calls_warning_emitted is False
 
     def test_no_warning_at_exact_equal(self, tmp_path, caplog):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_turns=6)), tmp_path)
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_tool_calls=6)), tmp_path)
         # 5 tools + reply = 6 visible turns; equal → no warning.
         orch.result.iterations.append(_make_turn(iteration=1, commands=3))
         orch.result.iterations.append(_make_turn(iteration=2, commands=2, reply="done"))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=2)
+            orch._check_expected_tool_calls(iteration=2)
         assert "Visible turns" not in caplog.text
-        assert orch._expected_turns_warning_emitted is False
+        assert orch._expected_tool_calls_warning_emitted is False
 
     def test_warning_fires_once_when_exceeded(self, tmp_path, caplog):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_turns=5)), tmp_path)
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_tool_calls=5)), tmp_path)
         # 2 + 2 = 4 visible turns, still under 5.
         orch.result.iterations.append(_make_turn(iteration=1, commands=2))
         orch.result.iterations.append(_make_turn(iteration=2, commands=2))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=2)
+            orch._check_expected_tool_calls(iteration=2)
         assert "Visible turns" not in caplog.text
 
         # +3 tools = 7 visible turns, over 5 → fires.
         orch.result.iterations.append(_make_turn(iteration=3, commands=3))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=3)
-        assert "Visible turns (7) exceeded expected_turns (5)" in caplog.text
-        assert orch._expected_turns_warning_emitted is True
+            orch._check_expected_tool_calls(iteration=3)
+        assert "Visible tool calls (7) exceeded expected_tool_calls (5)" in caplog.text
+        assert orch._expected_tool_calls_warning_emitted is True
 
         # Re-firing on a later iteration is a no-op.
         caplog.clear()
         orch.result.iterations.append(_make_turn(iteration=4, commands=5))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=4)
+            orch._check_expected_tool_calls(iteration=4)
         assert "Visible turns" not in caplog.text
 
     def test_warning_counts_reply_as_one(self, tmp_path, caplog):
         """A pure-text iteration (0 tools, just a reply) contributes 1 visible turn."""
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_turns=3)), tmp_path)
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_tool_calls=3)), tmp_path)
         # 2 tools, then a 2-tool turn that also emits a final reply.
         # Visible: 2 + 2 + 1(reply) = 5. Crosses 3 → warns.
         orch.result.iterations.append(_make_turn(iteration=1, commands=2))
         orch.result.iterations.append(_make_turn(iteration=2, commands=2, reply="ok"))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=2)
-        assert "Visible turns (5) exceeded expected_turns (3)" in caplog.text
+            orch._check_expected_tool_calls(iteration=2)
+        assert "Visible tool calls (5) exceeded expected_tool_calls (3)" in caplog.text
 
     def test_noop_when_result_is_none(self, tmp_path, caplog):
-        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_turns=1)), tmp_path)
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_tool_calls=1)), tmp_path)
         orch.result = None
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_turns(iteration=1)
+            orch._check_expected_tool_calls(iteration=1)
         assert "Visible turns" not in caplog.text
 
 
 @pytest.mark.asyncio
 class TestExpectedTurnsSingleShot:
-    """Drive the real _evaluation_loop and assert expected_turns warning never aborts."""
+    """Drive the real _evaluation_loop and assert expected_tool_calls warning never aborts."""
 
     async def test_warning_does_not_abort_run(self, tmp_path, caplog):
-        task = _make_task(run_limits=RunLimits(expected_turns=2))
+        task = _make_task(run_limits=RunLimits(expected_tool_calls=2))
         # 4 tools + reply = 5 visible turns, exceeds 2.
         turn = _make_turn(iteration=1, commands=4, reply="done")
 
@@ -517,18 +517,18 @@ class TestExpectedTurnsSingleShot:
             all_passed = await orch._evaluation_loop()
 
         assert all_passed is True
-        assert orch._expected_turns_warning_emitted is True
-        assert "Visible turns (5) exceeded expected_turns (2)" in caplog.text
+        assert orch._expected_tool_calls_warning_emitted is True
+        assert "Visible tool calls (5) exceeded expected_tool_calls (2)" in caplog.text
 
 
 @pytest.mark.asyncio
 class TestExpectedTurnsSimulation:
-    """Drive the simulation dialog loop and confirm expected_turns fires once."""
+    """Drive the simulation dialog loop and confirm expected_tool_calls fires once."""
 
     async def test_warning_fires_in_simulation_and_does_not_abort(self, tmp_path, caplog):
         """A simulation turn that trips the soft target logs once; the dialog
         continues until the simulator decides to stop. The warning must fire
-        before the max_turns_exhausted break so a turn that trips both still
+        before the tool_calls_exhausted break so a turn that trips both still
         emits the soft-target signal."""
         from coder_eval.models import SimulationConfig
         from coder_eval.simulation.user_simulator import SimulatorResult
@@ -540,7 +540,7 @@ class TestExpectedTurnsSimulation:
             max_turns=5,
             check_criteria="end_of_dialog",
         )
-        task = _make_task(run_limits=RunLimits(expected_turns=3))
+        task = _make_task(run_limits=RunLimits(expected_tool_calls=3))
         task = task.model_copy(update={"simulation": sim, "initial_prompt": "first message"})
 
         orch = _make_orchestrator(task, tmp_path)
@@ -578,7 +578,7 @@ class TestExpectedTurnsSimulation:
         # The simulator-driven loop only sends one agent turn before hitting
         # the stop token, so cumulative is 1 (not over 3). Confirm no warning.
         assert "Visible turns" not in caplog.text
-        assert orch._expected_turns_warning_emitted is False
+        assert orch._expected_tool_calls_warning_emitted is False
         # Run completed cleanly.
         assert orch.result.simulation is not None
         assert orch.result.simulation.stop_reason == "stop_token"
@@ -596,7 +596,7 @@ class TestExpectedTurnsSimulation:
             max_turns=5,
             check_criteria="end_of_dialog",
         )
-        task = _make_task(run_limits=RunLimits(expected_turns=2))
+        task = _make_task(run_limits=RunLimits(expected_tool_calls=2))
         task = task.model_copy(update={"simulation": sim, "initial_prompt": "first message"})
 
         orch = _make_orchestrator(task, tmp_path)
@@ -629,8 +629,8 @@ class TestExpectedTurnsSimulation:
         ):
             await orch._simulation_dialog_loop("first message", tmp_path / "sandbox")
 
-        assert "Visible turns (5) exceeded expected_turns (2)" in caplog.text
-        assert orch._expected_turns_warning_emitted is True
+        assert "Visible tool calls (5) exceeded expected_tool_calls (2)" in caplog.text
+        assert orch._expected_tool_calls_warning_emitted is True
 
 
 class TestBuildSimulationTelemetry:

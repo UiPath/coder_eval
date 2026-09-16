@@ -7,7 +7,7 @@ description: >
   environment/task.yaml's sandbox block being field-merged (not replaced).
 
 run_limits:
-  expected_turns: 3
+  expected_tool_calls: 3
 
 agent:
   type: "claude-code"

@@ -161,13 +161,13 @@ class TestDockerGradeBoundary:
         score, so `graded_anyway` was `False` in all four tests — replacing that
         whole expression with a literal `False` left the suite fully green, i.e.
         the defect it exists for could be reintroduced silently. A stale image
-        returning a fully graded MAX_TURNS_EXHAUSTED row is exactly the case the
+        returning a fully graded TOOL_CALLS_EXHAUSTED row is exactly the case the
         exemption must NOT cover: a fresh image reports that status with no
         verdict attached.
         """
         from coder_eval.isolation.docker_runner import DockerRunError
 
-        graded = _result(FinalStatus.MAX_TURNS_EXHAUSTED)
+        graded = _result(FinalStatus.TOOL_CALLS_EXHAUSTED)
         graded.weighted_score = 1.0
         graded.success_criteria_results = [
             CriterionResult(criterion_type="file_exists", description="x", score=1.0, weight=1.0)

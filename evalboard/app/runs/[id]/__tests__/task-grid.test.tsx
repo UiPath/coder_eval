@@ -223,7 +223,7 @@ describe("TaskGrid — Turns column", () => {
         expect(overCell).toHaveTextContent("10");
         expect(overCell.className).toContain("text-rose-700");
         expect(overCell.className).not.toContain("bg-");
-        expect(overCell).toHaveAttribute("title", "expected_turns target: 5");
+        expect(overCell).toHaveAttribute("title", "expected_tool_calls target: 5");
 
         expect(turnsCellFor("mid").className).toContain("text-amber-700");
         expect(turnsCellFor("under").className).toContain("text-emerald-700");
@@ -236,7 +236,7 @@ describe("TaskGrid — Turns column", () => {
         );
         expect(noTargetCell).toHaveAttribute(
             "title",
-            "no expected_turns target set",
+            "no expected_tool_calls target set",
         );
     });
 
@@ -304,7 +304,7 @@ describe("TaskGrid — column tooltips", () => {
         );
         expect(header("Turns")).toHaveAttribute(
             "title",
-            expect.stringContaining("expected_turns"),
+            expect.stringContaining("expected_tool_calls"),
         );
         // No ⓘ buttons anywhere: each header carries its sort toggle and nothing else.
         for (const h of screen.getAllByRole("columnheader")) {

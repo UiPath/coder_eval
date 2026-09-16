@@ -451,7 +451,7 @@ def test_gate_classifies_every_final_status():
     assert not unknown, f"the gate compares `status` against non-FinalStatus values {unknown} — dead branches"
 
     tolerated = {s.value for s in FinalStatus} - named
-    assert tolerated == {FinalStatus.FAILURE.value, FinalStatus.MAX_TURNS_EXHAUSTED.value}, (
+    assert tolerated == {FinalStatus.FAILURE.value, FinalStatus.TOOL_CALLS_EXHAUSTED.value}, (
         f"the gate does not classify {tolerated}. Every FinalStatus must be either hard-failed "
         "or deliberately tolerated as a model-quality outcome; an unclassified one falls through "
         "to a GREEN unattended paid run."

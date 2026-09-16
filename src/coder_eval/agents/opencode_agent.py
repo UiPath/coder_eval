@@ -733,7 +733,6 @@ class _OpenCodeTurnState:
                 assistant_turn_count=self.step_count,
                 messages=list(self.messages),
                 num_turns=self.step_count,
-                max_turns_exhausted=self.max_turns_exhausted,
                 result_summary=ResultSummary(
                     is_error=crashed,
                     subtype=status.value,
@@ -1269,7 +1268,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         if stopped_early:
             return AgentEndStatus.STOPPED_EARLY
         if state.max_turns_exhausted:
-            return AgentEndStatus.MAX_TURNS_EXHAUSTED
+            return AgentEndStatus.TOOL_CALLS_EXHAUSTED
         return AgentEndStatus.COMPLETED
 
     def _crash_turn(

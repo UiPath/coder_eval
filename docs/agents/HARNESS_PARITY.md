@@ -597,7 +597,7 @@ The cap is enforced on the same loop boundary as the cooperative early stop: the
 step or notification that reaches the cap is processed whole, and the next one is
 never pulled. The in-flight turn is then cancelled server-side (best effort) so
 the cap actually stops spend. A run cut this way finalizes cleanly as
-`max_turns_exhausted` — it is not a crash, and it is not retried.
+`tool_calls_exhausted` — it is not a crash, and it is not retried.
 
 **claude-code keeps its native SDK cap.** That is a real, honored cap, so it is
 left alone rather than reimplemented in a different unit. Its unit is the SDK's own
@@ -633,9 +633,9 @@ The signals a capped run leaves behind, on every backend:
 - Criteria are still checked against whatever the agent produced, because the cap is
   an ordinary end-of-run rather than an error. So a capped run that nonetheless
   satisfies its criteria finishes as `SUCCESS`; one that does not finishes as
-  `MAX_TURNS_EXHAUSTED` (reporting category `failed`, icon `M`). Never `ERROR`,
+  `TOOL_CALLS_EXHAUSTED` (reporting category `failed`, icon `C`). Never `ERROR`,
   and never retried.
-- `max_turns_exhausted: true` on the task record.
+- `tool_calls_exhausted: true` on the task record.
 - On Codex and Antigravity, the count of *resolved* tool calls the model itself
   issued equals the cap. Two things can add a further *recorded* command, and
   neither means the cap leaked:

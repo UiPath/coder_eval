@@ -242,7 +242,7 @@ docker` whenever the task prompt or workspace is not fully trusted.
   instead — it is enforced via `--append-system-prompt`.
 - **`max_turns` counts Pi's native agent-loop turns.** One `turn_start` = one
   agent-loop step; `max_turns: N` allows N complete turns, then the run finalizes
-  cleanly as `max_turns_exhausted`. See
+  cleanly as `tool_calls_exhausted`. See
   [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant across
   harnesses.
 - **No sub-agent attribution.** Pi's CLI stream does not expose nested agent

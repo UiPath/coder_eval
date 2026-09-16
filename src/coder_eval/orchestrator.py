@@ -479,9 +479,9 @@ class Orchestrator:
         # exactly once per task even if _check_run_limits fires every turn.
         self._cost_budget_skipped_logged: bool = False
 
-        # One-shot flag: emit the expected_turns rollup warning exactly once per
-        # task run even though _check_expected_turns is called after every turn.
-        self._expected_turns_warning_emitted: bool = False
+        # One-shot flag: emit the expected_tool_calls rollup warning exactly once per
+        # task run even though _check_expected_tool_calls is called after every turn.
+        self._expected_tool_calls_warning_emitted: bool = False
 
         # One-shot flag: a resolved task may be inspected more than once during
         # setup, but its ineffective timeout relationship should be logged once.
@@ -507,7 +507,7 @@ class Orchestrator:
         """The status a normally-completed evaluation loop lands on.
 
         ORDER MATTERS at every step: a detached grade may not overturn an
-        execution fact, and the NOT_GRADED arm sits ABOVE ``max_turns_exhausted``
+        execution fact, and the NOT_GRADED arm sits ABOVE ``tool_calls_exhausted``
         so that ``execute`` + ``evaluate`` equals a single ``run``.
 
         With ``grade=True`` and no prior result the chain is the original one.
@@ -526,8 +526,8 @@ class Orchestrator:
             return FinalStatus.SUCCESS
         if not self.grade:
             return FinalStatus.NOT_GRADED
-        if self.result.max_turns_exhausted:
-            return FinalStatus.MAX_TURNS_EXHAUSTED
+        if self.result.tool_calls_exhausted:
+            return FinalStatus.TOOL_CALLS_EXHAUSTED
         return FinalStatus.FAILURE
 
     async def run(self) -> EvaluationResult:
@@ -709,7 +709,7 @@ class Orchestrator:
                 await self._cleanup()
                 # AFTER teardown, so post-run and cleanup errors land in the
                 # report, but BEFORE finalization so task.json includes it. An
-                # ALLOWLIST: SUCCESS, MAX_TURNS_EXHAUSTED and NOT_GRADED all skip
+                # ALLOWLIST: SUCCESS, TOOL_CALLS_EXHAUSTED and NOT_GRADED all skip
                 # it, none being a diagnosis of something going wrong.
                 if self.result.final_status in {
                     FinalStatus.ERROR,
@@ -759,7 +759,7 @@ class Orchestrator:
         self.result.early_stop = prior.early_stop
 
         # Execution facts that outlive the agent process.
-        self.result.max_turns_exhausted = prior.max_turns_exhausted
+        self.result.tool_calls_exhausted = prior.tool_calls_exhausted
         self.result.error_message = prior.error_message
         self.result.error_details = prior.error_details
         self.result.error_log_tail = prior.error_log_tail
@@ -1227,35 +1227,33 @@ class Orchestrator:
                     iteration=iteration,
                 )
 
-    def _check_expected_turns(self, *, iteration: int) -> None:
-        """Emit a one-shot warning if visible turns exceed expected_turns.
+    def _check_expected_tool_calls(self, *, iteration: int) -> None:
+        """Emit a one-shot warning if visible tool calls exceed expected_tool_calls.
 
-        Soft sibling of ``_check_run_limits.max_turns``: never aborts the run.
-        ``max_turns`` remains the hard cap (enforced inside the SDK). A
-        "turn" here is one timeline entry: each tool call plus the final
-        reply when present — the same metric evalboard renders. Cumulative
-        across iterations so simulation/dialog tasks compare against the
-        budget the user set.
+        Soft sibling of the hard tool-call cap: never aborts the run. The count is
+        one timeline entry per tool call plus the final reply when present — the
+        same metric evalboard renders. Cumulative across iterations so dialog tasks
+        compare against the budget the user set.
         """
         if self.result is None:
             return
         limits = self.task.run_limits
-        if limits is None or limits.expected_turns is None:
+        if limits is None or limits.expected_tool_calls is None:
             return
-        if self._expected_turns_warning_emitted:
+        if self._expected_tool_calls_warning_emitted:
             return
 
         total = visible_turn_count(self.result)
-        if total > limits.expected_turns:
+        if total > limits.expected_tool_calls:
             logger.warning(
-                "Visible turns (%d) exceeded expected_turns (%d) at iteration %d "
-                + "for task %s. Run continues — max_turns remains the hard cap.",
+                "Visible tool calls (%d) exceeded expected_tool_calls (%d) at iteration %d "
+                + "for task %s. Run continues — this target never aborts.",
                 total,
-                limits.expected_turns,
+                limits.expected_tool_calls,
                 iteration,
                 self.task.task_id,
             )
-            self._expected_turns_warning_emitted = True
+            self._expected_tool_calls_warning_emitted = True
 
     def _warn_on_ineffective_task_timeout(self) -> None:
         """Log resolved cross-field run-limit warnings once per task run."""
@@ -2209,18 +2207,18 @@ class Orchestrator:
 
         # Facts about the RUN, recorded BEFORE the grading switch: `execute`
         # withholds the verdict, never the facts. Recording the fact is not
-        # finalizing on it — max_turns decides the status only when the criteria
+        # finalizing on it — the tool-call cap decides the status only when the criteria
         # fail, so under grade=False this is carried into task.json for the
         # detached grade rather than turned into a terminal status.
         # Rationale: .claude/notes/orchestration.md § The four grading sites
-        if turn_record.max_turns_exhausted:
-            self.result.max_turns_exhausted = True
+        if turn_record.tool_calls_exhausted:
+            self.result.tool_calls_exhausted = True
             logger.warning(
                 "Agent exhausted max_turns (%s).",
                 self.task.run_limits.max_turns if self.task.run_limits else None,
             )
         # Soft cumulative-turn check (logs once; never aborts).
-        self._check_expected_turns(iteration=iteration)
+        self._check_expected_tool_calls(iteration=iteration)
 
         # Grading site 2 of 4. The trajectory is captured and persisted exactly as
         # on a graded run, but nothing is scored; returning False keeps FinalStatus
@@ -2608,16 +2606,16 @@ class Orchestrator:
                     stop_reason = stop_decision.reason
                     break
 
-                # Soft check (logs once, never aborts). BEFORE the max_turns
-                # break, so a turn tripping both still emits the expected_turns
-                # warning before the dialog terminates.
-                self._check_expected_turns(iteration=turns_completed)
+                # Soft check (logs once, never aborts). BEFORE the cap break, so a
+                # turn tripping both still emits the expected_tool_calls warning
+                # before the dialog terminates.
+                self._check_expected_tool_calls(iteration=turns_completed)
 
-                if turn_record.max_turns_exhausted:
-                    self.result.max_turns_exhausted = True
-                    stop_reason = DialogStopReason.MAX_TURNS
+                if turn_record.tool_calls_exhausted:
+                    self.result.tool_calls_exhausted = True
+                    stop_reason = DialogStopReason.TOOL_CALL_CAP
                     logger.warning(
-                        "Agent exhausted its inner max_turns during simulation turn %s; ending dialog.",
+                        "Agent reached the tool-call cap during simulation turn %s; ending dialog.",
                         turns_completed,
                     )
                     break

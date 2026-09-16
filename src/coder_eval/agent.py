@@ -228,7 +228,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 some SDKs swallow it.
             max_turns: Hard cap on inner-loop turns within this single
                 ``communicate()`` call. When the agent would exceed it, the
-                returned ``TurnRecord`` has ``max_turns_exhausted=True``.
+                returned ``TurnRecord`` has ``tool_calls_exhausted=True``.
                 None defers to the underlying SDK default.
             should_stop: Cooperative early-stop poll. An implementation with
                 ``contract.cooperative_stop`` calls it at each safe message

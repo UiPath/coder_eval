@@ -96,7 +96,7 @@ class TestRunLimitsValidation:
     def test_all_fields_roundtrip(self):
         rl = RunLimits(
             max_turns=20,
-            expected_turns=15,
+            expected_tool_calls=15,
             task_timeout=600,
             turn_timeout=120,
             max_input_tokens=1000,
@@ -109,21 +109,21 @@ class TestRunLimitsValidation:
         rebuilt = RunLimits.model_validate(dumped)
         assert rebuilt == rl
 
-    def test_expected_turns_default_none(self):
-        assert RunLimits().expected_turns is None
+    def test_expected_tool_calls_default_none(self):
+        assert RunLimits().expected_tool_calls is None
 
-    def test_expected_turns_lower_bound(self):
+    def test_expected_tool_calls_lower_bound(self):
         with pytest.raises(ValidationError, match="greater than or equal to 1"):
-            RunLimits(expected_turns=0)
-        assert RunLimits(expected_turns=1).expected_turns == 1
+            RunLimits(expected_tool_calls=0)
+        assert RunLimits(expected_tool_calls=1).expected_tool_calls == 1
 
-    def test_expected_turns_yaml_coercion(self):
-        assert RunLimits.model_validate({"expected_turns": "10"}).expected_turns == 10
+    def test_expected_tool_calls_yaml_coercion(self):
+        assert RunLimits.model_validate({"expected_tool_calls": "10"}).expected_tool_calls == 10
 
-    def test_expected_turns_greater_than_max_turns_allowed(self):
-        rl = RunLimits(max_turns=5, expected_turns=20)
+    def test_expected_tool_calls_greater_than_max_turns_allowed(self):
+        rl = RunLimits(max_turns=5, expected_tool_calls=20)
         assert rl.max_turns == 5
-        assert rl.expected_turns == 20
+        assert rl.expected_tool_calls == 20
 
     def test_extra_forbid_still_rejects_unknowns(self):
         with pytest.raises(ValidationError):

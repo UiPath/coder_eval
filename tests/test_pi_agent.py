@@ -464,13 +464,13 @@ class TestMaxTurns:
     async def test_max_turns_marks_exhausted(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=1)
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
 
     async def test_a_cap_the_run_stays_under_is_not_exhausted(self, patch_exec, tmp_path):
         """The fixture is exactly 3 turns, so max_turns=3 is the boundary."""
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=3)
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 3
 
     async def test_the_deciding_turn_is_kept_whole(self, patch_exec, tmp_path):
@@ -478,7 +478,7 @@ class TestMaxTurns:
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=1)
 
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
         assert len(record.commands) == 1  # turn 1's write
         usage = record.token_usage
         assert usage is not None
@@ -491,7 +491,7 @@ class TestMaxTurns:
         recorder = _EventRecorder()
         record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
 
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
         assert record.assistant_turn_count == 1
         starts = [e for e in recorder.events if isinstance(e, TurnStartEvent)]
         ends = [e for e in recorder.events if isinstance(e, TurnEndEvent)]
@@ -501,7 +501,7 @@ class TestMaxTurns:
     async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path)
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 3
 
 
@@ -851,7 +851,7 @@ class TestTurnLifecycleAndTokenTelemetry:
     async def test_max_turns_cut_after_an_error_turn_finalizes_cleanly(self, patch_exec, tmp_path):
         """A max_turns cut landing right after an error turn_end (pi still retrying,
         so error_message is set but not yet cleared) must finalize as
-        max_turns_exhausted — NOT crash on the stale error. Guards the documented
+        tool_calls_exhausted — NOT crash on the stale error. Guards the documented
         'no crash, no retry' contract; without the intentional-cut gate the error
         arm would fire on a clean budget exhaustion."""
         # turn 1 errors; turn 2's turn_start trips max_turns=1 before any clean
@@ -859,7 +859,7 @@ class TestTurnLifecycleAndTokenTelemetry:
         stream = [_turn_start(), _turn_end_error("transient 429"), _turn_start(), _turn_end(inp=1, out=1)]
         patch_exec(_FakeProcess(stream))
         record = await _run(_agent(), tmp_path, max_turns=1)
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
         assert record.crashed is False
 
     def test_error_message_resets_on_a_recovered_turn(self):

@@ -17,7 +17,7 @@ describe("TurnsStat", () => {
         expect(dd.tagName).toBe("DD");
         expect(dd.className).toContain("text-rose-700");
         expect(dd.className).not.toContain("bg-");
-        expect(dd).toHaveAttribute("title", "expected_turns target: 5");
+        expect(dd).toHaveAttribute("title", "expected_tool_calls target: 5");
     });
 
     test("yellow text at +25%–+50% (ratio 1.4)", () => {
@@ -38,7 +38,7 @@ describe("TurnsStat", () => {
         expect(dd.tagName).toBe("DD");
         expect(dd.className).toContain("text-gray-900");
         expect(dd.className).not.toMatch(/text-(rose|amber|emerald)-/);
-        expect(dd).toHaveAttribute("title", "no expected_turns target set");
+        expect(dd).toHaveAttribute("title", "no expected_tool_calls target set");
     });
 
     test("both null renders em dash with default text", () => {
@@ -46,7 +46,7 @@ describe("TurnsStat", () => {
         const dd = screen.getByText("—");
         expect(dd.tagName).toBe("DD");
         expect(dd.className).toContain("text-gray-900");
-        expect(dd).toHaveAttribute("title", "no expected_turns target set");
+        expect(dd).toHaveAttribute("title", "no expected_tool_calls target set");
     });
 });
 

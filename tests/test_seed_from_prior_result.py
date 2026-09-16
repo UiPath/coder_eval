@@ -45,7 +45,7 @@ CARRIED = {
     "iterations",
     "iteration_count",
     "early_stop",
-    "max_turns_exhausted",
+    "tool_calls_exhausted",
     "error_message",
     "error_details",
     "error_log_tail",
@@ -117,7 +117,7 @@ def _prior() -> EvaluationResult:
         # its dialog record.
         iterations=[TurnRecord(iteration=1, user_input="prior prompt", agent_output="prior reply")],
         simulation=SimulationTelemetry(n_trials=3, replicate_index=2, stop_reason="stop_token", total_turns=4),
-        max_turns_exhausted=True,
+        tool_calls_exhausted=True,
         error_message="prior message",
         error_details={"where": "prior"},
         error_log_tail="prior tail",
@@ -291,7 +291,7 @@ def test_grading_cannot_overturn_an_execution_fact() -> None:
         assert status.is_execution_fact, f"{status} describes the run, so grading must preserve it"
 
 
-def test_max_turns_exhausted_is_not_an_execution_fact() -> None:
+def test_tool_calls_exhausted_is_not_an_execution_fact() -> None:
     """The one status that reads like an execution fact and is not one.
 
     It is SUBORDINATE to the verdict: `run` returns SUCCESS for a max-turns
@@ -299,16 +299,26 @@ def test_max_turns_exhausted_is_not_an_execution_fact() -> None:
     they do not — which is why `_terminal_status` puts the `grade=False` arm
     above it. The table said True while that method's docstring argued the
     opposite, so a prior max-turns row re-graded through `evaluate` was written
-    back as MAX_TURNS_EXHAUSTED *holding weighted_score 1.000* and exited 1 — a
+    back as TOOL_CALLS_EXHAUSTED *holding weighted_score 1.000* and exited 1 — a
     combination `run` can never produce for the same trajectory.
 
     Its own test, not a line in the loop above, because the two statements
     ("grading may not launder a crash into a pass" and "grading decides this
     one") are different contracts that happened to share a fixture.
     """
-    assert not FinalStatus.MAX_TURNS_EXHAUSTED.is_execution_fact
+    assert not FinalStatus.TOOL_CALLS_EXHAUSTED.is_execution_fact
     # The fact is not lost; it just lives somewhere a verdict cannot contradict.
-    assert "max_turns_exhausted" in EvaluationResult.model_fields
+    assert "tool_calls_exhausted" in EvaluationResult.model_fields
+
+
+def test_a_prior_record_with_the_historical_flag_spelling_loads_with_the_fact_unset() -> None:
+    """A task.json written before the rename carries ``max_turns_exhausted``: ignored, not aliased."""
+    raw = _prior().model_dump(mode="json")
+    del raw["tool_calls_exhausted"]
+    raw["max_turns_exhausted"] = True
+    loaded = EvaluationResult.model_validate(raw)
+    assert loaded.tool_calls_exhausted is False
+    assert not hasattr(loaded, "max_turns_exhausted")
 
 
 def test_seeding_is_a_no_op_without_a_prior_result(tmp_path: Path) -> None:

@@ -40,8 +40,8 @@ EXPECTED_ROW = {
     "error_category": None,
     "error_message": None,
     "expected_commands": None,
-    "expected_turns": None,
-    "expected_turns_overage": None,
+    "expected_tool_calls": None,
+    "expected_tool_calls_overage": None,
     "gate_threshold": None,
     "generation_ms": None,
     "has_final_reply": False,
@@ -59,7 +59,7 @@ EXPECTED_ROW = {
         }
     ],
     "judge_cost_usd": None,
-    "max_turns_exhausted": False,
+    "tool_calls_exhausted": False,
     "model_used": "claude-haiku-4-5",
     "output_tokens": 200,
     "reference_similarity": None,
@@ -229,11 +229,11 @@ class TestTotalTurns:
 class TestExpectedTurnsKey:
     def test_emits_when_configured(self):
         result = _make_result(
-            resolved={"run_limits": {"expected_turns": 12}},
+            resolved={"run_limits": {"expected_tool_calls": 12}},
             turns=[_turn_with_expected(5)],
         )
         d = eval_result_to_task_dict(result)
-        assert d["expected_turns"] == 12
+        assert d["expected_tool_calls"] == 12
 
     def test_none_when_unset(self):
         result = _make_result(
@@ -241,28 +241,35 @@ class TestExpectedTurnsKey:
             turns=[_turn_with_expected(5)],
         )
         d = eval_result_to_task_dict(result)
-        assert d["expected_turns"] is None
+        assert d["expected_tool_calls"] is None
 
     def test_none_when_task_config_none(self):
         result = _make_result(task_config=False, turns=[_turn_with_expected(5)])
         d = eval_result_to_task_dict(result)
-        assert d["expected_turns"] is None
+        assert d["expected_tool_calls"] is None
+
+    def test_row_carries_the_tool_call_keys_and_none_of_the_historical_ones(self):
+        result = _make_result(resolved={"run_limits": {"expected_turns": 12}}, turns=[_turn_with_expected(5)])
+        d = eval_result_to_task_dict(result)
+        assert {"tool_calls_exhausted", "expected_tool_calls", "expected_tool_calls_overage"} <= d.keys()
+        assert not {"max_turns_exhausted", "expected_turns", "expected_turns_overage"} & d.keys()
+        assert d["expected_tool_calls"] is None
 
     def test_none_when_invalid_type(self):
         result = _make_result(
-            resolved={"run_limits": {"expected_turns": "ten"}},
+            resolved={"run_limits": {"expected_tool_calls": "ten"}},
             turns=[_turn_with_expected(5)],
         )
         d = eval_result_to_task_dict(result)
-        assert d["expected_turns"] is None
+        assert d["expected_tool_calls"] is None
 
     def test_none_when_zero(self):
         result = _make_result(
-            resolved={"run_limits": {"expected_turns": 0}},
+            resolved={"run_limits": {"expected_tool_calls": 0}},
             turns=[_turn_with_expected(5)],
         )
         d = eval_result_to_task_dict(result)
-        assert d["expected_turns"] is None
+        assert d["expected_tool_calls"] is None
 
     def test_none_when_run_limits_not_dict(self):
         result = _make_result(
@@ -270,4 +277,4 @@ class TestExpectedTurnsKey:
             turns=[_turn_with_expected(5)],
         )
         d = eval_result_to_task_dict(result)
-        assert d["expected_turns"] is None
+        assert d["expected_tool_calls"] is None

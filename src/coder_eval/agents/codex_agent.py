@@ -739,7 +739,6 @@ class _CodexTurnState:
                 num_turns=1,
                 crashed=crashed,
                 crash_reason=crash_reason,
-                max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
             )
         )
@@ -1009,7 +1008,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if state.stopped_early_hit:
             status = AgentEndStatus.STOPPED_EARLY
         elif state.max_turns_hit:
-            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+            status = AgentEndStatus.TOOL_CALLS_EXHAUSTED
         else:
             status = AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)

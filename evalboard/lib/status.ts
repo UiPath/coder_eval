@@ -3,7 +3,7 @@
 //   SUCCESS              -> passed
 //   ERROR / BUILD_FAILED -> error  (BUILD_FAILED is an environment/setup failure)
 //   NOT_GRADED           -> ungraded (`coder-eval execute`: ran, deliberately unscored)
-//   anything else (FAILURE, TIMEOUT, MAX_TURNS_EXHAUSTED, …) -> failed
+//   anything else (FAILURE, TIMEOUT, TOOL_CALLS_EXHAUSTED, …) -> failed
 //
 // "ungraded" is its OWN member rather than being folded into "unknown". Folding
 // it there looks safe — an ungraded row genuinely has no verdict — but every

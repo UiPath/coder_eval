@@ -64,14 +64,19 @@ describe("parseCriterionResults", () => {
 });
 
 describe("toTaskRow", () => {
-    test("propagates total_turns and expected_turns", () => {
+    test("propagates total_turns and expected_tool_calls", () => {
         const row = toTaskRow({
             task_id: "x",
             total_turns: 7,
-            expected_turns: 5,
+            expected_tool_calls: 5,
         });
         expect(row.totalTurns).toBe(7);
         expect(row.expectedTurns).toBe(5);
+    });
+
+    test("a run written before the rename reads the historical expected_turns key", () => {
+        const row = toTaskRow({ task_id: "x", expected_turns: 4 });
+        expect(row.expectedTurns).toBe(4);
     });
 
     test("legacy raw shape (no new fields) yields null", () => {
@@ -80,8 +85,8 @@ describe("toTaskRow", () => {
         expect(row.expectedTurns).toBeNull();
     });
 
-    test("expected_turns explicitly null on raw yields null", () => {
-        const row = toTaskRow({ task_id: "x", expected_turns: null });
+    test("expected_tool_calls explicitly null on raw yields null", () => {
+        const row = toTaskRow({ task_id: "x", expected_tool_calls: null });
         expect(row.expectedTurns).toBeNull();
     });
 

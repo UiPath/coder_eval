@@ -38,7 +38,7 @@ agent:
   setting_sources: []   # isolate the sandbox from your own CLAUDE.md/settings
 
 run_limits:
-  expected_turns: 5     # soft target — warns when exceeded, never aborts
+  expected_tool_calls: 5  # soft target — warns when exceeded, never aborts
 
 success_criteria:
   - type: "file_exists"
@@ -62,7 +62,7 @@ What each block does:
   settings out of the sandbox. Without it, a large host `CLAUDE.md` is injected
   into every API call, inflating cache-creation tokens and cost. Leave it out
   only when the task needs your MCP servers.
-- **`run_limits.expected_turns`** — an efficiency target, not a cap: exceeding
+- **`run_limits.expected_tool_calls`** — an efficiency target, not a cap: exceeding
   it logs a warning and adds a report badge but never aborts (use
   `run_limits.max_turns` for a hard cap).
 - **`success_criteria`** — each criterion scores 0.0–1.0 and supports `weight`

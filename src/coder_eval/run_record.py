@@ -17,7 +17,7 @@ from typing import Any
 
 from coder_eval.errors import truncate_crash_message
 from coder_eval.models import EvaluationResult, FinalStatus, judge_cost_usd, simulator_cost_usd, sum_costs
-from coder_eval.result_metrics import expected_turns_overage, turn_time_buckets, visible_turn_count
+from coder_eval.result_metrics import expected_tool_calls_overage, turn_time_buckets, visible_turn_count
 from coder_eval.result_metrics import has_final_reply as _has_final_reply
 
 
@@ -84,7 +84,7 @@ def eval_result_to_task_dict(
             ref_similarity = cr.score
             break
 
-    overage = expected_turns_overage(result)
+    overage = expected_tool_calls_overage(result)
 
     total_turns = sum((t.num_turns or 0) for t in result.iterations)
 
@@ -97,13 +97,13 @@ def eval_result_to_task_dict(
     simulator_cost = simulator_cost_usd(result)
     row_total_cost = sum_costs(agent_cost, judge_cost, simulator_cost)
 
-    expected_turns_value: int | None = None
+    expected_tool_calls_value: int | None = None
     if result.task_config is not None:
         rl = (result.task_config.resolved or {}).get("run_limits") or {}
         if isinstance(rl, dict):
-            raw = rl.get("expected_turns")
+            raw = rl.get("expected_tool_calls")
             if isinstance(raw, int) and raw >= 1:
-                expected_turns_value = raw
+                expected_tool_calls_value = raw
 
     _buckets = turn_time_buckets(result)
 
@@ -175,13 +175,13 @@ def eval_result_to_task_dict(
         "agent_config": (result.agent_config.model_dump() if result.agent_config else None),
         "sdk_options": result.sdk_options,
         "installed_tools": result.environment_info.get("installed_tools"),
-        "max_turns_exhausted": result.max_turns_exhausted,
-        "expected_turns_overage": list(overage) if overage is not None else None,
+        "tool_calls_exhausted": result.tool_calls_exhausted,
+        "expected_tool_calls_overage": list(overage) if overage is not None else None,
         "total_turns": total_turns,
         # "Visible turns" (tool calls + final reply) -- what the "within expected
-        # turns" metric compares against. Distinct from total_turns (SDK num_turns).
+        # tool calls" metric compares against. Distinct from total_turns (SDK num_turns).
         "visible_turns": visible_turn_count(result),
-        "expected_turns": expected_turns_value,
+        "expected_tool_calls": expected_tool_calls_value,
         "has_final_reply": has_reply,
         # None/False on the default path, so downstream analysis never confuses a
         # truncated run with a full one.

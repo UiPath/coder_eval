@@ -1438,7 +1438,7 @@ async def test_claude_agent_crash_preserves_partial_turn_record():
         partial = agent.pending_turn
         assert partial is not None
         assert partial.crashed is True
-        assert partial.max_turns_exhausted is False
+        assert partial.tool_calls_exhausted is False
         # No ResultMessage arrived before the crash, so num_turns is None.
         assert partial.num_turns is None
         # The Skill invocation that happened before the crash is preserved.
@@ -1645,7 +1645,7 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
     retryable (max_retries=2) and resume the same prompt that just
     burned its turn budget — pure waste. Instead the agent falls
     through to the success path so the orchestrator's existing
-    ``max_turns_exhausted`` handling can stop iterating.
+    ``tool_calls_exhausted`` handling can stop iterating.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -1684,7 +1684,7 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
             turn_record = await agent.communicate("solve something hard")
 
         assert turn_record.crashed is False
-        assert turn_record.max_turns_exhausted is True
+        assert turn_record.tool_calls_exhausted is True
         # Iteration counter advances normally on a clean turn (no rollback).
         assert agent._iteration == 1
         # The ResultMessage details are still captured for diagnostics.
@@ -1737,7 +1737,7 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
             turn_record = await agent.communicate("solve something hard")
 
         assert turn_record.crashed is False
-        assert turn_record.max_turns_exhausted is True
+        assert turn_record.tool_calls_exhausted is True
         assert agent._iteration == 1
         assert turn_record.result_summary is not None
         assert turn_record.result_summary.subtype == "error_max_turns"

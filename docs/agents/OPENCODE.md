@@ -346,7 +346,7 @@ any other provider credential can be added via `sandbox.env_passthrough_extra`.
 - **`max_turns` counts OpenCode's native steps.** One step = one assistant
   generation (`step_start`/`step_finish`) and may carry several tool calls;
   `max_turns: N` allows N complete steps, then the run finalizes cleanly as
-  `max_turns_exhausted`. This is the claude-code-style native unit, not the
+  `tool_calls_exhausted`. This is the claude-code-style native unit, not the
   visible-turn unit Codex/Antigravity use — see
   [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant
   across harnesses.

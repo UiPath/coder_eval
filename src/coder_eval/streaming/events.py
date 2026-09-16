@@ -59,7 +59,7 @@ class TurnEndStatus(StrEnum):
     COMPLETED = "completed"
     CRASHED = "crashed"
     TIMEOUT = "timeout"
-    MAX_TURNS_EXHAUSTED = "max_turns_exhausted"
+    TOOL_CALLS_EXHAUSTED = "tool_calls_exhausted"
     STOPPED_EARLY = "stopped_early"  # cooperative early-stop-on-criterion (clean, non-crash)
 
 
@@ -69,7 +69,7 @@ class AgentEndStatus(StrEnum):
     COMPLETED = "completed"
     CRASHED = "crashed"
     TIMEOUT = "timeout"
-    MAX_TURNS_EXHAUSTED = "max_turns_exhausted"
+    TOOL_CALLS_EXHAUSTED = "tool_calls_exhausted"
     STOPPED_EARLY = "stopped_early"  # cooperative early-stop-on-criterion (clean, non-crash)
 
 
@@ -167,7 +167,6 @@ class AgentEndEvent(StreamEvent):
     assistant_turn_count: int = 0
     messages: _MessageList = Field(default_factory=list)
     num_turns: int | None = None
-    max_turns_exhausted: bool = False
     result_summary: ResultSummary | None = None
     crashed: bool = False
     crash_reason: str | None = None

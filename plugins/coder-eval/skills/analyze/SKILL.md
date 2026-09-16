@@ -50,7 +50,7 @@ summary per task with `jq` (or `python3` if `jq` is missing):
 ```
 {
   task_id, final_status, weighted_score, duration_seconds,
-  iteration_count, model_used, max_turns_exhausted,
+  iteration_count, model_used, tool_calls_exhausted,
   total_cost_usd:  .total_token_usage.total_cost_usd,
   total_tokens:    (.total_token_usage.input_tokens + .total_token_usage.output_tokens),
   assistant_turns: .total_assistant_turns,
@@ -255,7 +255,7 @@ Write the report to `<target_path>/analysis.md`.
 ## Score Breakdown
 | Metric | Value |
 |---|---|
-| Tasks run / succeeded / failed / ERROR / MAX_TURNS_EXHAUSTED | ... |
+| Tasks run / succeeded / failed / ERROR / TOOL_CALLS_EXHAUSTED | ... |
 | Success rate | ...% |
 | Mean weighted score | ... ± std |
 | Total cost / tokens | $... / ... |

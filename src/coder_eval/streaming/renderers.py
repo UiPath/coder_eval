@@ -10,6 +10,7 @@ from coder_eval.formatting import format_payload, format_token_usage
 from coder_eval.models import ResultSummary
 from coder_eval.streaming.events import (
     AgentEndEvent,
+    AgentEndStatus,
     AgentStartEvent,
     CriteriaCheckEvent,
     CriterionSummary,
@@ -125,8 +126,8 @@ class RichStreamRenderer:
                 f"[bold]--- Turn complete: {len(event.messages)} msgs, "
                 f"{event.duration_seconds:.1f}s, {usage_str} ---[/bold]"
             )
-            if event.max_turns_exhausted:
-                line += " [yellow](max_turns exhausted)[/yellow]"
+            if event.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED:
+                line += " [yellow](tool-call cap reached)[/yellow]"
             if event.crashed and event.crash_reason:
                 line += f"\n[red]    reason: {escape(event.crash_reason)}[/red]"
             error_detail = _format_result_error(event.result_summary)
@@ -232,8 +233,8 @@ class LoggingStreamRenderer:
                 f"[{event.task_id}] --- Agent complete [{event.status.value}]: "
                 f"{len(event.messages)} msgs, {event.duration_seconds:.1f}s, {usage_str} ---"
             )
-            if event.max_turns_exhausted:
-                line += " (max_turns exhausted)"
+            if event.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED:
+                line += " (tool-call cap reached)"
             if event.crashed and event.crash_reason:
                 line += f"\n[{event.task_id}]     reason: {event.crash_reason}"
             error_detail = _format_result_error(event.result_summary)

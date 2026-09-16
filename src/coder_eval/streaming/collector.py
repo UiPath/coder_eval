@@ -27,6 +27,7 @@ from coder_eval.models import (
 )
 from coder_eval.streaming.events import (
     AgentEndEvent,
+    AgentEndStatus,
     AgentStartEvent,
     StreamEvent,
     ToolEndEvent,
@@ -238,7 +239,7 @@ class EventCollector:
             assistant_turn_count=end.assistant_turn_count,
             messages=messages,
             num_turns=end.num_turns,
-            max_turns_exhausted=end.max_turns_exhausted,
+            tool_calls_exhausted=end.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED,
             result_summary=end.result_summary,
             crashed=end.crashed,
             crash_reason=end.crash_reason,

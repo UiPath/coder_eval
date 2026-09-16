@@ -122,8 +122,8 @@ After each exchange the driver evaluates the stop conditions **in this order**, 
 2. **`stop_on_criteria_pass`** (`criteria_passed`) — every success criterion passes. Requires
    per-turn checking (`check_criteria: every_turn` or `both`); pairing it with the default
    `end_of_dialog` is rejected at load time, since there would be nothing to check against.
-3. **`max_turns`** (`max_turns`) — the hard cap on exchanges. The agent exhausting its *own* inner
-   `max_turns` mid-exchange ends the dialog with the same reason.
+3. **`max_turns`** (`max_turns`) — the hard cap on exchanges. The agent reaching its *own* tool-call
+   cap mid-exchange ends the dialog with its own reason, `tool_call_cap`.
 4. **`max_total_tokens`** (`budget`) — the dialog-wide budget across simulator **and** agent. The
    dialog ends and the task is **still scored** — unlike
    [`run_limits.max_total_tokens`](TASK_DEFINITION_GUIDE.md#run-limits), which covers the subject

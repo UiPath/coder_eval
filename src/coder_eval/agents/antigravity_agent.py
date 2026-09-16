@@ -654,7 +654,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         if state.stopped_early_hit:
             status = AgentEndStatus.STOPPED_EARLY
         elif state.max_turns_hit:
-            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+            status = AgentEndStatus.TOOL_CALLS_EXHAUSTED
         else:
             status = AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
@@ -1064,7 +1064,6 @@ class _AntigravityTurnState:
                 num_turns=self._assistant_turns,
                 crashed=crashed,
                 crash_reason=crash_reason,
-                max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
                 # One basis with the window bounds — see the AgentStartEvent site.
                 timestamp=self.clock.now(),

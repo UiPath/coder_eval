@@ -355,8 +355,8 @@ function HistoryTable({
                                     e.matureSkipped
                                         ? MATURE_TOOLTIP
                                         : e.expectedTurns != null
-                                          ? `expected_turns target: ${e.expectedTurns}`
-                                          : "no expected_turns target set"
+                                          ? `expected_tool_calls target: ${e.expectedTurns}`
+                                          : "no expected_tool_calls target set"
                                 }
                             >
                                 {e.matureSkipped

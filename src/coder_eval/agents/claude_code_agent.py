@@ -642,7 +642,7 @@ class _ClaudeTurnState:
             or (self.max_turns is not None and self.num_turns is not None and self.num_turns > self.max_turns)
         )
         if max_turns_exhausted and status == AgentEndStatus.COMPLETED:
-            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
+            status = AgentEndStatus.TOOL_CALLS_EXHAUSTED
             self.log.warning("Agent exhausted max_turns (%s); turn ended without completing", self.max_turns)
 
         if self.current_turn_id is not None:
@@ -676,7 +676,6 @@ class _ClaudeTurnState:
                 assistant_turn_count=self.assistant_turn_count,
                 messages=list(self.sdk_messages),
                 num_turns=self.num_turns,
-                max_turns_exhausted=max_turns_exhausted,
                 result_summary=self.sdk_result_summary,
                 crashed=crashed,
                 crash_reason=crash_reason,

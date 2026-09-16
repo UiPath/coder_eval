@@ -398,9 +398,9 @@ class TurnRecord(BaseModel):
             "ResultMessage (e.g. crash partial before the final message arrived)."
         ),
     )
-    max_turns_exhausted: bool = Field(
+    tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether the agent hit the max_turns limit without voluntarily completing",
+        description="Whether the tool-call cap ended this turn before the agent completed on its own",
     )
     result_summary: ResultSummary | None = Field(
         default=None,
@@ -455,6 +455,7 @@ class SimulationTelemetry(BaseModel):
         "criteria_passed",
         "stop_token",
         "max_turns",
+        "tool_call_cap",
         "budget",
         "error",
         "run_limit_exceeded",
@@ -597,9 +598,9 @@ class EvaluationResult(BaseModel):
 
     # Results
     final_status: FinalStatus = Field(description="Final status of the evaluation")
-    max_turns_exhausted: bool = Field(
+    tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether any iteration hit the agent max_turns limit without the agent voluntarily completing",
+        description="Whether the tool-call cap ended any iteration before the agent completed on its own",
     )
     weighted_score: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"

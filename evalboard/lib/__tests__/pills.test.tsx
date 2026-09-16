@@ -18,7 +18,7 @@ describe("StatusPill — colour by outcome", () => {
         "FAILURE",
         "ERROR",
         "TIMEOUT",
-        "MAX_TURNS_EXHAUSTED",
+        "TOOL_CALLS_EXHAUSTED",
         "TOKEN_BUDGET_EXCEEDED",
         "COST_BUDGET_EXCEEDED",
     ])("%s is red (not grey)", (status) => {
@@ -34,10 +34,10 @@ describe("StatusPill — colour by outcome", () => {
     });
 
     test("relabel keeps the specific status label but still colours red", () => {
-        // MAX_TURNS_EXHAUSTED keeps its raw label (informative) while being red.
-        const el = pill("MAX_TURNS_EXHAUSTED", true);
+        // TOOL_CALLS_EXHAUSTED keeps its raw label (informative) while being red.
+        const el = pill("TOOL_CALLS_EXHAUSTED", true);
         expect(el.className).toContain("text-red-700");
-        expect(el.textContent).toBe("MAX_TURNS_EXHAUSTED");
+        expect(el.textContent).toBe("TOOL_CALLS_EXHAUSTED");
         // Generic FAILURE relabels to "Failed".
         expect(pill("FAILURE", true).textContent).toBe("Failed");
         expect(pill("SUCCESS", true).textContent).toBe("Passed");

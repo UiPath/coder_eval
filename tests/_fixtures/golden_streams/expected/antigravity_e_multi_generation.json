@@ -8,7 +8,6 @@
   "harness_startup_ms": "<scrubbed>",
   "harness_teardown_ms": "<scrubbed>",
   "iteration": 1,
-  "max_turns_exhausted": false,
   "messages": [
     {
       "cache_creation_tokens": 0,
@@ -104,6 +103,7 @@
     "total_cost_usd": "<scrubbed>",
     "uncached_input_tokens": 330
   },
+  "tool_calls_exhausted": false,
   "tool_union_ms": null,
   "user_input": "do it"
 }

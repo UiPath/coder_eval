@@ -1468,15 +1468,15 @@ class TestCooperativeStop:
     async def test_max_turns_marks_exhausted(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=1)
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
 
     async def test_a_cap_the_run_stays_under_is_not_exhausted(self, patch_exec, tmp_path):
         """The OTHER direction, which decides `FinalStatus`.
 
         HAPPY_STREAM is exactly 2 steps, so `max_turns=2` is the boundary: an
         off-by-one here (`>` becoming `>=`, or counting finished steps instead of
-        started ones) reports MAX_TURNS_EXHAUSTED — orchestrator.py turns the flag
-        straight into `FinalStatus.MAX_TURNS_EXHAUSTED` — for a run that finished
+        started ones) reports TOOL_CALLS_EXHAUSTED — orchestrator.py turns the flag
+        straight into `FinalStatus.TOOL_CALLS_EXHAUSTED` — for a run that finished
         well inside its budget. A spurious exhaustion also suppresses the non-zero-
         exit and zero-telemetry crash guards, which are both conditioned on it, so
         the run would score silently instead of failing loudly.
@@ -1484,7 +1484,7 @@ class TestCooperativeStop:
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=2)
 
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 2
         # Both steps' telemetry is present — the cap did not truncate the stream.
         assert record.token_usage is not None
@@ -1493,7 +1493,7 @@ class TestCooperativeStop:
     async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path)
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 2
 
     async def test_the_deciding_step_is_kept_whole(self, patch_exec, tmp_path):
@@ -1506,7 +1506,7 @@ class TestCooperativeStop:
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path, max_turns=1)
 
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
         assert len(record.commands) == 1  # step 1's tool call
         usage = record.token_usage
         assert usage is not None
@@ -1522,7 +1522,7 @@ class TestCooperativeStop:
         recorder = _EventRecorder()
         record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
 
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
         assert record.assistant_turn_count == 1
         assert len([e for e in recorder.events if isinstance(e, TurnStartEvent)]) == 1
         assert len([e for e in recorder.events if isinstance(e, TurnEndEvent)]) == 1

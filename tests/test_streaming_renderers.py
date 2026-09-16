@@ -270,22 +270,21 @@ def test_rich_agent_start_includes_model():
     assert "model=claude-opus-4-8" in buf.getvalue()
 
 
-def test_rich_agent_end_surfaces_crash_and_max_turns():
-    """AgentEndEvent on the console surfaces max_turns + crash reason + error detail."""
+def test_rich_agent_end_surfaces_crash_reason_and_error_detail():
+    """AgentEndEvent on the console surfaces the crash reason + error detail, and no cap label."""
     renderer, buf = _make_renderer()
     renderer.on_event(
         AgentEndEvent(
             task_id="t1",
             status=AgentEndStatus.CRASHED,
             duration_seconds=1.0,
-            max_turns_exhausted=True,
             crashed=True,
             crash_reason="CLI process failed (exit code 1)",
             result_summary=ResultSummary(is_error=True, subtype="error_during_execution", result="boom"),
         )
     )
     output = buf.getvalue()
-    assert "max_turns exhausted" in output
+    assert "tool-call cap reached" not in output
     assert "reason:" in output and "exit code 1" in output
     assert "detail:" in output and "error_during_execution" in output
 
@@ -327,21 +326,26 @@ def test_logging_text_chunk_is_skipped(caplog):
     assert len(caplog.records) == 0
 
 
-def test_logging_agent_end_notes_max_turns(caplog):
-    """A clean max_turns-exhausted exit is annotated without a crash reason."""
+def test_rich_agent_end_labels_the_tool_call_cap_from_the_status():
+    renderer, buf = _make_renderer()
+    renderer.on_event(AgentEndEvent(task_id="t1", status=AgentEndStatus.TOOL_CALLS_EXHAUSTED, duration_seconds=1.0))
+    assert "tool-call cap reached" in buf.getvalue()
+
+
+def test_logging_agent_end_notes_tool_call_cap(caplog):
+    """A clean tool-call-cap exit is annotated from the status, without a crash reason."""
     renderer = LoggingStreamRenderer()
     with caplog.at_level(logging.DEBUG, logger="coder_eval.streaming.renderers"):
         renderer.on_event(
             AgentEndEvent(
                 task_id="t1",
-                status=AgentEndStatus.MAX_TURNS_EXHAUSTED,
+                status=AgentEndStatus.TOOL_CALLS_EXHAUSTED,
                 duration_seconds=2.0,
-                max_turns_exhausted=True,
                 crashed=False,
             )
         )
     out = _logged_lines(caplog)
-    assert "max_turns exhausted" in out
+    assert "tool-call cap reached" in out
     assert "reason:" not in out
 
 

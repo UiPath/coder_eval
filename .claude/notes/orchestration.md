@@ -57,7 +57,7 @@
   and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run -
   tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run`
   invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it**
-  — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are
+  — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `TOOL_CALLS_EXHAUSTED` and the budget stops are
   facts about the *run*, not about grading, and still apply (so `execute` still exits
   non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)`
   → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog
@@ -88,15 +88,15 @@ grading switch was threaded in. Its ORDER is load-bearing at every step.
 observed. Without that first arm, a crashed run re-graded against its half-finished
 workspace reports SUCCESS — with the original `error_message` still attached.
 
-**The NOT_GRADED arm sits ABOVE `max_turns_exhausted`, and that order is what makes
-`execute` + `evaluate` equal a single `run`.** MAX_TURNS_EXHAUSTED reads like an execution
+**The NOT_GRADED arm sits ABOVE `tool_calls_exhausted`, and that order is what makes
+`execute` + `evaluate` equal a single `run`.** TOOL_CALLS_EXHAUSTED reads like an execution
 fact but is not one: on the graded path it is subordinate to the verdict — `run` returns
 SUCCESS for a max-turns trajectory whose criteria pass, and only falls through to
-MAX_TURNS_EXHAUSTED when they do not — so it is not knowable under `grade=False`.
+TOOL_CALLS_EXHAUSTED when they do not — so it is not knowable under `grade=False`.
 Consuming it first made it terminal AND permanent, so the same agent output scored
-SUCCESS/1.0 under `run` and MAX_TURNS_EXHAUSTED under `execute` → `evaluate`; being
+SUCCESS/1.0 under `run` and TOOL_CALLS_EXHAUSTED under `execute` → `evaluate`; being
 category `failed`, `run --resume` then called the row complete and left it forever
-unscored. Nothing is lost by deferring: the fact lives on `result.max_turns_exhausted`,
+unscored. Nothing is lost by deferring: the fact lives on `result.tool_calls_exhausted`,
 which the seeding carries. The statuses that ARE execution facts differ in kind — they
 abort the run before a verdict is reachable, so preserving them overturns nothing.
 

@@ -84,7 +84,7 @@ exits non-zero, exactly as under `run`.
 Exhausting `max_turns` is the one fact that does *not* become a status here. Under
 `run` it decides the outcome only when the criteria fail — a max-turns trajectory
 whose criteria pass is `SUCCESS` — so it is not knowable without grading. `execute`
-records `max_turns_exhausted: true` on the row and finalizes `NOT_GRADED`; the later
+records `tool_calls_exhausted: true` on the row and finalizes `NOT_GRADED`; the later
 grade reads the flag and reaches exactly the status `run` would have. Rows like this
 are picked up by `run --resume`, which owes a grade to anything executed but never
 scored — including a row that also timed out or tripped a budget.

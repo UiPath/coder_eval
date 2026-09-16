@@ -892,14 +892,14 @@ def test_task_html_renders_cost_badge_in_header():
     assert "$0.5000" in header
 
 
-def _result_with_expected_turns(
+def _result_with_expected_tool_calls(
     resolved_run_limits: dict | None,
     *,
     commands_per_turn: list[int] | None = None,
     final_reply: str | None = None,
     task_config: bool = True,
 ) -> EvaluationResult:
-    """Build an EvaluationResult that exercises expected_turns_overage.
+    """Build an EvaluationResult that exercises expected_tool_calls_overage.
 
     Visible turns = sum(commands_per_turn) + (1 if final_reply else 0).
     """
@@ -938,39 +938,39 @@ def _result_with_expected_turns(
     return result
 
 
-def test_task_html_renders_expected_turns_badge_when_exceeded():
+def test_task_html_renders_expected_tool_calls_badge_when_exceeded():
     # 6 tools + reply = 7 visible turns; budget 5 → 7/5 overage.
-    result = _result_with_expected_turns(
-        {"expected_turns": 5},
+    result = _result_with_expected_tool_calls(
+        {"expected_tool_calls": 5},
         commands_per_turn=[2, 3, 1],
         final_reply="done",
     )
     html = HTMLReportGenerator.generate_task_html(result)
-    assert "expected_turns exceeded" in html
+    assert "expected_tool_calls exceeded" in html
     assert "7/5" in html
 
 
-def test_task_html_no_expected_turns_badge_when_under():
+def test_task_html_no_expected_tool_calls_badge_when_under():
     # 7 visible turns under budget 10 → no badge.
-    result = _result_with_expected_turns(
-        {"expected_turns": 10},
+    result = _result_with_expected_tool_calls(
+        {"expected_tool_calls": 10},
         commands_per_turn=[2, 3, 1],
         final_reply="done",
     )
     html = HTMLReportGenerator.generate_task_html(result)
-    assert "expected_turns exceeded" not in html
+    assert "expected_tool_calls exceeded" not in html
 
 
-def test_task_html_no_expected_turns_badge_when_unset():
-    result = _result_with_expected_turns({"max_turns": 10}, commands_per_turn=[2, 3, 2])
+def test_task_html_no_expected_tool_calls_badge_when_unset():
+    result = _result_with_expected_tool_calls({"max_turns": 10}, commands_per_turn=[2, 3, 2])
     html = HTMLReportGenerator.generate_task_html(result)
-    assert "expected_turns exceeded" not in html
+    assert "expected_tool_calls exceeded" not in html
 
 
-def test_task_html_no_expected_turns_badge_when_task_config_none():
-    result = _result_with_expected_turns(None, commands_per_turn=[2, 3, 2], task_config=False)
+def test_task_html_no_expected_tool_calls_badge_when_task_config_none():
+    result = _result_with_expected_tool_calls(None, commands_per_turn=[2, 3, 2], task_config=False)
     html = HTMLReportGenerator.generate_task_html(result)
-    assert "expected_turns exceeded" not in html
+    assert "expected_tool_calls exceeded" not in html
 
 
 def test_task_html_omits_cost_badge_when_cost_is_none():
@@ -1232,7 +1232,7 @@ _EXPECTED_BADGE_CLASS = {
     FinalStatus.ERROR: "error",
     FinalStatus.BUILD_FAILED: "error",
     FinalStatus.TIMEOUT: "failure",
-    FinalStatus.MAX_TURNS_EXHAUSTED: "failure",
+    FinalStatus.TOOL_CALLS_EXHAUSTED: "failure",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "failure",
     FinalStatus.COST_BUDGET_EXCEEDED: "failure",
     # Neutral on purpose — an ungraded row has no verdict to colour. See

@@ -70,7 +70,7 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
   their CLIs stream a real multi-step loop per `communicate()`
   (`step_start`/`step_finish`, `turn_start`/`turn_end`). The cap is enforced on the same
   loop boundary as the cooperative early stop and finalizes cleanly as
-  `max_turns_exhausted` (no crash, no retry); on Antigravity that boundary lives in
+  `tool_calls_exhausted` (no crash, no retry); on Antigravity that boundary lives in
   `_drain()`, so the background-work poll loop honors it too.
 
   The **known unfixed divergences** — which config fields each harness does and does not
@@ -111,7 +111,7 @@ failure is not swallowed.
 `finalize` is total: an unmapped future member raises loudly instead of silently
 bucketing to COMPLETED.
 
-Status precedence is the same everywhere: timeout > stopped_early > max_turns_exhausted >
+Status precedence is the same everywhere: timeout > stopped_early > tool_calls_exhausted >
 completed. `stopped_early` outranks the cap because an armed criterion deciding the
 outcome is the more specific reason to have cut the run, and every loop checks it first.
 
@@ -261,13 +261,13 @@ matter how much the run actually billed. So the CLI harnesses crash rather than 
   Crashing routes it to `FinalStatus.ERROR`, which is excluded from outcomes.
 - **A CLI that closed its stream but would not exit** within the grace period.
 
-Every arm is gated on `stopped_early` / `max_turns_exhausted`, because an intentional cut
+Every arm is gated on `stopped_early` / `tool_calls_exhausted`, because an intentional cut
 can land before the clearing event arrives. Pi's error case shows why: `error_message` is
 set at an error `turn_end` and cleared only by a LATER non-error `turn_end`, but a
 `max_turns` / `should_stop` cut can fire at the next `turn_start`, leaving a stale error
 from a turn Pi was still retrying. Without the guard that clean, budget-exhausted cut
 would crash and burn retries, contradicting the documented "finalizes cleanly as
-`max_turns_exhausted`, no crash" contract.
+`tool_calls_exhausted`, no crash" contract.
 
 OpenCode has one escape hatch, `require_token_telemetry`, for a provider or auth mode that
 reports no usage at all — where crashing every turn makes the harness unusable rather than

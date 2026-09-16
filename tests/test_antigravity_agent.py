@@ -1522,7 +1522,7 @@ async def test_max_turns_caps_visible_turns():
     record = await agent.communicate("go", max_turns=2)
 
     assert len(record.commands) == 2
-    assert record.max_turns_exhausted is True
+    assert record.tool_calls_exhausted is True
 
 
 async def test_max_turns_keeps_the_deciding_step_whole():
@@ -1542,7 +1542,7 @@ async def test_under_the_cap_completes_normally():
     record = await agent.communicate("go", max_turns=5)
 
     assert len(record.commands) == 2
-    assert record.max_turns_exhausted is False
+    assert record.tool_calls_exhausted is False
 
 
 async def test_no_max_turns_is_uncapped():
@@ -1552,7 +1552,7 @@ async def test_no_max_turns_is_uncapped():
     record = await agent.communicate("go")
 
     assert len(record.commands) == 4
-    assert record.max_turns_exhausted is False
+    assert record.tool_calls_exhausted is False
 
 
 async def test_cooperative_stop_outranks_the_cap():
@@ -1561,7 +1561,7 @@ async def test_cooperative_stop_outranks_the_cap():
 
     record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
 
-    assert record.max_turns_exhausted is False
+    assert record.tool_calls_exhausted is False
     assert len(record.commands) == 1
 
 
@@ -1606,7 +1606,7 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
 
     record = await agent.communicate("go", max_turns=2)
 
-    assert record.max_turns_exhausted is True
+    assert record.tool_calls_exhausted is True
     # The cap counts RESOLVED calls. The still-open bg2 is force-closed and recorded
     # as unresolved rather than dropped, so the trajectory shows what was interrupted.
     resolved = [c for c in record.commands if c.result_status != "unknown"]

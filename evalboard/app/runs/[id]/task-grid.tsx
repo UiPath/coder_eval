@@ -53,7 +53,7 @@ type SortKey =
 // TOKEN_COLUMN_HELP; the rest is grid-specific.
 const COLUMN_HELP: Partial<Record<SortKey, string>> = {
     ...TOKEN_COLUMN_HELP,
-    turns: "Visible turns: one per tool call plus one for the final reply. Tinted against the task's hand-written expected_turns budget (yellow past 1.25×, red past 1.5×); untinted when the task declares none.",
+    turns: "Visible turns: one per tool call plus one for the final reply. Tinted against the task's hand-written expected_tool_calls budget (yellow past 1.25×, red past 1.5×); untinted when the task declares none.",
     vsExp: "Duration ÷ the time this task is expected to need. The expected time is derived per task, per harness by the eval runner (its fastest passing run, or p10 once there are ten) and stamped into the run — never hand-written. Past 2× counts as slow; a task its harness has never passed shows —.",
     cost: "Total billed cost for this task, reported by the SDK (summed across turns).",
     variant: "Experiment arm this row was produced by. A run declaring `variants:` executes every task once per arm and keeps each arm's output in its own subtree, so the same task appears once per arm and the two rows are separate measurements — never collapsed together.",
@@ -817,8 +817,8 @@ export function TaskGrid({
                                 className={`py-3 px-4 text-right tabular-nums font-medium ${turnsCellClasses(turnsTint)}`}
                                 title={
                                     t.expectedTurns != null
-                                        ? `expected_turns target: ${t.expectedTurns}`
-                                        : "no expected_turns target set"
+                                        ? `expected_tool_calls target: ${t.expectedTurns}`
+                                        : "no expected_tool_calls target set"
                                 }
                             >
                                 {fmtTurnsCount(

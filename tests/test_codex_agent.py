@@ -2045,7 +2045,7 @@ class TestMaxTurnsVisibleTurnCap:
         record = await agent.communicate("go", max_turns=2)
 
         assert len(record.commands) == 2
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
 
     async def test_cap_keeps_the_deciding_call_complete(self):
         """Counting COMPLETED calls means the one that reaches the cap keeps its result."""
@@ -2070,7 +2070,7 @@ class TestMaxTurnsVisibleTurnCap:
         record = await agent.communicate("go", max_turns=5)
 
         assert len(record.commands) == 2
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
 
     async def test_no_cap_consumes_the_whole_stream(self):
         """None must preserve the pre-existing behavior exactly."""
@@ -2079,7 +2079,7 @@ class TestMaxTurnsVisibleTurnCap:
         record = await agent.communicate("go")
 
         assert len(record.commands) == 4
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
 
     async def test_cooperative_stop_outranks_the_cap(self):
         """Both firing on the same notification reports STOPPED_EARLY."""
@@ -2087,7 +2087,7 @@ class TestMaxTurnsVisibleTurnCap:
 
         record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
 
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
 
     async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
         """A capped turn must not lose the child threads' spend.
@@ -2124,7 +2124,7 @@ class TestMaxTurnsVisibleTurnCap:
 
         record = await agent.communicate("delegate it", max_turns=2)
 
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
         # The child's inner shell command was recovered despite the cap...
         assert [c for c in record.commands if c.tool_name == "Bash"]
         # ...and its generation nests under the spawn, carrying its own tokens...

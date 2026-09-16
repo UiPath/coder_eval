@@ -1762,9 +1762,9 @@ async def test_overrides_apply_max_turns_field_merge(tmp_path):
     from coder_eval.orchestration.overrides import apply_overrides
 
     task, _ = load_task(Path("tasks/hello_date.yaml"))
-    # hello_date.yaml ships a baseline run_limits.expected_turns; max_turns is
+    # hello_date.yaml ships a baseline run_limits.expected_tool_calls; max_turns is
     # the field this test exercises. The override must field-merge on top.
-    baseline_expected_turns = task.run_limits.expected_turns if task.run_limits else None
+    baseline_expected_tool_calls = task.run_limits.expected_tool_calls if task.run_limits else None
     assert task.run_limits is None or task.run_limits.max_turns is None
 
     apply_overrides(task, {"run_limits.max_turns": 42})
@@ -1772,7 +1772,7 @@ async def test_overrides_apply_max_turns_field_merge(tmp_path):
     assert task.run_limits is not None
     assert task.run_limits.max_turns == 42
     # Field-merge must preserve other run_limits keys from the task YAML.
-    assert task.run_limits.expected_turns == baseline_expected_turns
+    assert task.run_limits.expected_tool_calls == baseline_expected_tool_calls
 
 
 # ==================== Duplicate Task ID Validation Tests ====================
@@ -1829,7 +1829,7 @@ success_criteria:
 
 
 @pytest.mark.asyncio
-async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
+async def test_evaluation_loop_breaks_on_tool_calls_exhausted(tmp_path):
     """Orchestrator stops iterating when the agent exhausts max_turns without passing criteria."""
     from datetime import datetime
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -1877,13 +1877,13 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
         environment_info={},
     )
 
-    # Agent returns a turn record with max_turns_exhausted=True
+    # Agent returns a turn record with tool_calls_exhausted=True
     exhausted_turn = TurnRecord(
         iteration=1,
         user_input="test prompt",
         agent_output="I ran out of turns",
         duration_seconds=5.0,
-        max_turns_exhausted=True,
+        tool_calls_exhausted=True,
     )
     mock_agent = AsyncMock()
     mock_agent.communicate = AsyncMock(return_value=exhausted_turn)
@@ -1911,8 +1911,8 @@ async def test_evaluation_loop_breaks_on_max_turns_exhausted(tmp_path):
     assert orchestrator.result.iteration_count == 1
     # Agent communicate should have been called only once
     assert mock_agent.communicate.call_count == 1
-    # max_turns_exhausted should be propagated to the result
-    assert orchestrator.result.max_turns_exhausted is True
+    # tool_calls_exhausted should be propagated to the result
+    assert orchestrator.result.tool_calls_exhausted is True
 
 
 @pytest.mark.asyncio

@@ -78,14 +78,14 @@ export function StatusPill({
     const ok = status === "SUCCESS" || status === "Completed";
     // Colour EVERY non-passing terminal status red, not just the enumerated
     // few. statusCategory maps all coder_eval failure statuses (FAILURE, ERROR,
-    // TIMEOUT, MAX_TURNS_EXHAUSTED, TOKEN_BUDGET_EXCEEDED, …) to failed/error;
+    // TIMEOUT, TOOL_CALLS_EXHAUSTED, TOKEN_BUDGET_EXCEEDED, …) to failed/error;
     // this catches the ones that previously fell through to a misleading grey.
     // Flow-execution failures (Faulted/Failed) land in statusCategory's "failed"
     // bucket too. Only null/unknown stays grey.
     const cat = statusCategory(status);
     const isFailure = !ok && isFailureCategory(cat);
     // Narrower list drives the relabel-to-"Failed" text so specific statuses
-    // (e.g. MAX_TURNS_EXHAUSTED) keep their raw label while still showing red.
+    // (e.g. TOOL_CALLS_EXHAUSTED) keep their raw label while still showing red.
     const fail =
         status === "FAILURE" ||
         status === "ERROR" ||

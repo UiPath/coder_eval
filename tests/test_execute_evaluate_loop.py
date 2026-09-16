@@ -419,12 +419,12 @@ def test_grading_the_same_run_twice_reaches_the_same_verdict(tmp_path: Path) -> 
 # --------------------------------------------------------------------------
 
 
-def test_execute_records_max_turns_exhausted_exactly_as_run_does(tmp_path: Path) -> None:
-    """`max_turns_exhausted` is a fact about the RUN, not a verdict.
+def test_execute_records_tool_calls_exhausted_exactly_as_run_does(tmp_path: Path) -> None:
+    """`tool_calls_exhausted` is a fact about the RUN, not a verdict.
 
     It used to be captured AFTER the grading switch's early return, so under
     `execute` it was never recorded at all: the row finalized NOT_GRADED and the
-    command exited 0 where `run` reported MAX_TURNS_EXHAUSTED and exited 1 — for
+    command exited 0 where `run` reported TOOL_CALLS_EXHAUSTED and exited 1 — for
     identical agent output. `_seed_from_prior_result` cannot restore a fact the
     execute phase never captured, so a later `evaluate` inherited the wrong
     terminal status too.
@@ -436,7 +436,7 @@ def test_execute_records_max_turns_exhausted_exactly_as_run_does(tmp_path: Path)
 
     def _exhausted(self, *args: Any, **kwargs: Any):
         record = original(self, *args, **kwargs)
-        record.max_turns_exhausted = True
+        record.tool_calls_exhausted = True
         return record
 
     def _run(command: str, run_dir: Path) -> Any:
@@ -451,15 +451,15 @@ def test_execute_records_max_turns_exhausted_exactly_as_run_does(tmp_path: Path)
     _run("execute", executed_dir)
     executed = _row(_task_dir(executed_dir))
 
-    assert graded["max_turns_exhausted"] is True, "the fixture must actually exhaust turns under `run`"
-    assert executed["max_turns_exhausted"] is True, (
+    assert graded["tool_calls_exhausted"] is True, "the fixture must actually exhaust turns under `run`"
+    assert executed["tool_calls_exhausted"] is True, (
         "`execute` dropped a fact about the run. Only the verdict is withheld."
     )
     # The FACT is recorded; the STATUS is not decided. `run` returns SUCCESS for
     # a max-turns trajectory whose criteria pass and only falls through to
-    # MAX_TURNS_EXHAUSTED when they fail — so the status is not knowable without
+    # TOOL_CALLS_EXHAUSTED when they fail — so the status is not knowable without
     # grading, and claiming it here made it both terminal and permanent
-    # (MAX_TURNS_EXHAUSTED is an execution fact, which the detached grade may
+    # (TOOL_CALLS_EXHAUSTED is an execution fact, which the detached grade may
     # never overturn).
     assert executed["final_status"] == FinalStatus.NOT_GRADED.value
 
@@ -470,7 +470,7 @@ def test_execute_records_max_turns_exhausted_exactly_as_run_does(tmp_path: Path)
 
     assert regraded["final_status"] == graded["final_status"]
     assert regraded["weighted_score"] == graded["weighted_score"]
-    assert regraded["max_turns_exhausted"] is True, "the fact must survive the grade too"
+    assert regraded["tool_calls_exhausted"] is True, "the fact must survive the grade too"
 
 
 def test_a_detached_grade_keeps_the_runs_api_routing_not_the_graders(tmp_path: Path) -> None:
