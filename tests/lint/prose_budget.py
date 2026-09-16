@@ -37,8 +37,19 @@ _COMMENT_LINE_FLOOR = 20
 _COMMENT_LINE_RATIO = 0.15
 
 # Docstring sections that are STRUCTURE, not prose: a parameter list is interface
-# documentation and must not count against an essay budget aimed at narrative.
-_DOCSTRING_SECTIONS = ("Args:", "Arguments:", "Returns:", "Yields:", "Raises:", "Attributes:")
+# documentation and a call example is code, so neither counts against an essay budget
+# aimed at narrative. Kept in step with _TRAILING_SECTIONS, which already accepts an
+# Example: block after a pointer -- a shape the budget must not then penalise.
+_DOCSTRING_SECTIONS = (
+    "Args:",
+    "Arguments:",
+    "Returns:",
+    "Yields:",
+    "Raises:",
+    "Attributes:",
+    "Example:",
+    "Examples:",
+)
 
 _SRC = Path("src/coder_eval")
 

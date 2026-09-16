@@ -264,6 +264,19 @@ def task_log_handler(
     Attaches a file handler for the task's own log, sets the task-id ContextVar so
     parallel tasks stay isolated, and yields the bounded tail buffer the HTML report
     reads.
+
+    Args:
+        task_log_file: Path to the task log file.
+        level: Logging level for the file output.
+        task_id: Filters the file to this task's own records in a parallel batch.
+
+    Yields:
+        ``_LogTailBuffer`` exposing ``get_text()`` for the sanitised log tail.
+
+    Example:
+        >>> with task_log_handler(Path("task.log"), task_id="my_task") as log_tail:
+        ...     logger.info("This goes to both console and task.log")
+        ...     tail_text = log_tail.get_text()
     """
     # Create handler
     handler = logging.FileHandler(task_log_file, mode="w", encoding="utf-8")

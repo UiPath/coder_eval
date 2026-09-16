@@ -71,6 +71,20 @@ class TestTyperExemption:
         assert prose is not None
         assert prose.docstring_words == 400
 
+    def test_every_exempt_pair_still_exists(self) -> None:
+        """An allowlist entry whose function has moved or been renamed exempts nothing
+        while still reading as a deliberate exemption -- the same vacuous-guarantee
+        failure CE057's membership test exists to catch."""
+        import ast
+
+        package = Path(__file__).resolve().parents[1] / "src" / "coder_eval"
+        for rel, name in sorted(prose_budget._TYPER_COMMANDS):
+            path = package / rel
+            assert path.is_file(), f"_TYPER_COMMANDS names {rel}, which does not exist"
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            top_level = {node.name for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)}
+            assert name in top_level, f"_TYPER_COMMANDS names {rel}::{name}, which is not defined there"
+
 
 class TestCommentMeasurement:
     def test_three_consecutive_lines_are_a_block(self) -> None:
@@ -175,6 +189,19 @@ class TestProseWords:
     def test_returns_and_raises_are_structure_too(self) -> None:
         doc = f"Summary.\n\nReturns:\n    {_words(90)}\n\nRaises:\n    ValueError: {_words(90)}\n"
         assert prose_budget.prose_words(doc) < 150
+
+    def test_an_example_block_is_structure_not_prose(self) -> None:
+        """A call example is code. Counting it penalised exactly the docstrings that
+        show a caller how to use the thing -- and ``_TRAILING_SECTIONS`` already
+        accepts an ``Example:`` block after a pointer, so the two must agree."""
+        doc = f"Summary.\n\nExample:\n    >>> f({_words(200)})\n"
+        assert prose_budget.prose_words(doc) < 150
+        assert prose_budget.docstring_words(doc) > 150
+
+    def test_the_two_section_lists_agree_on_example(self) -> None:
+        for section in ("Example:", "Examples:"):
+            assert section in prose_budget._DOCSTRING_SECTIONS
+            assert section in prose_budget._TRAILING_SECTIONS
 
 
 class TestInterfaceContractExemption:

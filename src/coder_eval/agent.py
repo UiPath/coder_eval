@@ -239,23 +239,19 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 before raising if telemetry was captured.
             AgentCrashError: Agent failed mid-turn; same ``pending_turn`` contract.
 
-        On success, ``pending_turn`` must be None and the completed TurnRecord
-        is returned directly. On failure, ``pending_turn`` is set (if telemetry
-        was available) before raising — rollback of per-turn bookkeeping happens
-        exclusively in ``discard_pending_turn``, which the caller invokes after
-        every failed ``communicate()``.
+        On success ``pending_turn`` must be None. On failure it holds the partial
+        record, and only ``discard_pending_turn`` — which the caller invokes after
+        every failed call — rolls back per-turn bookkeeping.
 
-        Streaming contract: the agent is the SOLE emitter of the standardized
-        event protocol (the orchestrator is a pure consumer). An implementation
-        MUST emit exactly one ``AgentStartEvent`` at the top of ``communicate()``
-        and exactly one matching ``AgentEndEvent`` on every exit path (success,
-        crash, or timeout — emit it from ``finally``), with one ``TurnStartEvent``
-        / ``TurnEndEvent`` pair per inner turn and ``ToolStartEvent`` /
-        ``ToolEndEvent`` for each tool call (every ``ToolStart`` closed by a
-        ``ToolEnd``, including ``status=unresolved`` for tools orphaned by a crash).
-        Events fan out through an internal ``EventCollector`` (which builds the
-        returned ``TurnRecord``) and the caller's ``stream_callback``; renderers
-        and the task-log handler consume the same stream.
+        The agent is the SOLE emitter of the event protocol. Emit exactly one
+        ``AgentStartEvent`` at entry and one matching ``AgentEndEvent`` from
+        ``finally`` on every exit path, one ``TurnStartEvent`` / ``TurnEndEvent``
+        pair per inner turn, and a ``ToolStartEvent`` closed by a ``ToolEndEvent``
+        for every tool call (``status=unresolved`` when a crash orphans one). Fan
+        every event through an internal ``EventCollector``, which builds the
+        returned ``TurnRecord``, and through the caller's ``stream_callback``.
+
+        Rationale: .claude/notes/agents.md § Shared turn lifecycle
         """
         pass
 
