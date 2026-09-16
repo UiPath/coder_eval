@@ -6,6 +6,9 @@ import type { Pricing } from "./pricing";
 // Omitted (per_request_billing): the provider bills per request, so a static
 // rate here would replace the captured ACTUAL per-call cost with an estimate.
 // deepseek/deepseek-v4-pro, moonshotai/kimi-k3, z-ai/glm-5.2
+// Omitted (DELIBERATELY_UNMIRRORED in tests/lint/pricing_mirror.py): priced in
+// Python for the max_usd pre-flight, but no harness runs them on this board.
+// gpt-5.4-mini, gpt-5.4-nano, gpt-5.4-pro, gpt-5.5-pro
 export const PRICING: Record<string, Pricing> = {
     "claude-3-5-sonnet-20240620": { inputPerMTok: 3.0, outputPerMTok: 15.0, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3 },
     "claude-3-5-sonnet-20241022": { inputPerMTok: 3.0, outputPerMTok: 15.0, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3 },
@@ -53,11 +56,7 @@ export const PRICING: Record<string, Pricing> = {
     "gpt-5.2-codex": { inputPerMTok: 1.75, outputPerMTok: 14.0, cacheWritePerMTok: 1.75, cacheReadPerMTok: 0.175 },
     "gpt-5.3-codex": { inputPerMTok: 1.75, outputPerMTok: 14.0, cacheWritePerMTok: 1.75, cacheReadPerMTok: 0.175 },
     "gpt-5.4": { inputPerMTok: 2.5, outputPerMTok: 15.0, cacheWritePerMTok: 2.5, cacheReadPerMTok: 0.25 },
-    "gpt-5.4-mini": { inputPerMTok: 0.75, outputPerMTok: 4.5, cacheWritePerMTok: 0.75, cacheReadPerMTok: 0.075 },
-    "gpt-5.4-nano": { inputPerMTok: 0.2, outputPerMTok: 1.25, cacheWritePerMTok: 0.2, cacheReadPerMTok: 0.02 },
-    "gpt-5.4-pro": { inputPerMTok: 30.0, outputPerMTok: 180.0, cacheWritePerMTok: 30.0, cacheReadPerMTok: 3.0 },
     "gpt-5.5": { inputPerMTok: 5.0, outputPerMTok: 30.0, cacheWritePerMTok: 5.0, cacheReadPerMTok: 0.5 },
-    "gpt-5.5-pro": { inputPerMTok: 30.0, outputPerMTok: 180.0, cacheWritePerMTok: 30.0, cacheReadPerMTok: 3.0 },
     "gpt-5.6-luna": { inputPerMTok: 0.2, outputPerMTok: 1.2, cacheWritePerMTok: 0.2, cacheReadPerMTok: 0.02 },
     "gpt-5.6-sol": { inputPerMTok: 4.0, outputPerMTok: 20.0, cacheWritePerMTok: 4.0, cacheReadPerMTok: 0.4 },
     "gpt-5.6-terra": { inputPerMTok: 2.0, outputPerMTok: 12.0, cacheWritePerMTok: 2.0, cacheReadPerMTok: 0.2 },

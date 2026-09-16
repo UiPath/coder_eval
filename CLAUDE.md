@@ -169,9 +169,12 @@ make docs-budget       # per-file comment budget + docstring essay check (fails 
 `src/coder_eval/pricing.py` is the single source of truth for rates on both halves of
 the repo. The evalboard's table (`evalboard/lib/pricing.generated.ts`) is generated from
 it by `make pricing-mirror` — regenerate and commit after a reprice; **CE065** fails the
-build on drift. Never hand-edit the generated file. A rate flagged
-`per_request_billing` is deliberately omitted from the mirror: the provider bills per
-request, so the board shows the captured actual per-call cost instead of a static estimate.
+build on drift. Never hand-edit the generated file. Two sets are omitted from the mirror:
+a rate flagged `per_request_billing` (the provider bills per request, so the board shows
+the captured actual per-call cost instead of a static estimate), and the ids in
+`DELIBERATELY_UNMIRRORED` (`tests/lint/pricing_mirror.py`), which are priced in Python
+for the `max_usd` pre-flight but not worth pricing on the board. Adding to that second
+set needs a corpus grep first — a stale entry hides a live bug.
 
 ## Custom Lint Rules (CE000+)
 

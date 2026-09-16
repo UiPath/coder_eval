@@ -10,8 +10,9 @@ import { PRICING, resolvePricing } from "../pricing";
 
 describe("generated pricing table", () => {
     test("is not silently narrow", () => {
-        // 59 built-in Python rows minus the 3 per_request_billing ones.
-        expect(Object.keys(PRICING).length).toBeGreaterThanOrEqual(56);
+        // 59 built-in Python rows, minus the 3 per_request_billing ones and the
+        // 4 in DELIBERATELY_UNMIRRORED.
+        expect(Object.keys(PRICING).length).toBeGreaterThanOrEqual(52);
     });
 
     test("each field carries its own rate", () => {
@@ -37,15 +38,15 @@ describe("generated pricing table", () => {
         expect(resolvePricing("deepseek/deepseek-v4-pro")).toBeNull();
     });
 
-    test("previously-unmirrored drift entries now resolve", () => {
-        // gpt-5.5-pro sat in the old hand-copy's exemption set as
-        // bookkeeping, not a product rule — so it rendered "—" for cost.
-        // Generating the table is what fixes that; pin the fix, not the
-        // status quo it replaced.
-        // Resolving at all IS the fix; the rates themselves are CE065's job,
-        // so pinning them here would be the same two-file coupling again.
+    test("DELIBERATELY_UNMIRRORED models stay unpriced here", () => {
+        // The second exemption axis, and the one that is a FRONTEND decision
+        // rather than a fact about the rate: these are priced in pricing.py for
+        // the Python max_usd pre-flight, but no harness runs them on this board.
+        // Generating the table must reproduce that, not quietly widen it —
+        // pricing a model the hand-copy deliberately skipped is a behaviour
+        // change smuggled in as a refactor.
         for (const id of ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-pro", "gpt-5.5-pro"]) {
-            expect(resolvePricing(id), `${id} should resolve`).not.toBeNull();
+            expect(resolvePricing(id), `${id} should not be priced`).toBeNull();
         }
     });
 });

@@ -7,11 +7,16 @@ the generator exists to remove.
 """
 
 import math
+import re
 
 import pytest
 
 from coder_eval.pricing import ModelPricing, builtin_rates
-from tests.lint.pricing_mirror import render_pricing
+from tests.lint.pricing_mirror import (
+    DELIBERATELY_UNMIRRORED,
+    _assert_exemptions_are_live,
+    render_pricing,
+)
 
 
 ORDINARY = ModelPricing(1.0, 2.0, 3.0, 4.0)
@@ -78,3 +83,45 @@ def test_builtin_rates_is_read_only_and_populated():
     assert "claude-sonnet-5" in rates
     with pytest.raises(TypeError):
         rates["claude-sonnet-5"] = ORDINARY  # type: ignore[index]
+
+
+class TestTheSecondExemptionAxis:
+    """`DELIBERATELY_UNMIRRORED` — priced in Python, not priced on the frontend.
+
+    Separate from `per_request_billing` because the two make different claims: a
+    routed rate MUST NOT be mirrored (an estimate would displace a real captured
+    figure), whereas these are simply not worth pricing on the board. Folding them
+    into one axis is what silently widened the generated table past the hand-copy
+    it replaced.
+    """
+
+    def test_an_exempted_id_is_omitted_but_still_priced_in_python(self):
+        exempt = next(iter(DELIBERATELY_UNMIRRORED))
+        assert exempt in builtin_rates()
+        assert f'"{exempt}": {{' not in render_pricing()
+
+    def test_the_generated_file_names_both_axes_separately(self):
+        rendered = render_pricing()
+        assert "per_request_billing" in rendered
+        assert "DELIBERATELY_UNMIRRORED" in rendered
+
+    def test_a_stale_exemption_fails_the_build(self):
+        """The guard the deleted parity test carried, and the reason it mattered:
+        an id that has left `pricing.py` silences nothing and only survives to be
+        copied."""
+        with pytest.raises(ValueError, match=re.escape("gpt-5.4-pro")):
+            _assert_exemptions_are_live({"claude-sonnet-5": ORDINARY})
+
+    def test_a_live_exemption_set_passes(self):
+        _assert_exemptions_are_live(builtin_rates())
+
+    def test_the_generated_table_reproduces_what_the_hand_copy_priced(self):
+        """The mirror must not silently PRICE a model the frontend deliberately did
+        not. Stated as the set identity rather than a literal key list, so an
+        ordinary reprice stays a one-file edit and only an exemption change moves it.
+        """
+        rendered = render_pricing()
+        keys = {line.split('"')[1] for line in rendered.splitlines() if line.startswith('    "')}
+        rates = builtin_rates()
+        routed = {k for k, v in rates.items() if v.per_request_billing}
+        assert keys == rates.keys() - routed - DELIBERATELY_UNMIRRORED

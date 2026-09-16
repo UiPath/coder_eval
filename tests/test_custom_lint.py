@@ -2384,6 +2384,11 @@ class TestCE065PricingMirrorParity:
     render "—" for cost. The table is now generated; `make pricing-mirror`
     writes it and this class diffs it. Reasons over generated text rather than
     one Python AST, so it lives here rather than in the AST runner.
+
+    Generating the table removed the regex layers, not the two exemptions
+    themselves — a generator that quietly PRICES a model the hand-copy skipped
+    has changed behaviour under cover of a refactor. Both axes are asserted
+    below, from their declared sources.
     """
 
     REPO_ROOT = Path(__file__).parent.parent
@@ -2401,12 +2406,14 @@ class TestCE065PricingMirrorParity:
     def test_every_statically_priced_model_is_mirrored(self):
         """Table-driven, so a new rate in pricing.py needs zero edits here.
 
-        The old hand-copy's exemption set is what shipped the bug: an id could
-        sit in it forever and silence the guard. The only exclusion now is the
-        `per_request_billing` product rule, declared on the rate itself.
+        Two exclusions, each read from where it is declared rather than repeated:
+        `per_request_billing` on the rate, and `DELIBERATELY_UNMIRRORED` beside the
+        generator. What the old hand-copy got wrong was not HAVING an exemption set
+        but letting it go stale unnoticed, which `_assert_exemptions_are_live` now
+        fails the build on.
         """
         from coder_eval.pricing import builtin_rates
-        from tests.lint.pricing_mirror import render_pricing
+        from tests.lint.pricing_mirror import DELIBERATELY_UNMIRRORED, render_pricing
 
         rendered = render_pricing()
         for key, rate in builtin_rates().items():
@@ -2418,8 +2425,22 @@ class TestCE065PricingMirrorParity:
                     f"{key} bills per request — statically pricing it on the frontend replaces "
                     "the captured actual per-call cost with an estimate"
                 )
+            elif key in DELIBERATELY_UNMIRRORED:
+                assert needle not in rendered, (
+                    f"{key} is exempt from the mirror — pricing it here widens the frontend "
+                    "table past what the hand-copy it replaced priced"
+                )
             else:
                 assert needle in rendered, f"{key} is priced in pricing.py but missing from the mirror"
+
+    def test_the_exemption_set_is_not_stale(self):
+        """The guard the deleted parity test carried. An id that has left
+        `pricing.py` silences nothing and only survives to be copied, so its
+        membership must be a build failure rather than a comment."""
+        from coder_eval.pricing import builtin_rates
+        from tests.lint.pricing_mirror import _assert_exemptions_are_live
+
+        _assert_exemptions_are_live(builtin_rates())
 
 
 @pytest.mark.lint

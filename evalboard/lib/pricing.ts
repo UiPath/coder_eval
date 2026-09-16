@@ -21,10 +21,12 @@ export interface Pricing {
 // build if the generated file drifts from it. Never hand-edit a rate here or in
 // pricing.generated.ts — change pricing.py and regenerate.
 //
-// Models flagged `per_request_billing` in pricing.py are deliberately absent
-// from the generated table: the provider routes per request, so a static
-// headline rate is wrong. resolvePricing returns null for them and runs.ts
-// apportions the captured ACTUAL per-call cost instead.
+// Two sets of models are deliberately absent from the generated table, for
+// different reasons. A model flagged `per_request_billing` in pricing.py MUST NOT
+// be priced here: the provider routes per request, so resolvePricing returns null
+// and runs.ts apportions the captured ACTUAL per-call cost instead. A model in
+// `DELIBERATELY_UNMIRRORED` (tests/lint/pricing_mirror.py) simply is not worth
+// pricing on this board — it is priced in Python for the max_usd pre-flight only.
 //
 // Re-exported so the rate table has one import path for the whole frontend
 // regardless of which file generates it. Not part of the consumer API; use
