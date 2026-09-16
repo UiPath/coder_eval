@@ -617,10 +617,9 @@ async def test_runner_reference_dir_with_nested_underscore_reference_preserved(
 ) -> None:
     """A nested ``_reference/`` inside the user's reference dir is NOT stripped.
 
-    Regression for finding #9: the pre-fix code reused the sandbox-side
-    ``ignore_patterns`` (which includes ``_reference``) for the reference-side
-    copytree, so a customer who happened to have a nested ``_reference/`` subdir
-    in their reference bundle would silently lose it.
+    Pins: the reference-side copytree does not reuse the sandbox-side
+    ``ignore_patterns`` (which include ``_reference``), so a nested
+    ``_reference/`` subdir in a customer's reference bundle survives.
     """
     (tmp_path / "Main.xaml").write_text("<x/>")
 

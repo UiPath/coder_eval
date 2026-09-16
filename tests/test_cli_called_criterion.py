@@ -281,10 +281,9 @@ class TestLogHandling:
     escalate: a `FinalStatus.ERROR` reads as "harness broken, discard this data
     point", which is a strictly better outcome for a failing agent than FAILED.
 
-    An earlier revision raised `CheckerMisuseError` on `rule_error`, believing only a
-    task author could produce it. `test_a_crafted_rule_error_cannot_launder_a_failure`
-    is the regression test for that. The authoring concern it was addressing is
-    handled at LOAD time instead, by `RecordedCli._validate_responses_are_evaluable`.
+    `test_a_crafted_rule_error_cannot_launder_a_failure` pins this for `rule_error`.
+    Authoring faults are rejected at LOAD time, by
+    `RecordedCli._validate_responses_are_evaluable`.
     """
 
     def test_a_shim_rule_fault_scores_zero_without_escalating(self, sandbox_with_log):
@@ -317,9 +316,10 @@ class TestLogHandling:
         assert "42" in (result.error or "")
 
     def test_a_crafted_rule_error_cannot_launder_a_failure(self, sandbox_with_log):
-        """Regression: `rule_error` used to RAISE, on the premise that only a task
-        author could cause it. The log is agent-writable, so one appended line turned
-        an honest FAILED into a FinalStatus.ERROR -- i.e. "discard this data point".
+        """An appended `rule_error` line scores zero and does not raise.
+
+        The log is agent-writable, so raising would let one appended line turn an
+        honest FAILED into a FinalStatus.ERROR -- i.e. "discard this data point".
         """
         sandbox, sandbox_dir = sandbox_with_log
         # The agent never ran the required command, so this must fail.
@@ -434,9 +434,10 @@ class TestLogHandling:
         assert result.error is None
 
     def test_malformed_line_now_fails_instead_of_being_skipped(self, sandbox_with_log):
-        """Superseded behaviour: an unparseable line used to be skipped with the
-        score untouched, which let a max_count: 0 guard pass on a truncated record
-        of the forbidden call. It is now a harness fault, like a missing log."""
+        """An unparseable line is a harness fault, like a missing log.
+
+        Skipping it would let a max_count: 0 guard pass on a truncated record of the
+        forbidden call."""
         sandbox, sandbox_dir = sandbox_with_log
         log_path = sandbox_dir / LOG
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -642,9 +643,10 @@ class TestRegressionsFromReview:
         assert "(+1 more)" in details
 
     def test_clustered_short_flags_are_split(self, sandbox_with_log):
-        """`-yf` used to parse as one flag named `yf`, so an aliases: [y] predicate
-        missed it -- leaving the `-y` escape one keystroke away from the hole
-        `aliases` exists to close."""
+        """`-yf` splits into `-y` and `-f`, so an aliases: [y] predicate sees it.
+
+        Parsed as one flag named `yf`, the `-y` escape would be one keystroke away
+        from the hole `aliases` exists to close."""
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "fields", "delete", "-yf", "proj-1"])])
         guard = CliCalledCriterion(
@@ -700,7 +702,7 @@ class TestRegressionsFromReview:
         assert flags == {"yes": [""]}
 
     def test_equals_form_keeps_a_dash_leading_value_and_invents_no_flag(self):
-        """`--offset=-1` used to drop the value AND invent a flag named `1`."""
+        """`--offset=-1` keeps the value `-1` and invents no flag named `1`."""
         positional, flags = split_flags(["get", "--offset=-1"], frozenset(), frozenset())
         assert positional == ["get"]
         assert flags == {"offset": ["-1"]}
@@ -740,7 +742,7 @@ class TestRegressionsFromReview:
         assert "unusable record" in (result.error or "")
 
     def test_required_flag_missing_entirely_scores_zero(self, sandbox_with_log):
-        """The branch separating `equals` from `absent`, previously uncovered."""
+        """Pins the branch separating `equals` from `absent`."""
         sandbox, sandbox_dir = sandbox_with_log
         _write_log(sandbox_dir, [_call(["ixp", "projects", "configure-model", "proj-1"])])
         criterion = CliCalledCriterion(

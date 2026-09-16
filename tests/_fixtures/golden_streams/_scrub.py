@@ -123,19 +123,14 @@ _IDENTITY_SHARE = 0.20
 def _tool_union_ms(record: dict[str, Any]) -> float:
     """Wall ms this turn's MAIN-THREAD tools occupied — the union, never the sum.
 
-    Validates the raw dump into a ``TurnRecord`` and calls the SAME typed
-    selector the collector uses, rather than reimplementing the selection rule
-    (the sub-agent-id derivation, the stamp parse, the ``end >= start`` filter)
-    over dicts. Three copies of that rule existed and agreed only because
-    someone kept checking; the collector's own version once passed every command
-    while filtering only its generations, and the two agreed by luck.
+    Shares the collector's SELECTION (``main_thread_tool_spans``) and
+    ``union_ms``, but not the bookkeeping around them — where the per-reducer
+    timing defects lived (see CE063's docstring). Do not
+    "simplify" it into reading ``tool_union_ms``: that would make the sensor a
+    restatement of the producer's answer, and the cross-check below is what
+    verifies that field.
 
-    What is shared with production is the SELECTION and ``union_ms``. What is
-    NOT shared is the bookkeeping around them — this still builds its own span
-    set and computes its own union, which is where every timing defect on this
-    branch actually lived (see CE063's docstring). Do not "simplify" it into
-    reading ``tool_union_ms``: that would make the sensor a restatement of the
-    producer's answer, and the cross-check below is what verifies that field.
+    Rationale: .claude/notes/timing.md § The golden-stream timing sensor
     """
     turn = TurnRecord.model_validate(record)
     return union_ms(main_thread_tool_spans(turn.messages, turn.commands))
@@ -151,86 +146,21 @@ def assert_timing_captured(
 ) -> None:
     """Assert a TurnRecord dump actually recorded the timing it could measure.
 
-    Run on the UNSCRUBBED dump. ``scrub()`` masks values but preserves ``None``
-    (see its docstring), and present-vs-absent IS the whole assertion here — a
-    scrubbed snapshot can tell you a field was set, never that it was set to
-    something meaningful.
+    Run on the UNSCRUBBED dump: ``scrub()`` masks values but preserves ``None``
+    (see its docstring), and present-vs-absent is the assertion.
 
-    An AST rule cannot see that an SDK returned ``0.0``; this replay-based
-    sensor can. Two checks:
+    - Every RESOLVED command (``"success"`` / ``"error"``) carries both
+      execution stamps and ``duration_ms``; an ``"unknown"`` orphan is exempt.
+    - When ``expect_generation_window``, some assistant entry has a positive
+      ``generation_duration_ms`` whose bounds span it.
+    - The head and tail are both set exactly when an assistant message has a
+      non-``None`` ``generation_duration_ms`` — keyed on the messages, not the flag.
+    - When ``check_identity``: a stored ``tool_union_ms``, when present, matches
+      the recomputed union; and the four buckets overshoot the wall clock by no
+      more than the tolerance. One-sided on purpose: the two-sided check is
+      ``tests/test_timing_identity_contract.py``.
 
-    **Unconditional.** Every command that RESOLVED (``result_status`` of
-    ``"success"`` or ``"error"``) carries ``execution_started_at``,
-    ``execution_completed_at`` and ``duration_ms``. A force-closed orphan
-    (``"unknown"``) is exempt: it was never timed, and saying so is the honest
-    record. Where a scenario resolves no command the check is vacuously true,
-    which is correct rather than weak — the scenario is asserting nothing
-    about commands because it has none.
-
-    **Flagged.** When ``expect_generation_window``, at least one assistant
-    entry reports a ``generation_duration_ms`` that is non-``None`` AND
-    greater than zero AND whose recorded bounds actually span it
-    (``completed_at > started_at``).
-
-    The bounds half is not redundant. Two harnesses derive the duration from a
-    MONOTONIC clock and the bounds from the wall clock, so the two can
-    disagree: a reducer could report a healthy duration beside two stamps that
-    collapsed to one instant. CE059 catches that statically only when both
-    bounds are the same ``ast.Name``; when they are two different names
-    holding the same value it cannot, and this is the check that does.
-
-    **Unconditional, and keyed on the messages rather than on the flag.** A
-    turn's head and tail (``harness_startup_ms`` / ``harness_teardown_ms``) are
-    set exactly when the turn produced an assistant message with a MEASURABLE
-    window, because that is what the collector measures them against — so both
-    are non-``None`` when one exists and both are ``None`` when none does.
-
-    Both halves of that key are load-bearing. The flag is the wrong one:
-    ``codex_e_orphan_tool`` streams a generation whose window subtracts to
-    zero, so it clears the flag while still having a head and a tail to report.
-    And "any assistant message" is too weak: ``codex_g_items_rebuild`` rebuilds
-    its transcript from the rollout after the turn ended, with
-    ``generation_duration_ms=None`` and placeholder ``now()`` bounds, so there
-    is nothing there to measure an end against and the honest answer is
-    ``None`` for both.
-
-    PRESENCE is all the fixtures can support, and it is the thing worth
-    asserting: the replays run in ~0.3 ms of synthetic wall clock, so their
-    head and tail are microseconds and any bound or ordering check would be
-    noise. A ``>= 0`` check would be worse than noise — ``decompose_turn``
-    clamps with ``max(..., 0.0)``, so it would restate the implementation and
-    could never fail.
-
-    **The four-bucket identity**, when ``check_identity``. Generation plus the
-    UNION of the tool intervals plus the head plus the tail cannot exceed the
-    turn's ``duration_seconds``, because the four are disjoint: the windows are
-    tool-subtracted and so are the head and tail. This is the one assertion
-    that catches a DOUBLE-COUNT rather than an absence — it is how an orphaned
-    tool force-closed inside the tail, booked both as tool and as teardown, was
-    found reconciling at -86% of wall clock while all 72 golden tests passed.
-
-    The check is ONE-SIDED on purpose and stays that way. A symmetric bound
-    would be a sensor in name only here: the replays run in ~0.3 ms of
-    synthetic wall clock, so ``abs(residual) <= max(0.1 ms, 20% x wall)``
-    passes essentially any magnitude. The two-sided, millisecond-exact check
-    lives in ``tests/test_timing_identity_contract.py``, where a scripted clock
-    makes the magnitudes real, and the live two-sided gate is
-    ``scripts/timing/decompose_run.py --max-residual-pct``.
-
-    ``check_identity`` is off for the scenarios that inject their own SDK
-    timestamps (see ``FICTIONAL_DURATIONS``): those declare integer-millisecond
-    item durations of 17-900 ms while the replay itself takes ~0.3 ms of real
-    wall clock, so no rebasing can make the two commensurable — the SDK's
-    stamps are milliseconds and the replay is faster than one.
-
-    Why a scenario-level floor rather than a per-entry rule: no per-entry form
-    works against the real snapshots. ``claude_d_subagent_terminal`` holds two
-    content-bearing assistant messages of which exactly one is legitimately
-    ``None`` (the synthesized sub-agent generation, delivered as a tool result
-    and never streamed), so no scenario-level flag can express "this one but
-    not that one". And "never exactly 0.0" conflicts with the clamps that can
-    legitimately produce a measured zero. The detailed per-message contract
-    lives in each agent's own unit tests; this is the cross-harness floor.
+    Rationale: .claude/notes/timing.md § The golden-stream timing sensor
     """
     for command in record.get("commands") or []:
         if command.get("result_status") not in ("success", "error"):

@@ -50,9 +50,9 @@ class TestAvgCommandTimeDivisor:
     def test_an_untimed_command_is_not_ranked_among_the_slowest(self):
         """The slowest list is built from timed commands only.
 
-        It used to coalesce a missing duration to 0.0, which put an untimed
-        command in a "slowest" ranking at the bottom — a measurement it never
-        had. The pre-filter and the reported value are now the same fact.
+        Coalescing a missing duration to 0.0 would rank an untimed command in
+        the "slowest" list with a measurement it never had. The pre-filter and
+        the reported value are the same fact.
         """
         now = datetime.now()
         commands = [

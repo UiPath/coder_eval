@@ -32,18 +32,11 @@ from coder_eval.models import CONTAINER_REFERENCE_DIR
 from coder_eval.path_utils import digest_tree
 
 
-# These tests drive `chmod` against the HOST filesystem. Windows `chmod` honours
-# only the read-only bit, so mode 000 never takes and every assertion reads back
-# 0o555/0o777.
-#
-# This is NOT a coverage gap for Windows users. The window is enforced only when
-# CODER_EVAL_IN_CONTAINER=1, which only DockerRunner sets — and Docker Desktop on
-# Windows runs LINUX containers (WSL2), so the in-container orchestrator that
-# performs the chmod is on Linux and behaves exactly as these tests assert. A
-# Windows host only ever sees the window under `driver: tempdir`, where it is a
-# deliberate no-op regardless of platform. So there is nothing here for a Windows
-# runner to exercise — the real behaviour is covered by the Linux CI jobs and by
-# `tasks/anti_cheat_reference`, which runs in the container.
+# These tests drive `chmod` against the HOST filesystem, and Windows `chmod` honours
+# only the read-only bit, so mode 000 never takes. Not a coverage gap for Windows
+# users: the window is enforced only in the container, which is Linux even under
+# Docker Desktop on Windows.
+# Rationale: .claude/notes/permissions.md § Why the chmod tests are Linux-only
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="host-side POSIX mode semantics; the window runs in a Linux container on every host OS",
@@ -196,8 +189,8 @@ class TestRestrictPermissions:
     async def test_overlapping_windows_of_the_same_mode(self, guarded_dir):
         """Two windows applying the same mode: the inner exit must NOT restore.
 
-        This is what a refcount used to buy; the stack gives it for free, because
-        the inner pop re-applies the outer's (identical) mode.
+        The stack gives this for free: the inner pop re-applies the outer's
+        (identical) mode.
         """
         original = _mode(guarded_dir)
 
@@ -311,26 +304,24 @@ class TestRestrictPermissions:
         assert _mode(guarded_dir) == original
 
     async def test_crash_handlers_install_from_the_event_loop_thread(self, guarded_dir, monkeypatch):
-        """The advertised crash-safety property: a killed run must not leave the
-        tree at mode 000.
+        """A killed run must not leave the tree at mode 000.
 
-        Asserted through the PUBLIC ``set_permissions`` entry point, not by
-        calling ``push`` directly. That distinction is the whole bug this test
-        exists for: installation used to happen inside ``push``, which only ever
-        runs on an ``asyncio.to_thread`` worker, where ``signal.signal`` raises
-        ``ValueError`` into a swallowing ``except`` — so SIGTERM had no restore
-        at all in production while a push-level test reported it installed.
+        Pins: opening a window through the PUBLIC ``set_permissions`` entry point
+        registers the atexit restore and installs SIGINT/SIGTERM handlers once.
+        Hazard: do not assert through ``push`` directly — it runs on an
+        ``asyncio.to_thread`` worker, where ``signal.signal`` raises ``ValueError``.
+
+        Rationale: .claude/notes/permissions.md § Locking and crash safety
         """
         registered: list[object] = []
         installed_signals: list[int] = []
         monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", registered.append)
 
         def _fake_signal(signum, _handler):
-            # Reproduce the property that made the original bug invisible: the
-            # real signal.signal raises off the main thread. A permissive stub
-            # records an install that CPython would have refused, which is
-            # exactly how a push()-time install passed its own test while doing
-            # nothing in production.
+            # The real signal.signal raises off the main thread. A permissive
+            # stub would record an install that CPython refuses, so a
+            # push()-time install would pass this test while doing nothing in
+            # production.
             if threading.current_thread() is not threading.main_thread():
                 raise ValueError("signal only works in main thread of the main interpreter")
             installed_signals.append(signum)
@@ -353,9 +344,8 @@ class TestRestrictPermissions:
     async def test_install_failure_is_not_latched(self, guarded_dir, monkeypatch):
         """A failed install must be retried, not recorded as done.
 
-        ``_install_crash_handlers`` used to swallow the failure internally and
-        latch ``_handlers_installed = True`` regardless, so the one retry that
-        could have succeeded (from the main thread) never happened.
+        Pins: after a refused install, the next ``ensure_crash_handlers`` call
+        attempts both signals again, so a retry from the main thread can succeed.
         """
         attempts: list[int] = []
 
@@ -366,13 +356,11 @@ class TestRestrictPermissions:
         registry = _PermissionStack()
 
         # SCOPE the patches, do not lift them by hand. `signal.signal` is patched
-        # process-wide, and the async teardown restores SIGINT by calling
-        # `signal.signal(SIGINT, default_int_handler)` — which hits `_refuse` and raises
-        # `ValueError` out of teardown, failing the test for something it does not test.
-        # An explicit `undo()` after the calls fixed the happy path only: if
-        # `ensure_crash_handlers` itself raised — the very regression this test exists to
-        # catch — the undo would be skipped and the teardown ValueError would MASK the
-        # real failure. A context manager restores on every exit path.
+        # process-wide, and the async teardown restores SIGINT through it, which hits
+        # `_refuse` and raises `ValueError` out of teardown. A manual `undo()` is skipped
+        # if `ensure_crash_handlers` itself raises (the regression this test catches),
+        # and the teardown ValueError then MASKS the real failure. A context manager
+        # restores on every exit path.
         with monkeypatch.context() as mp:
             mp.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
             mp.setattr("coder_eval.fs_permissions.signal.signal", _refuse)
@@ -432,10 +420,10 @@ class TestRestrictPermissions:
             assert killed == [signal.SIGTERM]
 
     async def test_sig_ign_previous_is_not_re_raised(self, guarded_dir, monkeypatch):
-        """SIG_IGN is neither callable nor SIG_DFL — the one disposition the
-        original chain fell through entirely. Restoring and returning is correct;
-        killing the process would override a deliberate `signal.signal(SIGINT,
-        SIG_IGN)` by the embedding application."""
+        """A SIG_IGN previous disposition restores and returns without a re-raise.
+
+        SIG_IGN is neither callable nor SIG_DFL. Killing the process would override
+        a deliberate `signal.signal(SIGINT, SIG_IGN)` by the embedding application."""
         monkeypatch.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
         captured: dict[int, Any] = {}
         killed: list[int] = []
@@ -454,9 +442,10 @@ class TestRestrictPermissions:
         assert killed == []
 
     async def test_failed_restore_keeps_the_entry_for_the_crash_path(self, guarded_dir, monkeypatch):
-        """``pop`` used to ``del`` the entry BEFORE the restoring chmod, so a
-        failed chmod stripped ``restore_all`` of the only record of the original
-        mode — turning a recoverable failure into a permanently-000 tree."""
+        """A failed restoring chmod in ``pop`` keeps the registry entry.
+
+        Pins: ``restore_all`` still holds the original mode and recovers the path,
+        instead of leaving a permanently-000 tree."""
         registry = _PermissionStack()
         original = _mode(guarded_dir)
         assert registry.push(guarded_dir, RESTRICTED_MODE) is True

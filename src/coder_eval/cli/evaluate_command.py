@@ -511,14 +511,10 @@ def _report_and_exit(
     status handling landed. Always raises ``typer.Exit``.
     """
 
-    # BEFORE the count guard below: a grading crash returns a populated ERROR
-    # result with an EMPTY criteria list, so the count check fired first and the
-    # real error was never printed.
-    #
-    # Whether the terminal status describes THIS pass or was carried over from the
-    # run being graded. `Orchestrator._terminal_status` preserves a prior execution
-    # fact, so reading `result.final_status` as this pass's own outcome misreports
-    # both arms below.
+    # BEFORE the count guard below: a grading crash returns a populated ERROR result
+    # with an EMPTY criteria list, so the count check fires first and hides the real
+    # error. `inherited` says whether the terminal status describes THIS pass or was
+    # carried over from the run being graded.
     # Rationale: .claude/notes/isolation.md § Detached grading from the CLI
     inherited = prior is not None and prior.final_status.is_execution_fact
 

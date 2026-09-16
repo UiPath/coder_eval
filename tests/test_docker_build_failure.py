@@ -1,8 +1,8 @@
 """Build-failure observability: a failed `docker build` must not vanish.
 
-A task image is built before run_dir / docker.log / task.json exist, so a build
-failure used to leave an empty result directory with no status and no log. These
-tests assert the fix: the build log is captured to docker.log and a synthetic
+A task image is built before run_dir / docker.log / task.json exist. These tests
+pin that a build failure still leaves a status and a log: the build log is captured
+to docker.log and a synthetic
 ``BUILD_FAILED`` task.json is written, and the batch layer records BUILD_FAILED
 (not generic ERROR) at the run level. Hermetic — docker is never invoked.
 """

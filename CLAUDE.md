@@ -163,7 +163,7 @@ make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
 make pricing-mirror    # the evalboard's rate table from pricing.py (CE065)
 
-make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
+make docs-budget       # comment-run cap + comment budget + essay check (fails `make verify`)
 ```
 
 `src/coder_eval/pricing.py` is the single source of truth for rates on both halves of
@@ -183,10 +183,10 @@ and whole-tree rules — those reasoning over Markdown/YAML or the entire `src/`
 rather than one AST at a time — are instead `@pytest.mark.lint` classes in
 `tests/test_custom_lint.py`.
 
-**Every rule carries its own rationale in its module docstring**, including the defect
-that motivated it and its known blind spots. That docstring is the authoritative
-explanation; read it before editing, suppressing, or widening a rule. Run `make lint` —
-`make test` deliberately excludes these.
+**Each rule's module docstring states its invariant, its scope and its known blind
+spots.** Read it before you edit, suppress or widen a rule. The defect that caused each
+rule is in `.claude/notes/lint-rules.md`. Run `make lint` — `make test` does not run
+these rules.
 
 When fixing a bug, ask: *could a custom lint rule have prevented this?* If the root
 cause is a mechanically detectable pattern, add a rule following the CE000+ pattern and
@@ -308,10 +308,15 @@ bandit, pre-commit, mcp
   code cannot say
 - **A docstring states the contract, not the history** — what a caller must know to call
   it correctly. Why the design is this shape belongs in `.claude/notes/`; what it used to
-  be belongs in git. `make docs-budget` enforces two rules, both self-adjusting: a file's
-  own-line comments may not exceed `MAX(20, 0.15 × its length)`, and no docstring may
-  exceed 150 words of PROSE (an `Args:`/`Returns:`/`Raises:` block is structure, not
-  prose; an `@abstractmethod` is exempt because its docstring IS the interface contract).
+  be belongs in git. `make docs-budget` applies three self-adjusting rules to `src/` and
+  `tests/`: no own-line comment RUN may exceed 8 lines (a run reads through one blank line,
+  so a paragraph split on one blank line does not duck it), a file's own-line comments may
+  not exceed `MAX(20, 0.15 × its length)` in total, and no docstring may exceed 150 words of PROSE (an
+  `Args:`/`Returns:`/`Raises:` block is structure, not prose; an `@abstractmethod` is exempt
+  because its docstring IS the interface contract). The run cap governs the SHAPE of any one
+  comment — put the paragraph in `.claude/notes/` behind a `Rationale:` pointer — and the
+  file total is the backstop under it, for a file that is mostly commentary however it is
+  broken up.
 
 ## Notes for AI Assistants
 

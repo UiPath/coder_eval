@@ -26,16 +26,10 @@ logger = logging.getLogger(__name__)
 
 # A criterion's verdict from a PARTIAL, mid-run trajectory (early-stop observability).
 # "undecided" means the outcome is not yet knowable from the events seen so far.
-#
-# CONTRACT every live_verdict override must satisfy (see BaseCriterion.live_verdict):
-#   - Deterministic: a pure function of the ``turn_records`` prefix passed in — no
-#     wall-clock, randomness, or other hidden state.
-#   - Monotonic: once it returns "pass"/"fail" for some trajectory prefix, it MUST
-#     return that SAME verdict for every longer prefix (i.e. every later call in the
-#     same run). "undecided" is the only verdict allowed to change on a later call.
-#
-# Enforced by lint rule CE036, which replays every live criterion against every prefix
-# of recorded trajectories; CE025 checks only the subclassing/pairing shape.
+# Every live_verdict override must be DETERMINISTIC (a pure function of the
+# ``turn_records`` prefix, no hidden state) and MONOTONIC (a "pass"/"fail" holds for
+# every longer prefix; only "undecided" may change). CE036 replays every live
+# criterion against every prefix; CE025 checks the subclassing shape.
 # Rationale: .claude/notes/contracts.md § The live_verdict contract
 LiveVerdict = Literal["pass", "fail", "undecided"]
 

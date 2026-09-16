@@ -226,17 +226,13 @@ class TestInContainerGradeCoercion:
         )
 
     def test_invoking_the_command_here_arms_no_process_lethal_watchdog(self, tmp_path: Path) -> None:
-        """The command's heartbeat watchdog reaps an ORPHANED CONTAINER by calling
-        `os._exit(137)` on itself. This suite invokes the command in-process, so an
-        unconditionally-armed thread exits the pytest WORKER instead — 40s later
-        (20s grace + 20s stale), inside whatever unrelated test that worker has
-        moved on to. It shipped that way: it killed a different test on each run
-        and on each platform, with no traceback, and the dead worker's lost
-        coverage data then failed the gate as `65.13 < 80.00`.
+        """Pins: invoking the command outside a container starts no daemon thread.
 
-        Asserted on the live thread list rather than by patching `threading`, so
-        the guard is proven at the only place that matters — whether a thread now
-        exists in this process.
+        The heartbeat watchdog calls `os._exit(137)`; armed in-process, it exits
+        the pytest WORKER 40s later, inside an unrelated test. Assert on the live
+        thread list, not by patching `threading`.
+
+        Rationale: .claude/notes/isolation.md § The heartbeat watchdog is armed only inside a container
         """
         import threading
 
@@ -285,9 +281,8 @@ class TestInContainerGradeCoercion:
 
     # The in-container default is asserted BEHAVIOURALLY by
     # `TestGradePlumbedIntoTheContainerOrchestrator::test_an_absent_key_still_grades`.
-    # It used to be a `assert 'context.get("grade", True)' in source` grep, which
-    # is the same static check that already failed here once: it passes happily
-    # while the line it describes is never executed.
+    # A `assert 'context.get("grade", True)' in source` grep is no substitute: it
+    # passes while the line it describes is never executed.
 
 
 class TestInContainerRegradeBranch:
@@ -882,13 +877,12 @@ class TestCriterionPathsCannotEscapeTheSandbox:
     def test_an_absolute_path_is_refused_as_a_config_error(self, tmp_path: Path) -> None:
         """Refused, not silently scored 0.0.
 
-        This used to return `[]`, which the checker reports as "file does not
-        exist" — a gating verdict about the AGENT for a file that plainly does
-        exist and that no agent behaviour could ever put inside the sandbox.
-        `tasks/byod_smoke_test.yaml` was broken exactly that way for several
-        commits (it checks `/opt/byod_marker`, baked into the BYOD image) and
-        the only signal was a warning in the task log. CE039 names this
-        distinction; `CheckerMisuseError` is its signal.
+        Returning `[]` would report "file does not exist" — a gating verdict
+        about the AGENT for a file that exists and that no agent behaviour could
+        put inside the sandbox. CE039 names this distinction;
+        `CheckerMisuseError` is its signal.
+
+        Rationale: .claude/notes/isolation.md § Criterion paths are contained, quietly
         """
         sandbox, _ = self._sandbox(tmp_path)
         outside = tmp_path / "outside.txt"

@@ -29,12 +29,10 @@ from coder_eval.models.sandbox import RECORD_CLI_LOG
 
 
 # SECURITY: the judge's ignore_patterns FLOOR, enforced unconditionally in
-# ``criteria/agent_judge.py::_build_agent_config`` even when the user supplied their
-# own list. These are COPY-TIME controls, not just SDK settings: the same list is
-# the ``ignore`` passed to ``shutil.copytree`` in ``evaluation/sub_agent.py``, so
-# dropping an entry lets an agent-planted ``.claude/`` or ``.mcp.json`` land in the
-# judge's own working directory. Imported from both call sites so the model
-# defaults and the checker floor cannot drift.
+# ``criteria/agent_judge.py::_build_agent_config`` even over a user-supplied list. It is a
+# COPY-TIME control too: the ``shutil.copytree`` ignore in ``evaluation/sub_agent.py``, so
+# dropping an entry lets an agent-planted ``.claude/`` or ``.mcp.json`` land in the judge's
+# working directory. Both call sites import it, so the defaults and the floor cannot drift.
 # Rationale: .claude/notes/contracts.md § The security floor
 JUDGE_SECURITY_IGNORE_FLOOR: tuple[str, ...] = (".claude", ".mcp.json", "_reference")
 

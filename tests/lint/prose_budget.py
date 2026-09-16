@@ -1,9 +1,9 @@
-"""Measure and ratchet the essay-shaped prose in ``src/coder_eval``.
+"""Check the docstring and comment prose rules in ``src/coder_eval`` and ``tests`` (``_ROOTS``).
 
-One gated number: ``essay_words`` — words in docstrings over 150 words (Typer command
-docstrings exempt, they render as ``--help``) plus words in comment runs of three or
-more consecutive lines. Each file's comments are capped as a SHARE OF ITS LENGTH, so the house style
-is *no new essays*, not *no new documentation*.
+Two per-file rules, with no baseline: no docstring over 150 prose words (Typer commands
+and ``@abstractmethod`` exempt), and own-line comments within a SHARE OF THE FILE'S
+LENGTH. The house style is *no new essays*, not *no new documentation*. The report also
+lists words in comment runs of three or more lines, for orientation only.
 
 Also resolves every ``Rationale: <path> § <heading>`` pointer, and — under
 ``--assert-code-unchanged <ref>`` — proves a commit moved prose only, by comparing the
@@ -28,11 +28,18 @@ from typing import NamedTuple
 
 _DOCSTRING_ESSAY_WORDS = 150
 _COMMENT_BLOCK_LINES = 3
-# Own-line comments a file may carry: a FLOOR for small files, then a share of its
-# length. Proportional on purpose — there is no tree-wide total to hand-maintain, a
-# file that loses code loses budget with it, and a NEW file is governed from its
-# first commit. The tree's natural maximum sits just under this (a constants module
-# at one comment per constant); the floor is what protects those.
+# The longest own-line comment RUN a file may carry, and the blank lines a run
+# reads through. A cap on the block: the shape a comment may not take is a
+# PARAGRAPH. ONE blank line, not two: one is how a paragraph is split to duck the
+# cap, two is the separation PEP 8 already puts between a banner and its section.
+_COMMENT_RUN_LINES = 8
+_RUN_BLANK_BRIDGE = 1
+
+# Own-line comments a file may carry in TOTAL: a FLOOR for small files, then a
+# share of its length. The run cap governs the shape of any one comment; this is
+# the outlier backstop for a file that is mostly commentary however it is broken
+# up. Proportional on purpose — no tree-wide total to hand-maintain, a file that
+# loses code loses budget with it, and a NEW file is governed from its first commit.
 _COMMENT_LINE_FLOOR = 20
 _COMMENT_LINE_RATIO = 0.15
 
@@ -51,22 +58,22 @@ _DOCSTRING_SECTIONS = (
     "Examples:",
 )
 
-_SRC = Path("src/coder_eval")
+_ROOTS: tuple[Path, ...] = (Path("src/coder_eval"), Path("tests"))
 
-# Exempt by (path relative to src/coder_eval, function name) pair, and only for a
-# function at module level: `Sandbox.run_command` is a method and a bare-name exemption
-# would silently excuse it. Registered in src/coder_eval/cli/__init__.py.
+# Exempt by (repo-relative path, function name) pair, and only for a function at module
+# level: `Sandbox.run_command` is a method and a bare-name exemption would silently
+# excuse it. Registered in src/coder_eval/cli/__init__.py.
 _TYPER_COMMANDS = frozenset(
     {
-        ("cli/run_command.py", "run_command"),
-        ("cli/execute_command.py", "execute_command"),
-        ("cli/plan_command.py", "plan_command"),
-        ("cli/evaluate_command.py", "evaluate_command"),
-        ("cli/report_command.py", "report_command"),
-        ("cli/aggregate_command.py", "aggregate_command"),
-        ("cli/export_command.py", "export_command"),
-        ("cli/harbor_command.py", "reward_command"),
-        ("cli/run_task_internal_command.py", "run_task_internal_command"),
+        ("src/coder_eval/cli/run_command.py", "run_command"),
+        ("src/coder_eval/cli/execute_command.py", "execute_command"),
+        ("src/coder_eval/cli/plan_command.py", "plan_command"),
+        ("src/coder_eval/cli/evaluate_command.py", "evaluate_command"),
+        ("src/coder_eval/cli/report_command.py", "report_command"),
+        ("src/coder_eval/cli/aggregate_command.py", "aggregate_command"),
+        ("src/coder_eval/cli/export_command.py", "export_command"),
+        ("src/coder_eval/cli/harbor_command.py", "reward_command"),
+        ("src/coder_eval/cli/run_task_internal_command.py", "run_task_internal_command"),
     }
 )
 
@@ -202,12 +209,31 @@ def measure_source(source: str, rel: str) -> FileProse | None:
     )
 
 
+def _roots(repo_root: Path) -> tuple[Path, ...]:
+    """``_ROOTS``, after checking each one exists.
+
+    Raises:
+        FileNotFoundError: a root is not a directory — a renamed root must fail the gate,
+            never measure zero files.
+    """
+    for root in _ROOTS:
+        if not (repo_root / root).is_dir():
+            raise FileNotFoundError(f"prose budget root does not exist: {root}")
+    return _ROOTS
+
+
+def _python_files(repo_root: Path) -> list[tuple[Path, Path]]:
+    """``(absolute, repo-relative)`` for every ``*.py`` under each root, sorted."""
+    return sorted(
+        (path, path.relative_to(repo_root)) for root in _roots(repo_root) for path in (repo_root / root).rglob("*.py")
+    )
+
+
 def measure(repo_root: Path) -> Measurement:
-    """Scan ``src/coder_eval``. Files that do not parse are skipped, never fatal."""
+    """Scan the configured roots. Files that do not parse are skipped, never fatal."""
     files: dict[Path, FileProse] = {}
     skipped: list[Path] = []
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
-        rel = path.relative_to(repo_root / _SRC)
+    for path, rel in _python_files(repo_root):
         prose = measure_source(path.read_text(encoding="utf-8"), rel.as_posix())
         if prose is None:
             skipped.append(rel)
@@ -222,7 +248,9 @@ def total_words(files: dict[Path, FileProse]) -> int:
 
 
 def _subsystem(rel: Path) -> str:
-    return rel.parts[0] if len(rel.parts) > 1 else "top-level"
+    root = next(root for root in _ROOTS if rel.is_relative_to(root))
+    below = rel.relative_to(root)
+    return f"{root.as_posix()}/{below.parts[0]}" if len(below.parts) > 1 else root.as_posix()
 
 
 def render_report(measurement: Measurement) -> str:
@@ -236,9 +264,9 @@ def render_report(measurement: Measurement) -> str:
         lines.append(subsystem)
         for rel, prose in rows:
             lines.append(
-                f"  {rel.as_posix():<48}{prose.docstring_words:>7} doc{prose.comment_words:>7} cmt{prose.total:>8}"
+                f"  {rel.as_posix():<64}{prose.docstring_words:>7} doc{prose.comment_words:>7} cmt{prose.total:>8}"
             )
-        lines.append(f"  {'subtotal':<48}{'':>7}    {'':>7}    {sum(p.total for _, p in rows):>8}")
+        lines.append(f"  {'subtotal':<64}{'':>7}    {'':>7}    {sum(p.total for _, p in rows):>8}")
         lines.append("")
 
     files = measurement.files
@@ -260,7 +288,7 @@ def render_report(measurement: Measurement) -> str:
         key=lambda row: (-row[2], row[0].as_posix(), row[1]),
     )
     lines += ["", f"ESSAYS ({len(roster)} docstrings over {_DOCSTRING_ESSAY_WORDS} words)"]
-    lines += [f"  {f'{rel.as_posix()}::{name}':<68}{words:>6}" for rel, name, words in roster]
+    lines += [f"  {f'{rel.as_posix()}::{name}':<84}{words:>6}" for rel, name, words in roster]
     return "\n".join(lines) + "\n"
 
 
@@ -290,8 +318,7 @@ def check_pointers(repo_root: Path) -> list[str]:
     """Every ``Rationale: <path> § <heading>`` must resolve. Returns the failures."""
     failures: list[str] = []
     headings: dict[Path, set[str]] = {}
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
-        rel = path.relative_to(repo_root / _SRC)
+    for path, rel in _python_files(repo_root):
         for line in _prose_lines(path.read_text(encoding="utf-8")):
             match = _POINTER.search(line.strip())
             if not match:
@@ -323,8 +350,8 @@ def check_pointer_placement(repo_root: Path) -> list[str]:
     file unparseable, which the measurement silently reports as zero words.
     """
     failures: list[str] = []
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
-        rel = path.relative_to(repo_root / _SRC).as_posix()
+    for path, rel_path in _python_files(repo_root):
+        rel = rel_path.as_posix()
         source = path.read_text(encoding="utf-8")
         lines = source.split("\n")
 
@@ -370,6 +397,38 @@ def check_pointer_placement(repo_root: Path) -> list[str]:
     return failures
 
 
+def own_comment_runs(source: str) -> list[tuple[int, int]]:
+    """``(first line, length)`` for every own-line comment run, in file order.
+
+    A run is consecutive own-line comments, reading through up to
+    ``_RUN_BLANK_BRIDGE`` blank lines so that splitting a paragraph on whitespace
+    does not read as several short comments. Code between two comments always ends
+    the run. A trailing ``# noqa`` never starts one: it is a directive, not
+    commentary.
+
+    Blind spot: at module scope ruff format keeps two blank lines, so a paragraph split
+    on two blank lines there reads as two runs.
+    """
+    lines = source.split("\n")
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (SyntaxError, tokenize.TokenError, ValueError):
+        return []
+    own = sorted(
+        token.start[0]
+        for token in tokens
+        if token.type == tokenize.COMMENT and lines[token.start[0] - 1].strip().startswith("#")
+    )
+    runs: list[list[int]] = []
+    for line in own:
+        bridged = runs and line - runs[-1][-1] <= _RUN_BLANK_BRIDGE + 1
+        if bridged and all(not lines[between - 1].strip() for between in range(runs[-1][-1] + 1, line)):
+            runs[-1].append(line)
+        else:
+            runs.append([line])
+    return [(run[0], len(run)) for run in runs]
+
+
 def comment_line_budget(total_lines: int) -> int:
     """A file's own-line comment allowance."""
     return max(_COMMENT_LINE_FLOOR, round(_COMMENT_LINE_RATIO * total_lines))
@@ -378,12 +437,14 @@ def comment_line_budget(total_lines: int) -> int:
 def check_comment_density(repo_root: Path) -> list[str]:
     """Every file's own-line comments must fit :func:`comment_line_budget`.
 
-    Own-line only. A trailing ``# noqa`` is a directive, not commentary, and a
-    per-member annotation on an enum is the contract a dispatcher reads — counting
-    either would push against documenting them.
+    The backstop under :func:`check_comment_runs`: a file may pass the run cap with
+    every block short and still be mostly commentary. Own-line only. A trailing
+    ``# noqa`` is a directive, not commentary, and a per-member annotation on an enum
+    is the contract a dispatcher reads — counting either would push against
+    documenting them.
     """
     failures: list[str] = []
-    for path in sorted((repo_root / _SRC).rglob("*.py")):
+    for path, rel in _python_files(repo_root):
         source = path.read_text(encoding="utf-8")
         try:
             tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
@@ -397,12 +458,27 @@ def check_comment_density(repo_root: Path) -> list[str]:
         }
         budget = comment_line_budget(len(lines))
         if len(own) > budget:
-            rel = path.relative_to(repo_root / _SRC).as_posix()
             failures.append(
-                f"{rel}: {len(own)} own-line comments against a budget of {budget} "
+                f"{rel.as_posix()}: {len(own)} own-line comments against a budget of {budget} "
                 f"({len(lines)} lines). Move rationale to .claude/notes/."
             )
     return failures
+
+
+def check_comment_runs(repo_root: Path) -> list[str]:
+    """No own-line comment run may exceed :data:`_COMMENT_RUN_LINES`.
+
+    A cap on the BLOCK, with no per-file allowance: a file may carry any number of
+    one-line notes, and none of them may grow into a paragraph. The essay bar in
+    prose, one granularity down.
+    """
+    return [
+        f"{rel.as_posix()}:{line}: comment run of {length} lines "
+        f"(bar is {_COMMENT_RUN_LINES}). Move the narrative to .claude/notes/."
+        for path, rel in _python_files(repo_root)
+        for line, length in own_comment_runs(path.read_text(encoding="utf-8"))
+        if length > _COMMENT_RUN_LINES
+    ]
 
 
 def check_essays(repo_root: Path) -> list[str]:
@@ -418,6 +494,17 @@ def check_essays(repo_root: Path) -> list[str]:
         for rel, prose in sorted(measure(repo_root).files.items())
         for name, words in prose.essays
     ]
+
+
+def collect_failures(repo_root: Path) -> list[str]:
+    """Every check's failures, each prefixed with the check that raised it."""
+    return (
+        [f"unresolved pointer: {failure}" for failure in check_pointers(repo_root)]
+        + [f"misplaced pointer: {failure}" for failure in check_pointer_placement(repo_root)]
+        + [f"comment run: {failure}" for failure in check_comment_runs(repo_root)]
+        + [f"comment budget: {failure}" for failure in check_comment_density(repo_root)]
+        + [f"docstring essay: {failure}" for failure in check_essays(repo_root)]
+    )
 
 
 def code_shape(source: str) -> str:
@@ -463,13 +550,17 @@ def _git(repo_root: Path, *args: str) -> tuple[int, str]:
 
 
 def assert_code_unchanged(repo_root: Path, ref: str) -> list[str]:
-    """Report every ``src/coder_eval`` file whose code — not prose — differs from ``ref``."""
-    code, listing = _git(repo_root, "diff", "--name-only", ref, "--", _SRC.as_posix())
+    """Report every file under the configured roots whose code — not prose — differs from ``ref``."""
+    roots = [root.as_posix() for root in _roots(repo_root)]
+    code, listing = _git(repo_root, "diff", "--name-only", ref, "--", *roots)
     if code != 0:
         return [f"git diff against {ref!r} failed"]
+    code, untracked = _git(repo_root, "ls-files", "--others", "--exclude-standard", "--", *roots)
+    if code != 0:
+        return ["git ls-files for untracked files failed"]
 
     findings: list[str] = []
-    for name in sorted(filter(None, listing.splitlines())):
+    for name in sorted(set(filter(None, (listing + untracked).splitlines()))):
         if not name.endswith(".py"):
             continue
         shown, before = _git(repo_root, "show", f"{ref}:{name}")
@@ -482,16 +573,27 @@ def assert_code_unchanged(repo_root: Path, ref: str) -> list[str]:
         except SyntaxError:
             findings.append(f"{name}: could not parse both revisions")
             continue
-        dropped = directive_comments(before) - directive_comments(after)
-        findings += [
-            f"{name}: dropped directive comment {comment!r} x{count}" for comment, count in sorted(dropped.items())
-        ]
+        before_directives, after_directives = directive_comments(before), directive_comments(after)
+        for verb, changed in (
+            ("dropped", before_directives - after_directives),
+            ("added", after_directives - before_directives),
+        ):
+            findings += [
+                f"{name}: {verb} directive comment {comment!r} x{count}" for comment, count in sorted(changed.items())
+            ]
     return findings
 
 
 def main(argv: list[str]) -> int:
     repo_root = Path(__file__).resolve().parents[2]
+    try:
+        return _run(repo_root, argv)
+    except FileNotFoundError as error:
+        print(error, file=sys.stderr)
+        return 1
 
+
+def _run(repo_root: Path, argv: list[str]) -> int:
     if argv[:1] == ["--assert-code-unchanged"]:
         if len(argv) != 2:
             print("usage: --assert-code-unchanged <git-ref>", file=sys.stderr)
@@ -500,23 +602,16 @@ def main(argv: list[str]) -> int:
         for finding in findings:
             print(finding, file=sys.stderr)
         return 1 if findings else 0
+    if argv:
+        print("usage: prose_budget.py [--assert-code-unchanged <git-ref>]", file=sys.stderr)
+        return 2
 
     print(render_report(measure(repo_root)), end="")
 
-    failed = False
-    for failure in check_pointers(repo_root):
-        print(f"unresolved pointer: {failure}", file=sys.stderr)
-        failed = True
-    for failure in check_pointer_placement(repo_root):
-        print(f"misplaced pointer: {failure}", file=sys.stderr)
-        failed = True
-    for failure in check_comment_density(repo_root):
-        print(f"comment budget: {failure}", file=sys.stderr)
-        failed = True
-    for failure in check_essays(repo_root):
-        print(f"docstring essay: {failure}", file=sys.stderr)
-        failed = True
-    return 1 if failed else 0
+    failures = collect_failures(repo_root)
+    for failure in failures:
+        print(failure, file=sys.stderr)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

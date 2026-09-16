@@ -727,7 +727,7 @@ def test_parity_real_producer_output_through_writer(write_run_json: Callable[...
     (``run_record.eval_result_to_task_dict``, the batch.py path) so a
     producer-side rename of ``status`` / ``task_path`` / ``total_cost_usd`` /
     ``model_used`` / ``total_tokens`` / ``visible_turns`` / ``weighted_score``
-    (RunSummary.task_results is an untyped ``list[dict[str, Any]]``) can no longer
+    (RunSummary.task_results is an untyped ``list[dict[str, Any]]``) cannot
     silently drop a property/classname or mis-bucket a row with zero failing
     assertions.
     """

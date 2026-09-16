@@ -1,22 +1,16 @@
 """OpenCode golden-master scenarios: recorded CLI event lines + a runner.
 
-The agent shells out to ``opencode run --format json`` and reduces its
-newline-delimited JSON, so a scenario is an ordered list of event LINES and the
-driver is a fake process that replays them. No Python package to guard on:
-``pyproject.toml`` declares ``opencode = []``.
+A scenario is an ordered list of ``opencode run --format json`` event LINES,
+replayed by a fake process. The event helpers, ``HAPPY_STREAM`` and the
+``_FakeProcess`` / ``_RunningProcess`` fakes live HERE and are imported by
+``test_opencode_agent``; its ``patch_exec`` fixture needs ``monkeypatch``, so
+the runner below patches with a context manager.
 
-The event helpers, the ``HAPPY_STREAM`` sample and the ``_FakeProcess`` /
-``_RunningProcess`` fakes live HERE and are imported back into
-``test_opencode_agent`` — one definition, two consumers. The ``patch_exec``
-pytest FIXTURE stays in that module (it needs ``monkeypatch``); the runner
-below does the same patching with a plain context manager.
+The lines mirror a LIVE capture (``step_start`` / ``step_finish`` / ``text`` /
+``tool_use``, payload under ``part``). Do NOT "correct" them toward the
+``session.next.*`` names of ``opencode serve``'s SSE surface.
 
-The lines mirror events CAPTURED FROM A LIVE run — the CLI's own compact
-vocabulary (``step_start`` / ``step_finish`` / ``text`` / ``tool_use``, payload
-under ``part``). Do NOT "correct" them toward the ``session.next.*`` names in
-the server's OpenAPI schema: those describe ``opencode serve``'s SSE surface,
-and an earlier version of this harness parsed them and silently captured zero
-telemetry on a real run.
+Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
 """
 
 from __future__ import annotations
@@ -310,15 +304,13 @@ def _build_catalogue() -> list[OpenCodeScenario]:
         )
     )
 
-    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved`
-    # by the orphan sweep at finalization. It carries NO `state.time`, which is
-    # the honest shape for a call that never returned: with no
+    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved` by
+    # the orphan sweep at finalization. It carries NO `state.time`: with no
     # `execution_started_at` there is no `duration_ms` and no span.
-    #
-    # READ THE SNAPSHOT: the sweep still stamps `execution_completed_at`, which
-    # it does on every close path, so the record holds an end with no
-    # beginning. Compare `pi_d_orphaned_tool`, where the start IS stamped and a
-    # manufactured duration follows from it.
+    # READ THE SNAPSHOT: the sweep still stamps `execution_completed_at`, as it does
+    # on every close path, so the record holds an end with no beginning. Compare
+    # `pi_d_orphaned_tool`, where the start IS stamped and a manufactured duration
+    # follows from it.
     scenarios.append(
         OpenCodeScenario(
             name="d_orphaned_tool",

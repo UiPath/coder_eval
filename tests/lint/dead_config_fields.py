@@ -1,33 +1,21 @@
 """CE031 — behavior-driving config fields must be consumed somewhere in ``src/``.
 
-A Pydantic field on a config model that users set in a task YAML but that no code
-ever reads is *dead config*: it silently does nothing, and the author has no way
-to know. This is what ``SimulationConfig.parallel_trials`` was — documented, set
-in a shipped task YAML, defaulting to ``True``, and read nowhere (trial
-concurrency is entirely ``--max-parallel``'s job). CE031 makes that class
-impossible to reintroduce for a small, explicit registry of models.
+For every model in ``CONSUMED_MODELS``, each field must appear as an **attribute
+access** (``x.field``) somewhere under ``src/``, or be listed in ``EXEMPT`` with a
+reason it is consumed only via serialization.
 
-"Consumed" here means the field name appears as an **attribute access**
-(``x.field``) anywhere under ``src/`` — the consumption contract for a
-*behavior-driving* config: the orchestrator/validators must read the field by
-name for it to have any effect. A field read only via ``model_dump()`` /
-serialization is NOT caught by this definition, which is exactly why the registry
-is restricted to behavior models (``SimulationConfig``, ``RunLimits``,
-``Dataset``) and does **not** include serialization/telemetry models or the
-sprawling ``TaskDefinition`` (whose fields are largely round-tripped through
-``model_dump`` in the dataset expander).
+Register only behavior-driving models. A field read only through ``model_dump()`` is
+not an attribute access, so a serialization or telemetry model, or ``TaskDefinition``,
+would report live fields as dead.
 
-Known floor (documented, accepted): attribute names collide across models — if
-``RunLimits`` and ``SimulationConfig`` both declare ``max_turns`` and only one is
-read by name, both count as consumed. Collisions cause **false negatives** (a dead
-field masked by a same-named live one elsewhere), never false positives, so the
-rule can never wrongly break the build. An ``EXEMPT`` map covers any field that is
-legitimately consumed only via serialization, with a reason.
+BLIND SPOT: attribute names are not tied to a model. A dead field is masked by a
+same-named attribute read anywhere under ``src/``. This causes false negatives, never
+false positives.
 
-Like CE027 through CE030, this is not a ``BaseRule`` in the AST runner (that runner walks
-one file at a time and reports line-level violations; this rule reasons over the
-*whole* ``src/`` tree at once). It is wired as
-``tests/test_custom_lint.py::TestCE031DeadConfigFields``.
+Wired as ``tests/test_custom_lint.py::TestCE031DeadConfigFields``, not the AST runner,
+because it reasons over the whole ``src/`` tree at once.
+
+Rationale: .claude/notes/lint-rules.md § CE031
 """
 
 from __future__ import annotations

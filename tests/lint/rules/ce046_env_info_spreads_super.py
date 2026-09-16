@@ -1,30 +1,19 @@
 """CE046: a ``get_environment_info`` override must spread the base result.
 
-``Agent.get_environment_info`` (agent.py) emits the ``system_prompt_semantics``
-run marker from the ClassVar of the same name, so EVERY run — including
-out-of-tree SPI agents — records which system-prompt regime built its prompts.
-Dashboards read an ABSENT marker as "a run from before the marker existed" and
-pool it into a legacy bucket, so an override that returns a bare dict does not
-merely omit a key: it silently mis-buckets every one of that agent's runs.
-
-The motivating bug: ``OpenCodeAgent.get_environment_info`` returned
-``{"opencode_model": ..., "opencode_pure": ...}`` with no ``super()`` spread, so
-no OpenCode run ever carried the marker and no test caught it. Every other agent
-(codex/antigravity/claude_code) spreads the base correctly.
-
-The base's docstring already states the contract ("Overrides should spread
-``super().get_environment_info()`` rather than returning a bare dict"); this rule
-makes it mechanical.
+``Agent.get_environment_info`` emits the ``system_prompt_semantics`` run marker.
+An override that returns a bare dict drops it, and every run of that agent is
+silently mis-bucketed as pre-marker.
 
 Fires on any method named ``get_environment_info`` defined directly in a class
 body that neither
 
   * calls ``super().get_environment_info()`` (the override contract), nor
   * references ``self.system_prompt_semantics`` (the base itself, which emits
-    the marker directly — exempt so the rule does not flag its own source).
+    the marker directly).
 
-``# noqa: CE046`` if an agent genuinely must not record the marker (there is no
-such case today).
+``# noqa: CE046`` only if an agent genuinely must not record the marker.
+
+Rationale: .claude/notes/lint-rules.md § CE046
 """
 
 import ast

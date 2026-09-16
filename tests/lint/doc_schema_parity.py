@@ -1,43 +1,21 @@
 """CE030 — models the project commits to documenting must have no undocumented fields.
 
-Every defect this docs overhaul fixed was the same failure: a doc claim that no
-longer matched (or never matched) the code. P0 and P1 were literally "a Pydantic
-field the user must set, documented nowhere." CE030 is the sensor that makes that
-class impossible to reintroduce: for a small, explicit registry of user-facing
-models, every field must appear in the model's doc page as inline code, or be
-listed in ``EXEMPT`` with a reason it is not user-authored.
+``DOCUMENTED_MODELS`` is the registry of tracked models, each paired with its doc
+page. Every field of a registered model must appear in that page as Markdown inline
+code, or be listed in ``EXEMPT`` with a reason it is not user-authored. A new field
+that is neither fails ``make lint``; that is the intent.
 
-Design choices, each load-bearing:
+Nested models (``SandboxConfig``, ``CliMatch``, criteria) are NOT walked; each
+registration is a standing documentation obligation.
 
-* **Allowlist, not denylist.** A new field on a registered model that is neither
-  documented nor exempted *fails* — which is the point. Adding a user-facing field
-  now forces a doc update or a reasoned exemption in the same change.
-* **Explicit registry, no recursion.** Only the six registered models are
-  checked; nested models (``AgentConfig``, ``SandboxConfig``, criteria, …) are NOT
-  walked. Walking them would silently expand the documentation commitment to
-  dozens of models nobody signed up for. ``CliMatch`` is deliberately absent for
-  that reason: its fields are documented in the ``cli_called`` reference, and
-  registering a third nested model under ``SandboxConfig`` would start exactly
-  the tree-walk this bullet exists to prevent. A new field on a registered model
-  fails ``make lint`` until it is documented or exempted -- that is the intent,
-  not a bug in the rule.
-* **Inline-code match, deliberately simple.** A field counts as documented when
-  its bare name appears wrapped in Markdown inline-code backticks anywhere in the
-  doc. This is a floor, not a proof — a field name that appears in an unrelated
-  context (e.g. a
-  common word like ``rows``) can pass spuriously. Accepted: the rule exists to
-  catch *entirely undocumented* fields, and a fuzzier "documented in the right
-  section" rule invites false passes that erode trust in the gate.
+BLIND SPOT: a field name used as inline code in an unrelated context (e.g. ``rows``)
+passes. Models sharing field names (``RecordedCli`` / ``CliResponse``) share coverage,
+so a green gate is not per-model coverage.
 
-  A corollary for models that share a vocabulary: ``RecordedCli`` and
-  ``CliResponse`` both declare ``exit_code`` / ``stdout`` / ``stderr``, so
-  registering the second only newly guards ``when``, and a FUTURE field on either
-  that reuses a name the other already documents passes without its own doc line.
-  Still net-positive, but do not read a green gate here as per-model coverage.
+Wired as ``tests/test_custom_lint.py::TestCE030DocSchemaParity``, not the AST runner:
+it reasons over Markdown.
 
-Like CE027/CE029, this is intentionally NOT a ``BaseRule`` registered in
-``tests/lint/runner.py`` (that runner is AST-only over ``.py`` files); it reasons
-over Markdown and is wired as ``tests/test_custom_lint.py::TestCE030DocSchemaParity``.
+Rationale: .claude/notes/lint-rules.md § CE030
 """
 
 from __future__ import annotations

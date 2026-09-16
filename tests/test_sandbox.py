@@ -1094,9 +1094,8 @@ def test_check_parent_node_modules_contamination_reports_scoped_offender(tmp_pat
 def test_check_parent_node_modules_contamination_reports_unscoped_offender(tmp_path, caplog):
     """An ancestor node_modules/ holding any installed package is reported.
 
-    Locks in the generic check: previously the helper only caught
-    ``@uipath/*`` and would have missed unscoped packages, leaving
-    coder_eval consumers in other ecosystems uncovered.
+    Pins: the check is generic, not limited to ``@uipath/*``, so an unscoped
+    package is reported and consumers in other ecosystems are covered.
     """
     parent = tmp_path / "fake-home"
     contam = parent / "node_modules" / "lodash"
@@ -1320,16 +1319,13 @@ class TestReferenceDirEnv:
 def test_default_venv_can_import_system_site_packages():
     """The sandbox venv must not shadow the interpreter it is layered over.
 
-    `SandboxConfig.python` defaults to a `PythonEnvConfig()` instance, so every
-    task gets a venv. Built ISOLATED, that venv split the toolchain inside a task
-    image that provisions packages globally: `python` resolved to the venv and
-    could not import them, while `pip` -- which `uv venv` never places in the venv
-    -- fell through to the image's global pip and reported them present. Measured
-    in a task image: `import langchain` raised ModuleNotFoundError while
-    `pip list` showed `langchain 1.3.14`.
+    Pins: the default `SandboxConfig` (whose `python` is a `PythonEnvConfig()`
+    instance, so every task gets a venv) writes `include-system-site-packages =
+    true` into `pyvenv.cfg`. Asserted through `pyvenv.cfg` rather than a live
+    import so the test holds on a host whose base interpreter has nothing
+    installed.
 
-    Asserted through `pyvenv.cfg` rather than a live import so the test is
-    hermetic: it holds on a host whose base interpreter has nothing installed.
+    Rationale: .claude/notes/isolation.md § Why the venv gets system site packages
     """
     config = SandboxConfig(driver="tempdir")
     assert config.python is not None, "default is an instance, not None -- the case this guards"

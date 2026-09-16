@@ -105,9 +105,9 @@ def test_connection_string_resolves_from_each_documented_env_alias(monkeypatch, 
     # The three documented env vars are the entire activation contract. Prove each
     # actually populates telemetry_connection_string through pydantic-settings'
     # real env resolution (fresh Settings, no .env), so dropping or renaming an
-    # AliasChoices entry can no longer silently disable telemetry with no test
-    # failure. (Other tests monkeypatch the already-resolved field, which can't
-    # catch a broken alias.)
+    # AliasChoices entry fails a test instead of silently disabling telemetry.
+    # (Other tests monkeypatch the already-resolved field, which can't catch a
+    # broken alias.)
     from coder_eval.config import Settings
 
     for v in ("TELEMETRY_CONNECTION_STRING", "APPLICATIONINSIGHTS_CONNECTION_STRING", "UIPATH_AI_CONNECTION_STRING"):

@@ -1,29 +1,14 @@
 """The two derived version pins must equal ``pyproject.toml``'s version.
 
-``pyproject.toml`` is the single version source; two files carry a *derived* pin
-of it, and one ``release.yml`` step bumps both inside the release commit:
+Pins, on every commit, ``action.yml``'s ``version:`` default and
+``plugins/coder-eval/.claude-plugin/plugin.json``'s ``version`` to
+``pyproject.toml``. Also pins the line shapes that ``release.yml``'s sed is keyed
+on: the ``# <-- kept in sync`` anchor in ``action.yml`` and the comma-terminated
+``"version"`` line in ``plugin.json``.
 
-- ``action.yml``'s ``version:`` default — the published composite action installs
-  ``coder-eval==<that default>``, so a consumer pinning
-  ``UiPath/coder_eval@vX.Y.Z`` (or the moving ``@v0``) must get X.Y.Z and not
-  some other release.
-- ``plugins/coder-eval/.claude-plugin/plugin.json``'s ``version`` — the Claude
-  Code plugin manifest. ``claude plugin validate --strict`` rejects a manifest
-  with no version, and a pinned-but-stale one strands users on a cached copy
-  because Claude Code keys plugin updates off it.
+A reformat that detaches either anchor turns the release-time bump into a no-op.
 
-The release-time seds make both invariants mechanically true *at rest* — every
-commit on main has the pins in agreement with ``pyproject.toml``.
-
-Nothing asserted it, which is how ``action.yml`` shipped pinned to 0.8.6 while
-main was already 0.8.9: the seds live on the release path only, so a hand-edit
-(or a release whose amend step was skipped) drifts silently and ``@v0``
-consumers install a version other than the tag they pinned.
-
-This also guards the ``# <-- kept in sync`` anchor itself: ``release.yml``'s sed
-is keyed on that exact trailing comment, so a reformat that detaches it turns
-the release-time bump into a no-op (caught there by a ``grep -q`` guard, but
-only after the tag exists).
+Rationale: .claude/notes/reporting.md § Why the derived version pins are tested on every commit
 """
 
 from __future__ import annotations

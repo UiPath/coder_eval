@@ -10,8 +10,7 @@ from coder_eval.evaluation.judge_models import to_anthropic_alias, to_bedrock_mo
 
 
 # Representative vendor-prefixed model names (the Bedrock AWS-id dialect) the judge
-# model-name translators must normalize. Formerly sourced from the proxy's
-# DEFAULT_MODEL_MAP; kept inline here now that the proxy has been removed.
+# model-name translators must normalize.
 _VENDOR_MODEL_NAMES = [
     "anthropic.claude-sonnet-4-6",
     "anthropic.claude-opus-4-6-v1",

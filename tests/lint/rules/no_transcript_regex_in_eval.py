@@ -1,26 +1,18 @@
 """CE013: Don't regex-parse agent transcripts inside ``evaluation/`` or ``criteria/``.
 
-Replacing text-with-JSON verdict parsing with a typed tool channel was the
-whole point of the 2026-05-20 judge refactor. The legacy parser used regex
-against structural-tag patterns (``[ASSISTANT]``, ``[RESULT - …]``) and
-JSON-shape literals (``\\{``, ``"score"``, ``"rationale"``) — both highly
-coupled to ``ClaudeCodeAgent._format_messages`` rendering choices that
-have no business being a correctness contract.
-
-This rule prevents that pattern from coming back. Inside ``evaluation/``
-or ``criteria/``, any call to ``re.compile`` / ``re.search`` / ``re.match`` /
-``re.findall`` / ``re.finditer`` / ``re.fullmatch`` whose first positional
-argument is a string literal containing one of:
+Inside ``evaluation/`` or ``criteria/``, flags any ``re.compile`` /
+``re.search`` / ``re.match`` / ``re.findall`` / ``re.finditer`` /
+``re.fullmatch`` call whose first positional argument is a string literal
+containing one of:
 
   * ``[ASSISTANT]``, ``[RESULT``, ``[TOOL USE]`` (structural transcript tags)
-  * ``"score"``, ``"rationale"`` (JSON-shape verdict fields)
-  * ``\\{`` followed by a verdict-shape hint (loose: literal ``\\{`` with
-    one of the above markers anywhere in the pattern)
+  * ``"score"``, ``"rationale"``, in either quote style (JSON-shape verdict fields)
 
-…is flagged. Use the verdict tool channel instead.
+Use the verdict tool channel instead. Add ``# noqa: CE013 -- <reason>`` for
+legitimate non-correctness-critical sites (e.g. log scrubbing, telemetry-only
+utterance extraction).
 
-Add ``# noqa: CE013 -- <reason>`` for legitimate non-correctness-critical
-sites (e.g. log scrubbing, telemetry-only utterance extraction).
+Rationale: .claude/notes/lint-rules.md § CE013
 """
 
 import ast

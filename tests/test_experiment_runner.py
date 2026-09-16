@@ -216,12 +216,9 @@ class TestResolveAllTasks:
     def test_skip_true_excludes_task_from_resolution(self, tmp_path, run_dir, default_experiment):
         """`skip: true` in the YAML excludes the task and records it in `skipped`.
 
-        Regression guard for MST-9675: TaskDefinition previously had no ``skip``
-        field, so authors writing ``skip: true`` to quarantine a known-blocked
-        task got a silent no-op — the task still ran (and often errored). Honor
-        the field at resolve_all_tasks time and report it via SkippedTask with
-        a ``"skip: true"`` reason prefix so consumers can distinguish opt-outs
-        from load failures.
+        Pins: resolve_all_tasks drops the task and reports it via SkippedTask
+        with a ``"skip: true"`` reason prefix, so consumers can distinguish
+        opt-outs from load failures.
         """
         blocked = _write_task_yaml(tmp_path, "task-blocked", agent={"type": "claude-code"})
         # Mutate the loaded YAML to add `skip: true` while keeping every other

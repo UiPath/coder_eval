@@ -1,42 +1,19 @@
 """CE052: a process-lethal call must be gated on actually being in the container.
 
-``os._exit`` bypasses ``atexit``, buffered IO, ``finally`` blocks and every
-exception handler: the process is simply gone. That is the correct primitive for
-exactly one thing in this codebase — reaping the container's own disposable main
-process when the host that started it has died — and it is safe there only
-because that process is *ours to destroy*. In any other process it is not a
-degraded outcome, it is an unattributable one.
+Fires on ``os._exit(...)`` (any module alias) anywhere in ``src/coder_eval/`` that is
+not lexically inside the body of an ``if``/``elif`` whose test mentions
+``CODER_EVAL_IN_CONTAINER`` or ``IN_CONTAINER_ENV``. An ``else`` arm is not gated.
+``os._exit`` skips ``atexit``, ``finally`` and every handler, so it is correct only for
+reaping the container's own disposable main process.
 
-The motivating bug: ``run_task_internal_command`` armed its host-heartbeat
-watchdog — a daemon thread whose whole authority is ``os._exit(137)`` — as an
-unconditional side effect of the command body. A test invoked that command
-in-process (legitimately: the command must refuse a malformed ``context.json``,
-and asserting that means calling it), and the pytest worker inherited the
-thread. Forty seconds later — 20s grace plus the 20s stale window — it found no
-heartbeat and exited the worker, mid-way through whatever unrelated test file
-that worker had since moved on to.
+HAZARD: do not gate on ``sandbox.driver``. ``run_task_internal_command`` rewrites the
+driver to ``tempdir`` before it builds the in-container Orchestrator, so a driver gate
+disables itself on the one path that needs it.
 
-Every property of that failure is the one this rule exists to prevent:
+The check is lexical, not a data-flow proof: it forces the guard to be written at the
+site. Add ``# noqa: CE052`` with a reason for an intentional exception.
 
-  * it named the wrong test — a different one on each run, on each platform,
-    with no traceback, because there is no exception to raise;
-  * it was invisible at low load — with 14 local workers the file finished and
-    the run ended before the timer fired, so it reproduced only on CI's 2;
-  * and it took the coverage gate with it. A dead worker returns no coverage
-    data, so a single killed process reported as "total of 65.13 is less than
-    fail-under=80.00" — a failure naming neither the test nor the cause.
-
-Fires on ``os._exit(...)`` anywhere in ``src/coder_eval/`` that is not lexically
-inside a branch testing ``CODER_EVAL_IN_CONTAINER``. That env var is the repo's
-established in-container predicate (``Sandbox.enforces_permission_windows``,
-``orchestration/evaluation.resolve_reference_dir``) and is deliberately NOT
-``sandbox.driver`` — ``run_task_internal_command`` rewrites the driver to
-``tempdir`` before building the in-container Orchestrator, so a driver-based gate
-disables itself on precisely the path that needs it.
-
-The check is lexical (an enclosing ``if``/``elif`` whose test mentions the var),
-not a data-flow proof. That is enough to force the guard to be written down at
-the site, which is the property that was missing.
+Rationale: .claude/notes/lint-rules.md § CE052
 """
 
 import ast

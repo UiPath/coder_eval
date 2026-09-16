@@ -1,22 +1,16 @@
 """CE022: ``Orchestrator._simulation_dialog_loop`` must stay under its statement cap.
 
-``_simulation_dialog_loop`` is the one function in the tree that keeps a
-``# noqa: PLR0915``: it is a sequential dialog driver whose residual length is
-irreducible without a state-object rewrite (see the 2026-06-23
-decompose-god-functions plan, Phase 5). But ``# noqa: PLR0915`` *disables ruff's
-statement check entirely* — without a guard the function could silently regrow
-back toward its pre-decomposition size and nothing would fail.
+The rule counts every statement node in ``_simulation_dialog_loop`` in
+``orchestrator.py`` (recursively, the notion ruff PLR0915 bounds; ``def`` or
+``async def``) and fires when the count exceeds ``_CAP``. It targets only that one
+function; ruff's ceiling covers every other function.
 
-This rule re-imposes a bound: it counts the statements in
-``_simulation_dialog_loop`` (every statement node in the body, recursively — the
-same notion ruff PLR0915 bounds) and fires if the count exceeds ``_CAP``. The cap
-is the measured post-decomposition size plus a small headroom, so ordinary edits
-don't trip it but a real regrowth does. Deliberately narrow: it targets the one
-named function in ``orchestrator.py``, not a general size rule (ruff's 80/25
-ceiling already covers every other function).
+HAZARD: the function keeps ``# noqa: PLR0915``, which disables ruff's statement
+check for it, so this rule is its only bound. Bump ``_CAP`` only with a reviewed
+change to the dialog driver. If a decomposition brings the function under ruff's
+ceiling, remove the ``# noqa: PLR0915`` AND this rule together.
 
-If a future decomposition legitimately brings the function under ruff's ceiling,
-remove the ``# noqa: PLR0915`` AND this rule together.
+Rationale: .claude/notes/lint-rules.md § CE022
 """
 
 import ast

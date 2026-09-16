@@ -1,29 +1,18 @@
 """CE014: every ``list``-typed field on a config-merge root model must declare
 an explicit ``MergeField(strategy=...)``.
 
-The declarative merge engine reads a per-field strategy off the Pydantic
-``FieldInfo`` (``coder_eval.models.merge_strategy.merge_strategy_of``), falling
-back to a type-aware default: nested ``BaseModel`` / free-form ``dict`` -> ``deep``;
-``list`` / scalar -> ``replace``. A ``list`` is the one type whose default
-(``replace``) is easy to mean-otherwise (``append``) — so a list field that
-silently keeps the ``replace`` default when it meant ``append`` is a latent
-resolution bug. This rule forces the choice to be explicit.
+The rule requires the annotation, not a particular strategy: an explicit
+``replace`` on a list is fine. Nested-``BaseModel`` and free-form ``dict``
+fields may use a plain ``Field(...)``. Default strategies:
+``coder_eval.models.merge_strategy.merge_strategy_of``.
 
-Scope is the set of model classes the engine actually feeds through
-``merge_layers`` / ``resolve_root`` — the three ``-D``-reachable roots, the
-sandbox sub-models reached by deep merge, AND the two models merged outside the
-``-D`` roots (``TaskDefinition`` for ``pre_run``/``post_run``, ``SimulationConfig``
-for ``constraints``). Scoping by class name (not file) keeps the rule pinned to
-the engine's real roots and avoids flagging unrelated list fields that happen to
-share a file (e.g. ``PreRunCommand`` in ``tasks.py``).
-
-Nested-``BaseModel`` and free-form ``dict`` fields are allowed to rely on the
-type-aware ``deep`` default (a plain ``Field(...)`` is fine) — the nested-replace
-regression is structurally impossible for them. An explicit ``replace`` override
-on a list is permitted and visible; this rule only requires the annotation, not
-a particular strategy.
+Scope: classes named in ``_MERGE_ROOT_CLASSES``, inside ``_SCOPED_PATHS``,
+matched by class name. A model newly fed through ``merge_layers`` /
+``resolve_root`` goes unchecked until it is added there.
 
 Add ``# noqa: CE014`` on the field line for an intentional exception.
+
+Rationale: .claude/notes/lint-rules.md § CE014
 """
 
 import ast

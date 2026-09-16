@@ -231,6 +231,27 @@ overlaps, so a call closing in the gap before a step start needs nobody to remem
 The rule that used to live there was wrong once on OpenCode — clearing at `step_start`
 wiped the span before `step_finish` could subtract it, a 100% overstatement of that window.
 
+The OpenCode gap case is reachable only through the NON-TERMINAL tool path. The CLI
+normally emits one already-`completed` event per call, and that call closes inside the
+step that opened it. That is why the measured corpus shows 0.00% for this case, and why
+`TestToolSpansSurviveTheStepBoundary` drives `_OpenCodeTurnState` directly instead of a
+recorded stream.
+
+The Pi inter-turn gap is small in practice: measured across 25 real window pairs, the
+median was 0.25 ms and the maximum 0.75 ms. The fix is worth
+keeping mainly because the tool spans must keep working once the gap closes, which
+`tests/test_pi_agent.py::TestToolSpansSurviveTheTurnBoundary` pins.
+
+An Antigravity call that is still running when a flush cuts the window must have its
+already-elapsed part taken out of that window. Subtracting only CLOSED intervals published
+that part as model time while the call's own `duration_ms` counted it again, and because
+the windows cover the turn end to end, there is no slack to absorb it. Measured on `tasks/hello_date`
+with a live gemini-3.1-pro-preview: a `Bash` opening 1.7 ms before the flush drove
+Σ generation + Σ command 0.26 ms PAST the turn's own `duration_seconds`, on a turn whose
+entire headroom was 1.4 ms. Four sibling runs passed by 1.2-8.7 ms out of ~12 s, so the
+defect was a coin flip per run. `tests/test_antigravity_agent.py::test_a_tool_still_open_at_the_flush_is_not_generation_time`
+pins it.
+
 ## Why a clean exit can still be a crash
 
 An exit code of 0 with no telemetry is indistinguishable from a real pass in every
@@ -266,6 +287,14 @@ OpenCode has one escape hatch, `require_token_telemetry`, for a provider or auth
 reports no usage at all — where crashing every turn makes the harness unusable rather than
 merely imprecise. It deliberately does NOT cover vocabulary drift: that arm has silently
 zeroed a whole run before, and no provider quirk explains it.
+
+The OpenCode golden fixtures (`tests/_fixtures/golden_streams/opencode_fixtures.py`) mirror
+events captured from a live `opencode run --format json`, in the CLI's own compact
+vocabulary (`step_start` / `step_finish` / `text` / `tool_use`, payload under `part`). The
+`session.next.*` names in the server's OpenAPI schema describe `opencode serve`'s SSE
+surface, not the CLI stream, so "correcting" a fixture toward them re-creates the
+zero-telemetry vocabulary drift above. The fixtures need no import guard because
+`pyproject.toml` declares `opencode = []`: there is no Python package to skip on.
 
 ## Token accounting, per harness
 

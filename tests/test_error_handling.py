@@ -686,7 +686,7 @@ class TestTruncateLog:
 
 
 class TestAgentCrashErrorNoPartialField:
-    """AgentCrashError no longer carries partial_turn_record."""
+    """AgentCrashError has no partial_turn_record attribute."""
 
     def test_constructs_without_kwargs(self):
         err = AgentCrashError("boom")

@@ -344,8 +344,8 @@ class TestTurnTimeoutResolution:
     """Regression tests for turn_timeout flowing through the field-merge resolver."""
 
     def test_turn_timeout_in_agent_dict_now_rejected(self):
-        """Legacy turn_timeout under agent: is no longer hoisted — it fails loudly
-        via the agent model's extra='forbid' (the hoist shim was removed)."""
+        """turn_timeout under agent: is not hoisted — it fails loudly via the
+        agent model's extra='forbid'."""
         default_exp = ExperimentDefinition(
             experiment_id="default",
             defaults=ExperimentDefaults(agent={"type": "claude-code", "turn_timeout": 300}),

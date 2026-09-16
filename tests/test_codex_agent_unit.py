@@ -134,19 +134,13 @@ class TestCodexTurnState:
         assert cmd.result_tokens > 100
 
 
-# ---------------------------------------------------------------------------
-# Execution bounds
-#
-# The SDK delivers `started_at_ms` / `completed_at_ms` on the item notification
-# and the agent discarded both, publishing the item's own `duration_ms`
-# instead — 0.0 for 70 of 211 commands in one nightly, absent for 25 more, and
-# no execution bounds at all, so no Codex tool call could be placed on a
-# timeline. All three telemetry builders now derive their timing identically.
-#
-# Pure logic: the builders take plain SimpleNamespace roots, so these live
-# here rather than behind test_codex_agent.py's importorskip — otherwise a
-# clean `make test` (which syncs no codex extra) skips them entirely.
-# ---------------------------------------------------------------------------
+# Execution bounds. The SDK delivers `started_at_ms` / `completed_at_ms` on the item
+# notification and the agent discarded both, publishing the item's own `duration_ms`
+# instead — 0.0 for 70 of 211 commands in one nightly, absent for 25 more. All three
+# telemetry builders now derive their timing identically.
+# Pure logic: the builders take plain SimpleNamespace roots, so these live here rather
+# than behind test_codex_agent.py's importorskip — otherwise a clean `make test`
+# (which syncs no codex extra) skips them entirely.
 
 _EPOCH_MS = 1_800_000_000_000
 
@@ -225,8 +219,8 @@ class TestExecutionBoundsFromSdkStamps:
 
     @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
     def test_timestamp_is_the_tools_own_start(self, factory, root_type):
-        # It used to be datetime.now() at COMPLETION, which places the call
-        # after its own execution.
+        # datetime.now() at COMPLETION would place the call after its own
+        # execution.
         tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=_EPOCH_MS + 250)
         assert tel.timestamp == datetime.fromtimestamp(_EPOCH_MS / 1000)
 

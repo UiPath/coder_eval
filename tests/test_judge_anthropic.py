@@ -31,7 +31,7 @@ def _make_response(*, score: float = 0.5, rationale: str = "ok") -> MagicMock:
 def _make_client(response: MagicMock | None = None) -> MagicMock:
     client = MagicMock()
     # spec-bound to the real ``AsyncMessages.create`` signature so a kwarg the
-    # installed SDK no longer accepts (e.g. a removed ``temperature``) fails
+    # installed SDK does not accept (e.g. a removed ``temperature``) fails
     # here instead of silently passing against an unconstrained MagicMock.
     client.messages = MagicMock(spec=AsyncMessages)
     client.messages.create = AsyncMock(
@@ -108,9 +108,9 @@ async def test_invoke_anthropic_judge_passes_temperature_and_max_tokens() -> Non
 
 
 async def test_invoke_anthropic_judge_escalates_on_signature_break() -> None:
-    """A kwarg the installed SDK no longer accepts must escalate as infra, not
+    """A kwarg the installed SDK does not accept must escalate as infra, not
     silently score the row 0.0 (see judge_bedrock.py's parallel retry/escalation
-    contract and CLAUDE.md's CE039 rationale)."""
+    contract and CE039)."""
     from coder_eval.errors import JudgeInfrastructureError
 
     client = _make_client()

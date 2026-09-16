@@ -1,30 +1,18 @@
 """CE044 — the marketplace entry and the plugin manifest are one metadata surface.
 
-``.claude-plugin/marketplace.json`` is what the ``/plugin`` browser and the
-plugin directories show *before* install; ``plugins/coder-eval/.claude-plugin/
-plugin.json`` is what an installed user's copy carries *after*. Six fields are
-byte-identical duplicates across the two files (``description``, ``keywords``,
-``author``, ``homepage``, ``repository``, ``license``, plus ``name`` and
-``displayName``), and nothing compared them — the only test that reads
-``plugin.json`` at all is ``tests/test_action_version_pin.py``, and only its
-``version``. A one-sided edit — retitling the plugin in the marketplace but not
-the manifest — would ship silently and show two different one-liners in the wild.
+``.claude-plugin/marketplace.json`` is what the ``/plugin`` browser shows before
+install; ``plugins/coder-eval/.claude-plugin/plugin.json`` is what an installed copy
+carries. For each marketplace entry:
 
-The second half of the rule is the one that has already bitten: the marketplace
-entry must not carry a *discovery* field the plugin manifest cannot mirror. The
-marketplace schema allows both ``keywords`` ("Tags for plugin discovery and
-categorization") and ``tags`` ("Tags for searchability and discovery"); the
-plugin-manifest schema has no ``tags`` property at all. Splitting discovery
-strings across the two therefore drops half of them from the installed copy, and
-leaves a future editor with no rule for which list a new term belongs in. So an
-extra key on the entry is a lint failure unless it is listed in
-``MARKETPLACE_ONLY`` with a written reason — the allowlist *is* the rule, kept in
-code rather than in tribal knowledge.
+- its ``source`` must resolve to a directory that holds a plugin manifest;
+- every key in ``SHARED_KEYS`` must be equal on both sides;
+- any other key on the entry fails unless ``MARKETPLACE_ONLY`` lists it with a
+  reason. The allowlist is the rule: a new key needs a written reason.
 
-Like CE026-CE031 and CE033 this reasons over whole files (JSON, plus resolving a
-``source`` path to a directory) rather than one ``.py`` AST, so it is not a
-``BaseRule`` in the runner; it is wired as a dedicated ``@pytest.mark.lint`` test
-class in ``tests/test_custom_lint.py``.
+Not a ``BaseRule``: it reasons over whole JSON files, and is wired as a
+``@pytest.mark.lint`` class in ``tests/test_custom_lint.py``.
+
+Rationale: .claude/notes/lint-rules.md § CE044
 """
 
 from __future__ import annotations

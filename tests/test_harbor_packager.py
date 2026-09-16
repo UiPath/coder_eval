@@ -151,7 +151,10 @@ class TestEmittedDirectoryStructure:
 
 
 class TestVerifierTaskYaml:
-    """tests/task.yaml must never set agent: {type: none} — see packager.py's module docstring."""
+    """tests/task.yaml must never set agent: {type: none}.
+
+    Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
+    """
 
     def test_never_sets_agent_type_none(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
@@ -172,10 +175,12 @@ class TestVerifierTaskYaml:
         assert len(reloaded.success_criteria) == 2
 
     def test_reference_comparison_survives_the_none_agent_trap(self, tmp_path: Path) -> None:
-        """The corrected design: a placeholder real agent type unblocks reference_comparison.
+        """A placeholder real agent type unblocks reference_comparison.
 
         If tests/task.yaml set agent: {type: none} instead, this would raise at
-        TaskDefinition.model_validate — see the module docstring for why.
+        TaskDefinition.model_validate.
+
+        Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
         """
         task_file = _write_task(
             tmp_path,

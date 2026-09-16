@@ -962,3 +962,33 @@ re-derive from scratch.
   leaves them stale with nothing failing. Needs a backtick-path extractor scoped to
   one section, which is the narrow case of the prose-path candidate above. — caught
   during the reports consolidation rebase.
+
+- [ ] **A prose "see X's docstring" citation whose target no longer holds the
+  claim.** Moving rationale out of a docstring leaves every citation of that
+  docstring pointing at text that is gone, and `check_pointers` cannot see it
+  because the citation is prose, not a `Rationale:` pointer. Not mechanised: the
+  match is heuristic ("see the module docstring", "see CE063's docstring",
+  "see that class's docstring" all read differently), and most citations are
+  in-file and still valid, so a rule would need per-site triage rather than a
+  regex. Instances found (line numbers at 946ca968):
+  `src/coder_eval/harbor/packager.py:382` and `:386`,
+  `tests/test_harbor_packager.py:163` and `:187`,
+  `tests/lint/rules/ce064_turn_bracket_on_the_clock.py:40`. Caught in: tests
+  prose slimming, Phases 3 and 7.
+
+- [ ] **Narrative after a docstring's `Args:`/`Returns:` block that follows a
+  `Rationale:` pointer.** `check_pointer_placement` accepts any tail that STARTS
+  with a trailing section, so pointer → `Args:` → an indented entry → a new
+  base-indented paragraph passes although the pointer is no longer the last prose
+  line. Guarding it means walking section blocks by indentation (the shape
+  `prose_words` already uses), plus false-positive triage over every src/ and
+  tests/ docstring that ends in a section — more than a quick add. Caught in:
+  tests prose slimming, final review (gpt-5.6-sol).
+
+- [ ] **A `Rationale:` pointer whose target is not under `.claude/notes/`.**
+  `check_pointers` joins the captured path onto the repo root, so an absolute
+  path, a `..` segment or any other Markdown file resolves, while CLAUDE.md and
+  `.claude/notes/README.md` define the pointer as a repo-relative notes path. No
+  such pointer exists today. Deferred because restricting the target is a design
+  decision (a `docs/` guide heading is a plausible SSOT target) rather than a
+  mechanical guard. Caught in: tests prose slimming, final review (gpt-5.6-sol).

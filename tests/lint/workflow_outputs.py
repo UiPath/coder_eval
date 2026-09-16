@@ -1,36 +1,20 @@
 """CE035 — every ``steps.<id>.outputs.<key>`` / ``needs.<job>.outputs.<key>`` reference
 in a workflow must resolve to a key its writer actually produces.
 
-The motivating bug shipped in ``verify-published-action.yml``: two steps read
-``steps.parity.outputs.version``, but the ``parity`` step writes only ``pin`` /
-``newest`` / ``lagging`` (the *shell variable* was ``VERSION``, the *output key* was
-``newest``). GitHub expands an unwritten output to the empty string, so
-``TAG_REF: v${{ steps.parity.outputs.version }}`` became the bare string ``v``,
-``git show "v:action.yml"`` exited 128 under ``set -euo pipefail``, and the preflight
-job was red on 100% of triggers — which, via ``needs: preflight``, meant the paid
-end-to-end tier could never run at all.
+Writers, per referenced step id:
 
-Nothing caught it: the workflow is invisible to ruff, pyright, pytest and the AST lint
-runner, and ``actionlint`` models ``steps.*.outputs`` as an open string map, so an
-unwritten shell key is untyped and unflagged there too.
+* ``run:`` step → any ``key=`` / ``key<<`` in an ``echo`` or ``printf``.
+  Over-approximating writers is safe; INVENTING one is a false failure. A body that
+  touches ``$GITHUB_OUTPUT`` with no readable key is skipped.
+* local composite (``uses: ./``) → the ``outputs:`` block of ``action.yml``.
+* BLIND SPOT: third-party ``uses:`` → **skipped**; its metadata is not on disk.
+* a missing step id, or a ``needs`` output absent from that job's ``outputs:``, is
+  always a finding.
 
-**Writers are mechanically enumerable, and this rule only reasons about the ones that
-are.** For a referenced step id:
+Wired as ``tests/test_custom_lint.py::TestCE035WorkflowOutputParity``, not the AST
+runner: it reads workflow YAML plus shell.
 
-* ``run:`` step → the keys it echoes/prints into ``$GITHUB_OUTPUT``. Writers are
-  collected by an over-approximating scan (any ``key=`` / ``key<<`` in an ``echo`` or
-  ``printf`` in the body), because over-approximating *writers* can only make the rule
-  quieter, never produce a false failure. If a body touches ``$GITHUB_OUTPUT`` in a way
-  the scan cannot read (no key found at all), the step is skipped rather than guessed at.
-* local composite (``uses: ./``) → the ``outputs:`` block of the repo's ``action.yml``.
-* third-party ``uses:`` → **skipped**. Resolving those needs the action's own metadata,
-  which is not on disk; pretending otherwise would fail on every pinned action.
-* a missing step id, or a ``needs`` output absent from that job's ``outputs:`` map, is
-  always a finding — those are fully enumerable from the file.
-
-Like CE026-CE031 this is deliberately NOT a ``BaseRule`` in ``tests/lint/runner.py``:
-that runner is AST-only over ``.py`` files, whereas this rule reasons over workflow YAML
-plus embedded shell. It is wired as ``tests/test_custom_lint.py::TestCE035WorkflowOutputParity``.
+Rationale: .claude/notes/lint-rules.md § CE035
 """
 
 from __future__ import annotations
@@ -48,13 +32,11 @@ STEP_OUTPUT_REF = re.compile(r"steps\.(?P<id>[A-Za-z_][A-Za-z0-9_-]*)\.outputs\.
 NEEDS_OUTPUT_REF = re.compile(r"needs\.(?P<job>[A-Za-z_][A-Za-z0-9_-]*)\.outputs\.(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)")
 
 # `echo "key=value"` / `printf 'key=%s' …` / `echo "key<<EOF"` (multiline form).
-# Loose about what precedes the key, but the key must start at a TOKEN boundary — the
-# start of the arguments, whitespace, or an opening quote. Without that anchor the lazy
-# prefix walks into a format string and reports the conversion letter as the key:
-# `printf "%s=%s\n" "$KEY" "$VAL"` yielded `{'s'}`, a non-empty set, which defeats the
-# "no readable key => skip the step" contract in `_written_keys` and turns every real
-# reference to that step into a false CE035 failure. See the docstring: over-approximating
-# writers is safe, INVENTING one is not.
+# Loose about what precedes the key, but the key must start at a TOKEN boundary: the start
+# of the arguments, whitespace, or an opening quote. Without that anchor
+# `printf "%s=%s\n" "$KEY" "$VAL"` yielded the key `{'s'}`, which defeats the "no readable
+# key => skip the step" contract in `_written_keys` and turns every real reference to that
+# step into a false CE035 failure. Over-approximating writers is safe; INVENTING one is not.
 OUTPUT_WRITE = re.compile(r"""(?:echo|printf)\s+(?:[^\n]*?["'\s])?(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)(?:=|<<)""")
 
 
