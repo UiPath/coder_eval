@@ -1877,17 +1877,12 @@ async def test_generation_and_tool_time_account_for_the_turn():
     assert head_ms > 0, "the dispatch before the first Step is now a measured bucket, not 0.0"
     assert gen_ms + tool_ms + head_ms + tail_ms <= turn_ms
 
-    # NO relative LOWER bound. This case runs on the REAL clock, and the fake
-    # conversation's own overhead is the residual — under parallel load the
-    # denominator (`duration_seconds`, the agent's monotonic span) inflates
-    # while the measured buckets do not, so any `>= share * turn_ms` assertion
-    # is a scheduler-noise detector.
-    #
-    # The exact share is asserted in tests/test_timing_identity_contract.py, on
-    # a scripted clock where the identity closes to the millisecond. What an
-    # end-to-end run can honestly claim is left here: the buckets are measured,
-    # the head is a measured value rather than the clamped 0.0, and nothing
-    # overflows the turn.
+    # NO relative LOWER bound. This case runs on the REAL clock, so under parallel load
+    # the denominator (`duration_seconds`) inflates while the measured buckets do not,
+    # and any `>= share * turn_ms` assertion is a scheduler-noise detector. The exact
+    # share is asserted in tests/test_timing_identity_contract.py on a scripted clock.
+    # What an end-to-end run can honestly claim is left here.
+    # Rationale: .claude/notes/timing.md § decompose_turn
 
 
 async def test_timing_change_moves_no_token_bucket():

@@ -535,17 +535,13 @@ def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
             message_id="m1",
         )
     )
-    # The tool itself is 20 ms. What follows is the shape a live turn actually
-    # has, traced off `tasks/dataset_example.yaml`: the SDK delivers TWO user
-    # messages, the second ~2 s after the first. The old code reset the mark on
-    # each, so the next window opened at the LAST one and that 2 s vanished.
-    #
-    # One user message is not enough to catch it, and that is exactly why this
-    # shipped: claude-code reconstructs `execution_started_at` by subtracting
-    # the measured duration from the resolve instant, so with a single message
-    # the discarded interval and the tool's own span are the SAME milliseconds
-    # — `subtract_tool_time` removes them either way and the identity closes
-    # with or without the bug. The second message is what separates them.
+    # The tool itself is 20 ms. What follows is the shape a live turn actually has,
+    # traced off `tasks/dataset_example.yaml`: the SDK delivers TWO user messages, the
+    # second ~2 s after the first. The old code reset the mark on each, so the next
+    # window opened at the LAST one and that 2 s vanished. One user message is not
+    # enough to catch it — with a single message the discarded interval and the tool's
+    # own span are the SAME milliseconds, so the identity closes either way.
+    # Rationale: .claude/notes/timing.md § subtract_tool_time
     clock.at_ms = 1000
     state.on_user_message(UserMessage("c1", False, "written"))
     clock.at_ms = 3000

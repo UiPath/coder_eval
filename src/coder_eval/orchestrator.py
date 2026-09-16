@@ -2997,15 +2997,10 @@ class Orchestrator:
 
         # Deliberately NOT preserved into run_dir/artifacts: run directories get
         # archived, uploaded and shared, and the reference must not ride along.
-        #
         # Keyed on the staging root recorded BEFORE the copy — NOT on
-        # `_reference_dir.parent`, which is only set once the copy succeeds. The
-        # field is None under docker, where the reference is the host-owned bind
-        # mount: that one is NOT OURS TO DELETE, and rmtree'ing its parent would
-        # take `/work` with it.
-        #
-        # rmtree_restrictive, because a run killed mid-turn leaves the tree at
-        # mode 000, where plain rmtree silently declines.
+        # `_reference_dir.parent`, which is set only once the copy succeeds, and is
+        # None under docker where the reference is a host-owned bind mount that is
+        # NOT OURS TO DELETE.
         # Rationale: .claude/notes/persistence.md § rmtree_restrictive
         staging_root = self._reference_staging_root
         self._reference_dir = None

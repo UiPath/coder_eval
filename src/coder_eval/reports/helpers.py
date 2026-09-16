@@ -111,20 +111,11 @@ def collect_variant_series(result: ExperimentResult) -> dict[str, VariantSeries]
             s = series.get(vr.variant_id)
             if s is None:  # a task result for a variant not in variant_ids
                 continue
-            # Only the SCORE is dropped when there is none — never the row.
-            # Duration, tokens and assistant turns are facts about the run that
-            # grading has nothing to do with, and `execute`'s stated contract is
-            # that only the verdict is withheld. Skipping the row whole made an
-            # all-ungraded experiment render `Avg Duration | N/A | N/A` with the
-            # Tokens and Assistant Turns rows absent entirely.
-            #
-            # The series are consumed independently (each statistic reads one
-            # list), so they need not be index-aligned with each other;
-            # `paired_comparison` pairs across VARIANTS by task id, not by index
-            # into these lists. An earlier note here claimed an experiment is
-            # either entirely graded or entirely ungraded because `grade` is
-            # run-level — `run --resume` grades rows independently and folds a
-            # failed one back ungraded, so mixed experiments are real.
+            # Only the SCORE is dropped when there is none — never the row. The
+            # series are consumed independently (each statistic reads one list), so
+            # they need not be index-aligned; `paired_comparison` pairs across
+            # VARIANTS by task id, not by index into these lists.
+            # Rationale: .claude/notes/reporting.md § Ungraded rows in a rollup
             if vr.weighted_score is not None:
                 s.scores.append(vr.weighted_score)
             s.durations.append(vr.duration_seconds / vr.replicate_count)

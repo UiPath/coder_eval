@@ -304,15 +304,14 @@ def _build_catalogue() -> list[OpenCodeScenario]:
         )
     )
 
-    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved`
-    # by the orphan sweep at finalization. It carries NO `state.time`, which is
-    # the honest shape for a call that never returned: with no
+    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved` by
+    # the orphan sweep at finalization. It carries NO `state.time`: with no
     # `execution_started_at` there is no `duration_ms` and no span.
     #
-    # READ THE SNAPSHOT: the sweep still stamps `execution_completed_at`, which
-    # it does on every close path, so the record holds an end with no
-    # beginning. Compare `pi_d_orphaned_tool`, where the start IS stamped and a
-    # manufactured duration follows from it.
+    # READ THE SNAPSHOT: the sweep still stamps `execution_completed_at`, as it does
+    # on every close path, so the record holds an end with no beginning. Compare
+    # `pi_d_orphaned_tool`, where the start IS stamped and a manufactured duration
+    # follows from it.
     scenarios.append(
         OpenCodeScenario(
             name="d_orphaned_tool",

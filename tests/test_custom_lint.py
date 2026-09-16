@@ -1370,18 +1370,13 @@ SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task"}
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
 # Whether each skill must locate a repository's eval tree before it can do anything.
-# All six currently must, and each for its own reason: `analyze` needs the run store,
-# `init` and `check-skill` must know where tasks already live before writing beside
-# them, `lint-tasks` and `task` glob the task tree, and `ci` writes the resolved glob
-# into the workflow it emits. A per-skill hardcoded guess (`runs/latest`, `tasks/`)
-# is wrong in any repository that names the tree something else or nests it — so the
-# policy is declared once in reference/repo-layout.md and a reader that stops pointing
-# at it has forked it.
-#
-# A mapping rather than a set, mirroring SKILL_DISABLE_MODEL_INVOCATION: a SEVENTH skill
-# then has to state whether it needs discovery instead of silently defaulting to "no"
-# and quietly reintroducing a hardcoded path. `False` is a legitimate answer — a skill
-# that touches no task or run tree — but it has to be written down.
+# All six currently must. A per-skill hardcoded guess (`runs/latest`, `tasks/`) is
+# wrong in any repository that names the tree something else or nests it, so the
+# policy is declared once in reference/repo-layout.md and a reader that stops
+# pointing at it has forked it. A mapping rather than a set, mirroring
+# SKILL_DISABLE_MODEL_INVOCATION: a SEVENTH skill has to state whether it needs
+# discovery instead of silently defaulting to "no". `False` is a legitimate answer,
+# but it has to be written down.
 SKILL_NEEDS_EVAL_ROOT_DISCOVERY = {
     "analyze": True,
     "ci": True,
@@ -1417,15 +1412,13 @@ SKILL_DISABLE_MODEL_INVOCATION = {
 # undocumented. Adding a surface is one edit here.
 SKILL_DOC_SURFACES = ("plugins/coder-eval/README.md", "docs/PLUGIN.md", "README.md", "CLAUDE.md")
 
-# Claude Code loads a listing of every skill's name and description into context.
-# The listing's character budget scales at ~1% of the model's context window and is
-# SHARED with every other skill the user has installed; when it overflows,
-# descriptions are dropped starting with the least-invoked skills. So a plugin that
-# grows its descriptions without bound quietly evicts the user's own skills. This
-# ceiling makes growth a reviewed decision: raising it is allowed, in a commit that
-# says why — which is exactly what a silent drift would not be. Asserted on the SUM,
-# not per skill: the longest single description is ~300 against a 1,536 per-entry
-# truncation limit, so a per-skill cap would guard nothing.
+# Claude Code loads a listing of every skill's name and description into context. The
+# budget scales at ~1% of the model's context window and is SHARED with every other
+# skill the user has installed; on overflow, descriptions are dropped starting with
+# the least-invoked. A plugin that grows its descriptions without bound quietly evicts
+# the user's own skills, so this ceiling makes growth a reviewed decision. Asserted on
+# the SUM, not per skill: the longest single description is ~300 against a 1,536
+# per-entry truncation limit, so a per-skill cap would guard nothing.
 SKILL_LISTING_BUDGET_CHARS = 1_600
 
 # Tokens that name THIS repository's files. An installed plugin is copied to
@@ -1645,16 +1638,13 @@ class TestPluginArtifacts:
         )
 
     def test_lint_tasks_skill_is_read_only(self):
-        # Assert BOTH keys, because neither alone carries the contract: `allowed-tools` names
-        # the tools this skill expects to use, `disallowed-tools` removes the write tools from
-        # the pool. Assert only the allowlist and a denylist regression passes; assert only the
-        # denylist and a widened allowlist (say `Bash`) passes.
-        #
-        # Neither key is the real guarantee, which is why the skill body carries a STANDING
-        # prohibition too: per the skills spec, `disallowed-tools` "clears when you send your
-        # next message", and this skill's step 1 deliberately asks the user one before linting a
-        # whole directory. So the frontmatter covers the first turn and the prose covers the
-        # rest — `test_lint_tasks_read_only_rule_survives_the_next_turn` guards that half.
+        # Assert BOTH keys: assert only the allowlist and a denylist regression passes;
+        # assert only the denylist and a widened allowlist (say `Bash`) passes. Neither
+        # is the real guarantee, which is why the skill body carries a STANDING
+        # prohibition too — per the skills spec `disallowed-tools` "clears when you send
+        # your next message", and this skill's step 1 asks the user one. The frontmatter
+        # covers the first turn, the prose the rest;
+        # `test_lint_tasks_read_only_rule_survives_the_next_turn` guards that half.
         meta = _skill_frontmatter(PLUGIN_ROOT / "skills" / "lint-tasks" / "SKILL.md")
 
         # `and allowed` first: an ABSENT allowed-tools is the weakest state, not the
@@ -1743,16 +1733,14 @@ class TestPluginArtifacts:
         assert not missing, f"{name} is not documented in {missing} — a shipped skill nobody can discover"
 
     def test_skill_docs_surfaces_state_the_right_count(self):
-        # The companion to the test above, which only checks that each NAME appears. These
-        # surfaces also state the count in prose, and adding the sixth skill meant hand-editing
-        # seven such sites across four files. Without this, a seventh ships with every count
-        # silently wrong — the exact drift that repair was. Derived from disk: no count is
-        # written down here.
-        #
-        # Three phrasings are in use and all three are covered: "<word> skills" / "<word> slash
-        # commands" (both READMEs, docs/PLUGIN.md), "x <digit>" (CLAUDE.md's `SKILL.md` x 6),
-        # and "The other <word>" (the model-invokable subset, which is the skill count minus
-        # the explicit-invocation-only ones).
+        # The companion to the test above, which only checks that each NAME appears.
+        # These surfaces also state the count in prose, and adding the sixth skill meant
+        # hand-editing seven such sites across four files. Derived from disk: no count is
+        # written down here. Three phrasings are in use and all three are covered:
+        # "<word> skills" / "<word> slash commands" (both READMEs, docs/PLUGIN.md),
+        # "x <digit>" (CLAUDE.md's `SKILL.md` x 6), and "The other <word>" (the
+        # model-invokable subset, the skill count minus the explicit-invocation-only
+        # ones).
         words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
         count = len(PLUGIN_SKILLS)
         assert count in words, f"{count} skills — extend `words` to cover the new count"
@@ -1810,13 +1798,11 @@ class TestPluginArtifacts:
         # A skill body is an instruction document; an unbalanced fence silently swallows
         # everything after it. `analyze` shipped a ```markdown block containing a ```diff
         # block, and because a closing fence may not carry an info string, the inner
-        # opener closed the outer block early and the next bare ``` opened one that never
-        # closed — burying 32 lines including the whole Principles section. Nothing caught
-        # it, because it is still valid YAML frontmatter and valid-ish Markdown.
-        #
-        # CommonMark rule applied here: a fence closes only on a run of backticks at least
-        # as long as the opener AND carrying no info string. Nesting therefore requires the
-        # OUTER fence to be longer (````markdown wrapping ```diff).
+        # opener closed the outer block early — burying 32 lines including the whole
+        # Principles section, while staying valid YAML frontmatter and valid-ish
+        # Markdown. CommonMark rule applied here: a fence closes only on a run of
+        # backticks at least as long as the opener AND carrying no info string, so
+        # nesting requires the OUTER fence to be longer (````markdown wrapping ```diff).
         open_len = 0
         for n, raw in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             line = raw.strip()

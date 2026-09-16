@@ -89,6 +89,20 @@ static reference mid-turn cannot break the `LiveVerdict` monotonicity contract
 (contracts.md § The live_verdict contract); reading the half-written sandbox can, and is
 the "end-state peeking" `live_verdict` rules out.
 
+## Why the chmod tests are Linux-only
+
+`tests/test_reference_permissions.py` drives `chmod` against the HOST filesystem, and
+Windows `chmod` honours only the read-only bit, so mode 000 never takes and every
+assertion reads back 0o555/0o777.
+
+This is NOT a coverage gap for Windows users. The window is enforced only when
+`CODER_EVAL_IN_CONTAINER=1`, which only `DockerRunner` sets — and Docker Desktop on
+Windows runs LINUX containers (WSL2), so the in-container orchestrator that performs the
+chmod is on Linux and behaves exactly as these tests assert. A Windows host only ever sees
+the window under `driver: tempdir`, where it is a deliberate no-op regardless of platform.
+The real behaviour is covered by the Linux CI jobs and by `tasks/anti_cheat_reference`,
+which runs in the container.
+
 ## Locking and crash safety
 
 The registry is keyed by the *resolved* path so a directory reached by two different

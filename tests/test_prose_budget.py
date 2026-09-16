@@ -170,35 +170,42 @@ class TestMeasureTree:
         assert prose_budget.total_words(prose_budget.measure(root).files) == 206
 
 
-class TestCommentBudget:
-    """The per-file comment budget: a floor, then a share of the file's length."""
+class TestCommentRuns:
+    """The comment-run cap: a bar on the BLOCK, with no per-file allowance."""
 
-    def test_the_floor_applies_to_a_small_file(self) -> None:
-        assert prose_budget.comment_line_budget(10) == 20
-        assert prose_budget.comment_line_budget(100) == 20
+    def test_a_run_at_the_bar_passes(self, tmp_path: Path) -> None:
+        root = _tree(tmp_path, {"a.py": "\n".join(["# pad"] * 8) + "\nx = 1\n"})
+        assert prose_budget.check_comment_runs(root) == []
 
-    def test_the_ratio_applies_once_it_beats_the_floor(self) -> None:
-        assert prose_budget.comment_line_budget(1000) == 150
-
-    def test_a_file_within_its_budget_passes(self, tmp_path: Path) -> None:
-        body = "\n".join(["x = 1"] * 200)
-        root = _tree(tmp_path, {"a.py": "# one\n# two\n" + body})
-        assert prose_budget.check_comment_density(root) == []
-
-    def test_a_file_over_its_budget_fails(self, tmp_path: Path) -> None:
-        root = _tree(tmp_path, {"a.py": "\n".join(["# pad"] * 40) + "\nx = 1\n"})
-        failures = prose_budget.check_comment_density(root)
+    def test_a_run_over_the_bar_fails(self, tmp_path: Path) -> None:
+        root = _tree(tmp_path, {"a.py": "\n".join(["# pad"] * 9) + "\nx = 1\n"})
+        failures = prose_budget.check_comment_runs(root)
         assert len(failures) == 1
-        assert "own-line comments" in failures[0]
+        assert "comment run of 9 lines" in failures[0]
+
+    def test_many_short_runs_cost_nothing(self, tmp_path: Path) -> None:
+        """The inversion the ratio had: 200 one-line notes are not an essay."""
+        root = _tree(tmp_path, {"a.py": "\n".join(["# note", "x = 1"] * 200) + "\n"})
+        assert prose_budget.check_comment_runs(root) == []
+
+    def test_one_blank_line_does_not_split_a_paragraph(self, tmp_path: Path) -> None:
+        body = "\n".join(["# pad"] * 5) + "\n\n" + "\n".join(["# pad"] * 5) + "\nx = 1\n"
+        failures = prose_budget.check_comment_runs(_tree(tmp_path, {"a.py": body}))
+        assert len(failures) == 1
+        assert "comment run of 10 lines" in failures[0]
+
+    def test_two_blank_lines_are_a_section_break(self, tmp_path: Path) -> None:
+        body = "\n".join(["# pad"] * 5) + "\n\n\n" + "\n".join(["# pad"] * 5) + "\nx = 1\n"
+        assert prose_budget.check_comment_runs(_tree(tmp_path, {"a.py": body})) == []
+
+    def test_code_between_comments_ends_a_run(self, tmp_path: Path) -> None:
+        body = "\n".join(["# pad"] * 5) + "\nx = 1\n" + "\n".join(["# pad"] * 5) + "\ny = 2\n"
+        assert prose_budget.check_comment_runs(_tree(tmp_path, {"a.py": body})) == []
 
     def test_a_trailing_comment_is_a_directive_not_commentary(self, tmp_path: Path) -> None:
-        """40 trailing `# noqa` must not consume the budget; 40 own-line ones would."""
+        """A stack of trailing `# noqa` is not a paragraph and starts no run."""
         root = _tree(tmp_path, {"a.py": "\n".join(["x = 1  # noqa: E501"] * 40) + "\n"})
-        assert prose_budget.check_comment_density(root) == []
-
-    def test_the_budget_shrinks_with_the_file(self) -> None:
-        """The point of a ratio: deleting code takes its comment budget with it."""
-        assert prose_budget.comment_line_budget(2000) > prose_budget.comment_line_budget(1000)
+        assert prose_budget.check_comment_runs(root) == []
 
 
 class TestProseWords:
@@ -453,15 +460,15 @@ class TestRoots:
         root = _write(tmp_path, {"src/coder_eval/a.py": _ESSAY, "tests/b.py": _ESSAY})
         assert set(prose_budget.measure(root).files) == {Path("src/coder_eval/a.py"), Path("tests/b.py")}
 
-    def test_density_and_essays_follow_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_runs_and_essays_follow_roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         root = _write(tmp_path, {"src/coder_eval/a.py": "x = 1\n", "tests/c.py": _DENSE, "tests/e.py": _ESSAY})
         monkeypatch.setattr(prose_budget, "_ROOTS", (Path("src/coder_eval"),))
-        assert prose_budget.check_comment_density(root) == []
+        assert prose_budget.check_comment_runs(root) == []
         assert prose_budget.check_essays(root) == []
         monkeypatch.setattr(prose_budget, "_ROOTS", (Path("tests"),))
-        density = prose_budget.check_comment_density(root)
-        assert len(density) == 1
-        assert density[0].startswith("tests/c.py: ")
+        runs = prose_budget.check_comment_runs(root)
+        assert len(runs) == 1
+        assert runs[0].startswith("tests/c.py:1: ")
         essays = prose_budget.check_essays(root)
         assert len(essays) == 1
         assert essays[0].startswith("tests/e.py::f: ")
@@ -501,7 +508,7 @@ class TestCollectFailures:
         misplaced = f"def g():\n    {Q}Do it.\n\n    Rationale: .claude/notes/absent.md § x\n    tail.\n    {Q}\n"
         root = _tree(tmp_path, {"essay.py": _ESSAY, "dense.py": _DENSE, "misplaced.py": misplaced})
         prefixes = {failure.split(": ", 1)[0] for failure in prose_budget.collect_failures(root)}
-        assert prefixes == {"unresolved pointer", "misplaced pointer", "comment budget", "docstring essay"}
+        assert prefixes == {"unresolved pointer", "misplaced pointer", "comment run", "docstring essay"}
 
     def test_a_clean_tree_has_no_failures(self, tmp_path: Path) -> None:
         assert prose_budget.collect_failures(_tree(tmp_path, {"a.py": "x = 1\n"})) == []

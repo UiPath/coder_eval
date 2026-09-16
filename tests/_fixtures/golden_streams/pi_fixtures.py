@@ -270,18 +270,14 @@ def _build_catalogue() -> list[PiScenario]:
         )
     )
 
-    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved`
-    # by the orphan sweep at finalization.
+    # (d) a tool the CLI opens and never resolves — force-closed as `unresolved` by the
+    # orphan sweep at finalization.
     #
-    # READ THE SNAPSHOT: the command carries `execution_started_at` (the CLI
-    # really did emit that start) and NEITHER `execution_completed_at` NOR
-    # `duration_ms`. Nothing observed this call finishing, so the instant the
-    # sweep runs is not a completion; stamping it would manufacture both, and
-    # the pair would read as a measured span that the collector subtracts from
-    # a generation window the tool never occupied. One bound alone forms no
-    # span (`main_thread_tool_spans` requires both), so the window is left
-    # whole. Same rule as claude-code's `_finalize_commands`: unknown status
-    # and unknown duration are one fact (CE058).
+    # READ THE SNAPSHOT: the command carries `execution_started_at` and NEITHER
+    # `execution_completed_at` NOR `duration_ms`. Nothing observed this call finishing,
+    # so stamping the sweep instant would manufacture a span the tool never occupied.
+    # One bound alone forms no span, so the window is left whole.
+    # Rationale: .claude/notes/timing.md § main_thread_tool_spans
     scenarios.append(
         PiScenario(
             name="d_orphaned_tool",
@@ -313,19 +309,14 @@ def _build_catalogue() -> list[PiScenario]:
         )
     )
 
-    # (f) a duplicate `turn_end` with no `turn_start` between — a transport
-    # hiccup this reducer explicitly promises to survive, since pi retries
-    # internally. A spent `turn_started_at` left in place reopens the next
-    # window at the PREVIOUS turn's start and republishes that whole span:
-    # reproduced as 3000 ms of generation for a 2000 ms turn.
+    # (f) a duplicate `turn_end` with no `turn_start` between — a transport hiccup this
+    # reducer promises to survive, since pi retries internally. A spent
+    # `turn_started_at` left in place reopens the next window at the PREVIOUS turn's
+    # start: reproduced as 3000 ms of generation for a 2000 ms turn.
     #
-    # READ THE SNAPSHOT: both halves of that reset are in `on_turn_end`.
-    # The second assistant message carries NO content block and an empty
-    # `tool_use_ids` — it booked the duplicate's own usage and nothing else.
-    # Clearing `turn_text_parts` / `turn_tool_ids` in `on_turn_start` only
-    # would publish the first turn's text a second time as the replayed line's
-    # own message; the argument `on_turn_end`'s comment makes for
-    # `turn_started_at` applies to those two lists unchanged.
+    # READ THE SNAPSHOT: both halves of that reset are in `on_turn_end`, and the second
+    # assistant message carries no content block and an empty `tool_use_ids`.
+    # Rationale: .claude/notes/timing.md § Where a reducer's window opens
     scenarios.append(
         PiScenario(
             name="f_duplicate_turn_end",

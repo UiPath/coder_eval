@@ -165,15 +165,13 @@ def validate_early_stop(task: TaskDefinition) -> None:
             + "Disarm with run_limits.stop_early: false to run this agent anyway."
         )
 
-    # (4) A threshold of exactly 0 trivially satisfies both the pass-stop
-    # floor check and the final weighted gate regardless of whether any armed
-    # criterion has actually decided — neutralizing the armed pass/fail gate
-    # with one YAML line (coder-eval is used as a CI gate). Checked here
-    # (not on RunLimits itself) because this is the whole-task, hard-stop
-    # surface: an EarlyStopConfigError here flips the plan exit code and
-    # aborts run, whereas a plain ValueError on the merged RunLimits model
-    # would land in the CLI's generic "resolution failed" branch, which
-    # prints red text but does not flip the exit code.
+    # (4) A threshold of exactly 0 trivially satisfies both the pass-stop floor and
+    # the final weighted gate however the armed criteria decided, neutralizing the
+    # gate with one YAML line. Checked here, not on RunLimits: an
+    # EarlyStopConfigError flips the plan exit code and aborts run, where a plain
+    # ValueError lands in the CLI's generic "resolution failed" branch, which prints
+    # red text but does not flip the exit code.
+    # Rationale: .claude/notes/orchestration.md § Early stop on criterion
     if limits is not None and limits.stop_early_gate_threshold <= 0.0:
         raise EarlyStopConfigError(
             f"run_limits.stop_early_gate_threshold ({limits.stop_early_gate_threshold}) must be "

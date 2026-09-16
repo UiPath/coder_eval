@@ -32,18 +32,11 @@ from coder_eval.models import CONTAINER_REFERENCE_DIR
 from coder_eval.path_utils import digest_tree
 
 
-# These tests drive `chmod` against the HOST filesystem. Windows `chmod` honours
-# only the read-only bit, so mode 000 never takes and every assertion reads back
-# 0o555/0o777.
-#
-# This is NOT a coverage gap for Windows users. The window is enforced only when
-# CODER_EVAL_IN_CONTAINER=1, which only DockerRunner sets — and Docker Desktop on
-# Windows runs LINUX containers (WSL2), so the in-container orchestrator that
-# performs the chmod is on Linux and behaves exactly as these tests assert. A
-# Windows host only ever sees the window under `driver: tempdir`, where it is a
-# deliberate no-op regardless of platform. So there is nothing here for a Windows
-# runner to exercise — the real behaviour is covered by the Linux CI jobs and by
-# `tasks/anti_cheat_reference`, which runs in the container.
+# These tests drive `chmod` against the HOST filesystem, and Windows `chmod` honours
+# only the read-only bit, so mode 000 never takes. Not a coverage gap for Windows
+# users: the window is enforced only in the container, which is Linux even under
+# Docker Desktop on Windows.
+# Rationale: .claude/notes/permissions.md § Why the chmod tests are Linux-only
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="host-side POSIX mode semantics; the window runs in a Linux container on every host OS",

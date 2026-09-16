@@ -574,16 +574,12 @@ def test_a_copy_grade_leaves_the_runs_artifacts_pointer_alone(tmp_path: Path) ->
     assert _row(task_dir)["final_status"] == FinalStatus.SUCCESS.value
 
 
-# ---------------------------------------------------------------------------
-# post_run belongs to the GRADING phase
-#
-# `post_run` is defined as running "after the evaluation verdict is finalized",
-# and it may mutate the workspace. Under `execute` there is no verdict to come
-# after, so running it there inverted its own contract AND broke the round-trip
-# guarantee: the criteria had not read the tree yet, so `evaluate` graded a
-# workspace `post_run` had already modified. `execute` now DEFERS it to whichever
-# command grades.
-# ---------------------------------------------------------------------------
+# post_run belongs to the GRADING phase. It is defined as running "after the
+# evaluation verdict is finalized" and it may mutate the workspace, so under
+# `execute` — where no verdict is coming — running it inverted its own contract and
+# broke the round-trip guarantee. `execute` now DEFERS it to whichever command grades.
+# Rationale: .claude/notes/orchestration.md § Execute vs. run: the grading switch
+
 
 # Deliberately destructive, and destructive of the exact file the criteria read.
 # A `post_run` that mutates something no criterion observes (`rm -rf

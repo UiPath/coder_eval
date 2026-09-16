@@ -28,13 +28,13 @@ from typing import NamedTuple
 
 _DOCSTRING_ESSAY_WORDS = 150
 _COMMENT_BLOCK_LINES = 3
-# Own-line comments a file may carry: a FLOOR for small files, then a share of its
-# length. Proportional on purpose — there is no tree-wide total to hand-maintain, a
-# file that loses code loses budget with it, and a NEW file is governed from its
-# first commit. The tree's natural maximum sits just under this (a constants module
-# at one comment per constant); the floor is what protects those.
-_COMMENT_LINE_FLOOR = 20
-_COMMENT_LINE_RATIO = 0.15
+# The longest own-line comment RUN a file may carry, and the blank lines a run
+# reads through. A cap on the block, not on the file's total: the shape a comment
+# may not take is a PARAGRAPH, and a file owes no allowance for one-line notes.
+# ONE blank line, not two: one is how a paragraph is split to duck the cap, two is
+# the separation PEP 8 already puts between a banner and the section under it.
+_COMMENT_RUN_LINES = 8
+_RUN_BLANK_BRIDGE = 1
 
 # Docstring sections that are STRUCTURE, not prose: a parameter list is interface
 # documentation and a call example is code, so neither counts against an essay budget
@@ -390,38 +390,49 @@ def check_pointer_placement(repo_root: Path) -> list[str]:
     return failures
 
 
-def comment_line_budget(total_lines: int) -> int:
-    """A file's own-line comment allowance."""
-    return max(_COMMENT_LINE_FLOOR, round(_COMMENT_LINE_RATIO * total_lines))
+def own_comment_runs(source: str) -> list[tuple[int, int]]:
+    """``(first line, length)`` for every own-line comment run, in file order.
 
-
-def check_comment_density(repo_root: Path) -> list[str]:
-    """Every file's own-line comments must fit :func:`comment_line_budget`.
-
-    Own-line only. A trailing ``# noqa`` is a directive, not commentary, and a
-    per-member annotation on an enum is the contract a dispatcher reads — counting
-    either would push against documenting them.
+    A run is consecutive own-line comments, reading through up to
+    ``_RUN_BLANK_BRIDGE`` blank lines so that splitting a paragraph on whitespace
+    does not read as several short comments. Code between two comments always ends
+    the run. A trailing ``# noqa`` never starts one: it is a directive, not
+    commentary.
     """
-    failures: list[str] = []
-    for path, rel in _python_files(repo_root):
-        source = path.read_text(encoding="utf-8")
-        try:
-            tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-        except (SyntaxError, tokenize.TokenError, ValueError):
-            continue
-        lines = source.split("\n")
-        own = {
-            token.start[0]
-            for token in tokens
-            if token.type == tokenize.COMMENT and lines[token.start[0] - 1].strip().startswith("#")
-        }
-        budget = comment_line_budget(len(lines))
-        if len(own) > budget:
-            failures.append(
-                f"{rel.as_posix()}: {len(own)} own-line comments against a budget of {budget} "
-                f"({len(lines)} lines). Move rationale to .claude/notes/."
-            )
-    return failures
+    lines = source.split("\n")
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (SyntaxError, tokenize.TokenError, ValueError):
+        return []
+    own = sorted(
+        token.start[0]
+        for token in tokens
+        if token.type == tokenize.COMMENT and lines[token.start[0] - 1].strip().startswith("#")
+    )
+    runs: list[list[int]] = []
+    for line in own:
+        bridged = runs and line - runs[-1][-1] <= _RUN_BLANK_BRIDGE + 1
+        if bridged and all(not lines[between - 1].strip() for between in range(runs[-1][-1] + 1, line)):
+            runs[-1].append(line)
+        else:
+            runs.append([line])
+    return [(run[0], len(run)) for run in runs]
+
+
+def check_comment_runs(repo_root: Path) -> list[str]:
+    """No own-line comment run may exceed :data:`_COMMENT_RUN_LINES`.
+
+    A cap on the BLOCK, with no per-file allowance: a file may carry any number of
+    one-line notes, and none of them may grow into a paragraph. The essay bar in
+    prose, one granularity down.
+    """
+    return [
+        f"{rel.as_posix()}:{line}: comment run of {length} lines "
+        f"(bar is {_COMMENT_RUN_LINES}). Move the narrative to .claude/notes/."
+        for path, rel in _python_files(repo_root)
+        for line, length in own_comment_runs(path.read_text(encoding="utf-8"))
+        if length > _COMMENT_RUN_LINES
+    ]
 
 
 def check_essays(repo_root: Path) -> list[str]:
@@ -444,7 +455,7 @@ def collect_failures(repo_root: Path) -> list[str]:
     return (
         [f"unresolved pointer: {failure}" for failure in check_pointers(repo_root)]
         + [f"misplaced pointer: {failure}" for failure in check_pointer_placement(repo_root)]
-        + [f"comment budget: {failure}" for failure in check_comment_density(repo_root)]
+        + [f"comment run: {failure}" for failure in check_comment_runs(repo_root)]
         + [f"docstring essay: {failure}" for failure in check_essays(repo_root)]
     )
 

@@ -707,6 +707,37 @@ value is written, and a literal `1234.0` is a legitimate test factory or replay.
 placeholder zero is the tell, the same narrowing form 1 makes for the same reason. Form 4
 keeps its wider literal set, so a guarded `= 1234.0` still fires exactly once, from form 4.
 
+## The CE id space
+
+CE062 IS DELIBERATELY UNUSED and must stay that way — the ids in `runner.py` jump 061 to
+063. It was claimed during the turn-timing work and then folded into CE063 rather than
+shipped. An id is a permanent documentation anchor: a suppression comment carrying 062 in
+an older branch, review or commit message must never start meaning something new. CE023 is
+retired the same way, after the rule was deleted with the package it guarded.
+
+Claim 068 next, and note 065 IS TAKEN without being in `ALL_RULES`: doc-surface and
+whole-tree rules are `@pytest.mark.lint` classes in `tests/test_custom_lint.py` rather than
+`BaseRule`s, so `runner.py`'s uniqueness assert cannot see them. Enumerating them in a
+comment is how that note fell behind CE044, so grep instead:
+`grep -E '^class Test(CE[0-9]{3})' tests/test_custom_lint.py`. Spell it `[0-9]`, not `\d`
+— GNU and BSD `grep -E` read `\d` as a literal `d` and report zero hits, which reads as
+"no ids taken". The whole id space is unioned in one place, by
+`TestRuffExternalCoversEveryRule._known()`.
+
+### CE058 field families
+
+THREE field families, not two. `tool_union_ms` is the turn's third wall-clock bucket, on
+the same model and under the same None-vs-0.0 contract as the `harness_*` pair — and it
+matched NO arm of `_TIMING_NAME`, so `TurnRecord(tool_union_ms=0.0)` was invisible although
+`TurnRecord` was already in `_TIMING_CONSTRUCTORS`. Naming the field
+`tool_union_duration_ms`, to inherit the generic `_duration_ms` arm for free, was
+considered and rejected: the two fields beside it needed their own arm for exactly this
+reason, and one spelling across the four buckets is worth two lines of regex.
+
+The `_startup_ms` / `_teardown_ms` arms need a leading segment for the same reason the
+`_duration_ms` arm does: the shipped fields are `harness_*`, and a bare `startup_ms` is
+more likely a budget than a measurement.
+
 ## CE059
 
 in `src/coder_eval/agents/`, an `AssistantMessage` may not receive the same `ast.Name` for both `started_at` and `completed_at` — the Antigravity reducer read `datetime.now()` once and passed it as both bounds, so `started_at == completed_at` on 368 of 368 sampled messages. A separate id from CE058 because it is a separate invariant, a zero-length window whatever the duration field says, and one invariant per id is what makes a `# noqa` mean one thing. It does NOT fire when the same call passes `generation_duration_ms=None`: a call that says, in the field built to say it, that no window was measurable is not claiming one — that exemption is what keeps the rule pointed at the misleading case instead of accumulating four permanent suppressions on the rollout-rebuild and sub-agent-synthesis sites
@@ -844,6 +875,13 @@ real bill still fires is a property of the RATE, so it is now data on the rate i
 it. That four heavy frontier variants are not priced on the frontend is a property of the
 FRONTEND, so it stays as `DELIBERATELY_UNMIRRORED` with the same stale-membership guard the
 deleted test carried — an exemption nobody re-reads is what shipped the bug above.
+
+### Keeping DELIBERATELY_UNMIRRORED honest
+
+Membership silences the mirror for one id indefinitely, so a stale entry hides a live bug
+rather than a non-issue. Before adding an id, grep the run corpus for it — absence from run
+data is the ONLY justification, and it expires the moment a harness adopts the model.
+`_assert_exemptions_are_live` fails the build once an id leaves `pricing.py`.
 
 ## CE066
 

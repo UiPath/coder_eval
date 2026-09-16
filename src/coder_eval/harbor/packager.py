@@ -589,16 +589,11 @@ def _write_agent_phase_task_yaml(
     if not is_agentless:
         payload["initial_prompt"] = initial_prompt
     if task.pre_run:
-        # `pre_run` runs "inside the sandbox after setup completes but before the
-        # agent starts" (PreRunCommand's own docstring) -- exactly the phase
-        # `coder-eval execute` still performs for the CoderEvalAgent embed (it shares
-        # `run`'s entire pipeline minus grading, see execute_command.py's module
-        # docstring), so this is a real translation, not a Dockerfile-build-time
-        # stand-in. Unlike `post_run` (belongs to the GRADING phase -- see
-        # orchestrator.py's own comment -- which `coder-eval execute` never runs at
-        # all), `pre_run` has a real place to run here. Commands are relative to the
-        # sandbox cwd, resolved the same way template_sources/`_setup_template` are,
-        # so no path rewriting is needed.
+        # A real translation, not a build-time stand-in: `coder-eval execute` still
+        # runs the pre-agent phase for the CoderEvalAgent embed, unlike `post_run`,
+        # which belongs to grading and never runs there. Commands are relative to the
+        # sandbox cwd, resolved as template_sources are, so no path rewriting.
+        # Rationale: .claude/notes/reporting.md § Harbor export
         payload["pre_run"] = [c.model_dump(mode="json", exclude_none=True) for c in task.pre_run]
     if task.run_limits is not None:
         # `CoderEvalAgent.run()` invokes `coder-eval execute` against this

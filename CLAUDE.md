@@ -163,7 +163,7 @@ make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
 make pricing-mirror    # the evalboard's rate table from pricing.py (CE065)
 
-make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
+make docs-budget       # comment-run cap + docstring essay check (fails `make verify`)
 ```
 
 `src/coder_eval/pricing.py` is the single source of truth for rates on both halves of
@@ -308,11 +308,13 @@ bandit, pre-commit, mcp
   code cannot say
 - **A docstring states the contract, not the history** — what a caller must know to call
   it correctly. Why the design is this shape belongs in `.claude/notes/`; what it used to
-  be belongs in git. `make docs-budget` applies two self-adjusting rules to `src/` and
-  `tests/`: a file's own-line comments may not exceed `MAX(20, 0.15 × its length)`, and
-  no docstring may exceed 150 words of PROSE (an `Args:`/`Returns:`/`Raises:` block is
-  structure, not prose; an `@abstractmethod` is exempt because its docstring IS the
-  interface contract).
+  be belongs in git. `make docs-budget` applies two bars to `src/` and `tests/`, neither
+  of which grants an allowance: no own-line comment RUN may exceed 8 lines (a run reads
+  through one blank line, so splitting a paragraph does not duck it), and no docstring may
+  exceed 150 words of PROSE (an `Args:`/`Returns:`/`Raises:` block is structure, not prose;
+  an `@abstractmethod` is exempt because its docstring IS the interface contract). Both cap
+  a SHAPE, not a quantity: carry as many one-line notes as earn their place, and put the
+  paragraph in `.claude/notes/` behind a `Rationale:` pointer.
 
 ## Notes for AI Assistants
 

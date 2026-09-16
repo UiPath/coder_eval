@@ -134,19 +134,14 @@ class TestCodexTurnState:
         assert cmd.result_tokens > 100
 
 
-# ---------------------------------------------------------------------------
-# Execution bounds
+# Execution bounds. The SDK delivers `started_at_ms` / `completed_at_ms` on the item
+# notification and the agent discarded both, publishing the item's own `duration_ms`
+# instead — 0.0 for 70 of 211 commands in one nightly, absent for 25 more. All three
+# telemetry builders now derive their timing identically.
 #
-# The SDK delivers `started_at_ms` / `completed_at_ms` on the item notification
-# and the agent discarded both, publishing the item's own `duration_ms`
-# instead — 0.0 for 70 of 211 commands in one nightly, absent for 25 more, and
-# no execution bounds at all, so no Codex tool call could be placed on a
-# timeline. All three telemetry builders now derive their timing identically.
-#
-# Pure logic: the builders take plain SimpleNamespace roots, so these live
-# here rather than behind test_codex_agent.py's importorskip — otherwise a
-# clean `make test` (which syncs no codex extra) skips them entirely.
-# ---------------------------------------------------------------------------
+# Pure logic: the builders take plain SimpleNamespace roots, so these live here rather
+# than behind test_codex_agent.py's importorskip — otherwise a clean `make test`
+# (which syncs no codex extra) skips them entirely.
 
 _EPOCH_MS = 1_800_000_000_000
 

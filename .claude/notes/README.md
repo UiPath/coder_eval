@@ -50,10 +50,16 @@ There is no other accepted form: `tests/lint/prose_budget.py` parses this one an
 ## The prose budget is not a lint rule
 
 `make docs-budget` runs `tests/lint/prose_budget.py` over `src/coder_eval` and `tests`.
-It enforces two per-file rules with no baseline to maintain: no docstring over 150 prose
-words (an `@abstractmethod` and the Typer commands are exempt), and own-line comments
-within `MAX(20, 0.15 × lines)`. It also fails when a `Rationale:` pointer does not
-resolve or is not the last prose line of its block.
+It enforces two bars with no baseline to maintain: no docstring over 150 prose words (an
+`@abstractmethod` and the Typer commands are exempt), and no own-line comment run over 8
+lines. It also fails when a `Rationale:` pointer does not resolve or is not the last prose
+line of its block.
+
+Neither bar grants a per-file allowance, and that is the point. The run cap replaced a
+`MAX(20, 0.15 × lines)` budget on a file's TOTAL comment lines, which was inverted: it
+blocked `isolation/docker_runner.py` at 229/229 for carrying 62 short annotations, while a
+16-line essay in `tests/test_regrade.py` sat at 29% of its budget. Four files had settled
+at exactly 100% of the cap — the budget had stopped being a ceiling and become a target.
 
 It is deliberately **not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants
 one AST at a time, while this measures prose across whole trees. Making it a rule would

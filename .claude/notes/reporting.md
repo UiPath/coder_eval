@@ -281,6 +281,19 @@ literal `50` beside its own `SLOW_PARAMS_PREVIEW_CHARS`, and a hand-rolled
 and moving them in would give the package an SDK dependency and force CE066 to exempt the
 orchestrator's `analysis` import.
 
+## Ungraded rows in a rollup
+
+Only the SCORE is dropped from an ungraded row, never the row itself. Duration, tokens and
+assistant turns are facts about the run that grading has nothing to do with, and `execute`'s
+stated contract is that only the verdict is withheld. Skipping the row whole made an
+all-ungraded experiment render `Avg Duration | N/A | N/A` with the Tokens and Assistant
+Turns rows absent entirely.
+
+An earlier note in `reports/helpers.py` claimed an experiment is either entirely graded or
+entirely ungraded, because `grade` is run-level. It is not: `run --resume` grades rows
+independently and folds a failed one back ungraded, so mixed experiments are real. That is
+why the series are consumed independently rather than index-aligned.
+
 ## Report rollups and the HTML twin
 
 `reports/html.py` is the evalboard's STATIC TWIN: the two render the same run and must
