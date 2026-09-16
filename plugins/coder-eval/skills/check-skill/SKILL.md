@@ -176,8 +176,9 @@ export SKILL_SOURCE_PATH="$(pwd)/.claude"
 
 Keep it an environment variable rather than baking an absolute path into the YAML — the
 suite is committed and re-run on other machines. If the variable is unset, or the path holds
-no skill, `coder-eval plan` fails with a config error. If `skill_name` is not among the skills
-the path offers, every `skill_triggered` row finishes `ERROR` rather than scoring 0.
+no skill, `coder-eval plan` fails with a config error. It fails the same way when `skill_name`
+is not among the skills the path offers (their `SKILL.md` frontmatter `name`), before any
+run is paid for.
 
 `skill_name` must be the bare name even when the skill comes from a plugin and is
 invoked as `plugin:skill` — the checker strips the namespace before comparing. A

@@ -648,22 +648,32 @@ adapter used to scan the authored path its own way. claude-code loaded nothing f
 skills directory, with no error, so an activation suite scored recall 0.0 and read exactly
 like a skill that never triggers.
 
-- **Both authored layouts are accepted.** For each root, the manifest-declared skill dirs
-  that exist are scanned (default `skills/`). If none exists, the root is a bare skills
-  directory. The manifest's `skills` field is read, not hardcoded, so a plugin that
-  relocates its skills keeps working.
+- **A plugin root is read the way Claude Code reads it.** The default `skills/` is always
+  scanned, and each path the manifest's `skills` field declares ADDS to it; a declared path
+  may parent skills or be one skill (it holds `SKILL.md`). A root holding `SKILL.md` is a
+  single-skill plugin. If a root yields nothing that way, it is read as a bare skills
+  directory. A skill's name is its frontmatter `name`, else its directory name: Claude
+  Code invokes the frontmatter name, so a gate keyed on the directory name would refuse a
+  skill that loads. Confirmed by the plugins reference ("Adds to the default: `skills`")
+  and a CLI 2.1.273 spike on 2026-09-16; the moved reader had treated the manifest as a
+  REPLACEMENT, which dropped the default `skills/` of any plugin that declared extras.
 - **Only skills are staged.** A plugin's agents, hooks, commands and MCP servers are
   dropped on every harness, claude-code included. That also removes a confound: a project
   subagent beside `skills/` can no longer answer the request the skill should answer.
-- **The staged manifest is `{"name": "coder-eval-plugins"}` and nothing else.** A spike
-  with `claude -p --plugin-dir` showed that a manifest declaring `"skills": ["skills"]`
-  loaded no skill, symlinked or copied. A name-only manifest loads the `skills/` default.
+- **The staged manifest is `{"name": "coder-eval-plugins"}` and nothing else.** A
+  2026-09-17 spike with `claude -p --plugin-dir` showed a staged root whose manifest declared
+  `"skills": ["skills"]` load no skill; a 2026-09-16 spike on CLI 2.1.273 loaded a real
+  `["./skills"]` fine. The name-only manifest loads the `skills/` default either way.
 - **Refusal is at resolution.** `validate_plugins` runs in `validate_resolved_task`, so a
-  path with no skill, an unresolvable path, or one skill name from two sources fails
-  `plan`. A run can no longer measure the model WITHOUT the skill under test and look normal.
+  path with no skill, an unresolvable path, one skill name from two sources, or a
+  `skill_triggered` `skill_name` the plugins do not offer fails `plan` before the run is paid
+  for. A name still holding a `${row...}` placeholder is checked on its expanded row. The
+  cost: a task whose skill under test comes from a template or `setting_sources` while it
+  also sets `agent.plugins` is refused, because only plugin skills are offered.
 - **`skills_offered` is recorded** in `environment_info` and passed to the checker.
-  `skill_triggered` raises `CheckerMisuseError` when its `skill_name` is not offered: the
-  positive control cannot run, so the row escalates instead of scoring 0.0.
+  `skill_triggered` still raises `CheckerMisuseError` when its `skill_name` is not offered.
+  Resolution catches every new run first; the checker gate remains for a detached grade of
+  a recorded run, where resolution does not re-run.
 
 Delivery, per harness:
 

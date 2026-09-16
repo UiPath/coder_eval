@@ -17,11 +17,17 @@ from coder_eval.orchestration.plugin_staging import (
 )
 
 
-def _skill(parent: Path, name: str) -> Path:
+def _skill(parent: Path, name: str, *, frontmatter_name: str | None = None) -> Path:
     skill_dir = parent / name
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\nbody\n", encoding="utf-8")
+    declared = frontmatter_name if frontmatter_name is not None else name
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {declared}\ndescription: d\n---\nbody\n", encoding="utf-8")
     return skill_dir
+
+
+def _manifest(root: Path, skills: object) -> None:
+    (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "p", "skills": skills}), encoding="utf-8")
 
 
 def _local(path: Path | str) -> dict[str, str]:
@@ -33,13 +39,39 @@ class TestLayouts:
         _skill(tmp_path / "plugin" / "skills", "alpha")
         assert set(scan_plugin_skills([_local(tmp_path / "plugin")])) == {"alpha"}
 
-    def test_a_manifest_relocates_the_skills_dir(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("declared", [["./custom"], "./custom"])
+    def test_manifest_paths_add_to_the_default_skills_dir(self, tmp_path: Path, declared: object) -> None:
+        """Claude Code scans the default skills/ AND each declared path (plugins-reference, spike 2026-09-16)."""
         root = tmp_path / "plugin"
-        _skill(root / "custom", "alpha")
-        _skill(root / "skills", "ignored")
-        (root / ".claude-plugin").mkdir()
-        (root / ".claude-plugin" / "plugin.json").write_text(json.dumps({"skills": ["custom"]}), encoding="utf-8")
-        assert set(scan_plugin_skills([_local(root)])) == {"alpha"}
+        _skill(root / "custom", "beta")
+        _skill(root / "skills", "alpha")
+        _manifest(root, declared)
+        assert set(scan_plugin_skills([_local(root)])) == {"alpha", "beta"}
+
+    def test_a_declared_path_may_name_one_skill(self, tmp_path: Path) -> None:
+        root = tmp_path / "plugin"
+        _skill(root / "skills", "alpha")
+        _skill(root / "custom", "beta")
+        _skill(root / "custom", "not-declared")
+        _manifest(root, ["./custom/beta"])
+        assert set(scan_plugin_skills([_local(root)])) == {"alpha", "beta"}
+
+    def test_a_root_holding_skill_md_is_a_single_skill_plugin(self, tmp_path: Path) -> None:
+        root = tmp_path / "solo"
+        root.mkdir()
+        (root / "SKILL.md").write_text("---\nname: solo-skill\ndescription: d\n---\n", encoding="utf-8")
+        _skill(root, "nested-helper")
+        assert set(scan_plugin_skills([_local(root)])) == {"solo-skill"}
+
+    def test_the_frontmatter_name_names_the_skill(self, tmp_path: Path) -> None:
+        _skill(tmp_path / "plugin" / "skills", "dir-name", frontmatter_name="invoked-name")
+        assert set(scan_plugin_skills([_local(tmp_path / "plugin")])) == {"invoked-name"}
+
+    def test_the_directory_name_is_the_fallback(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "plugin" / "skills" / "dir-name"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("no frontmatter here\n", encoding="utf-8")
+        assert set(scan_plugin_skills([_local(tmp_path / "plugin")])) == {"dir-name"}
 
     def test_a_bare_skills_directory(self, tmp_path: Path) -> None:
         _skill(tmp_path / "bare", "alpha")
@@ -117,6 +149,48 @@ class TestValidatePlugins:
     def test_a_path_with_no_skill_is_refused(self, tmp_path: Path) -> None:
         with pytest.raises(PluginStagingError):
             validate_plugins(self._task([_local(tmp_path)]))
+
+    @staticmethod
+    def _skill_task(plugins: list[dict[str, str]], skill_name: str) -> TaskDefinition:
+        from coder_eval.models import SkillTriggeredCriterion
+
+        return TaskDefinition(
+            task_id="plugins",
+            description="d",
+            initial_prompt="p",
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, plugins=plugins),
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[
+                SkillTriggeredCriterion(
+                    type="skill_triggered", description="d", skill_name=skill_name, expected_skill=skill_name
+                )
+            ],
+        )
+
+    def test_a_skill_triggered_target_the_plugins_offer_passes(self, tmp_path: Path) -> None:
+        _skill(tmp_path / "plugin" / "skills", "alpha")
+        validate_plugins(self._skill_task([_local(tmp_path / "plugin")], "alpha"))
+
+    def test_a_skill_triggered_target_the_plugins_do_not_offer_is_refused_before_the_run(self, tmp_path: Path) -> None:
+        _skill(tmp_path / "plugin" / "skills", "alpha")
+        with pytest.raises(PluginStagingError, match=r"skill_triggered names skill\(s\) \['absent'\]"):
+            validate_plugins(self._skill_task([_local(tmp_path / "plugin")], "absent"))
+
+    def test_an_unexpanded_row_placeholder_is_left_to_its_row(self, tmp_path: Path) -> None:
+        _skill(tmp_path / "plugin" / "skills", "alpha")
+        validate_plugins(self._skill_task([_local(tmp_path / "plugin")], "${row.skill}"))
+
+    def test_without_plugins_the_target_is_not_checked(self) -> None:
+        from coder_eval.models import SkillTriggeredCriterion
+
+        task = self._task(None).model_copy(
+            update={
+                "success_criteria": [
+                    SkillTriggeredCriterion(type="skill_triggered", description="d", skill_name="x", expected_skill="x")
+                ]
+            }
+        )
+        validate_plugins(task)
 
 
 class TestStaging:

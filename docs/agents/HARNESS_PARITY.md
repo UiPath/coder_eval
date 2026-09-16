@@ -659,8 +659,12 @@ whose cap fires should not look like a task whose harness hung.
 
 ## Plugin staging
 
-Each `agent.plugins[].path` names a plugin root (`<path>/skills/<name>/SKILL.md`) or a bare
-skills directory (`<path>/<name>/SKILL.md`). Both layouts work on every harness. Before the
+Each `agent.plugins[].path` names a plugin root or a bare skills directory
+(`<path>/<name>/SKILL.md`). A plugin root is read as Claude Code reads it: the default
+`skills/` plus every path its `.claude-plugin/plugin.json` `skills` field declares (a
+declared path may be one skill), or the root itself when it holds `SKILL.md`. A skill's name
+is its `SKILL.md` frontmatter `name`, else its directory name. Every layout works on every
+harness. Before the
 agent starts, coder-eval stages the skills into one root, `<run_dir>/plugin_root`: a
 `.claude-plugin/plugin.json` that names `coder-eval-plugins`, and one `skills/<name>` symlink
 per skill. Each harness receives that root in its native way. Only skills are staged: a
@@ -669,9 +673,10 @@ included. Claude Code names staged skills `coder-eval-plugins:<skill>`, not `<pl
 Files beside the skills also stay behind: a skill that reads `${CLAUDE_PLUGIN_ROOT}/scripts/`
 or a shared `references/` directory at the plugin root cannot find it. Keep a skill's files
 inside its own `<name>/` directory.
-A path that offers no skill, or two paths that offer the same skill name, fail `coder-eval plan`.
-`environment_info.skills_offered` records the staged skill names. A `skill_triggered` criterion
-whose `skill_name` is not in that list finishes `ERROR`, not 0.0.
+A path that offers no skill, two paths that offer the same skill name, or a `skill_triggered`
+criterion whose `skill_name` the plugins do not offer fail `coder-eval plan`, before the run is
+paid for. `environment_info.skills_offered` records the staged skill names; re-grading a
+recorded run whose `skill_name` is not in that list finishes `ERROR`, not 0.0.
 
 ## Reproducing
 

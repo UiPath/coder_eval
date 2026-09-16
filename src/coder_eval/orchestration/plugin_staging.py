@@ -2,8 +2,11 @@
 
 The canonical root is ``<root>/.claude-plugin/plugin.json`` plus
 ``<root>/skills/<name>`` (a symlink to the authored skill directory, or a copy where
-symlinks fail). Both authored layouts are accepted: a plugin root whose manifest (or
-default ``skills/``) parents the skills, and a bare skills directory.
+symlinks fail). A plugin root is read the way Claude Code reads it: the default
+``skills/`` plus every manifest-declared path, where a path may parent skills or be one
+skill, and a root holding ``SKILL.md`` is a single-skill plugin. A bare skills
+directory is accepted too. A skill's name is its ``SKILL.md`` frontmatter ``name``,
+else its directory name.
 
 Rationale: .claude/notes/agents.md § Skills, per harness
 """
@@ -17,6 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
+from coder_eval.models import SkillTriggeredCriterion
 from coder_eval.orchestration.harness_contract import TaskResolutionError
 from coder_eval.utils import expand_env_vars
 
@@ -60,7 +66,7 @@ def resolve_plugin_path(raw: str) -> Path:
     return root
 
 
-def _declared_skill_dirs(root: Path) -> list[Path]:
+def _declared_skill_paths(root: Path) -> list[Path]:
     manifest = root.joinpath(*_MANIFEST_RELPATH)
     declared: list[str] = []
     if manifest.is_file():
@@ -74,34 +80,55 @@ def _declared_skill_dirs(root: Path) -> list[Path]:
                 declared = [value]
             elif isinstance(value, list):
                 declared = [entry for entry in value if isinstance(entry, str)]
-    if not declared:
-        declared = [_DEFAULT_SKILLS_SUBDIR]
     return [(root / relative).resolve() for relative in declared]
 
 
-def scan_plugin_skills(plugins: Sequence[LocalPluginConfig]) -> dict[str, Path]:
-    """Skill name -> its directory, over every entry, both authored layouts.
+def _skill_name(skill_dir: Path) -> str:
+    """The frontmatter ``name`` of ``<skill_dir>/SKILL.md``, else the directory name."""
+    text = (skill_dir / _SKILL_FILE).read_text(encoding="utf-8", errors="replace")
+    if text.startswith("---"):
+        front, _, _rest = text[3:].partition("\n---")
+        try:
+            data: Any = yaml.safe_load(front)
+        except yaml.YAMLError:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("name"), str) and data["name"].strip():
+            return data["name"].strip()
+    return skill_dir.name
 
-    For each root, the manifest-declared skill directories that exist are scanned;
-    if none exists, the root itself is a bare skills directory.
+
+def _skill_dirs(root: Path) -> list[Path]:
+    """Every skill directory one ``plugins:`` root offers, in Claude Code's reading order."""
+    candidates = [root / _DEFAULT_SKILLS_SUBDIR, *_declared_skill_paths(root)]
+    found: list[Path] = []
+    for candidate in candidates:
+        if (candidate / _SKILL_FILE).is_file():
+            found.append(candidate)
+        elif candidate.is_dir():
+            found += [skill_file.parent for skill_file in sorted(candidate.glob(f"*/{_SKILL_FILE}"))]
+    if found:
+        return found
+    if (root / _SKILL_FILE).is_file():
+        return [root]
+    return [skill_file.parent for skill_file in sorted(root.glob(f"*/{_SKILL_FILE}"))]
+
+
+def scan_plugin_skills(plugins: Sequence[LocalPluginConfig]) -> dict[str, Path]:
+    """Skill name -> its directory, over every entry and every accepted layout.
 
     Raises:
         PluginStagingError: an unresolvable path, a skill name from two sources, or no skill at all.
     """
     skills: dict[str, Path] = {}
     for plugin in plugins:
-        root = resolve_plugin_path(plugin["path"])
-        candidates = [directory for directory in _declared_skill_dirs(root) if directory.is_dir()] or [root]
-        for candidate in candidates:
-            for skill_file in sorted(candidate.glob(f"*/{_SKILL_FILE}")):
-                skill_dir = skill_file.parent
-                previous = skills.get(skill_dir.name)
-                if previous is not None and previous != skill_dir.resolve():
-                    raise PluginStagingError(
-                        f"ambiguous skill name {skill_dir.name!r}: agent.plugins offers it from both "
-                        + f"{previous} and {skill_dir.resolve()}"
-                    )
-                skills[skill_dir.name] = skill_dir.resolve()
+        for skill_dir in _skill_dirs(resolve_plugin_path(plugin["path"])):
+            name, source = _skill_name(skill_dir), skill_dir.resolve()
+            previous = skills.get(name)
+            if previous is not None and previous != source:
+                raise PluginStagingError(
+                    f"ambiguous skill name {name!r}: agent.plugins offers it from both {previous} and {source}"
+                )
+            skills[name] = source
     if not skills:
         paths = [plugin["path"] for plugin in plugins]
         raise PluginStagingError(
@@ -114,12 +141,25 @@ def scan_plugin_skills(plugins: Sequence[LocalPluginConfig]) -> dict[str, Path]:
 def validate_plugins(task: TaskDefinition) -> None:
     """Resolution-time refusal; no-op when plugins is unset or empty.
 
+    Also refuses a ``skill_triggered`` criterion whose ``skill_name`` the plugins do
+    not offer, before the run is paid for. A name still holding a ``${row...}``
+    placeholder is checked on its expanded row instead.
+
     Raises:
-        PluginStagingError: see ``scan_plugin_skills``.
+        PluginStagingError: see ``scan_plugin_skills``, or a ``skill_triggered`` target not offered.
     """
     plugins = task.agent.plugins if task.agent is not None else None
-    if plugins:
-        scan_plugin_skills(plugins)
+    if not plugins:
+        return
+    offered = scan_plugin_skills(plugins)
+    targets = {c.skill_name for c in task.success_criteria if isinstance(c, SkillTriggeredCriterion)}
+    missing = sorted(name for name in targets if "${" not in name and name not in offered)
+    if missing:
+        raise PluginStagingError(
+            f"skill_triggered names skill(s) {missing} but agent.plugins offers only {sorted(offered)}: "
+            + "the positive control cannot run. With agent.plugins set, the skill under test must come "
+            + "from a plugin path (a skill from a template or setting_sources is not offered)."
+        )
 
 
 def link_or_copy(source: Path, target: Path) -> None:

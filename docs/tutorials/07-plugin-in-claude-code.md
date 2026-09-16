@@ -160,8 +160,7 @@ covers telling them apart with `/doctor` and `/context`.
 | No `/coder-eval:` commands after installing | Check `/plugin`; re-run the install |
 | A skill offers to install the CLI, or Bash reports `command not found` | The CLI isn't installed or isn't on `PATH` — accept the offer, or install it yourself |
 | `coder-eval run` matches nothing | Wrong directory — use the path `init` reported in step 2 |
-| Step 5 stops with a config error about `agent.plugins` | `SKILL_SOURCE_PATH` is unset, or points at a directory that holds no `<name>/SKILL.md` |
-| A `skill_triggered` row finishes `ERROR` | The skill name is not among the skills the plugin path offers |
+| Step 5 stops with a config error about `agent.plugins` | `SKILL_SOURCE_PATH` is unset, points at a directory that holds no `<name>/SKILL.md`, or the suite's `skill_name` is not the frontmatter `name` of a skill that path offers |
 
 To update after the marketplace moves, `/plugin marketplace update coder-eval`; to
 remove it, `/plugin uninstall`.

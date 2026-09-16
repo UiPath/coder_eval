@@ -191,7 +191,8 @@ judge's author-written `files:` entry, because it names one file of the solution
 compared against and traversal out of the staged copy is always a mistake.
 
 `skill_triggered` escalates the same way when its `skill_name` is not among the skills
-`agent.plugins` offered (`CheckContext.skills_offered`). The agent was never offered the
+`agent.plugins` offered (`CheckContext.skills_offered`). Resolution refuses the same task
+first (`validate_plugins`), so this gate fires only on a detached grade of a recorded run. The agent was never offered the
 skill, so the positive control cannot run. Scored as 0.0, every positive row of an
 activation suite would read as a skill that never triggers. The gate applies only when the
 task sets plugins: with `skills_offered` `None` the criterion scores as before, so a skill
