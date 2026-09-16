@@ -30,7 +30,7 @@ from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITra
 
 # SystemPromptPreset is not re-exported from the SDK root, so claude_agent_sdk.types
 # is the only import route (same treatment as evaluation/verdict_tool.py).
-from claude_agent_sdk.types import SystemPromptPreset
+from claude_agent_sdk.types import SdkPluginConfig, SystemPromptPreset
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
@@ -85,7 +85,7 @@ from coder_eval.streaming.events import (
     end_status_for,
 )
 from coder_eval.timing import TurnClock, close_window
-from coder_eval.utils import dump_dataclass, process_plugins
+from coder_eval.utils import dump_dataclass
 
 
 logger = logging.getLogger(__name__)
@@ -746,6 +746,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         self._active_transport: SubprocessCLITransport | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
+        self._plugin_root: Path | None = None
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
         # Dedupe "unhandled SDK message type" warnings: _format_messages runs
         # many times per task and the types are stable for a session.
@@ -757,6 +758,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the Claude Code agent.
 
@@ -766,10 +768,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 subprocess (typically the resolved ``SandboxConfig.mock_path_dirs``).
             plugin_tools_dir: Canonical ``node_modules/@uipath`` to export as
                 ``PLUGIN_TOOLS_DIR``. An external env-var pin still wins.
+            plugin_root: The staged plugin root, loaded as one local plugin.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
+        self._plugin_root = plugin_root
         self._state = AgentState.WORKING
         # Note: Client is created per-communication to avoid transport issues
 
@@ -1147,8 +1151,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         """
         assert self.working_directory is not None  # guaranteed by communicate's guard above
 
-        # Process plugins: copy from config and replace env vars in paths.
-        plugins = process_plugins(self.config.plugins or [], log=self._log)  # type: ignore[arg-type]
+        plugins: list[SdkPluginConfig] = (
+            [{"type": "local", "path": str(self._plugin_root)}] if self._plugin_root is not None else []
+        )
 
         # Per-turn cost-correlation headers (LiteLLM only): the run/task tag plus
         # this turn's iteration, so the proxy-side cost log joins to the turn.
@@ -1185,7 +1190,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             allowed_tools=self.config.allowed_tools or [],
             disallowed_tools=disallowed_tools,
             model=effective_model,
-            plugins=plugins,  # type: ignore[arg-type]
+            plugins=plugins,
             stderr=stderr_callback,  # Capture stderr for better error messages
             env=env,
             # Recovers the CUMULATIVE output_tokens per emission from

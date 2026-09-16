@@ -34,6 +34,7 @@ class TextStubAgent(Agent):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         self.working_directory = Path(working_directory)
         self._state = AgentState.WORKING

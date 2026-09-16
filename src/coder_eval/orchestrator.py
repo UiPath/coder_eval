@@ -67,10 +67,12 @@ from .models import (
 )
 from .orchestration.early_stop import early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
+from .orchestration.plugin_staging import stage_plugins
 from .orchestration.resolution_checks import validate_resolved_task
 from .orchestration.run_limits import validate_run_limits
 from .orchestration.turn_monitor import TurnMonitor
 from .path_utils import (
+    PLUGIN_ROOT_DIRNAME,
     TASK_JSON_FILENAME,
     digest_tree,
     format_task_log_id,
@@ -475,6 +477,10 @@ class Orchestrator:
         # Built once in _setup and handed to every communicate() call, so every
         # count it answers the should_stop poll from is cumulative per task.
         self._monitor: TurnMonitor | None = None
+
+        # The skill names the staged plugin root offered; None when the task sets
+        # no plugins. Read back from the prior result on an evaluate-only grade.
+        self._skills_offered: tuple[str, ...] | None = None
 
         # One-shot flag: emit the expected_tool_calls rollup warning exactly once per
         # task run even though _check_expected_tool_calls is called after every turn.
@@ -902,6 +908,7 @@ class Orchestrator:
                 runnable,
                 reference_dir=self._reference_dir,
                 turn_records=self.result.iterations,
+                skills_offered=self._skills_offered,
             )
 
         if len(checked) != len(runnable):
@@ -1408,6 +1415,9 @@ class Orchestrator:
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
             self._restore_recorded_command_path()
+            recorded_skills = self.prior_result.environment_info.get("skills_offered") if self.prior_result else None
+            if isinstance(recorded_skills, list):
+                self._skills_offered = tuple(str(name) for name in recorded_skills)
 
             self._resolve_routes()
             self._record_route_environment_info()
@@ -1486,6 +1496,12 @@ class Orchestrator:
 
         env_path_prepend = [str(p) for p in self.sandbox.resolved_mock_path_dirs]
         plugin_tools_dir = self.sandbox.plugin_tools_dir
+        plugin_root: Path | None = None
+        if self.task.agent.plugins:
+            staged = await asyncio.to_thread(stage_plugins, self.task.agent.plugins, self.run_dir / PLUGIN_ROOT_DIRNAME)
+            plugin_root = staged.root
+            self._skills_offered = staged.skills_offered
+            self.result.environment_info["skills_offered"] = list(staged.skills_offered)
 
         async def _start_agent() -> None:
             assert self.agent is not None
@@ -1493,6 +1509,7 @@ class Orchestrator:
                 str(sandbox_dir),
                 env_path_prepend=env_path_prepend,
                 plugin_tools_dir=plugin_tools_dir,
+                plugin_root=plugin_root,
             )
 
         await execute_with_retry(
@@ -2076,6 +2093,7 @@ class Orchestrator:
                 self.task.success_criteria,
                 reference_dir=self._reference_dir,
                 turn_records=self.result.iterations,
+                skills_offered=self._skills_offered,
             )
             self.result.success_criteria_results = criteria_results
             return self._select_gate()
@@ -2157,6 +2175,7 @@ class Orchestrator:
             self.task.success_criteria,
             reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
+            skills_offered=self._skills_offered,
         )
         self.result.success_criteria_results = criteria_results
 
@@ -2238,6 +2257,7 @@ class Orchestrator:
             self.task.success_criteria,
             reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
+            skills_offered=self._skills_offered,
         )
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
         self.result.success_criteria_results = criteria_results

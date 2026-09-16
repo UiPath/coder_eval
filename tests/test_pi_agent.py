@@ -26,6 +26,7 @@ import pytest
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig, TokenUsage
+from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -396,16 +397,6 @@ class TestSandboxEnvironment:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert captured["kwargs"]["env"]["OPENROUTER_API_KEY"] == "sk-test"
-
-
-class TestPluginWarnings:
-    async def test_plugins_that_do_not_resolve_warn_loudly(self, patch_exec, tmp_path, caplog):
-        """plugins IS supported now (-> --skill), but a path that resolves to no skills
-        must warn — else the run silently measures the model WITHOUT the skill."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(plugins=[{"type": "local", "path": "/no/such/dir"}]).start(str(tmp_path))
-        assert "0 skill dir(s) resolved" in caplog.text or "did not resolve" in caplog.text
 
 
 class TestAutoRetry:
@@ -968,38 +959,28 @@ class TestTurnLifecycleAndTokenTelemetry:
 
 
 class TestSkillInjection:
-    """agent.plugins -> `pi --skill <dir>` (mirrors OpenCode/Codex plugin->skills)."""
+    """The staged plugin root reaches Pi as ``--skill <root>/skills``."""
 
-    def _plugin_root(self, tmp_path):
-        # A Claude-plugin root: <root>/skills/<name>/SKILL.md (manifest-default layout).
-        root = tmp_path / "plug"
-        skill = root / "skills" / "demo-skill"
+    def _staged_root(self, tmp_path: Path) -> Path:
+        skill = tmp_path / "authored" / "skills" / "demo-skill"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: demo-skill\ndescription: demo\n---\n# Demo\n")
-        return root
+        return stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
 
-    async def test_resolved_plugin_emits_skill_arg(self, patch_exec, tmp_path):
-        root = self._plugin_root(tmp_path)
+    async def test_staged_root_emits_skill_arg(self, patch_exec, tmp_path):
+        root = self._staged_root(tmp_path)
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path)
+        agent = _agent()
+        await agent.start(str(tmp_path), plugin_root=root)
+        await agent.communicate("do the thing")
         argv = captured["argv"]
-        assert "--skill" in argv
-        # Points at the skills-PARENT dir (Pi discovers <name>/SKILL.md recursively).
-        assert argv[argv.index("--skill") + 1] == str((root / "skills").resolve())
+        assert argv[argv.index("--skill") + 1] == str(root / "skills")
+        assert "pi_skill_paths" not in agent.get_environment_info()
 
-    async def test_no_plugins_means_no_skill_arg(self, patch_exec, tmp_path):
+    async def test_no_plugin_root_means_no_skill_arg(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert "--skill" not in captured["argv"]
-
-    async def test_skill_paths_recorded_in_environment_info(self, patch_exec, tmp_path):
-        # Installs the shutil.which("pi") patch so start() doesn't require the real
-        # CLI on PATH (CI has no pi binary); we only assert on recorded skill paths.
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        root = self._plugin_root(tmp_path)
-        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
-        await agent.start(str(tmp_path))
-        assert agent.get_environment_info()["pi_skill_paths"] == [str((root / "skills").resolve())]
 
 
 class TestTurnAlwaysReapsTheCli:

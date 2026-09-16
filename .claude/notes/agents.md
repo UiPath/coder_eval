@@ -66,13 +66,9 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
   finalizes cleanly as `tool_calls_exhausted` (no crash, no retry).
 
   The **known unfixed divergences** — which config fields each harness does and does not
-  enforce, and the per-harness `agent.plugins[].path` depth (claude-code REQUIRES a
-  plugin root holding `skills/` and silently loads NOTHING from a bare skills directory,
-  which is the costly direction: no error, every positive row of an activation suite
-  scores 0, and the suite reports recall 0.0, reading exactly like a skill that never
-  triggers; held to the plugin-root shape for `SKILL_SOURCE_PATH` by CE045) — are the
-  table's to state, not this file's. Full table + rationale:
-  docs/agents/HARNESS_PARITY.md.
+  enforce — are the table's to state, not this file's. Full table + rationale:
+  docs/agents/HARNESS_PARITY.md. The per-harness `agent.plugins[].path` depth is no longer
+  a divergence: staging hands every harness one layout (§ Skills, per harness).
 
   The agent-field half of parity is now the `HarnessContract` each agent class declares:
   a field, `permission_mode` value or tool name a harness cannot honor is a resolution
@@ -632,8 +628,7 @@ tempdir is still reclaimed.
 
 `_TERM_GRACE_SECONDS` is re-declared at the same value in both nd-JSON harnesses rather
 than shared: the CLI-driver hoist that would unify their teardown constants and reducers is
-a tracked follow-up. The shared plugin→skills resolver already lives in `agents/_skills.py`,
-and `STDOUT_LINE_LIMIT_BYTES`, which IS canonical, is imported.
+a tracked follow-up. `STDOUT_LINE_LIMIT_BYTES`, which IS canonical, is imported.
 
 ## The system_prompt_semantics marker
 
@@ -657,36 +652,50 @@ cannot disagree with what was sent.
 
 ## Skills, per harness
 
-A `plugins:` entry is a Claude-plugin root, and only the SKILLS half of it is honored
-anywhere — a plugin's agents, hooks, commands and MCP servers have no equivalent outside
-claude-code and are dropped. The manifest's `skills` field is read rather than `skills/`
-being hardcoded, so a plugin that relocates its skills keeps working.
+`orchestration/plugin_staging.py` stages every `plugins:` entry into one canonical root,
+`<run_dir>/plugin_root`, before `Agent.start`. Each harness then receives the SAME layout:
+`.claude-plugin/plugin.json` and `skills/<name>` links. The staging exists because each
+adapter used to scan the authored path its own way. claude-code loaded nothing from a bare
+skills directory, with no error, so an activation suite scored recall 0.0 and read exactly
+like a skill that never triggers.
 
-- **OpenCode** maps each root to `skills.paths` via `OPENCODE_CONFIG_CONTENT`, which the
-  CLI merges as a final local-scope layer. That was chosen over writing
-  `<sandbox>/.opencode/skills/` because it writes nothing into the sandbox that is later
-  preserved as a run artifact and inspected by file criteria, and does not depend on how
-  the CLI resolves a project root from `--dir`. Verified orthogonal to `--pure`, which
-  skips external *plugins*, not configured skill paths. An inherited value is appended to
-  rather than clobbered, since the host may legitimately configure OpenCode the same way.
-- **Pi** passes each as `--skill <dir>`.
-- **Codex** symlinks (or copies, on Windows) each skill dir into `.agents/skills/`, which
-  the CLI auto-discovers from the working directory upward.
-- **Antigravity** takes search paths natively via `skills_paths` — but those only drive
-  DISCOVERY. The file-tool allowlist is `workspaces` alone, so the skill roots must appear
+- **Both authored layouts are accepted.** For each root, the manifest-declared skill dirs
+  that exist are scanned (default `skills/`). If none exists, the root is a bare skills
+  directory. The manifest's `skills` field is read, not hardcoded, so a plugin that
+  relocates its skills keeps working.
+- **Only skills are staged.** A plugin's agents, hooks, commands and MCP servers are
+  dropped on every harness, claude-code included. That also removes a confound: a project
+  subagent beside `skills/` can no longer answer the request the skill should answer.
+- **The staged manifest is `{"name": "coder-eval-plugins"}` and nothing else.** A spike
+  with `claude -p --plugin-dir` showed that a manifest declaring `"skills": ["skills"]`
+  loaded no skill, symlinked or copied. A name-only manifest loads the `skills/` default.
+- **Refusal is at resolution.** `validate_plugins` runs in `validate_resolved_task`, so a
+  path with no skill, an unresolvable path, or one skill name from two sources fails
+  `plan`. A run can no longer measure the model WITHOUT the skill under test and look normal.
+- **`skills_offered` is recorded** in `environment_info` and passed to the checker.
+  `skill_triggered` raises `CheckerMisuseError` when its `skill_name` is not offered: the
+  positive control cannot run, so the row escalates instead of scoring 0.0.
+
+Delivery, per harness:
+
+- **Claude Code** takes the root as an SDK `{"type": "local", "path": plugin_root}` plugin.
+- **OpenCode** appends `<plugin_root>/skills` to `skills.paths` via
+  `OPENCODE_CONFIG_CONTENT`, which the CLI merges as a final local-scope layer. That was
+  chosen over writing `<sandbox>/.opencode/skills/` because it writes nothing into the
+  sandbox that is later preserved as a run artifact and inspected by file criteria, and
+  does not depend on how the CLI resolves a project root from `--dir`. Verified orthogonal
+  to `--pure`, which skips external *plugins*, not configured skill paths. An inherited
+  value is appended to rather than clobbered. The staged `skills/` holds only skill links,
+  so the recursive scan no longer walks a repo root's self-referential symlinks.
+- **Pi** passes `--skill <plugin_root>/skills`.
+- **Codex** links each `<plugin_root>/skills/<name>` into `.agents/skills/<name>` with
+  `link_or_copy`, which the CLI auto-discovers from the working directory upward.
+- **Antigravity** takes `<plugin_root>/skills` in `skills_paths` — but those only drive
+  DISCOVERY. The file-tool allowlist is `workspaces` alone, so the same path must appear
   there too, or the agent discovers a skill and every read of its `SKILL.md` is denied as
   out-of-workspace.
 
-A bare skills directory is used as-is only when the root declares no `skills/` subdir.
-That is deliberately not a fallback for a root that HAS one: `skills.paths` is scanned
-recursively and a repo root can contain self-referential symlinks (`UiPath/skills` has
-`plugins/uipath -> ..`), which resolves skills through an arbitrary path and silently drops
-duplicate names.
-
-Every way this can come up empty is logged loudly — an unresolved env var, a missing dir,
-a root with no `<name>/SKILL.md` under it. A plugin whose skills never reach the agent
-still *looks* like a normal run, which is precisely the failure the logging closes: the
-run measures the model WITHOUT the skill under test.
+`plugin_tools_dir` is not a skills source on any harness.
 
 ## Why the registry rejects a re-registration
 

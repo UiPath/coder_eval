@@ -72,7 +72,7 @@ agent:
   thinking_level: medium          # minimal | low | medium | high (default: medium)
   plugins:
     - type: local
-      path: "$SKILLS_PLUGIN_PATH"  # a directory of skills (SKILL.md), env-expanded
+      path: "$SKILLS_PLUGIN_PATH"  # a plugin root or a bare skills directory, env-expanded
 
 run_limits:
   max_tool_calls: 5
@@ -120,19 +120,13 @@ via the `claude_code` preset; Codex via `developer_instructions`).
 ### Skills (SKILL.md)
 
 Antigravity supports [Agent Skills](https://agentskills.io/specification)
-(`SKILL.md`) natively. Skill directories are discovered from:
-
-1. `agent.plugins` entries with `type: local` and a `path` (env vars in the path are
-   expanded at runtime), and
-2. the runtime plugin directory passed to `start()`.
-
-For each source, the harness is handed whichever of `<source>/skills` or `<source>`
-directly contains subdirectories with a `SKILL.md`. Unlike Codex — which symlinks
-skills into `.agents/skills/` — Antigravity is given the search-path roots directly
-via the SDK's `skills_paths`, and those roots are also added to the harness
-`workspaces` allowlist (otherwise the agent would find a skill but be denied the
-`SKILL.md` read as out-of-workspace). The agent logs a loud warning if a skills path
-can't be resolved or if zero skills are discovered.
+(`SKILL.md`) natively. Each `agent.plugins` entry with `type: local` names a plugin
+root or a bare skills directory (env vars in the path are expanded). coder-eval
+stages every entry into `<run_dir>/plugin_root` (see
+[Plugin staging](HARNESS_PARITY.md#plugin-staging)). The adapter hands
+`<plugin_root>/skills` to the SDK's `skills_paths` and adds the same path to the
+harness `workspaces` allowlist (otherwise the agent would find a skill but be denied
+the `SKILL.md` read as out-of-workspace). A path with no skill fails `coder-eval plan`.
 
 ## Permissions & tools — important differences
 

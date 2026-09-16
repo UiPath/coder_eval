@@ -654,74 +654,20 @@ A timeout is a *failure* (partial turn captured, error status); the tool-call ca
 *clean stop*. Conflating them is the mistake this page exists to prevent: a task
 whose cap fires should not look like a task whose harness hung.
 
-## `agent.plugins[].path` accepts different depths per harness
+## Plugin staging
 
-Not a run limit, but the same promise: one task file, three harnesses, same meaning.
-This field breaks it silently.
-
-| | claude-code | codex | antigravity | pi |
-|---|---|---|---|---|
-| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted | accepted |
-| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted | **loads, but undetected** † |
-
-claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
-live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
-parents the skill directories and no skill loads. Codex
-(`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
-both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
-
-† Pi uses the shared `_plugin_skill_dirs` resolver, whose bare-dir fallback resolves a
-bare skills directory to itself and passes it as `--skill <dir>`, so the skill *does*
-load and the agent can use it. But `skill_triggered` detects engagement by matching a
-`skills/<name>/` segment in the read path (`_SKILL_PATH_RE`), which a bare dir lacks — so
-an **activation suite** on a bare dir still scores recall 0 even though the skill ran.
-Net effect for activation suites is therefore the same silent-0 as claude-code, via a
-different mechanism; use the plugin-root shape (lint rule CE045 holds `SKILL_SOURCE_PATH`
-to it for exactly this reason).
-
-So `.claude/skills` works on two backends out of three and fails on the third — and
-fails without an error. The agent simply is not offered the skill, every positive row
-of an activation suite scores 0, and the suite reports recall 0.0. That is
-indistinguishable from a skill that never triggers, which is the finding such a suite
-exists to produce. It shipped in six documentation surfaces at once for exactly this
-reason.
-
-Probe it — but **read the namespace, not the presence**. Claude Code discovers a
-project's own `./.claude/skills/` natively, independent of `--plugin-dir`, so run
-from a repo root and BOTH commands list the skill: the deeper one only looks
-correct. The plugin loaded iff the name carries the root's prefix.
-
-```bash
-# Run from a directory that is NOT the skill's own repo root.
-claude --plugin-dir /path/to/root        # lists `root:<skill>`  <- plugin loaded
-claude --plugin-dir /path/to/root/skills # lists nothing         <- loaded nothing
-```
-
-A bare `<skill>` with no prefix is project discovery, not your plugin.
-
-**Write the plugin root.** It is correct on all three, so there is never a reason to
-write the deeper form. For `.claude/skills/my-skill/SKILL.md` that is `.claude`.
-
-Note what else that pulls in: a plugin root loads the **whole** plugin, so an
-`agents/`, `commands/` or `hooks/` directory sitting beside `skills/` becomes visible
-to the evaluated agent as well. Verified — a root holding `skills/probe-beta/`,
-`agents/probe-subagent.md` and `commands/probe-cmd.md` offers all three as
-`root:probe-beta`, `root:probe-subagent` and `root:probe-cmd`. Pointing a suite at a
-repo's `.claude` therefore hands the agent every project subagent, which can answer a
-request the skill was supposed to answer. Stage a minimal root when the suite must
-isolate one skill.
-
-`SKILL_SOURCE_PATH` — the variable `/coder-eval:check-skill` emits — is held to the
-plugin-root shape by lint rule CE045. The rule keys on that variable name only; it is
-**not** a statement that other variables may use the deeper form. `$PLUGIN_PATH`, for
-one, feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code,
-so the same requirement applies there and is unlinted.
-
-**OpenCode and Pi both honor the *skills* half of a plugin.** OpenCode maps each
-local plugin root to its `skills.paths`; Pi maps each to a `--skill <dir>` argument —
-both via the same `_plugin_skill_dirs` resolver — so both **can** run activation
-suites. A plugin's non-skill assets (agents/hooks/commands/MCP servers) are dropped on
-both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
+Each `agent.plugins[].path` names a plugin root (`<path>/skills/<name>/SKILL.md`) or a bare
+skills directory (`<path>/<name>/SKILL.md`). Both layouts work on every harness. Before the
+agent starts, coder-eval stages the skills into one root, `<run_dir>/plugin_root`: a
+`.claude-plugin/plugin.json` that names `coder-eval-plugins`, and one `skills/<name>` symlink
+per skill. Each harness receives that root in its native way. Only skills are staged: a
+plugin's `agents/`, `commands/` and `hooks/` do not reach any harness, Claude Code included.
+Files beside the skills also stay behind: a skill that reads `${CLAUDE_PLUGIN_ROOT}/scripts/`
+or a shared `references/` directory at the plugin root cannot find it. Keep a skill's files
+inside its own `<name>/` directory.
+A path that offers no skill, or two paths that offer the same skill name, fail `coder-eval plan`.
+`environment_info.skills_offered` records the staged skill names. A `skill_triggered` criterion
+whose `skill_name` is not in that list finishes `ERROR`, not 0.0.
 
 ## Reproducing
 

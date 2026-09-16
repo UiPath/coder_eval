@@ -63,6 +63,8 @@ class CheckContext:
 
     route: "ApiRoute | None" = None
     reference_dir: "Path | None" = None
+    # The skill names the staged plugin root offered; None when the task sets no plugins.
+    skills_offered: "tuple[str, ...] | None" = None
 
 
 # Module-level ParamSpec, not the PEP 695 form ruff's UP047 prefers: CodeQL's Python

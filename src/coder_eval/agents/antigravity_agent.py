@@ -73,7 +73,6 @@ from coder_eval.streaming.events import (
     end_status_for,
 )
 from coder_eval.timing import TurnClock, close_window
-from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
@@ -248,67 +247,20 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """Resolve the model: task ``agent.model`` > ``ANTIGRAVITY_MODEL`` > default."""
         return self.config.model or settings.antigravity_model or _DEFAULT_MODEL
 
-    def _resolve_skills_paths(self, plugin_tools_dir: str | None) -> list[str]:
-        """Resolve skill search-path roots for the harness's native ``skills_paths``.
-
-        For each ``type: local`` plugin path (env-expanded) plus the runtime
-        ``plugin_tools_dir``, hands the harness the directory that DIRECTLY parents
-        skill dirs — ``<source>/skills`` or ``<source>`` itself, whichever holds a
-        ``<skill>/SKILL.md``. Unlike Codex, Antigravity takes search paths, so no
-        symlinking is needed.
-
-        Rationale: .claude/notes/agents.md § Skills, per harness
-        """
-        sources: list[Path] = []
-        for plugin in self.config.plugins or []:
-            if not (isinstance(plugin, dict) and plugin.get("type") == "local"):
-                continue
-            raw = plugin.get("path")
-            if not raw:
-                continue
-            expanded = expand_env_vars(raw)
-            path = Path(expanded)
-            if path.is_dir():
-                sources.append(path)
-            else:
-                # Loud: an unresolved env var or a missing dir drops the skills
-                # silently, so the agent runs blind.
-                hint = "env var likely unset" if "$" in expanded else "path does not exist"
-                self._log.warning("Plugin skills path did not resolve: %r → %r (%s)", raw, expanded, hint)
-        if plugin_tools_dir and Path(plugin_tools_dir).is_dir():
-            sources.append(Path(plugin_tools_dir))
-
-        roots: list[str] = []
-        seen: set[str] = set()
-        for source in sources:
-            # Prefer the nested ``skills/`` layout (repo root) over the source itself.
-            for candidate in (source / "skills", source):
-                if candidate.is_dir() and any(
-                    (child / "SKILL.md").exists() for child in candidate.iterdir() if child.is_dir()
-                ):
-                    resolved = str(candidate.resolve())
-                    if resolved not in seen:
-                        seen.add(resolved)
-                        roots.append(resolved)
-                    break  # first matching layout per source wins
-        if sources and not roots:
-            self._log.warning(
-                "0 skills discovered under %s; check the plugin path points at a skills repo root",
-                [str(s) for s in sources],
-            )
-        else:
-            self._log.debug("Antigravity skills_paths resolved: %s", roots)
-        return roots
-
-    def _resolve_workspaces(self, skills_paths: list[str]) -> list[str]:
+    def _resolve_workspaces(self, plugin_root: Path | None) -> list[str]:
         """Workspace roots for the harness's ``workspace_only`` file-tool policy.
 
-        The sandbox working directory (the write target) plus the resolved skill
-        roots. ``skills_paths`` drives DISCOVERY only; the file-tool allowlist is
-        ``workspaces`` alone, so a skill root missing here is discovered and then
-        denied on every read of its ``SKILL.md``.
+        The sandbox working directory (the write target), the staged skills dir, and
+        each staged skill's resolved source: the policy canonicalizes a read through
+        the stage's symlink, so without the source a discovered skill is unreadable.
+        ``skills_paths`` drives DISCOVERY only; the file-tool allowlist is
+        ``workspaces`` alone.
         """
-        return [str(self.working_directory), *skills_paths]
+        if plugin_root is None:
+            return [str(self.working_directory)]
+        skills_dir = plugin_root / "skills"
+        sources = sorted({str(skill.resolve()) for skill in skills_dir.iterdir()})
+        return [str(self.working_directory), str(skills_dir), *sources]
 
     def _harness_env(self) -> dict[str, str] | None:
         """Per-agent environment for the localharness subprocess (``LocalAgentConfig.env``).
@@ -350,6 +302,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the Antigravity agent's local harness session.
 
@@ -361,8 +314,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 ones (the shared mock-shadowing contract), delivered through the
                 SDK's per-agent ``env`` seam so concurrent tasks get genuinely
                 separate environments rather than a time-sliced global one.
-            plugin_tools_dir: A skills/plugin source root, resolved together with
-                ``config.plugins`` into the harness's native ``skills_paths``.
+            plugin_tools_dir: Accepted for the ``Agent.start`` signature; unused here.
+            plugin_root: The staged plugin root; its ``skills/`` is the harness's
+                native ``skills_paths`` entry.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
@@ -381,14 +335,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             # None lets the SDK read GEMINI_API_KEY itself, and raise a clear
             # error if truly unset.
             api_key = os.getenv("GEMINI_API_KEY") or None
-            skills_paths = self._resolve_skills_paths(plugin_tools_dir)
+            skills_paths = [str(plugin_root / "skills")] if plugin_root is not None else []
             cfg = LocalAgentConfig(
                 model=self._effective_model(),
                 api_key=api_key,
                 # File tools are confined to ``workspaces`` by the auto-prepended
                 # workspace_only policy — see _resolve_workspaces for why the skill
                 # roots must be in here and not only in ``skills_paths``.
-                workspaces=self._resolve_workspaces(skills_paths),
+                workspaces=self._resolve_workspaces(plugin_root),
                 policies=self._policies(policy),
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: the search-path roots that parent the skill dirs.

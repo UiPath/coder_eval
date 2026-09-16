@@ -123,8 +123,8 @@ skill injection (below) works under the default `pure: true`.
 
 ### `plugins` — skill injection
 
-A `plugins:` entry is a Claude-plugin root, which is how a task ships the skills
-under test:
+A `plugins:` entry is how a task ships the skills under test. It names a plugin
+root or a bare skills directory:
 
 ```yaml
 agent:
@@ -133,28 +133,18 @@ agent:
       path: "$SKILLS_REPO_PATH"
 ```
 
-OpenCode has no plugin knob, but it does load skills from `skills.paths` in its
-config, so each local plugin root is mapped to that:
+coder-eval stages every entry into `<run_dir>/plugin_root` before the agent starts
+(see [Plugin staging](HARNESS_PARITY.md#plugin-staging)). OpenCode has no plugin
+knob, but it loads skills from `skills.paths` in its config, so the adapter appends
+`<plugin_root>/skills` to that list.
 
-1. `<root>/.claude-plugin/plugin.json` is read for its `skills` field (a string or
-   a list, each relative to the root); Claude Code reads the same field, so one
-   `plugins:` line means the same thing on both harnesses.
-2. Absent a manifest, the convention default `<root>/skills` is used.
-3. A path that is already a bare skills directory (`<root>/<name>/SKILL.md`, no
-   `skills/` subdir) is used as-is.
-
-The resulting directories are passed through `OPENCODE_CONFIG_CONTENT`, which the
-CLI merges as a final local-scope config layer. That seam was chosen over writing
+The path is passed through `OPENCODE_CONFIG_CONTENT`, which the CLI merges as a
+final local-scope config layer. That seam was chosen over writing
 `<sandbox>/.opencode/skills/` because it writes nothing into the sandbox that is
 later preserved as a run artifact and inspected by file criteria, and because it
 does not depend on how the CLI resolves a project root from `--dir`. An inherited
 `OPENCODE_CONFIG_CONTENT` is merged into, not clobbered. With no `plugins:` entry
 the variable is left exactly as inherited.
-
-> A plugin root is mapped to its *skills subdirectory*, never to the root itself
-> when one exists. `skills.paths` is scanned **recursively**, and a plugin root can
-> contain a self-referential symlink (`UiPath/skills` has `plugins/uipath -> ..`),
-> which resolves skills through an arbitrary path and silently drops duplicate names.
 
 Verify what the agent will actually see, using the same environment it builds:
 
@@ -162,11 +152,9 @@ Verify what the agent will actually see, using the same environment it builds:
 opencode debug skill --pure   # lists every skill the CLI can load
 ```
 
-Every way this can resolve to nothing — an unset `$SKILLS_REPO_PATH`, a missing
-directory, a root with no `SKILL.md` under it — is logged as a warning at `start()`,
-and the resolved paths are recorded per task under `environment_info`
-(`opencode_skill_paths`). A run that quietly measures the bare model instead of the
-skills under test otherwise looks entirely normal.
+An unset `$SKILLS_REPO_PATH`, a missing directory, or a path with no `SKILL.md`
+fails `coder-eval plan` with a config error. The staged skill names are recorded
+per task as `environment_info.skills_offered`.
 
 ## Permissions
 

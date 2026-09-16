@@ -483,3 +483,58 @@ class TestRegistry:
 
         init_criteria(validate=True)
         assert "skill_triggered" in CriterionRegistry.list_types()
+
+
+class TestSkillsOfferedGate:
+    """The positive control: a criterion that names a skill the staged plugin root does not offer is misuse."""
+
+    @staticmethod
+    def _criterion(skill_name: str, expected_skill: str = "probe-skill") -> SkillTriggeredCriterion:
+        return SkillTriggeredCriterion(description="d", expected_skill=expected_skill, skill_name=skill_name)
+
+    @staticmethod
+    def _turns() -> list[TurnRecord]:
+        return [_turn([_cmd("Skill", {"skill": "probe-skill"})])]
+
+    def _check_all(self, criteria: list[SkillTriggeredCriterion], skills_offered: tuple[str, ...] | None):
+        from coder_eval.evaluation.checker import SuccessChecker
+
+        checker = SuccessChecker(sandbox=None)  # type: ignore[arg-type]
+        return checker.check_all(criteria, turn_records=self._turns(), skills_offered=skills_offered)
+
+    def test_ungated_when_no_plugins_were_staged(self) -> None:
+        (result,) = self._check_all([self._criterion("absent-skill", expected_skill="absent-skill")], None)
+        assert result.error is None
+        assert result.score == 0.0 and isinstance(result, ClassificationCriterionResult)
+        assert result.observed_label == "no"
+
+    def test_offered_target_scores(self) -> None:
+        (result,) = self._check_all([self._criterion("probe-skill")], ("probe-skill",))
+        assert result.error is None
+        assert result.score == 1.0
+
+    def test_offered_distractor_scores(self) -> None:
+        (result,) = self._check_all([self._criterion("probe-skill", expected_skill="")], ("other", "probe-skill"))
+        assert result.error is None
+        assert result.score == 0.0 and isinstance(result, ClassificationCriterionResult)
+        assert result.observed_label == "yes" and result.expected_label == "no"
+
+    def test_target_not_offered_is_misuse(self) -> None:
+        from coder_eval.errors import CheckerMisuseError
+
+        with pytest.raises(
+            CheckerMisuseError, match=r"names skill 'absent-skill' but agent.plugins offered only \['probe-skill'\]"
+        ):
+            self._check_all([self._criterion("absent-skill", expected_skill="absent-skill")], ("probe-skill",))
+
+    async def test_async_path_carries_skills_offered(self) -> None:
+        from coder_eval.errors import CheckerMisuseError
+        from coder_eval.evaluation.checker import SuccessChecker
+
+        checker = SuccessChecker(sandbox=None)  # type: ignore[arg-type]
+        (ok,) = await checker.check_all_async(
+            [self._criterion("probe-skill")], turn_records=self._turns(), skills_offered=("probe-skill",)
+        )
+        assert ok.score == 1.0
+        with pytest.raises(CheckerMisuseError, match="the positive control cannot run"):
+            await checker.check_all_async([self._criterion("absent-skill", expected_skill="absent-skill")])

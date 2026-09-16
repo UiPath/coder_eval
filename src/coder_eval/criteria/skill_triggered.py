@@ -1,9 +1,9 @@
 """Skill-triggered criterion checker: did the agent engage the target skill?
 
-Agent-agnostic. Claude Code engages a skill via an explicit ``Skill`` tool call;
-Codex has no such tool — it auto-discovers skills under ``.agents/skills/`` and
-engages one by reading its ``SKILL.md`` / references off disk via shell. Both
-signals are detected here so the criterion scores identically across agents.
+Agent-agnostic. Every harness receives the staged ``skills/<name>/`` layout. Claude
+Code engages a skill via an explicit ``Skill`` tool call; a harness with no such tool
+engages one by reading its ``SKILL.md`` / references off disk via shell. Both signals
+are detected here so the criterion scores identically across agents.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from coder_eval.criteria._classification_aggregate import overlay_classification_metrics
 from coder_eval.criteria.base import BaseCriterion, LiveVerdict, register_criterion
+from coder_eval.errors import CheckerMisuseError
 from coder_eval.models import (
     ClassificationCriterionResult,
     CriterionAggregate,
@@ -114,6 +115,14 @@ class SkillTriggeredChecker(BaseCriterion[SkillTriggeredCriterion]):
                 score=0.0,
                 details="No turn records available",
                 error="turn_records not provided to checker",
+            )
+
+        offered = context.skills_offered if context is not None else None
+        if offered is not None and criterion.skill_name not in offered:
+            raise CheckerMisuseError(
+                f"skill_triggered names skill {criterion.skill_name!r} but agent.plugins offered only "
+                + f"{sorted(offered)}: the positive control cannot run. Check the plugin path (both "
+                + "`<root>/skills/<name>/SKILL.md` and `<root>/<name>/SKILL.md` are accepted)."
             )
 
         # Any-engagement policy, mirroring ``live_verdict``: scored on whether this

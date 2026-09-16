@@ -29,11 +29,11 @@ from coder_eval.agents import opencode_agent as agent_module
 from coder_eval.agents.opencode_agent import (
     OpenCodeAgent,
     _OpenCodeTurnState,
-    _plugin_skill_dirs,
     _unwrap,
 )
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AssistantMessage, CommandTelemetry, OpenCodeAgentConfig, PermissionMode, TokenUsage
+from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -85,8 +85,10 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
-async def _run(agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", **kwargs: Any):
-    await agent.start(str(tmp_path))
+async def _run(
+    agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", *, plugin_root: Path | None = None, **kwargs: Any
+):
+    await agent.start(str(tmp_path), plugin_root=plugin_root)
     return await agent.communicate(prompt, **kwargs)
 
 
@@ -650,20 +652,12 @@ class TestSandboxEnvironment:
         assert captured["kwargs"]["env"]["OPENROUTER_API_KEY"] == "sk-test"
 
 
-def _skill_repo(root, names=("uipath-admin",), *, manifest: str | None = None, nested: bool = True):
-    """Build a plugin root on disk; returns it.
-
-    ``nested`` mirrors the Claude-plugin layout (``<root>/skills/<name>/SKILL.md``);
-    False makes ``root`` itself a bare skills directory.
-    """
-    base = root / "skills" if nested else root
-    for name in names:
-        (base / name).mkdir(parents=True, exist_ok=True)
-        (base / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
-    if manifest is not None:
-        (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
-        (root / ".claude-plugin" / "plugin.json").write_text(manifest, encoding="utf-8")
-    return root
+def _staged_root(tmp_path: Path) -> Path:
+    """A plugin root staged by ``stage_plugins`` over one authored skill."""
+    authored = tmp_path / "authored" / "skills" / "uipath-admin"
+    authored.mkdir(parents=True)
+    (authored / "SKILL.md").write_text("---\nname: uipath-admin\ndescription: d\n---\n", encoding="utf-8")
+    return stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
 
 
 def _injected_skill_paths(captured) -> list[str]:
@@ -672,144 +666,33 @@ def _injected_skill_paths(captured) -> list[str]:
 
 
 class TestSkillInjection:
-    """`plugins:` is how a task ships the skills under test.
+    """The staged plugin root reaches OpenCode as a ``skills.paths`` entry in the injected config."""
 
-    OpenCode has no plugin knob, so before this mapping existed every skill-injection
-    run silently measured the bare model instead — a run that looks entirely normal.
-    """
-
-    async def test_manifest_declared_skills_dir_is_used(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug", manifest='{"name": "uipath", "skills": "./skills/"}')
+    async def test_staged_root_skills_dir_is_injected(self, patch_exec, tmp_path):
+        root = _staged_root(tmp_path)
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        agent = _agent()
+        await _run(agent, tmp_path / "sandbox", plugin_root=root)
         assert _injected_skill_paths(captured) == [str(root / "skills")]
+        assert "opencode_skill_paths" not in agent.get_environment_info()
 
-    async def test_default_layout_without_a_manifest(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug")
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")]
-
-    async def test_bare_skills_directory_is_used_as_is(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "bare", nested=False)
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root)]
-
-    async def test_plugin_root_is_never_added_alongside_its_skills_dir(self, patch_exec, tmp_path):
-        """`skills.paths` is scanned RECURSIVELY. A plugin root can contain a
-        self-referential symlink (UiPath/skills has `plugins/uipath -> ..`), which
-        resolves skills through an arbitrary path and drops duplicate names."""
-        root = _skill_repo(tmp_path / "plug")
-        (root / "plugins").mkdir()
-        (root / "plugins" / "self").symlink_to(root, target_is_directory=True)
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")]
-
-    async def test_env_untouched_when_no_plugins_declared(self, patch_exec, tmp_path):
-        """A run without `plugins:` must behave byte-for-byte as before."""
+    async def test_env_untouched_without_a_plugin_root(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert "OPENCODE_CONFIG_CONTENT" not in captured["kwargs"]["env"]
 
     async def test_inherited_config_content_is_merged_not_clobbered(self, patch_exec, tmp_path, monkeypatch):
-        root = _skill_repo(tmp_path / "plug")
+        root = _staged_root(tmp_path)
         monkeypatch.setenv(
             "OPENCODE_CONFIG_CONTENT",
             json.dumps({"username": "host", "skills": {"paths": ["/host/skills"]}}),
         )
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        await _run(_agent(), tmp_path / "sandbox", plugin_root=root)
 
         config = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["username"] == "host"
         assert config["skills"]["paths"] == ["/host/skills", str(root / "skills")]
-
-    async def test_unresolved_path_warns_and_injects_nothing(self, patch_exec, tmp_path, caplog):
-        """An unset `$SKILLS_REPO_PATH` is the exact shape of the original defect."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(plugins=[{"type": "local", "path": "$DEFINITELY_UNSET_REPO/skills"}])
-        with caplog.at_level("WARNING"):
-            await agent.start(str(tmp_path))
-        assert agent._skill_dirs == []
-        assert "env var likely unset" in caplog.text
-        assert "0 skill path(s) resolved" in caplog.text
-
-    async def test_resolved_paths_are_recorded_for_audit(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug")
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
-        await agent.start(str(tmp_path / "sandbox"))
-        assert agent.get_environment_info()["opencode_skill_paths"] == [str(root / "skills")]
-
-    async def test_list_form_manifest_declares_several_dirs(self, patch_exec, tmp_path):
-        """The docstring promises "a string or a list of strings"; only the string
-        form was exercised, so the list form could have been broken on arrival."""
-        root = tmp_path / "plug"
-        for sub in ("skills", "extra"):
-            (root / sub / "s1").mkdir(parents=True)
-            (root / sub / "s1" / "SKILL.md").write_text("---\nname: s1\n---\n", encoding="utf-8")
-        (root / ".claude-plugin").mkdir(parents=True)
-        (root / ".claude-plugin" / "plugin.json").write_text(
-            json.dumps({"name": "p", "skills": ["./skills", "./extra"]}), encoding="utf-8"
-        )
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills"), str(root / "extra")]
-
-    async def test_list_form_manifest_ignores_non_string_entries(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug", manifest=json.dumps({"skills": [123, "./skills", None]}))
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")]
-
-    @pytest.mark.parametrize(
-        ("manifest", "case"),
-        [
-            ("{ not json at all", "unparseable"),
-            ('["a", "list"]', "not a JSON object"),
-            ('{"name": "p"}', "no skills field"),
-            ('{"name": "p", "skills": 7}', "skills is not a string or list"),
-        ],
-    )
-    async def test_unusable_manifest_falls_back_to_the_convention(self, patch_exec, tmp_path, manifest, case):
-        """A manifest we cannot read must not lose the skills — `<root>/skills` is
-        the convention default, and silently injecting nothing is the exact failure
-        this whole mapping exists to close."""
-        root = _skill_repo(tmp_path / "plug", manifest=manifest)
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")], case
-
-    def test_a_non_local_plugin_entry_is_skipped_with_a_warning(self, tmp_path, caplog):
-        """Only `type: local` maps to a directory; anything else has no path to
-        hand OpenCode and must say so rather than vanish.
-
-        Driven through `_plugin_skill_dirs` directly, not the agent: this branch is
-        defensive only — `LocalPluginConfig` pins `type: Literal["local"]`, so
-        pydantic rejects any other value before the agent ever sees it.
-        """
-        root = _skill_repo(tmp_path / "plug")
-        with caplog.at_level("WARNING"):
-            resolved = _plugin_skill_dirs([{"type": "git", "path": str(root)}, {"type": "local", "path": str(root)}])
-
-        assert "ignoring non-local plugin entry" in caplog.text
-        assert resolved == [str(root / "skills")]
-
-    async def test_a_root_with_no_skill_md_warns_but_still_injects(self, patch_exec, tmp_path, caplog):
-        """A directory holding no `<name>/SKILL.md` is suspicious, not fatal — the
-        CLI scans `skills.paths` recursively, so the path is still injected and the
-        warning tells the author to check that the plugin path is a skills root."""
-        root = tmp_path / "plug"
-        (root / "skills").mkdir(parents=True)
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
-        with caplog.at_level("WARNING"):
-            await agent.start(str(tmp_path / "sandbox"))
-
-        assert "no <name>/SKILL.md directly under" in caplog.text
-        assert agent._skill_dirs == [str(root / "skills")]
 
     @pytest.mark.parametrize("inherited", ["{ not json", '["a", "list"]', '"a string"'])
     async def test_unusable_inherited_config_is_replaced_with_a_warning(
@@ -817,11 +700,11 @@ class TestSkillInjection:
     ):
         """An inherited value we cannot merge into must not cost us the skills;
         replacing it is announced so the host knows its config was dropped."""
-        root = _skill_repo(tmp_path / "plug")
+        root = _staged_root(tmp_path)
         monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", inherited)
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         with caplog.at_level("WARNING"):
-            await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+            await _run(_agent(), tmp_path / "sandbox", plugin_root=root)
 
         assert _injected_skill_paths(captured) == [str(root / "skills")]
         assert "replacing it with the injected config" in caplog.text
@@ -939,7 +822,7 @@ class TestSystemPromptInstructions:
         assert "OPENCODE_CONFIG_CONTENT" not in captured["kwargs"]["env"]
 
     async def test_inherited_config_merges_all_three_keys(self, patch_exec, tmp_path, monkeypatch):
-        root = _skill_repo(tmp_path / "plug")
+        root = _staged_root(tmp_path)
         monkeypatch.setenv(
             "OPENCODE_CONFIG_CONTENT",
             json.dumps(
@@ -951,10 +834,8 @@ class TestSystemPromptInstructions:
             ),
         )
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(
-            plugins=[{"type": "local", "path": str(root)}], system_prompt="be terse", disallowed_tools=["Bash"]
-        )
-        await _run(agent, tmp_path / "sandbox")
+        agent = _agent(system_prompt="be terse", disallowed_tools=["Bash"])
+        await _run(agent, tmp_path / "sandbox", plugin_root=root)
         await agent.stop()
 
         config = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])

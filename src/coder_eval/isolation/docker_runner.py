@@ -42,6 +42,7 @@ from coder_eval.models import (
     ResourceLimits,
 )
 from coder_eval.orchestration.evaluation import resolve_host_reference_dir
+from coder_eval.orchestration.plugin_staging import PluginStagingError, resolve_plugin_path, scan_plugin_skills
 from coder_eval.path_utils import (
     DOCKER_LOG_FILENAME,
     PRIOR_RESULT_FILENAME,
@@ -706,6 +707,13 @@ class DockerRunner:
                 # Only the fields a layer wrote: the reloaded task must not claim a
                 # model default (e.g. permission_mode) the harness contract rejects.
                 payload["agent"] = self.rt.task.agent.model_dump(mode="json", exclude_unset=True)
+                # The absolute host path the plugin is auto-mounted at: the container
+                # cwd would otherwise resolve a relative path somewhere else. Kept as
+                # authored when it does not resolve here: a detached grade on another
+                # host never uses the plugin, and a run fails its own resolution check.
+                for plugin in payload["agent"].get("plugins") or []:
+                    with contextlib.suppress(PluginStagingError):
+                        plugin["path"] = str(resolve_plugin_path(plugin["path"]))
             return yaml.safe_dump(payload, sort_keys=False)
 
         task_yaml_text = await asyncio.to_thread(_dump_task_yaml)
@@ -1310,6 +1318,23 @@ class DockerRunner:
         # every turn, which a `:ro` mount rejects with EROFS.
         return ["-v", f"{self._reference_mount_src}:{CONTAINER_REFERENCE_DIR}"]
 
+    def _plugin_mount_paths(self) -> list[str]:
+        """Each plugin path as authored, plus each skill source outside every plugin root.
+
+        Staging links a skill to its RESOLVED source, which can sit outside the root
+        (a symlinked skill, a manifest ``skills: ../x``), so that source is mounted too.
+        """
+        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
+        paths = [plugin["path"] for plugin in plugins]
+        roots: list[Path] = []
+        for raw in paths:
+            with contextlib.suppress(PluginStagingError):
+                roots.append(resolve_plugin_path(raw))
+        with contextlib.suppress(PluginStagingError):
+            skill_dirs = scan_plugin_skills(plugins).values() if plugins else ()
+            paths += [str(d) for d in skill_dirs if not any(d.is_relative_to(root) for root in roots)]
+        return paths
+
     def _build_argv(
         self, input_dir: Path, output_dir: Path, *, container_name: str, image: str | None = None
     ) -> list[str]:
@@ -1448,9 +1473,8 @@ class DockerRunner:
             mounted.add(target)
             argv.extend(["-v", f"{target}:{target}:ro"])
 
-        plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
-        for plugin in plugins:
-            _auto_mount(plugin.get("path") if isinstance(plugin, dict) else None)
+        for plugin_path in self._plugin_mount_paths():
+            _auto_mount(plugin_path)
 
         from coder_eval.models import TemplateDirSource
 

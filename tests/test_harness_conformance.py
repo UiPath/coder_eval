@@ -36,6 +36,7 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.orchestration.harness_contract import HarnessContractError, validate_harness_contract
+from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.streaming.events import AgentEndEvent, StopReason, ToolEndEvent, end_status_for
 from tests.test_antigravity_agent import _install_fake_sdk
@@ -69,14 +70,11 @@ def _task(kind: AgentKind, **agent: Any) -> TaskDefinition:
 
 
 def _plugin_root(tmp_path: Path) -> Path:
+    """A root staged by ``stage_plugins`` over one authored ``probe-skill``."""
     skill = tmp_path / "plugin" / "skills" / "probe-skill"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: probe-skill\ndescription: d\n---\n", encoding="utf-8")
-    return tmp_path / "plugin"
-
-
-def _plugins(tmp_path: Path) -> list[dict[str, str]]:
-    return [{"type": "local", "path": str(_plugin_root(tmp_path))}]
+    return stage_plugins([{"type": "local", "path": str(tmp_path / "plugin")}], tmp_path / "plugin_root").root
 
 
 _GATED_VALUES: dict[str, Any] = {
@@ -127,7 +125,7 @@ def test_unknown_tool_name_is_rejected(kind: AgentKind) -> None:
 # --- probes: the value reaches the native call --------------------------------------
 
 
-async def _claude(tmp_path: Path, **agent: Any) -> tuple[Any, str]:
+async def _claude(tmp_path: Path, plugin_root: Path | None = None, **agent: Any) -> tuple[Any, str]:
     captured: dict[str, Any] = {}
 
     async def fake_query(prompt: str, options: Any):
@@ -139,7 +137,7 @@ async def _claude(tmp_path: Path, **agent: Any) -> tuple[Any, str]:
         )()
 
     claude = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, **agent))
-    await claude.start(str(tmp_path))
+    await claude.start(str(tmp_path), plugin_root=plugin_root)
     with patch("coder_eval.agents.claude_code_agent.query", fake_query):
         await claude.communicate(USER_TURN)
     return captured["options"], captured["prompt"]
@@ -153,8 +151,13 @@ async def _probe_claude_system_prompt(tmp_path: Path, _mp: pytest.MonkeyPatch) -
 
 async def _probe_claude_plugins(tmp_path: Path, _mp: pytest.MonkeyPatch) -> None:
     root = _plugin_root(tmp_path)
-    options, _ = await _claude(tmp_path, plugins=[{"type": "local", "path": str(root)}])
-    assert [p["path"] for p in options.plugins] == [str(root)]
+    options, _ = await _claude(tmp_path, plugin_root=root)
+    assert options.plugins == [{"type": "local", "path": str(root)}]
+
+
+async def test_claude_loads_no_plugin_without_a_plugin_root(tmp_path: Path) -> None:
+    options, _ = await _claude(tmp_path)
+    assert options.plugins == []
 
 
 def _claude_mode(mode: PermissionMode) -> Probe:
@@ -193,15 +196,22 @@ async def _probe_codex_system_prompt(_tmp: Path, _mp: pytest.MonkeyPatch) -> Non
     assert turn_inputs == [USER_TURN]
 
 
-async def _probe_codex_plugins(tmp_path: Path, _mp: pytest.MonkeyPatch) -> None:
-    codex = CodexAgent(parse_agent_config(type=AgentKind.CODEX, plugins=_plugins(tmp_path)))
-    codex.working_directory = tmp_path / "work"
-    codex.working_directory.mkdir()
-    codex._setup_skills(None)
-    assert (codex.working_directory / ".agents" / "skills" / "probe-skill" / "SKILL.md").exists()
+async def _probe_codex_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import openai_codex
+
+    root = _plugin_root(tmp_path)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+    work = tmp_path / "work"
+    work.mkdir()
+    await CodexAgent(parse_agent_config(type=AgentKind.CODEX)).start(str(work), plugin_root=root)
+    linked = work / ".agents" / "skills" / "probe-skill"
+    assert linked.resolve() == (root / "skills" / "probe-skill").resolve()
 
 
-async def _antigravity_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **agent: Any) -> Any:
+async def _antigravity_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plugin_root: Path | None = None, **agent: Any
+) -> Any:
     configs: list[Any] = []
 
     class _FakeSdkAgent:
@@ -215,7 +225,9 @@ async def _antigravity_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *
             return False
 
     _install_fake_sdk(monkeypatch, _FakeSdkAgent)
-    await AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, **agent)).start(str(tmp_path))
+    await AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, **agent)).start(
+        str(tmp_path), plugin_root=plugin_root
+    )
     return configs[0]
 
 
@@ -245,8 +257,8 @@ async def _probe_antigravity_system_prompt(tmp_path: Path, monkeypatch: pytest.M
 
 async def _probe_antigravity_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _plugin_root(tmp_path)
-    cfg = await _antigravity_config(tmp_path / "work", monkeypatch, plugins=[{"type": "local", "path": str(root)}])
-    assert str(root / "skills") in cfg.skills_paths
+    cfg = await _antigravity_config(tmp_path / "work", monkeypatch, plugin_root=root)
+    assert cfg.skills_paths == [str(root / "skills")]
 
 
 async def _probe_antigravity_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,16 +281,25 @@ async def _probe_antigravity_disallowed(tmp_path: Path, monkeypatch: pytest.Monk
     assert _policy_pairs(cfg) == [("allow_all", None), ("deny", "run_command")]
 
 
-async def _cli_agent(cls: type, kind: AgentKind, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **agent: Any):
+async def _cli_agent(
+    cls: type,
+    kind: AgentKind,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_root: Path | None = None,
+    **agent: Any,
+):
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/local/bin/{name}")
     cli = cls(parse_agent_config(type=kind, model="provider/model", **agent), task_id="t1")
-    await cli.start(str(tmp_path / "work"))
+    await cli.start(str(tmp_path / "work"), plugin_root=plugin_root)
     return cli
 
 
-async def _opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **agent: Any) -> tuple[dict[str, Any], list[str]]:
+async def _opencode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plugin_root: Path | None = None, **agent: Any
+) -> tuple[dict[str, Any], list[str]]:
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
-    opencode = await _cli_agent(OpenCodeAgent, AgentKind.OPENCODE, tmp_path, monkeypatch, **agent)
+    opencode = await _cli_agent(OpenCodeAgent, AgentKind.OPENCODE, tmp_path, monkeypatch, plugin_root, **agent)
     try:
         raw = opencode._build_env().get("OPENCODE_CONFIG_CONTENT")
         config = json.loads(raw) if raw else {}
@@ -296,7 +317,7 @@ async def _probe_opencode_system_prompt(tmp_path: Path, monkeypatch: pytest.Monk
 
 async def _probe_opencode_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _plugin_root(tmp_path)
-    config, _ = await _opencode(tmp_path, monkeypatch, plugins=[{"type": "local", "path": str(root)}])
+    config, _ = await _opencode(tmp_path, monkeypatch, plugin_root=root)
     assert config["skills"]["paths"] == [str(root / "skills")]
 
 
@@ -322,8 +343,10 @@ async def _probe_opencode_disallowed(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert config["permission"] == {"bash": "deny"}
 
 
-async def _pi_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **agent: Any) -> list[str]:
-    pi = await _cli_agent(PiAgent, AgentKind.PI, tmp_path, monkeypatch, **agent)
+async def _pi_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plugin_root: Path | None = None, **agent: Any
+) -> list[str]:
+    pi = await _cli_agent(PiAgent, AgentKind.PI, tmp_path, monkeypatch, plugin_root, **agent)
     try:
         return pi._build_argv(USER_TURN)
     finally:
@@ -342,7 +365,7 @@ async def _probe_pi_system_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 async def _probe_pi_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _plugin_root(tmp_path)
-    argv = await _pi_argv(tmp_path, monkeypatch, plugins=[{"type": "local", "path": str(root)}])
+    argv = await _pi_argv(tmp_path, monkeypatch, plugin_root=root)
     assert _flag(argv, "--skill") == str(root / "skills")
 
 

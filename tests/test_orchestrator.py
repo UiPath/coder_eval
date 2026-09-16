@@ -755,6 +755,7 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
             *,
             env_path_prepend: list[str] | None = None,
             plugin_tools_dir: str | None = None,
+            plugin_root: Path | None = None,
         ) -> None:
             self.working_directory = working_directory
 
@@ -826,7 +827,7 @@ async def test_direct_write_warns_on_non_empty_target(tmp_path, monkeypatch, cap
     from coder_eval.sandbox import Sandbox
 
     class DummyAgent:
-        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None):
+        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root=None):
             self.working_directory = working_directory
 
         def get_sdk_options(self):
@@ -898,7 +899,7 @@ async def test_workspace_dir_staleness_warning_keys_on_in_container_not_field(
     from coder_eval.models import IN_CONTAINER_ENV, ApiBackend, DirectRoute, EvaluationResult
 
     class DummyAgent:
-        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None):
+        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root=None):
             self.working_directory = working_directory
 
         def get_sdk_options(self):
@@ -2646,3 +2647,187 @@ async def test_cleanup_workspace_dir_none_uses_move_on_write(tmp_path):
     expected = run_dir / "artifacts" / task.task_id
     assert orchestrator.result.sandbox_path == str(expected)
     assert (expected / "out.txt").read_text(encoding="utf-8") == "x"
+
+
+# --------------------------------------------------------------------------
+# Plugin staging and skills_offered
+# --------------------------------------------------------------------------
+
+
+def _skill_plugin(tmp_path: Path, name: str = "probe-skill") -> Path:
+    root = tmp_path / "plugin"
+    (root / "skills" / name).mkdir(parents=True)
+    (root / "skills" / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: probe\n---\nbody\n")
+    return root
+
+
+def _skill_task(plugins: list[dict[str, str]], skill_name: str = "probe-skill") -> TaskDefinition:
+    from coder_eval.models import SkillTriggeredCriterion, parse_agent_config
+
+    return TaskDefinition(
+        task_id="skill-staging",
+        description="plugin staging",
+        initial_prompt="Use the skill.",
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, plugins=plugins),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[
+            SkillTriggeredCriterion(description="engaged", skill_name=skill_name, expected_skill=skill_name)
+        ],
+    )
+
+
+class _PluginRootAgent(MockAgent):
+    """MockAgent that records the ``plugin_root`` it was started with and engages ``probe-skill``."""
+
+    def __init__(self, task: TaskDefinition) -> None:
+        super().__init__(task, scenario="success")
+        self.start_kwargs: dict[str, object] = {}
+
+    async def start(self, working_directory, **kwargs) -> None:
+        self.start_kwargs = kwargs
+        await super().start(working_directory, **kwargs)
+
+    async def communicate(self, user_input: str, **kwargs):
+        from datetime import datetime
+
+        from coder_eval.models import CommandTelemetry, TurnRecord
+
+        self._iteration += 1
+        skill = CommandTelemetry(
+            tool_name="Skill", tool_id="s1", timestamp=datetime.now(), parameters={"skill": "probe-skill"}
+        )
+        return TurnRecord(iteration=self._iteration, user_input=user_input, agent_output="done", commands=[skill])
+
+
+def _patch_routes(monkeypatch) -> None:
+    from coder_eval.models import ApiBackend
+
+    monkeypatch.setattr(orchestrator_module.settings, "api_backend", ApiBackend.DIRECT)
+    monkeypatch.setattr(type(orchestrator_module.settings), "validate_api_keys", lambda _self, _agent_type: None)
+    monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _settings: DirectRoute(judge_transport=None))
+
+
+def _install_plugin_root_agent(monkeypatch) -> list[_PluginRootAgent]:
+    agents: list[_PluginRootAgent] = []
+
+    async def _create(self):
+        agent = _PluginRootAgent(self.task)
+        agents.append(agent)
+        return agent
+
+    monkeypatch.setattr(Orchestrator, "_create_agent", _create)
+    return agents
+
+
+def _spy_check_all_async(monkeypatch) -> list[object]:
+    from coder_eval.evaluation.checker import SuccessChecker
+
+    seen: list[object] = []
+    original = SuccessChecker.check_all_async
+
+    async def _spy(self, criteria, **kwargs):
+        seen.append(kwargs.get("skills_offered"))
+        return await original(self, criteria, **kwargs)
+
+    monkeypatch.setattr(SuccessChecker, "check_all_async", _spy)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_setup_stages_plugins_and_records_skills_offered(tmp_path, monkeypatch):
+    """Staging writes the canonical root, records the offer, and hands the root to the agent and the checker."""
+    from coder_eval.models import FinalStatus
+    from coder_eval.path_utils import PLUGIN_ROOT_DIRNAME
+
+    _patch_routes(monkeypatch)
+    agents = _install_plugin_root_agent(monkeypatch)
+    seen = _spy_check_all_async(monkeypatch)
+    plugin = _skill_plugin(tmp_path)
+    run_dir = tmp_path / "run" / "skill-staging"
+
+    orchestrator = Orchestrator(
+        task=_skill_task([{"type": "local", "path": str(plugin)}]), run_dir=run_dir, variant_id="v"
+    )
+    result = await orchestrator.run()
+
+    plugin_root = run_dir / PLUGIN_ROOT_DIRNAME
+    assert result.environment_info["skills_offered"] == ["probe-skill"]
+    assert (plugin_root / "skills" / "probe-skill" / "SKILL.md").is_file()
+    (agent,) = agents
+    assert agent.start_kwargs["plugin_root"] == plugin_root
+    assert seen and all(offered == ("probe-skill",) for offered in seen)
+    assert result.final_status == FinalStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_criterion_naming_an_unoffered_skill_finishes_error(tmp_path, monkeypatch):
+    from coder_eval.models import FinalStatus
+
+    _patch_routes(monkeypatch)
+    _install_plugin_root_agent(monkeypatch)
+    plugin = _skill_plugin(tmp_path)
+    task = _skill_task([{"type": "local", "path": str(plugin)}], skill_name="absent-skill")
+
+    result = await Orchestrator(task=task, run_dir=tmp_path / "run" / "misuse", variant_id="v").run()
+
+    assert result.final_status == FinalStatus.ERROR
+    assert "absent-skill" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_empty_plugins_stages_nothing(tmp_path, monkeypatch):
+    from coder_eval.path_utils import PLUGIN_ROOT_DIRNAME
+
+    _patch_routes(monkeypatch)
+    agents = _install_plugin_root_agent(monkeypatch)
+    seen = _spy_check_all_async(monkeypatch)
+    run_dir = tmp_path / "run" / "no-plugins"
+
+    result = await Orchestrator(task=_skill_task([]), run_dir=run_dir, variant_id="v").run()
+
+    assert "skills_offered" not in result.environment_info
+    assert not (run_dir / PLUGIN_ROOT_DIRNAME).exists()
+    (agent,) = agents
+    assert agent.start_kwargs["plugin_root"] is None
+    assert seen and all(offered is None for offered in seen)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_only_reads_skills_offered_from_the_prior_result(tmp_path, monkeypatch):
+    """A re-grade stages nothing: the gate uses the offer the graded run recorded."""
+    from datetime import datetime
+
+    from coder_eval.models import CommandTelemetry, EvaluationResult, FinalStatus, TurnRecord
+
+    _patch_routes(monkeypatch)
+    seen = _spy_check_all_async(monkeypatch)
+    task = _skill_task([{"type": "local", "path": str(tmp_path / "gone")}], skill_name="absent-skill")
+    skill = CommandTelemetry(tool_name="Skill", tool_id="s1", timestamp=datetime.now(), parameters={"skill": "x"})
+    prior = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="v",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime(2026, 1, 1),
+        final_status=FinalStatus.NOT_GRADED,
+        iteration_count=1,
+        iterations=[TurnRecord(iteration=1, user_input="p", agent_output="o", commands=[skill])],
+        environment_info={"skills_offered": ["probe-skill"]},
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sandbox = Sandbox(SandboxConfig(driver="tempdir"), task_id=task.task_id)
+    sandbox.adopt(workspace)
+
+    result = await Orchestrator(
+        task=task,
+        run_dir=tmp_path / "run" / "regrade",
+        preservation_mode=PreservationMode.NONE,
+        sandbox=sandbox,
+        variant_id="v",
+        prior_result=prior,
+    ).run()
+
+    assert seen and all(offered == ("probe-skill",) for offered in seen)
+    assert result.final_status == FinalStatus.ERROR
+    assert "absent-skill" in (result.error_message or "")

@@ -40,13 +40,11 @@ one thing only — a run from before the marker existed.
 
 
 class LocalPluginConfig(TypedDict):
-    """Vendor-neutral local plugin/skills source: a directory the agent scans for skills.
+    """Vendor-neutral local skills source: a plugin root or a bare skills directory.
 
-    Mirrors the runtime shape of claude_agent_sdk.SdkPluginConfig but carries no SDK
-    dependency, so the agnostic BaseAgentConfig can declare ``plugins`` without leaking a
-    Claude-Code type onto Codex / NoOp configs. Entries remain plain dicts at runtime
-    (TypedDict), so all consumers — Codex skill discovery, docker_runner auto-mount,
-    utils.process_plugins, and the Claude SDK pass-through — are unchanged.
+    Staged by ``orchestration.plugin_staging.stage_plugins`` into one canonical root
+    before the agent starts. A plain dict at runtime (TypedDict), so the agnostic
+    ``BaseAgentConfig`` declares ``plugins`` without an SDK type.
     """
 
     type: Literal["local"]

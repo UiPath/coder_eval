@@ -252,6 +252,74 @@ class TestCodexEnvironmentConfiguration:
 
         assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
 
+    @pytest.mark.asyncio
+    async def test_start_links_each_staged_skill_into_agents_skills(self, monkeypatch, tmp_path):
+        """start(plugin_root=...) links ``<root>/skills/<name>`` into ``<cwd>/.agents/skills/<name>``."""
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        from coder_eval.orchestration.plugin_staging import stage_plugins
+
+        authored = tmp_path / "authored" / "skills" / "probe-skill"
+        authored.mkdir(parents=True)
+        (authored / "SKILL.md").write_text("---\nname: probe-skill\ndescription: d\n---\n", encoding="utf-8")
+        root = stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+        work = tmp_path / "work"
+        work.mkdir()
+
+        await CodexAgent(parse_agent_config(type=AgentKind.CODEX)).start(str(work), plugin_root=root)
+
+        linked = work / ".agents" / "skills" / "probe-skill"
+        assert linked.resolve() == (root / "skills" / "probe-skill").resolve()
+        assert (linked / "SKILL.md").is_file()
+
+    async def test_start_replaces_a_dangling_link_left_by_an_earlier_run(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        from coder_eval.orchestration.plugin_staging import stage_plugins
+
+        authored = tmp_path / "authored" / "skills" / "probe-skill"
+        authored.mkdir(parents=True)
+        (authored / "SKILL.md").write_text("---\nname: probe-skill\ndescription: d\n---\n", encoding="utf-8")
+        root = stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+        work = tmp_path / "work"
+        (work / ".agents" / "skills").mkdir(parents=True)
+        (work / ".agents" / "skills" / "probe-skill").symlink_to(tmp_path / "gone", target_is_directory=True)
+
+        await CodexAgent(parse_agent_config(type=AgentKind.CODEX)).start(str(work), plugin_root=root)
+
+        assert (work / ".agents" / "skills" / "probe-skill" / "SKILL.md").is_file()
+
+    async def test_a_skill_that_cannot_be_linked_fails_start(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        from coder_eval.orchestration import plugin_staging
+
+        root = tmp_path / "plugin_root"
+        (root / "skills" / "probe-skill").mkdir(parents=True)
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+
+        def _refuse(source, target):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr("coder_eval.agents.codex_agent.link_or_copy", _refuse)
+        assert plugin_staging.link_or_copy is not _refuse
+        work = tmp_path / "work"
+        work.mkdir()
+
+        with pytest.raises(RuntimeError, match="read-only file system"):
+            await CodexAgent(parse_agent_config(type=AgentKind.CODEX)).start(str(work), plugin_root=root)
+
 
 class TestCustomProviderRouting:
     """Test that CODEX_BASE_URL injects a custom model provider."""

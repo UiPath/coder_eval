@@ -92,6 +92,8 @@ class SuccessChecker:
         self._reference_dir: Path | None = None
         # Cached turn records - set by check()/check_all() when provided
         self._turn_records: TurnRecords | None = None
+        # The skills the run's staged plugin root offered, set by check_all()/check_all_async().
+        self._skills_offered: tuple[str, ...] | None = None
         self.route = route
         # Accumulated HERE, not at the four orchestrator call sites, so a fifth
         # cannot be added without it. `None` until something is checked, so an
@@ -150,6 +152,7 @@ class SuccessChecker:
         *,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
+        skills_offered: tuple[str, ...] | None = None,
     ) -> CriteriaResults:
         """Check all success criteria.
 
@@ -160,11 +163,15 @@ class SuccessChecker:
                 Consumed by ``reference_comparison`` (which scores 0.0 without
                 it), ``llm_judge`` and ``agent_judge``; other criteria accept the
                 uniform signature and ignore it.
+            skills_offered: The skill names the staged plugin root offered, or
+                None when the task sets no plugins. Consumed by ``skill_triggered``.
 
         Returns:
             List of criterion results with scores
         """
         records, ref_dir = self._resolve_refs(turn_records, reference_dir)
+        if skills_offered is not None:
+            self._skills_offered = skills_offered
         return self._check_all_sync(criteria, records, ref_dir)
 
     async def check_all_async(
@@ -173,6 +180,7 @@ class SuccessChecker:
         *,
         turn_records: TurnRecords | None = None,
         reference_dir: Path | None = None,
+        skills_offered: tuple[str, ...] | None = None,
     ) -> CriteriaResults:
         """Async twin of ``check_all`` — the orchestrator's entry point.
 
@@ -188,11 +196,15 @@ class SuccessChecker:
             reference_dir: Optional resolved path to a reference directory.
                 Consumed by ``reference_comparison`` (which scores 0.0 without it),
                 ``llm_judge`` and ``agent_judge``; the rest ignore it.
+            skills_offered: The skill names the staged plugin root offered, or
+                None when the task sets no plugins. Consumed by ``skill_triggered``.
 
         Returns:
             List of criterion results with scores, in the same order as ``criteria``.
         """
         records, ref_dir = self._resolve_refs(turn_records, reference_dir)
+        if skills_offered is not None:
+            self._skills_offered = skills_offered
 
         # Monotonic: a wall-clock delta would move if the clock stepped mid-grade,
         # and an `agent_judge` criterion can run for minutes.
@@ -338,7 +350,7 @@ class SuccessChecker:
         # V3: Broader exception handling - catches checker constructor failures too
         try:
             checker = self._get_checker_instance(criterion.type)
-            context = CheckContext(route=self.route, reference_dir=reference_dir)
+            context = CheckContext(route=self.route, reference_dir=reference_dir, skills_offered=self._skills_offered)
             result = checker.check(
                 criterion,
                 self.sandbox,
@@ -368,7 +380,7 @@ class SuccessChecker:
         """
         try:
             checker = self._get_checker_instance(criterion.type)
-            context = CheckContext(route=self.route, reference_dir=reference_dir)
+            context = CheckContext(route=self.route, reference_dir=reference_dir, skills_offered=self._skills_offered)
             result = await checker.check_async(
                 criterion,
                 self.sandbox,

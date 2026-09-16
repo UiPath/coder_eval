@@ -35,8 +35,7 @@ variants:
   - variant_id: with-plugin
     agent:
       plugins:
-        # $PLUGIN_PATH must be a PLUGIN ROOT (a directory holding skills/). The default
-        # agent here is claude-code, which loads nothing from a bare skills directory —
-        # so a wrong depth makes this arm identical to `without-plugin` with no error.
+        # $PLUGIN_PATH names a plugin root or a bare skills directory. Both are staged;
+        # a path with no skill fails `plan`.
         - type: "local"
           path: "$PLUGIN_PATH"

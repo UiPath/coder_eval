@@ -101,12 +101,7 @@ rejected at resolution: Codex honors none of them (see
 
 ### Skills (SKILL.md)
 
-CodexAgent supports SKILL.md files following the [Agent Skills open standard](https://agentskills.io/specification). Skills are discovered from:
-
-1. **config.plugins** - Local plugins with `type: local` and `path` pointing to a skills directory
-2. **plugin_tools_dir** parameter - Runtime plugin directory passed to `start()`
-
-Skills are symlinked (or copied) to `.agents/skills/` where the Codex CLI auto-discovers them. Environment variables in plugin paths (`$VAR`, `${VAR}`) are expanded at runtime.
+CodexAgent supports SKILL.md files following the [Agent Skills open standard](https://agentskills.io/specification). Each `agent.plugins` entry with `type: local` names a plugin root or a bare skills directory. Environment variables in the path (`$VAR`, `${VAR}`) are expanded. coder-eval stages every entry into `<run_dir>/plugin_root` (see [Plugin staging](HARNESS_PARITY.md#plugin-staging)), and the adapter symlinks (or copies) each `<plugin_root>/skills/<name>` into `.agents/skills/`, where the Codex CLI auto-discovers it.
 
 Example with environment variable:
 ```yaml
@@ -181,13 +176,7 @@ Codex honors none of `permission_mode`, `allowed_tools` and `disallowed_tools`. 
 
 ### Skills Discovery
 
-The agent sets up SKILL.md files (Agent Skills open standard) in `.agents/skills/` directory:
-
-1. Scans `config.plugins` for local plugins with `path` field
-2. Checks `plugin_tools_dir` parameter passed to `start()`
-3. Expands environment variables in paths (`$PLUGIN_PATH`, `${PLUGIN_PATH}`)
-4. Symlinks skill directories (falls back to copying if symlink fails)
-5. Codex CLI auto-discovers skills in `.agents/skills/`
+The agent links each staged skill, `<plugin_root>/skills/<name>`, into `.agents/skills/<name>` (a symlink, or a copy where symlinks fail). The Codex CLI auto-discovers skills in `.agents/skills/`.
 
 ### Async Integration
 

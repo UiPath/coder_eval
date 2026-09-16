@@ -190,6 +190,13 @@ is genuinely a gating 0.0. `reference_file` is confined to the reference directo
 judge's author-written `files:` entry, because it names one file of the solution being
 compared against and traversal out of the staged copy is always a mistake.
 
+`skill_triggered` escalates the same way when its `skill_name` is not among the skills
+`agent.plugins` offered (`CheckContext.skills_offered`). The agent was never offered the
+skill, so the positive control cannot run. Scored as 0.0, every positive row of an
+activation suite would read as a skill that never triggers. The gate applies only when the
+task sets plugins: with `skills_offered` `None` the criterion scores as before, so a skill
+the harness finds by other means still counts.
+
 Grading time is accumulated at the checker, not at the four orchestrator call sites, so a
 fifth site cannot be added without it — the same reason the tool subtraction lives at one
 collector seam. It is monotonic, booked in a `finally` so a grade that raises still records

@@ -6,6 +6,7 @@
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
@@ -191,6 +192,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the agent.
 
@@ -204,6 +206,8 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 instead of walking up from CWD. An external ``PLUGIN_TOOLS_DIR`` in
                 the process environment still wins. Implementations that don't shell
                 out may ignore this argument.
+            plugin_root: The staged canonical plugin root (``<root>/skills/<name>/SKILL.md``),
+                or None when the task sets no plugins. Deliver it the harness's native way.
         """
         pass
 

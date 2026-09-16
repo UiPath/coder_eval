@@ -45,8 +45,8 @@ defaults:
     type: claude-code
 
     # Claude Code plugins to load (null = none)
-    # `path` must be a PLUGIN ROOT: a directory holding skills/, so the skill sits at
-    # <path>/skills/<name>/SKILL.md. One level deeper loads nothing on claude-code.
+    # `path` names a plugin root (<path>/skills/<name>/SKILL.md) or a bare skills
+    # directory (<path>/<name>/SKILL.md). Both are staged; a path with no skill fails `plan`.
     # Example: [{"type": "local", "path": "/path/to/plugin-root"}]
     plugins: null
 

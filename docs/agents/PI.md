@@ -225,19 +225,14 @@ docker` whenever the task prompt or workspace is not fully trusted.
 
 ## Known limitations
 
-- **`plugins` skills are injected via `--skill`.** Each `type: local` plugin root
-  is resolved to its skills dir (`<root>/skills`, holding `<name>/SKILL.md`) and
-  passed to the CLI as a `--skill <dir>` argument — the same `_plugin_skill_dirs`
-  resolver OpenCode uses — and recorded as `pi_skill_paths` in `environment_info`.
-  Pi therefore **can run activation suites**: `skill_triggered` detects Pi's
-  engagement agent-agnostically (the agent `read`s the full `SKILL.md`, a
-  `read`→`Read` call whose `path` matches `skills/<name>/`). Use the **plugin-root
-  shape** (`<path>/skills/<name>/SKILL.md`) for activation suites: a bare skills dir
-  still *loads* (the resolver's fallback passes it as `--skill <dir>`), but the read
-  path then lacks the `skills/<name>/` segment `skill_triggered` matches on, so the
-  suite scores recall 0 even though the skill ran — see
-  [Harness Parity § plugin-path depth](HARNESS_PARITY.md). A plugin's non-skill
-  assets (agents/hooks/commands/MCP) are not wired.
+- **`plugins` skills are injected via `--skill`.** coder-eval stages every
+  `plugins:` entry into `<run_dir>/plugin_root` and passes
+  `--skill <plugin_root>/skills` to the CLI. A plugin root and a bare skills
+  directory both work. Pi therefore **can run activation suites**:
+  `skill_triggered` detects Pi's engagement agent-agnostically (the agent `read`s
+  the full `SKILL.md`, a `read`→`Read` call whose `path` matches `skills/<name>/`).
+  Only skills are staged; a plugin's agents, hooks, commands and MCP servers are not
+  wired. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
 - **`system_prompt_file` is not read by the adapter.** Use `system_prompt` (inline)
   instead — it is enforced via `--append-system-prompt`.
 - **`max_tool_calls` counts resolved tool calls, not Pi turns.** The adapter counts

@@ -16,6 +16,7 @@ See ``docs/TASK_DEFINITION_GUIDE.md`` (No-op / System Tasks) and issue #203.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents.registry import AgentRegistry
@@ -74,6 +75,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """No-op: there is no agent process to launch."""
         self._state = AgentState.WORKING

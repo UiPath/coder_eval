@@ -35,11 +35,11 @@ import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal, NoReturn
 from uuid import uuid4
 
 from coder_eval.agent import Agent
-from coder_eval.agents._skills import _plugin_skill_dirs  # shared plugin->skills resolver
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
@@ -711,8 +711,7 @@ class PiAgent(Agent[PiAgentConfig]):
         self.working_directory: str | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
-        # Skills-parent dirs resolved from `agent.plugins`, passed to `pi --skill`
-        # (Pi discovers `<name>/SKILL.md` recursively). Assigned in start().
+        # The staged root's skills dir, passed to `pi --skill`. Assigned in start().
         self._skill_dirs: list[str] = []
         # Per-agent session, reused across communicate() calls for multi-turn
         # continuity. Removed in stop(), deliberately NOT in kill().
@@ -733,24 +732,14 @@ class PiAgent(Agent[PiAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         if shutil.which("pi") is None:
             raise RuntimeError(
                 "The 'pi' CLI was not found on PATH."
                 + " Install it with `npm install -g @earendil-works/pi-coding-agent` (see https://pi.dev/)."
             )
-        # Resolve `agent.plugins` -> skills dirs and load them via `pi --skill`.
-        # Loudly logs when plugins were declared but nothing resolved (the run
-        # would otherwise measure the model WITHOUT the skill under test).
-        self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger, harness="pi")
-        if self._skill_dirs:
-            logger.info("pi: loading %d skill dir(s) via --skill: %s", len(self._skill_dirs), self._skill_dirs)
-        elif self.config.plugins:
-            logger.warning(
-                "pi: %d plugin(s) declared but 0 skill dir(s) resolved — the agent will run WITHOUT them "
-                + "(see docs/agents/PI.md).",
-                len(self.config.plugins),
-            )
+        self._skill_dirs = [str(plugin_root / "skills")] if plugin_root is not None else []
         self.working_directory = working_directory
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
@@ -820,10 +809,6 @@ class PiAgent(Agent[PiAgentConfig]):
         }
         if self._session_id:
             info["pi_session_id"] = self._session_id
-        if self._skill_dirs:
-            # Recorded per task so a run's report can confirm the skills under test
-            # actually reached the agent.
-            info["pi_skill_paths"] = list(self._skill_dirs)
         return info
 
     # --- command construction ---------------------------------------------
@@ -851,8 +836,8 @@ class PiAgent(Agent[PiAgentConfig]):
         if self.config.thinking_level:
             argv += ["--thinking", self.config.thinking_level]
         for skill_dir in self._skill_dirs:
-            # Additive skill load (from agent.plugins): Pi lists each skill's
-            # name+description in the system prompt and reads SKILL.md on demand.
+            # Additive skill load from the staged root: Pi lists each skill's
+            # name+description in the system prompt and reads it on demand.
             argv += ["--skill", skill_dir]
         argv += self._tool_flags()
         if self.config.system_prompt:

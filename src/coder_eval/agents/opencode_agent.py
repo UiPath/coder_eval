@@ -73,7 +73,6 @@ from coder_eval.streaming.events import (
 )
 from coder_eval.timing import close_window
 
-from ._skills import _plugin_skill_dirs
 from .registry import AgentRegistry
 
 
@@ -810,28 +809,14 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         if shutil.which("opencode") is None:
             raise RuntimeError(
                 "The 'opencode' CLI was not found on PATH."
                 + " Install it with `npm install -g opencode-ai` (or see https://opencode.ai/docs/)."
             )
-        self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger)
-        if self._skill_dirs:
-            logger.info(
-                "opencode: injecting %d skill path(s) via %s: %s",
-                len(self._skill_dirs),
-                _CONFIG_CONTENT_ENV,
-                self._skill_dirs,
-            )
-        elif self.config.plugins:
-            # The run is about to measure the model without the skills under
-            # test. Say so loudly.
-            logger.warning(
-                "opencode: %d plugin(s) declared but 0 skill path(s) resolved — the agent will run "
-                + "WITHOUT them (see docs/agents/OPENCODE.md).",
-                len(self.config.plugins),
-            )
+        self._skill_dirs = [str(plugin_root / "skills")] if plugin_root is not None else []
         await asyncio.to_thread(self._write_prompt_file)
         self.working_directory = working_directory
         self._env_path_prepend = list(env_path_prepend or [])
@@ -898,10 +883,6 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             "opencode_model": self.config.model,
             "opencode_pure": self.config.pure,
         }
-        if self._skill_dirs:
-            # Recorded per task so a report can confirm the skills reached the
-            # agent.
-            info["opencode_skill_paths"] = list(self._skill_dirs)
         if self.config.variant:
             info["opencode_variant"] = self.config.variant
         if self._session_id:

@@ -8,6 +8,7 @@ loop without touching any external LLM.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -156,6 +157,7 @@ class _ExplodingAgent(Agent):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         pass
 

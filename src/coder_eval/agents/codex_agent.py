@@ -40,6 +40,7 @@ from coder_eval.models import (
     TurnRecord,
     UsageGranularity,
 )
+from coder_eval.orchestration.plugin_staging import link_or_copy
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
@@ -58,7 +59,6 @@ from coder_eval.streaming.events import (
     end_status_for,
 )
 from coder_eval.timing import close_window
-from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
@@ -793,6 +793,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the Codex agent.
 
@@ -802,7 +803,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 Codex app-server (typically the resolved
                 ``SandboxConfig.mock_path_dirs``), so mock CLIs shadow the
                 real ones — same semantics as the Claude agent.
-            plugin_tools_dir: Optional plugin tools directory (for skills setup)
+            plugin_tools_dir: Accepted for the ``Agent.start`` signature; Codex does not use it.
+            plugin_root: The staged plugin root whose skills are linked into ``.agents/skills/``.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
@@ -834,8 +836,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         "CodexAgent: login_api_key failed — agent will fall back to env-based auth: %s", exc
                     )
 
-            # Set up skills from plugin_tools_dir or plugins config
-            self._setup_skills(plugin_tools_dir)
+            self._setup_skills(plugin_root)
 
         except ImportError as e:
             raise RuntimeError("Codex SDK not installed. Install with: pip install 'coder-eval[codex]'") from e
@@ -1059,97 +1060,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
             "codex_model_is_deployment": True,
         }
 
-    def _setup_skills(self, plugin_tools_dir: str | None) -> None:
-        """Set up .agents/skills directory from plugins or plugin_tools_dir.
+    def _setup_skills(self, plugin_root: Path | None) -> None:
+        """Link each staged skill into ``.agents/skills/``, where Codex auto-discovers skills.
 
-        Codex auto-discovers skills in ``.agents/skills/``, scanned from the working
-        directory up to the repo root, so each source's skill dirs are symlinked
-        (or copied, on Windows) into it.
+        Codex scans ``.agents/skills/`` from the working directory up to the repo root,
+        so each ``<plugin_root>/skills/<name>`` is symlinked (or copied) into it.
 
         Rationale: .claude/notes/agents.md § Skills, per harness
         """
-        if not self.working_directory:
+        if not self.working_directory or plugin_root is None:
             return
-
-        skills_sources: list[Path] = []
-
-        # Collect skills directories from config.plugins
-        if self.config.plugins:
-            for plugin in self.config.plugins:
-                if isinstance(plugin, dict) and plugin.get("type") == "local":
-                    path_str = plugin.get("path")
-                    if path_str:
-                        # Expand environment variables in path
-                        expanded_path = expand_env_vars(path_str)
-                        plugin_path = Path(expanded_path)
-                        if plugin_path.exists() and plugin_path.is_dir():
-                            skills_sources.append(plugin_path)
-                            self._log.debug(f"Found skills from plugin: {plugin_path}")
-                        else:
-                            # Loud: an unresolved env var or missing dir drops the
-                            # skills silently, so the agent runs blind.
-                            hint = "env var likely unset" if "$" in expanded_path else "path does not exist"
-                            self._log.warning(
-                                f"Plugin skills path did not resolve: {path_str!r} "
-                                + f"→ {expanded_path!r} ({hint}); no skills linked from it"
-                            )
-
-        # Also check plugin_tools_dir parameter
-        if plugin_tools_dir:
-            plugin_path = Path(plugin_tools_dir)
-            if plugin_path.exists() and plugin_path.is_dir():
-                skills_sources.append(plugin_path)
-                self._log.debug(f"Found skills from plugin_tools_dir: {plugin_path}")
-
-        if not skills_sources:
-            return
-
-        # Create .agents/skills directory (Codex auto-discovery location)
         agents_skills_dir = self.working_directory / ".agents" / "skills"
-        try:
-            agents_skills_dir.mkdir(parents=True, exist_ok=True)
-
-            # A source may hold skill dirs directly or be a plugin root whose
-            # skills live one level deeper. Scan both layouts.
-            for skills_source in skills_sources:
-                scan_dirs = [skills_source]
-                nested = skills_source / "skills"
-                if nested.is_dir():
-                    scan_dirs.append(nested)
-
-                for scan_dir in scan_dirs:
-                    for skill_dir in scan_dir.iterdir():
-                        if not (skill_dir.is_dir() and (skill_dir / "SKILL.md").exists()):
-                            continue
-                        target = agents_skills_dir / skill_dir.name
-                        if target.exists():
-                            # Skip if already exists (first source wins)
-                            continue
-
-                        try:
-                            # Try to create a symlink for efficiency
-                            target.symlink_to(skill_dir)
-                            self._log.debug(f"Linked skill: {skill_dir.name}")
-                        except (OSError, NotImplementedError):
-                            # Fall back to copying if symlink fails (Windows compatibility)
-                            shutil.copytree(skill_dir, target, dirs_exist_ok=True)
-                            self._log.debug(f"Copied skill: {skill_dir.name}")
-
-            linked = list(agents_skills_dir.iterdir())
-            if linked:
-                self._log.debug(f"Linked {len(linked)} skill(s) into {agents_skills_dir}")
-            else:
-                # Sources existed but held no SKILL.md, so codex runs with no
-                # skill context at all.
-                self._log.warning(
-                    f"0 skills linked into {agents_skills_dir} despite "
-                    + f"{len(skills_sources)} plugin source(s): "
-                    + f"{[str(s) for s in skills_sources]}; "
-                    + "check the plugin path points at a skills repo root"
-                )
-
-        except Exception as e:
-            self._log.warning(f"Failed to set up skills: {e}")
+        agents_skills_dir.mkdir(parents=True, exist_ok=True)
+        for skill_dir in sorted((plugin_root / "skills").iterdir()):
+            target = agents_skills_dir / skill_dir.name
+            if target.is_symlink() and not target.exists():
+                target.unlink()
+            if not target.exists():
+                link_or_copy(skill_dir.resolve(), target)
+        self._log.debug("Linked the staged skills into %s", agents_skills_dir)
 
     @staticmethod
     def _resolve_base_url() -> str | None:

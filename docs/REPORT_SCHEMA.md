@@ -174,6 +174,8 @@ each of `system_prompt`, `plugin_skills`, `permission_mode`, `allowed_tools` and
 `disallowed_tools`, `"enforced"` or `"unsupported"`, plus
 `system_prompt_semantics` (the class default), `cooperative_stop`, and
 `permission_modes` (the sorted `permission_mode` values the harness honors, or `null`).
+`environment_info.skills_offered` is the list of skill names the staged plugin root
+offered to the agent. It is absent when the task sets no `agent.plugins`.
 `sdk_options.system_prompt` is a `SystemPromptPreset` dict
 (`{type: "preset", preset: "claude_code", exclude_dynamic_sections: true, append?: str}`)
 on append-mode Claude Code runs and a plain string only in replace mode — it is

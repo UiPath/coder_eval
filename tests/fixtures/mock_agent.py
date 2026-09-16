@@ -46,6 +46,7 @@ class MockAgent(Agent):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize mock agent with working directory.
 
