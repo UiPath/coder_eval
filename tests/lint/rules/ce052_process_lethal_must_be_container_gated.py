@@ -6,9 +6,9 @@ not lexically inside the body of an ``if``/``elif`` whose test mentions
 ``os._exit`` skips ``atexit``, ``finally`` and every handler, so it is correct only for
 reaping the container's own disposable main process.
 
-HAZARD: do not gate on ``sandbox.driver``. ``run_task_internal_command`` rewrites the
-driver to ``tempdir`` before it builds the in-container Orchestrator, so a driver gate
-disables itself on the one path that needs it.
+HAZARD: do not gate on ``sandbox.driver``. ``DockerRunner._stage_inputs`` stages the
+in-container task with ``driver: tempdir``, so a driver gate disables itself on the one
+path that needs it.
 
 The check is lexical, not a data-flow proof: it forces the guard to be written at the
 site. Add ``# noqa: CE052`` with a reason for an intentional exception.

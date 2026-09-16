@@ -372,6 +372,7 @@ class Orchestrator:
         prior_result: EvaluationResult | None = None,
         recorded_task: TaskDefinition | None = None,
         recorded_task_file: Path | None = None,
+        container_contract: dict[str, Any] | None = None,
     ):
         """Initialize the orchestrator.
 
@@ -395,6 +396,8 @@ class Orchestrator:
             prior_result: A completed run's result to re-grade.
             recorded_task / recorded_task_file: What the run RECORDS, which is not
                 always what this process runs.
+            container_contract: The parsed ``ContainerContext`` (JSON mode), echoed
+                into ``environment_info["container_contract"]``. In-container only.
 
         Rationale: .claude/notes/orchestration.md § Recording the task as authored
         """
@@ -416,9 +419,8 @@ class Orchestrator:
         self.replicate_index = replicate_index
         self.grade = grade
         # What `task_config.resolved` records, which is NOT always what we RUN:
-        # the in-container path rewrites `driver: docker` -> `tempdir` before
-        # building its Orchestrator, and recording that made the run's own record
-        # deny it ever used docker.
+        # a container runs the task the host staged with `driver: tempdir`, and
+        # recording that made the run's own record deny it ever used docker.
         # Rationale: .claude/notes/orchestration.md § Recording the task as authored
         self.recorded_task = recorded_task if recorded_task is not None else task
         # Same seam, same reason, for the PATH: in a container `task_file` is
@@ -426,6 +428,7 @@ class Orchestrator:
         # The host forwards its own path for the record.
         self.recorded_task_file = recorded_task_file if recorded_task_file is not None else task_file
         self.prior_result = prior_result
+        self.container_contract = container_contract
 
         # Derived paths
         self.report_path = self.run_dir / TASK_JSON_FILENAME
@@ -1050,6 +1053,15 @@ class Orchestrator:
         # The row keeps the agent run's duration; the grading pass's own cost is
         # preserved alongside, so a slow judge is still visible.
         self._finalize_regrade_timing()
+
+        # HAZARD: after _seed_from_prior_result, whose merge lets the PRIOR row's environment_info win.
+        # Written any earlier, the echo is erased on the regrade path -- the one it must cover.
+        # Rationale: .claude/notes/isolation.md § The contract echo
+        if self.container_contract is not None:
+            self.result.environment_info["container_contract"] = self.container_contract
+        elif self.prior_result is not None:
+            # A host grade: the prior row's echo describes a container that did not produce this verdict.
+            self.result.environment_info.pop("container_contract", None)
 
         # Wrapped because _finalize_result runs inside run()'s finally, where an
         # unguarded raise would skip persistence and lose task.json. The

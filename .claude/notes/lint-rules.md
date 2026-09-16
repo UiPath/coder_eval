@@ -70,7 +70,7 @@ boundary is mechanically detectable, so the rule guards it.
 crosses the container boundary, and the per-task record every dashboard and timeline reads.
 A bare `EvaluationResult.model_validate_json(text)` turns a present-but-malformed file
 into an uncaught exception that crashes the run. Two causes produce such a file: schema
-skew between a stale `:latest` image and the host (the docker version checks only warn),
+skew between a stale `:latest` image and the host that the image preflight did not catch,
 and a truncated or torn write. The incident was at `docker_runner.py`: the parse re-bucketed
 the task to a non-persisted in-memory ERROR with no per-task report. The fix degrades:
 catch `ValueError` and persist a synthetic ERROR record (`batch.py::_load_completed_result`,
@@ -517,8 +517,8 @@ host.
 The motivating bug: `regrade.grading_sandbox_config` rewrote the driver unconditionally
 on BOTH new grading entry points, which also neutralized the `driver: docker` refusal in
 `Sandbox.adopt` — a guard added in the same change specifically to catch this. The
-legitimate suppressions are the in-container rewrite in `run_task_internal_command` and
-the opt-in host-grading branch, which refuses by default and stamps `graded_on_host` on
+legitimate suppressions are the host-side staging rewrite in `docker_runner._stage_inputs`
+and the opt-in host-grading branch, which refuses by default and stamps `graded_on_host` on
 the row.
 
 ## CE052

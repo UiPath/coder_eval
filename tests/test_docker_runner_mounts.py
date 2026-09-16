@@ -1011,6 +1011,8 @@ class TestOutputMountWidenedBeforeLaunch:
 
     async def test_run_widens_output_dir_before_container_starts(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("CODER_EVAL_NO_CLAUDE_MOUNT", "1")
+        # Whatever image this machine happens to have locally must not decide this test.
+        monkeypatch.setattr("coder_eval.isolation.docker_runner._preflight_image_contract", lambda *_args: None)
         run_dir = tmp_path / "run"
         run_dir.mkdir(mode=0o755)
         task = TaskDefinition(

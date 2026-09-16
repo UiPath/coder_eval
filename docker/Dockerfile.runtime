@@ -14,7 +14,7 @@
 #   /usr/local/bin/coder_eval_entrypoint.sh      entrypoint (host pins --entrypoint here)
 #   LABEL org.coder-eval.version=<ver>           for `docker inspect` / parity
 #
-# NOTE: the host's _assert_runtime_image gate inspects the *injected task image*,
+# NOTE: the host's _preflight_image_contract gate inspects the *injected task image*,
 # not this kit image — labels don't survive `COPY --from`. The converter re-stamps
 # org.coder-eval.version on the injected image (that's the label the host asserts).
 # This kit carries it too purely for `docker inspect`/parity.
