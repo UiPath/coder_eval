@@ -26,69 +26,28 @@ data-driven analysis.
 
 ## Directory Structure
 
-```
-coder_eval/
-├── agent.py                  # Agent ABC (start, communicate, stop, get_state)
-├── config.py                 # Settings via pydantic-settings (.env loading)
-├── sandbox.py                # Sandbox manager (tempdir, venv, templates, adopt)
-├── orchestrator.py           # Main evaluation loop
-├── reports.py                # Markdown/JSON run reports + per-suite rollups
-├── reports_experiment.py     # Cross-variant experiment reports
-├── reports_junit.py          # JUnit XML from a finalized run dir (CI ingestion)
-├── reports_html.py           # Single-file HTML report (the evalboard's static twin)
-├── reports_stats.py          # Shared report statistics + ungraded rendering helpers
-├── formatting.py             # Number/duration formatting shared by the renderers
-├── analysis.py               # Command statistics aggregation
-├── logging_config.py         # Structured logging setup
-├── path_utils.py             # Run IDs, path utilities, atomic writes, tree digests
-├── fs_permissions.py         # set_permissions: stacked chmod window
-├── pricing.py                # Model pricing (mirrored by evalboard/lib/pricing.ts)
-├── litellm_cost.py           # Join proxy-captured actual per-call cost onto turns
-├── timing.py                 # TurnClock + turn decomposition (single subtraction seam)
-├── invocation_log.py         # record_cli recording shim + JSON Lines reader
-├── argv_match.py             # Structured argv matcher (STDLIB-ONLY sidecar — CE057)
-├── telemetry.py              # App Insights / OpenTelemetry emission
-├── isolation/                # driver: docker — one container per task
-├── harbor/                   # Harbor export + coder-eval as a Harbor agent
-├── optimize/                 # Prompt/config optimization helpers
-├── utils.py                  # Version info helpers
-│
-├── agents/                   # Agent implementations (claude_code, codex, antigravity,
-│                             #   opencode, pi, noop) + registry, watchdog
-│
-├── models/                   # Pure Pydantic data models (see __init__ for exports)
-│   ├── enums.py              # AgentKind, AgentState, FinalStatus, ApiBackend
-│   ├── criteria.py           # 15 success criterion types + base + union
-│   ├── experiment.py         # ExperimentDefinition, ExperimentVariant, ResolvedTask
-│   ├── cli_match.py          # FlagMatch + CliMatch (cycle-free leaf)
-│   ├── container_paths.py    # IN_CONTAINER_ENV + container path constants (CE056)
-│   ├── mutations.py          # PromptMutation variants
-│   ├── results.py            # CriterionResult, TurnRecord, EvaluationResult, rollups
-│   ├── routing.py            # ApiRoute (DirectRoute/BedrockRoute)
-│   ├── sandbox.py            # SandboxConfig, ResourceLimits, RecordedCli, CliResponse
-│   ├── tasks.py              # TaskDefinition, AgentConfig, Dataset, RunLimits
-│   ├── telemetry.py          # CommandTelemetry, TokenUsage, TranscriptMessage
-│   └── templates.py          # RepoSource, TemplateDirSource, StarterFilesSource
-│
-├── criteria/                 # Criterion checker plugins (one file per type)
-│   ├── __init__.py           # CriterionRegistry with auto-discovery
-│   └── base.py               # BaseCriterion + @handle_criterion_errors
-│
-├── evaluation/               # checker.py (SuccessChecker), judge_context, judge_verdict,
-│                             #   sub_agent, summaries
-├── orchestration/            # batch, config, config_merge, early_stop, evaluation,
-│                             #   regrade, experiment, overrides, task_loader
-├── cli/                      # Typer commands; each has a plain-Python twin (CE048)
-├── scoring/                  # AST / token / signature / complexity / quality similarity
-├── streaming/                # Event protocol, EventCollector, renderers
-├── simulation/               # Multi-turn user simulation (dialog mode)
-└── resources/                # Package resources
+`src/coder_eval/` — run `ls` for the current layout. What a filename does not tell you:
 
-experiments/   tasks/   tests/   docs/   templates/   evalboard/
-plugins/coder-eval/            # Published Claude Code plugin (six skills)
-action.yml                     # Published composite GitHub Action
-.claude-plugin/marketplace.json
-```
+- **`models/`** is the pure-Pydantic layer: the dependency arrow runs `agents` →
+  `models`, so it may reach `agents` / `plugins` only lazily (CE017). All core models
+  import from `coder_eval.models`, never from its submodules.
+- **`criteria/`** auto-discovers one checker per type via `pkgutil`.
+- **`cli/`** holds Typer commands; each has a plain-Python twin (CE048).
+- **`timing.py`** owns the single subtraction seam (CE063).
+- **`argv_match.py`** is a STDLIB-ONLY sidecar copied beside the recorder (CE057).
+- **`fs_permissions.py`** is `set_permissions`, the stacked chmod window.
+- **`path_utils.py`** owns run ids, atomic writes and tree digests — and every run-record
+  filename literal (CE053).
+- **`models/container_paths.py`** owns `IN_CONTAINER_ENV` (CE056).
+- **`pricing.py`** is hand-mirrored by `evalboard/lib/pricing.ts`; a parity test fails on
+  drift either way.
+- **`reports_html.py`** is the evalboard's static twin.
+- **`isolation/`** is `driver: docker`, one container per task.
+- **`streaming/`** is the event protocol and `EventCollector`.
+
+Outside the package: `tasks/`, `experiments/`, `templates/`, `tests/`, `docs/`,
+`evalboard/`, `plugins/coder-eval/` (the published plugin), `action.yml` (the published
+composite Action).
 
 ## Key Architectural Patterns
 
@@ -120,8 +79,7 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
   Defense-in-depth, not a boundary — the known gaps are documented in the notes.
   Authoring reference: [Reference Solutions](docs/TASK_DEFINITION_GUIDE.md#reference-solutions).
 - **Harness run-limit parity**: a shared config field must mean the same thing on every
-  backend, or the adapter rejects it at load time. A silently ignored field is a defect,
-  not a table row. Table:
+  backend, or the divergence is documented. Table:
   [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Caps are authored under
   [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
 - **Execute vs. run**: `execute` is `run` with grading off — rows finalize as
@@ -145,36 +103,19 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
 - **Dialog mode**: `simulation/` drives a multi-turn LLM user — see
   [Dialog Mode](docs/DIALOG_MODE.md).
 
-## Success Criteria (15 types)
+## Success Criteria
 
-| Type | Scoring | Description |
-|------|---------|-------------|
-| [`file_exists`](docs/TASK_DEFINITION_GUIDE.md#file_exists) | Binary | File must exist |
-| [`file_contains`](docs/TASK_DEFINITION_GUIDE.md#file_contains) | Fractional | String presence/absence |
-| [`file_check`](docs/TASK_DEFINITION_GUIDE.md#file_check) | Fractional | Unified file existence + content + regex check |
-| [`json_check`](docs/TASK_DEFINITION_GUIDE.md#json_check) | Fractional | JSON validation + JSON Schema + JMESPath assertions |
-| [`run_command`](docs/TASK_DEFINITION_GUIDE.md#run_command) | Binary / Continuous | Exit code + optional stdout matching or float scoring |
-| [`file_matches_regex`](docs/TASK_DEFINITION_GUIDE.md#file_matches_regex) | Binary | Regex match on file |
-| [`reference_comparison`](docs/TASK_DEFINITION_GUIDE.md#reference_comparison) | Continuous | AST/token/complexity similarity |
-| [`command_executed`](docs/TASK_DEFINITION_GUIDE.md#command_executed) | Fractional | Agent tool usage verification |
-| [`cli_called`](docs/TASK_DEFINITION_GUIDE.md#cli_called) | Binary | Structured match over the `record_cli` invocation log |
-| [`commands_efficiency`](docs/TASK_DEFINITION_GUIDE.md#commands_efficiency) | Continuous | Tool-call efficiency against an expected budget |
-| [`uipath_eval`](docs/TASK_DEFINITION_GUIDE.md#uipath_eval) | Fractional | UiPath agent evaluation results |
-| [`classification_match`](docs/TASK_DEFINITION_GUIDE.md#classification_match) | Binary | File-based label match; emits suite-level P/R/F1 |
-| [`skill_triggered`](docs/TASK_DEFINITION_GUIDE.md#skill_triggered) | Binary | Did the agent engage the target skill? Agent-agnostic |
-| [`llm_judge`](docs/TASK_DEFINITION_GUIDE.md#llm_judge) | Continuous | LLM grades artifacts + optional trajectory/reference |
-| [`agent_judge`](docs/TASK_DEFINITION_GUIDE.md#agent_judge) | Continuous | Sandboxed SDK agent investigates with tools. Expensive |
+Every criterion type registers in `criteria/` and is listed by
+`CriterionRegistry.list_types()`. The authoritative per-field reference is
+[Task Definition Guide § Success criteria](docs/TASK_DEFINITION_GUIDE.md#success-criteria);
+path and env-var resolution inside a checker is
+[Checker Context](docs/TASK_DEFINITION_GUIDE.md#checker-context). The plugin ships a
+generated copy at `plugins/coder-eval/reference/criteria.md` — regenerate it with
+`make plugin-reference`; never hand-edit it (CE033).
 
 All criteria support `weight` (default 1.0) and `pass_threshold` (default 0.9). Live
 criteria also accept `stop_early:`. Dataset-backed tasks may set `suite_thresholds:`
 (see [Suite-level scoring](docs/DATASETS.md#suite-level-scoring)).
-
-Each type above links to its own section in the
-[Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md#success-criteria), which is the
-authoritative per-field reference. Path and env-var resolution inside a checker is
-[Checker Context](docs/TASK_DEFINITION_GUIDE.md#checker-context). The plugin ships a
-generated copy at `plugins/coder-eval/reference/criteria.md` — regenerate it with
-`make plugin-reference`; never hand-edit it (CE033).
 
 ## Evaluation Flow
 
@@ -284,50 +225,25 @@ documentation: [Claude Code plugin](docs/PLUGIN.md).
 
 ## Extension Points
 
-### Adding a New Criterion
+**A new criterion**: model in `models/criteria.py` → the `SuccessCriterion` union →
+checker in `criteria/` decorated `@register_criterion`, auto-discovered via `pkgutil`.
+A live criterion also needs `ContractCase`s (CE036) and `make plugin-reference`.
 
-1. Define the model in `models/criteria.py` inheriting `BaseSuccessCriterion`.
-2. Add it to the `SuccessCriterion` union.
-3. Create the checker in `criteria/` inheriting `BaseCriterion`, decorated with
-   `@register_criterion` — auto-discovered at runtime.
-4. If it is a live criterion, add `ContractCase`s (CE036) and run `make plugin-reference`.
-
-Worked example: [Custom success criteria](docs/EXTENDING.md). Document the new type in
-the [Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md#success-criteria).
-
-### Adding a New Agent
-
-Agents register through the plugin SPI (entry-point group `coder_eval.plugins`) — there
-is no closed enum or dispatch to edit. In-tree and third-party agents use the same path.
-Full walkthrough: [Extending Coder Eval](docs/EXTENDING.md). Per-agent setup and
-credentials: [Claude Code](docs/agents/CLAUDE_CODE.md), [Codex](docs/agents/CODEX.md),
-[Antigravity](docs/agents/ANTIGRAVITY.md), [OpenCode](docs/agents/OPENCODE.md),
-[Pi](docs/agents/PI.md). A new agent must also be added to every onboarding surface
-CE047 tracks, and its run-limit behaviour recorded in
+**A new agent**: agents register through the plugin SPI (entry-point group
+`coder_eval.plugins`) — there is no closed enum or dispatch to edit, and in-tree and
+third-party agents take the same path. A new agent must be named on every onboarding
+surface CE047 tracks, and its run-limit behaviour recorded in
 [Run-Limit Parity](docs/agents/HARNESS_PARITY.md).
 
-1. Define a `BaseAgentConfig` subclass (its own `type: Literal["your-kind"]`) and
-   implement the `Agent` ABC.
-2. Bind them with `registry.register("your-kind", YourConfig)(YourAgent)` inside a
-   `register(registry)` hook exposed via a `coder_eval.plugins` entry point.
-3. Use the shared turn lifecycle on the base class — `self._begin_turn()`,
-   `self._end_turn_ok()`, `self._mark_stopped()`. Do not reimplement it.
-4. Before raising on a mid-turn failure, set `self.pending_turn` to a `crashed=True`
-   `TurnRecord`, then raise `AgentCrashError` or `TurnTimeoutError` bare.
-5. Emit the standardized event protocol and fan it through an internal `EventCollector`
-   plus the caller's `stream_callback`. One `AgentStartEvent` and one matching
-   `AgentEndEvent` on *every* exit path, from `finally`.
-6. If the agent shells out or holds OS resources, implement real `stop()` / `kill()` /
-   `kill_sync()`. `kill_sync()` runs on a non-asyncio thread and must not await.
+**Model pricing**: `register_pricing(YOUR_RATES)` from the same `register(registry)`
+hook — no separate entry-point group.
 
-### Registering Model Pricing (plugins)
-
-Call `register_pricing(YOUR_RATES)` from the same `register(registry)` hook — there is
-no separate entry-point group. Keys are bare model ids; vendor/Bedrock prefixes are
-normalized off at lookup. Registration is idempotent for identical rates and raises on a
-conflicting rate for an existing key, so plugin load order can never silently reprice a
-model. `coder_eval_uipath/pricing.py` is the worked example; see also
-[Model pricing](docs/EXTENDING.md).
+Steps, checklists and worked examples: [Extending Coder Eval](docs/EXTENDING.md).
+Document a new criterion type in the
+[Task Definition Guide](docs/TASK_DEFINITION_GUIDE.md#success-criteria). Per-agent setup
+and credentials: [Claude Code](docs/agents/CLAUDE_CODE.md) · [Codex](docs/agents/CODEX.md)
+· [Antigravity](docs/agents/ANTIGRAVITY.md) · [OpenCode](docs/agents/OPENCODE.md) ·
+[Pi](docs/agents/PI.md).
 
 ## Task Definition
 
@@ -362,6 +278,7 @@ bandit, pre-commit, mcp
 - **YAGNI** — don't add complexity until actually needed
 - **KISS** — keep it simple
 - **Clean code** — no dead code, all imports used, all tests passing
+- **Greenfield project** — no backward-compatibility burden
 - **Delete before you guard** — before you add a lint rule, doc paragraph, criterion
   type or config field, try to delete the pattern that needs it. A new type that
   subsumes an old one removes the old one in the same change (no back-compat burden)
