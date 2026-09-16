@@ -10,8 +10,10 @@ sandbox config forward while replacing ``driver``:
 
 A driver downgrade must be an explicit, logged, operator-visible decision.
 Exempt: ``models/sandbox.py`` (the model's own construction). Elsewhere,
-``# noqa: CE051`` must name the reason, for example an opt-in that refuses by
-default and stamps the row.
+``# noqa: CE051`` must name the reason. The two legitimate sites are the host-side
+staging rewrite in ``docker_runner._stage_inputs`` (the authored sandbox crosses
+beside it in the contract) and the opt-in host-grading branch in
+``regrade.grading_sandbox_config``, which refuses by default and stamps the row.
 
 Rationale: .claude/notes/lint-rules.md § CE051
 """

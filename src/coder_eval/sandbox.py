@@ -184,9 +184,9 @@ class Sandbox:
         user's own working copy across tasks.
 
         NOTE the predicate is the ``CODER_EVAL_IN_CONTAINER`` env var, NOT
-        ``config.driver``: the in-container entry point rewrites ``driver: docker``
-        to ``tempdir`` before constructing the Orchestrator, so keying on the
-        driver would silently disable the window on the path that needs it.
+        ``config.driver``: the host stages a container's task with ``driver: tempdir``,
+        so keying on the driver would silently disable the window on the path that
+        needs it.
 
         Rationale: .claude/notes/isolation.md § Capability drops and the anti-cheat window
         """

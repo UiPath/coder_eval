@@ -329,7 +329,7 @@ async def test_a_container_run_records_the_driver_it_was_authored_with(tmp_path:
     """`task_config.resolved` must describe the task as AUTHORED, not as rewritten.
 
     Pins: an Orchestrator built with `recorded_task` records that task's
-    `driver: docker`, not the in-container `tempdir` rewrite it runs. A recorded
+    `driver: docker`, not the `tempdir` copy the host stages for the container. A recorded
     `tempdir` lets `evaluate <run_dir>` skip the host-grading refusal and the
     `graded_on_host` stamp. `recorded_task` is the seam, exercised without docker.
 

@@ -105,8 +105,9 @@ coder-eval run tasks/byod_smoke_test.yaml
 | Symptom | Cause and fix |
 | --- | --- |
 | `docker: Error response from daemon: pull access denied` | The image isn't built locally and isn't pullable. Check `docker images`, then rebuild it. Docker treats an unknown local tag as a remote reference, which is why the error mentions a pull. |
-| `Image <your-image> coder_eval <a> != host <b>` | The custom image carries an `org.coder-eval.version` label inherited from a stale framework base. Rebuild the base with `make docker-image`, then rebuild your derived image with `docker build --no-cache`. |
-| `Image <your-image> has no org.coder-eval.version label` | The image doesn't descend from `coder-eval-agent` (or predates the label). Rebase it on the framework image, or use the runtime kit. |
+| `Image <your-image> runs coder_eval <a> but the host runs <b>` | The run is refused before the container starts: the image carries an `org.coder-eval.version` label from a different coder-eval than the one installed on the host, usually inherited from a stale framework base. Rebuild the base with `make docker-image`, then rebuild your derived image with `docker build --no-cache`. To run a deliberately different image anyway (for example an unreleased build under test), set `ALLOW_IMAGE_SKEW=1` in the environment or `.env`; the mismatch then only warns, and the run gives up the reproducibility guarantee. |
+| `Image <your-image> is not a coder-eval runtime image (missing the org.coder-eval.version label)` | The image doesn't descend from `coder-eval-agent` (or predates the label). Rebase it on the framework image, or use the runtime kit. `ALLOW_IMAGE_SKEW` does not bypass this. |
+| `The container returned a result with no container_contract echo` or `The container did not honor the contract it was sent` | The code inside the image does not match the host's, even if its label agrees — for example an overlay image that reinstalled coder-eval, or a stale image rebuilt under the same tag. The result is refused: the record is moved to `task.json.unhonored` and a synthetic ERROR `task.json` takes its place. Rebuild or pull a matching image. `ALLOW_IMAGE_SKEW` does not bypass this. |
 
 ## Building the image from a task Dockerfile
 
@@ -183,9 +184,10 @@ Behavior:
   `coder-eval-task-<task_id>:built`, so repeat runs of the same task reuse
   Docker's layer cache. Edit the Dockerfile and the next run rebuilds the
   changed layers only.
-- **Version-label check skipped** — the `org.coder-eval.version` preflight only
-  applies to the framework image; task-built images don't carry it and won't
-  warn.
+- **Version-checked too** — the built image inherits `org.coder-eval.version`
+  from its `FROM coder-eval-agent` base, so the same preflight applies: a missing
+  label, or a version that differs from the host's, refuses the run (see
+  [Troubleshooting custom images](#troubleshooting-custom-images)).
 
 A build failure aborts the task with a `DockerBuildError` (a `DockerRunError`
 subclass) carrying `docker build`'s output. Because the build runs before the

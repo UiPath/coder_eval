@@ -58,43 +58,44 @@
   (its join keys on a per-Orchestrator nonce the prior turns never carried, so it would
   clobber already-correct costs). The verdict is written back into the run's
   `task.json`, with the pre-grade record kept as `task.execute.json` — that in-place
-  write is what makes plain `coder-eval aggregate <run_dir>` rebuild a graded `run.json`
-  with **zero** new code. **`Sandbox.adopt(workspace)`** is the grade-in-place
-  primitive: it reuses `setup`'s adoption half but skips every *materializing* step
-  (`_setup_template`, `_generate_cli_recorders`, venv/package installs, the destructive
-  `$HOME` remediation), running only non-mutating derivation (mock-dir `+x`, venv
-  *discovery*, plugin-tools pin); `_cleanup_on_exit` stays False so an adopted tree is
-  never moved or deleted, and `Sandbox.was_adopted` is set — the Orchestrator reads it
-  to SKIP the `pre_run` hook (`run()` calls it unconditionally with `cwd = sandbox_dir`,
-  and several in-tree tasks stage fixtures there with `cp -a /app/[!.]* "$PWD/"`, which
-  would overwrite the agent's deliverables before the criteria read them) and to KEEP
-  `sandbox_path` in the `PreservationMode.NONE` cleanup arm (an adopted tree survives
-  cleanup, so the path is not stale). `pre_run`'s recorded results are carried from the
-  prior run instead. **`post_run` is the opposite case and moved phases**: it is defined
-  as running after the verdict and may mutate the workspace the criteria read (`rm -rf
-  node_modules` is the archetype), so running it under `execute` inverted its own
-  contract and broke round-trip equivalence — the criteria had not read the tree yet, so
-  `execute` + `evaluate` graded a workspace `post_run` had already modified and could
-  return a different verdict than a single `run` for the identical trajectory (the
-  in-tree tasks all escaped it only because their `post_run` touches nothing a criterion
-  reads). `execute` now DEFERS it; whichever command grades runs it, exactly once —
-  `_skip_post_run` skips on `grade=False`, and skips again when the prior row already
-  recorded results, since nothing declares these commands idempotent. That makes it a
-  capability of the in-place path, so `embedded_commands` scans it OUTSIDE
-  `include_setup_phase` (which is False in place) — minus
-  `_operator_baseline_post_run()`, the grading host's own `experiments/default.yaml`
-  contribution, which every task carries and the record therefore did not choose;
-  without that exemption the refusal fired on 100% of run directories, and a refusal
-  that always fires is waved through. In-place is **more correct**, not merely faster:
-  `_setup_template` filters the copy through `_should_ignore_template_file`, which drops
-  `node_modules` / `dist` / `build` / `.venv` / `.git`, so on the copy path a criterion
-  like `test -f dist/bundle.js` fails as a *copying artifact* rather than as a verdict
-  (verified: 0.00 "does not exist" on copy vs 1.00 in place). Defaults: in-place for a
-  run dir, copy for a bare work dir (criteria can mutate it and it is the user's own
-  tree); `--in-place`/`--copy` override. `adopt` hard-errors on `driver: docker` (a
-  container workspace is unreachable from the host), and grading a `driver: docker` task
-  is DISPATCHED INTO A CONTAINER of the task's own image (`_should_grade_in_container`
-  -> `_grade_in_container` -> `DockerRunner(prior_result=, grade_workspace=)`), because
+  write is what lets `evaluate` refresh the owning run's `run.json` by re-reading its
+  rows, with no grading-specific aggregation code. **`Sandbox.adopt(workspace)`** is the
+  grade-in-place primitive: it reuses `setup`'s adoption half but skips every
+  *materializing* step (`_setup_template`, `_generate_cli_recorders`, venv/package
+  installs, the destructive `$HOME` remediation), running only non-mutating derivation
+  (mock-dir `+x`, venv *discovery*, plugin-tools pin); `_cleanup_on_exit` stays False so
+  an adopted tree is never moved or deleted, and `Sandbox.was_adopted` is set — the
+  Orchestrator reads it to SKIP the `pre_run` hook (`run()` calls it unconditionally
+  with `cwd = sandbox_dir`, and several in-tree tasks stage fixtures there with `cp -a
+  /app/[!.]* "$PWD/"`, which would overwrite the agent's deliverables before the
+  criteria read them) and to KEEP `sandbox_path` in the `PreservationMode.NONE` cleanup
+  arm (an adopted tree survives cleanup, so the path is not stale). `pre_run`'s recorded
+  results are carried from the prior run instead. **`post_run` is the opposite case and
+  moved phases**: it is defined as running after the verdict and may mutate the
+  workspace the criteria read (`rm -rf node_modules` is the archetype), so running it
+  under `execute` inverted its own contract and broke round-trip equivalence — the
+  criteria had not read the tree yet, so `execute` + `evaluate` graded a workspace
+  `post_run` had already modified and could return a different verdict than a single
+  `run` for the identical trajectory (the in-tree tasks all escaped it only because
+  their `post_run` touches nothing a criterion reads). `execute` now DEFERS it;
+  whichever command grades runs it, exactly once — `_skip_post_run` skips on
+  `grade=False`, and skips again when the prior row already recorded results, since
+  nothing declares these commands idempotent. That makes it a capability of the in-place
+  path, so `embedded_commands` scans it OUTSIDE `include_setup_phase` (which is False in
+  place) — minus `_operator_baseline_post_run()`, the grading host's own
+  `experiments/default.yaml` contribution, which every task carries and the record
+  therefore did not choose; without that exemption the refusal fired on 100% of run
+  directories, and a refusal that always fires is waved through. In-place is **more
+  correct**, not merely faster: `_setup_template` filters the copy through
+  `_should_ignore_template_file`, which drops `node_modules` / `dist` / `build` /
+  `.venv` / `.git`, so on the copy path a criterion like `test -f dist/bundle.js` fails
+  as a *copying artifact* rather than as a verdict (verified: 0.00 "does not exist" on
+  copy vs 1.00 in place). Defaults: in-place for a run dir, copy for a bare work dir
+  (criteria can mutate it and it is the user's own tree); `--in-place`/`--copy`
+  override. `adopt` hard-errors on `driver: docker` (a container workspace is
+  unreachable from the host), and grading a `driver: docker` task is DISPATCHED INTO A
+  CONTAINER of the task's own image (`_should_grade_in_container` ->
+  `_grade_in_container` -> `DockerRunner(prior_result=, grade_workspace=)`), because
   that is the only place its criteria mean what they meant during the run:
   `tasks/byod_smoke_test.yaml` asserts `test -f /opt/byod_marker`, baked into its image,
   and the IDENTICAL row scores SUCCESS 1.000 in a container and FAILURE 0.000 on the
@@ -137,9 +138,9 @@
   dispatch guard's `task_file is None` test passed and `_prepare_task_dir_mount`'s `if
   not source.is_dir(): return` then mounted NOTHING — every `$TASK_DIR` criterion
   silently resolving against the wrong tree; and the dispatch is guarded against an
-  image that ignores the `regrade` key (see § The two honored-request guards). The
-  grading container is a SECOND, fresh container: only the workspace crosses and
-  `pre_run` is not re-run, so a criterion depending on out-of-workspace state
+  image that ignores the `regrade` key (see § The contract echo). The grading container
+  is a SECOND, fresh container: only the workspace crosses and `pre_run` is not re-run,
+  so a criterion depending on out-of-workspace state
   (`tasks/samples/skillsbench/3d-scan-calc` symlinks `/root/mass_report.json` in
   `pre_run` and its verifier asserts that path) scores 0.000 for a trajectory `run`
   scores 1.000 — warned at dispatch AND stamped onto the row as
@@ -169,32 +170,31 @@
   `CoderEval.Task.End` host-side (`_emit_task_telemetry`), mirroring `batch.py`: the
   grading path had inherited only the silent half of the container-silent invariant (§
   Environment forwarding). The dispatch is gated on `IN_CONTAINER_ENV`, never on the
-  driver — the in-container entry point rewrites `docker` -> `tempdir` before building
-  its Orchestrator, so a driver-based test would read an already-changed value and a
-  grading container would dispatch a grading container. That env var now has ONE
-  definition (`models/container_paths.py::IN_CONTAINER_ENV`), and **CE056** keeps it
-  that way — the migration converted all four READERS and left the single WRITER
-  (`docker_runner`'s `--env CODER_EVAL_IN_CONTAINER=1`) on the literal, which is the one
-  site that produces the value the gates consume: a rename would have updated every
-  consumer and left the container exporting the old name, disarming the reference
-  anti-cheat window, the reference mount, the grading-container recursion guard and the
-  watchdog together, all silently. CE052 accepts both spellings — a rule that saw only
-  the literal would read a constant-based gate as no gate and tell the author to paste
-  the literal back, arguing against the SSOT it exists to reinforce. The earlier
-  behavior silently rewrote the driver to `tempdir`, which ran a container task's
-  criteria against a host filesystem lacking `/verifier` and the image's toolchain
-  (FAILURE for a trajectory `run` scored 1.0, plus `rm -rf /verifier` unsandboxed on the
-  grading machine) and neutralized `adopt`'s own docker guard; an opted-in row is
-  stamped `graded_on_host` so it is never silently comparable with a container-graded
-  one (lint rule CE051). A re-grade refuses on a `reference_digest` mismatch — the
-  digest is persisted into `environment_info` at staging time by `_stage_reference` (it
-  shipped once as a read with no writer anywhere, so the guard was dead code; then it
-  shipped with a writer whose value was **discarded before it reached disk**, because
-  `_setup` REBOUND the whole `environment_info` dict from `get_version_info()` a hundred
-  lines later, which CE054 cannot see — a write existed in `src/`, it was just dead.
-  `_setup` now `update()`s that dict rather than rebinding it, and
-  `tests/test_detached_grading_boundaries.py` asserts the key survives a real end-to-end
-  run, not just that `_staged_digest` works in isolation), and
+  driver — the host stages a container's task with `driver: tempdir`, so a driver-based
+  test would read an already-resolved value and a grading container would dispatch a
+  grading container. That env var now has ONE definition
+  (`models/container_paths.py::IN_CONTAINER_ENV`), and **CE056** keeps it that way — the
+  migration converted all four READERS and left the single WRITER (`docker_runner`'s
+  `--env CODER_EVAL_IN_CONTAINER=1`) on the literal, which is the one site that produces
+  the value the gates consume: a rename would have updated every consumer and left the
+  container exporting the old name, disarming the reference anti-cheat window, the
+  reference mount, the grading-container recursion guard and the watchdog together, all
+  silently. CE052 accepts both spellings — a rule that saw only the literal would read a
+  constant-based gate as no gate and tell the author to paste the literal back, arguing
+  against the SSOT it exists to reinforce. The earlier behavior silently rewrote the
+  driver to `tempdir`, which ran a container task's criteria against a host filesystem
+  lacking `/verifier` and the image's toolchain (FAILURE for a trajectory `run` scored
+  1.0, plus `rm -rf /verifier` unsandboxed on the grading machine) and neutralized
+  `adopt`'s own docker guard; an opted-in row is stamped `graded_on_host` so it is never
+  silently comparable with a container-graded one (lint rule CE051). A re-grade refuses
+  on a `reference_digest` mismatch — the digest is persisted into `environment_info` at
+  staging time by `_stage_reference` (it shipped once as a read with no writer anywhere,
+  so the guard was dead code; then it shipped with a writer whose value was **discarded
+  before it reached disk**, because `_setup` REBOUND the whole `environment_info` dict
+  from `get_version_info()` a hundred lines later, which CE054 cannot see — a write
+  existed in `src/`, it was just dead. `_setup` now `update()`s that dict rather than
+  rebinding it, and `tests/test_detached_grading_boundaries.py` asserts the key survives
+  a real end-to-end run, not just that `_staged_digest` works in isolation), and
   `verify_reference_unchanged` now takes the task file it resolves against and RAISES on
   a vanished or unresolvable reference instead of returning silently. That comparison
   digests a STAGED copy of the source, not the raw tree: the recorded digest is taken
@@ -223,18 +223,18 @@
   cwd) and anything inside the run dir rather than only the workspace, and
   `write_text_atomic` opens its temp file `O_EXCL|O_NOFOLLOW` — a pre-planted
   `task.json.tmp` symlink otherwise bypassed the write-back's destination symlink guard
-  entirely. The record must also describe the task as AUTHORED, not as executed:
-  `run_task_internal_command` rewrites `driver: docker` -> `tempdir` before building the
-  in-container Orchestrator (see .claude/notes/orchestration.md § The in-container
-  driver rewrite), and recording that rewrite made a docker run's own `task.json` claim
-  `driver: tempdir`. Since `grading_sandbox_config` reads the driver back OUT of the
-  record, `evaluate <run_dir>` on a container row skipped BOTH the
-  `--allow-host-grading` refusal and the `graded_on_host` stamp and graded a container
-  task against the host filesystem silently — the exact outcome that gate exists to
-  prevent. `Orchestrator(recorded_task=...)` is the seam: what is recorded, as distinct
-  from what is run — and `recorded_task_file` is its path twin, which must travel with
-  it through EVERY caller. `regrade_in_place` and `_grade_recorded_run` shipped without
-  it, so every container-graded row re-recorded `/work/task_dir/task.yaml` as its
+  entirely. The record must also describe the task as AUTHORED, not as executed: the
+  host stages a container's task with `driver: tempdir` and forwards the authored
+  sandbox beside it (see .claude/notes/orchestration.md § The host-side driver rewrite),
+  and recording that rewrite made a docker run's own `task.json` claim `driver:
+  tempdir`. Since `grading_sandbox_config` reads the driver back OUT of the record,
+  `evaluate <run_dir>` on a container row skipped BOTH the `--allow-host-grading`
+  refusal and the `graded_on_host` stamp and graded a container task against the host
+  filesystem silently — the exact outcome that gate exists to prevent.
+  `Orchestrator(recorded_task=...)` is the seam: what is recorded, as distinct from what
+  is run — and `recorded_task_file` is its path twin, which must travel with it through
+  EVERY caller. `regrade_in_place` and `_grade_recorded_run` shipped without it, so
+  every container-graded row re-recorded `/work/task_dir/task.yaml` as its
   `source_file`, reintroducing the defect one caller down; both seams are now pinned by
   a test that drives the in-container regrade branch end to end, because deleting either
   left the whole suite green. NOTE the Typer command is a thin wrapper over
@@ -341,6 +341,25 @@ link turns `evaluate <run_dir>` into an arbitrary-file-overwrite primitive on th
 host — and it is atomic, matching the orchestrator's own writer, because a torn write makes
 the row parse as malformed, which a later `--resume` reads as "not complete" and re-pays
 for the agent.
+
+After the write-back, `evaluate` rebuilds the `run.json` of the run that owns the row — the
+nearest ancestor holding one — so a detached grade needs no second command. The rebuild
+re-reads every row on disk, so replicate siblings are summarized at their current state and a
+quarantined `task.json.unhonored` is never folded in. It is best-effort like the write-back:
+the verdict is already printed, so a failed refresh warns and never changes the exit code. It
+refuses to write through a symlinked `run.json` or `run.md` for the same reason the write-back
+refuses a symlinked `task.json`, and the refusal sits in `rebuild_run_summary` itself — the
+one write path `report --rebuild` shares — so neither caller can skip it. A row with no
+`run.json` above it (copied out of its run) gets no summary: creating one would invent a run.
+
+The walk-up accepts only a `run.json` that is a JSON object with `run_id` and `task_results`.
+The name is generic, and a row copied into a project or home directory that holds another
+tool's `run.json` would otherwise have that file silently overwritten by a plain `evaluate`.
+The refresh is also skipped when the grading pass's own `--run-dir` sits inside the owning
+run: the orchestrator writes that pass's `task.json` there, so the rebuild would count the
+same row twice. `run.json` and `run.md` are written through `write_text_atomic`, because
+the refresh now runs on every detached grade, and a torn `run.json` makes the next rebuild
+silently drop the tags, paths and window it carries forward.
 
 The pre-grade snapshot is taken BEFORE anything grades. Taking it inside `_write_back`
 captured an ALREADY-GRADED record whenever `--run-dir` pointed at the target run dir (the
@@ -458,9 +477,9 @@ one task. On the host (`driver: tempdir`) it is a deliberate no-op: parallel tas
 batch share the checked-out `tasks/<name>/` tree, so chmod-ing it is a cross-task side
 effect on the user's own working copy for no isolation benefit — there is no boundary to
 enforce when the agent is just another process with the same uid. The predicate is the
-`CODER_EVAL_IN_CONTAINER` env var, NOT `config.driver`, because the in-container entry
-point rewrites `driver: docker` to `tempdir` before constructing the orchestrator, so a
-driver-keyed predicate would read "tempdir" inside the container and disable the window on
+`CODER_EVAL_IN_CONTAINER` env var, NOT `config.driver`, because the host stages a
+container's task with `driver: tempdir`, so a driver-keyed predicate would read
+"tempdir" inside the container and disable the window on
 exactly the path that needs it.
 
 ### grant_container_access
@@ -654,22 +673,33 @@ routinely be lost, making a genuine stale-heartbeat exit indistinguishable from 
 SIGKILL in the archived logs. Flush best-effort first; never let a flush failure stop the
 exit.
 
-### The context payload is untrusted input
+### The container contract
 
-`context.json` is the host→container boundary, and every value crossing it is COERCED, not
-merely annotated. `json.loads` returns `Any`, so pyright accepts `variant_id: str =
-context["variant_id"]` for a value that may be anything at all — the annotation reads like a
-guarantee and enforces nothing, and a `"replicate_index": "00"` reached `build_task_run_dir`
-typed as `int`. `grade` was once the only value coerced: a hand-edited or older-format
-`"grade": "false"` arrives as a truthy `str` typed as `bool` and silently grades a run that
-asked not to be graded. `regrade` is coerced for the same reason, and getting that one wrong
-re-RUNS the agent against a workspace the operator asked only to grade, destroying the
-trajectory being graded.
+`context.json` is the host→container boundary, and it is parsed as one `ContainerContext`
+rather than read key by key. `json.loads` returns `Any`, so pyright accepts `variant_id: str
+= context["variant_id"]` for a value that may be anything at all — the annotation reads like
+a guarantee and enforces nothing, and a `"replicate_index": "00"` reached
+`build_task_run_dir` typed as `int`. `grade` and `regrade` are `StrictBool` because lax
+coercion is itself the defect: a hand-edited `"grade": "false"` is a truthy string that
+silently grades a run that asked not to be graded, and the same mistake on `regrade` re-RUNS
+the agent against a workspace the operator asked only to grade, destroying the trajectory
+being graded. `replicate_index` is `StrictInt` because a bool is an int, and `True` files the
+row under `01/`.
 
-Keys absent on an older host fall back to the pre-existing behaviour rather than failing:
-`grade` defaults to True, `preservation_mode` to the docker default (a deliberate default,
-not back-compat — this command only ever runs under the docker driver), `host_task_file` and
-`workspace_dir` to None, and `source_yaml` to the staged post-override YAML.
+Every field is required and unknown top-level keys are refused. A default on any key is
+reachable only
+when host and image DISAGREE — `grade: True` for a host that predates `execute`,
+`host_task_file: None` for one that predates the record seam — so a default does not
+preserve behaviour, it hides a skew. With `extra="forbid"` and no defaults, that disagreement
+is a parse failure naming the field, in both directions: an older host omits a key, a newer
+host sends a key the image does not know. `host_task_file` and `workspace_dir` are required
+keys with nullable values, because `null` is a real answer (no task file; the standard
+workspace) and absence is not. `tests/test_container_context.py` derives its checks from
+`model_fields`, so a field added with a default fails there.
+
+No explicit contract-version field exists. It would answer the question the image's
+`org.coder-eval.version` label and this parse already answer, with no bump policy: an image
+older than the field ignores it, and one newer always agrees.
 
 The host always serialises the POST-override `TaskDefinition` into the staged `task.yaml`,
 never `source_yaml`, because the raw on-disk text predates `--model` and `-D` mutations the
@@ -724,36 +754,80 @@ Suppression is narrowed to `CancelledError` throughout, so a genuine `KeyboardIn
 the container was already gone (a race with `--rm`) or the daemon refused, so stderr is
 surfaced to keep the ambiguity debuggable.
 
-### The two honored-request guards
+### The image version preflight
 
-`grade` and `regrade` cross the boundary only through `context.json`, and an image that
-predates either key ignores it and falls through to its old behaviour. The image-version
-preflight only warns, so version skew would change what a command MEANS.
+Before a billed container starts, the host reads the image's `org.coder-eval.version` label
+once. A missing label refuses: the image cannot run the in-container orchestrator, and a bare
+`FROM ubuntu` would otherwise build fine and then die at `docker run` with a cryptic
+missing-entrypoint error. A label that differs from the host's installed coder-eval also
+refuses. `dockerfile_path` images are checked the same way, because a task Dockerfile must
+start `FROM coder-eval-agent` and so inherits the label.
 
-For `grade`: a stale image grades anyway, so `execute --driver docker` would silently
-produce SUCCESS/FAILURE rows indistinguishable from a normal graded run. For `regrade`: a
-stale image ignores the staged `prior.json` and the workspace mount and falls through to the
-ordinary orchestrator branch, which **starts an agent** from `initial_prompt` — so the host
-would fold a fabricated trajectory back over the recorded row as its "grade", publishing a
-verdict for work it never looked at and billing the model for it. Nothing else catches that:
-`_assert_grade_honored` early-returns because a grading container is dispatched with
-`grade=True`.
+A mismatch is a legitimate operator choice in one known case — testing an unreleased image
+against a released host wheel, which a downstream CI workflow does on purpose — so
+`ALLOW_IMAGE_SKEW=1` downgrades it to a warning, and the refusal message names the variable
+so the operator can recover from the error text alone. It is a `Settings` field, not a task
+field: image freshness is a property of the operator's machine, not of the evaluation being
+defined. It never excuses a missing label. A label reading `unknown` — what `docker/Dockerfile`
+stamps when built without `make`, which passes no `CODER_EVAL_VERSION` — is a version that
+differs, not a missing label, so the escape hatch applies to it: such an image does carry the
+runtime. A source checkout has no packaged version, so skew
+is not computable there; the preflight warns and continues. An inspect or daemon failure is
+left for `docker run` to report canonically.
 
-Both are keyed on EVIDENCE, not on the label. For `grade`, "did it grade" is
-`success_criteria_results` or a non-None `weighted_score`: exempting every execution-fact
-status let a stale image return a fully graded MAX_TURNS_EXHAUSTED row — criteria vector,
-weighted score and all — unchallenged, because that exemption exists for statuses a *fresh*
-image also produces, and a fresh one produces them with neither. For `regrade`, a container
-that honored the request seeds from `prior` and never runs the agent, so a DIFFERENT
-`started_at` is the tell: `_seed_from_prior_result` restores the agent run's `started_at`
-verbatim, so a fresh run is the only way that field can move.
+The label is ADVISORY. It is a build-time claim every derived image inherits, and an overlay
+that reinstalls or patches coder-eval in the container keeps the base's label while changing
+what runs; a stale image rebuilt under the same version string is the same case. The preflight
+buys an early, cheap failure before a paid run. The contract echo is the authoritative check.
 
-The refusal quarantines the on-disk record before raising. Refusing in memory only left the
-graded `task.json` sitting in the bind-mounted host run dir, where a later `execute --resume`
-read it back as a completed row (its category is `succeeded`, so the resume partition files
-it under prior results) and plain `aggregate` folded it straight into `run.json` — publishing
-exactly the row the guard declined to publish. Refusing in memory while leaving contradictory
-bytes on disk is not a refusal.
+### The contract echo
+
+The container writes the `ContainerContext` it actually parsed back into
+`environment_info["container_contract"]`, and the host refuses a result whose echo is absent
+or differs from what it staged, naming each differing field. One comparison covers every
+field, so a field added to the contract is guarded with no new code. An absent echo means the
+image predates the contract; a different one means the container ran code that read the
+contract differently.
+
+Both directions that matter most are expensive. An image that ignores `grade` makes `execute
+--driver docker` publish SUCCESS/FAILURE rows indistinguishable from a graded run. An image
+that ignores `regrade` falls through to the ordinary orchestrator branch, which **starts an
+agent** from `initial_prompt` — so the host would fold a fabricated trajectory back over the
+recorded row as its "grade", publishing a verdict for work it never looked at and billing the
+model for it. Guards keyed on indirect evidence for each flag (criteria results for `grade`,
+a moved `started_at` for `regrade`) had to be written per field and each had its own blind
+spot; the echo asks the direct question once.
+
+The echo is written LATE, after `_finalize_regrade_timing`. `_seed_from_prior_result` merges
+the prior row's `environment_info` over ours with the prior winning, so an echo written at
+setup is erased on the regrade path, which is the path that most needs it — and a
+previously graded row already carries a stale echo that would win.
+`tests/test_container_context.py` drives that path end to end. Both sides compare
+`model_dump(mode="json")`, since enum and path objects do not equal their JSON forms.
+`ALLOW_IMAGE_SKEW` never reaches this check: it tolerates a version difference, never a
+container that did something other than what it was asked.
+
+The echo detects a skewed image; it is NOT a security boundary. The run dir is bind-mounted
+writable into the agent's own container, so an agent can forge `container_contract` exactly as
+it can forge the verdict beside it in the same `task.json`. It proves the harness code honored
+the contract, not that the agent was honest. A host grade (`--allow-host-grading`) removes a
+prior row's echo, since that echo describes a container that did not produce the new verdict.
+The key is excluded from the rendered Environment table: it is a nested object, and
+`environment_info` is rendered as a flat map.
+
+The refusal quarantines the on-disk record to `task.json.unhonored` before raising, and a
+synthetic ERROR `task.json` takes its place, as it does for a container that wrote no record:
+a refused row that simply vanished would drop out of every later rebuild of `run.json` while
+the batch's in-memory summary still counted it. A detached grade runs its container in a
+scratch directory, so the refused record is folded back beside the graded row with the
+grading logs. The staged `prior.json` carries no echo: an image that predates the echo keeps
+the prior row's `environment_info`, and a matching echo from an earlier identical dispatch
+would otherwise pass as its own. The run
+dir is bind-mounted, so a refused `task.json` left in place is read straight back by a later
+`execute --resume` (its category is `succeeded`, so the resume partition files it under prior
+results) and folded into `run.json` by a run-level rebuild — publishing exactly the row the
+refusal declined. A build failure's synthetic `BUILD_FAILED` record and a container that
+wrote no `task.json` never reach the check: both raise earlier.
 
 ## The sandbox the criteria run in
 
