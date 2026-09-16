@@ -42,7 +42,9 @@ class NoCliImportsInCore(BaseRule):
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         # Both spellings: `from coder_eval.cli import x` AND `from ..cli import x`.
-        if self._in_scope and (imports_package(node, "cli") or is_bare_package_import(node, "cli")):
+        if self._in_scope and (
+            imports_package(node, "cli", self.filepath) or is_bare_package_import(node, "cli", self.filepath)
+        ):
             named = f"{'.' * node.level}{node.module or 'cli'}"
             self.violation(
                 node,

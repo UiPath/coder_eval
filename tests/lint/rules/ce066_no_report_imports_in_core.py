@@ -74,7 +74,7 @@ class NoReportImportsInCore(BaseRule):
         # `from . import reports`, `from .. import reports`, `from coder_eval import
         # reports`: the package arrives as an alias, so there is no imported NAME to
         # check and every attribute read through it is invisible.
-        if is_bare_package_import(node, "reports"):
+        if is_bare_package_import(node, "reports", self.filepath):
             for alias in node.names:
                 if alias.name == "reports":
                     self.violation(
@@ -82,7 +82,7 @@ class NoReportImportsInCore(BaseRule):
                         f"architectural violation: '{alias.name}' (reports layer) imported wholesale "
                         f"into core — import the specific writer instead, or {_FIX}",
                     )
-        elif imports_package(node, "reports"):
+        elif imports_package(node, "reports", self.filepath):
             for alias in node.names:
                 if alias.name not in ALLOWED_WRITERS:
                     self.violation(

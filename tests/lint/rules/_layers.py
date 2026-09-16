@@ -26,6 +26,11 @@ not one of them, so ``isolation/docker_runner.py`` — the ``driver: docker``
 evaluation path, which imports ``models``, ``orchestration`` and ``streaming`` —
 could import anything with both rules silent.
 
+A relative import is RESOLVED against the importing file rather than pattern-
+matched: ``from .reports import x`` means ``coder_eval.reports`` in a top-level
+module and ``coder_eval.orchestration.reports`` inside ``orchestration/``, so the
+dots have to be counted against the file's own package. See ``_absolute_module``.
+
 The package regex is anchored on ``src/`` because the unanchored form made a
 repo-root file core: this project's own checkout directory is named
 ``coder_eval``, so ``…/coder_eval/conftest.py`` matched the package.
@@ -65,7 +70,43 @@ def is_core_path(filepath: str) -> bool:
     return is_package_path(filepath) and not is_cli_path(filepath) and not _REPORTS.search(filepath)
 
 
-def imports_package(node: ast.ImportFrom, package: str) -> bool:
+def _containing_package(filepath: str) -> list[str] | None:
+    """The dotted parts of the package a module lives in, rooted at ``coder_eval``.
+
+    ``reports/html.py`` and ``reports/__init__.py`` both answer
+    ``["coder_eval", "reports"]`` — Python resolves a package's ``__init__`` against
+    the package itself, not its parent, so dropping the filename is right for both.
+    """
+    match = _PKG.search(filepath)
+    if not match:
+        return None
+    parts = [p for p in filepath[match.end() :].replace("\\", "/").split("/") if p]
+    return ["coder_eval", *parts[:-1]]
+
+
+def _absolute_module(node: ast.ImportFrom, filepath: str) -> str | None:
+    """The fully-qualified module a ``from … import …`` names, or None if it escapes.
+
+    A relative import only means ``coder_eval.<package>`` at ONE depth, and which
+    depth depends on where the importing file sits. An earlier form compared
+    ``node.module`` against the bare package name whenever ``node.level`` was
+    non-zero, which reads ``from .reports import x`` inside ``orchestration/`` —
+    i.e. ``coder_eval.orchestration.reports`` — as the reports layer. Nothing in
+    the tree is nested that way today, so it was a latent false positive rather
+    than a live one; resolving the dots against the file removes the class.
+    """
+    if not node.level:
+        return node.module
+    package = _containing_package(filepath)
+    if package is None:
+        return None
+    base = package[: len(package) - (node.level - 1)]
+    if not base:
+        return None
+    return ".".join([*base, node.module]) if node.module else ".".join(base)
+
+
+def imports_package(node: ast.ImportFrom, package: str, filepath: str) -> bool:
     """Whether a ``from … import …`` names ``coder_eval.<package>``, EITHER spelling.
 
     This exists because matching ``node.module`` alone is a trap both layering
@@ -80,15 +121,14 @@ def imports_package(node: ast.ImportFrom, package: str) -> bool:
     they bind the package itself rather than a name out of it, so each rule reports
     them through ``is_bare_package_import`` as its own wholesale case.
     """
-    if not node.module:
+    module = _absolute_module(node, filepath)
+    if module is None:
         return False
-    if node.level:
-        return node.module == package or node.module.startswith(f"{package}.")
     full = f"coder_eval.{package}"
-    return node.module == full or node.module.startswith(f"{full}.")
+    return module == full or module.startswith(f"{full}.")
 
 
-def is_bare_package_import(node: ast.ImportFrom, package: str) -> bool:
+def is_bare_package_import(node: ast.ImportFrom, package: str, filepath: str) -> bool:
     """Whether this binds the package itself rather than a name out of it.
 
     Three spellings do that: ``from . import reports``, ``from .. import reports``
@@ -99,6 +139,4 @@ def is_bare_package_import(node: ast.ImportFrom, package: str) -> bool:
     Worth catching because the binding is the dangerous half: once `reports` is a
     local name, every attribute read through it is invisible to an import check.
     """
-    if node.level:
-        return node.module is None and any(a.name == package for a in node.names)
-    return node.module == "coder_eval" and any(a.name == package for a in node.names)
+    return _absolute_module(node, filepath) == "coder_eval" and any(a.name == package for a in node.names)

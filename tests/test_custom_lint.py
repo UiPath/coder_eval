@@ -2218,6 +2218,25 @@ class TestCE066NoReportImportsInCore:
         """orchestrator.py's real `from .reports import write_task_html`."""
         assert not self._violations("from .reports import write_task_html", self.ORCHESTRATOR)
 
+    @pytest.mark.parametrize(
+        ("source", "filepath"),
+        [
+            # `.reports` from a sub-package is `coder_eval.<subpkg>.reports`, and
+            # `...reports` from a sub-package escapes `coder_eval` entirely.
+            ("from .reports import format_score", "/repo/src/coder_eval/orchestration/batch.py"),
+            ("from ...reports import format_score", "/repo/src/coder_eval/orchestration/batch.py"),
+        ],
+    )
+    def test_a_relative_import_is_resolved_against_the_importing_file(self, source, filepath):
+        """The dots are counted, not merely noticed.
+
+        Matching `node.module == "reports"` for any non-zero level reads a nested
+        `coder_eval.orchestration.reports` — or a sibling of `coder_eval` — as the
+        reports layer. Latent (nothing in the tree is nested that way), which is
+        exactly why it needs a pin rather than a comment.
+        """
+        assert not self._violations(source, filepath)
+
     def test_a_top_level_core_module_other_than_the_orchestrator_is_core(self):
         """`result_metrics.py` is where the violation message tells you to move a
         metric TO — exempting it would be a hole in the middle of the rule."""
@@ -2336,12 +2355,15 @@ class TestCoreLayerMembership:
         exemption by borrowing the core predicate whole.
 
         Runs the RULE at every real module path rather than recomputing its scope
-        from the helpers, so it fails if the rule stops using them."""
+        from the helpers, so it fails if the rule stops using them. The probe uses
+        the ABSOLUTE spelling deliberately: a relative one resolves against the
+        importing file, so `..cli` names the cli layer only from inside a
+        sub-package and would test depth here instead of scope."""
         import ast
 
         from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
 
-        cli_import = ast.parse("from ..cli import run_command")
+        cli_import = ast.parse("from coder_eval.cli import run_command")
         misscoped = [
             str(py.relative_to(self.PKG))
             for py in self.PKG.rglob("*.py")
