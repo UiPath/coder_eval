@@ -23,11 +23,36 @@ async def execute_with_retry(
     """Execute an operation with automatic retry on transient errors.
 
     Retries only what ``errors/categorization.py`` classifies as retryable;
-    everything else raises on the first attempt. ``on_attempt_error`` runs after each
-    failed attempt, before the backoff, so a caller can reset per-attempt state (the
-    orchestrator uses it to preserve a crashed partial ``TurnRecord``).
+    everything else raises on the first attempt.
 
     Rationale: .claude/notes/agents.md § Shared turn lifecycle
+
+    Args:
+        operation: Async callable taking no arguments -- pass state by closure.
+        operation_name: Human-readable name, for logging only.
+        context: Requires ``task_id``; ``component`` and ``agent_name`` are optional.
+        max_attempts: Overrides the safety limit of 10.
+        on_attempt_error: Async ``(exception, zero_indexed_attempt) -> None`` invoked
+            after every failed attempt, including the final non-retryable one, and
+            before the backoff. Its own exceptions are logged and swallowed so they
+            cannot mask the original. The orchestrator uses it to drain
+            ``agent.pending_turn`` and call ``agent.discard_pending_turn()``.
+
+    Returns:
+        Whatever ``operation`` returned.
+
+    Raises:
+        The last exception, once the retries are exhausted.
+
+    Example:
+        >>> async def flaky_api_call():
+        ...     return await agent.communicate(prompt)
+        >>>
+        >>> result = await execute_with_retry(
+        ...     operation=flaky_api_call,
+        ...     operation_name="Agent communication",
+        ...     context={"task_id": "task-001", "component": "agent"},
+        ... )
     """
     task_id = context.get("task_id", "unknown")
     last_error = None
