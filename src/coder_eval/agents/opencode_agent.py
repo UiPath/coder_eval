@@ -173,9 +173,6 @@ _CLAUDE_TO_OPENCODE_PERMISSION: dict[str, tuple[str, ...]] = {
     for claude in set(_TOOL_NAME_MAP.values())
 }
 
-# `system_prompt_file` is inlined into `system_prompt` before the agent runs.
-_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = ("system_prompt_file",)
-
 # Skill paths, the system-prompt `instructions` file and tool `permission` rules are
 # merged through this variable, which OpenCode applies as a final local-scope layer.
 # Only the SKILLS half of a plugin is honored.
@@ -809,13 +806,6 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             raise RuntimeError(
                 "The 'opencode' CLI was not found on PATH."
                 + " Install it with `npm install -g opencode-ai` (or see https://opencode.ai/docs/)."
-            )
-        ignored = [f for f in _UNSUPPORTED_CONFIG_FIELDS if getattr(self.config, f, None)]
-        if ignored:
-            logger.warning(
-                "opencode: %s set but NOT enforced — the CLI has no equivalent knob, so the run is "
-                + "unconstrained by them; do not rely on them as a boundary (see docs/agents/OPENCODE.md).",
-                ", ".join(ignored),
             )
         self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger)
         if self._skill_dirs:

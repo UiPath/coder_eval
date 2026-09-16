@@ -11,7 +11,7 @@ from __future__ import annotations
 import importlib.resources
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -41,6 +41,7 @@ from ..models import (
 from ..path_utils import build_task_run_dir
 from .config import BatchRunConfig
 from .config_merge import ConfigSource, Layer, merge_layers, resolve_root
+from .overrides import cli_agent_type
 from .task_loader import (
     expand_dataset,
     load_task,
@@ -374,6 +375,55 @@ def _build_sandbox_layers(
     return sandbox_layers
 
 
+def _split_by_type(
+    patch: dict[str, Any] | None, layer: ConfigSource
+) -> tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]:
+    """Separate an experiment layer's ``by_type`` sub-layers from its plain agent fields.
+
+    Raises:
+        ValueError: ``by_type`` is not a mapping of kind -> mapping, or an entry sets ``type``.
+    """
+    if not patch or "by_type" not in patch:
+        return patch, {}
+    by_type = patch["by_type"]
+    if not isinstance(by_type, Mapping) or not all(
+        isinstance(kind, str) and isinstance(entry, Mapping) for kind, entry in by_type.items()
+    ):
+        raise ValueError(f"{layer} agent.by_type must map each agent kind to a mapping of agent fields")
+    for kind, entry in by_type.items():
+        if "type" in entry:
+            raise ValueError(f"{layer} agent.by_type.{kind} must not set 'type'; the entry is selected by it")
+    rest = {key: value for key, value in patch.items() if key != "by_type"}
+    return rest, {kind: dict(entry) for kind, entry in by_type.items()}
+
+
+def _effective_agent_kind(
+    default_agent: Mapping[str, Any] | None,
+    exp_defaults_agent: Mapping[str, Any] | None,
+    task_agent: Mapping[str, Any] | None,
+    variant_agent: Mapping[str, Any] | None,
+    config: BatchRunConfig | None,
+) -> str | None:
+    """The agent kind all five layers resolve to: the highest layer that sets ``type``."""
+    if config is not None and (kind := cli_agent_type(config.overrides, config.agent_type)) is not None:
+        return kind
+    for patch in (variant_agent, task_agent, exp_defaults_agent, default_agent):
+        if patch and patch.get("type") is not None:
+            return str(patch["type"])
+    return None
+
+
+def _log_unregistered_by_type_kinds(*by_types: Mapping[str, Any]) -> None:
+    from coder_eval.agents.registry import AgentRegistry
+    from coder_eval.plugins import ensure_plugins_loaded
+
+    ensure_plugins_loaded()
+    for by_type in by_types:
+        for kind in by_type:
+            if AgentRegistry.get(kind) is None:
+                logger.debug("agent.by_type.%s names no registered agent kind; the entry is never applied", kind)
+
+
 def resolve_task_for_variant(
     default_experiment: ExperimentDefinition,
     task: TaskDefinition,
@@ -385,9 +435,13 @@ def resolve_task_for_variant(
 
     Precedence (lowest to highest):
         1. default_experiment.defaults.agent   (global baseline defaults)
+           1b. its by_type[<kind>]
         2. experiment.defaults.agent           (experiment-wide defaults, below task)
+           2b. its by_type[<kind>]
         3. task.agent                          (task-explicit fields only via exclude_unset)
         4. variant.agent                       (per-variant overrides, highest)
+
+    ``<kind>`` is the agent type all five layers resolve to, CLI included.
 
     After resolution, CLI overrides (layer 5) are applied separately
     by _apply_cli_overrides().
@@ -405,10 +459,17 @@ def resolve_task_for_variant(
     # Experiment-side dicts pass through verbatim; the task agent is dumped with
     # exclude_unset so Pydantic defaults don't leak into the merge. Timing belongs
     # under run_limits — a legacy `max_turns` under `agent:` fails loudly.
-    default_agent = default_experiment.defaults.agent if default_experiment.defaults else None
-    exp_defaults_agent = experiment.defaults.agent if experiment.defaults else None
+    default_agent, default_by_type = _split_by_type(
+        default_experiment.defaults.agent if default_experiment.defaults else None, "default"
+    )
+    exp_defaults_agent, exp_by_type = _split_by_type(
+        experiment.defaults.agent if experiment.defaults else None, "experiment-defaults"
+    )
     variant_agent_clean = variant.agent
     task_agent = task.agent.model_dump(exclude_unset=True) if task.agent else None
+    kind = _effective_agent_kind(default_agent, exp_defaults_agent, task_agent, variant_agent_clean, config)
+    if default_by_type or exp_by_type:
+        _log_unregistered_by_type_kinds(default_by_type, exp_by_type)
 
     # All three `-D`-reachable roots through the SAME generic resolver the CLI
     # layer uses, with lineage emitted as a side effect. Type is enforced AFTER
@@ -420,15 +481,22 @@ def resolve_task_for_variant(
     # Rationale: .claude/notes/orchestration.md § No-op tasks need no special case anywhere
     resolved_agent: AgentConfig | BaseAgentConfig | None
     agent_layers: list[Layer] = []
-    agent_specs: list[tuple[ConfigSource, dict[str, Any] | None]] = [
-        ("default", default_agent),
-        ("experiment-defaults", exp_defaults_agent),
-        ("task", task_agent),
-        ("variant", variant_agent_clean),
+    by_type_detail = f"by_type.{kind}"
+    agent_specs: list[tuple[ConfigSource, dict[str, Any] | None, str | None]] = [
+        ("default", default_agent, None),
+        ("default", default_by_type.get(kind) if kind else None, by_type_detail),
+        ("experiment-defaults", exp_defaults_agent, None),
+        ("experiment-defaults", exp_by_type.get(kind) if kind else None, by_type_detail),
+        ("task", task_agent, None),
+        ("variant", variant_agent_clean, None),
     ]
-    for source, patch in agent_specs:
+    for source, patch, detail in agent_specs:
         if patch:
-            agent_layers.append(Layer(source=source, patch=patch))
+            agent_layers.append(Layer(source=source, patch=patch, detail=detail))
+    if config is not None and cli_agent_type(config.overrides, config.agent_type) is not None:
+        # The CLI kind selected the by_type entry, so layers 1-4 must validate against
+        # its config class too. Lineage-silent: layer 5 records the type itself.
+        agent_layers.append(Layer(source="cli", patch={"type": kind}, record_lineage=False))
     resolved_agent = resolve_root("agent", agent_layers, lineage=lineage)
     assert resolved_agent is not None  # parse_agent_config always returns a model
 
@@ -546,6 +614,11 @@ def _apply_cli_overrides(
             + "Set it in the task YAML, the experiment, or via --type."
         )
 
+    # A `-D agent.system_prompt_file` is relative to the invoking directory. After
+    # this no adapter ever sees a prompt file.
+    task.agent = resolve_agent_system_prompt(task.agent, Path.cwd())
+    assert task.agent.system_prompt_file is None
+
 
 def resolve_task_files(
     task: TaskDefinition,
@@ -600,7 +673,8 @@ def resolve_all_tasks(
     Raises:
         ValueError: If duplicate task IDs are found after resolution.
     """
-    from .early_stop import EarlyStopConfigError, validate_early_stop
+    from .early_stop import validate_early_stop
+    from .harness_contract import TaskResolutionError, validate_harness_contract
 
     resolved: list[ResolvedTask] = []
     skipped: list[SkippedTask] = []
@@ -671,6 +745,7 @@ def resolve_all_tasks(
                     # Once the task is fully resolved, so the -D kill switch is
                     # already merged. No-op unless armed.
                     validate_early_stop(resolved_task)
+                    validate_harness_contract(resolved_task)
 
                     # Fan-out: simulation n_trials takes precedence over experiment repeats
                     # when simulation is active; otherwise use experiment-level repeats.
@@ -696,7 +771,7 @@ def resolve_all_tasks(
                         )
         # A deliberate hard stop: never demoted to skipped, so a misconfigured
         # run fails loudly instead of quietly shrinking the suite.
-        except EarlyStopConfigError:
+        except TaskResolutionError:
             raise
         # NARROW, matching the load/expand block above.
         except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:

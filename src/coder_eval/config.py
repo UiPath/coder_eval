@@ -41,8 +41,8 @@ for key in [
 # pydantic-settings silently ignores unknown env vars, so without this guard a
 # stale knob would quietly stop having any effect. Fail loud with a migration hint.
 _REMOVED_DEFAULT_KNOBS = {
-    "DEFAULT_AGENT_MODEL": "agent.model",
-    "DEFAULT_PERMISSION_MODE": "agent.permission_mode",
+    "DEFAULT_AGENT_MODEL": "agent.by_type.claude-code.model",
+    "DEFAULT_PERMISSION_MODE": "agent.by_type.claude-code.permission_mode",
     "DEFAULT_MAX_TURNS": "run_limits.max_turns",
 }
 

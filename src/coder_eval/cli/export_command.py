@@ -24,6 +24,7 @@ import typer
 
 from ..harbor.experiment_packager import export_experiment
 from ..harbor.packager import CriteriaNotExportableError, TaskNotExportableError, export_task
+from ..orchestration.harness_contract import TaskResolutionError
 from .console import console
 from .run_helpers import expand_task_files
 
@@ -95,12 +96,16 @@ def export_command(
         return
 
     all_task_files = expand_task_files(task_files)
-    exp_result = export_experiment(
-        all_task_files,
-        experiment,
-        output_dir,
-        allow_credentials=allow_credentials,
-    )
+    try:
+        exp_result = export_experiment(
+            all_task_files,
+            experiment,
+            output_dir,
+            allow_credentials=allow_credentials,
+        )
+    except TaskResolutionError as e:
+        console.print(f"[red]✗[/] config error - {e}")
+        raise typer.Exit(1) from e
 
     for exported in exp_result.exported:
         console.print(f"[green]✓[/] Exported → {exported.out_dir} (format: {format})")

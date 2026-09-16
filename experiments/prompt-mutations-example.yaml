@@ -12,7 +12,9 @@ description: "Example of prompt mutations for A/B testing prompt phrasing"
 defaults:
   agent:
     type: claude-code
-    permission_mode: acceptEdits
+    by_type:
+      claude-code:
+        permission_mode: acceptEdits
 
   # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
   post_run:

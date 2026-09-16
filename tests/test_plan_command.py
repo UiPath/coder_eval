@@ -311,3 +311,28 @@ class TestPlanCommandValidation:
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "Bad experiment" in printed
+
+
+class TestPlanCommandHarnessContract:
+    def test_unsupported_agent_field_flips_the_exit_code(self, tmp_path: Path) -> None:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text(
+            "task_id: contract-task\ndescription: d\ninitial_prompt: do it\n"
+            + "agent:\n  type: codex\n  permission_mode: acceptEdits\n"
+            + "sandbox:\n  driver: tempdir\n"
+            + "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: c\n"
+        )
+        exp_file = tmp_path / "experiment.yaml"
+        exp_file.write_text("experiment_id: contract\nvariants:\n  - variant_id: default\n")
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", tmp_path / "missing.yaml"),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+            pytest.raises(typer.Exit) as exc,
+        ):
+            run_plan(task_files=[task_file], experiment=exp_file)
+        printed = " ".join(str(call) for call in mock_console.print.call_args_list)
+        assert exc.value.exit_code == 1
+        assert "config error" in printed
+        assert "agent.permission_mode" in printed

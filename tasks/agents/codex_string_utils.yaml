@@ -12,7 +12,6 @@ tags:
 agent:
   type: codex
   model: gpt-5.5
-  permission_mode: acceptEdits
 
 initial_prompt: |
   Create a Python module named `string_utils.py` with the following functions:

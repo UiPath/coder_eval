@@ -143,9 +143,6 @@ _CLAUDE_TO_PI_TOOLS: dict[str, tuple[str, ...]] = {
     for claude in set(_TOOL_NAME_MAP.values())
 }
 
-# `system_prompt_file` is inlined into `system_prompt` before the agent runs.
-_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = ("system_prompt_file",)
-
 # The full recognized Pi vocabulary (from `pi` 0.84.4). A clean exit that
 # recognized NOTHING from this set is vocabulary drift and is crashed, not scored.
 # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
@@ -737,13 +734,6 @@ class PiAgent(Agent[PiAgentConfig]):
             raise RuntimeError(
                 "The 'pi' CLI was not found on PATH."
                 + " Install it with `npm install -g @earendil-works/pi-coding-agent` (see https://pi.dev/)."
-            )
-        ignored = [f for f in _UNSUPPORTED_CONFIG_FIELDS if getattr(self.config, f, None)]
-        if ignored:
-            logger.warning(
-                "pi: %s set but NOT enforced — the CLI has no equivalent knob in JSON print mode, so the run is "
-                + "unconstrained by them; do not rely on them as a boundary (see docs/agents/PI.md).",
-                ", ".join(ignored),
             )
         # Resolve `agent.plugins` -> skills dirs and load them via `pi --skill`.
         # Loudly logs when plugins were declared but nothing resolved (the run

@@ -76,6 +76,7 @@ from coder_eval.orchestration.early_stop import (
     validate_early_stop,
 )
 from coder_eval.orchestration.experiment import load_experiment, resolve_all_tasks
+from coder_eval.orchestration.harness_contract import HarnessContractError
 from coder_eval.orchestrator import Orchestrator, build_task_event
 from coder_eval.reports import ReportGenerator
 from coder_eval.reports.html import _render_criteria, _render_header
@@ -801,7 +802,7 @@ class TestValidateEarlyStop:
         # An armed task with no agent block at all: the diagnosis must point at
         # the missing agent block, not at plugin loading.
         task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)]).model_copy(update={"agent": None})
-        with pytest.raises(EarlyStopConfigError, match="agent block"):
+        with pytest.raises(HarnessContractError, match="agent block"):
             validate_early_stop(task)
 
     def test_guardrail3_unregistered_agent_type_rejected(self) -> None:
@@ -813,7 +814,7 @@ class TestValidateEarlyStop:
             task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=kind)
         finally:
             AgentRegistry._registry.pop(kind, None)
-        with pytest.raises(EarlyStopConfigError, match="not registered"):
+        with pytest.raises(HarnessContractError, match="not registered"):
             validate_early_stop(task)
 
     def test_guardrail1_armed_codex_accepts(self) -> None:
@@ -1067,7 +1068,7 @@ class TestGuardrailResolutionSurfaces:
         task_file = _write_task_yaml(tmp_path, criterion_yaml=_UNARMED_CRITERION, stop_early=True)
         printed, exit_code = self._run_plan(task_file, tmp_path)
         assert exit_code == 1
-        assert "early-stop config error" in printed
+        assert "config error" in printed
         assert "has been removed" in printed
 
     def test_plan_surface_accepts_valid_armed_task(self, tmp_path: Path) -> None:

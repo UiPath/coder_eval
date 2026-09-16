@@ -105,7 +105,13 @@ class ExperimentDefaults(BaseModel):
         ge=1,
         description="Default number of replicates across all variants. None = 1 (no repetition).",
     )
-    agent: dict[str, Any] | None = Field(default=None, description="Partial agent config defaults")
+    agent: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Partial agent config defaults. May carry `by_type: {<kind>: {...}}`, a sub-layer applied only "
+            "when the resolved agent kind matches; it sits below the task."
+        ),
+    )
     checker_context: dict[str, dict[str, Any]] | None = Field(
         default=None,
         description=(

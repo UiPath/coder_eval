@@ -144,12 +144,18 @@ class TestApplyOverrides:
 
     def test_sdk_options_on_codex_raises(self):
         task = _make_task(agent=parse_agent_config(type="codex"))
-        with pytest.raises(OverrideError, match="only supported for claude-code"):
+        with pytest.raises(
+            OverrideError,
+            match="sdk_options is not a field of the 'codex' agent config; it is supported by: claude-code",
+        ):
             apply_overrides(task, {"agent.sdk_options.effort": "high"})
 
     def test_sdk_options_with_agent_type_codex_raises(self):
         task = _make_task(agent=parse_agent_config(type="claude-code"))
-        with pytest.raises(OverrideError, match="only supported for claude-code"):
+        with pytest.raises(
+            OverrideError,
+            match="sdk_options is not a field of the 'codex' agent config; it is supported by: claude-code",
+        ):
             apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="codex")
 
     def test_unknown_root_raises(self):

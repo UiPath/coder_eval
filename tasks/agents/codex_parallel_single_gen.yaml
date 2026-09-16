@@ -16,7 +16,6 @@ tags:
 agent:
   type: codex
   model: gpt-5.5
-  permission_mode: acceptEdits
 
 initial_prompt: |
   Gather two completely independent pieces of system information at once. Issue

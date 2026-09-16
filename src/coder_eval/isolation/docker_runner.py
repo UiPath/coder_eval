@@ -1427,13 +1427,10 @@ class DockerRunner:
         # Rationale: .claude/notes/isolation.md § Extra mounts and reserved destinations
         sensitive_sources = self._sensitive_source_paths()
 
-        def _auto_mount(raw_path: str | None, *, dir_only: bool = True) -> None:
+        def _auto_mount(raw_path: str | None) -> None:
             if not raw_path:
                 return
-            resolved = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
-            # File paths get mounted as the parent dir so a single -v covers
-            # the file; container-side reads still resolve at the same path.
-            target = resolved if (dir_only or resolved.is_dir()) else resolved.parent
+            target = Path(os.path.expandvars(os.path.expanduser(raw_path))).resolve()
             if target in mounted or not target.is_dir():
                 return
             for sensitive in sensitive_sources:
@@ -1456,12 +1453,6 @@ class DockerRunner:
         for source in (sandbox_cfg.template_sources or []) if sandbox_cfg else []:
             if isinstance(source, TemplateDirSource):
                 _auto_mount(source.path)
-
-        # Defensive: normally inlined into system_prompt by load_task / experiment
-        # resolution, but a variant could inject an absolute path that survives.
-        agent_cfg = self.rt.task.agent
-        if agent_cfg and agent_cfg.system_prompt_file:
-            _auto_mount(agent_cfg.system_prompt_file, dir_only=False)
 
         # HAZARD: task.reference.directory is deliberately NOT auto-mounted at its
         # host path. That would bind the REAL tree in beside the shielded copy, so

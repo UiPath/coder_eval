@@ -188,7 +188,14 @@ an error.
 - `plan` — Agent proposes changes, waits for approval
 - `bypassPermissions` — No permission checks (use with caution)
 
-> **Codex note:** `permission_mode` confines the **`claude-code`** agent only. The **`codex`** agent always runs full-access regardless of the mode — its in-process OS sandbox is redundant given Coder Eval's docker/tempdir isolation and unusable on our CI hosts (and on Windows). Run adversarial or untrusted Codex evals under the **docker driver**, which is the OS-level write boundary; the tempdir/host driver is a working directory, not a confinement boundary.
+**Fields a harness cannot honor are rejected.** Every agent declares which of
+`system_prompt`, `plugins`, `permission_mode`, `allowed_tools` and
+`disallowed_tools` it honors. A task that sets one of them on a harness that marks
+it unsupported fails at resolution, and `coder-eval plan` exits non-zero. A field
+that only a lower layer's default sets does not count, and neither does a value of
+`null`. Put harness-specific values under `by_type` in the experiment (see
+[A/B Experiments](AB_EXPERIMENTS.md#per-kind-defaults-with-by_type)). Per-harness table:
+[Harness Parity](agents/HARNESS_PARITY.md).
 
 **Agent Types:**
 - `claude-code` (default) — Claude Code SDK agent. Supports `sdk_options`, `claude_settings`, and all permission modes.
@@ -227,7 +234,10 @@ Contract (enforced at load): a `type: none` task must declare no `initial_prompt
 / `initial_prompt_file` and no enabled `simulation` (no agent reads them), and
 every criterion must be agent-independent — criteria that inspect the agent
 trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
-`commands_efficiency`) are rejected. A worked example lives at
+`commands_efficiency`) are rejected. The no-op agent honors none of the gated agent
+fields, so a `type: none` task that sets `plugins`, `system_prompt`,
+`permission_mode`, `allowed_tools` or `disallowed_tools` is rejected too. A worked
+example lives at
 [`tasks/agentless_smoke_test.yaml`](https://github.com/UiPath/coder_eval/blob/main/tasks/agentless_smoke_test.yaml).
 
 ## Run Limits

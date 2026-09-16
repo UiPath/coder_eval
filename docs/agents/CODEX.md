@@ -85,13 +85,6 @@ Specify Codex in task YAML:
 ```yaml
 agent:
   type: codex
-  permission_mode: acceptEdits
-  allowed_tools:
-    - Bash
-    - Read
-    - Write
-  disallowed_tools:
-    - Edit
   plugins:
     - type: local
       path: "$PLUGIN_PATH"
@@ -102,11 +95,9 @@ success_criteria:
     description: "Solution file must exist"
 ```
 
-Valid `permission_mode` values:
-- `default` - Standard access, requires approval on failure
-- `acceptEdits` - Automatically accept file edits, no filesystem restrictions
-- `plan` - Read-only sandbox, approval required for any changes
-- `bypassPermissions` - Full access, no approvals needed
+A Codex task that sets `permission_mode`, `allowed_tools` or `disallowed_tools` is
+rejected at resolution: Codex honors none of them (see
+[Permission and Tool Mapping](#permission-and-tool-mapping)).
 
 ### Skills (SKILL.md)
 

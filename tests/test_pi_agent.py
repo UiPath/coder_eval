@@ -394,14 +394,7 @@ class TestSandboxEnvironment:
         assert captured["kwargs"]["env"]["OPENROUTER_API_KEY"] == "sk-test"
 
 
-class TestUnsupportedConfigIsAnnounced:
-    async def test_start_warns_about_unenforced_fields(self, patch_exec, tmp_path, caplog):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(system_prompt_file="prompt.md").start(str(tmp_path))
-        assert "system_prompt_file" in caplog.text
-        assert "NOT enforced" in caplog.text
-
+class TestPluginWarnings:
     async def test_plugins_that_do_not_resolve_warn_loudly(self, patch_exec, tmp_path, caplog):
         """plugins IS supported now (-> --skill), but a path that resolves to no skills
         must warn — else the run silently measures the model WITHOUT the skill."""
@@ -409,16 +402,6 @@ class TestUnsupportedConfigIsAnnounced:
         with caplog.at_level("WARNING"):
             await _agent(plugins=[{"type": "local", "path": "/no/such/dir"}]).start(str(tmp_path))
         assert "0 skill dir(s) resolved" in caplog.text or "did not resolve" in caplog.text
-        # plugins is no longer named in the "NOT enforced" warning.
-        assert "plugins" not in "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
-
-    async def test_enforced_fields_do_not_warn(self, patch_exec, tmp_path, caplog):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(allowed_tools=["Read"], disallowed_tools=["Bash"], system_prompt="be terse").start(
-                str(tmp_path)
-            )
-        assert "NOT enforced" not in caplog.text
 
 
 class TestAutoRetry:

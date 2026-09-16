@@ -161,6 +161,8 @@ coder-eval plan tasks/*.yaml   # validate specific tasks
 ```
 
 Checks task syntax, required CLI tools, API keys, and schema validity without executing.
+It exits non-zero on a hard configuration error, including an agent field the chosen
+harness does not support (see [Harness Parity](agents/HARNESS_PARITY.md)).
 
 | Flag | Description |
 | --- | --- |

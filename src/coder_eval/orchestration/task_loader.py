@@ -231,6 +231,9 @@ def resolve_agent_system_prompt[T: AgentConfig | BaseAgentConfig | None](agent_c
     rejects. A single ``model_copy(update=...)`` applies both edits at once so no
     half-updated state is ever validated.
 
+    Three call sites, one per base directory: ``load_task`` (task-relative), variant
+    file resolution (experiment-relative) and the layer-5 tail (``Path.cwd()``).
+
     Args:
         agent_config: Config to resolve; ``None`` and configs without a
             ``system_prompt_file`` are returned unchanged.

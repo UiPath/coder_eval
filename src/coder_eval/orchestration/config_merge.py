@@ -29,8 +29,6 @@ from pydantic import BaseModel
 
 from ..models import (
     BaseAgentConfig,
-    ClaudeCodeAgentConfig,
-    CodexAgentConfig,
     ConfigLineageEntry,
     RunLimits,
     SandboxConfig,
@@ -346,7 +344,7 @@ def merge_layers(
 @overload
 def resolve_root(
     root: Literal["agent"], layers: Sequence[Layer], *, lineage: dict[str, ConfigLineageEntry] | None = ...
-) -> ClaudeCodeAgentConfig | CodexAgentConfig | BaseAgentConfig | None:
+) -> BaseAgentConfig | None:
     """Resolve the ``agent`` root to its concrete agent-config model."""
 
 

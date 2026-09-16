@@ -306,3 +306,16 @@ class TestExportPathContainment:
 
         # Nothing should have been written outside out_dir.
         assert not (tmp_path.parent / "tmp" / "pwned").exists()
+
+
+def test_unsupported_agent_field_is_a_clean_cli_error(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from coder_eval.cli import app
+
+    task_file = _write_task(tmp_path, {"agent": {"type": "codex", "permission_mode": "acceptEdits"}})
+    exp_file = _write_experiment(tmp_path, {"experiment_id": "e", "variants": [{"variant_id": "v"}]})
+    result = CliRunner().invoke(app, ["export", str(task_file), "-e", str(exp_file), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 1
+    assert "config error" in result.output
+    assert "agent.permission_mode" in result.output

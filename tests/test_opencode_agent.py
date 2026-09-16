@@ -735,13 +735,6 @@ class TestSkillInjection:
         assert "env var likely unset" in caplog.text
         assert "0 skill path(s) resolved" in caplog.text
 
-    async def test_plugins_are_no_longer_announced_as_unenforced(self, patch_exec, tmp_path, caplog):
-        root = _skill_repo(tmp_path / "plug")
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(plugins=[{"type": "local", "path": str(root)}]).start(str(tmp_path / "sandbox"))
-        assert "NOT enforced" not in caplog.text
-
     async def test_resolved_paths_are_recorded_for_audit(self, patch_exec, tmp_path):
         root = _skill_repo(tmp_path / "plug")
         patch_exec(_FakeProcess(HAPPY_STREAM))
@@ -831,20 +824,6 @@ class TestSkillInjection:
 
         assert _injected_skill_paths(captured) == [str(root / "skills")]
         assert "replacing it with the injected config" in caplog.text
-
-
-class TestUnsupportedConfigIsAnnounced:
-    async def test_enforced_fields_do_not_warn(self, patch_exec, tmp_path, caplog):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(allowed_tools=["Bash"], system_prompt="be terse").start(str(tmp_path))
-        assert "NOT enforced" not in caplog.text
-
-    async def test_no_warning_when_nothing_is_dropped(self, patch_exec, tmp_path, caplog):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent().start(str(tmp_path))
-        assert "NOT enforced" not in caplog.text
 
 
 class TestArgvConstruction:
