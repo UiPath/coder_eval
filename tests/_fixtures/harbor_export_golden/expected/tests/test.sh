@@ -13,5 +13,11 @@
 # always reach it.
 set -u
 
-coder-eval evaluate /tests/task.yaml "/app" --in-place --run-dir /logs/verifier || true
+# `$(pwd)` -- not a baked-in path -- so this script is agnostic of whatever
+# WORKDIR the agent's container actually used (task.toml's `environment.workdir`
+# when the task set one explicitly, or the image's own built-in WORKDIR
+# otherwise; see _write_environment). `docker exec` (or `-w`, when set) always
+# lands this shell's cwd there, so `pwd` is authoritative at run time -- no
+# export-time guess needed, and nothing to drift if the image changes later.
+coder-eval evaluate /tests/task.yaml "$(pwd)" --in-place --run-dir /logs/verifier || true
 coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json

@@ -4,19 +4,13 @@ Emits a Harbor task directory from a coder-eval task, with coder-eval's own crit
 as the grader. Task *definition* only; ``harbor/reward.py`` is the runtime contract
 that makes the emitted ``tests/test.sh`` work once Harbor runs it.
 
-Emitted layout::
+Layout::
 
     <out>/
     ├── task.toml
-    ├── instruction.md       # placeholder -- the real prompt is in environment/task.yaml
-    ├── environment/
-    │   ├── Dockerfile          # only when sandbox.docker.dockerfile_path is set
-    │   ├── task.yaml           # criteria-free copy for the CoderEvalAgent embed
-    │   └── docker-compose.yaml # always written; every input is bind-mounted, never COPY'd
-    └── tests/
-        ├── test.sh          # the two-line shim
-        ├── task.yaml        # the criteria, as authored
-        └── reference/       # task.reference, verifier-side only
+    ├── instruction.md          # placeholder
+    ├── environment/            # Dockerfile (optional), task.yaml, docker-compose.yaml
+    └── tests/                  # test.sh, task.yaml, reference/
 
 ``tests/task.yaml`` is uploaded whole into the container at ``/tests/``, which is why
 ``_TEST_SH_TEMPLATE`` references it absolutely rather than cwd-relative.
@@ -27,9 +21,7 @@ Rationale: .claude/notes/reporting.md § Harbor export
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,7 +36,6 @@ from coder_eval.orchestration.task_loader import load_task
 from coder_eval.path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks
 
 
-DEFAULT_WORKDIR = "/app"
 _HARBOR_SCHEMA_VERSION = "1.4"  # pinned to the harbor 0.22.0 findings in tmp/harborframework.md § C0
 
 # Graded via `coder-eval evaluate`, which never instantiates an agent on the
@@ -70,7 +61,13 @@ _TEST_SH_TEMPLATE = """#!/bin/sh
 # always reach it.
 set -u
 
-coder-eval evaluate /tests/task.yaml "{workdir}" --in-place --run-dir /logs/verifier || true
+# `$(pwd)` -- not a baked-in path -- so this script is agnostic of whatever
+# WORKDIR the agent's container actually used (task.toml's `environment.workdir`
+# when the task set one explicitly, or the image's own built-in WORKDIR
+# otherwise; see _write_environment). `docker exec` (or `-w`, when set) always
+# lands this shell's cwd there, so `pwd` is authoritative at run time -- no
+# export-time guess needed, and nothing to drift if the image changes later.
+coder-eval evaluate /tests/task.yaml "$(pwd)" --in-place --run-dir /logs/verifier || true
 coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json
 """
 
@@ -100,7 +97,7 @@ class ExportResult:
     """What ``export_task`` produced, for the CLI to report."""
 
     out_dir: Path
-    workdir: str
+    workdir: str | None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -188,7 +185,7 @@ def export_resolved_task(
     workdir, docker_image = _write_environment(task, task_file, out_dir, warnings)
     _write_instruction(out_dir)
     _write_verifier_task_yaml(task, out_dir)
-    _write_test_sh(out_dir, workdir=workdir)
+    _write_test_sh(out_dir)
     _write_reference(task, task_file, out_dir)
     _write_task_toml(task, out_dir, workdir=workdir, docker_image=docker_image)
 
@@ -243,19 +240,22 @@ def _write_environment(
     task_file: Path,
     out_dir: Path,
     warnings: list[str],
-) -> tuple[str, str | None]:
-    """Derive ``environment/`` and return ``(workdir, docker_image)``:
+) -> tuple[str | None, str | None]:
+    """Derive ``environment/`` and return ``(workdir, docker_image)``.
 
-    - ``workdir``: the WORKDIR both it and test.sh must agree on. This function is
-      the one place that decides it, so nothing downstream can silently disagree.
-    - ``docker_image``: set only when no ``environment/Dockerfile`` was written, so
-      ``task.toml``'s ``[environment].docker_image`` points straight at the pre-built
-      image; ``None`` when a Dockerfile was written and Harbor must build from it.
+    ``workdir`` is an EXPLICIT override only — ``sandbox.docker.working_dir`` or a
+    Dockerfile's own ``WORKDIR`` line. ``None`` otherwise, so Harbor's ``docker exec``
+    gets no ``-w`` and lands wherever the image's OWN ``WORKDIR`` already puts it;
+    ``tests/test.sh`` resolves the real cwd itself at run time via ``$(pwd)``.
 
-    ``dockerfile_path`` set is the only shape that writes a Dockerfile: it is copied in
-    as the base, with a ``WORKDIR`` appended when it declared none. Unset writes none.
+    ``docker_image`` is set only when no ``environment/Dockerfile`` was written, so
+    ``task.toml``'s ``[environment].docker_image`` points at the pre-built image;
+    ``None`` when a Dockerfile was written and Harbor must build from it.
+
+    A ``dockerfile_path`` is the only shape that writes a Dockerfile, copied in
+    UNCHANGED — no ``WORKDIR`` appended even when it declares none.
     ``environment/task.yaml`` is bind-mounted at :data:`AGENT_TASK_YAML_PATH`, never
-    ``COPY``'d, so no Dockerfile is involved in getting it there.
+    ``COPY``'d.
 
     Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
     """
@@ -272,14 +272,11 @@ def _write_environment(
     if docker_cfg.dockerfile_path is not None:
         source_dockerfile = Path(docker_cfg.dockerfile_path)  # already absolute — load_task resolves it
         shutil.copy2(source_dockerfile, dest_dockerfile)
-        workdir = docker_cfg.working_dir or _find_workdir(dest_dockerfile) or DEFAULT_WORKDIR
-        if _find_workdir(dest_dockerfile) is None:
-            with dest_dockerfile.open("a", encoding="utf-8") as fh:
-                fh.write(f"\nWORKDIR {workdir}\n")
-            warnings.append(
-                f"environment/Dockerfile declared no WORKDIR; appended `WORKDIR {workdir}` so the "
-                + "verifier and agent phases agree on a path."
-            )
+        # No fabricated WORKDIR appended when the Dockerfile declares none --
+        # the built image just inherits its base image's own default, and
+        # tests/test.sh finds it at run time via `$(pwd)` either way (see
+        # _TEST_SH_TEMPLATE and this function's docstring).
+        workdir = docker_cfg.working_dir or _find_workdir(dest_dockerfile)
         if not _from_line_mentions_coder_eval_agent(dest_dockerfile):
             warnings.append(_MISSING_CODER_EVAL_WARNING)
         # A build context beyond the Dockerfile itself is not carried over in v1;
@@ -297,52 +294,16 @@ def _write_environment(
     # points Harbor straight at the pre-built image instead (see docstring).
     if "coder-eval-agent" not in docker_cfg.image:
         warnings.append(_MISSING_CODER_EVAL_WARNING)
-    if docker_cfg.working_dir is not None:
-        workdir = docker_cfg.working_dir
-    else:
-        inspected = _inspect_image_workdir(docker_cfg.image)
-        if inspected is not None:
-            workdir = inspected
-        else:
-            workdir = DEFAULT_WORKDIR
-            warnings.append(
-                f"Could not determine {docker_cfg.image}'s own WORKDIR (image not present locally, or "
-                + f"docker unavailable at export time) -- defaulting to `{DEFAULT_WORKDIR}`. Harbor's "
-                + "`docker exec -w` hard-fails if that path does not already exist in the image (unlike "
-                + "`docker run -w`, it will not create it); set `sandbox.docker.working_dir` explicitly "
-                + "to the image's real WORKDIR to avoid a verify-time exit 127."
-            )
+    # No `docker image inspect` guess here either (v1 used to shell out for
+    # one, defaulting to a fabricated path on failure -- a real bug: a stale
+    # or wrong guess baked into task.toml made Harbor's `docker exec -w`
+    # hard-fail with exit 127 the moment it didn't exist in the image that
+    # actually ran). Leaving `workdir` unset unless the task pins one is
+    # strictly safer: Harbor's docker environment only adds `-w <workdir>`
+    # when `[environment].workdir` is set at all, so `None` here means the
+    # container's OWN `WORKDIR` decides -- always current, never a snapshot.
+    workdir = docker_cfg.working_dir
     return workdir, docker_cfg.image
-
-
-def _inspect_image_workdir(image: str) -> str | None:
-    """Best-effort ``docker image inspect`` for a pre-built image's own ``WORKDIR``.
-
-    A pre-built image has no Dockerfile for ``_find_workdir`` to read, so this
-    is the only way to avoid guessing a path that doesn't exist in it (Harbor's
-    ``docker exec -w`` -- unlike ``docker run -w`` -- fails outright if the
-    directory isn't already there; confirmed live). Returns ``None`` (never
-    raises) whenever docker isn't available, the image isn't present locally,
-    or it declares no WORKDIR -- callers fall back to ``DEFAULT_WORKDIR`` and
-    warn.
-    """
-    try:
-        result = subprocess.run(
-            # `--` before `image` (task-YAML-controlled) stops it from being
-            # parsed as an option if it happens to start with "-".
-            ["docker", "image", "inspect", "--format", "{{.Config.WorkingDir}}", "--", image],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    workdir = result.stdout.strip()
-    return workdir or None
 
 
 _MISSING_CODER_EVAL_WARNING = (
@@ -605,12 +566,12 @@ def _write_agent_phase_task_yaml(
     (env_dir / "task.yaml").write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
-def _write_test_sh(out_dir: Path, *, workdir: str) -> None:
+def _write_test_sh(out_dir: Path) -> None:
+    # No task-controlled value is interpolated into the template anymore --
+    # `$(pwd)` is a fixed literal (see _TEST_SH_TEMPLATE) -- so there is no
+    # longer an injection surface here to shlex.quote against.
     path = out_dir / "tests" / "test.sh"
-    # HAZARD: `workdir` is task-authored and its only validator checks for a
-    # leading "/" -- it does not reject quotes, `$(...)`, backticks or newlines.
-    # shlex.quote before interpolating into the generated /bin/sh script.
-    path.write_text(_TEST_SH_TEMPLATE.format(workdir=shlex.quote(workdir)), encoding="utf-8")
+    path.write_text(_TEST_SH_TEMPLATE, encoding="utf-8")
     path.chmod(0o755)
 
 
@@ -632,7 +593,7 @@ def _write_reference(task: TaskDefinition, task_file: Path, out_dir: Path) -> No
         ) from e
 
 
-def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str, docker_image: str | None) -> None:
+def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str | None, docker_image: str | None) -> None:
     verifier_section: dict[str, object] = {}
     env_names = _env_passthrough_names(task)
     if env_names:
@@ -695,7 +656,9 @@ def _env_template_dict(names: list[str]) -> dict[str, str]:
     return {name: f"${{{name}:-}}" for name in names}
 
 
-def _build_environment_section(task: TaskDefinition, *, workdir: str, docker_image: str | None) -> dict[str, object]:
+def _build_environment_section(
+    task: TaskDefinition, *, workdir: str | None, docker_image: str | None
+) -> dict[str, object]:
     """``docker_image`` is set (by ``_write_environment``) only when no ``environment/Dockerfile``
     was written at all -- i.e. no ``dockerfile_path``, nothing to build -- so Harbor's own
     ``should_use_prebuilt_docker_image`` pulls this image directly and skips building. When a
@@ -703,7 +666,9 @@ def _build_environment_section(task: TaskDefinition, *, workdir: str, docker_ima
     and Harbor builds from that file instead.
     """
     docker_cfg = task.sandbox.docker
-    section: dict[str, object] = {"workdir": workdir}
+    section: dict[str, object] = {}
+    if workdir is not None:
+        section["workdir"] = workdir
     if docker_image is not None:
         section["docker_image"] = docker_image
     limits = task.sandbox.limits
@@ -719,7 +684,6 @@ def _build_environment_section(task: TaskDefinition, *, workdir: str, docker_ima
 
 
 __all__ = [
-    "DEFAULT_WORKDIR",
     "CriteriaNotExportableError",
     "ExportResult",
     "TaskNotExportableError",

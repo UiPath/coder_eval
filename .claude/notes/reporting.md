@@ -454,11 +454,22 @@ shell at exec time and equals the WORKDIR because the exec is given no explicit 
 No Dockerfile is written unless the task sets `sandbox.docker.dockerfile_path` — only
 real build steps (`RUN`) need one. Harbor's own `should_use_prebuilt_docker_image`
 (`harbor/environments/definition.py`) pulls `task.toml`'s `[environment].docker_image`
-and skips the build, confirmed against a real `harbor` install; `WORKDIR` needs no
-Dockerfile line either, because `[environment].workdir` is what Harbor passes as the
-`cwd` / `-w` at `docker exec` time, whether the image was built or pulled. So the
-Dockerfile-less shape is a real choice rather than a null-vs-set distinction:
-`docker_cfg.image` always has a value (`default_factory=get_default_docker_image_tag`).
+and skips the build, confirmed against a real `harbor` install. So the Dockerfile-less
+shape is a real choice rather than a null-vs-set distinction: `docker_cfg.image` always
+has a value (`default_factory=get_default_docker_image_tag`).
+
+`[environment].workdir` is what Harbor passes as `-w` at `docker exec` time, but the
+packager only sets it for an EXPLICIT override (`sandbox.docker.working_dir`, or a
+Dockerfile's own `WORKDIR` line) — never a guess. `docker exec` (unlike `docker run`)
+hard-fails with exit 127 if `-w`'s path doesn't already exist in the image, so guessing
+one at export time (originally via `docker image inspect`, falling back to a hardcoded
+`/app` when that failed) meant an export-time snapshot could go stale against whatever
+image the trial actually ran under, on a different machine or after the image changed —
+confirmed live: a wrong guess baked into `task.toml` broke every trial with the same exit
+127 well before the agent ever ran. Leaving `workdir` unset when the task names no
+override means `docker exec` runs with no `-w` at all, so the container's OWN current
+`WORKDIR` decides — always correct, nothing to go stale. `tests/test.sh` never needs the
+value in advance either; see below.
 
 A bind mount also removes a hazard the `COPY` approach had: it never walks the export's
 own `-o` directory, so a plugin source that contains it cannot self-nest.
@@ -497,9 +508,12 @@ letting a bare `OSError` escape, because the CLI catches only the export errors 
 unreadable tree would otherwise abort a whole experiment export the docstring promises it
 will not abort.
 
-The generated shell script quotes the workdir before interpolating it: that value comes
-from a task-YAML field whose only validator checks for a leading slash, so it does not
-reject quotes, substitutions, backticks or newlines.
+The generated shell script no longer interpolates a workdir value at all — it resolves its
+own cwd via `$(pwd)` at run time, a fixed literal in `_TEST_SH_TEMPLATE`. `docker exec`
+(with `-w` when the task set an explicit override, or none when it did not — see above)
+always lands the shell there, whether or not the same container's agent phase used an
+explicit override too, so `pwd` is authoritative and there is no longer an injection
+surface to `shlex.quote` against.
 
 ## The ATIF trajectory bridge
 
