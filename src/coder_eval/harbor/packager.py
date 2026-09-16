@@ -4,20 +4,13 @@ Emits a Harbor task directory from a coder-eval task, with coder-eval's own crit
 as the grader. Task *definition* only; ``harbor/reward.py`` is the runtime contract
 that makes the emitted ``tests/test.sh`` work once Harbor runs it.
 
-Emitted layout::
+Layout::
 
     <out>/
     ├── task.toml
-    ├── instruction.md       # placeholder -- the real prompt is in environment/task.yaml
-    ├── environment/
-    │   ├── Dockerfile          # only when sandbox.docker.dockerfile_path is set -- copied in
-    │   │                       # unchanged, no WORKDIR forced when it declares none
-    │   ├── task.yaml           # criteria-free copy for the CoderEvalAgent embed
-    │   └── docker-compose.yaml # always written; every input is bind-mounted, never COPY'd
-    └── tests/
-        ├── test.sh          # the two-line shim
-        ├── task.yaml        # the criteria, as authored
-        └── reference/       # task.reference, verifier-side only
+    ├── instruction.md          # placeholder
+    ├── environment/            # Dockerfile (optional), task.yaml, docker-compose.yaml
+    └── tests/                  # test.sh, task.yaml, reference/
 
 ``tests/task.yaml`` is uploaded whole into the container at ``/tests/``, which is why
 ``_TEST_SH_TEMPLATE`` references it absolutely rather than cwd-relative.
@@ -248,27 +241,21 @@ def _write_environment(
     out_dir: Path,
     warnings: list[str],
 ) -> tuple[str | None, str | None]:
-    """Derive ``environment/`` and return ``(workdir, docker_image)``:
+    """Derive ``environment/`` and return ``(workdir, docker_image)``.
 
-    - ``workdir``: an EXPLICIT override only — ``sandbox.docker.working_dir``, or a
-      Dockerfile's own ``WORKDIR`` line, when the task or its Dockerfile actually
-      names one. ``None`` otherwise, deliberately: Harbor's docker environment
-      only passes ``-w <workdir>`` to ``docker exec`` when ``[environment].workdir``
-      is set at all (``docker.py``'s ``cwd`` arg), so ``None`` here means the shell
-      lands wherever the image's OWN ``WORKDIR`` already puts it — no export-time
-      guess to go stale against whatever image the trial actually runs under.
-      ``tests/test.sh`` resolves the real cwd itself at run time via ``$(pwd)``
-      (see ``_TEST_SH_TEMPLATE``), so it never needs this value to be correct in
-      advance.
-    - ``docker_image``: set only when no ``environment/Dockerfile`` was written, so
-      ``task.toml``'s ``[environment].docker_image`` points straight at the pre-built
-      image; ``None`` when a Dockerfile was written and Harbor must build from it.
+    ``workdir`` is an EXPLICIT override only — ``sandbox.docker.working_dir`` or a
+    Dockerfile's own ``WORKDIR`` line. ``None`` otherwise, so Harbor's ``docker exec``
+    gets no ``-w`` and lands wherever the image's OWN ``WORKDIR`` already puts it;
+    ``tests/test.sh`` resolves the real cwd itself at run time via ``$(pwd)``.
 
-    ``dockerfile_path`` set is the only shape that writes a Dockerfile: it is copied in
-    as the base, UNCHANGED — no ``WORKDIR`` is appended even when it declares none; the
-    built image simply inherits its base image's own default. Unset writes none.
+    ``docker_image`` is set only when no ``environment/Dockerfile`` was written, so
+    ``task.toml``'s ``[environment].docker_image`` points at the pre-built image;
+    ``None`` when a Dockerfile was written and Harbor must build from it.
+
+    A ``dockerfile_path`` is the only shape that writes a Dockerfile, copied in
+    UNCHANGED — no ``WORKDIR`` appended even when it declares none.
     ``environment/task.yaml`` is bind-mounted at :data:`AGENT_TASK_YAML_PATH`, never
-    ``COPY``'d, so no Dockerfile is involved in getting it there.
+    ``COPY``'d.
 
     Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
     """
