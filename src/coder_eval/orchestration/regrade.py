@@ -644,8 +644,7 @@ def _should_grade_in_container(task: TaskDefinition, *, allow_host_grading: bool
       driver, for the same reason the reference-permission window is: the host
       stages a container's task with `driver: tempdir`, so a driver-based test
       would be reading a value that has already been resolved. Without this, a
-      grading container would try to
-      dispatch a grading container.
+      grading container would try to dispatch a grading container.
     * ``--allow-host-grading`` not passed. That flag is the operator saying
       "grade it here anyway" — the escape hatch for a machine with no docker, or
       for criteria known to be host-portable — and it must keep winning, since

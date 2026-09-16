@@ -7,6 +7,7 @@ from rich.markdown import Markdown
 from rich.markup import escape
 
 from ..models import EvaluationResult
+from ..orchestration.run_summary_rebuild import find_run_root, rebuild_run_summary
 from ..path_utils import TASK_JSON_FILENAME
 from ..reports import ReportGenerator, write_task_html
 from .console import console
@@ -111,8 +112,6 @@ def report_command(
 
 def _rebuild_run_summary(run_dir: Path) -> None:
     """Rebuild ``run_dir``'s run.json + run.md and print the counts; exit 1 when there is nothing to aggregate."""
-    from ..orchestration.run_summary_rebuild import find_run_root, rebuild_run_summary
-
     # A run.json written below the real root makes every later rebuild of that root drop these rows.
     if (run_dir / TASK_JSON_FILENAME).is_file():
         raise typer.BadParameter(f"{run_dir} is a task directory, not a run root; pass the run directory above it.")

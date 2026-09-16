@@ -398,7 +398,7 @@ class TestInContainerRegradeBranch:
     def test_an_older_host_that_omits_host_task_file_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An absent key is host/image skew. Accepting it recorded the container
+        """An absent key is host/image skew. Accepting it would record the container
         path, `/work/task_dir/task.yaml`, which exists on no host."""
         result, captured = self._invoke(tmp_path, monkeypatch, omit=("host_task_file",))
 
@@ -906,7 +906,7 @@ class TestContainerContextIsValidated:
         assert "sent_by_a_newer_host" in result.output
 
     def test_an_invalid_lineage_entry_is_a_clean_refusal(self, tmp_path: Path) -> None:
-        """Previously an unhandled ValidationError mid-command; now the one parse arm."""
+        """A nested field that fails validation exits 2 naming the field, not with a traceback."""
         result = self._run(tmp_path, config_lineage={"agent.model": {"value": "m", "source": "nowhere"}})
         assert result.exit_code == 2
         assert "config_lineage" in result.output

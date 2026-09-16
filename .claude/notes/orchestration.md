@@ -42,20 +42,20 @@
   non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)`
   → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog
   check, and post-failure diagnostics); it crosses the docker boundary in `context.json`
-  (a required contract field with no default, so a host and image that disagree about
-  it fail at parse time). It is **deliberately not a task-config field** — no 5-layer merge, no `-D` path — because
-  a task YAML must never declare itself ungraded; only the invoking command decides.
-  `run` and `execute` share one body (`run_command.run_pipeline`) and differ solely in
-  that flag, so there is no third code path. Three things are refused rather than
-  degraded: `--junit-xml` (a report of verdicts, and there are none — though
-  `reports/junit.py` still emits `<skipped>` for an ungraded row it encounters),
-  `--allow-host-grading` (it decides how an ungraded row is GRADED, and `execute` grades
-  nothing), and simulation tasks (their turn-continuation logic reads criteria results,
-  so an ungraded dialog would silently change its own stopping behavior). `stop_early:`
-  blocks are inert under `execute` for the same reason the kill switch exists: the full
-  trajectory is the deliverable. Motivating consumer: an external harness (Harbor /
-  Terminal-Bench 2.0) that builds its own container, calls coder-eval as the agent, and
-  grades with its own tests.
+  (a required contract field with no default, so a host and image that disagree about it
+  fail at parse time). It is **deliberately not a task-config field** — no 5-layer
+  merge, no `-D` path — because a task YAML must never declare itself ungraded; only the
+  invoking command decides. `run` and `execute` share one body
+  (`run_command.run_pipeline`) and differ solely in that flag, so there is no third code
+  path. Three things are refused rather than degraded: `--junit-xml` (a report of
+  verdicts, and there are none — though `reports/junit.py` still emits `<skipped>` for
+  an ungraded row it encounters), `--allow-host-grading` (it decides how an ungraded row
+  is GRADED, and `execute` grades nothing), and simulation tasks (their
+  turn-continuation logic reads criteria results, so an ungraded dialog would silently
+  change its own stopping behavior). `stop_early:` blocks are inert under `execute` for
+  the same reason the kill switch exists: the full trajectory is the deliverable.
+  Motivating consumer: an external harness (Harbor / Terminal-Bench 2.0) that builds its
+  own container, calls coder-eval as the agent, and grades with its own tests.
 
 ### The terminal-status chain
 

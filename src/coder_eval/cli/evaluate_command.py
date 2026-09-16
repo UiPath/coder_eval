@@ -23,6 +23,7 @@ from ..models import (
     TemplateDirSource,
     parse_agent_config,
 )
+from ..orchestration import run_summary_rebuild
 from ..orchestration.regrade import (
     RegradeError,
     back_up_pre_grade_record,
@@ -643,8 +644,6 @@ def _refresh_run_summary(row_dir: Path, grading_run_dir: Path) -> None:
 
     Rationale: .claude/notes/isolation.md § Detached grading from the CLI
     """
-    from ..orchestration import run_summary_rebuild
-
     try:
         root = run_summary_rebuild.find_run_root(row_dir)
         if root is None:

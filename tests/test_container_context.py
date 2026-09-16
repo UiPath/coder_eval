@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +14,9 @@ import yaml
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from coder_eval.cli import app
+from coder_eval import models
+from coder_eval.cli import app, run_task_internal_command
+from coder_eval.isolation.docker_runner import DockerRunner
 from coder_eval.models import (
     AgentKind,
     ConfigLineageEntry,
@@ -27,6 +31,8 @@ from coder_eval.models import (
     SandboxConfig,
     TaskDefinition,
 )
+from coder_eval.orchestration.regrade import regrade_in_place
+from coder_eval.orchestration.task_loader import load_task
 from coder_eval.path_utils import PRIOR_RESULT_FILENAME, TASK_JSON_FILENAME
 from coder_eval.reports import is_env_table_key
 from tests._container_contract import contract_payload
@@ -38,7 +44,7 @@ def test_the_fixture_names_every_field() -> None:
 
 
 def test_every_field_is_required() -> None:
-    """A default on any field restores the fallback a mismatched host/image pair used to hide behind."""
+    """A default on any field lets a mismatched host/image pair fall back silently instead of failing."""
     defaulted = [name for name, field in ContainerContext.model_fields.items() if not field.is_required()]
     assert not defaulted, f"ContainerContext fields must not carry defaults: {defaulted}"
 
@@ -59,7 +65,7 @@ def test_an_unknown_key_is_refused() -> None:
 @pytest.mark.parametrize("field", ["grade", "regrade"])
 @pytest.mark.parametrize("value", ["false", "False", "0", 0, 1])
 def test_a_string_grade_is_refused(field: str, value: object) -> None:
-    """Lax coercion is the defect: `"false"` is a truthy string, and a `regrade` read
+    """Lax coercion must refuse: `"false"` is a truthy string, and a `regrade` read
     that way re-RUNS the agent over the workspace it was asked only to grade."""
     with pytest.raises(ValidationError, match=rf"(?m)^{field}$"):
         ContainerContext.model_validate(contract_payload(**{field: value}))
@@ -181,7 +187,6 @@ def test_the_echo_survives_a_regrade(tmp_path: Path, monkeypatch: pytest.MonkeyP
     """`_seed_from_prior_result` lets the PRIOR row's environment_info win. The prior here
     carries a stale echo from an earlier pass, so an echo written before the seed would be
     replaced by it and the host would refuse a correct grade."""
-    from coder_eval import models
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -212,8 +217,6 @@ def test_the_echo_survives_a_regrade(tmp_path: Path, monkeypatch: pytest.MonkeyP
 async def test_a_host_grade_drops_the_prior_echo(tmp_path: Path) -> None:
     """A host grade is not a container's verdict. Keeping the prior echo would record
     `grade: false` / `regrade: false` on a row that this pass just graded."""
-    from coder_eval.orchestration.regrade import regrade_in_place
-    from coder_eval.orchestration.task_loader import load_task
 
     task_yaml = tmp_path / "task.yaml"
     task_yaml.write_text(_AGENTLESS_TASK_YAML, encoding="utf-8")
@@ -268,7 +271,6 @@ def _authored_docker_task() -> TaskDefinition:
 
 
 async def _stage(tmp_path: Path) -> tuple[ResolvedTask, Path, ContainerContext]:
-    from coder_eval.isolation.docker_runner import DockerRunner
 
     rt = ResolvedTask(
         task=_authored_docker_task(),
@@ -284,7 +286,6 @@ async def _stage(tmp_path: Path) -> tuple[ResolvedTask, Path, ContainerContext]:
 
 
 async def test_the_staged_task_yaml_says_tempdir(tmp_path: Path) -> None:
-    from coder_eval.orchestration.task_loader import load_task
 
     _, input_dir, _ = await _stage(tmp_path)
 
@@ -317,12 +318,7 @@ def test_the_container_records_the_authored_driver(tmp_path: Path) -> None:
 
 
 def test_run_task_internal_contains_no_driver_rewrite() -> None:
-    """CE051 covers the pattern tree-wide; this pins the module that must not hold an exemption again."""
-    import ast
-    import inspect
-
-    from coder_eval.cli import run_task_internal_command
-
+    """CE051 covers the pattern tree-wide; this pins the one module that must hold no exemption."""
     source = inspect.getsource(run_task_internal_command)
     driver_keys = [
         node.lineno
