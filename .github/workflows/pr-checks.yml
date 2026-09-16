@@ -798,10 +798,9 @@ jobs:
       - name: Run cost-budget smoke (max_usd → COST_BUDGET_EXCEEDED via DirectRoute)
         # Verifies the cost path end-to-end on DirectRoute (Anthropic reports
         # per-turn cost). A regression that broke per-turn cost reporting would
-        # log "max_usd budget configured but no turn reported cost; skipping
-        # cost check" and the task would land in tasks_failed via the
-        # placeholder criterion instead of COST_BUDGET_EXCEEDED. The
-        # final_status assertion below catches that silently-broken case.
+        # finish the task ERROR ("run_limits.max_usd could not be enforced")
+        # instead of COST_BUDGET_EXCEEDED. The final_status assertion below
+        # catches that case.
         run: |
           # Inverted exit semantics: coder-eval exits 1 when a task fails. We want that.
           if .venv/bin/coder-eval run tasks/smoke_cost_budget_exceeded.yaml \

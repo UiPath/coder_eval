@@ -114,7 +114,7 @@ describe("summarizeListing", () => {
 
 describe("turnBudgetRateForTasks", () => {
     test("null when no task in scope carries a budget", () => {
-        // No task carries an expected_turns budget, so none is eligible and the
+        // No task carries an expected_tool_calls budget, so none is eligible and the
         // final eligible>0 check returns null (the chart shows a gap).
         expect(turnBudgetRateForTasks([task({ visibleTurns: 5 })])).toBeNull();
     });
@@ -161,7 +161,7 @@ describe("turnBudgetRateForTasks", () => {
     });
 
     test("budget-less failures are excluded from the denominator", () => {
-        // Eligibility is symmetric: a failure with no expected_turns budget is
+        // Eligibility is symmetric: a failure with no expected_tool_calls budget is
         // excluded just like a budget-less success, so it cannot drag the rate
         // down. Only the budgeted within-budget SUCCESS counts → 100%.
         const rate = turnBudgetRateForTasks([

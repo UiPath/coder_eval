@@ -2,7 +2,7 @@ task_id: run-limits-turn-timeout
 description: >-
   Parity fixture for run_limits.turn_timeout. The prompt blocks far longer than
   the timeout allows, so every harness must abort the turn on the watchdog. The
-  contrast with the max_turns fixture is the point: a timeout is a FAILURE with a
+  contrast with the max_tool_calls fixture is the point: a timeout is a FAILURE with a
   partial turn captured, while the turn cap is a clean stop.
 
 tags:
@@ -18,9 +18,6 @@ initial_prompt: |
 run_limits:
   turn_timeout: 45
   task_timeout: 180
-
-agent:
-  permission_mode: bypassPermissions
 
 success_criteria:
   - type: file_exists

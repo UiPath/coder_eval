@@ -12,7 +12,6 @@ Run just these tests:
 
 import json
 import re
-import subprocess
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -316,7 +315,7 @@ class TestCE018NoFinalStatusNameDenylist:
             '"ERROR" == s',  # reversed
             's in ("FAILURE", "TIMEOUT")',
             's not in ("TOKEN_BUDGET_EXCEEDED", "COST_BUDGET_EXCEEDED")',
-            's in ("succeeded", "MAX_TURNS_EXHAUSTED")',  # tuple mixes a member name in
+            's in ("succeeded", "TOOL_CALLS_EXHAUSTED")',  # tuple mixes a member name in
             's in ["SUCCESS", "FAILURE"]',  # list literal
             's in {"ERROR"}',  # set literal
         ],
@@ -2177,12 +2176,40 @@ class TestCE069HarnessParityTable:
             "to regenerate:\n\n" + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
         )
 
-    def test_both_marker_pairs_exist(self):
-        from tests.lint.harness_parity import CONTRACT_END, CONTRACT_START, TOOLS_END, TOOLS_START
+    def test_all_three_marker_pairs_exist(self):
+        from tests.lint.harness_parity import (
+            CONTRACT_END,
+            CONTRACT_START,
+            RUN_LIMITS_END,
+            RUN_LIMITS_START,
+            TOOLS_END,
+            TOOLS_START,
+        )
 
         text = (self.REPO_ROOT / "docs/agents/HARNESS_PARITY.md").read_text(encoding="utf-8")
-        for marker in (CONTRACT_START, CONTRACT_END, TOOLS_START, TOOLS_END):
+        for marker in (CONTRACT_START, CONTRACT_END, TOOLS_START, TOOLS_END, RUN_LIMITS_START, RUN_LIMITS_END):
             assert marker in text
+
+    def test_run_limits_render_pins_the_header_and_the_noop_cap_cell(self):
+        from tests.lint.harness_parity import render_run_limits_table
+
+        lines = render_run_limits_table().splitlines()
+        assert lines[0] == "| limit | claude-code | codex | antigravity | opencode | pi | none |"
+        cap = next(line for line in lines if line.startswith("| `max_tool_calls` |"))
+        assert cap.endswith("| not polled (never fires) |")
+
+    def test_a_run_limits_field_without_a_cell_rule_fails_the_render(self):
+        from tests.lint.harness_parity import render_run_limits_table
+
+        with pytest.raises(KeyError, match="max_wall_clock"):
+            render_run_limits_table(["max_tool_calls", "max_wall_clock"])
+
+    def test_every_run_limits_field_has_a_row(self):
+        from coder_eval.models import RunLimits
+        from tests.lint.harness_parity import render_run_limits_table
+
+        text = render_run_limits_table()
+        assert all(f"| `{field}` |" in text for field in RunLimits.model_fields)
 
     def test_render_pins_the_header_and_a_known_cell(self):
         from tests.lint.harness_parity import render_table
@@ -2191,6 +2218,8 @@ class TestCE069HarnessParityTable:
         assert lines[0] == "| field | claude-code | codex | antigravity | opencode | pi | none |"
         system_prompt = next(line for line in lines if line.startswith("| `system_prompt` |"))
         assert system_prompt.split(" | ")[5] == "enforced"
+        granularity = next(line for line in lines if line.startswith("| `usage_granularity` |"))
+        assert granularity == "| `usage_granularity` | generation | turn | turn | step | step | turn |"
 
 
 @pytest.mark.lint
@@ -2243,6 +2272,61 @@ class TestCE068NoKindNamesInKernel:
         members = typing.get_args(typing.get_args(AgentConfig.__value__)[0])
         assert {cls.__name__ for cls in members} == CONFIG_CLASS_NAMES
         assert "PiAgentConfig" in CONFIG_CLASS_NAMES
+
+
+@pytest.mark.lint
+class TestCE070NoCapOrSkillScanInAdapters:
+    """CE070 — agent adapters neither count run caps nor scan for skills."""
+
+    AGENT = "/repo/src/coder_eval/agents/x_agent.py"
+    ORCHESTRATION = "/repo/src/coder_eval/orchestration/plugin_staging.py"
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce070_no_cap_or_skill_scan_in_adapters import NoCapOrSkillScanInAdapters
+
+        return list(NoCapOrSkillScanInAdapters(filepath).check(ast.parse(source)))
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "n = self.max_tool_calls",
+            "state.max_turns_hit = True",
+            "limits: RunLimits | None = None",
+            "from coder_eval.utils import expand_env_vars",
+            "def communicate(self, max_turns=None): ...",
+            "agent.communicate('p', max_turns=3)",
+            "record.tool_calls_exhausted = True",
+            "p = root / 'skills' / name / 'SKILL.md'",
+        ],
+    )
+    def test_a_cap_counter_or_a_skill_scan_in_an_adapter_violates(self, source: str):
+        found = self._violations(source, self.AGENT)
+        assert found
+        assert "TurnMonitor" in found[0].message
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "ok = self._is_max_turns_result(summary)",
+            "hit = summary.subtype == 'error_max_turns'",
+            "doc = 'reads SKILL.md on demand'",
+        ],
+    )
+    def test_substrings_and_longer_strings_are_allowed(self, source: str):
+        assert not self._violations(source, self.AGENT)
+
+    def test_the_same_code_outside_agents_is_allowed(self):
+        source = "from coder_eval.utils import expand_env_vars\nn = limits.max_tool_calls\nf = 'SKILL.md'"
+        assert not self._violations(source, self.ORCHESTRATION)
+
+    def test_the_rule_is_wired_into_the_runner(self):
+        from tests.lint.rules.ce070_no_cap_or_skill_scan_in_adapters import NoCapOrSkillScanInAdapters
+        from tests.lint.runner import ALL_RULES
+
+        assert NoCapOrSkillScanInAdapters in ALL_RULES
 
 
 @pytest.mark.lint
@@ -3361,7 +3445,7 @@ class TestRunRecordFieldVocabulary:
         assert "`iterations`" in text, "analyze no longer names `iterations` as the current key"
         denial = text.partition("There is no top-level")[2].partition(".")[0]
         assert denial, "analyze lost the never-top-level denial sentence entirely"
-        for name in ("`total_tokens`", "`total_cost_usd`", "`max_turns`", "`criteria_count`"):
+        for name in ("`total_tokens`", "`total_cost_usd`", "`max_tool_calls`", "`criteria_count`"):
             assert name in denial, (
                 f"analyze stopped denying a top-level {name}, which is absent in EVERY "
                 "generation — collateral damage from making the `turns` clause conditional"
@@ -3632,7 +3716,7 @@ class TestCE036LiveVerdictContract:
     """CE036 — every live-observable criterion's `live_verdict` must be deterministic
     and monotonic (GitHub issue #61 item 2).
 
-    `EarlyStopWatcher` latches verdicts, defers the fail-stop, and attributes pass-stop
+    `TurnMonitor` latches verdicts, defers the fail-stop, and attributes pass-stop
     flips against the previous round — all correct only while `live_verdict` never
     contradicts an earlier decision and never varies for identical input. That contract
     was documented on `LiveVerdict`/`BaseCriterion.live_verdict` but unenforced: a third
@@ -3861,7 +3945,7 @@ class TestCE036LiveVerdictContract:
 
     def test_permutation_renumbers_so_a_sequence_sorting_checker_is_still_probed(self):
         """The watcher hands `live_verdict` a trajectory sorted by `sequence_number`
-        (`EarlyStopWatcher._collect_verdicts`), so a checker may legitimately sort by it
+        (`TurnMonitor._collect_verdicts`), so a checker may legitimately sort by it
         too. If the shuffle left the original numbers attached, that sort would undo
         every permutation and this layer would silently probe nothing. Renumbering keeps
         the same recency bug detectable through the sort."""
@@ -3968,243 +4052,6 @@ class TestCE044PluginManifestParity:
         market_dir = root / ".claude-plugin"
         market_dir.mkdir(parents=True)
         (market_dir / "marketplace.json").write_text(json.dumps({"name": "demo", "plugins": [entry]}), encoding="utf-8")
-
-
-@pytest.mark.lint
-class TestCE045PluginPathIsAPluginRoot:
-    """CE045 — a claude-code local plugin path must name a plugin ROOT, not a skills dir.
-
-    `agent.plugins: [{type: local, path: X}]` reaches the Claude Code SDK as a plugin
-    directory, so a skill is found at `X/skills/<name>/SKILL.md`. Point X one level
-    deeper — at the directory that holds the skill directories — and NOTHING loads.
-    Probed against the real CLI, from a cwd that is not the skill's own repo (project
-    discovery would otherwise find it regardless of `--plugin-dir`, and the namespace
-    prefix is the real signal):
-
-        claude --plugin-dir <root>/skills  ->  nothing
-        claude --plugin-dir <root>         ->  `root:probe-beta`
-
-    The cost is invisible and total: every activation suite the plugin generated
-    reported recall 0.0, which the bundled template's own comment calls "reads exactly
-    like a broken skill", and `ci` wrote the same path into users' SCHEDULED workflows,
-    where it renders as a permanent red indistinguishable from the drift the schedule
-    exists to detect.
-
-    INCIDENT RECORD — the corpus below is that record, not this prose. Six wrong-value
-    lines across five files shipped at once: docs/PLUGIN.md, tutorial 07,
-    activation.yaml (comment and example), check-skill, and ci. Nothing held them in
-    agreement, which is why they drifted together.
-
-    The unit under test is the VALUE, not the sentence around it: a path whose last
-    segment is `skills` cannot be a plugin root, whatever the prose claims.
-
-    SCOPE. The rule keys on `SKILL_SOURCE_PATH`, the variable the plugin emits. That is
-    a limit, NOT a statement that other variables may use the deeper form — `$PLUGIN_PATH`
-    feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code, and
-    is unlinted. The guard that reaches every user, including the repos where
-    `/coder-eval:check-skill` actually writes suites, is the runtime warning in
-    `utils.process_plugins`; this rule only keeps THIS repo's shipped strings honest.
-    """
-
-    REPO_ROOT = Path(__file__).parent.parent
-
-    # Verbatim pre-fix lines, one per surface that shipped the wrong value. The mutation
-    # guard replays these through the FULL extract-then-predicate pipeline. An earlier
-    # revision asserted the predicate against hand-written strings the matcher could
-    # never produce, which is how the Actions form below stayed unreachable while the
-    # rule looked covered.
-    KNOWN_BAD_LINES = (
-        'export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"',
-        "#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills",
-        "  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude/skills",
-        "export SKILL_SOURCE_PATH=$HOME/repo/.claude/skills/",
-    )
-
-    # Value runs to end-of-line or a closing quote, NOT to the first space: the GitHub
-    # Actions form `${{ github.workspace }}/.claude/skills` contains spaces INSIDE the
-    # expression, and a whitespace-terminated pattern captured a bare `${{` — silently
-    # exempting the highest-cost surface, the one `ci` writes into users' workflows.
-    _ASSIGNMENT = re.compile(r"""SKILL_SOURCE_PATH\s*=\s*(?:"([^"]*)"|'([^']*)'|([^"'\n]*))""")
-
-    # Every tracked file that can carry the token. Kept in step with the tree by
-    # `test_globs_cover_every_file_naming_the_token`, so "globbed, not enumerated" is
-    # true by construction rather than aspirational.
-    _GLOBS = (
-        "*.md",
-        ".claude/**/*.md",
-        "docs/**/*.md",
-        "plugins/**/*.md",
-        "plugins/**/*.yaml",
-        "tasks/**/*.yaml",
-        "tasks/**/*.yml",
-        "experiments/**/*.yaml",
-        ".github/workflows/*.yml",
-        ".github/workflows/*.yaml",
-    )
-
-    def _surfaces(self) -> list[Path]:
-        found: set[Path] = set()
-        for pattern in self._GLOBS:
-            found.update(self.REPO_ROOT.glob(pattern))
-        return sorted(found)
-
-    @classmethod
-    def _values(cls, line: str) -> list[str]:
-        """Every SKILL_SOURCE_PATH value on one line, whichever quoting it uses.
-
-        `finditer`, not `findall`: an unmatched alternation group is None here but an
-        empty STRING in findall's tuples, so picking "the first non-None group" off a
-        findall tuple silently selects the empty quoted branch every time.
-        """
-        values = []
-        for match in cls._ASSIGNMENT.finditer(line):
-            captured = next((g for g in match.groups() if g is not None), "")
-            if captured.strip():
-                values.append(captured.strip())
-        return values
-
-    @staticmethod
-    def _is_skills_dir(value: str) -> bool:
-        """Does this path's last segment name a skills directory rather than a plugin root?"""
-        # Drop `${{ ... }}` expressions first: their inner spaces are not path separators,
-        # and what matters is the literal tail written after them.
-        literal = re.sub(r"\$\{\{.*?\}\}", "", value)
-        return literal.rstrip("/").rsplit("/", 1)[-1] == "skills"
-
-    def test_no_surface_points_skill_source_path_at_a_skills_dir(self):
-        offenders: list[str] = []
-        scanned = 0
-        for path in self._surfaces():
-            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                for value in self._values(line):
-                    scanned += 1
-                    if self._is_skills_dir(value):
-                        offenders.append(f"{path.relative_to(self.REPO_ROOT)}:{lineno}: {value}")
-
-        # Non-vacuity: a rule that silently matches nothing passes forever. If the docs
-        # move or the plugin directory is renamed, fail here rather than go quiet.
-        assert scanned, "CE045 found no SKILL_SOURCE_PATH assignment at all — the globs have gone stale"
-        assert not offenders, (
-            "SKILL_SOURCE_PATH must name a PLUGIN ROOT — a directory holding `skills/` — so the "
-            "skill resolves at `<path>/skills/<name>/SKILL.md`. These point one level too deep, "
-            "which loads no skills at all and reports recall 0.0 on every positive row:\n  "
-            + "\n  ".join(offenders)
-            + "\nFor `.claude/skills/my-skill/SKILL.md` the root is `.claude`, not `.claude/skills`."
-        )
-
-    def test_globs_cover_every_file_naming_the_token(self):
-        """The "globbed, not enumerated" claim, made checkable.
-
-        A surface that names the token but sits outside `_GLOBS` is unscanned, and the
-        rule reports success over it. Deriving the expected set from the tracked tree
-        means a new surface either falls inside the globs or fails the build.
-        """
-        tracked = subprocess.run(
-            ["git", "grep", "-l", "SKILL_SOURCE_PATH", "--", "."],
-            cwd=self.REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.split()
-        covered = {p.relative_to(self.REPO_ROOT).as_posix() for p in self._surfaces()}
-        # This file holds the corpus, so it names the token by construction.
-        missed = [f for f in tracked if f not in covered and not f.endswith("tests/test_custom_lint.py")]
-        assert not missed, (
-            "these files name SKILL_SOURCE_PATH but no CE045 glob reaches them, so the rule "
-            f"reports success over them: {missed}. Widen `_GLOBS`."
-        )
-
-    def test_literal_plugin_paths_are_plugin_roots(self):
-        """Config surfaces that write a `path:` literal rather than the env var."""
-        offenders: list[str] = []
-        for pattern in ("tasks/**/*.yaml", "experiments/**/*.yaml"):
-            for path in sorted(self.REPO_ROOT.glob(pattern)):
-                offenders.extend(self._offending_paths_in(path))
-        assert not offenders, (
-            "A local plugin `path` must be a plugin root holding `skills/`, not the skills "
-            "directory itself:\n  " + "\n  ".join(offenders)
-        )
-
-    def _offending_paths_in(self, path: Path) -> list[str]:
-        import yaml
-
-        try:
-            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError:
-            return []  # malformed YAML is another rule's problem
-        if not isinstance(doc, dict):
-            return []
-        blocks = [doc.get("agent")]
-        blocks.append((doc.get("defaults") or {}).get("agent") if isinstance(doc.get("defaults"), dict) else None)
-        for variant in doc.get("variants") or []:
-            if isinstance(variant, dict):
-                blocks.append(variant.get("agent"))
-
-        found: list[str] = []
-        for agent in blocks:
-            if not isinstance(agent, dict):
-                continue
-            for plugin in agent.get("plugins") or []:
-                if not isinstance(plugin, dict) or plugin.get("type") != "local":
-                    continue
-                value = str(plugin.get("path") or "")
-                # Skip ONLY a bare variable reference, whose value lives elsewhere. A value
-                # that merely STARTS with a variable still has a visible literal tail —
-                # `$REPO_ROOT/.claude/skills` is exactly the bug, and a blanket `$` skip
-                # waved it through.
-                if not value or re.fullmatch(r"\$\{?\w+\}?/?", value):
-                    continue
-                if self._is_skills_dir(value):
-                    # A fixture tree lives outside the repo, so relativize only when it applies.
-                    label = path.relative_to(self.REPO_ROOT) if path.is_relative_to(self.REPO_ROOT) else path
-                    found.append(f"{label}: {value}")
-        return found
-
-    def test_every_known_bad_line_is_caught_end_to_end(self):
-        """The mutation guard: replay the real incident lines through extract + predicate.
-
-        Asserting the predicate alone proved half the rule and hid the other half — the
-        Actions form was structurally unreachable while a companion test wrote its
-        truncated capture down as correct.
-        """
-        for line in self.KNOWN_BAD_LINES:
-            values = self._values(line)
-            assert values, f"matcher extracted nothing from {line!r}"
-            assert any(self._is_skills_dir(v) for v in values), (
-                f"CE045 would NOT flag the historical offender {line!r} (extracted {values!r})"
-            )
-
-    def test_the_fixed_forms_are_accepted(self):
-        for line in (
-            'export SKILL_SOURCE_PATH="$(pwd)/.claude"',
-            "#   export SKILL_SOURCE_PATH=/abs/path/to/.claude",
-            "  SKILL_SOURCE_PATH=${{ github.workspace }}/.claude",
-        ):
-            values = self._values(line)
-            assert values, f"matcher extracted nothing from {line!r}"
-            assert not any(self._is_skills_dir(v) for v in values), f"false positive on {line!r}"
-        # A directory merely CONTAINING the word is a plugin root, not an offender.
-        assert not self._is_skills_dir("my-skills")
-        assert not self._is_skills_dir(".claude/skills/pdf-forms")
-
-    def test_yaml_walk_flags_a_literal_tail_behind_a_variable(self, tmp_path: Path):
-        """The tasks/experiments walk has no offender in-tree, so prove it on a fixture."""
-        for value in (".claude/skills", "$REPO_ROOT/.claude/skills", "${REPO_ROOT}/skills/"):
-            task = tmp_path / "t.yaml"
-            task.write_text(
-                f'task_id: t\nagent:\n  type: claude-code\n  plugins:\n    - type: local\n      path: "{value}"\n',
-                encoding="utf-8",
-            )
-            assert self._offending_paths_in(task), f"walk missed {value!r}"
-
-        # A bare variable reference carries no literal tail to judge.
-        task = tmp_path / "bare.yaml"
-        task.write_text(
-            "task_id: t\nagent:\n  type: claude-code\n  plugins:\n"
-            '    - type: local\n      path: "$SKILL_SOURCE_PATH"\n',
-            encoding="utf-8",
-        )
-        assert not self._offending_paths_in(task)
 
 
 class TestCE054EnvInfoKeyRoundTrip:

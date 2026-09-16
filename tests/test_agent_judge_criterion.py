@@ -77,8 +77,8 @@ def _make_mock_agent(agent_output: str) -> MagicMock:
 _orig_run_async = SubAgentRunner.run_async
 
 
-async def _run_with_capture_simulation(self, user_msg, *, max_turns, turn_timeout):
-    turn = await _orig_run_async(self, user_msg, max_turns=max_turns, turn_timeout=turn_timeout)
+async def _run_with_capture_simulation(self, user_msg, *, turn_timeout):
+    turn = await _orig_run_async(self, user_msg, turn_timeout=turn_timeout)
     if self.capture is not None and self.capture.verdict is None and self.capture.error is None:
         try:
             data = _json.loads(turn.agent_output)
@@ -259,13 +259,11 @@ def test_agent_judge_config_propagates(sandbox: Sandbox, direct_route: DirectRou
     assert set(agent_config.allowed_tools or []) == {"Read", "Grep", "mcp__coder_eval_judge__submit_verdict"}
     assert agent_config.disallowed_tools == ["Bash"]
     assert agent_config.setting_sources == []
-    assert agent_config.sdk_options == {"effort": "low"}
-    # max_turns and turn_timeout are passed as call-time args to communicate(),
-    # not stored on AgentConfig.
+    assert agent_config.sdk_options == {"effort": "low", "max_turns": 3}
     mock_agent.communicate.assert_awaited_once()
     kwargs = mock_agent.communicate.call_args.kwargs
     assert kwargs["timeout"] == 45.0
-    assert kwargs["max_turns"] == 3
+    assert "max_turns" not in kwargs
 
 
 def test_agent_judge_rejects_turn_timeout_below_ten() -> None:
@@ -442,7 +440,22 @@ def test_agent_judge_sdk_options_deep_merge_with_growing_defaults(
         "max_thinking_tokens": 1024,
         "effort": "high",
         "fallback_model": "claude-haiku-4-5-20251001",
+        "max_turns": criterion.max_turns,
     }
+
+
+def test_agent_judge_criterion_max_turns_overrides_sdk_options_max_turns() -> None:
+    """``criterion.max_turns`` is the judge's turn cap; an ``agent.sdk_options.max_turns`` cannot replace it."""
+    from coder_eval.criteria.agent_judge import _build_agent_config
+
+    criterion = AgentJudgeCriterion(
+        description="x",
+        prompt="grade",
+        max_turns=7,
+        agent=parse_agent_config(type="claude-code", sdk_options={"max_turns": 99}),
+    )
+    config = _build_agent_config(criterion, system_prompt="sys")
+    assert config.sdk_options["max_turns"] == 7
 
 
 def test_agent_judge_security_ignore_patterns_floor_enforced(sandbox: Sandbox, direct_route: DirectRoute) -> None:
@@ -1157,7 +1170,7 @@ def _patch_runner_with_capture(verdict_payload: dict | None, agent_output: str =
     from coder_eval.evaluation.sub_agent import SubAgentRunner
     from coder_eval.models import JudgeVerdict
 
-    async def _stub_run(self, user_msg, *, max_turns, turn_timeout):
+    async def _stub_run(self, user_msg, *, turn_timeout):
         if verdict_payload is not None:
             self.capture.verdict = JudgeVerdict.model_validate(verdict_payload)
             self.capture.error = None
@@ -1189,7 +1202,7 @@ def test_agent_judge_tool_channel_overwrites_on_retry(sandbox: Sandbox, direct_r
     """LAST-call discipline at the criterion layer — the final verdict wins."""
     criterion = AgentJudgeCriterion(description="x", prompt="grade")
 
-    async def _stub_run(self, user_msg, *, max_turns, turn_timeout):
+    async def _stub_run(self, user_msg, *, turn_timeout):
         # Simulate two calls — final one wins.
         self.capture.verdict = JudgeVerdict(score=0.2, rationale="first")
         self.capture.called_count += 1
@@ -1245,7 +1258,7 @@ def test_agent_judge_timeout_returns_judge_criterion_result(sandbox: Sandbox, di
 
     criterion = AgentJudgeCriterion(description="x", prompt="grade", turn_timeout=10)
 
-    async def _raise(self, user_msg, *, max_turns, turn_timeout):
+    async def _raise(self, user_msg, *, turn_timeout):
         raise TurnTimeoutError(10.0, task_id="t", iteration=1)
 
     with patch.object(SubAgentRunner, "run_async", _raise):

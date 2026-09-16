@@ -50,6 +50,6 @@ tags:
     examples:
       - "300s turn_timeout exceeded at 80 turns; analysis recommends 600s"
   - name: max-turns-too-low
-    definition: Task ran out of turns before completing; max_turns budget is below what the task realistically needs.
+    definition: Task reached the tool-call cap before completing; max_tool_calls is below what the task realistically needs.
     examples:
-      - "MAX_TURNS_EXHAUSTED: max_turns=50 but 86 turns used"
+      - "TOOL_CALLS_EXHAUSTED: cap of 50 tool calls reached"

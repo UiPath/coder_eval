@@ -513,13 +513,15 @@ export interface RawTaskResult {
     // before the dashboard-expected-turns PR; both fields are optional and
     // null-fallback through the cell helpers in lib/turns.ts.
     total_turns?: number;
+    expected_tool_calls?: number | null;
+    // Historical spelling of expected_tool_calls, on runs written before the rename.
     expected_turns?: number | null;
     // Derived expected wall clock for this task, stamped by the eval runner
     // (see eval_runner/skills/timing.py). Absent on unscored tasks and on every
     // run predating the stamp, which read as unscored through lib/timing.ts.
     expected_seconds?: number | null;
     // Documented visible-turn count (tool calls + final reply) — the canonical
-    // metric the "within expected turns" chart compares against expected_turns.
+    // metric the "within expected turns" chart compares against expected_tool_calls.
     // Absent on runs predating this field; visibleTurnsFromRaw() then reconstructs
     // it from actual_commands + has_final_reply (the identical formula) so the
     // metric still populates for historical runs.
@@ -894,7 +896,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
         totalTurns: t.total_turns ?? null,
-        expectedTurns: t.expected_turns ?? null,
+        expectedTurns: t.expected_tool_calls ?? t.expected_turns ?? null,
         expectedSeconds: t.expected_seconds ?? null,
         hasFinalReply: t.has_final_reply ?? false,
         inputTokens: t.input_tokens ?? null,
@@ -1278,7 +1280,7 @@ export async function readRunOverview(
                 weightedScore: t.weighted_score ?? null,
                 actualCommands: t.actual_commands ?? null,
                 totalTurns: t.total_turns ?? null,
-                expectedTurns: t.expected_turns ?? null,
+                expectedTurns: t.expected_tool_calls ?? t.expected_turns ?? null,
                 expectedSeconds: t.expected_seconds ?? null,
                 visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,

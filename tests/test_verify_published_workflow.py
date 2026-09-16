@@ -296,7 +296,7 @@ def test_inline_consumer_task_declares_run_limits(tmp_path: Path):
 
     limits = load_task(path)[0].run_limits
     assert limits is not None, "the unattended paid task must declare run_limits"
-    assert limits.max_turns, "an unbounded turn count on a cron-triggered paid run"
+    assert limits.max_tool_calls, "an unbounded tool-call count on a cron-triggered paid run"
     assert limits.max_usd, "an unbounded spend on a cron-triggered paid run"
     assert limits.task_timeout, "no wall-clock cap below the job's timeout-minutes"
 
@@ -451,7 +451,7 @@ def test_gate_classifies_every_final_status():
     assert not unknown, f"the gate compares `status` against non-FinalStatus values {unknown} — dead branches"
 
     tolerated = {s.value for s in FinalStatus} - named
-    assert tolerated == {FinalStatus.FAILURE.value, FinalStatus.MAX_TURNS_EXHAUSTED.value}, (
+    assert tolerated == {FinalStatus.FAILURE.value, FinalStatus.TOOL_CALLS_EXHAUSTED.value}, (
         f"the gate does not classify {tolerated}. Every FinalStatus must be either hard-failed "
         "or deliberately tolerated as a model-quality outcome; an unclassified one falls through "
         "to a GREEN unattended paid run."

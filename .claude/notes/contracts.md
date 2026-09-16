@@ -41,7 +41,7 @@ answers pass or fail, it answers the same for every longer prefix); `undecided` 
 verdict allowed to change on a later call. Both properties are stated at the definition
 site in `criteria/base.py`, because they are the contract an author has to satisfy.
 
-`EarlyStopWatcher`'s deferred fail-stop and its pass/fail flip-attribution are correct ONLY
+`TurnMonitor`'s deferred fail-stop and its pass/fail flip-attribution are correct ONLY
 because the two shipped implementations honor them. A non-monotonic or non-deterministic
 override compiles, passes CE025, and silently corrupts the stop logic.
 
@@ -92,7 +92,7 @@ matches, but the same haystacks feed `exclude_pattern` and the `max_count` gate,
 normalized form can newly satisfy an exclusion or trip a cap — a command that counted on
 the raw text alone can stop counting.
 
-It is memoized because the early-stop watcher re-scans the whole accumulated trajectory on
+It is memoized because the `TurnMonitor` re-scans the whole accumulated trajectory on
 every tool-call event, normalizing the same command many times per run.
 
 The regex search window is capped to bound ReDoS on a large command string, and
@@ -189,6 +189,14 @@ gate, the JUnit report and the evalboard alike. A missing AGENT file is the oppo
 is genuinely a gating 0.0. `reference_file` is confined to the reference directory, unlike a
 judge's author-written `files:` entry, because it names one file of the solution being
 compared against and traversal out of the staged copy is always a mistake.
+
+`skill_triggered` escalates the same way when its `skill_name` is not among the skills
+`agent.plugins` offered (`CheckContext.skills_offered`). Resolution refuses the same task
+first (`validate_plugins`), so this gate fires only on a detached grade of a recorded run. The agent was never offered the
+skill, so the positive control cannot run. Scored as 0.0, every positive row of an
+activation suite would read as a skill that never triggers. The gate applies only when the
+task sets plugins: with `skills_offered` `None` the criterion scores as before, so a skill
+the harness finds by other means still counts.
 
 Grading time is accumulated at the checker, not at the four orchestrator call sites, so a
 fifth site cannot be added without it — the same reason the tool subtraction lives at one

@@ -12,7 +12,7 @@ class FinalStatus(StrEnum):
     ERROR = "ERROR"
     BUILD_FAILED = "BUILD_FAILED"
     TIMEOUT = "TIMEOUT"
-    MAX_TURNS_EXHAUSTED = "MAX_TURNS_EXHAUSTED"
+    TOOL_CALLS_EXHAUSTED = "TOOL_CALLS_EXHAUSTED"
     TOKEN_BUDGET_EXCEEDED = "TOKEN_BUDGET_EXCEEDED"
     COST_BUDGET_EXCEEDED = "COST_BUDGET_EXCEEDED"
     # No verdict to report. Distinct from FAILURE (criteria checked, did not pass)
@@ -54,7 +54,7 @@ _STATUS_CATEGORIES: dict[FinalStatus, Literal["succeeded", "failed", "error", "u
     # An environment fault, not a task outcome the agent could have avoided.
     FinalStatus.BUILD_FAILED: "error",
     FinalStatus.TIMEOUT: "failed",
-    FinalStatus.MAX_TURNS_EXHAUSTED: "failed",
+    FinalStatus.TOOL_CALLS_EXHAUSTED: "failed",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "failed",
     FinalStatus.COST_BUDGET_EXCEEDED: "failed",
     # A FOURTH category, not a fold into one of the three. Excluded from both the
@@ -71,7 +71,7 @@ _STATUS_ICONS: dict[FinalStatus, str] = {
     FinalStatus.ERROR: "!",
     FinalStatus.BUILD_FAILED: "B",
     FinalStatus.TIMEOUT: "T",
-    FinalStatus.MAX_TURNS_EXHAUSTED: "M",
+    FinalStatus.TOOL_CALLS_EXHAUSTED: "C",
     FinalStatus.TOKEN_BUDGET_EXCEEDED: "#",
     FinalStatus.COST_BUDGET_EXCEEDED: "$",
     FinalStatus.NOT_GRADED: "?",
@@ -90,11 +90,11 @@ _EXECUTION_FACT_STATUSES: dict[FinalStatus, bool] = {
     FinalStatus.ERROR: True,
     FinalStatus.BUILD_FAILED: True,
     FinalStatus.TIMEOUT: True,
-    # HAZARD: False, and it must stay False. MAX_TURNS_EXHAUSTED is SUBORDINATE to
+    # HAZARD: False, and it must stay False. TOOL_CALLS_EXHAUSTED is SUBORDINATE to
     # the verdict, not a fact that outranks it; the fact itself lives on
-    # `EvaluationResult.max_turns_exhausted`, which the seeding carries.
+    # `EvaluationResult.tool_calls_exhausted`, which the seeding carries.
     # Rationale: .claude/notes/orchestration.md § The terminal-status chain
-    FinalStatus.MAX_TURNS_EXHAUSTED: False,
+    FinalStatus.TOOL_CALLS_EXHAUSTED: False,
     FinalStatus.TOKEN_BUDGET_EXCEEDED: True,
     FinalStatus.COST_BUDGET_EXCEEDED: True,
 }

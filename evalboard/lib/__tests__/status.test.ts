@@ -18,6 +18,8 @@ const EVERY_FINAL_STATUS: Record<string, StatusCategory> = {
     ERROR: "error",
     BUILD_FAILED: "error",
     TIMEOUT: "failed",
+    TOOL_CALLS_EXHAUSTED: "failed",
+    // Historical spelling, on runs written before the rename.
     MAX_TURNS_EXHAUSTED: "failed",
     TOKEN_BUDGET_EXCEEDED: "failed",
     COST_BUDGET_EXCEEDED: "failed",

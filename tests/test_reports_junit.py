@@ -114,7 +114,7 @@ def test_happy_path_grouping_and_counts(write_run_json: Callable[..., Path], tmp
 
 def test_root_counts_equal_summed_children(write_run_json: Callable[..., Path], tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    rows = [_row("a", "SUCCESS"), _row("b", "FAILURE"), _row("c", "MAX_TURNS_EXHAUSTED")]
+    rows = [_row("a", "SUCCESS"), _row("b", "FAILURE"), _row("c", "TOOL_CALLS_EXHAUSTED")]
     write_run_json(run_dir, rows)
     root = fromstring(generate_junit_xml(run_dir))
 
@@ -129,7 +129,7 @@ def test_root_counts_equal_summed_children(write_run_json: Callable[..., Path], 
     assert int(root.get("tests")) == total_cases
     assert int(root.get("failures")) == total_failures
     assert int(root.get("errors")) == total_errors
-    # MAX_TURNS_EXHAUSTED is category "failed".
+    # TOOL_CALLS_EXHAUSTED is category "failed".
     assert total_failures == 2
     assert total_errors == 0
 

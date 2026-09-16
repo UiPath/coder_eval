@@ -153,12 +153,12 @@ def visible_turn_count(result: EvaluationResult) -> int:
     return commands + (1 if has_final_reply(result) else 0)
 
 
-def expected_turns_overage(result: EvaluationResult) -> tuple[int, int] | None:
+def expected_tool_calls_overage(result: EvaluationResult) -> tuple[int, int] | None:
     """Return ``(visible_turns, expected)`` when the visible-events turn
-    count strictly exceeds ``run_limits.expected_turns``; else ``None``.
+    count strictly exceeds ``run_limits.expected_tool_calls``; else ``None``.
 
     Safe against missing ``task_config``, missing ``run_limits``, and
-    non-int ``expected_turns`` values.
+    non-int ``expected_tool_calls`` values.
     """
     task_cfg = result.task_config
     if task_cfg is None:
@@ -166,7 +166,7 @@ def expected_turns_overage(result: EvaluationResult) -> tuple[int, int] | None:
     run_limits = (task_cfg.resolved or {}).get("run_limits") or {}
     if not isinstance(run_limits, dict):
         return None
-    expected = run_limits.get("expected_turns")
+    expected = run_limits.get("expected_tool_calls")
     if not isinstance(expected, int) or expected < 1:
         return None
     actual = visible_turn_count(result)

@@ -18,15 +18,16 @@ defaults:
   # Per-row dataset multiplication: a 100-row task with max_usd: 0.10 permits up to
   # $10 cumulative spend.
   run_limits:
-    # Hard safety ceiling on agent inner-loop turns per iteration (null = SDK
-    # default). Set well above the typical 3-18 turns a task needs so it only
-    # trips on runaway loops; task_timeout / turn_timeout below are the practical
+    # Hard safety ceiling on resolved tool calls per task, cumulative across every
+    # retry and dialog turn, in the tool-call unit, the same on every harness.
+    # Local runs show a median of 2 and a p99 of 31 visible turns, so 100 trips
+    # only on runaway loops; task_timeout / turn_timeout below are the practical
     # guards. Override per-task when a task legitimately needs more.
-    max_turns: 100
-    # Soft target: when cumulative SDK turns across all iterations of a task
-    # exceed this, the orchestrator logs a one-shot warning and the report
-    # surfaces a badge. Does NOT abort the run (max_turns is the hard cap).
-    # expected_turns: 15
+    max_tool_calls: 100
+    # Soft target: when cumulative visible tool calls across all iterations of a
+    # task exceed this, the orchestrator logs a one-shot warning and the report
+    # surfaces a badge. Does NOT abort the run.
+    # expected_tool_calls: 15
     # Maximum total seconds for the entire task evaluation (all iterations combined).
     task_timeout: 600
     # Maximum seconds per agent turn / communicate call (null = no limit).
@@ -44,8 +45,8 @@ defaults:
     type: claude-code
 
     # Claude Code plugins to load (null = none)
-    # `path` must be a PLUGIN ROOT: a directory holding skills/, so the skill sits at
-    # <path>/skills/<name>/SKILL.md. One level deeper loads nothing on claude-code.
+    # `path` names a plugin root (<path>/skills/<name>/SKILL.md) or a bare skills
+    # directory (<path>/<name>/SKILL.md). Both are staged; a path with no skill fails `plan`.
     # Example: [{"type": "local", "path": "/path/to/plugin-root"}]
     plugins: null
 

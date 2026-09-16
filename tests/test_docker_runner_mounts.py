@@ -1177,3 +1177,103 @@ class TestTaskDirCopyMount:
         runner._prepare_task_dir_mount(staging)
 
         assert runner._task_dir_mount_src is None
+
+
+class TestStagedTaskYamlPluginPath:
+    """The container reloads task.yaml from another cwd, so a relative plugin path must arrive absolute."""
+
+    async def test_relative_plugin_path_is_dumped_absolute(self, tmp_path: Path, monkeypatch) -> None:
+        import yaml
+
+        from coder_eval.models import parse_agent_config
+
+        plugin = tmp_path / "plugins" / "probe"
+        (plugin / "skills" / "probe-skill").mkdir(parents=True)
+        (plugin / "skills" / "probe-skill" / "SKILL.md").write_text("probe\n")
+        monkeypatch.chdir(tmp_path)
+
+        rt = MagicMock()
+        rt.task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            agent=parse_agent_config(type="claude-code", plugins=[{"type": "local", "path": "plugins/probe"}]),
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="x.txt")],
+        )
+        rt.variant_id = "default"
+        rt.replicate_index = 0
+        rt.config_lineage = {}
+        rt.source_yaml = ""
+        rt.task_file = None
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+
+        await DockerRunner(rt)._stage_inputs(input_dir)
+
+        dumped = yaml.safe_load((input_dir / "task.yaml").read_text(encoding="utf-8"))
+        assert dumped["agent"]["plugins"] == [{"type": "local", "path": str(plugin.resolve())}]
+
+    async def test_a_plugin_path_missing_on_this_host_is_dumped_as_authored(self, tmp_path: Path) -> None:
+        """A detached grade on another host never uses the plugin, so it must not fail on it."""
+        import yaml
+
+        from coder_eval.models import parse_agent_config
+
+        rt = MagicMock()
+        rt.task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            agent=parse_agent_config(type="claude-code", plugins=[{"type": "local", "path": "$UNSET_PROBE_PLUGIN"}]),
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="x.txt")],
+        )
+        rt.variant_id = "default"
+        rt.replicate_index = 0
+        rt.config_lineage = {}
+        rt.source_yaml = ""
+        rt.task_file = None
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+
+        await DockerRunner(rt)._stage_inputs(input_dir)
+
+        dumped = yaml.safe_load((input_dir / "task.yaml").read_text(encoding="utf-8"))
+        assert dumped["agent"]["plugins"] == [{"type": "local", "path": "$UNSET_PROBE_PLUGIN"}]
+
+
+class TestPluginSkillMounts:
+    """Staging links each skill to its resolved source, so a source outside the plugin root is mounted too."""
+
+    def test_a_skill_linked_from_outside_the_plugin_root_is_mounted(self, tmp_path: Path) -> None:
+        from coder_eval.models import parse_agent_config
+
+        shared = tmp_path / "shared" / "probe-skill"
+        shared.mkdir(parents=True)
+        (shared / "SKILL.md").write_text("probe\n")
+        root = tmp_path / "plugin"
+        (root / "skills").mkdir(parents=True)
+        (root / "skills" / "probe-skill").symlink_to(shared, target_is_directory=True)
+
+        rt = MagicMock()
+        rt.task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="p",
+            agent=parse_agent_config(type="claude-code", plugins=[{"type": "local", "path": str(root)}]),
+            sandbox=SandboxConfig(),
+            success_criteria=[FileExistsCriterion(description="c", path="x.txt")],
+        )
+        rt.run_dir = tmp_path / "run"
+        rt.task_file = None
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+
+        argv = DockerRunner(rt)._build_argv(input_dir, output_dir, container_name="c")
+
+        mounts = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-v"]
+        assert f"{root.resolve()}:{root.resolve()}:ro" in mounts
+        assert f"{shared.resolve()}:{shared.resolve()}:ro" in mounts

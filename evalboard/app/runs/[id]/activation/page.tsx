@@ -19,7 +19,7 @@ function pct(v: number | null): string {
 // A case is a mistake when the skill that fired isn't the one expected: a miss
 // (nothing fired), a false positive (something fired on a negative), or the wrong
 // skill. Tied to the two columns the table shows, not to the run status (which
-// also flips on harness noise like MAX_TURNS_EXHAUSTED). A negative case expects
+// also flips on harness noise like TOOL_CALLS_EXHAUSTED). A negative case expects
 // nothing — normalised to "". Unknown (no triggered signal) is never flagged.
 function isMistake(c: ActivationCaseRow): boolean {
     if (c.triggeredSkill == null) return false;

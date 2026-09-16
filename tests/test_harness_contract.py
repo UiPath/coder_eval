@@ -80,6 +80,12 @@ class TestModel:
         with pytest.raises(ValidationError):
             contract.cooperative_stop = False  # type: ignore[misc]
 
+    def test_usage_granularity_is_required(self) -> None:
+        fields = stub_contract().model_dump()
+        del fields["usage_granularity"]
+        with pytest.raises(ValidationError, match="usage_granularity"):
+            HarnessContract(**fields)
+
     def test_unknown_field_rejected(self) -> None:
         with pytest.raises(ValidationError, match="timing_basis"):
             HarnessContract(**{**stub_contract().model_dump(), "timing_basis": "wall"})
@@ -525,3 +531,32 @@ class TestByType:
         for kind in (k for k in AgentKind if k not in (AgentKind.UNKNOWN, AgentKind.NONE)):
             resolved, _ = _resolve(default, _bare_task(), agent_type=str(kind))
             validate_harness_contract(resolved)
+
+
+_PARITY_FIXTURE_DIRS = ("tasks/run_limits", "tasks/skills")
+
+
+def _cooperative_kinds() -> list[AgentKind]:
+    ensure_plugins_loaded()
+    kinds = [kind for kind in AgentKind if kind is not AgentKind.UNKNOWN]
+    return [
+        kind
+        for kind in kinds
+        if (reg := AgentRegistry.get(kind)) is not None and reg.agent_class.contract.cooperative_stop
+    ]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    sorted(str(p) for d in _PARITY_FIXTURE_DIRS for p in (Path(__file__).parent.parent / d).glob("*.yaml")),
+    ids=lambda p: Path(p).name,
+)
+def test_multi_harness_fixtures_run_on_every_cooperative_harness(fixture: str) -> None:
+    """A fixture documented to run with `--type <kind>` must not carry a field one harness rejects."""
+    from coder_eval.orchestration.task_loader import load_task
+
+    task, _source = load_task(Path(fixture))
+    authored = task.agent.model_dump(exclude_unset=True, exclude={"type"}) if task.agent is not None else {}
+    for kind in _cooperative_kinds():
+        retyped = task.model_copy(update={"agent": parse_agent_config(type=kind, **authored)})
+        validate_harness_contract(retyped)

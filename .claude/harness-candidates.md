@@ -31,7 +31,7 @@ Deferred lint/test guardrails surfaced during reviews. Promote to a `CExxx` rule
 
 - [ ] CE-rule: the early-stop watcher stop rule must decide polarity via the
   resolved `_armed_polarities`, never a raw `criterion.stop_when` comparison —
-  forbid `.stop_when` attribute reads inside `EarlyStopWatcher._evaluate` /
+  forbid `.stop_when` attribute reads inside `TurnMonitor._evaluate_impl` /
   `_resolve_armed_polarities`'s callers in `orchestration/early_stop.py`. This
   diff *was* the fix for exactly that class of bug (the old rule compared
   `stop_when in ("pass","decided")` and so vetoed every mixed `auto` pass-stop).
@@ -744,7 +744,7 @@ divergences, so the deferred-work record is one place. Measurements in
   `AgentStartEvent`**, which resets only `_agent_end`. Pre-existing and NOT
   introduced by the timing work. Blast radius is narrower than it first looks:
   the persisted record, the reports and `max_turns` all read the AGENT's
-  collector, which is fresh per `communicate()`. Only `EarlyStopWatcher`'s
+  collector, which is fresh per `communicate()`. Only `TurnMonitor`'s
   long-lived collector accumulates — where carrying a turn's whole engagement
   across retry attempts is arguably what a live "did it engage the skill"
   verdict wants, and `_check_round`'s docstring already reasons about crashed
@@ -965,3 +965,8 @@ re-derive from scratch.
 - [ ] A `TaskDefinition` serialized for a later reload (docker `_stage_inputs`, Harbor `environment/task.yaml`) must dump `agent` with `exclude_unset=True`, or the reload marks model defaults as set and the harness contract check rejects the task — two round-trip tests guard today's two sites, but nothing flags a third `task.model_dump(` written for reload; needs a call-site classifier, not a name match — caught in the harness-contract final review.
 - [ ] A real-SDK Antigravity policy test: run `policy.enforce(agent._policies(real_policy))` to prove deny-beats-allow and `finish` approval against the installed SDK instead of a SimpleNamespace fake — nothing exercises the SDK's own bucket precedence; needs study of the hook-evaluation API — caught in the harness-contract Phase 3 review.
 - [ ] OpenCode: warn when an inherited `OPENCODE_CONFIG_CONTENT` `permission` / `instructions` value is not a dict / list and is replaced — today it is dropped silently; small, but needs a decision on warn vs. keep — caught in the harness-contract Phase 3 review.
+- [ ] CE070 blind spot: an adapter that counts `ToolEndEvent`s (or tokens) under a new name to cap or stop a run itself — the rule matches identifiers only; needs a data-flow check that a counter in `agents/` feeds a break or an end status — caught in the central-enforcement plan (Phase 5).
+- [ ] CE070 blind spot: an adapter that re-grows a skill scanner through `glob("*.md")`, `rglob`, or a file name built from parts — the rule matches the literal `"SKILL.md"` only; needs a filesystem-walk classifier scoped to `agents/` — caught in the central-enforcement plan (Phase 5).
+- [ ] Every harness's `TurnEndEvent.tokens` must be a per-report DELTA: over a turn, their sum per bucket must not exceed `AgentEndEvent.usage` (the TurnMonitor latches budgets on the sum) — nothing checks it; the golden-stream runners return only the TurnRecord, so each of the five `run_*_scenario` helpers needs an event sink first — caught in the central-enforcement final review (Claude re-reported an interleaved message id's tokens).
+- [ ] Live tests (`-m live`) are neither run nor type-checked in `make verify`, so an SPI signature change (`communicate(max_turns=)`, bool `should_stop`) leaves them broken until someone runs them with credentials — needs pyright over `tests/*_live.py` or an import-time signature smoke test — caught in the central-enforcement live verification (Phase 6).
+

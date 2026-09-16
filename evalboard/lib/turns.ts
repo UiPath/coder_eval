@@ -17,7 +17,7 @@ export function getTurnRatioThresholds(): TurnRatioThresholds {
 
 export type TurnTint = "green" | "yellow" | "red" | null;
 
-// Pure turn-efficiency ratio (turns ÷ expected_turns), used to tint per-task
+// Pure turn-efficiency ratio (turns ÷ expected_tool_calls), used to tint per-task
 // "Turns" cells. This is deliberately blind to pass/fail: the cell answers
 // "was this task's turn usage efficient?", which is meaningful regardless of
 // outcome — a task that crashed at 2 turns should NOT read as "over budget"
@@ -77,12 +77,12 @@ export function fmtTurnsCount(n: number | null): string {
 }
 
 // Fail a task's turn-budget check once its visible turns exceed the budget by
-// more than this fraction (> 1.5× expected_turns).
+// more than this fraction (> 1.5× expected_tool_calls).
 export const TURN_BUDGET_TOLERANCE = 0.5;
 
 // Whether a task stayed within (1 + tolerance) × its expected-turns budget,
 // using the documented visible-turn count. Returns null when the task is not
-// eligible: no visible-turn count, or no positive expected_turns budget.
+// eligible: no visible-turn count, or no positive expected_tool_calls budget.
 export function withinTurnBudget(
     visibleTurns: number | null,
     expectedTurns: number | null,

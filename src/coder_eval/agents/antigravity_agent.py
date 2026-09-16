@@ -53,6 +53,7 @@ from coder_eval.models import (
     ToolNameMap,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
 )
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
@@ -61,6 +62,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TextChunkEvent,
     ToolEndEvent,
     ToolEndStatus,
@@ -68,9 +70,9 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import TurnClock, close_window
-from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
@@ -206,6 +208,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.TURN,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES
@@ -244,67 +247,20 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         """Resolve the model: task ``agent.model`` > ``ANTIGRAVITY_MODEL`` > default."""
         return self.config.model or settings.antigravity_model or _DEFAULT_MODEL
 
-    def _resolve_skills_paths(self, plugin_tools_dir: str | None) -> list[str]:
-        """Resolve skill search-path roots for the harness's native ``skills_paths``.
-
-        For each ``type: local`` plugin path (env-expanded) plus the runtime
-        ``plugin_tools_dir``, hands the harness the directory that DIRECTLY parents
-        skill dirs — ``<source>/skills`` or ``<source>`` itself, whichever holds a
-        ``<skill>/SKILL.md``. Unlike Codex, Antigravity takes search paths, so no
-        symlinking is needed.
-
-        Rationale: .claude/notes/agents.md § Skills, per harness
-        """
-        sources: list[Path] = []
-        for plugin in self.config.plugins or []:
-            if not (isinstance(plugin, dict) and plugin.get("type") == "local"):
-                continue
-            raw = plugin.get("path")
-            if not raw:
-                continue
-            expanded = expand_env_vars(raw)
-            path = Path(expanded)
-            if path.is_dir():
-                sources.append(path)
-            else:
-                # Loud: an unresolved env var or a missing dir drops the skills
-                # silently, so the agent runs blind.
-                hint = "env var likely unset" if "$" in expanded else "path does not exist"
-                self._log.warning("Plugin skills path did not resolve: %r → %r (%s)", raw, expanded, hint)
-        if plugin_tools_dir and Path(plugin_tools_dir).is_dir():
-            sources.append(Path(plugin_tools_dir))
-
-        roots: list[str] = []
-        seen: set[str] = set()
-        for source in sources:
-            # Prefer the nested ``skills/`` layout (repo root) over the source itself.
-            for candidate in (source / "skills", source):
-                if candidate.is_dir() and any(
-                    (child / "SKILL.md").exists() for child in candidate.iterdir() if child.is_dir()
-                ):
-                    resolved = str(candidate.resolve())
-                    if resolved not in seen:
-                        seen.add(resolved)
-                        roots.append(resolved)
-                    break  # first matching layout per source wins
-        if sources and not roots:
-            self._log.warning(
-                "0 skills discovered under %s; check the plugin path points at a skills repo root",
-                [str(s) for s in sources],
-            )
-        else:
-            self._log.debug("Antigravity skills_paths resolved: %s", roots)
-        return roots
-
-    def _resolve_workspaces(self, skills_paths: list[str]) -> list[str]:
+    def _resolve_workspaces(self, plugin_root: Path | None) -> list[str]:
         """Workspace roots for the harness's ``workspace_only`` file-tool policy.
 
-        The sandbox working directory (the write target) plus the resolved skill
-        roots. ``skills_paths`` drives DISCOVERY only; the file-tool allowlist is
-        ``workspaces`` alone, so a skill root missing here is discovered and then
-        denied on every read of its ``SKILL.md``.
+        The sandbox working directory (the write target), the staged skills dir, and
+        each staged skill's resolved source: the policy canonicalizes a read through
+        the stage's symlink, so without the source a discovered skill is unreadable.
+        ``skills_paths`` drives DISCOVERY only; the file-tool allowlist is
+        ``workspaces`` alone.
         """
-        return [str(self.working_directory), *skills_paths]
+        if plugin_root is None:
+            return [str(self.working_directory)]
+        skills_dir = plugin_root / "skills"
+        sources = sorted({str(skill.resolve()) for skill in skills_dir.iterdir()})
+        return [str(self.working_directory), str(skills_dir), *sources]
 
     def _harness_env(self) -> dict[str, str] | None:
         """Per-agent environment for the localharness subprocess (``LocalAgentConfig.env``).
@@ -346,6 +302,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the Antigravity agent's local harness session.
 
@@ -357,8 +314,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 ones (the shared mock-shadowing contract), delivered through the
                 SDK's per-agent ``env`` seam so concurrent tasks get genuinely
                 separate environments rather than a time-sliced global one.
-            plugin_tools_dir: A skills/plugin source root, resolved together with
-                ``config.plugins`` into the harness's native ``skills_paths``.
+            plugin_tools_dir: Accepted for the ``Agent.start`` signature; unused here.
+            plugin_root: The staged plugin root; its ``skills/`` is the harness's
+                native ``skills_paths`` entry.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
@@ -377,14 +335,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             # None lets the SDK read GEMINI_API_KEY itself, and raise a clear
             # error if truly unset.
             api_key = os.getenv("GEMINI_API_KEY") or None
-            skills_paths = self._resolve_skills_paths(plugin_tools_dir)
+            skills_paths = [str(plugin_root / "skills")] if plugin_root is not None else []
             cfg = LocalAgentConfig(
                 model=self._effective_model(),
                 api_key=api_key,
                 # File tools are confined to ``workspaces`` by the auto-prepended
                 # workspace_only policy — see _resolve_workspaces for why the skill
                 # roots must be in here and not only in ``skills_paths``.
-                workspaces=self._resolve_workspaces(skills_paths),
+                workspaces=self._resolve_workspaces(plugin_root),
                 policies=self._policies(policy),
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: the search-path roots that parent the skill dirs.
@@ -415,7 +373,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         self,
         conversation: Any,
         state: "_AntigravityTurnState",
-        should_stop: Callable[[], bool] | None,
+        should_stop: Callable[[], StopReason | None] | None,
     ) -> None:
         """Consume one ``receive_steps()`` cycle onto ``state``, honoring a
         cooperative stop mid-stream. Shared by the initial drain and each poll
@@ -437,19 +395,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     async for step in steps:
                         pulled = True
                         state.process_step(step)
-                        if should_stop is not None and should_stop():
-                            state.stopped_early_hit = True
-                            self._log.debug("Cooperative stop requested; ending step loop at this boundary")
-                            break
-                        # The turn cap shares this boundary: the step that reached
-                        # the cap is kept whole, the next is never pulled. After the
-                        # cooperative stop, so an armed early-stop wins a tie.
-                        if state.max_turns_reached():
-                            state.max_turns_hit = True
-                            self._log.debug(
-                                "max_turns (%s visible turns) reached; ending step loop",
-                                state.max_turns,
-                            )
+                        reason = should_stop() if should_stop is not None else None
+                        if reason is not None:
+                            state.stop_reason = reason
+                            self._log.debug("Stop requested (%s); ending step loop at this boundary", reason.value)
                             break
                 return
             except RuntimeError:
@@ -467,20 +416,14 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Send a message to the Antigravity agent and receive its response.
 
-        ``should_stop`` is the cooperative early-stop callback, polled after each
-        processed step. When it returns True the step loop breaks, the
-        conversation is cancelled (best-effort) and the turn finalizes cleanly as
-        ``STOPPED_EARLY`` (``crashed=False``).
-
-        ``max_turns`` caps VISIBLE turns — resolved tool calls — enforced in-stream
-        on the same boundary as the cooperative stop: one ``communicate()`` here is
-        a single SDK turn, so a native counter would cap at 1 and mean nothing.
-        See docs/agents/HARNESS_PARITY.md.
+        ``should_stop`` is the run's stop poll, called after each processed step.
+        On a reason the step loop breaks, the conversation is cancelled
+        (best-effort) and the turn finalizes cleanly with ``end_status_for(reason)``
+        (``crashed=False``).
 
         Drives one logical turn: ``conversation.send(prompt)`` then iterate
         ``receive_steps()`` until the turn goes idle.
@@ -520,7 +463,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             model=model,
             turn_start_time=turn_start_time,
             clock=clock,
-            max_turns=max_turns,
         )
 
         try:
@@ -556,7 +498,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 poll_deadline = turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
                 try:
                     await conversation.send(user_input)
-                    # should_stop runs AFTER process_step (the emission the watcher
+                    # should_stop runs AFTER process_step (the emission the monitor
                     # latches on) and BEFORE the next step is pulled.
                     await self._drain(conversation, state, should_stop)
 
@@ -566,8 +508,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                     # zero times.
                     # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
                     while (
-                        not state.stopped_early_hit
-                        and not state.max_turns_hit
+                        state.stop_reason is None
                         and not state.timeout_hit
                         and state.has_orphaned_tool_call()
                         and (
@@ -583,19 +524,13 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             # Skip the re-drain, which could itself await
                             # indefinitely on genuinely non-idle work.
                             break
-                        if should_stop is not None and should_stop():
-                            state.stopped_early_hit = True
+                        reason = should_stop() if should_stop is not None else None
+                        if reason is not None:
+                            state.stop_reason = reason
                             break
-                        # A re-drain honors the turn cap too (the check lives in
-                        # _drain), so a poll cycle can be the one that reaches it.
                         await self._drain(conversation, state, should_stop)
 
-                    if (
-                        state.has_orphaned_tool_call()
-                        and not state.stopped_early_hit
-                        and not state.max_turns_hit
-                        and not state.timeout_hit
-                    ):
+                    if state.has_orphaned_tool_call() and state.stop_reason is None and not state.timeout_hit:
                         # Exited via this loop's OWN bound, not an external
                         # stop/timeout: the call is force-closed as unresolved and
                         # the turn is still graded normally on everything else.
@@ -607,7 +542,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                         msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
                         self._log.warning(msg, bound, poll_count)
 
-                    if state.stopped_early_hit or state.max_turns_hit:
+                    if state.stop_reason is not None:
                         # Best-effort server-side cancel. One check point, so it
                         # fires exactly once whichever drain stopped.
                         with contextlib.suppress(Exception):
@@ -649,14 +584,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
 
         self._state = AgentState.WORKING
         self._end_turn_ok()
-        # Precedence: timeout (raised above) > stopped_early > max_turns > done.
+        # Precedence: timeout (raised above) > the stop reason > done.
         # Rationale: .claude/notes/agents.md § Shared turn lifecycle
-        if state.stopped_early_hit:
-            status = AgentEndStatus.STOPPED_EARLY
-        elif state.max_turns_hit:
-            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
-        else:
-            status = AgentEndStatus.COMPLETED
+        status = end_status_for(state.stop_reason) if state.stop_reason is not None else AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
@@ -745,7 +675,6 @@ class _AntigravityTurnState:
         model: str,
         turn_start_time: float,
         clock: TurnClock,
-        max_turns: int | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -760,10 +689,8 @@ class _AntigravityTurnState:
         # instead of monkeypatching `datetime` out from under the reducer.
         self.clock = clock
 
-        self.max_turns = max_turns
         self.timeout_hit = False
-        self.stopped_early_hit = False
-        self.max_turns_hit = False
+        self.stop_reason: StopReason | None = None
         self.finalized = False
 
         self.total_usage = TokenUsage()
@@ -794,22 +721,12 @@ class _AntigravityTurnState:
 
     @property
     def ended_cleanly(self) -> bool:
-        """True once the loop broke on purpose (cooperative stop or the turn cap).
+        """True once the loop broke on a ``should_stop`` reason.
 
-        Both are non-crash terminations, so a stray exception raised while
-        unwinding the step generator afterwards must not be escalated.
+        A non-crash termination, so a stray exception raised while unwinding the
+        step generator afterwards must not be escalated.
         """
-        return self.stopped_early_hit or self.max_turns_hit
-
-    def max_turns_reached(self) -> bool:
-        """True once this turn has produced ``max_turns`` visible turns.
-
-        Delegates to ``EventCollector.visible_turn_count``, the single
-        agent-agnostic capture path, so one ``max_turns`` means the same thing here
-        and on Codex. It counts RESOLVED tool calls, so the call that reaches the
-        cap keeps its result instead of being force-closed as unresolved.
-        """
-        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
+        return self.stop_reason is not None
 
     def _seed_first_generation_window(self, source: Any) -> None:
         """Move the first window's mark to the first observed MODEL output.
@@ -1064,7 +981,6 @@ class _AntigravityTurnState:
                 num_turns=self._assistant_turns,
                 crashed=crashed,
                 crash_reason=crash_reason,
-                max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
                 # One basis with the window bounds — see the AgentStartEvent site.
                 timestamp=self.clock.now(),

@@ -94,7 +94,7 @@ class SubAgentRunner:
         # when the caller passed ``capture=None``.
         self.capture = capture
 
-    async def run_async(self, user_msg: str, *, max_turns: int | None, turn_timeout: float) -> TurnRecord:
+    async def run_async(self, user_msg: str, *, turn_timeout: float) -> TurnRecord:
         """Copy sandbox → start agent → communicate → stop. Kill on any exception.
 
         Async so a genuine network/subprocess wait yields the event loop instead of
@@ -155,14 +155,13 @@ class SubAgentRunner:
             logger.info(
                 "sub_agent: starting (model=%s, max_turns=%s, allowed_tools=%s)",
                 self._agent_config.model,
-                max_turns,
+                self._agent_config.sdk_options.get("max_turns"),
                 self._agent_config.allowed_tools,
             )
             turn = await self._run_agent(
                 agent,
                 judge_dir,
                 user_msg,
-                max_turns,
                 turn_timeout,
                 plugin_tools_dir=self._sandbox.plugin_tools_dir,
             )
@@ -203,7 +202,6 @@ class SubAgentRunner:
         agent: ClaudeCodeAgent,
         judge_dir: Path,
         user_msg: str,
-        max_turns: int | None,
         turn_timeout: float,
         *,
         plugin_tools_dir: str | None = None,
@@ -215,7 +213,7 @@ class SubAgentRunner:
         """
         try:
             await agent.start(str(judge_dir), plugin_tools_dir=plugin_tools_dir)
-            return await agent.communicate(user_msg, timeout=turn_timeout, max_turns=max_turns)
+            return await agent.communicate(user_msg, timeout=turn_timeout)
         except BaseException:
             with contextlib.suppress(Exception):
                 await agent.kill()

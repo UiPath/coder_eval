@@ -8,7 +8,7 @@ initial_prompt: "Create a Python file named app.py in the current working direct
 tags: [smoke, basic, pure-python, pi]
 
 run_limits:
-  expected_turns: 5
+  expected_tool_calls: 5
   # The CLI drives a full agent loop per invocation; give it room but keep the
   # smoke bounded so a hung provider fails fast instead of stalling a suite.
   task_timeout: 600

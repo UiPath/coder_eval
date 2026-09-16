@@ -44,7 +44,7 @@ def _make_default_experiment() -> ExperimentDefinition:
         experiment_id="default",
         defaults=ExperimentDefaults(
             agent={"type": "claude-code", "permission_mode": "acceptEdits"},
-            run_limits=RunLimits(max_turns=3),
+            run_limits=RunLimits(max_tool_calls=3),
         ),
         variants=[ExperimentVariant(variant_id="default")],
     )

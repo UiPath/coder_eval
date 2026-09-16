@@ -258,8 +258,8 @@ valid and an empty block is legal — every field defaults to "no limit".
 ```yaml
 run_limits:
   # Structural caps
-  max_turns: 20                       # hard cap on agent inner-loop turns per iteration
-  expected_turns: 8                   # SOFT efficiency budget (visible turns) — never aborts
+  max_tool_calls: 20                  # hard cap on resolved tool calls across the whole task
+  expected_tool_calls: 8              # SOFT efficiency budget (visible tool calls) — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
 
@@ -273,8 +273,8 @@ run_limits:
 
 | Field | Default | Constraint | Description |
 |-------|---------|------------|-------------|
-| `max_turns` | *unset* | `> 0` | Hard cap on agent inner-loop turns per iteration. Unset uses the SDK default. |
-| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative visible turns. Exceeding it warns and badges the report; it never aborts. See [`expected_turns`](#expected_turns-soft-efficiency-budget). |
+| `max_tool_calls` | *unset* | `> 0` | Hard cap on resolved tool calls across the whole task: every retry attempt and every dialog turn count. The TurnMonitor enforces it at the agent's next poll boundary, on every harness. The round that reaches the cap is processed whole, so tool calls already in flight can still land after it. The run finalizes cleanly as `tool_calls_exhausted`, and the criteria are still checked. Unset means no cap. |
+| `expected_tool_calls` | *unset* | `>= 1` | **Soft** target for cumulative visible tool calls. Exceeding it warns and badges the report; it never aborts. See [`expected_tool_calls`](#expected_tool_calls-soft-efficiency-budget). |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
@@ -297,17 +297,22 @@ model.
 
 **Budget-cap semantics:**
 
-- **Checked after each completed agent turn**, and **cumulative** across all of the task's turns.
-  There is no mid-turn enforcement, so a single runaway turn can overshoot the cap before the
-  between-turns check sees it. Size caps with headroom for one turn.
+- **Enforced live**, and **cumulative** across all of the task's turns. The `TurnMonitor` stops the
+  agent at its next poll once a cap is crossed. The overshoot is bounded by one usage report plus
+  any tool calls in flight; how often a harness reports usage is its `usage_granularity` in
+  [Run-Limit Parity](agents/HARNESS_PARITY.md). A harness that reports usage only once per turn is
+  checked at the turn end. Size caps with that headroom.
 - **Subject agent only.** Judge (`llm_judge` / `agent_judge`) and user-simulator token spend are
   **not** counted against these caps.
 - A breach aborts the task with `FinalStatus.TOKEN_BUDGET_EXCEEDED` (any of the three token caps) or
   `FinalStatus.COST_BUDGET_EXCEEDED` (`max_usd`). Both categorize as `failed` — see
   [Report Schema](REPORT_SCHEMA.md).
-- **`max_usd` needs per-turn cost from the SDK.** If no turn reports a cost, the check is **skipped
-  with a one-shot warning per task**, not failed. A run can therefore blow past `max_usd` silently
-  on a backend that doesn't report cost — don't rely on it as your only guardrail.
+- **`max_usd` is priced from the harness's reported cost**, else from the rate card in
+  `coder_eval.pricing` for the model the harness reports (then `agent.model`). A turn with no usage
+  costs nothing. A run that can price a turn neither way finishes **`ERROR`** at that turn's end with
+  the message "run_limits.max_usd could not be enforced". It is never skipped. Add a rate with
+  `register_pricing`, pin a priced model, or remove `max_usd`. Mid-turn usage reports rarely carry a
+  cost, so when the model has no rate the USD cap is checked once the turn's reported cost arrives.
 - **Cached-read and cache-creation tokens are excluded by default.** `count_cache_creation: true` is
   what makes an input-token budget meaningful for **Codex**, which buckets its fresh (full-price)
   prompt slice into `cache_creation`; with the default `false`, a Codex token budget effectively
@@ -317,7 +322,7 @@ model.
 `run_limits` without disturbing the task's other caps:
 
 ```bash
-coder-eval run task.yaml -D run_limits.max_turns=30 -D run_limits.task_timeout=900
+coder-eval run task.yaml -D run_limits.max_tool_calls=30 -D run_limits.task_timeout=900
 coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_tokens=200000
 ```
 
@@ -331,18 +336,21 @@ coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_toke
 > **No longer supported:** `max_turns` / `turn_timeout` (and top-level
 > `task_timeout`) under `agent:` or at the task top level are rejected —
 > the agent model's `extra="forbid"` raises a clear validation error.
-> They must live under `run_limits:`. (A deprecation shim hoisted them
-> automatically until it was removed on 2026-06-01.)
+> `turn_timeout` and `task_timeout` must live under `run_limits:`. (A
+> deprecation shim hoisted them automatically until it was removed on
+> 2026-06-01.) `max_turns` under `run_limits:` is rejected too: use
+> `run_limits.max_tool_calls`, which counts resolved tool calls, not agent
+> inner-loop turns.
 
-### `expected_turns` (soft efficiency budget)
+### `expected_tool_calls` (soft efficiency budget)
 
-`run_limits.expected_turns` is a **soft target**, not a cap: the run is never
-aborted for exceeding it (use `max_turns` for a hard limit). It's the budget the
+`run_limits.expected_tool_calls` is a **soft target**, not a cap: the run is never
+aborted for exceeding it (use `max_tool_calls` for a hard limit). It's the budget the
 dashboard's **"Within Expected Turns"** metric divides by — a task counts as
 "within budget" when it succeeds *and* its turn count stays within **1.5×**
-`expected_turns`. The run-level headline reports the share of **budgeted** tasks
+`expected_tool_calls`. The run-level headline reports the share of **budgeted** tasks
 that did: a budgeted task that failed counts as over budget, while tasks with no
-`expected_turns` budget are excluded entirely (success or fail).
+`expected_tool_calls` budget are excluded entirely (success or fail).
 
 The count compared against the budget is **visible turns** — one per tool call
 plus one for the agent's final reply — *not* the SDK's `total_turns` (which
@@ -356,7 +364,7 @@ default) to exclude a task from the metric entirely.
 ### `stop_early` (opt-in early stop)
 
 Early stop ends a single-shot run **early** once the run's **armed** criteria
-decide the outcome — so you can raise `max_turns` for the full-run flavor
+decide the outcome — so you can raise `max_tool_calls` for the full-run flavor
 without paying for turns the smoke flavor doesn't need. A criterion is *armed*
 by attaching a **`stop_early:` block** to it — the block's presence IS the
 arming, and it alone activates the run's watcher; there is **no run-level
@@ -380,7 +388,7 @@ under the weighted ceiling rule — plus two knobs inside the block:
 
 ```yaml
 run_limits:
-  max_turns: 30
+  max_tool_calls: 30
 success_criteria:
   - type: skill_triggered
     skill_name: date-teller
@@ -518,7 +526,7 @@ Semantics:
   cannot doom the gate is absorbed, and the run continues). The timeout is
   checked after the criterion's own verdict each round, so one that decides on
   that very step is never penalized. `None` (default) = no timeout; the run
-  relies solely on `run_limits.max_turns`. The step count is **cumulative
+  relies solely on `run_limits.max_tool_calls`. The step count is **cumulative
   across every retry attempt** of the turn — including an attempt that crashed
   or timed out before this criterion's own investigation even began — so size
   the budget with that headroom in mind.
@@ -528,8 +536,8 @@ compares a truncated run against a full one):
 
 | Surface | Field / marker |
 |---------|----------------|
-| `run.json` row | `stopped_early`, `early_stop_reason`, `turns_remaining_at_stop` |
-| `run.md` | `> **NOTE:** […] stopped early (<reason>); <= N turn(s) avoided …` |
+| `run.json` row | `stopped_early`, `early_stop_reason`, `tool_calls_remaining_at_stop` |
+| `run.md` | `> **NOTE:** […] stopped early (<reason>); <gate note>` |
 | `task.html` | header badge `stopped early (<reason>)` + `advisory — not gated` markers |
 | Telemetry | `EarlyStopped` / `EarlyStopReason` dimensions on `CoderEval.Task.End` |
 
@@ -1349,6 +1357,8 @@ Observed label is `"yes"` when either signal is found, else `"no"`. Expected lab
 | `expected_skill` | *required* | The row's expected skill (after `${row.*}` substitution); empty string `""` for negative rows where the skill should **not** fire |
 
 **Requires agent telemetry.** This criterion reads `turn_records`, so it only works against a real agent run (not a static check). With no turn records it reports `score=0.0` and an `error`.
+
+**The skill must be offered.** When the task sets `agent.plugins`, coder-eval stages the skills those paths offer (a plugin root or a bare skills directory) and records their names (the `SKILL.md` frontmatter `name`) in `environment_info.skills_offered`. A `skill_name` that is not among them fails `coder-eval plan` before the run is paid for: the positive control cannot run. A `skill_name` taken from a dataset row is checked on each expanded row. This applies even when the skill reaches the agent another way (for example a template's `.claude/skills/`): with `agent.plugins` set, put the skill under test in a plugin path. Re-grading a recorded run whose `skill_name` was not offered finishes `ERROR`, not `0.0`. A plugin path that offers no skill also fails `coder-eval plan`. See [Plugin staging](agents/HARNESS_PARITY.md#plugin-staging).
 
 **Classification metrics.** `skill_triggered` returns a `ClassificationCriterionResult`, so on a [dataset-backed task](#dataset) the suite aggregator computes accuracy / precision / recall / F1 / confusion matrix across all rows. Gate the suite with `suite_thresholds` using any of: `accuracy`, `macro_f1`, `weighted_f1`, `micro_f1`, or per-label `precision.<label>` / `recall.<label>` / `f1.<label>` (labels are `yes` / `no`). The run exits non-zero if any listed metric falls below its minimum.
 

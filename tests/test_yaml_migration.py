@@ -31,20 +31,20 @@ def _experiment_yamls() -> list[Path]:
 
 @pytest.mark.parametrize("path", _task_yamls(), ids=lambda p: p.relative_to(ROOT).as_posix())
 def test_task_yaml_has_no_stale_top_level_keys(path: Path) -> None:
-    """No top-level max_turns / task_timeout / turn_timeout on any task YAML."""
+    """No top-level max_turns / max_tool_calls / task_timeout / turn_timeout on any task YAML."""
     # `encoding="utf-8"` matches CE008/CE011 (which guard the same in src/);
     # task YAMLs frequently contain UTF-8 (← arrows, ≤, em-dashes, smart quotes)
     # and the Windows-default cp1252 raises UnicodeDecodeError on those bytes.
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         return
-    for key in ("max_turns", "task_timeout", "turn_timeout"):
+    for key in ("max_turns", "max_tool_calls", "task_timeout", "turn_timeout"):
         assert key not in data, f"{path}: stale top-level {key!r} (should be under run_limits:)"
 
 
 @pytest.mark.parametrize("path", _experiment_yamls(), ids=lambda p: p.name)
 def test_experiment_yaml_has_no_stale_top_level_keys(path: Path) -> None:
-    """No top-level max_turns / task_timeout / turn_timeout on experiment defaults / variants."""
+    """No top-level max_turns / max_tool_calls / task_timeout / turn_timeout on experiment defaults / variants."""
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         return
@@ -53,7 +53,7 @@ def test_experiment_yaml_has_no_stale_top_level_keys(path: Path) -> None:
     for blob, label in [(defaults, "defaults"), *((v, f"variant {v.get('variant_id')!r}") for v in variants)]:
         if not isinstance(blob, dict):
             continue
-        for key in ("max_turns", "task_timeout", "turn_timeout"):
+        for key in ("max_turns", "max_tool_calls", "task_timeout", "turn_timeout"):
             assert key not in blob, f"{path} {label}: stale top-level {key!r} (should be under run_limits:)"
 
 
@@ -66,8 +66,8 @@ def test_migrated_smoke_tasks_load() -> None:
     from coder_eval.orchestration.task_loader import load_task
 
     samples = [
-        ("tasks/smoke_task_timeout.yaml", {"max_turns": 2, "task_timeout": 30}),
-        ("tasks/smoke_cost_budget_exceeded.yaml", {"max_turns": 2, "max_usd": 0.0001}),
+        ("tasks/smoke_task_timeout.yaml", {"max_tool_calls": 10, "task_timeout": 30}),
+        ("tasks/smoke_cost_budget_exceeded.yaml", {"max_tool_calls": 2, "max_usd": 0.0001}),
     ]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)

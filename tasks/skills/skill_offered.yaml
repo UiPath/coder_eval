@@ -1,0 +1,21 @@
+task_id: skill-offered
+description: >-
+  Positive control for plugin staging. The probe plugin is staged into the run's
+  plugin_root, skills_offered records probe-skill, and the agent engages it.
+  Run from the repo root so the relative plugin path resolves.
+
+tags:
+  - skills
+
+agent:
+  plugins:
+    - type: local
+      path: tasks/skills/probe_plugin
+
+initial_prompt: "Use the probe-skill skill and reply."
+
+success_criteria:
+  - type: skill_triggered
+    description: "probe-skill was engaged"
+    skill_name: probe-skill
+    expected_skill: probe-skill

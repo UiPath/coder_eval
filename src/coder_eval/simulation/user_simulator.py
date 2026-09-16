@@ -209,6 +209,8 @@ class UserSimulator:
             # preset must not prefix it.
             # Rationale: .claude/notes/contracts.md § The judge's identity is its system prompt
             system_prompt_mode="replace",
+            # One user utterance per call, so the SDK's own agent loop stops after one turn.
+            sdk_options={"max_turns": 1},
         )
         # parse_agent_config returns a union, but type=CLAUDE_CODE guarantees ClaudeCodeAgentConfig
         assert isinstance(agent_config, ClaudeCodeAgentConfig)
@@ -330,8 +332,7 @@ class UserSimulator:
 
         assert self._agent is not None, "UserSimulator.start() must be called before next_user_message()"
         prompt = dialog_pairs[-1][1] if dialog_pairs else _OPENER_NUDGE
-        # Simulator emits one user utterance per call, so cap the inner loop at 1 turn.
-        turn = await self._agent.communicate(prompt, max_turns=1)
+        turn = await self._agent.communicate(prompt)
         raw = turn.agent_output or ""
         usage = turn.token_usage
         input_tokens = usage.uncached_input_tokens if usage is not None else None

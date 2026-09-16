@@ -26,12 +26,14 @@ import pytest
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig, TokenUsage
+from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
@@ -397,16 +399,6 @@ class TestSandboxEnvironment:
         assert captured["kwargs"]["env"]["OPENROUTER_API_KEY"] == "sk-test"
 
 
-class TestPluginWarnings:
-    async def test_plugins_that_do_not_resolve_warn_loudly(self, patch_exec, tmp_path, caplog):
-        """plugins IS supported now (-> --skill), but a path that resolves to no skills
-        must warn — else the run silently measures the model WITHOUT the skill."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(plugins=[{"type": "local", "path": "/no/such/dir"}]).start(str(tmp_path))
-        assert "0 skill dir(s) resolved" in caplog.text or "did not resolve" in caplog.text
-
-
 class TestAutoRetry:
     async def test_two_agent_cycles_reduce_to_one_agent_end(self, patch_exec, tmp_path):
         """Pi retries a transient error internally: agent_end(willRetry:true) then a
@@ -437,71 +429,94 @@ class TestAutoRetry:
         assert record.assistant_turn_count == 2
 
 
+def _stop_after(calls: int, reason: StopReason):
+    """A ``should_stop`` that returns ``reason`` from its ``calls``-th check on (one check per dispatched line)."""
+    seen = 0
+
+    def should_stop() -> StopReason | None:
+        nonlocal seen
+        seen += 1
+        return reason if seen >= calls else None
+
+    return should_stop
+
+
 class TestCooperativeStop:
     def test_capability_flag_is_declared(self):
         assert PiAgent.contract.cooperative_stop is True
 
-    async def test_should_stop_ends_turn_cleanly(self, patch_exec, tmp_path):
+    async def test_early_criterion_ends_turn_stopped_early(self, patch_exec, tmp_path):
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        recorder = _EventRecorder()
+        record = await _run(
+            _agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION, stream_callback=recorder
+        )
 
         assert record.crashed is False
         assert proc.terminated is True
-        # should_stop() is True from the first check, which lands after the first
-        # streamed line (the `session` header) and before any turn completes — so
-        # the cut is at turn 0, not merely "fewer than the full 3".
+        # The first check lands after the first streamed line (the `session`
+        # header), before any turn completes.
         assert record.assistant_turn_count == 0
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.STOPPED_EARLY]
 
-    async def test_partial_record_is_returned_not_raised(self, patch_exec, tmp_path):
+    async def test_tool_call_cap_ends_turn_tool_calls_exhausted(self, patch_exec, tmp_path):
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
-        assert isinstance(record.assistant_turn_count, int)
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP, stream_callback=recorder)
 
+        assert proc.terminated is True
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is True
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.TOOL_CALLS_EXHAUSTED]
 
-class TestMaxTurns:
-    async def test_max_turns_marks_exhausted(self, patch_exec, tmp_path):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=1)
-        assert record.max_turns_exhausted is True
+    async def test_token_budget_ends_turn_token_budget_exceeded(self, patch_exec, tmp_path):
+        proc = _RunningProcess(HAPPY_STREAM)
+        patch_exec(proc)
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET, stream_callback=recorder)
 
-    async def test_a_cap_the_run_stays_under_is_not_exhausted(self, patch_exec, tmp_path):
-        """The fixture is exactly 3 turns, so max_turns=3 is the boundary."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=3)
-        assert record.max_turns_exhausted is False
-        assert record.assistant_turn_count == 3
+        assert proc.terminated is True
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is False
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.TOKEN_BUDGET_EXCEEDED]
 
     async def test_the_deciding_turn_is_kept_whole(self, patch_exec, tmp_path):
-        """max_turns=1 cuts at the START of turn 2, so turn 1 survives complete."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=1)
+        """A stop that lands on turn 2's `turn_start` keeps turn 1 complete."""
+        second_turn_start = [i for i, line in enumerate(HAPPY_STREAM) if json.loads(line)["type"] == "turn_start"][1]
+        patch_exec(_RunningProcess(HAPPY_STREAM))
+        record = await _run(
+            _agent(), tmp_path, should_stop=_stop_after(second_turn_start + 1, StopReason.TOOL_CALL_CAP)
+        )
 
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
         assert len(record.commands) == 1  # turn 1's write
         usage = record.token_usage
         assert usage is not None
         assert usage.uncached_input_tokens == 406  # turn 1's input exactly
         assert usage.output_tokens == 77  # 69 + 8 reasoning
 
-    async def test_the_turn_past_the_cap_is_never_admitted(self, patch_exec, tmp_path):
-        """The cap stops at the (N+1)th `turn_start`, before it is counted or emitted."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
+    async def test_an_intentional_stop_is_exempt_from_a_non_zero_exit(self, patch_exec, tmp_path):
+        """Killing the CLI makes it exit non-zero; that must not crash an intentional stop."""
+        patch_exec(_RunningProcess(HAPPY_STREAM, returncode=-15, stderr=b"terminated"))
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP)
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is True
 
-        assert record.max_turns_exhausted is True
-        assert record.assistant_turn_count == 1
-        starts = [e for e in recorder.events if isinstance(e, TurnStartEvent)]
-        ends = [e for e in recorder.events if isinstance(e, TurnEndEvent)]
-        assert len(starts) == 1
-        assert len(ends) == 1
+    async def test_an_intentional_stop_is_exempt_from_no_recognized_events(self, patch_exec, tmp_path):
+        """A stop can land before the first recognized event; that is not vocabulary drift."""
+        patch_exec(_RunningProcess([json.dumps({"type": "not_a_pi_event"}), *HAPPY_STREAM]))
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET)
+        assert record.crashed is False
 
-    async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
+    async def test_no_stop_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
-        assert record.max_turns_exhausted is False
+        record = await _run(_agent(), tmp_path, should_stop=lambda: None)
+        assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 3
 
 
@@ -848,18 +863,14 @@ class TestTurnLifecycleAndTokenTelemetry:
         assert partial is not None
         assert partial.crashed is True
 
-    async def test_max_turns_cut_after_an_error_turn_finalizes_cleanly(self, patch_exec, tmp_path):
-        """A max_turns cut landing right after an error turn_end (pi still retrying,
-        so error_message is set but not yet cleared) must finalize as
-        max_turns_exhausted — NOT crash on the stale error. Guards the documented
-        'no crash, no retry' contract; without the intentional-cut gate the error
-        arm would fire on a clean budget exhaustion."""
-        # turn 1 errors; turn 2's turn_start trips max_turns=1 before any clean
-        # turn_end can clear error_message.
+    async def test_a_stop_after_an_error_turn_finalizes_cleanly(self, patch_exec, tmp_path):
+        """A stop landing right after an error turn_end (pi still retrying, so
+        error_message is set but not yet cleared) must finalize with the stop's
+        status — NOT crash on the stale error."""
         stream = [_turn_start(), _turn_end_error("transient 429"), _turn_start(), _turn_end(inp=1, out=1)]
-        patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path, max_turns=1)
-        assert record.max_turns_exhausted is True
+        patch_exec(_RunningProcess(stream))
+        record = await _run(_agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP))
+        assert record.tool_calls_exhausted is True
         assert record.crashed is False
 
     def test_error_message_resets_on_a_recovered_turn(self):
@@ -948,38 +959,28 @@ class TestTurnLifecycleAndTokenTelemetry:
 
 
 class TestSkillInjection:
-    """agent.plugins -> `pi --skill <dir>` (mirrors OpenCode/Codex plugin->skills)."""
+    """The staged plugin root reaches Pi as ``--skill <root>/skills``."""
 
-    def _plugin_root(self, tmp_path):
-        # A Claude-plugin root: <root>/skills/<name>/SKILL.md (manifest-default layout).
-        root = tmp_path / "plug"
-        skill = root / "skills" / "demo-skill"
+    def _staged_root(self, tmp_path: Path) -> Path:
+        skill = tmp_path / "authored" / "skills" / "demo-skill"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: demo-skill\ndescription: demo\n---\n# Demo\n")
-        return root
+        return stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
 
-    async def test_resolved_plugin_emits_skill_arg(self, patch_exec, tmp_path):
-        root = self._plugin_root(tmp_path)
+    async def test_staged_root_emits_skill_arg(self, patch_exec, tmp_path):
+        root = self._staged_root(tmp_path)
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path)
+        agent = _agent()
+        await agent.start(str(tmp_path), plugin_root=root)
+        await agent.communicate("do the thing")
         argv = captured["argv"]
-        assert "--skill" in argv
-        # Points at the skills-PARENT dir (Pi discovers <name>/SKILL.md recursively).
-        assert argv[argv.index("--skill") + 1] == str((root / "skills").resolve())
+        assert argv[argv.index("--skill") + 1] == str(root / "skills")
+        assert "pi_skill_paths" not in agent.get_environment_info()
 
-    async def test_no_plugins_means_no_skill_arg(self, patch_exec, tmp_path):
+    async def test_no_plugin_root_means_no_skill_arg(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert "--skill" not in captured["argv"]
-
-    async def test_skill_paths_recorded_in_environment_info(self, patch_exec, tmp_path):
-        # Installs the shutil.which("pi") patch so start() doesn't require the real
-        # CLI on PATH (CI has no pi binary); we only assert on recorded skill paths.
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        root = self._plugin_root(tmp_path)
-        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
-        await agent.start(str(tmp_path))
-        assert agent.get_environment_info()["pi_skill_paths"] == [str((root / "skills").resolve())]
 
 
 class TestTurnAlwaysReapsTheCli:

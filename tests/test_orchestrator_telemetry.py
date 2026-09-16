@@ -95,7 +95,7 @@ def test_success_emits_task_end(tmp_path):
     [
         (FinalStatus.SUCCESS, "succeeded"),
         (FinalStatus.FAILURE, "failed"),
-        (FinalStatus.MAX_TURNS_EXHAUSTED, "failed"),
+        (FinalStatus.TOOL_CALLS_EXHAUSTED, "failed"),
         (FinalStatus.ERROR, "error"),
         (FinalStatus.TIMEOUT, "failed"),
         (FinalStatus.TOKEN_BUDGET_EXCEEDED, "failed"),

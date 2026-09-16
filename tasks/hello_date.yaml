@@ -7,7 +7,7 @@ tags: [smoke, smoke-pass, golden, basic, pure-python]
 # warning + report badge when exceeded; does NOT abort the task or
 # affect scoring.
 run_limits:
-  expected_turns: 5
+  expected_tool_calls: 5
 
 agent:
   type: "claude-code"

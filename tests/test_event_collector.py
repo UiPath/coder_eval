@@ -211,6 +211,8 @@ class TestFullFieldParity:
         "token_usage",
         "timestamp",
         "provider_call_costs",
+        # Derived from end.status: the end status is the one source of truth.
+        "tool_calls_exhausted",
         # Measured by the collector between the agent's own start/end event
         # stamps and the first/last generation window — not carried on
         # AgentEndEvent, because no agent computes them.
@@ -241,7 +243,6 @@ class TestFullFieldParity:
             assistant_turn_count=3,
             messages=[msg],
             num_turns=3,
-            max_turns_exhausted=True,
             result_summary=ResultSummary(is_error=False, subtype="success", result="all done"),
             crashed=True,
             crash_reason="boom",
@@ -284,6 +285,22 @@ class TestFullFieldParity:
                 assert record_value == list(event_value), f"{name} did not round-trip"
             else:
                 assert record_value == event_value, f"{name}: record={record_value!r} event={event_value!r}"
+
+    @pytest.mark.parametrize(
+        ("status", "exhausted"),
+        [
+            (AgentEndStatus.TOOL_CALLS_EXHAUSTED, True),
+            (AgentEndStatus.COMPLETED, False),
+            (AgentEndStatus.STOPPED_EARLY, False),
+        ],
+    )
+    def test_tool_calls_exhausted_is_derived_from_the_end_status(self, status, exhausted):
+        collector = EventCollector()
+        _feed(
+            collector,
+            [AgentStartEvent(task_id=TASK_ID, prompt="p", iteration=1), AgentEndEvent(task_id=TASK_ID, status=status)],
+        )
+        assert collector.build_turn_record().tool_calls_exhausted is exhausted
 
 
 _GEN_BASE = datetime(2026, 9, 11, 9, 0, 0)
@@ -730,7 +747,7 @@ class TestHarnessOverheadBuckets:
         assert rec.harness_startup_ms == pytest.approx(3000.0)
 
     def test_a_new_turn_clears_the_previous_turn_terminal_event(self):
-        """EarlyStopWatcher keeps ONE collector across retries. Left stale, the
+        """TurnMonitor keeps ONE collector across retries. Left stale, the
         next attempt's start pairs with the last attempt's end and the clamped
         inversion publishes as a measured 0.0."""
         t0 = datetime(2026, 1, 1, 12, 0, 0)
@@ -1115,7 +1132,7 @@ class TestTheToolUnionIsStored:
         assert parameter.default is inspect.Parameter.empty
 
     def test_two_builds_agree(self):
-        """`EarlyStopWatcher` holds one collector across a turn's rounds."""
+        """`TurnMonitor` holds one collector across a turn's rounds."""
         collector = EventCollector()
         _feed(
             collector,
@@ -1136,7 +1153,7 @@ class TestTheToolUnionIsStored:
 class TestBuildTurnRecordIsIdempotent:
     """Building the record twice must give the same numbers.
 
-    `EventCollector` is not built once and read once. `EarlyStopWatcher` holds
+    `EventCollector` is not built once and read once. `TurnMonitor` holds
     ONE across a turn's tool-call rounds and calls `build_turn_record()` on
     every one, and the crash path builds it again from `Agent._finalize`. The
     tool subtraction now happens inside that method, so a version of it that

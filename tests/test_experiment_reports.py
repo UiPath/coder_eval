@@ -273,7 +273,7 @@ class TestExperimentReportGenerator:
         assert "**Errors**: 1" in md
 
     def test_task_detail_table_shows_timeout_icon(self):
-        """TIMEOUT and MAX_TURNS_EXHAUSTED should get distinct icons, not '?'."""
+        """TIMEOUT and TOOL_CALLS_EXHAUSTED should get distinct icons, not '?'."""
         result = ExperimentResult(
             experiment_id="icon-test",
             description="Icon test",
@@ -300,7 +300,7 @@ class TestExperimentReportGenerator:
                             variant_id="v",
                             task_id="t-exhausted",
                             weighted_score=0.0,
-                            final_status="MAX_TURNS_EXHAUSTED",
+                            final_status="TOOL_CALLS_EXHAUSTED",
                             duration_seconds=30.0,
                         ),
                     ],
@@ -322,7 +322,7 @@ class TestExperimentReportGenerator:
             total_duration_seconds=90.0,
         )
         md = ExperimentReportGenerator.generate_experiment_report(result)
-        # TIMEOUT and MAX_TURNS_EXHAUSTED should NOT show "?" — they should have real icons
+        # TIMEOUT and TOOL_CALLS_EXHAUSTED should NOT show "?" — they should have real icons
         assert "(?)" not in md
 
     def test_generate_task_summary_json(self, sample_result):

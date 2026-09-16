@@ -86,7 +86,7 @@ agent:
   # Mirrors anti_cheat_reference. Read is kept deliberately: Claude Code's Write
   # tool refuses to overwrite a file the session has not read, so an agent that
   # wants to correct or extend captured.txt would otherwise burn turns against
-  # max_turns discovering the Bash heredoc fallback. Restricting tools would NOT
+  # max_tool_calls discovering the Bash heredoc fallback. Restricting tools would NOT
   # make the response strings unreachable anyway -- see the description block.
   allowed_tools:
     - Bash
@@ -201,6 +201,6 @@ success_criteria:
 # model may skip after two successes is a pure flake source in a blocking bucket.
 
 run_limits:
-  max_turns: 6
+  max_tool_calls: 6
   task_timeout: 300
   turn_timeout: 150

@@ -1,6 +1,6 @@
 """CE036 — every live-observable criterion must honor the ``live_verdict`` contract.
 
-``EarlyStopWatcher``'s deferred fail-stop, verdict latching, and ``_prev_verdicts``
+``TurnMonitor``'s deferred fail-stop, verdict latching, and ``_prev_verdicts``
 flip-attribution (``orchestration/early_stop.py``) are correct ONLY because every
 armed criterion's ``live_verdict`` is:
 
@@ -340,7 +340,7 @@ def verdict_at(
     """``live_verdict`` over the first ``prefix_len`` commands.
 
     Wraps the prefix in a SINGLE ``TurnRecord``, which is exactly how
-    ``EarlyStopWatcher._collect_verdicts`` calls it (``records = [record]``) — the
+    ``TurnMonitor._collect_verdicts`` calls it (``records = [record]``) — the
     watcher rebuilds one record from its own collector on every round rather than
     accumulating a list.
     """
@@ -447,7 +447,7 @@ def contract_violations(checker: BaseCriterion[Any], case: ContractCase) -> list
         if final not in claimed:
             violations.append(
                 f"{case.label!r}: live_verdict decided {final!r}, but this instance's "
-                + f"live_decidable_polarities() claims only {set(claimed) or '{}'}. EarlyStopWatcher "
+                + f"live_decidable_polarities() claims only {set(claimed) or '{}'}. TurnMonitor "
                 + "would treat that trigger as inert while the checker actually decides it."
             )
 
@@ -477,7 +477,7 @@ def permuted_violations(
 
     Each shuffle is RENUMBERED (``sequence_number`` reassigned 0..N-1 in the new
     order) so the permuted trajectory is one the runtime could actually produce:
-    ``EarlyStopWatcher._collect_verdicts`` keeps its partial trajectory sorted by
+    ``TurnMonitor._collect_verdicts`` keeps its partial trajectory sorted by
     ``sequence_number``, so ``live_verdict`` never sees a list whose order
     contradicts those numbers. Without the renumber this layer would (a) report
     breaches on inputs the watcher cannot construct, and (b) degrade to a silent

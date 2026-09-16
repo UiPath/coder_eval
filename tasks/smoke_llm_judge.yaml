@@ -12,7 +12,7 @@ initial_prompt: |
 tags: [smoke, smoke-pass, judge]
 
 run_limits:
-  max_turns: 2
+  max_tool_calls: 2
 
 agent:
   type: "claude-code"

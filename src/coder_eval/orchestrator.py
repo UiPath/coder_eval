@@ -65,11 +65,14 @@ from .models import (
     resolve_evaluation_route,
     resolve_route,
 )
-from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
+from .orchestration.early_stop import early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
-from .orchestration.harness_contract import validate_harness_contract
+from .orchestration.plugin_staging import stage_plugins
+from .orchestration.resolution_checks import validate_resolved_task
 from .orchestration.run_limits import validate_run_limits
+from .orchestration.turn_monitor import TurnMonitor
 from .path_utils import (
+    PLUGIN_ROOT_DIRNAME,
     TASK_JSON_FILENAME,
     digest_tree,
     format_task_log_id,
@@ -471,17 +474,17 @@ class Orchestrator:
         # overwrite the reference and drive `reference_comparison` to 1.0.
         self._reference_digest: str | None = None
 
-        # Created in _setup only when armed; None otherwise, so the default path
-        # is entirely unaffected.
-        self._early_stop_watcher: EarlyStopWatcher | None = None
+        # Built once in _setup and handed to every communicate() call, so every
+        # count it answers the should_stop poll from is cumulative per task.
+        self._monitor: TurnMonitor | None = None
 
-        # One-shot flag: emit the "cost budget configured but no cost data" warning
-        # exactly once per task even if _check_run_limits fires every turn.
-        self._cost_budget_skipped_logged: bool = False
+        # The skill names the staged plugin root offered; None when the task sets
+        # no plugins. Read back from the prior result on an evaluate-only grade.
+        self._skills_offered: tuple[str, ...] | None = None
 
-        # One-shot flag: emit the expected_turns rollup warning exactly once per
-        # task run even though _check_expected_turns is called after every turn.
-        self._expected_turns_warning_emitted: bool = False
+        # One-shot flag: emit the expected_tool_calls rollup warning exactly once per
+        # task run even though _check_expected_tool_calls is called after every turn.
+        self._expected_tool_calls_warning_emitted: bool = False
 
         # One-shot flag: a resolved task may be inspected more than once during
         # setup, but its ineffective timeout relationship should be logged once.
@@ -507,7 +510,7 @@ class Orchestrator:
         """The status a normally-completed evaluation loop lands on.
 
         ORDER MATTERS at every step: a detached grade may not overturn an
-        execution fact, and the NOT_GRADED arm sits ABOVE ``max_turns_exhausted``
+        execution fact, and the NOT_GRADED arm sits ABOVE ``tool_calls_exhausted``
         so that ``execute`` + ``evaluate`` equals a single ``run``.
 
         With ``grade=True`` and no prior result the chain is the original one.
@@ -526,8 +529,8 @@ class Orchestrator:
             return FinalStatus.SUCCESS
         if not self.grade:
             return FinalStatus.NOT_GRADED
-        if self.result.max_turns_exhausted:
-            return FinalStatus.MAX_TURNS_EXHAUSTED
+        if self.result.tool_calls_exhausted:
+            return FinalStatus.TOOL_CALLS_EXHAUSTED
         return FinalStatus.FAILURE
 
     async def run(self) -> EvaluationResult:
@@ -709,7 +712,7 @@ class Orchestrator:
                 await self._cleanup()
                 # AFTER teardown, so post-run and cleanup errors land in the
                 # report, but BEFORE finalization so task.json includes it. An
-                # ALLOWLIST: SUCCESS, MAX_TURNS_EXHAUSTED and NOT_GRADED all skip
+                # ALLOWLIST: SUCCESS, TOOL_CALLS_EXHAUSTED and NOT_GRADED all skip
                 # it, none being a diagnosis of something going wrong.
                 if self.result.final_status in {
                     FinalStatus.ERROR,
@@ -759,7 +762,7 @@ class Orchestrator:
         self.result.early_stop = prior.early_stop
 
         # Execution facts that outlive the agent process.
-        self.result.max_turns_exhausted = prior.max_turns_exhausted
+        self.result.tool_calls_exhausted = prior.tool_calls_exhausted
         self.result.error_message = prior.error_message
         self.result.error_details = prior.error_details
         self.result.error_log_tail = prior.error_log_tail
@@ -905,6 +908,7 @@ class Orchestrator:
                 runnable,
                 reference_dir=self._reference_dir,
                 turn_records=self.result.iterations,
+                skills_offered=self._skills_offered,
             )
 
         if len(checked) != len(runnable):
@@ -1078,14 +1082,6 @@ class Orchestrator:
         # Aggregate token usage
         self._aggregate_token_usage()
 
-        # Record whether per-turn cost data was available when a cost budget was set.
-        # Lets users audit whether a configured max_usd budget was actually enforceable.
-        if self.task.run_limits is not None and self.task.run_limits.max_usd is not None:
-            any_cost_reported = any(
-                t.token_usage is not None and t.token_usage.total_cost_usd is not None for t in self.result.iterations
-            )
-            self.result.environment_info["cost_data_available"] = any_cost_reported
-
         if self.result.iterations:
             self.result.total_assistant_turns = sum(t.assistant_turn_count for t in self.result.iterations)
 
@@ -1159,103 +1155,33 @@ class Orchestrator:
 
         write_task_html(self.result, self.html_report_path)
 
-    def _check_run_limits(self, *, iteration: int) -> None:
-        """Raise BudgetExceededError if any RunLimits budget is exceeded.
+    def _check_expected_tool_calls(self, *, iteration: int) -> None:
+        """Emit a one-shot warning if visible tool calls exceed expected_tool_calls.
 
-        Called after each completed turn. Aggregates across self.result.iterations.
-        No-op when self.task.run_limits is None.
-        """
-        assert self.result is not None
-        limits = self.task.run_limits
-        if limits is None:
-            return
-
-        usages = [t.token_usage for t in self.result.iterations if t.token_usage is not None]
-        if not usages:
-            return
-
-        input_tokens = sum(u.uncached_input_tokens for u in usages)
-        if limits.count_cache_creation:
-            input_tokens += sum(u.cache_creation_input_tokens for u in usages)
-        if limits.count_cached_input:
-            input_tokens += sum(u.cache_read_input_tokens for u in usages)
-        output_tokens = sum(u.output_tokens for u in usages)
-        total_tokens = input_tokens + output_tokens
-
-        if limits.max_input_tokens is not None and input_tokens > limits.max_input_tokens:
-            raise BudgetExceededError(
-                "input_tokens",
-                actual=input_tokens,
-                limit=limits.max_input_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-        if limits.max_output_tokens is not None and output_tokens > limits.max_output_tokens:
-            raise BudgetExceededError(
-                "output_tokens",
-                actual=output_tokens,
-                limit=limits.max_output_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-        if limits.max_total_tokens is not None and total_tokens > limits.max_total_tokens:
-            raise BudgetExceededError(
-                "total_tokens",
-                actual=total_tokens,
-                limit=limits.max_total_tokens,
-                task_id=self.task.task_id,
-                iteration=iteration,
-            )
-
-        if limits.max_usd is not None:
-            costs = [u.total_cost_usd for u in usages if u.total_cost_usd is not None]
-            if not costs:
-                if not self._cost_budget_skipped_logged:
-                    logger.warning(
-                        "[%s] max_usd budget configured but no turn reported cost; skipping cost check",
-                        self.task.task_id,
-                    )
-                    self._cost_budget_skipped_logged = True
-                return
-            total_cost = sum(costs)
-            if total_cost > limits.max_usd:
-                raise BudgetExceededError(
-                    "usd",
-                    actual=total_cost,
-                    limit=limits.max_usd,
-                    task_id=self.task.task_id,
-                    iteration=iteration,
-                )
-
-    def _check_expected_turns(self, *, iteration: int) -> None:
-        """Emit a one-shot warning if visible turns exceed expected_turns.
-
-        Soft sibling of ``_check_run_limits.max_turns``: never aborts the run.
-        ``max_turns`` remains the hard cap (enforced inside the SDK). A
-        "turn" here is one timeline entry: each tool call plus the final
-        reply when present — the same metric evalboard renders. Cumulative
-        across iterations so simulation/dialog tasks compare against the
-        budget the user set.
+        Soft sibling of the hard tool-call cap: never aborts the run. The count is
+        one timeline entry per tool call plus the final reply when present — the
+        same metric evalboard renders. Cumulative across iterations so dialog tasks
+        compare against the budget the user set.
         """
         if self.result is None:
             return
         limits = self.task.run_limits
-        if limits is None or limits.expected_turns is None:
+        if limits is None or limits.expected_tool_calls is None:
             return
-        if self._expected_turns_warning_emitted:
+        if self._expected_tool_calls_warning_emitted:
             return
 
         total = visible_turn_count(self.result)
-        if total > limits.expected_turns:
+        if total > limits.expected_tool_calls:
             logger.warning(
-                "Visible turns (%d) exceeded expected_turns (%d) at iteration %d "
-                + "for task %s. Run continues — max_turns remains the hard cap.",
+                "Visible tool calls (%d) exceeded expected_tool_calls (%d) at iteration %d "
+                + "for task %s. Run continues — this target never aborts.",
                 total,
-                limits.expected_turns,
+                limits.expected_tool_calls,
                 iteration,
                 self.task.task_id,
             )
-            self._expected_turns_warning_emitted = True
+            self._expected_tool_calls_warning_emitted = True
 
     def _warn_on_ineffective_task_timeout(self) -> None:
         """Log resolved cross-field run-limit warnings once per task run."""
@@ -1430,24 +1356,21 @@ class Orchestrator:
                 + f"({current[:12]}...). Refusing to grade against a reference the agent may have written."
             )
 
-    def _arm_early_stop(self) -> None:
-        """Build the early-stop watcher, once, when the task arms one.
+    def _build_monitor(self) -> None:
+        """Build the task's ``TurnMonitor``, once.
 
-        Sits BEFORE `_setup`'s evaluate-only early return, so an armed
-        evaluate-only re-grade builds an inert (never-fed) watcher — harmless,
-        and keeps a single creation point.
+        Sits BEFORE `_setup`'s evaluate-only early return, so an evaluate-only
+        re-grade builds an inert (never-fed) monitor — harmless, and keeps a single
+        creation point.
         """
-        if not early_stop_active(self.task):
-            return
-        if self.grade:
-            self._early_stop_watcher = EarlyStopWatcher.for_task(self.task)
-            return
-        # Under `execute` there is no outcome to decide and the trajectory IS the
-        # deliverable, so an armed criterion must not truncate it.
-        logger.info(
-            "Grading disabled (execute mode): early-stop is armed but stays disabled; "
-            + "the full trajectory is the deliverable."
-        )
+        self._monitor = TurnMonitor.for_task(self.task, arm=self.grade)
+        if not self.grade and early_stop_active(self.task):
+            # Under `execute` there is no outcome to decide and the trajectory IS
+            # the deliverable, so an armed criterion must not truncate it.
+            logger.info(
+                "Grading disabled (execute mode): early-stop is armed but stays disabled; "
+                + "the full trajectory is the deliverable."
+            )
 
     def _restore_recorded_command_path(self) -> None:
         """Re-apply the graded run's own PATH before its criteria run.
@@ -1476,10 +1399,10 @@ class Orchestrator:
         self._warn_on_ineffective_task_timeout()
 
         # ONCE, up front, and BEFORE the evaluate-only early return: an armed
-        # evaluate-only re-grade builds an inert watcher, which is harmless and
+        # evaluate-only re-grade builds an inert monitor, which is harmless and
         # keeps a single creation point.
         # Rationale: .claude/notes/orchestration.md § Gate selection is fired-only
-        self._arm_early_stop()
+        self._build_monitor()
 
         # BEFORE either branch returns: judge criteria with include_reference
         # expect it populated in evaluate-only re-grades too.
@@ -1492,6 +1415,9 @@ class Orchestrator:
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
             self._restore_recorded_command_path()
+            recorded_skills = self.prior_result.environment_info.get("skills_offered") if self.prior_result else None
+            if isinstance(recorded_skills, list):
+                self._skills_offered = tuple(str(name) for name in recorded_skills)
 
             self._resolve_routes()
             self._record_route_environment_info()
@@ -1499,7 +1425,7 @@ class Orchestrator:
 
         # After the evaluate-only return: a re-grade builds no agent, so a recorded
         # config from before the contract existed stays gradable.
-        validate_harness_contract(self.task)
+        validate_resolved_task(self.task)
 
         # validate_api_keys exempts the no-op agent internally — it makes no API
         # call, so it needs no agent keys.
@@ -1570,6 +1496,12 @@ class Orchestrator:
 
         env_path_prepend = [str(p) for p in self.sandbox.resolved_mock_path_dirs]
         plugin_tools_dir = self.sandbox.plugin_tools_dir
+        plugin_root: Path | None = None
+        if self.task.agent.plugins:
+            staged = await asyncio.to_thread(stage_plugins, self.task.agent.plugins, self.run_dir / PLUGIN_ROOT_DIRNAME)
+            plugin_root = staged.root
+            self._skills_offered = staged.skills_offered
+            self.result.environment_info["skills_offered"] = list(staged.skills_offered)
 
         async def _start_agent() -> None:
             assert self.agent is not None
@@ -1577,6 +1509,7 @@ class Orchestrator:
                 str(sandbox_dir),
                 env_path_prepend=env_path_prepend,
                 plugin_tools_dir=plugin_tools_dir,
+                plugin_root=plugin_root,
             )
 
         await execute_with_retry(
@@ -1896,19 +1829,16 @@ class Orchestrator:
         result = self.result
         run_limits = self.task.run_limits
         turn_timeout = run_limits.turn_timeout if run_limits else None
-        max_turns = run_limits.max_turns if run_limits else None
-
-        agent_callback: StreamCallback | None = None
-        if self.stream_callback is not None:
-            agent_callback = TaskScopedCallback(self.stream_callback, self._log_task_id)
+        monitor = self._monitor
+        assert monitor is not None, "TurnMonitor not built"
 
         # The sole callback when --stream is off, else alongside the
-        # TaskScopedCallback. The same instance persists across retry attempts, so
-        # its counters and wall-clock origin accumulate.
-        watcher = self._early_stop_watcher
-        if watcher is not None:
-            agent_callback = (
-                CompositeStreamCallback([watcher, agent_callback]) if agent_callback is not None else watcher
+        # TaskScopedCallback. The same instance persists across retry attempts and
+        # dialog turns, so its counters and wall-clock origin accumulate.
+        agent_callback: StreamCallback = monitor
+        if self.stream_callback is not None:
+            agent_callback = CompositeStreamCallback(
+                [monitor, TaskScopedCallback(self.stream_callback, self._log_task_id)]
             )
 
         def _drain_pending_turn(*, attempt: int) -> None:
@@ -1953,8 +1883,7 @@ class Orchestrator:
                 prompt,
                 stream_callback=agent_callback,
                 timeout=turn_timeout,
-                max_turns=max_turns,
-                should_stop=watcher.should_stop if watcher is not None else None,
+                should_stop=monitor.should_stop,
             )
             if turn_timeout is None:
                 return await coro
@@ -2088,7 +2017,7 @@ class Orchestrator:
         """Apply the verdict gate to the criteria results already on ``self.result``.
 
         Gate selection is FIRED-ONLY: the weighted armed gate applies IFF the
-        watcher actually cut the run. BOTH single-shot grading paths must call
+        monitor actually cut the run. BOTH single-shot grading paths must call
         this — the live one and the evaluate-only one — or a re-graded
         early-stopped run is scored under the full-run gate and flips its verdict.
 
@@ -2114,9 +2043,9 @@ class Orchestrator:
             )
             return self.result.armed_criteria_passed(self.task.success_criteria, gate_threshold)
 
-        if self._early_stop_watcher is not None:
-            if self._early_stop_watcher.disarmed:
-                logger.info("early-stop watcher disarmed fail-open (verdict error): gating on the full set.")
+        if self._monitor is not None and self._monitor.armed:
+            if self._monitor.disarmed:
+                logger.info("early-stop criteria disarmed fail-open (verdict error): gating on the full set.")
             else:
                 logger.info("early-stop armed but never fired (run completed naturally): gating on the full set.")
         return self.result.all_criteria_passed(self.task.success_criteria)
@@ -2164,6 +2093,7 @@ class Orchestrator:
                 self.task.success_criteria,
                 reference_dir=self._reference_dir,
                 turn_records=self.result.iterations,
+                skills_offered=self._skills_offered,
             )
             self.result.success_criteria_results = criteria_results
             return self._select_gate()
@@ -2201,26 +2131,30 @@ class Orchestrator:
         self.result.iterations.append(turn_record)
         self._sync_sandbox_command_path_with_agent()
 
-        # Record early-stop info (if the watcher tripped) BEFORE check_all_async, so it
+        # Record early-stop info (if the monitor tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
-        self.result.early_stop = self._early_stop_watcher.info if self._early_stop_watcher is not None else None
+        monitor = self._monitor
+        assert monitor is not None
+        self.result.early_stop = monitor.info
 
         logger.debug(f"Agent response received ({len(turn_record.agent_output)} chars)")
 
         # Facts about the RUN, recorded BEFORE the grading switch: `execute`
         # withholds the verdict, never the facts. Recording the fact is not
-        # finalizing on it — max_turns decides the status only when the criteria
+        # finalizing on it — the tool-call cap decides the status only when the criteria
         # fail, so under grade=False this is carried into task.json for the
-        # detached grade rather than turned into a terminal status.
+        # detached grade rather than turned into a terminal status. Read from the
+        # turn's end status, not the monitor's latch: a cap latched after the
+        # agent's last poll did not stop anything.
         # Rationale: .claude/notes/orchestration.md § The four grading sites
-        if turn_record.max_turns_exhausted:
-            self.result.max_turns_exhausted = True
+        if turn_record.tool_calls_exhausted:
+            self.result.tool_calls_exhausted = True
             logger.warning(
-                "Agent exhausted max_turns (%s).",
-                self.task.run_limits.max_turns if self.task.run_limits else None,
+                "Agent reached the tool-call cap (%d resolved tool calls).",
+                monitor.tool_calls,
             )
         # Soft cumulative-turn check (logs once; never aborts).
-        self._check_expected_turns(iteration=iteration)
+        self._check_expected_tool_calls(iteration=iteration)
 
         # Grading site 2 of 4. The trajectory is captured and persisted exactly as
         # on a graded run, but nothing is scored; returning False keeps FinalStatus
@@ -2231,7 +2165,7 @@ class Orchestrator:
             logger.info("Grading disabled (execute mode): skipping success criteria.")
             # A run limit, not a verdict: its only reason to sit after the
             # criteria on the graded path is partial-credit visibility.
-            self._check_run_limits(iteration=iteration)
+            monitor.raise_if_over_budget(iteration=iteration)
             return False
 
         # Check success criteria (reference_dir feeds reference_comparison + judges)
@@ -2241,6 +2175,7 @@ class Orchestrator:
             self.task.success_criteria,
             reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
+            skills_offered=self._skills_offered,
         )
         self.result.success_criteria_results = criteria_results
 
@@ -2262,7 +2197,7 @@ class Orchestrator:
         self._emit_criteria_event(criteria_results)
 
         # AFTER the criteria, so partial-credit visibility is preserved.
-        self._check_run_limits(iteration=iteration)
+        monitor.raise_if_over_budget(iteration=iteration)
 
         return all_passed
 
@@ -2322,6 +2257,7 @@ class Orchestrator:
             self.task.success_criteria,
             reference_dir=self._reference_dir,
             turn_records=self.result.iterations,
+            skills_offered=self._skills_offered,
         )
         self._accumulate_judge_usage(criteria_results, judge_usage_accum)
         self.result.success_criteria_results = criteria_results
@@ -2587,8 +2523,9 @@ class Orchestrator:
 
                 # Budget gate: aborts the dialog with a dedicated stop reason and
                 # ensures end-of-dialog criteria still run for partial credit.
+                assert self._monitor is not None
                 try:
-                    self._check_run_limits(iteration=turns_completed)
+                    self._monitor.raise_if_over_budget(iteration=turns_completed)
                 except BudgetExceededError:
                     stop_reason = DialogStopReason.RUN_LIMIT_EXCEEDED
                     if not criteria_checked_this_turn:
@@ -2597,29 +2534,28 @@ class Orchestrator:
                         await self._run_dialog_criteria_check(judge_usage_accum)
                     raise
 
+                # Soft check (logs once, never aborts), then the cap fact, both BEFORE
+                # any stop decision, so a turn that also ends the dialog keeps them.
+                self._check_expected_tool_calls(iteration=turns_completed)
+                if turn_record.tool_calls_exhausted:
+                    self.result.tool_calls_exhausted = True
+
                 stop_decision = evaluate_stop(
                     config=sim_config,
                     turns_completed=turns_completed,
                     total_tokens_used=total_tokens_used,
                     criteria_all_passed=all_passed,
                 )
+                if turn_record.tool_calls_exhausted and stop_decision.reason is not DialogStopReason.CRITERIA_PASSED:
+                    stop_reason = DialogStopReason.TOOL_CALL_CAP
+                    logger.warning(
+                        "Agent reached the tool-call cap during simulation turn %s; ending dialog.",
+                        turns_completed,
+                    )
+                    break
                 if stop_decision.stop:
                     assert stop_decision.reason is not None
                     stop_reason = stop_decision.reason
-                    break
-
-                # Soft check (logs once, never aborts). BEFORE the max_turns
-                # break, so a turn tripping both still emits the expected_turns
-                # warning before the dialog terminates.
-                self._check_expected_turns(iteration=turns_completed)
-
-                if turn_record.max_turns_exhausted:
-                    self.result.max_turns_exhausted = True
-                    stop_reason = DialogStopReason.MAX_TURNS
-                    logger.warning(
-                        "Agent exhausted its inner max_turns during simulation turn %s; ending dialog.",
-                        turns_completed,
-                    )
                     break
 
                 solicited = await self._solicit_user_message(

@@ -16,16 +16,26 @@ See ``docs/TASK_DEFINITION_GUIDE.md`` (No-op / System Tasks) and issue #203.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, ApiRoute, Enforcement, HarnessContract, NoneAgentConfig, TurnRecord
+from coder_eval.models import (
+    AgentKind,
+    ApiRoute,
+    Enforcement,
+    HarnessContract,
+    NoneAgentConfig,
+    TurnRecord,
+    UsageGranularity,
+)
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
@@ -51,6 +61,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=False,
+        usage_granularity=UsageGranularity.TURN,
     )
 
     def __init__(
@@ -64,6 +75,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """No-op: there is no agent process to launch."""
         self._state = AgentState.WORKING
@@ -74,8 +86,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Return an empty turn without contacting any model.
 

@@ -29,5 +29,5 @@ success_criteria:
     weight: 1.0
 
 run_limits:
-  max_turns: 15
+  max_tool_calls: 15
   task_timeout: 120

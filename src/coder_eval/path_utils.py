@@ -41,6 +41,9 @@ PRIOR_RESULT_FILENAME = "prior.json"
 DOCKER_LOG_FILENAME = "docker.log"
 GRADE_DOCKER_LOG_FILENAME = "grade.docker.log"
 
+# The staged plugin root the agent was handed (`orchestration/plugin_staging.py`).
+PLUGIN_ROOT_DIRNAME = "plugin_root"
+
 # The virtualenv directory `setup` creates and `adopt` discovers. Named because
 # whether it is on PATH decides which binaries a criterion resolves.
 VENV_DIRNAME = ".venv"

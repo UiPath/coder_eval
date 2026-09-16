@@ -1315,26 +1315,27 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
     harness's latency rather than as ours.
     """
 
-    # Measured at 0.03 ms bare and 0.10 ms with four plugin roots. The bound is
+    # Measured at 0.03 ms bare and 0.10 ms with plugins. The bound is
     # ~300x that: generous enough that a loaded CI box cannot trip it, tight
     # enough to catch a regression that would make the reasoning above wrong.
     BUDGET_MS = 50.0
 
     @staticmethod
-    def _build_ms(**config_kwargs) -> float:
+    def _build_ms(plugin_root=None) -> float:
         from pathlib import Path
 
         from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 
-        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, model="claude-haiku-4-5-20251001", **config_kwargs)
+        config = parse_agent_config(type=AgentKind.CLAUDE_CODE, model="claude-haiku-4-5-20251001")
         agent = ClaudeCodeAgent(config)
         agent.working_directory = Path(".")
+        agent._plugin_root = plugin_root
         # Best of N: the claim is about the work the call does, not about the
         # worst scheduling slice a shared runner happens to hand it.
         samples = []
         for _ in range(5):
             started = time.perf_counter()
-            agent._build_claude_query("hi", 60, 10, lambda _line: None)
+            agent._build_claude_query("hi", 60, lambda _line: None)
             samples.append((time.perf_counter() - started) * 1000.0)
         return min(samples)
 
@@ -1348,15 +1349,43 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
             "to the turn and the gap would be ours, not the harness's."
         )
 
-    def test_plugin_resolution_does_not_change_that(self, tmp_path):
-        """A plugin-heavy task is where our own setup could plausibly dominate."""
-        (tmp_path / "skills").mkdir()
-        roots = [{"type": "local", "path": str(tmp_path)} for _ in range(4)]
-        elapsed = self._build_ms(plugins=roots)
+    def test_a_staged_plugin_root_does_not_change_that(self, tmp_path):
+        """A plugin task is where our own setup could plausibly dominate."""
+        elapsed = self._build_ms(plugin_root=tmp_path)
         assert elapsed < self.BUDGET_MS, (
-            f"_build_claude_query with 4 plugin roots took {elapsed:.2f} ms, over the "
+            f"_build_claude_query with a staged plugin root took {elapsed:.2f} ms, over the "
             f"{self.BUDGET_MS} ms budget — see the sibling test for why that matters."
         )
+
+
+class TestClaudeTurnTokensAreDeltas:
+    """A message id that resumes after another id's emission reports only its new tokens.
+
+    The ``TurnMonitor`` sums ``TurnEndEvent.tokens`` mid-turn, so a re-reported
+    generation would latch a budget on usage the agent never spent.
+    """
+
+    def test_interleaved_message_ids_never_report_the_same_tokens_twice(self, monkeypatch):
+        from coder_eval.streaming.callbacks import CompositeStreamCallback
+        from coder_eval.streaming.events import AgentEndStatus, TurnEndEvent
+
+        clock, state = TestClaudeFirstWindowReseed()._state(monkeypatch)
+        ends: list[TurnEndEvent] = []
+
+        class _Sink:
+            def on_event(self, event):
+                if isinstance(event, TurnEndEvent):
+                    ends.append(event)
+
+        state.emit = CompositeStreamCallback([state.collector, _Sink()])
+        for mid in ("x", "y", "x", "y"):
+            clock.at_ms += 100
+            state.on_assistant_message(TestClaudeFirstWindowReseed._assistant(mid))
+        state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
+
+        reported = sum((end.tokens.output_tokens for end in ends if end.tokens is not None), 0)
+        recorded = sum(rec.output_tokens for records in state.emissions_by_id.values() for rec in records)
+        assert reported == recorded
 
 
 class TestClaudeFirstWindowReseed:
@@ -1399,7 +1428,6 @@ class TestClaudeFirstWindowReseed:
             task_id="t",
             user_input="go",
             iteration=1,
-            max_turns=None,
             log=agent._log,
             turn_start_time=0.0,
             deadline=None,

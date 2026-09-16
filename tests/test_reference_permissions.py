@@ -576,6 +576,7 @@ class TestOrchestratorWiring:
             variant_id="v",
             task_file=task_file,
         )
+        orchestrator._build_monitor()
         await orchestrator._stage_reference()
         staged = orchestrator._reference_dir
         assert staged is not None
@@ -642,6 +643,7 @@ class TestOrchestratorWiring:
 
         task = _reference_task(reference_dir="reference")
         orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="v", task_file=task_file)
+        orchestrator._build_monitor()
         await orchestrator._stage_reference()
         staged = orchestrator._reference_dir
         assert staged is not None

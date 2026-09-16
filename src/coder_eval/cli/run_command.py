@@ -341,7 +341,7 @@ def run_command(
         metavar="PATH=VALUE",
         help=(
             "Override any resolved task-config field under agent/run_limits/sandbox, "
-            "e.g. -D run_limits.max_turns=30 -D agent.permission_mode=plan "
+            "e.g. -D run_limits.max_tool_calls=30 -D agent.permission_mode=plan "
             "-D agent.sdk_options.effort=high -D sandbox.docker.network=none. "
             "Repeatable. Validated against the schema. A path set by both an alias "
             "and -D is an error; values are YAML-parsed (on/off/yes/no stay strings). "

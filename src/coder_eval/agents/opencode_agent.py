@@ -51,6 +51,7 @@ from coder_eval.models import (
     ToolNameMap,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
 )
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
@@ -59,6 +60,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     StreamEvent,
     TextChunkEvent,
     ToolEndEvent,
@@ -67,10 +69,10 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import close_window
 
-from ._skills import _plugin_skill_dirs
 from .registry import AgentRegistry
 
 
@@ -280,7 +282,6 @@ class _OpenCodeTurnState:
         self.sequence = 0
         self.stop_reason: str | None = None
         self.error_message: str | None = None
-        self.max_turns_exhausted = False
         # Guards the one-terminal-event rule; see finalize().
         self.finalized = False
         # Guards _warn_token_shape: one report per turn, not one per step.
@@ -733,7 +734,6 @@ class _OpenCodeTurnState:
                 assistant_turn_count=self.step_count,
                 messages=list(self.messages),
                 num_turns=self.step_count,
-                max_turns_exhausted=self.max_turns_exhausted,
                 result_summary=ResultSummary(
                     is_error=crashed,
                     subtype=status.value,
@@ -762,6 +762,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.STEP,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES
@@ -808,28 +809,14 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         if shutil.which("opencode") is None:
             raise RuntimeError(
                 "The 'opencode' CLI was not found on PATH."
                 + " Install it with `npm install -g opencode-ai` (or see https://opencode.ai/docs/)."
             )
-        self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger)
-        if self._skill_dirs:
-            logger.info(
-                "opencode: injecting %d skill path(s) via %s: %s",
-                len(self._skill_dirs),
-                _CONFIG_CONTENT_ENV,
-                self._skill_dirs,
-            )
-        elif self.config.plugins:
-            # The run is about to measure the model without the skills under
-            # test. Say so loudly.
-            logger.warning(
-                "opencode: %d plugin(s) declared but 0 skill path(s) resolved — the agent will run "
-                + "WITHOUT them (see docs/agents/OPENCODE.md).",
-                len(self.config.plugins),
-            )
+        self._skill_dirs = [str(plugin_root / "skills")] if plugin_root is not None else []
         await asyncio.to_thread(self._write_prompt_file)
         self.working_directory = working_directory
         self._env_path_prepend = list(env_path_prepend or [])
@@ -896,10 +883,6 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             "opencode_model": self.config.model,
             "opencode_pure": self.config.pure,
         }
-        if self._skill_dirs:
-            # Recorded per task so a report can confirm the skills reached the
-            # agent.
-            info["opencode_skill_paths"] = list(self._skill_dirs)
         if self.config.variant:
             info["opencode_variant"] = self.config.variant
         if self._session_id:
@@ -1027,8 +1010,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         if self.working_directory is None:
             raise RuntimeError("OpenCodeAgent.start() must be called before communicate()")
@@ -1059,7 +1041,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         )
 
         deadline = None if timeout is None else time.monotonic() + timeout
-        stopped_early = False
+        requested_stop: StopReason | None = None
         stderr_drain: asyncio.Future[bytes] | None = None
         # Bound OUTSIDE the try so `finally` can tell "never spawned" from
         # "spawned and possibly still running".
@@ -1120,13 +1102,10 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     if not line:
                         break
 
-                    self._handle_line(line, state, max_turns=max_turns)
+                    self._handle_line(line, state)
 
-                    if state.max_turns_exhausted:
-                        await self.kill()
-                        break
-                    if should_stop is not None and should_stop():
-                        stopped_early = True
+                    requested_stop = should_stop() if should_stop is not None else None
+                    if requested_stop is not None:
                         await self.kill()
                         break
             finally:
@@ -1139,7 +1118,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 state,
                 collector,
                 stderr_drain,
-                stopped_early=stopped_early,
+                requested_stop=requested_stop,
                 deadline=deadline,
                 timeout=timeout,
             )
@@ -1194,7 +1173,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         collector: EventCollector,
         stderr_drain: asyncio.Future[bytes] | None,
         *,
-        stopped_early: bool,
+        requested_stop: StopReason | None,
         deadline: float | None,
         timeout: float | None,
     ) -> AgentEndStatus:
@@ -1231,7 +1210,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
 
         # A non-zero exit with no structured error still means the turn died:
         # surface stderr rather than reporting a silent empty success.
-        if proc.returncode not in (0, None) and not stopped_early and not state.max_turns_exhausted:
+        if proc.returncode not in (0, None) and requested_stop is None:
             detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
             self._crash_turn(state, collector, f"OpenCode exited non-zero: {detail}")
 
@@ -1244,7 +1223,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
         nothing_recognized = state.recognized_events == 0
         finished_without_tokens = state.steps_finished > 0 and state.usage.is_empty()
-        if not stopped_early and not state.max_turns_exhausted and (nothing_recognized or finished_without_tokens):
+        if requested_stop is None and (nothing_recognized or finished_without_tokens):
             if nothing_recognized:
                 seen = ", ".join(sorted(state.unrecognized_types)) or "none (stdout carried no JSON events)"
                 detail = f"It emitted no recognized events at all. Unrecognized event types seen: {seen}."
@@ -1266,11 +1245,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             else:
                 self._crash_turn(state, collector, message)
 
-        if stopped_early:
-            return AgentEndStatus.STOPPED_EARLY
-        if state.max_turns_exhausted:
-            return AgentEndStatus.MAX_TURNS_EXHAUSTED
-        return AgentEndStatus.COMPLETED
+        return end_status_for(requested_stop) if requested_stop is not None else AgentEndStatus.COMPLETED
 
     def _crash_turn(
         self,
@@ -1308,11 +1283,8 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         finally:
             self._capture_partial_turn(collector)
 
-    def _handle_line(self, line: bytes, state: _OpenCodeTurnState, *, max_turns: int | None = None) -> None:
-        """Parse one nd-JSON line and dispatch it. Never raises on bad input.
-
-        A ``step_start`` past ``max_turns`` sets ``state.max_turns_exhausted`` instead of opening a step.
-        """
+    def _handle_line(self, line: bytes, state: _OpenCodeTurnState) -> None:
+        """Parse one nd-JSON line and dispatch it. Never raises on bad input."""
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
             return
@@ -1340,9 +1312,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 state.thread_id = session_id
             self._session_id = session_id
 
-        if event_type == _STEP_START and max_turns is not None and state.step_count >= max_turns:
-            state.max_turns_exhausted = True
-        elif event_type == _STEP_START:
+        if event_type == _STEP_START:
             state.on_step_start(part)
         elif event_type == _TEXT:
             state.on_text(part)

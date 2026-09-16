@@ -1179,6 +1179,19 @@ class TestHarnessContractAtResolution:
         with pytest.raises(HarnessContractError, match="did you mean 'Bash'"):
             _resolve_all(tmp_path, task_file)
 
+    def test_plugin_path_with_no_skill_aborts(self, tmp_path):
+        from coder_eval.orchestration.harness_contract import TaskResolutionError
+        from coder_eval.orchestration.plugin_staging import PluginStagingError
+
+        empty = tmp_path / "empty_plugin"
+        empty.mkdir()
+        task_file = _write_task(
+            tmp_path, f"agent:\n  type: claude-code\n  plugins:\n    - type: local\n      path: {empty}\n"
+        )
+        with pytest.raises(PluginStagingError, match="offers no skill") as exc_info:
+            _resolve_all(tmp_path, task_file)
+        assert isinstance(exc_info.value, TaskResolutionError)
+
     def test_cli_prompt_file_is_inlined_after_layer_five(self, tmp_path, monkeypatch):
         (tmp_path / "prompt.md").write_text("be terse\n")
         monkeypatch.chdir(tmp_path)

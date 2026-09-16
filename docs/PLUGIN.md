@@ -106,18 +106,18 @@ It then:
 One prerequisite the suite cannot infer: the evaluated agent runs in a fresh
 sandbox holding none of your files, so it is offered no skills unless the task
 says where they live. The template reads that location from an environment
-variable — point it at a **plugin root**: a directory holding a `skills/`
-subdirectory, so the skill sits at `<path>/skills/<skill-name>/SKILL.md`. For
-`.claude/skills/pdf-forms/SKILL.md` that root is `.claude`, not `.claude/skills`:
+variable. Point it at a plugin root (`<path>/skills/<skill-name>/SKILL.md`) or at a
+bare skills directory (`<path>/<skill-name>/SKILL.md`). Both are staged. For
+`.claude/skills/pdf-forms/SKILL.md`, `.claude` works and `.claude/skills` works too:
 
 ```bash
 export SKILL_SOURCE_PATH="$(pwd)/.claude"
 ```
 
-Leave it unset and the skill is simply absent, every positive row scores 0, and
-the result is indistinguishable from a skill that never fires. It stays an
-environment variable rather than a path baked into the YAML so the suite is
-portable — it is committed and re-run on other machines, and in CI.
+Leave it unset, or point it at a directory with no skill, and `coder-eval plan`
+fails with a config error. It stays an environment variable rather than a path
+baked into the YAML so the suite is portable — it is committed and re-run on other
+machines, and in CI.
 
 ### A low-recall result has three causes, not one
 

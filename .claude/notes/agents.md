@@ -59,34 +59,11 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
 
 ## Harness run-limit parity
 
-- **Harness run-limit parity**: a shared `BaseAgentConfig` field must mean the same
-  thing on every backend, so a divergence is either fixed or documented — never silent.
-  **`run_limits.max_turns` on Codex/Antigravity counts VISIBLE turns** (resolved tool
-  calls, read live off the shared `EventCollector.visible_turn_count`, the same list
-  `TurnRecord.commands` holds) because one `communicate()` is a single SDK turn on both,
-  so a native counter would clamp at 1; claude-code keeps its native SDK cap, whose unit
-  (an agent-loop turn) absorbs arbitrarily many parallel calls — the same number is NOT
-  the same budget across harnesses. OpenCode and Pi each keep a native unit too, because
-  their CLIs stream a real multi-step loop per `communicate()`
-  (`step_start`/`step_finish`, `turn_start`/`turn_end`). The cap is enforced on the same
-  loop boundary as the cooperative early stop and finalizes cleanly as
-  `max_turns_exhausted` (no crash, no retry); on Antigravity that boundary lives in
-  `_drain()`, so the background-work poll loop honors it too.
-
-  The **known unfixed divergences** — which config fields each harness does and does not
-  enforce, and the per-harness `agent.plugins[].path` depth (claude-code REQUIRES a
-  plugin root holding `skills/` and silently loads NOTHING from a bare skills directory,
-  which is the costly direction: no error, every positive row of an activation suite
-  scores 0, and the suite reports recall 0.0, reading exactly like a skill that never
-  triggers; held to the plugin-root shape for `SKILL_SOURCE_PATH` by CE045) — are the
-  table's to state, not this file's. Full table + rationale:
-  docs/agents/HARNESS_PARITY.md.
-
-  The agent-field half of parity is now the `HarnessContract` each agent class declares:
-  a field, `permission_mode` value or tool name a harness cannot honor is a resolution
-  error, and `make parity-table` renders the contract (CE069 checks it), so the page can no
-  longer drift from the adapters. The run-limit half is still the hand-written table above;
-  Plan 2 moves it onto the contract.
+A shared field must mean the same thing on every backend. Both halves are generated
+tables in docs/agents/HARNESS_PARITY.md (`make parity-table`, CE069): `run_limits` from
+`RunLimits` and each agent's `HarnessContract`, the agent fields from the contract. Every
+cap and budget is the `TurnMonitor`'s (orchestration.md § The watcher became the
+TurnMonitor); CE070 keeps adapters from counting one again.
 
 ## Shared turn lifecycle
 
@@ -111,17 +88,18 @@ failure is not swallowed.
 `finalize` is total: an unmapped future member raises loudly instead of silently
 bucketing to COMPLETED.
 
-Status precedence is the same everywhere: timeout > stopped_early > max_turns_exhausted >
+Status precedence is the same everywhere: timeout > stopped_early > tool_calls_exhausted >
 completed. `stopped_early` outranks the cap because an armed criterion deciding the
-outcome is the more specific reason to have cut the run, and every loop checks it first.
+outcome is the more specific reason to have cut the run; the `TurnMonitor` evaluates the
+armed criteria before the cap, so an armed stop wins a tie and the first latched reason is
+final.
 
 ## Why a post-stop exception is not a crash
 
-Once the loop has broken on purpose — a cooperative stop or the turn cap — an exception
-raised while tearing the stream down must NOT be escalated. Escalating triggers the
-orchestrator's retry with the watcher's decision still latched, so the retry stops at turn
-0 having spent nothing useful; a cap-break is the same shape, where the retry burns the
-budget again and re-hits the cap. `ended_cleanly` is the guard.
+Once the loop has broken on purpose — any `should_stop` reason, including the tool-call
+cap — an exception raised while tearing the stream down must NOT be escalated. Escalating
+triggers the orchestrator's retry with the monitor's decision still latched, so the retry
+stops at its first poll having spent nothing useful. `ended_cleanly` is the guard.
 
 ## Why the constructors declare every kwarg
 
@@ -261,13 +239,13 @@ matter how much the run actually billed. So the CLI harnesses crash rather than 
   Crashing routes it to `FinalStatus.ERROR`, which is excluded from outcomes.
 - **A CLI that closed its stream but would not exit** within the grace period.
 
-Every arm is gated on `stopped_early` / `max_turns_exhausted`, because an intentional cut
+Every arm is gated on `stopped_early` / `tool_calls_exhausted`, because an intentional cut
 can land before the clearing event arrives. Pi's error case shows why: `error_message` is
 set at an error `turn_end` and cleared only by a LATER non-error `turn_end`, but a
-`max_turns` / `should_stop` cut can fire at the next `turn_start`, leaving a stale error
+`should_stop` cut (an early stop or the tool-call cap) can fire at the next `turn_start`, leaving a stale error
 from a turn Pi was still retrying. Without the guard that clean, budget-exhausted cut
 would crash and burn retries, contradicting the documented "finalizes cleanly as
-`max_turns_exhausted`, no crash" contract.
+`tool_calls_exhausted`, no crash" contract.
 
 OpenCode has one escape hatch, `require_token_telemetry`, for a provider or auth mode that
 reports no usage at all — where crashing every turn makes the harness unusable rather than
@@ -335,8 +313,9 @@ The Claude SDK's own `costUSD` is a client-side estimate assuming Anthropic pric
 is wrong for an open-weight model behind LiteLLM and is repriced from the token buckets at
 the model's real rate. The buckets are untouched, so the reconciliation invariant holds —
 only the cost scalar changes. An unpriced model sets the cost to `None` (an honest N/A)
-**and warns**, because a silent `None` makes the orchestrator skip the `max_usd` gate with
-no diagnostic.
+**and warns**. When the task sets `max_usd`, the `TurnMonitor` then raises
+`BudgetUnenforceableError` at the turn end, so the row finishes `ERROR` and is never a
+silent skip.
 
 ## Codex rollout rebuild
 
@@ -638,8 +617,7 @@ tempdir is still reclaimed.
 
 `_TERM_GRACE_SECONDS` is re-declared at the same value in both nd-JSON harnesses rather
 than shared: the CLI-driver hoist that would unify their teardown constants and reducers is
-a tracked follow-up. The shared plugin→skills resolver already lives in `agents/_skills.py`,
-and `STDOUT_LINE_LIMIT_BYTES`, which IS canonical, is imported.
+a tracked follow-up. `STDOUT_LINE_LIMIT_BYTES`, which IS canonical, is imported.
 
 ## The system_prompt_semantics marker
 
@@ -663,36 +641,60 @@ cannot disagree with what was sent.
 
 ## Skills, per harness
 
-A `plugins:` entry is a Claude-plugin root, and only the SKILLS half of it is honored
-anywhere — a plugin's agents, hooks, commands and MCP servers have no equivalent outside
-claude-code and are dropped. The manifest's `skills` field is read rather than `skills/`
-being hardcoded, so a plugin that relocates its skills keeps working.
+`orchestration/plugin_staging.py` stages every `plugins:` entry into one canonical root,
+`<run_dir>/plugin_root`, before `Agent.start`. Each harness then receives the SAME layout:
+`.claude-plugin/plugin.json` and `skills/<name>` links. The staging exists because each
+adapter used to scan the authored path its own way. claude-code loaded nothing from a bare
+skills directory, with no error, so an activation suite scored recall 0.0 and read exactly
+like a skill that never triggers.
 
-- **OpenCode** maps each root to `skills.paths` via `OPENCODE_CONFIG_CONTENT`, which the
-  CLI merges as a final local-scope layer. That was chosen over writing
-  `<sandbox>/.opencode/skills/` because it writes nothing into the sandbox that is later
-  preserved as a run artifact and inspected by file criteria, and does not depend on how
-  the CLI resolves a project root from `--dir`. Verified orthogonal to `--pure`, which
-  skips external *plugins*, not configured skill paths. An inherited value is appended to
-  rather than clobbered, since the host may legitimately configure OpenCode the same way.
-- **Pi** passes each as `--skill <dir>`.
-- **Codex** symlinks (or copies, on Windows) each skill dir into `.agents/skills/`, which
-  the CLI auto-discovers from the working directory upward.
-- **Antigravity** takes search paths natively via `skills_paths` — but those only drive
-  DISCOVERY. The file-tool allowlist is `workspaces` alone, so the skill roots must appear
+- **A plugin root is read the way Claude Code reads it.** The default `skills/` is always
+  scanned, and each path the manifest's `skills` field declares ADDS to it; a declared path
+  may parent skills or be one skill (it holds `SKILL.md`). A root holding `SKILL.md` is a
+  single-skill plugin. If a root yields nothing that way, it is read as a bare skills
+  directory. A skill's name is its frontmatter `name`, else its directory name: Claude
+  Code invokes the frontmatter name, so a gate keyed on the directory name would refuse a
+  skill that loads. Confirmed by the plugins reference ("Adds to the default: `skills`")
+  and a CLI 2.1.273 spike on 2026-09-16; the moved reader had treated the manifest as a
+  REPLACEMENT, which dropped the default `skills/` of any plugin that declared extras.
+- **Only skills are staged.** A plugin's agents, hooks, commands and MCP servers are
+  dropped on every harness, claude-code included. That also removes a confound: a project
+  subagent beside `skills/` can no longer answer the request the skill should answer.
+- **The staged manifest is `{"name": "coder-eval-plugins"}` and nothing else.** A
+  2026-09-17 spike with `claude -p --plugin-dir` showed a staged root whose manifest declared
+  `"skills": ["skills"]` load no skill; a 2026-09-16 spike on CLI 2.1.273 loaded a real
+  `["./skills"]` fine. The name-only manifest loads the `skills/` default either way.
+- **Refusal is at resolution.** `validate_plugins` runs in `validate_resolved_task`, so a
+  path with no skill, an unresolvable path, one skill name from two sources, or a
+  `skill_triggered` `skill_name` the plugins do not offer fails `plan` before the run is paid
+  for. A name still holding a `${row...}` placeholder is checked on its expanded row. The
+  cost: a task whose skill under test comes from a template or `setting_sources` while it
+  also sets `agent.plugins` is refused, because only plugin skills are offered.
+- **`skills_offered` is recorded** in `environment_info` and passed to the checker.
+  `skill_triggered` still raises `CheckerMisuseError` when its `skill_name` is not offered.
+  Resolution catches every new run first; the checker gate remains for a detached grade of
+  a recorded run, where resolution does not re-run.
+
+Delivery, per harness:
+
+- **Claude Code** takes the root as an SDK `{"type": "local", "path": plugin_root}` plugin.
+- **OpenCode** appends `<plugin_root>/skills` to `skills.paths` via
+  `OPENCODE_CONFIG_CONTENT`, which the CLI merges as a final local-scope layer. That was
+  chosen over writing `<sandbox>/.opencode/skills/` because it writes nothing into the
+  sandbox that is later preserved as a run artifact and inspected by file criteria, and
+  does not depend on how the CLI resolves a project root from `--dir`. Verified orthogonal
+  to `--pure`, which skips external *plugins*, not configured skill paths. An inherited
+  value is appended to rather than clobbered. The staged `skills/` holds only skill links,
+  so the recursive scan no longer walks a repo root's self-referential symlinks.
+- **Pi** passes `--skill <plugin_root>/skills`.
+- **Codex** links each `<plugin_root>/skills/<name>` into `.agents/skills/<name>` with
+  `link_or_copy`, which the CLI auto-discovers from the working directory upward.
+- **Antigravity** takes `<plugin_root>/skills` in `skills_paths` — but those only drive
+  DISCOVERY. The file-tool allowlist is `workspaces` alone, so the same path must appear
   there too, or the agent discovers a skill and every read of its `SKILL.md` is denied as
   out-of-workspace.
 
-A bare skills directory is used as-is only when the root declares no `skills/` subdir.
-That is deliberately not a fallback for a root that HAS one: `skills.paths` is scanned
-recursively and a repo root can contain self-referential symlinks (`UiPath/skills` has
-`plugins/uipath -> ..`), which resolves skills through an arbitrary path and silently drops
-duplicate names.
-
-Every way this can come up empty is logged loudly — an unresolved env var, a missing dir,
-a root with no `<name>/SKILL.md` under it. A plugin whose skills never reach the agent
-still *looks* like a normal run, which is precisely the failure the logging closes: the
-run measures the model WITHOUT the skill under test.
+`plugin_tools_dir` is not a skills source on any harness.
 
 ## Why the registry rejects a re-registration
 

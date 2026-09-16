@@ -2,10 +2,10 @@ task_id: "early_stop_decision_budget_exceeded"
 description: >
   Decision-step timeout (GitHub issue #61, item 3): the armed command_executed
   criterion sets stop_early.decide_within: 3 — if the agent hasn't run the script
-  within its first 3 tool calls, EarlyStopWatcher latches an effective FAIL
+  within its first 3 tool calls, the TurnMonitor latches an effective FAIL
   for it (reported as reason=decision_budget_exceeded) and, since that fail
   drops the armed ceiling below the default gate threshold of 1.0, the run
-  fail-stops immediately instead of burning the rest of run_limits.max_turns.
+  fail-stops immediately instead of burning the rest of run_limits.max_tool_calls.
   The timeout gates through the same weighted armed gate as a native
   live-fail — no special force-fail path. Note the block's on_pass stays
   'continue', so a live PASS never stops the run
@@ -28,7 +28,7 @@ agent:
   allowed_tools: ["Read", "Write", "Bash", "Glob"]
 
 run_limits:
-  max_turns: 20
+  max_tool_calls: 20
 
 success_criteria:
   - type: "command_executed"

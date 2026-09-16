@@ -17,7 +17,7 @@
 
 - **Generic CLI overrides (`-D`/`--set`)**: Layer 5 is a thin wrapper
   (`orchestration/overrides.py`) over the resolver above. `coder-eval run -D
-  agent.model=opus -D run_limits.max_turns=30` overrides any field on the resolved
+  agent.model=opus -D run_limits.max_tool_calls=30` overrides any field on the resolved
   `TaskDefinition` (`agent`/`run_limits`/`sandbox` roots), schema-validated with
   did-you-mean. Only `--model` (→ `agent.model`) and `--driver` (→ `sandbox.driver`)
   survive as active thin aliases that emit the equivalent `-D` entry; an alias and `-D`
@@ -57,7 +57,7 @@
   and `VariantAggregate.pass_rate` divide by `tasks_graded` (`tasks_run -
   tasks_not_graded`), and `tasks_not_graded` is part of the sum-to-`tasks_run`
   invariant, not a `tasks_failed` sub-counter. **Only SUCCESS/FAILURE collapse into it**
-  — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `MAX_TURNS_EXHAUSTED` and the budget stops are
+  — `ERROR`, `TIMEOUT`, `BUILD_FAILED`, `TOOL_CALLS_EXHAUSTED` and the budget stops are
   facts about the *run*, not about grading, and still apply (so `execute` still exits
   non-zero on a crash). The switch is `BatchRunConfig.grade` → `Orchestrator(grade=...)`
   → the **four** grading call sites (single-shot, evaluate-only, the simulation dialog
@@ -88,15 +88,15 @@ grading switch was threaded in. Its ORDER is load-bearing at every step.
 observed. Without that first arm, a crashed run re-graded against its half-finished
 workspace reports SUCCESS — with the original `error_message` still attached.
 
-**The NOT_GRADED arm sits ABOVE `max_turns_exhausted`, and that order is what makes
-`execute` + `evaluate` equal a single `run`.** MAX_TURNS_EXHAUSTED reads like an execution
+**The NOT_GRADED arm sits ABOVE `tool_calls_exhausted`, and that order is what makes
+`execute` + `evaluate` equal a single `run`.** TOOL_CALLS_EXHAUSTED reads like an execution
 fact but is not one: on the graded path it is subordinate to the verdict — `run` returns
-SUCCESS for a max-turns trajectory whose criteria pass, and only falls through to
-MAX_TURNS_EXHAUSTED when they do not — so it is not knowable under `grade=False`.
+SUCCESS for a capped trajectory whose criteria pass, and only falls through to
+TOOL_CALLS_EXHAUSTED when they do not — so it is not knowable under `grade=False`.
 Consuming it first made it terminal AND permanent, so the same agent output scored
-SUCCESS/1.0 under `run` and MAX_TURNS_EXHAUSTED under `execute` → `evaluate`; being
+SUCCESS/1.0 under `run` and TOOL_CALLS_EXHAUSTED under `execute` → `evaluate`; being
 category `failed`, `run --resume` then called the row complete and left it forever
-unscored. Nothing is lost by deferring: the fact lives on `result.max_turns_exhausted`,
+unscored. Nothing is lost by deferring: the fact lives on `result.tool_calls_exhausted`,
 which the seeding carries. The statuses that ARE execution facts differ in kind — they
 abort the run before a verdict is reachable, so preserving them overturns nothing.
 
@@ -279,8 +279,8 @@ silent. A missing stamp (a run predating the feature) is tolerated.
 
 - **Early stop on criterion (opt-in, per-criterion arming)**: a `stop_early:` block
   (`StopEarlyPolicy`) on a criterion ends a single-shot run early once the run's
-  **armed** criteria decide the outcome, so a raised `max_turns` isn't wasted on the
-  smoke flavor. The block's PRESENCE is the arming and alone activates the watcher —
+  **armed** criteria decide the outcome, so a raised `max_tool_calls` isn't wasted on the
+  smoke flavor. The block's PRESENCE is the arming and alone arms the monitor —
   there is **no run-level master switch**: `run_limits.stop_early: false` is the
   run-level KILL SWITCH that force-disarms every block (the one-line
   experiment-variant/`-D` override for an authoritative full run), and
@@ -313,8 +313,9 @@ silent. A missing stamp (a run predating the feature) is tolerated.
   never freezes a sibling `on_pass: continue` criterion's signal out of the trajectory).
   A fail-stop is therefore verdict-preserving; a pass-stop can miss a *later* distractor
   misfire, so authoritative P/R/F1 comes from a kill-switched (`stop_early: false`) run.
-  Driven by `orchestration/early_stop.py::EarlyStopWatcher` (built when
-  `early_stop_active(task)`: ≥1 armed criterion, kill switch not thrown) through the
+  Driven by `orchestration/turn_monitor.py::TurnMonitor` (built by `_build_monitor` in
+  `_setup` on every run; its criteria are armed when `early_stop_active(task)`: ≥1 armed
+  criterion, kill switch not thrown, and grading on) through the
   agent's cooperative `should_stop` seam (tool-call granularity, no SIGKILL); live
   verdicts only *trigger* the stop — the standard `check_all_async` on the frozen
   trajectory is authoritative. Gating is **FIRED-ONLY**: a run the watcher actually cut
@@ -359,11 +360,14 @@ is never assigned there, so an armed simulation task gates strict-AND on a possi
 truncated trajectory. Wiring the dialog path through it means also setting `early_stop`
 there; until then the limit is stated rather than implied.
 
-The watcher is built ONCE, in `_setup`, so its turn/tool counters and wall-clock origin
-accumulate across retry attempts. It is built before the evaluate-only early return, so an
-armed evaluate-only re-grade builds an inert, never-fed watcher — harmless, and one
-creation point. Under `execute` it is armed but stays disabled: there is no outcome to
-decide and the trajectory is the deliverable, so an armed criterion must not truncate it.
+The `TurnMonitor` is built ONCE, by `_build_monitor` in `_setup`, on every run, so its
+tool-call counters and wall-clock origin accumulate across retry attempts and dialog turns
+(that is what makes `run_limits.max_tool_calls` cumulative per task). It is built before
+the evaluate-only early return, so an evaluate-only re-grade builds an inert, never-fed
+monitor — harmless, and one creation point. Under `execute` its criteria are not armed
+(`arm=self.grade`): there is no outcome to decide and the trajectory is the deliverable, so
+an armed criterion must not truncate it. The tool-call cap still applies there, because it
+is a run limit, not a verdict.
 
 ### Verdicts latch, and the decision happens on the CALL
 
@@ -454,6 +458,23 @@ the pass-stop each round — and if none ever decides, the run simply continues 
 A row with zero pass-capable armed criteria (a negative row stacking only distractors) has
 nothing to defer for and fail-stops on the first misfire.
 
+### The watcher became the TurnMonitor
+
+`EarlyStopWatcher` answered one question on the `should_stop` channel. Every harness
+also counted its own turn cap in its own unit, and the budgets were checked by the
+orchestrator after a turn had already spent the money. `TurnMonitor` answers all four
+reasons (`EARLY_CRITERION`, `TOOL_CALL_CAP`, `TOKEN_BUDGET`, `USD_BUDGET`) from ONE
+collector, so a cap means the same number of resolved tool calls on every harness and a
+budget stops the agent at its next poll. It is cumulative because one instance serves
+every retry attempt and every dialog turn of a task: the cap, the budgets and
+`expected_tool_calls` all measure the task, not an attempt. On one round the armed stop
+wins, then the cap, then the token budgets, then USD, and the first latched reason is
+final, so the status an adapter finalizes with cannot flip after the fact. Fail-open
+covers only the armed criteria: a raising `live_verdict` is agent-output-dependent code,
+while the cap and budgets read counters and must keep running on a run that has lost its
+criteria. `result.tool_calls_exhausted` still comes from the turn's end status, not the
+latch, because a cap latched after the agent's last poll stopped nothing.
+
 ### Inert triggers are by design, and the watcher fails open
 
 A trigger whose polarity an instance can never decide is INERT, not an error — one
@@ -462,14 +483,15 @@ distractor rows (fail live, pass and timeout inert) without per-row conditionals
 why the validator carries NO per-instance polarity guards. Arming an unobservable criterion
 is structurally impossible, since the block exists only on `LiveSuccessCriterion`, so a
 `file_exists` criterion carrying one is an `extra='forbid'` error at load. An armed-but-
-empty set needs no guard either: with no blocks present there is simply no watcher.
+empty set needs no guard either: with no blocks present the monitor has nothing armed and
+only its run-limit cap can stop the run.
 
-The watcher keeps its OWN `EventCollector`, independent of the one the agent builds its
+The monitor keeps its OWN `EventCollector`, independent of the one the agent builds its
 returned `TurnRecord` from, so each `live_verdict` sees a fresh single-element partial
 trajectory.
 
-**Fail-open:** a `live_verdict` that raises disarms the watcher, logs loudly, and degrades
-to a full run. Because live verdicts are triggers and not truth, this can never produce a
+**Fail-open:** a `live_verdict` that raises disarms the armed criteria, logs loudly, and
+degrades to a full run. The tool-call cap reads counters, so it keeps running. Because live verdicts are triggers and not truth, this can never produce a
 FALSE early stop — it only ever errs toward running more.
 
 ### Why the guardrails are not model validators

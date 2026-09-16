@@ -59,7 +59,9 @@ class TurnEndStatus(StrEnum):
     COMPLETED = "completed"
     CRASHED = "crashed"
     TIMEOUT = "timeout"
-    MAX_TURNS_EXHAUSTED = "max_turns_exhausted"
+    TOOL_CALLS_EXHAUSTED = "tool_calls_exhausted"
+    TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
+    COST_BUDGET_EXCEEDED = "cost_budget_exceeded"
     STOPPED_EARLY = "stopped_early"  # cooperative early-stop-on-criterion (clean, non-crash)
 
 
@@ -69,8 +71,33 @@ class AgentEndStatus(StrEnum):
     COMPLETED = "completed"
     CRASHED = "crashed"
     TIMEOUT = "timeout"
-    MAX_TURNS_EXHAUSTED = "max_turns_exhausted"
+    TOOL_CALLS_EXHAUSTED = "tool_calls_exhausted"
+    TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
+    COST_BUDGET_EXCEEDED = "cost_budget_exceeded"
     STOPPED_EARLY = "stopped_early"  # cooperative early-stop-on-criterion (clean, non-crash)
+
+
+class StopReason(StrEnum):
+    """Why ``should_stop`` asked the agent to stop; the agent finalizes with ``end_status_for(reason)``."""
+
+    EARLY_CRITERION = "early_criterion"
+    TOOL_CALL_CAP = "tool_call_cap"
+    TOKEN_BUDGET = "token_budget"
+    USD_BUDGET = "usd_budget"
+
+
+_END_STATUS_FOR_STOP: dict[StopReason, AgentEndStatus] = {
+    StopReason.EARLY_CRITERION: AgentEndStatus.STOPPED_EARLY,
+    StopReason.TOOL_CALL_CAP: AgentEndStatus.TOOL_CALLS_EXHAUSTED,
+    StopReason.TOKEN_BUDGET: AgentEndStatus.TOKEN_BUDGET_EXCEEDED,
+    StopReason.USD_BUDGET: AgentEndStatus.COST_BUDGET_EXCEEDED,
+}
+assert set(_END_STATUS_FOR_STOP) == set(StopReason), "Missing end status for StopReason member"
+
+
+def end_status_for(reason: StopReason) -> AgentEndStatus:
+    """The clean ``AgentEndStatus`` a turn stopped for ``reason`` finalizes with."""
+    return _END_STATUS_FOR_STOP[reason]
 
 
 # The canonical TranscriptMessage union, so AgentEndEvent carries per-message
@@ -167,7 +194,6 @@ class AgentEndEvent(StreamEvent):
     assistant_turn_count: int = 0
     messages: _MessageList = Field(default_factory=list)
     num_turns: int | None = None
-    max_turns_exhausted: bool = False
     result_summary: ResultSummary | None = None
     crashed: bool = False
     crash_reason: str | None = None

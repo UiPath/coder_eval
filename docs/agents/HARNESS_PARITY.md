@@ -1,21 +1,44 @@
 # Run-Limit Parity
 
-One task file, run on any harness, must be the same task. `run_limits.max_turns`
-was the field that broke that promise hardest: Claude Code enforced it, and Codex and
-Antigravity accepted it and never read it, so `max_turns: 6` ran capped on one
-backend and unbounded on the other two.
+One task file, run on any harness, must be the same task. `max_turns` broke that
+promise hardest: Claude Code enforced it, and Codex and Antigravity accepted it and
+never read it, so `max_turns: 6` ran capped on one backend and unbounded on the other
+two. It is now `max_tool_calls`, one counter on every harness.
 
 This page is the contract for what each run limit means per harness, plus what each
-shared `agent` field means on each harness.
+shared `agent` field means on each harness. Both tables are generated.
 
-## The table
+## Run limits
 
-| Limit | claude-code | codex | antigravity | opencode | pi |
-|---|---|---|---|---|---|
-| `run_limits.max_turns` | native SDK cap (agent-loop turns) | visible-turn cap (resolved tool calls) | visible-turn cap (resolved tool calls) | native step cap (the CLI's own agent-loop steps) | native turn cap (the CLI's own `turn_start` agent-loop steps) |
-| `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
-| `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
-| `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
+Every structural cap and budget is one `TurnMonitor` answer on the `should_stop`
+channel. Generated from `RunLimits` and each agent's `contract` by `make parity-table`;
+CE069 fails the build on drift.
+
+<!-- harness-run-limits:start -->
+| limit | claude-code | codex | antigravity | opencode | pi | none |
+| --- | --- | --- | --- | --- | --- | --- |
+| `max_tool_calls` | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | not polled (never fires) |
+| `expected_tool_calls` | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only |
+| `task_timeout` | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic |
+| `turn_timeout` | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) |
+| `max_input_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_output_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_total_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `count_cached_input` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
+| `count_cache_creation` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
+| `stop_early` | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | rejected at resolution |
+| `stop_early_gate_threshold` | armed gate | armed gate | armed gate | armed gate | armed gate | armed gate |
+<!-- harness-run-limits:end -->
+
+A capped run is an ordinary end of run, never `ERROR` and never retried:
+
+- Criteria are still checked. A capped run that meets them finishes `SUCCESS`; one that
+  does not finishes `TOOL_CALLS_EXHAUSTED` (category `failed`, icon `C`).
+- `tool_calls_exhausted: true` is on the task record.
+- Calls of the round that reached the cap can still resolve after it. A call in flight
+  is recorded with `result_status: unknown`, and a Codex sub-agent's recovered calls still
+  reach the record.
 
 ## Agent-field contract
 
@@ -31,6 +54,7 @@ Generated from each agent class's `contract` by `make parity-table`; CE069 fails
 | `allowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `cooperative_stop` | yes | yes | yes | yes | yes | no |
+| `usage_granularity` | generation | turn | turn | step | step | turn |
 | `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
 <!-- harness-contract:end -->
 
@@ -38,6 +62,9 @@ A task that sets a field a harness marks `unsupported`, or a `permission_mode` v
 outside that harness's `permission_modes`, is rejected at resolution and `coder-eval plan`
 exits non-zero. `system_prompt_semantics` `append` / `replace` mean the system or
 developer instruction channel of the model request, never the user turn.
+`usage_granularity` is how often a harness reports token usage on the stream (per model
+generation, per agent-loop step, or once per `communicate()`); a token or USD budget can
+overshoot by one such report.
 
 ### Tool names
 
@@ -572,8 +599,8 @@ needed to drive it.
   when a generation begins. Nothing in the timing accounting reads it — the
   head and tail are measured from the first and last `AssistantMessage`
   instead, which is uniform across all five — so this is recorded rather than
-  fixed. It is NOT a `max_turns` hazard: `EventCollector.visible_turn_count` is
-  `len(self._commands)`, derived from `ToolEndEvent`, and `_turn_starts` feeds
+  fixed. It is NOT a `max_tool_calls` hazard: the TurnMonitor counts resolved
+  `ToolEndEvent`s, and `_turn_starts` feeds
   only `assistant_turn_count` on the no-`AgentEndEvent` fallback path. The real
   cost of normalizing it is that the event drives the live renderers, so moving
   it changes the turn boundaries users watch during a run.
@@ -581,72 +608,19 @@ needed to drive it.
 All three are deliberately deferred; see `c/time-bugs-audit.md` for the
 measurements.
 
-## `max_turns` counts visible turns on Codex and Antigravity
+## Timeouts
 
-A "visible turn" is one entry in the run's timeline: one resolved tool call. It is
-the unit `result_metrics.visible_turn_count` reports and the unit that lands in
-`TurnRecord.commands`. Both backends count it live off the shared
-`EventCollector.visible_turn_count`, so one `max_turns` value means one thing on
-both.
+How each harness enforces `run_limits.turn_timeout` (the meaning is the same everywhere):
 
-They need their own counter because a native one would be meaningless: Codex and
-Antigravity each deliver exactly **one SDK turn per `communicate()` call**, so an
-SDK-level cap would clamp at 1 no matter what the task asked for.
+| harness | mechanism |
+|---|---|
+| claude-code | watchdog, SIGKILL on the CLI subprocess |
+| codex | watchdog + cooperative interrupt |
+| antigravity | watchdog, plus an earlier internal poll deadline at 80% of it (see below) |
+| opencode | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
+| pi | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
 
-The cap is enforced on the same loop boundary as the cooperative early stop: the
-step or notification that reaches the cap is processed whole, and the next one is
-never pulled. The in-flight turn is then cancelled server-side (best effort) so
-the cap actually stops spend. A run cut this way finalizes cleanly as
-`max_turns_exhausted` — it is not a crash, and it is not retried.
-
-**claude-code keeps its native SDK cap.** That is a real, honored cap, so it is
-left alone rather than reimplemented in a different unit. Its unit is the SDK's own
-agent-loop turn, which absorbs an arbitrary number of *parallel* tool calls, so the
-same number bounds very different amounts of work: under a prompt that encourages
-batching, a cap of N here permits many more than N tool calls, where it buys exactly
-N on the other two.
-
-**OpenCode also keeps a native unit — its stream's own steps.** Unlike Codex and
-Antigravity, `opencode run` executes a real multi-step agent loop per invocation
-and streams it (`step_start` / `step_finish`), so the natural agent-loop unit
-exists and is honored: `max_turns: N` allows N complete steps and cuts the run
-when step N+1 begins, with the completed steps' tokens intact. A step is one
-assistant generation and may carry several tool calls — so, as with claude-code,
-the same number is a looser tool-call budget than on the visible-turn backends.
-
-**Pi keeps a native unit too — its `turn_start` agent-loop steps.** Like OpenCode,
-`pi -p --mode json` runs a real multi-step agent loop per invocation and streams it
-(`turn_start` / `turn_end`), so `max_turns: N` allows N complete turns and cuts the
-run when turn N+1 begins, with the completed turns' tokens intact. Pi streams
-incrementally, so the cut genuinely stops spend mid-run. A Pi turn is one assistant
-generation and may carry several tool calls — the same looser budget as claude-code
-and OpenCode.
-
-**So holding `max_turns` constant across harnesses does not hold the budget
-constant.** If you are A/B-ing across backends and the cap is close to binding, that
-is the number to distrust.
-
-### What a capped run looks like
-
-The signals a capped run leaves behind, on every backend:
-
-- Criteria are still checked against whatever the agent produced, because the cap is
-  an ordinary end-of-run rather than an error. So a capped run that nonetheless
-  satisfies its criteria finishes as `SUCCESS`; one that does not finishes as
-  `MAX_TURNS_EXHAUSTED` (reporting category `failed`, icon `M`). Never `ERROR`,
-  and never retried.
-- `max_turns_exhausted: true` on the task record.
-- On Codex and Antigravity, the count of *resolved* tool calls the model itself
-  issued equals the cap. Two things can add a further *recorded* command, and
-  neither means the cap leaked:
-    - A tool call already in flight when the cap fires is force-closed and recorded
-      with `result_status: unknown` rather than dropped, so the trajectory shows what
-      was interrupted.
-    - On Codex, a sub-agent's inner tool calls are recovered from its rollout after
-      the pump stops, so the child's work and its tokens still reach the record. The
-      cap bounds what the model was allowed to do, not what the record may explain.
-
-## What a timeout looks like
+### What a timeout looks like
 
 On Claude Code and Codex a `turn_timeout` breach is a *failure*: the watchdog fires
 at the deadline, the partial turn is preserved on `pending_turn`, and the turn is
@@ -654,7 +628,7 @@ marked `crashed`.
 
 Antigravity stops earlier and more gently, for the reason in the next section.
 
-## Antigravity backgrounds anything over 10 seconds
+### Antigravity backgrounds anything over 10 seconds
 
 The Antigravity localharness has a **10-second maximum synchronous wait** for shell
 commands. Past it, the harness moves the command to a background task and hands the
@@ -677,84 +651,36 @@ a long `npm install` or build runs to completion here the way it does on the oth
 two, but a command that never finishes reads as an ordinary low score rather than a
 timeout.
 
-## Timeouts are not turn caps
+### Timeouts are not tool-call caps
 
-A timeout is a *failure* (partial turn captured, error status); the turn cap is a
+A timeout is a *failure* (partial turn captured, error status); the tool-call cap is a
 *clean stop*. Conflating them is the mistake this page exists to prevent: a task
 whose cap fires should not look like a task whose harness hung.
 
-## `agent.plugins[].path` accepts different depths per harness
+## Plugin staging
 
-Not a run limit, but the same promise: one task file, three harnesses, same meaning.
-This field breaks it silently.
-
-| | claude-code | codex | antigravity | pi |
-|---|---|---|---|---|
-| `<path>/skills/<name>/SKILL.md` (plugin root) | **required** | accepted | accepted | accepted |
-| `<path>/<name>/SKILL.md` (bare skills dir) | **loads nothing** | accepted | accepted | **loads, but undetected** † |
-
-claude-code hands the value to the SDK as a *plugin directory*, and a plugin's skills
-live at `<plugin>/skills/<name>/SKILL.md`. Point it at the directory that directly
-parents the skill directories and no skill loads. Codex
-(`codex_agent._setup_skills`) and Antigravity (`antigravity_agent._resolve_skills_paths`)
-both scan **both** layouts and take whichever actually holds a `<skill>/SKILL.md`.
-
-† Pi uses the shared `_plugin_skill_dirs` resolver, whose bare-dir fallback resolves a
-bare skills directory to itself and passes it as `--skill <dir>`, so the skill *does*
-load and the agent can use it. But `skill_triggered` detects engagement by matching a
-`skills/<name>/` segment in the read path (`_SKILL_PATH_RE`), which a bare dir lacks — so
-an **activation suite** on a bare dir still scores recall 0 even though the skill ran.
-Net effect for activation suites is therefore the same silent-0 as claude-code, via a
-different mechanism; use the plugin-root shape (lint rule CE045 holds `SKILL_SOURCE_PATH`
-to it for exactly this reason).
-
-So `.claude/skills` works on two backends out of three and fails on the third — and
-fails without an error. The agent simply is not offered the skill, every positive row
-of an activation suite scores 0, and the suite reports recall 0.0. That is
-indistinguishable from a skill that never triggers, which is the finding such a suite
-exists to produce. It shipped in six documentation surfaces at once for exactly this
-reason.
-
-Probe it — but **read the namespace, not the presence**. Claude Code discovers a
-project's own `./.claude/skills/` natively, independent of `--plugin-dir`, so run
-from a repo root and BOTH commands list the skill: the deeper one only looks
-correct. The plugin loaded iff the name carries the root's prefix.
-
-```bash
-# Run from a directory that is NOT the skill's own repo root.
-claude --plugin-dir /path/to/root        # lists `root:<skill>`  <- plugin loaded
-claude --plugin-dir /path/to/root/skills # lists nothing         <- loaded nothing
-```
-
-A bare `<skill>` with no prefix is project discovery, not your plugin.
-
-**Write the plugin root.** It is correct on all three, so there is never a reason to
-write the deeper form. For `.claude/skills/my-skill/SKILL.md` that is `.claude`.
-
-Note what else that pulls in: a plugin root loads the **whole** plugin, so an
-`agents/`, `commands/` or `hooks/` directory sitting beside `skills/` becomes visible
-to the evaluated agent as well. Verified — a root holding `skills/probe-beta/`,
-`agents/probe-subagent.md` and `commands/probe-cmd.md` offers all three as
-`root:probe-beta`, `root:probe-subagent` and `root:probe-cmd`. Pointing a suite at a
-repo's `.claude` therefore hands the agent every project subagent, which can answer a
-request the skill was supposed to answer. Stage a minimal root when the suite must
-isolate one skill.
-
-`SKILL_SOURCE_PATH` — the variable `/coder-eval:check-skill` emits — is held to the
-plugin-root shape by lint rule CE045. The rule keys on that variable name only; it is
-**not** a statement that other variables may use the deeper form. `$PLUGIN_PATH`, for
-one, feeds `experiments/plugin-comparison.yaml`, whose default agent is claude-code,
-so the same requirement applies there and is unlinted.
-
-**OpenCode and Pi both honor the *skills* half of a plugin.** OpenCode maps each
-local plugin root to its `skills.paths`; Pi maps each to a `--skill <dir>` argument —
-both via the same `_plugin_skill_dirs` resolver — so both **can** run activation
-suites. A plugin's non-skill assets (agents/hooks/commands/MCP servers) are dropped on
-both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
+Each `agent.plugins[].path` names a plugin root or a bare skills directory
+(`<path>/<name>/SKILL.md`). A plugin root is read as Claude Code reads it: the default
+`skills/` plus every path its `.claude-plugin/plugin.json` `skills` field declares (a
+declared path may be one skill), or the root itself when it holds `SKILL.md`. A skill's name
+is its `SKILL.md` frontmatter `name`, else its directory name. Every layout works on every
+harness. Before the
+agent starts, coder-eval stages the skills into one root, `<run_dir>/plugin_root`: a
+`.claude-plugin/plugin.json` that names `coder-eval-plugins`, and one `skills/<name>` symlink
+per skill. Each harness receives that root in its native way. Only skills are staged: a
+plugin's `agents/`, `commands/`, `hooks/` and `.mcp.json` do not reach any harness, Claude Code
+included. Claude Code names staged skills `coder-eval-plugins:<skill>`, not `<plugin>:<skill>`.
+Files beside the skills also stay behind: a skill that reads `${CLAUDE_PLUGIN_ROOT}/scripts/`
+or a shared `references/` directory at the plugin root cannot find it. Keep a skill's files
+inside its own `<name>/` directory.
+A path that offers no skill, two paths that offer the same skill name, or a `skill_triggered`
+criterion whose `skill_name` the plugins do not offer fail `coder-eval plan`, before the run is
+paid for. `environment_info.skills_offered` records the staged skill names; re-grading a
+recorded run whose `skill_name` is not in that list finishes `ERROR`, not 0.0.
 
 ## Reproducing
 
-`tasks/run_limits/` holds one fixture per limit: `max_turns_cap.yaml` asks for more
+`tasks/run_limits/` holds one fixture per limit: `max_tool_calls_cap.yaml` asks for more
 sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
 outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
 `--type antigravity` / `--type opencode` / `--type pi` to check a backend against the

@@ -83,11 +83,27 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `judge_cost_usd` / `simulator_cost_usd` slices and the `cost_complete` flag),
 `expected_commands`,
 `actual_commands`, `commands_efficiency`, `agent_config`, `sdk_options`,
-`installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_turns`,
-`max_turns_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
-`early_stop_reason`, `turns_remaining_at_stop`). `iterations` here is a **reduced**
+`installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_tool_calls`,
+`expected_tool_calls_overage`, `tool_calls_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
+`early_stop_reason`, `tool_calls_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
 crashed, crash_reason}`) — the full transcript is in `task.json`.
+
+> **Historical spellings.** Runs written before the tool-call rename carry
+> `max_turns_exhausted`, `expected_turns`, `expected_turns_overage` and the status
+> `MAX_TURNS_EXHAUSTED` instead of `tool_calls_exhausted`, `expected_tool_calls`,
+> `expected_tool_calls_overage` and `TOOL_CALLS_EXHAUSTED`. The evalboard reads both.
+> The Python side does not: there is no alias. A `task.json` with the old flag loads with
+> the fact `false`; one whose `final_status` is `MAX_TURNS_EXHAUSTED`, or whose recorded
+> config sets `run_limits.expected_turns`, does not load. `run --resume` then runs that
+> row again, and `evaluate <run_dir>` cannot re-grade it from its recorded config.
+>
+> Runs written before the tool-call cap replaced the turn cap carry
+> `turns_remaining_at_stop` instead of `tool_calls_remaining_at_stop`, in both
+> `EarlyStopInfo` and the `run.json` row. No reader maps the old key. Their recorded
+> config also sets `run_limits.max_turns`, which no longer validates, so
+> `evaluate <run_dir>` re-grades such a run from the source task YAML and prints its
+> fallback warning.
 
 ### Missing cost is never fatal
 
@@ -128,7 +144,7 @@ The authoritative per-replicate record.
 | --- | --- | --- |
 | `final_status` | [`FinalStatus`](#finalstatus) | Terminal status. |
 | `weighted_score` | `float \| null` | Weighted average of criterion scores, 0.0–1.0. |
-| `max_turns_exhausted` | `bool` | Ran out of turns. |
+| `tool_calls_exhausted` | `bool` | The tool-call cap ended an iteration before the agent completed on its own. |
 | `iteration_count` | `int` | Number of turns. |
 | `success_criteria_results` | `list[CriterionResult]` | Per-criterion results — see [below](#criterionresult). |
 | `post_failure_criteria_results` | `list[CriterionResult]` | Diagnostic artifact evidence collected after a terminal agent failure. It does not affect `final_status`, `weighted_score`, gating, or suite aggregation. |
@@ -158,6 +174,8 @@ each of `system_prompt`, `plugin_skills`, `permission_mode`, `allowed_tools` and
 `disallowed_tools`, `"enforced"` or `"unsupported"`, plus
 `system_prompt_semantics` (the class default), `cooperative_stop`, and
 `permission_modes` (the sorted `permission_mode` values the harness honors, or `null`).
+`environment_info.skills_offered` is the list of skill names the staged plugin root
+offered to the agent. It is absent when the task sets no `agent.plugins`.
 `sdk_options.system_prompt` is a `SystemPromptPreset` dict
 (`{type: "preset", preset: "claude_code", exclude_dynamic_sections: true, append?: str}`)
 on append-mode Claude Code runs and a plain string only in replace mode — it is
@@ -211,7 +229,7 @@ canonical score remains 0.0.
 (`list[ProviderCallCost]` — one row per real upstream call with its ACTUAL cost +
 cache buckets, captured proxy-side on the LiteLLM open-weight backend and rendered
 by the evalboard as a per-call table; empty on every other
-backend), `num_turns`, `max_turns_exhausted`,
+backend), `num_turns`, `tool_calls_exhausted`,
 `result_summary` (`{is_error, subtype, stop_reason, result}`), `crashed`,
 `crash_reason`.
 
@@ -233,7 +251,8 @@ criterion timed out undecided past its `stop_early.decide_within`; it gates thro
 the same weighted armed gate as a native fail),
 `deciding_criterion_type`, `deciding_criterion_description`, `armed_criteria`,
 `sdk_turn_index`, `tool_call_index` (1-based, includes the in-flight call),
-`elapsed_seconds`, `turns_remaining_at_stop`, `gate_threshold` (the
+`elapsed_seconds`, `tool_calls_remaining_at_stop` (`max_tool_calls − tool_call_index`,
+floored at `0`; `null` when `run_limits.max_tool_calls` is unset), `gate_threshold` (the
 `run_limits.stop_early_gate_threshold` in effect for this stop; default `1.0`).
 
 ---
@@ -320,7 +339,7 @@ String enum values and their reporting category:
 | `SUCCESS` | succeeded | `+` |
 | `FAILURE` | failed | `-` |
 | `TIMEOUT` | failed | `T` |
-| `MAX_TURNS_EXHAUSTED` | failed | `M` |
+| `TOOL_CALLS_EXHAUSTED` | failed | `C` |
 | `TOKEN_BUDGET_EXCEEDED` | failed | `#` |
 | `COST_BUDGET_EXCEEDED` | failed | `$` |
 | `ERROR` | error | `!` |
@@ -341,7 +360,7 @@ crash, timeout, or budget breach under `execute` reports `ERROR` / `TIMEOUT` /
 
 `TOKEN_BUDGET_EXCEEDED` and `COST_BUDGET_EXCEEDED` are produced by the cumulative budget caps under
 `run_limits:` (`max_input_tokens` / `max_output_tokens` / `max_total_tokens`, and `max_usd`
-respectively), checked after each completed agent turn — see
+respectively), enforced live by the `TurnMonitor` — see
 [Task Definition Guide → Run Limits](TASK_DEFINITION_GUIDE.md#run-limits).
 
 ---

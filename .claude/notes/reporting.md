@@ -15,16 +15,16 @@
 
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits`
   (`RunLimits` model) is the single namespace for all *task-level* run-time caps —
-  `max_turns` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` /
+  `max_tool_calls` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` /
   `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD
   breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED`
   (both `category == "failed"`). Structural caps are set from the CLI via `-D
-  run_limits.max_turns=…` / `-D run_limits.task_timeout=…` / `-D
+  run_limits.max_tool_calls=…` / `-D run_limits.task_timeout=…` / `-D
   run_limits.turn_timeout=…` (field-merged into `run_limits`); budget caps via `-D
   run_limits.max_usd=…` etc. or YAML. Layered config uses field-merge — a variant block
   overrides individual keys without replacing the task's block. The one *per-criterion*
   cap, `stop_early.decide_within`, deliberately lives on `LiveSuccessCriterion` instead
-  (see [orchestration.md](orchestration.md) § Early stop on criterion) — the watcher
+  (see [orchestration.md](orchestration.md) § Early stop on criterion) — the monitor
   must attribute a decision-step timeout to a specific criterion, which `RunLimits`
   (task-scoped, criterion-agnostic) cannot express.
 
@@ -332,10 +332,12 @@ means the whole bill.
 
 ### The claims the reports do NOT make
 
-An early-stopped row does not advertise "N turns avoided". That derived from
+An early-stopped row does not advertise "N turns avoided". That claim once derived from
 `max_turns - sdk_turn_index`, and on harnesses where one `communicate()` is a single SDK
 turn it advertised dozens of avoided turns when all that was cut was a tool-call tail. The
-upper bound is still persisted, labelled as the bound it is.
+upper bound is still persisted as `tool_calls_remaining_at_stop`
+(`max_tool_calls - tool_call_index`, null when the cap is unset), labelled as the bound it
+is.
 
 Missing spend is worded cause-agnostically, because an unpriced turn and a hard kill reach
 the same conclusion and the report cannot always tell which applied.

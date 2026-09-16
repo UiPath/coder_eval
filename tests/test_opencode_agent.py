@@ -29,17 +29,18 @@ from coder_eval.agents import opencode_agent as agent_module
 from coder_eval.agents.opencode_agent import (
     OpenCodeAgent,
     _OpenCodeTurnState,
-    _plugin_skill_dirs,
     _unwrap,
 )
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AssistantMessage, CommandTelemetry, OpenCodeAgentConfig, PermissionMode, TokenUsage
+from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
@@ -84,8 +85,10 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
-async def _run(agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", **kwargs: Any):
-    await agent.start(str(tmp_path))
+async def _run(
+    agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", *, plugin_root: Path | None = None, **kwargs: Any
+):
+    await agent.start(str(tmp_path), plugin_root=plugin_root)
     return await agent.communicate(prompt, **kwargs)
 
 
@@ -649,20 +652,12 @@ class TestSandboxEnvironment:
         assert captured["kwargs"]["env"]["OPENROUTER_API_KEY"] == "sk-test"
 
 
-def _skill_repo(root, names=("uipath-admin",), *, manifest: str | None = None, nested: bool = True):
-    """Build a plugin root on disk; returns it.
-
-    ``nested`` mirrors the Claude-plugin layout (``<root>/skills/<name>/SKILL.md``);
-    False makes ``root`` itself a bare skills directory.
-    """
-    base = root / "skills" if nested else root
-    for name in names:
-        (base / name).mkdir(parents=True, exist_ok=True)
-        (base / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
-    if manifest is not None:
-        (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
-        (root / ".claude-plugin" / "plugin.json").write_text(manifest, encoding="utf-8")
-    return root
+def _staged_root(tmp_path: Path) -> Path:
+    """A plugin root staged by ``stage_plugins`` over one authored skill."""
+    authored = tmp_path / "authored" / "skills" / "uipath-admin"
+    authored.mkdir(parents=True)
+    (authored / "SKILL.md").write_text("---\nname: uipath-admin\ndescription: d\n---\n", encoding="utf-8")
+    return stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
 
 
 def _injected_skill_paths(captured) -> list[str]:
@@ -671,144 +666,33 @@ def _injected_skill_paths(captured) -> list[str]:
 
 
 class TestSkillInjection:
-    """`plugins:` is how a task ships the skills under test.
+    """The staged plugin root reaches OpenCode as a ``skills.paths`` entry in the injected config."""
 
-    OpenCode has no plugin knob, so before this mapping existed every skill-injection
-    run silently measured the bare model instead — a run that looks entirely normal.
-    """
-
-    async def test_manifest_declared_skills_dir_is_used(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug", manifest='{"name": "uipath", "skills": "./skills/"}')
+    async def test_staged_root_skills_dir_is_injected(self, patch_exec, tmp_path):
+        root = _staged_root(tmp_path)
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        agent = _agent()
+        await _run(agent, tmp_path / "sandbox", plugin_root=root)
         assert _injected_skill_paths(captured) == [str(root / "skills")]
+        assert "opencode_skill_paths" not in agent.get_environment_info()
 
-    async def test_default_layout_without_a_manifest(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug")
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")]
-
-    async def test_bare_skills_directory_is_used_as_is(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "bare", nested=False)
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root)]
-
-    async def test_plugin_root_is_never_added_alongside_its_skills_dir(self, patch_exec, tmp_path):
-        """`skills.paths` is scanned RECURSIVELY. A plugin root can contain a
-        self-referential symlink (UiPath/skills has `plugins/uipath -> ..`), which
-        resolves skills through an arbitrary path and drops duplicate names."""
-        root = _skill_repo(tmp_path / "plug")
-        (root / "plugins").mkdir()
-        (root / "plugins" / "self").symlink_to(root, target_is_directory=True)
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")]
-
-    async def test_env_untouched_when_no_plugins_declared(self, patch_exec, tmp_path):
-        """A run without `plugins:` must behave byte-for-byte as before."""
+    async def test_env_untouched_without_a_plugin_root(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert "OPENCODE_CONFIG_CONTENT" not in captured["kwargs"]["env"]
 
     async def test_inherited_config_content_is_merged_not_clobbered(self, patch_exec, tmp_path, monkeypatch):
-        root = _skill_repo(tmp_path / "plug")
+        root = _staged_root(tmp_path)
         monkeypatch.setenv(
             "OPENCODE_CONFIG_CONTENT",
             json.dumps({"username": "host", "skills": {"paths": ["/host/skills"]}}),
         )
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+        await _run(_agent(), tmp_path / "sandbox", plugin_root=root)
 
         config = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["username"] == "host"
         assert config["skills"]["paths"] == ["/host/skills", str(root / "skills")]
-
-    async def test_unresolved_path_warns_and_injects_nothing(self, patch_exec, tmp_path, caplog):
-        """An unset `$SKILLS_REPO_PATH` is the exact shape of the original defect."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(plugins=[{"type": "local", "path": "$DEFINITELY_UNSET_REPO/skills"}])
-        with caplog.at_level("WARNING"):
-            await agent.start(str(tmp_path))
-        assert agent._skill_dirs == []
-        assert "env var likely unset" in caplog.text
-        assert "0 skill path(s) resolved" in caplog.text
-
-    async def test_resolved_paths_are_recorded_for_audit(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug")
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
-        await agent.start(str(tmp_path / "sandbox"))
-        assert agent.get_environment_info()["opencode_skill_paths"] == [str(root / "skills")]
-
-    async def test_list_form_manifest_declares_several_dirs(self, patch_exec, tmp_path):
-        """The docstring promises "a string or a list of strings"; only the string
-        form was exercised, so the list form could have been broken on arrival."""
-        root = tmp_path / "plug"
-        for sub in ("skills", "extra"):
-            (root / sub / "s1").mkdir(parents=True)
-            (root / sub / "s1" / "SKILL.md").write_text("---\nname: s1\n---\n", encoding="utf-8")
-        (root / ".claude-plugin").mkdir(parents=True)
-        (root / ".claude-plugin" / "plugin.json").write_text(
-            json.dumps({"name": "p", "skills": ["./skills", "./extra"]}), encoding="utf-8"
-        )
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills"), str(root / "extra")]
-
-    async def test_list_form_manifest_ignores_non_string_entries(self, patch_exec, tmp_path):
-        root = _skill_repo(tmp_path / "plug", manifest=json.dumps({"skills": [123, "./skills", None]}))
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")]
-
-    @pytest.mark.parametrize(
-        ("manifest", "case"),
-        [
-            ("{ not json at all", "unparseable"),
-            ('["a", "list"]', "not a JSON object"),
-            ('{"name": "p"}', "no skills field"),
-            ('{"name": "p", "skills": 7}', "skills is not a string or list"),
-        ],
-    )
-    async def test_unusable_manifest_falls_back_to_the_convention(self, patch_exec, tmp_path, manifest, case):
-        """A manifest we cannot read must not lose the skills — `<root>/skills` is
-        the convention default, and silently injecting nothing is the exact failure
-        this whole mapping exists to close."""
-        root = _skill_repo(tmp_path / "plug", manifest=manifest)
-        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
-        assert _injected_skill_paths(captured) == [str(root / "skills")], case
-
-    def test_a_non_local_plugin_entry_is_skipped_with_a_warning(self, tmp_path, caplog):
-        """Only `type: local` maps to a directory; anything else has no path to
-        hand OpenCode and must say so rather than vanish.
-
-        Driven through `_plugin_skill_dirs` directly, not the agent: this branch is
-        defensive only — `LocalPluginConfig` pins `type: Literal["local"]`, so
-        pydantic rejects any other value before the agent ever sees it.
-        """
-        root = _skill_repo(tmp_path / "plug")
-        with caplog.at_level("WARNING"):
-            resolved = _plugin_skill_dirs([{"type": "git", "path": str(root)}, {"type": "local", "path": str(root)}])
-
-        assert "ignoring non-local plugin entry" in caplog.text
-        assert resolved == [str(root / "skills")]
-
-    async def test_a_root_with_no_skill_md_warns_but_still_injects(self, patch_exec, tmp_path, caplog):
-        """A directory holding no `<name>/SKILL.md` is suspicious, not fatal — the
-        CLI scans `skills.paths` recursively, so the path is still injected and the
-        warning tells the author to check that the plugin path is a skills root."""
-        root = tmp_path / "plug"
-        (root / "skills").mkdir(parents=True)
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(plugins=[{"type": "local", "path": str(root)}])
-        with caplog.at_level("WARNING"):
-            await agent.start(str(tmp_path / "sandbox"))
-
-        assert "no <name>/SKILL.md directly under" in caplog.text
-        assert agent._skill_dirs == [str(root / "skills")]
 
     @pytest.mark.parametrize("inherited", ["{ not json", '["a", "list"]', '"a string"'])
     async def test_unusable_inherited_config_is_replaced_with_a_warning(
@@ -816,11 +700,11 @@ class TestSkillInjection:
     ):
         """An inherited value we cannot merge into must not cost us the skills;
         replacing it is announced so the host knows its config was dropped."""
-        root = _skill_repo(tmp_path / "plug")
+        root = _staged_root(tmp_path)
         monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", inherited)
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         with caplog.at_level("WARNING"):
-            await _run(_agent(plugins=[{"type": "local", "path": str(root)}]), tmp_path / "sandbox")
+            await _run(_agent(), tmp_path / "sandbox", plugin_root=root)
 
         assert _injected_skill_paths(captured) == [str(root / "skills")]
         assert "replacing it with the injected config" in caplog.text
@@ -938,7 +822,7 @@ class TestSystemPromptInstructions:
         assert "OPENCODE_CONFIG_CONTENT" not in captured["kwargs"]["env"]
 
     async def test_inherited_config_merges_all_three_keys(self, patch_exec, tmp_path, monkeypatch):
-        root = _skill_repo(tmp_path / "plug")
+        root = _staged_root(tmp_path)
         monkeypatch.setenv(
             "OPENCODE_CONFIG_CONTENT",
             json.dumps(
@@ -950,10 +834,8 @@ class TestSystemPromptInstructions:
             ),
         )
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        agent = _agent(
-            plugins=[{"type": "local", "path": str(root)}], system_prompt="be terse", disallowed_tools=["Bash"]
-        )
-        await _run(agent, tmp_path / "sandbox")
+        agent = _agent(system_prompt="be terse", disallowed_tools=["Bash"])
+        await _run(agent, tmp_path / "sandbox", plugin_root=root)
         await agent.stop()
 
         config = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])
@@ -1219,7 +1101,7 @@ class TestZeroTelemetryIsLoud:
         stream = [json.dumps({"id": "evt_1", "type": "session.next.idle", "properties": {"sessionID": SESSION}})]
         proc = _RunningProcess(stream)
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert record.crashed is False
 
     @staticmethod
@@ -1278,7 +1160,7 @@ class TestZeroTelemetryIsLoud:
         a step's start and its `step_finish` is an intentional cut, not drift."""
         proc = _RunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"})])
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert record.crashed is False
 
     async def test_real_tokens_are_never_condemned(self, patch_exec, tmp_path):
@@ -1450,63 +1332,84 @@ class TestStderrIsDrainedConcurrently:
         assert record.crashed is False
 
 
+def _stop_after(calls: int, reason: StopReason):
+    """A ``should_stop`` that returns ``reason`` from its ``calls``-th check on (one check per dispatched line)."""
+    seen = 0
+
+    def should_stop() -> StopReason | None:
+        nonlocal seen
+        seen += 1
+        return reason if seen >= calls else None
+
+    return should_stop
+
+
 class TestCooperativeStop:
     def test_capability_flag_is_declared(self):
         assert OpenCodeAgent.contract.cooperative_stop is True
 
-    async def test_should_stop_ends_turn_cleanly(self, patch_exec, tmp_path):
+    async def test_early_criterion_ends_turn_stopped_early(self, patch_exec, tmp_path):
         """A live subprocess must be torn down, and the turn must not be a crash."""
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: True)
+        recorder = _EventRecorder()
+        record = await _run(
+            _agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION, stream_callback=recorder
+        )
 
         assert record.crashed is False
         assert proc.terminated is True
         # Stopped at the first event boundary rather than draining the stream.
         assert record.assistant_turn_count < 2
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.STOPPED_EARLY]
 
-    async def test_max_turns_marks_exhausted(self, patch_exec, tmp_path):
+    async def test_tool_call_cap_ends_turn_tool_calls_exhausted(self, patch_exec, tmp_path):
+        proc = _RunningProcess(HAPPY_STREAM)
+        patch_exec(proc)
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP, stream_callback=recorder)
+
+        assert proc.terminated is True
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is True
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.TOOL_CALLS_EXHAUSTED]
+
+    async def test_token_budget_ends_turn_token_budget_exceeded(self, patch_exec, tmp_path):
+        proc = _RunningProcess(HAPPY_STREAM)
+        patch_exec(proc)
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET, stream_callback=recorder)
+
+        assert proc.terminated is True
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is False
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [e.status for e in ends] == [AgentEndStatus.TOKEN_BUDGET_EXCEEDED]
+
+    async def test_no_stop_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=1)
-        assert record.max_turns_exhausted is True
-
-    async def test_a_cap_the_run_stays_under_is_not_exhausted(self, patch_exec, tmp_path):
-        """The OTHER direction, which decides `FinalStatus`.
-
-        HAPPY_STREAM is exactly 2 steps, so `max_turns=2` is the boundary: an
-        off-by-one here (`>` becoming `>=`, or counting finished steps instead of
-        started ones) reports MAX_TURNS_EXHAUSTED — orchestrator.py turns the flag
-        straight into `FinalStatus.MAX_TURNS_EXHAUSTED` — for a run that finished
-        well inside its budget. A spurious exhaustion also suppresses the non-zero-
-        exit and zero-telemetry crash guards, which are both conditioned on it, so
-        the run would score silently instead of failing loudly.
-        """
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=2)
-
-        assert record.max_turns_exhausted is False
-        assert record.assistant_turn_count == 2
-        # Both steps' telemetry is present — the cap did not truncate the stream.
-        assert record.token_usage is not None
-        assert record.token_usage.output_tokens == 57
-
-    async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
-        assert record.max_turns_exhausted is False
+        record = await _run(_agent(), tmp_path, should_stop=lambda: None)
+        assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 2
 
     async def test_the_deciding_step_is_kept_whole(self, patch_exec, tmp_path):
-        """`max_turns=1` cuts at the START of step 2, so step 1 survives complete.
+        """A stop after step 1's `step_finish` keeps step 1 complete and never opens step 2.
 
         Asserting only the flag would let a cut that discards the step that earned
-        the budget pass — the run would report exhaustion with none of the
+        the stop pass — the run would report exhaustion with none of the
         telemetry that reached it.
         """
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, max_turns=1)
+        patch_exec(_RunningProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        record = await _run(
+            _agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP), stream_callback=recorder
+        )
 
-        assert record.max_turns_exhausted is True
+        assert record.tool_calls_exhausted is True
+        assert record.assistant_turn_count == 1
+        assert len([e for e in recorder.events if isinstance(e, TurnStartEvent)]) == 1
         assert len(record.commands) == 1  # step 1's tool call
         usage = record.token_usage
         assert usage is not None
@@ -1516,16 +1419,12 @@ class TestCooperativeStop:
         assert usage.cache_creation_input_tokens == 5
         assert usage.cache_read_input_tokens == 10
 
-    async def test_the_step_past_the_cap_is_never_admitted(self, patch_exec, tmp_path):
-        """The cap stops at the (N+1)th `step_start`, before it is counted or emitted."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
-
-        assert record.max_turns_exhausted is True
-        assert record.assistant_turn_count == 1
-        assert len([e for e in recorder.events if isinstance(e, TurnStartEvent)]) == 1
-        assert len([e for e in recorder.events if isinstance(e, TurnEndEvent)]) == 1
+    async def test_an_intentional_stop_is_exempt_from_a_non_zero_exit(self, patch_exec, tmp_path):
+        """Killing the CLI makes it exit non-zero; that must not crash an intentional stop."""
+        patch_exec(_RunningProcess(HAPPY_STREAM, returncode=-15, stderr=b"terminated"))
+        record = await _run(_agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP))
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is True
 
 
 class _HangingProcess(_FakeProcess):
@@ -1730,12 +1629,12 @@ class TestTurnEventsAreBalanced:
         assert self._pairs(recorder) == (1, 1)
 
     async def test_a_clean_cut_closes_the_open_step(self, patch_exec, tmp_path):
-        """should_stop and max_turns cut between a step's start and its finish too."""
+        """A should_stop cut between a step's start and its finish closes the step too."""
         proc = _RunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
         patch_exec(proc)
         recorder = _EventRecorder()
 
-        await _run(_agent(), tmp_path, should_stop=lambda: True, stream_callback=recorder)
+        await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION, stream_callback=recorder)
 
         assert self._pairs(recorder) == (1, 1)
         end = next(e for e in recorder.events if isinstance(e, TurnEndEvent))
@@ -1849,7 +1748,7 @@ class TestProcessGroupTeardown:
 
     async def test_cooperative_stop_sweeps_the_group_too(self, patch_exec, tmp_path):
         captured = patch_exec(_RunningProcess(HAPPY_STREAM))
-        await _run(_agent(), tmp_path, should_stop=lambda: True)
+        await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert (4242, signal.SIGKILL) in captured["killpg"]
 
     async def test_kill_sync_signals_pid_and_group(self, patch_exec, monkeypatch, tmp_path):

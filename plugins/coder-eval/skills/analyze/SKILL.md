@@ -50,11 +50,11 @@ summary per task with `jq` (or `python3` if `jq` is missing):
 ```
 {
   task_id, final_status, weighted_score, duration_seconds,
-  iteration_count, model_used, max_turns_exhausted,
+  iteration_count, model_used, tool_calls_exhausted,
   total_cost_usd:  .total_token_usage.total_cost_usd,
   total_tokens:    (.total_token_usage.input_tokens + .total_token_usage.output_tokens),
   assistant_turns: .total_assistant_turns,
-  max_turns:       .task_config.resolved.run_limits.max_turns,
+  max_tool_calls:  .task_config.resolved.run_limits.max_tool_calls,
   criteria_count:  (.success_criteria_results | length),
   all_criteria_perfect:
     (.success_criteria_results | length > 0 and all(.[]; .score == 1.0)),
@@ -73,7 +73,7 @@ out means running `jq 'keys' <one task.json>` and reading the result**, not assu
 stale path yields a table of nulls that reads like a run with no data instead of an
 error.
 
-There is no top-level `total_tokens`, `total_cost_usd`, `max_turns` or `criteria_count`
+There is no top-level `total_tokens`, `total_cost_usd`, `max_tool_calls` or `criteria_count`
 in any generation: token and cost figures live under `total_token_usage`, and a
 criterion's type is `criterion_type`. A criterion passes when `score >= pass_threshold` —
 there is no `passed` boolean.
@@ -83,7 +83,7 @@ Two names *did* change between generations, which is what the `keys` check is fo
 | Current runs | Older runs | Where |
 | --- | --- | --- |
 | `iterations` | `turns` | top-level record key |
-| `task_config.resolved.run_limits.max_turns` | `task_config.resolved.max_iterations` | inside the free-form `task_config` dict |
+| `task_config.resolved.run_limits.max_tool_calls` | `task_config.resolved.run_limits.max_turns` (a turn cap, not a tool-call cap), and before that `task_config.resolved.max_iterations` | inside the free-form `task_config` dict |
 
 Extract whichever the file actually has. The loader still accepts the older top-level
 name when reading, so an old run is not broken — but current runs do not write it, and
@@ -159,7 +159,7 @@ passes:
    variant/run scope.
 4. **Criteria** — sensitivity `weight × (threshold − score)`; fragile passes sitting on
    the threshold; redundant criteria and coverage gaps.
-5. **Configuration** — lineage conflicts (`source != "task"`), `max_turns` hit or
+5. **Configuration** — lineage conflicts (`source != "task"`), tool-call cap (`max_tool_calls`) hit or
    wildly excessive, model fit, `allowed_tools` alignment with what the task needs.
 6. **Environment** — infrastructure errors, missing services, expired credentials, CLI
    tool errors. Also **idempotency and cross-run contamination**: a criterion that passed on
@@ -255,7 +255,7 @@ Write the report to `<target_path>/analysis.md`.
 ## Score Breakdown
 | Metric | Value |
 |---|---|
-| Tasks run / succeeded / failed / ERROR / MAX_TURNS_EXHAUSTED | ... |
+| Tasks run / succeeded / failed / ERROR / TOOL_CALLS_EXHAUSTED | ... |
 | Success rate | ...% |
 | Mean weighted score | ... ± std |
 | Total cost / tokens | $... / ... |

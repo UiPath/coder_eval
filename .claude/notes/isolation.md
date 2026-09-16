@@ -26,18 +26,18 @@
   `FinalStatus.is_execution_fact` (TIMEOUT / ERROR / BUILD_FAILED / the budget stops) is
   **preserved**, never overwritten: grading may only move `NOT_GRADED` to
   SUCCESS/FAILURE, since it neither repeated nor observed the agent phase.
-  **`MAX_TURNS_EXHAUSTED` is deliberately NOT one of them — anywhere**.
+  **`TOOL_CALLS_EXHAUSTED` is deliberately NOT one of them — anywhere**.
   `_EXECUTION_FACT_STATUSES` maps it to `False`, and the table and the chain that reads
   it must agree: it shipped as `True` while `_terminal_status`'s own docstring argued
-  the opposite, and the disagreement pinned a re-graded max-turns row at
-  MAX_TURNS_EXHAUSTED *while holding `weighted_score` 1.000* and exit 1 — a combination
+  the opposite, and the disagreement pinned a re-graded capped row at
+  TOOL_CALLS_EXHAUSTED *while holding `weighted_score` 1.000* and exit 1 — a combination
   `run` can never produce for the same trajectory. Under `execute`: `_terminal_status`
   puts the `grade=False` arm ABOVE it, because on the graded path it is subordinate to
-  the verdict — `run` returns SUCCESS for a max-turns trajectory whose criteria pass —
+  the verdict — `run` returns SUCCESS for a capped trajectory whose criteria pass —
   so it is not knowable without grading. Consuming it first made it terminal AND
   permanent (the `is_execution_fact` arm then pinned it), so identical agent output
-  scored SUCCESS/1.0 under `run` and MAX_TURNS_EXHAUSTED under `execute` → `evaluate`.
-  The fact survives on `result.max_turns_exhausted`, which `_seed_from_prior_result`
+  scored SUCCESS/1.0 under `run` and TOOL_CALLS_EXHAUSTED under `execute` → `evaluate`.
+  The fact survives on `result.tool_calls_exhausted`, which `_seed_from_prior_result`
   carries, so the detached grade walks the identical chain. The CLI must also branch on
   WHERE a status came from, not on its value: a preserved TIMEOUT exited 0 under "All
   criteria passed" (a CI wrapper reading the exit code went green on a row run.json
@@ -676,6 +676,16 @@ never `source_yaml`, because the raw on-disk text predates `--model` and `-D` mu
 container must see. `source_yaml` is forwarded separately so `task.json`'s audit trail
 matches the in-process driver's.
 
+### Plugin staging under docker
+
+The in-container orchestrator stages `agent.plugins` itself, under `/work/output`, which is
+the host run dir bind-mounted. Each `plugins[].path` is dumped into the container's
+`task.yaml` as the absolute host path (best-effort: a path that does not resolve on the
+dumping host is left as authored, because a detached grade never uses it), and that
+path is auto-mounted read-only at the same absolute path, together with any staged
+skill whose resolved source sits outside every plugin root. So the stage's symlinks
+resolve inside the container and, afterwards, on the host.
+
 ## Trusting what the container sends back
 
 ### The stdout line limit
@@ -741,7 +751,7 @@ verdict for work it never looked at and billing the model for it. Nothing else c
 
 Both are keyed on EVIDENCE, not on the label. For `grade`, "did it grade" is
 `success_criteria_results` or a non-None `weighted_score`: exempting every execution-fact
-status let a stale image return a fully graded MAX_TURNS_EXHAUSTED row — criteria vector,
+status let a stale image return a fully graded TOOL_CALLS_EXHAUSTED row — criteria vector,
 weighted score and all — unchallenged, because that exemption exists for statuses a *fresh*
 image also produces, and a fresh one produces them with neither. For `regrade`, a container
 that honored the request seeds from `prior` and never runs the agent, so a DIFFERENT

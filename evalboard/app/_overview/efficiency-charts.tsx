@@ -51,7 +51,7 @@ const TABS: Array<{
         key: "turns",
         label: "Turns",
         heading: "Within Expected Turns (%)",
-        title: "Share of tasks carrying an expected_turns budget whose visible turns stayed within 1.5× it. A budgeted task that failed counts as over budget.",
+        title: "Share of tasks carrying an expected_tool_calls budget whose visible turns stayed within 1.5× it. A budgeted task that failed counts as over budget.",
         blurb: (scoped) =>
             "% of budgeted tasks that stayed within 1.5× their expected turns (a budgeted task that failed counts as over budget) · runs with no budgeted task are omitted rather than plotted at 0" +
             (scoped ? " · scoped to the active filter" : ""),

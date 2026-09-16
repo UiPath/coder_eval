@@ -31,7 +31,7 @@ export interface RunPoint {
     harness: string;
     successRate: number | null;
     // % of budgeted tasks whose visible turns stayed within 1.5× their
-    // expected_turns budget. Only tasks carrying a positive expected_turns
+    // expected_tool_calls budget. Only tasks carrying a positive expected_tool_calls
     // budget are eligible — both SUCCESS and non-SUCCESS. A budgeted task that
     // did not succeed counts as over budget (a failed run never "stayed within
     // budget"); a budgeted SUCCESS task is over budget only if its visible
@@ -56,10 +56,10 @@ export interface RunPoint {
 }
 
 // The % of budgeted tasks whose visible turns stayed within 1.5× their
-// expected_turns budget; null when no task in scope carries a budget.
+// expected_tool_calls budget; null when no task in scope carries a budget.
 //
 // Eligibility is symmetric: a task counts iff it carries a positive
-// expected_turns budget, whether or not it succeeded. A budgeted non-SUCCESS
+// expected_tool_calls budget, whether or not it succeeded. A budgeted non-SUCCESS
 // task is treated as having exhausted its budget (infinite turns) and counts
 // against the rate — a failed run never "stayed within budget." A budgeted
 // SUCCESS task counts within budget only when its visible turns are within

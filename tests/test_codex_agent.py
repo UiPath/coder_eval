@@ -252,6 +252,74 @@ class TestCodexEnvironmentConfiguration:
 
         assert agent._env_path_prepend == ["/sandbox/mocks", "/sandbox/bins"]
 
+    @pytest.mark.asyncio
+    async def test_start_links_each_staged_skill_into_agents_skills(self, monkeypatch, tmp_path):
+        """start(plugin_root=...) links ``<root>/skills/<name>`` into ``<cwd>/.agents/skills/<name>``."""
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        from coder_eval.orchestration.plugin_staging import stage_plugins
+
+        authored = tmp_path / "authored" / "skills" / "probe-skill"
+        authored.mkdir(parents=True)
+        (authored / "SKILL.md").write_text("---\nname: probe-skill\ndescription: d\n---\n", encoding="utf-8")
+        root = stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+        work = tmp_path / "work"
+        work.mkdir()
+
+        await CodexAgent(parse_agent_config(type=AgentKind.CODEX)).start(str(work), plugin_root=root)
+
+        linked = work / ".agents" / "skills" / "probe-skill"
+        assert linked.resolve() == (root / "skills" / "probe-skill").resolve()
+        assert (linked / "SKILL.md").is_file()
+
+    async def test_start_replaces_a_dangling_link_left_by_an_earlier_run(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        from coder_eval.orchestration.plugin_staging import stage_plugins
+
+        authored = tmp_path / "authored" / "skills" / "probe-skill"
+        authored.mkdir(parents=True)
+        (authored / "SKILL.md").write_text("---\nname: probe-skill\ndescription: d\n---\n", encoding="utf-8")
+        root = stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+        work = tmp_path / "work"
+        (work / ".agents" / "skills").mkdir(parents=True)
+        (work / ".agents" / "skills" / "probe-skill").symlink_to(tmp_path / "gone", target_is_directory=True)
+
+        await CodexAgent(parse_agent_config(type=AgentKind.CODEX)).start(str(work), plugin_root=root)
+
+        assert (work / ".agents" / "skills" / "probe-skill" / "SKILL.md").is_file()
+
+    async def test_a_skill_that_cannot_be_linked_fails_start(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import openai_codex
+
+        from coder_eval.orchestration import plugin_staging
+
+        root = tmp_path / "plugin_root"
+        (root / "skills" / "probe-skill").mkdir(parents=True)
+        monkeypatch.delenv("CODEX_API_KEY", raising=False)
+        monkeypatch.setattr(openai_codex, "Codex", lambda **_kw: SimpleNamespace(close=lambda: None))
+
+        def _refuse(source, target):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr("coder_eval.agents.codex_agent.link_or_copy", _refuse)
+        assert plugin_staging.link_or_copy is not _refuse
+        work = tmp_path / "work"
+        work.mkdir()
+
+        with pytest.raises(RuntimeError, match="read-only file system"):
+            await CodexAgent(parse_agent_config(type=AgentKind.CODEX)).start(str(work), plugin_root=root)
+
 
 class TestCustomProviderRouting:
     """Test that CODEX_BASE_URL injects a custom model provider."""
@@ -482,12 +550,14 @@ import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
+from collections.abc import Callable  # noqa: E402
 from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
 
 from coder_eval.errors import AgentCrashError, TurnTimeoutError  # noqa: E402
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason  # noqa: E402
 
 
 def _item_notification(
@@ -893,6 +963,64 @@ class TestCommunicateCrashTokenFallback:
         assert tu.cache_read_input_tokens == 8
         assert tu.input_tokens == 100  # derived total
         assert tu.output_tokens == 40
+
+
+class TestFoldSubagentTokensCost:
+    """A turn total carries a cost only when every part of it could be priced."""
+
+    @staticmethod
+    def _child(model: str):
+        from datetime import datetime
+
+        from coder_eval.models import AssistantMessage
+
+        now = datetime.now()
+        return AssistantMessage(
+            started_at=now,
+            completed_at=now,
+            generation_duration_ms=1.0,
+            input_tokens=1000,
+            output_tokens=10,
+            model=model,
+            parent_tool_use_id="spawn-1",
+        )
+
+    def test_an_unpriced_parent_leaves_the_folded_total_unpriced(self, monkeypatch):
+        from coder_eval.models import TokenUsage
+
+        monkeypatch.setattr(CodexAgent, "_effective_model", lambda self: None)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
+        parent = TokenUsage(uncached_input_tokens=5000, output_tokens=50, total_cost_usd=None)
+
+        folded = agent._fold_subagent_tokens(parent, [self._child("gpt-5.5")])
+
+        assert folded is not None
+        assert folded.total_cost_usd is None
+
+    def test_an_unpriced_child_leaves_the_folded_total_unpriced(self):
+        from coder_eval.models import TokenUsage
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        parent = TokenUsage(uncached_input_tokens=5000, output_tokens=50, total_cost_usd=0.01)
+
+        folded = agent._fold_subagent_tokens(parent, [self._child("no-such-model-on-the-card")])
+
+        assert folded is not None
+        assert folded.total_cost_usd is None
+
+    def test_priced_parent_and_children_sum(self):
+        from coder_eval.models import TokenUsage
+        from coder_eval.pricing import calculate_cost
+
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        parent = TokenUsage(uncached_input_tokens=5000, output_tokens=50, total_cost_usd=0.01)
+
+        folded = agent._fold_subagent_tokens(parent, [self._child("gpt-5.5")])
+
+        child = calculate_cost("gpt-5.5", uncached_input_tokens=1000, output_tokens=10)
+        assert child is not None
+        assert folded is not None
+        assert folded.total_cost_usd == pytest.approx(0.01 + child)
 
 
 class TestTokenUsageFromMessages:
@@ -2012,13 +2140,34 @@ class TestLoginShellMockPathHome:
             agent._cleanup_login_shell_home()
 
 
-class TestMaxTurnsVisibleTurnCap:
-    """``max_turns`` was documented as "unused for Codex single-turn" and dropped.
+class _EndCapture:
+    """Stream callback that keeps the ``AgentEndEvent``."""
 
-    Codex delivers one SDK turn per ``communicate()``, so a native turn counter would
-    cap at 1 and mean nothing; the cap therefore counts VISIBLE turns (completed tool
-    calls — the unit ``result_metrics.visible_turn_count`` sums) and is enforced on the
-    same pump boundary as the cooperative stop.
+    def __init__(self) -> None:
+        self.end: AgentEndEvent | None = None
+
+    def on_event(self, event: object) -> None:
+        if isinstance(event, AgentEndEvent):
+            self.end = event
+
+
+def _stop_on_call(n: int, reason: StopReason) -> Callable[[], StopReason | None]:
+    """A ``should_stop`` that returns ``reason`` on its ``n``-th poll and every poll after."""
+    calls = 0
+
+    def should_stop() -> StopReason | None:
+        nonlocal calls
+        calls += 1
+        return reason if calls >= n else None
+
+    return should_stop
+
+
+class TestShouldStopReasons:
+    """The adapter owns no cap: a ``should_stop`` reason ends the pump at that boundary.
+
+    The reason picks the end status through ``end_status_for``, and the turn ends clean
+    (``crashed=False``) whichever reason fired.
     """
 
     @staticmethod
@@ -2039,68 +2188,60 @@ class TestMaxTurnsVisibleTurnCap:
         notifications.append(_turn_completed())
         return notifications
 
-    async def test_cap_stops_the_pump_at_the_limit(self):
+    async def test_tool_call_cap_ends_tool_calls_exhausted(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
+        capture = _EndCapture()
 
-        record = await agent.communicate("go", max_turns=2)
+        record = await agent.communicate(
+            "go", stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOOL_CALL_CAP)
+        )
 
-        assert len(record.commands) == 2
-        assert record.max_turns_exhausted is True
+        assert capture.end is not None
+        assert capture.end.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is True
+        assert len(record.commands) == 1
 
-    async def test_cap_keeps_the_deciding_call_complete(self):
-        """Counting COMPLETED calls means the one that reaches the cap keeps its result."""
+    async def test_token_budget_ends_token_budget_exceeded(self):
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
+        capture = _EndCapture()
+
+        record = await agent.communicate(
+            "go", stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOKEN_BUDGET)
+        )
+
+        assert capture.end is not None
+        assert capture.end.status is AgentEndStatus.TOKEN_BUDGET_EXCEEDED
+        assert record.crashed is False
+        assert record.tool_calls_exhausted is False
+
+    async def test_stop_keeps_the_deciding_call_complete(self):
+        """A stop polled after a call's completion keeps that call's result."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(3))
 
-        record = await agent.communicate("go", max_turns=1)
+        record = await agent.communicate("go", should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
 
         assert len(record.commands) == 1
         assert record.commands[0].result_status == "success"
 
-    async def test_cap_interrupts_the_in_flight_turn(self):
-        """Best-effort server-side interrupt, so the cap actually stops spend."""
+    async def test_stop_interrupts_the_in_flight_turn(self):
+        """Best-effort server-side interrupt, so the stop actually ends spend."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
 
-        await agent.communicate("go", max_turns=1)
+        await agent.communicate("go", should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
 
         assert agent.thread.last_handle.interrupted is True
 
-    async def test_under_the_cap_completes_normally(self):
-        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(2))
-
-        record = await agent.communicate("go", max_turns=5)
-
-        assert len(record.commands) == 2
-        assert record.max_turns_exhausted is False
-
-    async def test_no_cap_consumes_the_whole_stream(self):
-        """None must preserve the pre-existing behavior exactly."""
+    async def test_no_reason_consumes_the_whole_stream(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(4))
 
-        record = await agent.communicate("go")
+        record = await agent.communicate("go", should_stop=lambda: None)
 
         assert len(record.commands) == 4
-        assert record.max_turns_exhausted is False
+        assert record.tool_calls_exhausted is False
 
-    async def test_cooperative_stop_outranks_the_cap(self):
-        """Both firing on the same notification reports STOPPED_EARLY."""
-        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
-
-        record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
-
-        assert record.max_turns_exhausted is False
-
-    async def test_capped_turn_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
-        """A capped turn must not lose the child threads' spend.
-
-        Codex bills sub-agents on separate threads the parent total never sees, and
-        ``_recover_subagent_tool_calls`` is the ONLY writer of the
-        ``parent_tool_use_id`` messages ``_fold_subagent_tokens`` sums. So skipping
-        recovery because the pump was cut short does not just drop telemetry rows —
-        it silently removes the child's tokens and cost from the run. The cap is a
-        routine ending, so recovery still runs; only a cooperative stop skips it.
-        """
-        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-        child = "019e0000-eeee-7000-8000-000000000005"
+    @staticmethod
+    def _delegation(tmp_path, child: str) -> list:
         _write_child_rollout(
             tmp_path,
             child,
@@ -2112,56 +2253,44 @@ class TestMaxTurnsVisibleTurnCap:
         )
         spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
         wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
-        # The cap fires on the wait, before turn/completed is ever dispatched.
-        notifications = [
+        return [
             _item_notification("item/started", spawn),
             _item_notification("item/completed", spawn),
             _item_notification("item/started", wait),
             _item_notification("item/completed", wait),
-            *self._cmd_notifications(3),
+            *TestShouldStopReasons._cmd_notifications(3),
         ]
-        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it", max_turns=2)
+    async def test_cap_stop_still_folds_sub_agent_tokens(self, monkeypatch, tmp_path):
+        """A cap stop must not lose the child threads' spend.
 
-        assert record.max_turns_exhausted is True
-        # The child's inner shell command was recovered despite the cap...
+        ``_recover_subagent_tool_calls`` is the ONLY writer of the
+        ``parent_tool_use_id`` messages ``_fold_subagent_tokens`` sums, so skipping it
+        on a cap stop would remove the child's tokens and cost from the run.
+        """
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-eeee-7000-8000-000000000005"
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._delegation(tmp_path, child))
+
+        record = await agent.communicate("delegate it", should_stop=_stop_on_call(4, StopReason.TOOL_CALL_CAP))
+
+        assert record.tool_calls_exhausted is True
         assert [c for c in record.commands if c.tool_name == "Bash"]
-        # ...and its generation nests under the spawn, carrying its own tokens...
         nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
         assert sum(m.output_tokens for m in nested) == 96
-        # ...which is what makes the turn total (and therefore the run cost)
-        # include the sub-agent instead of silently under-reporting it.
         assert record.token_usage is not None
         assert record.token_usage.output_tokens >= 96
         assert record.token_usage.cache_read_input_tokens >= 15104
 
-    async def test_cooperative_stop_still_skips_sub_agent_recovery(self, monkeypatch, tmp_path):
-        """The early-stop path keeps its pre-existing skip: an armed gate already decided."""
+    async def test_early_criterion_stop_skips_sub_agent_recovery(self, monkeypatch, tmp_path):
+        """Same stop point as the cap test: only an early-criterion stop skips recovery."""
         monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         child = "019e0000-ffff-7000-8000-000000000006"
-        _write_child_rollout(
-            tmp_path,
-            child,
-            [
-                {"type": "function_call", "name": "exec_command", "call_id": "c_py", "arguments": '{"cmd":"x"}'},
-                {"type": "function_call_output", "call_id": "c_py", "output": "5050"},
-                _token_count_event(inp=23859, cached=15104, out=96, tot_in=23859, tot_cached=15104, tot_out=96),
-            ],
-        )
-        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
-        wait = _collab_call("wait", call_id="call_wait", result="5050", child_thread=child)
-        notifications = [
-            _item_notification("item/started", spawn),
-            _item_notification("item/completed", spawn),
-            _item_notification("item/started", wait),
-            _item_notification("item/completed", wait),
-            _turn_completed(),
-        ]
-        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._delegation(tmp_path, child))
 
-        record = await agent.communicate("delegate it", should_stop=lambda: True)
+        record = await agent.communicate("delegate it", should_stop=_stop_on_call(4, StopReason.EARLY_CRITERION))
 
+        assert record.tool_calls_exhausted is False
         assert not [c for c in record.commands if c.tool_name == "Bash"]
 
 

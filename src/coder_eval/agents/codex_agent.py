@@ -38,7 +38,9 @@ from coder_eval.models import (
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
 )
+from coder_eval.orchestration.plugin_staging import link_or_copy
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
@@ -46,6 +48,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TextChunkEvent,
     ToolEndEvent,
     ToolEndStatus,
@@ -53,9 +56,9 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import close_window
-from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
@@ -305,7 +308,6 @@ class _CodexTurnState:
         user_input: str,
         iteration: int,
         turn_start_time: float,
-        max_turns: int | None = None,
     ) -> None:
         self._agent = agent
         self.emit = emit
@@ -317,10 +319,8 @@ class _CodexTurnState:
         self.user_input = user_input
         self.iteration = iteration
         self.turn_start_time = turn_start_time
-        self.max_turns = max_turns
         self.timeout_hit = False
-        self.stopped_early_hit = False
-        self.max_turns_hit = False
+        self.stop_reason: StopReason | None = None
         self.finalized = False
 
         # Live pump scratch (set during streaming).
@@ -488,23 +488,12 @@ class _CodexTurnState:
 
     @property
     def ended_cleanly(self) -> bool:
-        """True once the pump broke on purpose (cooperative stop or the turn cap).
+        """True once the pump broke on a ``should_stop`` reason.
 
-        Both are non-crash terminations, so an exception raised while tearing the
-        stream down afterwards must not be escalated into a retry.
+        A non-crash termination, so an exception raised while tearing the stream
+        down afterwards must not be escalated into a retry.
         """
-        return self.stopped_early_hit or self.max_turns_hit
-
-    def max_turns_reached(self) -> bool:
-        """True once this turn has produced ``max_turns`` visible turns.
-
-        Delegates to ``EventCollector.visible_turn_count`` rather than
-        ``self.commands``, which SKIPS items whose telemetry the SDK does not
-        resolve; the collector counts every emitted tool end, which is what lands
-        in ``TurnRecord.commands``. Codex delivers one SDK turn per
-        ``communicate()``, so a native counter would cap at 1.
-        """
-        return self.max_turns is not None and self.collector.visible_turn_count >= self.max_turns
+        return self.stop_reason is not None
 
     def dispatch(self, notification: Any) -> bool:
         """Route a notification to its handler. Returns True on ``turn/completed``
@@ -739,7 +728,6 @@ class _CodexTurnState:
                 num_turns=1,
                 crashed=crashed,
                 crash_reason=crash_reason,
-                max_turns_exhausted=status is AgentEndStatus.MAX_TURNS_EXHAUSTED,
                 duration_seconds=time.monotonic() - self.turn_start_time,
             )
         )
@@ -763,6 +751,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.TURN,
     )
 
     def __init__(
@@ -804,6 +793,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the Codex agent.
 
@@ -813,7 +803,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 Codex app-server (typically the resolved
                 ``SandboxConfig.mock_path_dirs``), so mock CLIs shadow the
                 real ones — same semantics as the Claude agent.
-            plugin_tools_dir: Optional plugin tools directory (for skills setup)
+            plugin_tools_dir: Accepted for the ``Agent.start`` signature; Codex does not use it.
+            plugin_root: The staged plugin root whose skills are linked into ``.agents/skills/``.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
@@ -845,8 +836,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
                         "CodexAgent: login_api_key failed — agent will fall back to env-based auth: %s", exc
                     )
 
-            # Set up skills from plugin_tools_dir or plugins config
-            self._setup_skills(plugin_tools_dir)
+            self._setup_skills(plugin_root)
 
         except ImportError as e:
             raise RuntimeError("Codex SDK not installed. Install with: pip install 'coder-eval[codex]'") from e
@@ -859,8 +849,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Send a message to Codex and receive its response.
 
@@ -868,15 +857,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
             user_input: The message/prompt to send
             stream_callback: Optional callback for real-time event streaming
             timeout: Hard wall-clock deadline in seconds
-            max_turns: Hard cap on VISIBLE turns — tool calls, the unit
-                ``result_metrics.visible_turn_count`` counts — enforced in-stream on
-                the same pump boundary as the cooperative stop. Codex delivers one
-                SDK turn per ``communicate()``, so a native turn counter would cap
-                at 1; see docs/agents/HARNESS_PARITY.md.
-            should_stop: Cooperative early-stop callback, polled after each
-                dispatched notification. When it returns True the pump breaks,
-                the in-flight turn is interrupted (best-effort) and the turn
-                finalizes cleanly as ``STOPPED_EARLY`` (``crashed=False``).
+            should_stop: The run's stop poll, called after each dispatched
+                notification. On a reason the pump breaks, the in-flight turn is
+                interrupted (best-effort) and the turn finalizes cleanly with
+                ``end_status_for(reason)`` (``crashed=False``).
 
         Returns:
             TurnRecord containing the complete interaction
@@ -917,7 +901,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
             user_input=user_input,
             iteration=self._iteration,
             turn_start_time=turn_start_time,
-            max_turns=max_turns,
         )
 
         try:
@@ -1004,14 +987,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._state = AgentState.WORKING
         self._end_turn_ok()
 
-        # Precedence: timeout (raised above) > stopped_early > max_turns > done.
+        # Precedence: timeout (raised above) > the stop reason > done.
         # Rationale: .claude/notes/agents.md § Shared turn lifecycle
-        if state.stopped_early_hit:
-            status = AgentEndStatus.STOPPED_EARLY
-        elif state.max_turns_hit:
-            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
-        else:
-            status = AgentEndStatus.COMPLETED
+        status = end_status_for(state.stop_reason) if state.stop_reason is not None else AgentEndStatus.COMPLETED
         state.finalize(status, crashed=False, crash_reason=None)
         return collector.build_turn_record()
 
@@ -1082,97 +1060,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
             "codex_model_is_deployment": True,
         }
 
-    def _setup_skills(self, plugin_tools_dir: str | None) -> None:
-        """Set up .agents/skills directory from plugins or plugin_tools_dir.
+    def _setup_skills(self, plugin_root: Path | None) -> None:
+        """Link each staged skill into ``.agents/skills/``, where Codex auto-discovers skills.
 
-        Codex auto-discovers skills in ``.agents/skills/``, scanned from the working
-        directory up to the repo root, so each source's skill dirs are symlinked
-        (or copied, on Windows) into it.
+        Codex scans ``.agents/skills/`` from the working directory up to the repo root,
+        so each ``<plugin_root>/skills/<name>`` is symlinked (or copied) into it.
 
         Rationale: .claude/notes/agents.md § Skills, per harness
         """
-        if not self.working_directory:
+        if not self.working_directory or plugin_root is None:
             return
-
-        skills_sources: list[Path] = []
-
-        # Collect skills directories from config.plugins
-        if self.config.plugins:
-            for plugin in self.config.plugins:
-                if isinstance(plugin, dict) and plugin.get("type") == "local":
-                    path_str = plugin.get("path")
-                    if path_str:
-                        # Expand environment variables in path
-                        expanded_path = expand_env_vars(path_str)
-                        plugin_path = Path(expanded_path)
-                        if plugin_path.exists() and plugin_path.is_dir():
-                            skills_sources.append(plugin_path)
-                            self._log.debug(f"Found skills from plugin: {plugin_path}")
-                        else:
-                            # Loud: an unresolved env var or missing dir drops the
-                            # skills silently, so the agent runs blind.
-                            hint = "env var likely unset" if "$" in expanded_path else "path does not exist"
-                            self._log.warning(
-                                f"Plugin skills path did not resolve: {path_str!r} "
-                                + f"→ {expanded_path!r} ({hint}); no skills linked from it"
-                            )
-
-        # Also check plugin_tools_dir parameter
-        if plugin_tools_dir:
-            plugin_path = Path(plugin_tools_dir)
-            if plugin_path.exists() and plugin_path.is_dir():
-                skills_sources.append(plugin_path)
-                self._log.debug(f"Found skills from plugin_tools_dir: {plugin_path}")
-
-        if not skills_sources:
-            return
-
-        # Create .agents/skills directory (Codex auto-discovery location)
         agents_skills_dir = self.working_directory / ".agents" / "skills"
-        try:
-            agents_skills_dir.mkdir(parents=True, exist_ok=True)
-
-            # A source may hold skill dirs directly or be a plugin root whose
-            # skills live one level deeper. Scan both layouts.
-            for skills_source in skills_sources:
-                scan_dirs = [skills_source]
-                nested = skills_source / "skills"
-                if nested.is_dir():
-                    scan_dirs.append(nested)
-
-                for scan_dir in scan_dirs:
-                    for skill_dir in scan_dir.iterdir():
-                        if not (skill_dir.is_dir() and (skill_dir / "SKILL.md").exists()):
-                            continue
-                        target = agents_skills_dir / skill_dir.name
-                        if target.exists():
-                            # Skip if already exists (first source wins)
-                            continue
-
-                        try:
-                            # Try to create a symlink for efficiency
-                            target.symlink_to(skill_dir)
-                            self._log.debug(f"Linked skill: {skill_dir.name}")
-                        except (OSError, NotImplementedError):
-                            # Fall back to copying if symlink fails (Windows compatibility)
-                            shutil.copytree(skill_dir, target, dirs_exist_ok=True)
-                            self._log.debug(f"Copied skill: {skill_dir.name}")
-
-            linked = list(agents_skills_dir.iterdir())
-            if linked:
-                self._log.debug(f"Linked {len(linked)} skill(s) into {agents_skills_dir}")
-            else:
-                # Sources existed but held no SKILL.md, so codex runs with no
-                # skill context at all.
-                self._log.warning(
-                    f"0 skills linked into {agents_skills_dir} despite "
-                    + f"{len(skills_sources)} plugin source(s): "
-                    + f"{[str(s) for s in skills_sources]}; "
-                    + "check the plugin path points at a skills repo root"
-                )
-
-        except Exception as e:
-            self._log.warning(f"Failed to set up skills: {e}")
+        agents_skills_dir.mkdir(parents=True, exist_ok=True)
+        for skill_dir in sorted((plugin_root / "skills").iterdir()):
+            target = agents_skills_dir / skill_dir.name
+            if target.is_symlink() and not target.exists():
+                target.unlink()
+            if not target.exists():
+                link_or_copy(skill_dir.resolve(), target)
+        self._log.debug("Linked the staged skills into %s", agents_skills_dir)
 
     @staticmethod
     def _resolve_base_url() -> str | None:
@@ -1429,7 +1335,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return str(turn_result)
 
     async def _run_turn_with_streaming(
-        self, state: _CodexTurnState, should_stop: Callable[[], bool] | None = None
+        self, state: _CodexTurnState, should_stop: Callable[[], StopReason | None] | None = None
     ) -> tuple[Any, Any, str]:
         """Drive ``turn.stream()`` through the per-turn state, emitting the standard
         event protocol; returns ``(turn_result, latest_token_usage, agent_text)``.
@@ -1438,7 +1344,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         drives the inner pump. ``state`` is mutated IN PLACE, so a mid-turn crash
         keeps the partial.
 
-        ``should_stop`` runs AFTER ``state.dispatch`` (the emission the watcher
+        ``should_stop`` runs AFTER ``state.dispatch`` (the emission the monitor
         latches on) and BEFORE the next notification is pulled.
         """
         # Starts the turn without blocking, and opens the event stream.
@@ -1456,17 +1362,10 @@ class CodexAgent(Agent[CodexAgentConfig]):
                     break
                 if state.dispatch(notification):  # True on a valid turn/completed
                     break
-                if should_stop is not None and should_stop():
-                    state.stopped_early_hit = True
-                    self._log.debug("Cooperative stop requested; ending notification pump at this boundary")
-                    self._interrupt_active_turn()  # best-effort; stops server-side spend
-                    break
-                # The cap shares this boundary: the notification that reached it is
-                # dispatched whole, the next is never pulled. After the cooperative
-                # stop, so an armed early-stop wins a tie.
-                if state.max_turns_reached():
-                    state.max_turns_hit = True
-                    self._log.debug("max_turns (%s visible turns) reached; ending notification pump", state.max_turns)
+                reason = should_stop() if should_stop is not None else None
+                if reason is not None:
+                    state.stop_reason = reason
+                    self._log.debug("Stop requested (%s); ending notification pump at this boundary", reason.value)
                     self._interrupt_active_turn()  # best-effort; stops server-side spend
                     break
         finally:
@@ -1486,13 +1385,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if not state.messages:
             state.messages.extend(self._messages_from_items(getattr(state.turn_result, "items", None), state.turn_id))
 
-        # RUNS on a turn-cap stop, because recovery is also the only writer of the
-        # `parent_tool_use_id`-tagged messages `_fold_subagent_tokens` sums — so
+        # RUNS on a cap or budget stop, because recovery is also the only writer of
+        # the `parent_tool_use_id`-tagged messages `_fold_subagent_tokens` sums — so
         # skipping it drops the child threads' spend from the run's cost entirely.
-        # Still SKIPPED on a cooperative stop: an armed gate has already decided
-        # the run, and children may have no rollout yet.
+        # Still SKIPPED on an early-criterion stop: an armed gate has already
+        # decided the run, and children may have no rollout yet.
         # Rationale: .claude/notes/agents.md § Codex rollout rebuild
-        if state.spawned_children and not state.stopped_early_hit:
+        if state.spawned_children and state.stop_reason is not StopReason.EARLY_CRITERION:
             await self._recover_subagent_tool_calls(
                 state.spawned_children,
                 state.collab_results,
@@ -2233,26 +2132,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return parent
         base = parent or TokenUsage()
 
-        # Each child generation on its own model, then sum.
-        child_cost = 0.0
-        for m in children:
-            child_cost += (
-                calculate_cost(
-                    m.model or self._effective_model() or "",
-                    uncached_input_tokens=_message_uncached_input(m),
-                    output_tokens=m.output_tokens,
-                    cache_read_tokens=m.cache_read_tokens,
-                )
-                or 0.0
+        # Each child generation on its own model, then sum. The total is unpriced
+        # when any priced-from-tokens part is: a partial sum would read as the bill.
+        child_costs = [
+            calculate_cost(
+                m.model or self._effective_model() or "",
+                uncached_input_tokens=_message_uncached_input(m),
+                output_tokens=m.output_tokens,
+                cache_read_tokens=m.cache_read_tokens,
             )
-
+            for m in children
+        ]
         base_cost = base.total_cost_usd
+        unpriced = any(c is None for c in child_costs) or (base_cost is None and not base.is_empty())
         return TokenUsage(
             uncached_input_tokens=base.uncached_input_tokens + sum(_message_uncached_input(m) for m in children),
             output_tokens=base.output_tokens + sum(m.output_tokens for m in children),
             cache_creation_input_tokens=base.cache_creation_input_tokens,
             cache_read_input_tokens=base.cache_read_input_tokens + sum(m.cache_read_tokens for m in children),
-            total_cost_usd=(base_cost or 0.0) + child_cost if (base_cost is not None or child_cost) else None,
+            total_cost_usd=None if unpriced else (base_cost or 0.0) + sum(c or 0.0 for c in child_costs),
         )
 
     def _token_usage_from_messages(self, messages: list[TranscriptMessage]) -> TokenUsage | None:

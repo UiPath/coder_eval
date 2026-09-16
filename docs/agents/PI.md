@@ -155,7 +155,7 @@ Mapping from the CLI's event vocabulary onto `TurnRecord`:
 
 | Pi event | Becomes |
 |---|---|
-| `turn_start` | `TurnStartEvent` (one inner turn; the unit `max_turns` counts) |
+| `turn_start` | `TurnStartEvent` (one inner turn) |
 | `message_update` (`text_delta`) | `TextChunkEvent` + `agent_output` |
 | `tool_execution_start` | `ToolStartEvent` |
 | `tool_execution_end` | `ToolEndEvent` |
@@ -197,7 +197,7 @@ merged. The internal retry is bounded by `turn_timeout` / `task_timeout`.
 A turn whose CLI exits cleanly but which captured **no recognized events** (an
 upgrade renamed the vocabulary) is failed rather than reported as a clean empty
 success — the error names the unrecognized event types it saw. Intentional cuts
-(`should_stop`, `max_turns`) are exempt.
+(any `should_stop` reason, including the tool-call cap) are exempt.
 
 > **Zero-usage turn.** A provider that reports no usage yields an all-zero
 > `token_usage`. Pi does **not** hard-fail such a turn (its multi-provider surface
@@ -225,26 +225,20 @@ docker` whenever the task prompt or workspace is not fully trusted.
 
 ## Known limitations
 
-- **`plugins` skills are injected via `--skill`.** Each `type: local` plugin root
-  is resolved to its skills dir (`<root>/skills`, holding `<name>/SKILL.md`) and
-  passed to the CLI as a `--skill <dir>` argument — the same `_plugin_skill_dirs`
-  resolver OpenCode uses — and recorded as `pi_skill_paths` in `environment_info`.
-  Pi therefore **can run activation suites**: `skill_triggered` detects Pi's
-  engagement agent-agnostically (the agent `read`s the full `SKILL.md`, a
-  `read`→`Read` call whose `path` matches `skills/<name>/`). Use the **plugin-root
-  shape** (`<path>/skills/<name>/SKILL.md`) for activation suites: a bare skills dir
-  still *loads* (the resolver's fallback passes it as `--skill <dir>`), but the read
-  path then lacks the `skills/<name>/` segment `skill_triggered` matches on, so the
-  suite scores recall 0 even though the skill ran — see
-  [Harness Parity § plugin-path depth](HARNESS_PARITY.md). A plugin's non-skill
-  assets (agents/hooks/commands/MCP) are not wired.
+- **`plugins` skills are injected via `--skill`.** coder-eval stages every
+  `plugins:` entry into `<run_dir>/plugin_root` and passes
+  `--skill <plugin_root>/skills` to the CLI. A plugin root and a bare skills
+  directory both work. Pi therefore **can run activation suites**:
+  `skill_triggered` detects Pi's engagement agent-agnostically (the agent `read`s
+  the full `SKILL.md`, a `read`→`Read` call whose `path` matches `skills/<name>/`).
+  Only skills are staged; a plugin's agents, hooks, commands and MCP servers are not
+  wired. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
 - **`system_prompt_file` is not read by the adapter.** Use `system_prompt` (inline)
   instead — it is enforced via `--append-system-prompt`.
-- **`max_turns` counts Pi's native agent-loop turns.** One `turn_start` = one
-  agent-loop step; `max_turns: N` allows N complete turns, then the run finalizes
-  cleanly as `max_turns_exhausted`. See
-  [Run-Limit Parity](HARNESS_PARITY.md) before holding `max_turns` constant across
-  harnesses.
+- **`max_tool_calls` counts resolved tool calls, not Pi turns.** The adapter counts
+  nothing itself. The TurnMonitor owns the cap, as on every harness; the adapter
+  stops at its next `should_stop` poll, and the run finalizes cleanly as
+  `tool_calls_exhausted`. See [Run-Limit Parity](HARNESS_PARITY.md).
 - **No sub-agent attribution.** Pi's CLI stream does not expose nested agent
   generations, so per-sub-agent token grouping (available for Claude and Codex) is
   not derivable.

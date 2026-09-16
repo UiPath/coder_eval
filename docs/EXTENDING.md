@@ -48,7 +48,7 @@ signature.
 from coder_eval.spi import SPI_VERSION, AgentRegistry
 
 def register(registry: type[AgentRegistry]) -> None:
-    assert SPI_VERSION == 1, f"my-agent supports coder_eval SPI 1, not {SPI_VERSION}"
+    assert SPI_VERSION == 2, f"my-agent supports coder_eval SPI 2, not {SPI_VERSION}"
     # Bind type string → config class → agent class.
     registry.register("my-agent", MyAgentConfig)(MyAgent)
     # Optionally contribute pricing here too (see §3):
@@ -99,7 +99,7 @@ at resolution, so `coder-eval plan` fails before any run. This is a JSONL CLI ag
 that appends a system prompt and honors `plan` and tool lists natively:
 
 ```python
-from coder_eval.spi import Agent, Enforcement, HarnessContract, PermissionMode, ToolNameMap
+from coder_eval.spi import Agent, Enforcement, HarnessContract, PermissionMode, ToolNameMap, UsageGranularity
 
 # native tool name -> canonical (Claude) name; also used for telemetry
 _TOOL_NAME_MAP = {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "task": "Agent"}
@@ -114,6 +114,7 @@ class MyAgent(Agent[MyAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.STEP,
     )
     tool_names = ToolNameMap.from_inverse(
         _TOOL_NAME_MAP,
@@ -129,8 +130,8 @@ class MyAgent(Agent[MyAgentConfig]):
 - `tool_names` is required exactly when a tool-list row is `ENFORCED`. It must map every
   canonical name; list a name your harness has no tool for in `no_equivalent`.
 - Set `cooperative_stop=True` only if your `communicate()` honors `should_stop`
-  (needed for criterion-level `stop_early:` arming). `False` means early stop is
-  rejected at resolution for your agent.
+  (needed for criterion-level `stop_early:` arming and for `run_limits.max_tool_calls`
+  to cut a turn). `False` means early stop is rejected at resolution for your agent.
 
 ### The `Agent` ABC — implementation checklist
 
@@ -140,9 +141,25 @@ it on every LiteLLM route.
 
 Implement these three abstract methods:
 
-- [ ] `async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None) -> None`
-- [ ] `async def communicate(self, user_input, *, stream_callback=None, timeout=None, max_turns=None, should_stop=None) -> TurnRecord`
+- [ ] `async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root: Path | None = None) -> None`
+- [ ] `async def communicate(self, user_input, *, stream_callback=None, timeout=None, should_stop: Callable[[], StopReason | None] | None = None) -> TurnRecord`
 - [ ] `async def stop(self) -> None`
+
+`plugin_root` is the staged plugin root (`<root>/skills/<name>/SKILL.md`), or `None` when
+the task sets no plugins. Deliver it the harness's native way; do not scan for skills.
+
+`should_stop` is the run's single stop poll. The `TurnMonitor` owns it: it reads your
+event stream and decides every stop (armed criteria, the tool-call cap, the token and USD
+budgets). Your agent does not count or cap anything. The budgets read
+`TurnEndEvent.tokens` as a per-report DELTA and `AgentEndEvent.usage` as the attempt's
+authoritative total, so never report cumulative tokens on a `TurnEndEvent`. Declare how
+often you report them as `usage_granularity`. With `cooperative_stop=True`:
+
+- [ ] Call `should_stop()` at each safe boundary (for example, after each resolved
+      tool call, before you pull the next unit of work).
+- [ ] When it returns a `StopReason`, stop pulling work and remember the reason.
+- [ ] Finalize the turn with `AgentEndStatus` `end_status_for(reason)` (both names
+      come from `coder_eval.spi`), with `crashed=False`. Do not raise.
 
 Optional overrides (sensible defaults exist): `kill()`, `kill_sync()` (called from a
 non-asyncio watchdog thread — must **not** await), `discard_pending_turn()`.
@@ -270,14 +287,14 @@ Notes:
   own fields — no `turn_records`, no checker instance), and override the
   checker's `live_verdict(...)`. `LiveSuccessCriterion` subclassing is the
   single source of truth for "is this criterion type live-observable" —
-  `validate_early_stop`/`EarlyStopWatcher` check `isinstance(c,
+  `validate_early_stop`/`TurnMonitor` check `isinstance(c,
   LiveSuccessCriterion)` directly, no separate checker-side flag. A lint rule
   (`tests/test_custom_lint.py::TestCE025LiveVerdictConsistency`) keeps the
   model subclassing and the checker's `live_verdict` override paired.
 - Your `live_verdict` must be **deterministic** (a pure function of the
   `turn_records` prefix — no wall-clock, randomness, or hidden instance state)
   and **monotonic** (once it returns `"pass"`/`"fail"` for some prefix, every
-  longer prefix returns that same verdict) — `EarlyStopWatcher`'s verdict
+  longer prefix returns that same verdict) — `TurnMonitor`'s verdict
   latching and deferred stops silently depend on both. Lint rule CE036
   (`tests/lint/live_verdict_contract.py`) enforces this by replaying each live
   criterion against every prefix of recorded trajectories, and **fails until

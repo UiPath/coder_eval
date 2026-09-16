@@ -85,12 +85,14 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
 - **Reference solutions are directory-only** and chmod-shielded during `communicate`.
   Defense-in-depth, not a boundary — the known gaps are documented in the notes.
   Authoring reference: [Reference Solutions](docs/TASK_DEFINITION_GUIDE.md#reference-solutions).
-- **Harness run-limit parity**: a shared config field must mean the same thing on every
-  backend, or the divergence is documented. Every agent declares a `HarnessContract`; a
-  base field the harness marks unsupported is rejected at resolution. Table:
-  [Run-Limit Parity](docs/agents/HARNESS_PARITY.md) § Agent-field contract
-  (generated). Caps are authored under
-  [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
+- **Harness run-limit parity**: every structural cap and budget is one `TurnMonitor`
+  answer on the `should_stop` channel, in tool calls or tokens, on every harness;
+  `run_limits` and agent-field meanings are both generated tables in
+  [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Every agent declares a
+  `HarnessContract`; a base field the harness marks unsupported is rejected at
+  resolution. Caps are authored under [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
+- **Plugin staging**: `stage_plugins` hands every harness one canonical plugin root;
+  `skills_offered` is the positive control `skill_triggered` checks.
 - **Execute vs. run**: `execute` is `run` with grading off — rows finalize as
   `NOT_GRADED` and leave both sides of every rate. Per-command behaviour:
   [CLI Commands](docs/USER_GUIDE.md#cli-commands).
@@ -134,8 +136,9 @@ CLI → ExperimentRunner (task × variant, 5-layer merge) → run_batch → Orch
 
 Per-task (single iteration; simulation mode runs a multi-turn dialog):
   1. Orchestrator._communicate_with_retry(prompt, iteration) → TurnRecord
-     (wraps agent.communicate with retry, per-attempt turn_timeout, and
-      on_attempt_error → preserves crashed=True partial TurnRecords)
+     (wraps agent.communicate with retry, per-attempt turn_timeout, the task's
+      TurnMonitor as the should_stop poll, and on_attempt_error → preserves
+      crashed=True partial TurnRecords)
   2. SuccessChecker.check_all_async() → List[CriterionResult]
 
 Cleanup: stop agent, save EvaluationResult, generate reports.
@@ -164,7 +167,7 @@ make evalboard-verify   # the JS half: tsc --noEmit + vitest + next build
 make docs-indexes      # README/docs index tables from the mkdocs nav (CE028)
 make plugin-reference  # the plugin's criteria reference from the models (CE033)
 make pricing-mirror    # the evalboard's rate table from pricing.py (CE065)
-make parity-table      # the agent-field contract tables from the agent classes (CE069)
+make parity-table      # the run-limit and agent-field tables from RunLimits and the agent classes (CE069)
 
 make docs-budget       # per-file comment budget + docstring essay check (fails `make verify`)
 ```
@@ -220,8 +223,11 @@ A few rules constrain routine edits, so they are worth knowing before you start:
   `stats.py` and `run_record.py`.
 - **CE068** keeps `orchestration/`, `streaming/` and `timing.py` free of concrete agent
   config classes and `AgentKind` members (except `UNKNOWN`); ask the registry instead.
-- **CE069** diffs the generated contract tables in `docs/agents/HARNESS_PARITY.md` against
-  the agent classes. Regenerate with `make parity-table`.
+- **CE069** diffs the generated run-limit and contract tables in `docs/agents/HARNESS_PARITY.md`
+  against `RunLimits` and the agent classes. Regenerate with `make parity-table`.
+- **CE070** keeps agent adapters from counting caps (`max_tool_calls`, `RunLimits`,
+  `tool_calls_exhausted`, …) or scanning for `SKILL.md`: the `TurnMonitor` owns caps and
+  `orchestration/plugin_staging.py` owns skill discovery.
 
 **Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
 source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go

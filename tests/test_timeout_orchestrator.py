@@ -44,7 +44,7 @@ def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None 
         ignore_patterns=[],
     )
     run_limits = RunLimits.model_construct(
-        max_turns=None,
+        max_tool_calls=None,
         turn_timeout=turn_timeout,
         task_timeout=task_timeout,
     )
@@ -92,6 +92,7 @@ def _make_initialized_orchestrator(task: TaskDefinition, tmp_path) -> Orchestrat
     mock_sandbox.sandbox_dir.mkdir()
     orchestrator.sandbox = mock_sandbox
     orchestrator.success_checker = MagicMock()
+    orchestrator._build_monitor()
     return orchestrator
 
 
@@ -568,6 +569,7 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
     run_dir.mkdir(parents=True)
 
     orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._build_monitor()
     orchestrator.result = EvaluationResult(
         task_id="per_attempt_budget",
         task_description="per-attempt budget",
@@ -642,6 +644,7 @@ async def test_wait_for_backstop_calls_discard_pending_turn(tmp_path):
     run_dir.mkdir(parents=True)
 
     orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
+    orchestrator._build_monitor()
     orchestrator.result = EvaluationResult(
         task_id="discard_pending",
         task_description="discard_pending",

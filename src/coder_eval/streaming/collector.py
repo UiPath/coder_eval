@@ -27,6 +27,7 @@ from coder_eval.models import (
 )
 from coder_eval.streaming.events import (
     AgentEndEvent,
+    AgentEndStatus,
     AgentStartEvent,
     StreamEvent,
     ToolEndEvent,
@@ -66,7 +67,7 @@ class EventCollector:
             self._iteration = event.iteration
             self._user_input = event.prompt
             self._agent_start_at = event.timestamp
-            # EarlyStopWatcher keeps ONE collector across retries: left stale,
+            # TurnMonitor keeps ONE collector across retries: left stale,
             # this would pair the new start with the last attempt's end and
             # publish the clamped inversion as a measured 0.0.
             self._agent_end = None
@@ -80,22 +81,6 @@ class EventCollector:
             self._commands[event.tool.tool_id] = event.tool
         elif isinstance(event, AgentEndEvent):
             self._agent_end = event
-
-    @property
-    def visible_turn_count(self) -> int:
-        """Visible timeline entries observed so far — one per resolved tool call.
-
-        The live, in-stream counterpart of ``result_metrics.visible_turn_count``,
-        which counts the very same list once the turn is a finished
-        ``TurnRecord`` (minus its trailing final-reply entry, which cannot exist
-        while the turn is still running).
-
-        Agents whose SDK has no meaningful native turn counter (Codex,
-        Antigravity) enforce ``run_limits.max_turns`` against this, so the cap
-        means the same thing on both. Keying on ``tool_id`` means a re-emitted
-        end event cannot double-count.
-        """
-        return len(self._commands)
 
     def _ordered_commands(self) -> list[CommandTelemetry]:
         return sorted(self._commands.values(), key=lambda c: c.sequence_number)
@@ -238,7 +223,7 @@ class EventCollector:
             assistant_turn_count=end.assistant_turn_count,
             messages=messages,
             num_turns=end.num_turns,
-            max_turns_exhausted=end.max_turns_exhausted,
+            tool_calls_exhausted=end.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED,
             result_summary=end.result_summary,
             crashed=end.crashed,
             crash_reason=end.crash_reason,

@@ -8,7 +8,7 @@ description: >
 tags: [internal, pure-python]
 
 run_limits:
-  max_turns: 10
+  max_tool_calls: 10
 agent:
   type: claude-code
   permission_mode: acceptEdits

@@ -6,6 +6,7 @@
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
@@ -14,7 +15,7 @@ from .models import AgentState as AgentState
 from .models import ApiRoute, BaseAgentConfig, HarnessContract, ToolNameMap, TurnRecord
 from .streaming.callbacks import StreamCallback
 from .streaming.collector import EventCollector
-from .streaming.events import AgentEndStatus
+from .streaming.events import AgentEndStatus, StopReason
 
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the agent.
 
@@ -204,6 +206,8 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 instead of walking up from CWD. An external ``PLUGIN_TOOLS_DIR`` in
                 the process environment still wins. Implementations that don't shell
                 out may ignore this argument.
+            plugin_root: The staged canonical plugin root (``<root>/skills/<name>/SKILL.md``),
+                or None when the task sets no plugins. Deliver it the harness's native way.
         """
         pass
 
@@ -214,8 +218,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Send a message to the agent and receive its response.
 
@@ -226,15 +229,11 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 agent must force-terminate any in-flight subprocess and raise
                 TurnTimeoutError. Do not rely solely on asyncio cancellation --
                 some SDKs swallow it.
-            max_turns: Hard cap on inner-loop turns within this single
-                ``communicate()`` call. When the agent would exceed it, the
-                returned ``TurnRecord`` has ``max_turns_exhausted=True``.
-                None defers to the underlying SDK default.
-            should_stop: Cooperative early-stop poll. An implementation with
-                ``contract.cooperative_stop`` calls it at each safe message
-                boundary and, when it returns True, stops pulling further work and
-                finalizes the turn cleanly (``crashed=False``, no raise). Agents
-                that do not support it accept and ignore the argument.
+            should_stop: The run's single stop poll. An implementation with
+                ``contract.cooperative_stop`` calls it at each safe boundary; a
+                non-None reason means stop pulling work, remember the reason, and
+                finalize with ``end_status_for(reason)`` (``crashed=False``, no
+                raise). Agents that do not support it accept and ignore it.
 
         Returns:
             TurnRecord containing the complete interaction

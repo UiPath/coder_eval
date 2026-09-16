@@ -232,7 +232,7 @@ def _precedence_task():
         description="Test precedence",
         initial_prompt="test",
         agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model="yaml-model", permission_mode="default"),
-        run_limits=RunLimits(max_turns=10),
+        run_limits=RunLimits(max_tool_calls=10),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[{"type": "file_exists", "path": "test.py", "description": "test"}],
     )
@@ -249,7 +249,7 @@ def test_agent_override_precedence_cli_over_yaml():
         overrides={
             "agent.model": "cli-model",
             "agent.permission_mode": "bypassPermissions",
-            "run_limits.max_turns": 99,
+            "run_limits.max_tool_calls": 99,
         },
     )
 
@@ -258,24 +258,24 @@ def test_agent_override_precedence_cli_over_yaml():
     assert task.agent.model == "cli-model"
     assert task.agent.permission_mode == "bypassPermissions"
     assert task.run_limits is not None
-    assert task.run_limits.max_turns == 99
+    assert task.run_limits.max_tool_calls == 99
 
 
 def test_cli_override_applies_with_lineage_detail():
-    """A -D run_limits.max_turns override applies and records `-D` lineage detail."""
+    """A -D run_limits.max_tool_calls override applies and records `-D` lineage detail."""
     from coder_eval.models import ConfigLineageEntry
     from coder_eval.orchestration.config import BatchRunConfig
     from coder_eval.orchestration.experiment import _apply_cli_overrides
 
     task = _precedence_task()
-    config = BatchRunConfig(run_dir=Path("runs/test"), overrides={"run_limits.max_turns": 7})
+    config = BatchRunConfig(run_dir=Path("runs/test"), overrides={"run_limits.max_tool_calls": 7})
     lineage: dict[str, ConfigLineageEntry] = {}
 
     _apply_cli_overrides(task, config, lineage=lineage)
 
     assert task.run_limits is not None
-    assert task.run_limits.max_turns == 7
-    assert lineage["run_limits.max_turns"].source_detail == "-D run_limits.max_turns"
+    assert task.run_limits.max_tool_calls == 7
+    assert lineage["run_limits.max_tool_calls"].source_detail == "-D run_limits.max_tool_calls"
 
 
 def test_api_backend_enum_values():
@@ -401,7 +401,7 @@ def test_resolve_route_bedrock_missing_token_asserts():
     [
         ("DEFAULT_AGENT_MODEL", "agent.by_type.claude-code.model"),
         ("DEFAULT_PERMISSION_MODE", "agent.by_type.claude-code.permission_mode"),
-        ("DEFAULT_MAX_TURNS", "run_limits.max_turns"),
+        ("DEFAULT_MAX_TURNS", "run_limits.max_tool_calls"),
     ],
 )
 def test_stale_default_env_var_raises(monkeypatch, var_name: str, replacement: str):

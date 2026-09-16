@@ -27,8 +27,8 @@
 
 ## Run-time Notes
 
-> **WARNING:** [alpha] max_turns exhausted
-> **WARNING:** [beta] expected_turns exceeded: 10/5 (cumulative SDK turns)
+> **WARNING:** [alpha] tool-call cap reached
+> **WARNING:** [beta] expected_tool_calls exceeded: 10/5 (cumulative visible tool calls)
 
 
 ## Generation Metrics

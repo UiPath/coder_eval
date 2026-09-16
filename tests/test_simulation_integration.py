@@ -8,6 +8,7 @@ loop without touching any external LLM.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from coder_eval.agent import Agent, AgentState
 from coder_eval.models import (
     AgentKind,
     FileExistsCriterion,
+    RunLimits,
     SandboxConfig,
     SimulationConfig,
     TaskDefinition,
@@ -34,6 +36,7 @@ def _build_task(
     sim_overrides: dict[str, Any] | None = None,
     *,
     initial_prompt: str | None = "Please create the file.",
+    run_limits: RunLimits | None = None,
 ) -> TaskDefinition:
     sim_kwargs: dict[str, Any] = {
         "enabled": True,
@@ -54,6 +57,7 @@ def _build_task(
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(path="test.txt", description="file must exist")],
         simulation=SimulationConfig(**sim_kwargs),
+        run_limits=run_limits,
     )
 
 
@@ -62,6 +66,41 @@ def _install_fake_agent(monkeypatch: pytest.MonkeyPatch, scenario: str) -> None:
         return MockAgent(self.task, scenario=scenario)
 
     monkeypatch.setattr(Orchestrator, "_create_agent", _create)
+
+
+class _CooperativeToolAgent(MockAgent):
+    """MockAgent that makes ``calls_per_turn`` resolved tool calls per turn, polling ``should_stop``."""
+
+    def __init__(self, task: TaskDefinition, calls_per_turn: int) -> None:
+        super().__init__(task, scenario="failure")
+        self._calls_per_turn = calls_per_turn
+        self._tool_seq = 0
+        self.emitted_per_turn: list[int] = []
+
+    async def communicate(self, user_input: str, **kwargs: Any) -> TurnRecord:
+        from datetime import datetime
+
+        from coder_eval.models import CommandTelemetry
+        from coder_eval.streaming.events import StopReason, ToolEndEvent, ToolStartEvent
+
+        self._iteration += 1
+        stream_callback = kwargs["stream_callback"]
+        should_stop = kwargs["should_stop"]
+        commands: list[CommandTelemetry] = []
+        while should_stop() is None and len(commands) < self._calls_per_turn:
+            self._tool_seq += 1
+            tool = CommandTelemetry(tool_name="Bash", tool_id=f"tool-{self._tool_seq}", timestamp=datetime.now())
+            stream_callback.on_event(ToolStartEvent(task_id=self.task.task_id, tool=tool))
+            stream_callback.on_event(ToolEndEvent(task_id=self.task.task_id, tool=tool))
+            commands.append(tool)
+        self.emitted_per_turn.append(len(commands))
+        return TurnRecord(
+            iteration=self._iteration,
+            user_input=user_input,
+            agent_output="working",
+            commands=commands,
+            tool_calls_exhausted=should_stop() is StopReason.TOOL_CALL_CAP,
+        )
 
 
 def _install_fake_simulator(
@@ -118,6 +157,7 @@ class _ExplodingAgent(Agent):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         pass
 
@@ -399,3 +439,55 @@ async def test_standalone_turn_holding_a_pinned_opener_records_zero(tmp_path, mo
     ]
     assert openers, "expected a standalone turn holding the pinned opener"
     assert all(t.duration_seconds == 0.0 for t in openers)
+
+
+@pytest.mark.asyncio
+async def test_simulation_tool_call_cap_is_cumulative_across_dialog_turns(tmp_path, monkeypatch):
+    """Two turns of 2 tool calls under max_tool_calls=3: the cap latches in turn 2 and ends the dialog."""
+    agents: list[_CooperativeToolAgent] = []
+
+    async def _create(self):
+        agent = _CooperativeToolAgent(self.task, calls_per_turn=2)
+        agents.append(agent)
+        return agent
+
+    monkeypatch.setattr(Orchestrator, "_create_agent", _create)
+    stub = _install_fake_simulator(monkeypatch, responses=["keep going"] * 10)
+
+    task = _build_task({"max_turns": 4}, run_limits=RunLimits(max_tool_calls=3))
+    orch = Orchestrator(task=task, run_dir=tmp_path / "run" / "cap", variant_id="default")
+    result = await orch.run()
+
+    from coder_eval.simulation import DialogStopReason
+
+    (agent,) = agents
+    assert agent.emitted_per_turn == [2, 1]
+    assert result.simulation is not None
+    assert result.simulation.stop_reason == DialogStopReason.TOOL_CALL_CAP.value == "tool_call_cap"
+    assert result.simulation.total_turns == 2
+    assert result.tool_calls_exhausted is True
+    # The simulator answered turn 1 only; the cap ended the dialog before it was asked again.
+    assert len(stub.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_capped_last_dialog_turn_still_records_the_cap(tmp_path, monkeypatch):
+    """The turn that reaches the cap is also the last exchange: the cap is not lost to max_turns."""
+    monkeypatch.setattr(
+        Orchestrator, "_create_agent", lambda self: _async_value(_CooperativeToolAgent(self.task, calls_per_turn=2))
+    )
+    _install_fake_simulator(monkeypatch, responses=["keep going"] * 10)
+
+    task = _build_task({"max_turns": 2}, run_limits=RunLimits(max_tool_calls=3))
+    result = await Orchestrator(task=task, run_dir=tmp_path / "run" / "cap-last", variant_id="default").run()
+
+    from coder_eval.simulation import DialogStopReason
+
+    assert result.simulation is not None
+    assert result.simulation.total_turns == 2
+    assert result.tool_calls_exhausted is True
+    assert result.simulation.stop_reason == DialogStopReason.TOOL_CALL_CAP.value
+
+
+async def _async_value(value):
+    return value

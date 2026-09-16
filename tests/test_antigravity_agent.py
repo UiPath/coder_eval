@@ -11,6 +11,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from itertools import pairwise
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -25,9 +26,12 @@ from coder_eval.agents.antigravity_agent import (
     _to_token_usage,
 )
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, AntigravityAgentConfig, AssistantMessage, parse_agent_config
+from coder_eval.models import AgentKind, AntigravityAgentConfig, AssistantMessage, RunLimits, parse_agent_config
+from coder_eval.orchestration.plugin_staging import stage_plugins
+from coder_eval.orchestration.turn_monitor import TurnMonitor
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.pricing import calculate_cost
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason
 from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams._scrub import assert_reconciliation
 from tests._fixtures.golden_streams.antigravity_fixtures import (
@@ -88,89 +92,55 @@ def test_environment_info_reports_append_prompt_semantics():
     assert agent.get_environment_info()["system_prompt_semantics"] == "append"
 
 
-def _make_skill(parent, name: str) -> None:
-    d = parent / name
-    d.mkdir(parents=True)
-    (d / "SKILL.md").write_text(f"# {name}\n")
+def _staged_root(tmp_path: Path) -> Path:
+    """A plugin root staged by ``stage_plugins`` over one authored skill."""
+    skill = tmp_path / "authored" / "skills" / "uipath-sdd"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# uipath-sdd\n")
+    return stage_plugins([{"type": "local", "path": str(tmp_path / "authored")}], tmp_path / "plugin_root").root
 
 
-def test_resolve_skills_paths_prefers_nested_skills_layout(tmp_path):
-    """A repo-root plugin source resolves to its ``skills/`` subdir (where SKILL.md live)."""
-    repo = tmp_path / "skills-repo"
-    _make_skill(repo / "skills", "uipath-troubleshoot")
-    agent = AntigravityAgent(parse_agent_config(type="antigravity", plugins=[{"type": "local", "path": str(repo)}]))
-    assert agent._resolve_skills_paths(None) == [str((repo / "skills").resolve())]
+@pytest.mark.parametrize("staged", [True, False])
+async def test_start_delivers_the_staged_skills_dir(tmp_path, monkeypatch, staged):
+    """``skills_paths`` is exactly ``[<root>/skills]`` and that entry joins ``workspaces``."""
+    root = _staged_root(tmp_path) if staged else None
+    configs: list[Any] = []
+
+    class _RecordingSdkAgent:
+        def __init__(self, cfg: Any) -> None:
+            configs.append(cfg)
+
+        async def __aenter__(self) -> "_RecordingSdkAgent":
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    _install_fake_sdk(monkeypatch, _RecordingSdkAgent)
+    work = tmp_path / "work"
+    await AntigravityAgent(parse_agent_config(type="antigravity")).start(str(work), plugin_root=root)
+
+    expected = [str(root / "skills")] if root is not None else []
+    assert configs[0].skills_paths == expected
+    sources = [str((tmp_path / "authored" / "skills" / "uipath-sdd").resolve())] if root is not None else []
+    assert configs[0].workspaces == [str(work), *expected, *sources]
 
 
-def test_resolve_skills_paths_accepts_direct_skills_dir_via_plugin_tools_dir(tmp_path):
-    """A dir that *directly* parents skill dirs resolves to itself (no nested skills/)."""
-    direct = tmp_path / "node_modules" / "@uipath"
-    _make_skill(direct, "uipath-agents")
-    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
-    assert agent._resolve_skills_paths(str(direct)) == [str(direct.resolve())]
-
-
-def test_resolve_skills_paths_dedupes_and_drops_unresolved(tmp_path):
-    """Unresolved env-var paths are dropped; the same root from two sources appears once."""
-    repo = tmp_path / "skills-repo"
-    _make_skill(repo / "skills", "uipath-solution")
-    agent = AntigravityAgent(
-        parse_agent_config(
-            type="antigravity",
-            plugins=[
-                {"type": "local", "path": "$DEFINITELY_UNSET_SKILLS_VAR/x"},
-                {"type": "local", "path": str(repo)},
-            ],
-        )
-    )
-    # plugin_tools_dir points at the same resolved root as the plugin → deduped to one.
-    assert agent._resolve_skills_paths(str(repo)) == [str((repo / "skills").resolve())]
-
-
-def test_resolve_skills_paths_empty_without_sources():
-    """No plugins and no plugin_tools_dir → empty list (harness default, no skills)."""
-    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
-    assert agent._resolve_skills_paths(None) == []
-
-
-def test_resolve_workspaces_includes_workdir_and_skill_roots(tmp_path):
-    """workspaces = sandbox workdir + resolved skill roots, so SKILL.md stays readable."""
-    repo = tmp_path / "skills-repo"
-    _make_skill(repo / "skills", "uipath-sdd")
-    agent = AntigravityAgent(parse_agent_config(type="antigravity", plugins=[{"type": "local", "path": str(repo)}]))
-    agent.working_directory = tmp_path / "work"
-    skills_paths = agent._resolve_skills_paths(None)
-    assert agent._resolve_workspaces(skills_paths) == [
-        str(tmp_path / "work"),
-        str((repo / "skills").resolve()),
-    ]
-
-
-def test_workspace_only_permits_skill_reads_with_resolved_workspaces(tmp_path):
-    """Drives the harness's real ``workspace_only`` policy: a skill read is denied when
-    scoped to the workdir alone (the bug), but permitted once the resolved skill roots
-    join ``workspaces`` (the fix). ``skills_paths`` feeds discovery, not the file-tool
-    allowlist, so the roots must be in ``workspaces`` for the agent to read SKILL.md."""
+def test_workspace_only_permits_reading_a_staged_skill(tmp_path):
+    """Drives the harness's real ``workspace_only`` policy over a staged root: reading
+    ``<root>/skills/<name>/SKILL.md`` must be permitted by the delivered ``workspaces``."""
     policy = pytest.importorskip("google.antigravity.hooks.policy")
     ag_types = pytest.importorskip("google.antigravity.types")
 
-    repo = tmp_path / "skills-repo"
-    _make_skill(repo / "skills", "uipath-sdd")
-    skill_md = repo / "skills" / "uipath-sdd" / "SKILL.md"
+    root = _staged_root(tmp_path)
     workdir = tmp_path / "work"
     workdir.mkdir()
-
-    agent = AntigravityAgent(parse_agent_config(type="antigravity", plugins=[{"type": "local", "path": str(repo)}]))
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent.working_directory = workdir
-    skills_paths = agent._resolve_skills_paths(None)
 
-    def read_denied(workspaces) -> bool:
-        policies = policy.workspace_only([str(w) for w in workspaces])
-        tc = ag_types.ToolCall(name="read_file", canonical_path=str(skill_md))
-        return any(p.when(tc) for p in policies if p.when is not None)
-
-    assert read_denied([workdir]) is True  # pre-fix: out-of-workspace → denied
-    assert read_denied(agent._resolve_workspaces(skills_paths)) is False  # fix permits it
+    policies = policy.workspace_only(agent._resolve_workspaces(root))
+    tc = ag_types.ToolCall(name="read_file", canonical_path=str(root / "skills" / "uipath-sdd" / "SKILL.md"))
+    assert not any(p.when(tc) for p in policies if p.when is not None)
 
 
 def test_to_token_usage_maps_gemini_buckets():
@@ -983,10 +953,11 @@ async def test_communicate_respects_should_stop_during_poll(monkeypatch):
 
     call_count = 0
 
-    def should_stop() -> bool:
+    def should_stop() -> StopReason | None:
         nonlocal call_count
         call_count += 1
-        return call_count > 2  # False for batch1's 2 steps; True on the post-sleep check
+        # None for batch1's 2 steps; a reason on the post-sleep check
+        return StopReason.EARLY_CRITERION if call_count > 2 else None
 
     await agent.communicate("do it", should_stop=should_stop)
 
@@ -1077,7 +1048,7 @@ async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_
     agent.working_directory = Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
 
-    await agent.communicate("do it", should_stop=lambda: True)  # breaks after the first step
+    await agent.communicate("do it", should_stop=lambda: StopReason.EARLY_CRITERION)  # breaks after the first step
 
     # Without the retry, this second call raises AgentCrashError wrapping the
     # fake's RuntimeError (verified live before the fix landed). With it, the
@@ -1496,12 +1467,10 @@ def test_tool_names_cover_the_canonical_vocabulary():
     assert AntigravityAgent.tool_names.names["Bash"] == ("run_command",)
 
 
-# --- max_turns visible-turn cap -----------------------------------------------------
+# --- should_stop reasons -------------------------------------------------------------
 #
-# max_turns was accepted and never read on this backend, so a task capping turns ran
-# uncapped here while the same file capped on Claude Code. The cap counts VISIBLE
-# turns (tool calls — result_metrics.visible_turn_count's unit), enforced on the same
-# step-loop boundary as the cooperative stop.
+# The adapter owns no cap. A `should_stop` reason ends the step loop at that boundary,
+# and the reason picks the end status through `end_status_for`; the turn ends clean.
 
 
 def _tool_steps(count: int) -> list:
@@ -1515,54 +1484,63 @@ def _tool_steps(count: int) -> list:
     return steps
 
 
-async def test_max_turns_caps_visible_turns():
-    """The stream offers 5 tool calls; max_turns=2 keeps 2 and never pulls the rest."""
+class _EndCapture:
+    """Stream callback that keeps the ``AgentEndEvent``."""
+
+    def __init__(self) -> None:
+        self.end: AgentEndEvent | None = None
+
+    def on_event(self, event: object) -> None:
+        if isinstance(event, AgentEndEvent):
+            self.end = event
+
+
+@pytest.mark.parametrize(
+    ("reason", "status", "exhausted"),
+    [
+        (StopReason.TOOL_CALL_CAP, AgentEndStatus.TOOL_CALLS_EXHAUSTED, True),
+        (StopReason.TOKEN_BUDGET, AgentEndStatus.TOKEN_BUDGET_EXCEEDED, False),
+    ],
+)
+async def test_should_stop_reason_ends_the_turn_with_its_status(reason, status, exhausted):
+    """A reason after the first processed step ends the loop; nothing further is pulled."""
     agent = _agent_with_steps(_tool_steps(5))
+    capture = _EndCapture()
 
-    record = await agent.communicate("go", max_turns=2)
+    record = await agent.communicate("go", stream_callback=capture, should_stop=lambda: reason)
 
-    assert len(record.commands) == 2
-    assert record.max_turns_exhausted is True
+    assert capture.end is not None
+    assert capture.end.status is status
+    assert record.crashed is False
+    assert record.tool_calls_exhausted is exhausted
+    assert len(record.commands) == 1
+    assert agent._sdk_agent.conversation.cancel_call_count == 1
 
 
-async def test_max_turns_keeps_the_deciding_step_whole():
-    """The tool call that reaches the cap is completed, not cut mid-flight."""
+async def test_stop_after_a_done_step_keeps_the_deciding_call_whole():
+    """A stop polled after the call's DONE step keeps its result."""
     agent = _agent_with_steps(_tool_steps(3))
+    polls = 0
 
-    record = await agent.communicate("go", max_turns=1)
+    def should_stop() -> StopReason | None:
+        nonlocal polls
+        polls += 1
+        return StopReason.TOOL_CALL_CAP if polls >= 2 else None
+
+    record = await agent.communicate("go", should_stop=should_stop)
 
     assert len(record.commands) == 1
     assert record.commands[0].result_status == "success"
     assert record.commands[0].result_summary == "0"
 
 
-async def test_under_the_cap_completes_normally():
-    agent = _agent_with_steps(_tool_steps(2))
-
-    record = await agent.communicate("go", max_turns=5)
-
-    assert len(record.commands) == 2
-    assert record.max_turns_exhausted is False
-
-
-async def test_no_max_turns_is_uncapped():
-    """None must preserve the pre-existing behavior exactly."""
+async def test_no_reason_consumes_every_step():
     agent = _agent_with_steps(_tool_steps(4))
 
-    record = await agent.communicate("go")
+    record = await agent.communicate("go", should_stop=lambda: None)
 
     assert len(record.commands) == 4
-    assert record.max_turns_exhausted is False
-
-
-async def test_cooperative_stop_outranks_the_cap():
-    """Both firing on the same step reports STOPPED_EARLY — the more specific reason."""
-    agent = _agent_with_steps(_tool_steps(5))
-
-    record = await agent.communicate("go", max_turns=1, should_stop=lambda: True)
-
-    assert record.max_turns_exhausted is False
-    assert len(record.commands) == 1
+    assert record.tool_calls_exhausted is False
 
 
 async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
@@ -1581,8 +1559,7 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     batch1 = [_step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[bg])]
     # The re-drain kicks off a SECOND background job, then closes the first and runs
     # one more call — reaching the cap (2) with an orphan still ACTIVE. Both exit
-    # conditions are live at once, and the cap has to win: otherwise the loop keeps
-    # polling out a background job on a run that is already over.
+    # conditions are live at once, and the cap has to win.
     batch2 = [
         _step(
             "TOOL_CALL",
@@ -1603,10 +1580,12 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     batch3 = _tool_steps(2)  # must never be drained
     agent = _agent_with_steps([batch1, batch2, batch3])
     conv = agent._sdk_agent.conversation
+    monitor = TurnMonitor("t", [], limits=RunLimits(max_tool_calls=2))
 
-    record = await agent.communicate("go", max_turns=2)
+    record = await agent.communicate("go", stream_callback=monitor, should_stop=monitor.should_stop)
 
-    assert record.max_turns_exhausted is True
+    assert monitor.stop_reason is StopReason.TOOL_CALL_CAP
+    assert record.tool_calls_exhausted is True
     # The cap counts RESOLVED calls. The still-open bg2 is force-closed and recorded
     # as unresolved rather than dropped, so the trajectory shows what was interrupted.
     resolved = [c for c in record.commands if c.result_status != "unknown"]

@@ -353,3 +353,13 @@ class TestPlanCommandHarnessContract:
         exit_code, printed = self._plan(tmp_path, "agent:\n  type: pi\n  permission_mode: plan\n")
         assert exit_code == 0
         assert "All tasks are valid!" in printed
+
+    def test_plugin_path_with_no_skill_flips_the_exit_code(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty_plugin"
+        empty.mkdir()
+        exit_code, printed = self._plan(
+            tmp_path, f"agent:\n  type: claude-code\n  plugins:\n    - type: local\n      path: {empty}\n"
+        )
+        assert exit_code == 1
+        assert "config error" in printed
+        assert "offers no skill" in printed

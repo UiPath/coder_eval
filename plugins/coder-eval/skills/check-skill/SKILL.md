@@ -164,42 +164,21 @@ block in the template — and it is the template's job only **when nothing alrea
 skill**: if step 3 found an experiment supplying that block, inherit it and delete the
 template's copy rather than writing a second declaration.
 
-Otherwise, fill it in. **`path` must be a plugin root: a directory holding a `skills/`
-subdirectory**, so that the skill sits at `<path>/skills/<skill-name>/SKILL.md`. A
-`.claude-plugin/plugin.json` is optional — without one the namespace defaults to the
-directory's own name.
-
-For `.claude/skills/pdf-forms/SKILL.md` that root is **`.claude`**, not `.claude/skills`.
-Pointing at a bare directory of skill directories loads nothing at all.
-
-**Stage a minimal root rather than pointing at `.claude` itself.** A plugin root loads
-the WHOLE plugin, not just its skills: an `agents/`, `commands/` or `hooks/` directory
-sitting beside `skills/` becomes visible to the evaluated agent too. Point at a repo's
-`.claude` and you hand the agent every project subagent and command — and a subagent
-that can answer the request is a confound, not a detail. If `.claude/agents/pdf-expert.md`
-exists while you measure `pdf-forms`, the agent may delegate to it instead of calling the
-skill; `skill_triggered` records `no`, and recall drops for a reason that has nothing to
-do with the skill's description. It also makes the number repo-dependent, so two suites
-are no longer comparable.
-
-So build a root that contains exactly the unit under test, and point at that:
+Otherwise, fill it in. **`path` names a plugin root or a bare skills directory**: the skill
+sits at `<path>/skills/<skill-name>/SKILL.md` or at `<path>/<skill-name>/SKILL.md`. Both are
+staged. Only skills are staged, so a sibling `agents/`, `commands/` or `hooks/` directory
+does not reach the evaluated agent. For `.claude/skills/pdf-forms/SKILL.md`, `.claude` works
+and `.claude/skills` works too:
 
 ```bash
-SKILL_ROOT="$(mktemp -d)"
-mkdir -p "$SKILL_ROOT/skills"
-ln -s "$(pwd)/.claude/skills/pdf-forms" "$SKILL_ROOT/skills/pdf-forms"
-export SKILL_SOURCE_PATH="$SKILL_ROOT"
+export SKILL_SOURCE_PATH="$(pwd)/.claude"
 ```
 
-Use `cp -R` instead of `ln -s` where symlinks are awkward (Windows, some CI images). If
-the user prefers the one-liner, `export SKILL_SOURCE_PATH="$(pwd)/.claude"` still works —
-say plainly that it also exposes everything else under `.claude`, so a low recall may be
-the siblings rather than the skill.
-
 Keep it an environment variable rather than baking an absolute path into the YAML — the
-suite is committed and re-run on other machines. If the variable is unset the skill is simply
-absent, every positive row scores 0, and the result is indistinguishable from a skill that
-never triggers, so confirm it is set before reporting any low-recall finding.
+suite is committed and re-run on other machines. If the variable is unset, or the path holds
+no skill, `coder-eval plan` fails with a config error. It fails the same way when `skill_name`
+is not among the skills the path offers (their `SKILL.md` frontmatter `name`), before any
+run is paid for.
 
 `skill_name` must be the bare name even when the skill comes from a plugin and is
 invoked as `plugin:skill` — the checker strips the namespace before comparing. A

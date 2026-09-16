@@ -6,20 +6,18 @@ description: |
   the run as COST_BUDGET_EXCEEDED (which maps to tasks_failed via
   FinalStatus.category).
 
-  REQUIRES: a backend that reports per-turn cost — Anthropic direct with a
-  priced model, or Bedrock. This task is the regression check that the run
-  still emits per-turn cost telemetry (TurnRecord.token_usage.total_cost_usd).
-  A regression that broke cost reporting would log "max_usd budget
-  configured but no turn reported cost; skipping cost check" and the
-  task would land in tasks_failed via the placeholder criterion below
-  rather than via COST_BUDGET_EXCEEDED — so the workflow step must
-  verify final_status, not just the failed count.
+  REQUIRES: a run that can price its turns — a harness that reports cost, or
+  a model on the rate card. This task is the regression check that the run
+  still emits cost telemetry. A regression that broke cost reporting would
+  finish ERROR ("run_limits.max_usd could not be enforced") rather than
+  COST_BUDGET_EXCEEDED — so the workflow step must verify final_status, not
+  just the failed count.
 initial_prompt: |
   Print the word "ok".
 
 run_limits:
   max_usd: 0.0001
-  max_turns: 2
+  max_tool_calls: 2
 
 
 tags: [smoke-cost-budget]

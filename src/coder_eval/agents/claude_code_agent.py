@@ -30,7 +30,7 @@ from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITra
 
 # SystemPromptPreset is not re-exported from the SDK root, so claude_agent_sdk.types
 # is the only import route (same treatment as evaluation/verdict_tool.py).
-from claude_agent_sdk.types import SystemPromptPreset
+from claude_agent_sdk.types import SdkPluginConfig, SystemPromptPreset
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
@@ -61,6 +61,7 @@ from coder_eval.models import (
     ToolNameMap,
     TranscriptMessage,
     TurnRecord,
+    UsageGranularity,
     to_bedrock_inference_profile,
 )
 from coder_eval.models import (
@@ -73,6 +74,7 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     TextChunkEvent,
     ToolEndEvent,
     ToolEndStatus,
@@ -80,9 +82,10 @@ from coder_eval.streaming.events import (
     TurnEndEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import TurnClock, close_window
-from coder_eval.utils import dump_dataclass, process_plugins
+from coder_eval.utils import dump_dataclass
 
 
 logger = logging.getLogger(__name__)
@@ -207,7 +210,6 @@ class _ClaudeTurnState:
         task_id: str,
         user_input: str,
         iteration: int,
-        max_turns: int | None,
         log: PrefixedAdapter,
         turn_start_time: float,
         deadline: float | None,
@@ -219,15 +221,14 @@ class _ClaudeTurnState:
         self.task_id = task_id
         self.user_input = user_input
         self.iteration = iteration
-        self.max_turns = max_turns
         self.log = log
         self.turn_start_time = turn_start_time
         self.deadline = deadline
         # Set True by the in-loop deadline break OR the watchdog callback.
         self.timeout_hit = False
-        # Set True by the in-loop cooperative-stop break (early-stop-on-criterion).
-        # Distinct from timeout_hit: a clean, non-crash stop that must NOT raise.
-        self.stopped_early_hit = False
+        # Set by the in-loop should_stop break. Distinct from timeout_hit: a clean,
+        # non-crash stop that must NOT raise.
+        self.stop_reason: StopReason | None = None
         # Resolved by _build_claude_query, set on the state before any finalize
         # path. Stays None if we crash before setup (finalize reads it for cost
         # backfill).
@@ -278,6 +279,9 @@ class _ClaudeTurnState:
 
         # Turn/tool bracketing (self-describing event tree).
         self.current_turn_id: str | None = None
+        # Tokens each message id already reported on a TurnEndEvent: an id can
+        # resume after another id's emission, and must report only what is new.
+        self.reported_tokens_by_id: dict[str, TokenUsage] = {}
         self.tool_turn_ids: dict[str, str] = {}  # tool_id -> spawning turn_id
         self.emitted_tool_ends: set[str] = set()  # tool_ids already closed
         self.finalized = False
@@ -296,6 +300,22 @@ class _ClaudeTurnState:
                 cache_read_input_tokens=rec.cache_read_tokens,
             )
         return total
+
+    def unreported_turn_tokens(self, turn_id: str) -> TokenUsage | None:
+        """The part of ``turn_tokens`` no earlier ``TurnEndEvent`` for this id reported."""
+        total = self.turn_tokens(turn_id)
+        if total is None:
+            return None
+        previous = self.reported_tokens_by_id.get(turn_id)
+        self.reported_tokens_by_id[turn_id] = total
+        if previous is None:
+            return total
+        return TokenUsage(
+            uncached_input_tokens=total.uncached_input_tokens - previous.uncached_input_tokens,
+            output_tokens=total.output_tokens - previous.output_tokens,
+            cache_creation_input_tokens=total.cache_creation_input_tokens - previous.cache_creation_input_tokens,
+            cache_read_input_tokens=total.cache_read_input_tokens - previous.cache_read_input_tokens,
+        )
 
     def dispatch(self, message: Message) -> None:
         """Record the raw message and route it to its per-kind handler.
@@ -339,7 +359,7 @@ class _ClaudeTurnState:
                         task_id=self.task_id,
                         turn_id=self.current_turn_id,
                         status=TurnEndStatus.COMPLETED,
-                        tokens=self.turn_tokens(self.current_turn_id),
+                        tokens=self.unreported_turn_tokens(self.current_turn_id),
                     )
                 )
             self.current_turn_id = turn_id
@@ -637,21 +657,13 @@ class _ClaudeTurnState:
                 )
             )
 
-        max_turns_exhausted = not crashed and (
-            self._agent._is_max_turns_result(self.sdk_result_summary)
-            or (self.max_turns is not None and self.num_turns is not None and self.num_turns > self.max_turns)
-        )
-        if max_turns_exhausted and status == AgentEndStatus.COMPLETED:
-            status = AgentEndStatus.MAX_TURNS_EXHAUSTED
-            self.log.warning("Agent exhausted max_turns (%s); turn ended without completing", self.max_turns)
-
         if self.current_turn_id is not None:
             self.emit.on_event(
                 TurnEndEvent(
                     task_id=self.task_id,
                     turn_id=self.current_turn_id,
                     status=TurnEndStatus(status.value),
-                    tokens=self.turn_tokens(self.current_turn_id),
+                    tokens=self.unreported_turn_tokens(self.current_turn_id),
                 )
             )
             self.current_turn_id = None
@@ -676,7 +688,6 @@ class _ClaudeTurnState:
                 assistant_turn_count=self.assistant_turn_count,
                 messages=list(self.sdk_messages),
                 num_turns=self.num_turns,
-                max_turns_exhausted=max_turns_exhausted,
                 result_summary=self.sdk_result_summary,
                 crashed=crashed,
                 crash_reason=crash_reason,
@@ -704,6 +715,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        usage_granularity=UsageGranularity.GENERATION,
         permission_modes=frozenset(PermissionMode),
     )
     tool_names = ToolNameMap(names={name: (name,) for name in CANONICAL_TOOL_NAMES}, mcp_names=True)
@@ -753,6 +765,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         self._active_transport: SubprocessCLITransport | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
+        self._plugin_root: Path | None = None
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
         # Dedupe "unhandled SDK message type" warnings: _format_messages runs
         # many times per task and the types are stable for a session.
@@ -764,6 +777,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         *,
         env_path_prepend: list[str] | None = None,
         plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
     ) -> None:
         """Initialize and start the Claude Code agent.
 
@@ -773,10 +787,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 subprocess (typically the resolved ``SandboxConfig.mock_path_dirs``).
             plugin_tools_dir: Canonical ``node_modules/@uipath`` to export as
                 ``PLUGIN_TOOLS_DIR``. An external env-var pin still wins.
+            plugin_root: The staged plugin root, loaded as one local plugin.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
+        self._plugin_root = plugin_root
         self._state = AgentState.WORKING
         # Note: Client is created per-communication to avoid transport issues
 
@@ -923,8 +939,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         *,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
-        max_turns: int | None = None,
-        should_stop: Callable[[], bool] | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
     ) -> TurnRecord:
         """Send a message to Claude and receive its response.
 
@@ -935,10 +950,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 the CLI subprocess when it elapses — the SDK's anyio task groups
                 suppress cooperative cancellation, so `asyncio.wait_for` is not
                 sufficient.
-            max_turns: Hard cap on inner-loop turns. None defers to the SDK.
-            should_stop: Cooperative early-stop poll, checked after each dispatched
-                message; the first True finalizes cleanly as STOPPED_EARLY
-                (``crashed=False``, no raise) at the next boundary.
+            should_stop: The run's stop poll, checked after each dispatched message;
+                the first reason finalizes cleanly with ``end_status_for(reason)``
+                (``crashed=False``, no raise) at that boundary.
 
         Returns:
             TurnRecord containing the complete interaction
@@ -977,7 +991,6 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             task_id=task_id,
             user_input=user_input,
             iteration=self._iteration,
-            max_turns=max_turns,
             log=self._log,
             turn_start_time=turn_start_time,
             deadline=deadline,
@@ -991,9 +1004,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             stderr_lines.append(line)
 
         try:
-            options, transport, effective_model = self._build_claude_query(
-                user_input, timeout, max_turns, capture_stderr
-            )
+            options, transport, effective_model = self._build_claude_query(user_input, timeout, capture_stderr)
             # Set on the state BEFORE the AgentStart emit and any finalize path
             # (finalize reads it for cost backfill); stays None if setup crashed.
             state.effective_model = effective_model
@@ -1091,10 +1102,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 if state.timeout_hit:
                     assert timeout is not None
                     state.finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
-                elif state.stopped_early_hit:
-                    # NOT a crash, NOT a timeout. The max_turns promotion in
-                    # finalize() only fires for COMPLETED, so this survives.
-                    state.finalize(AgentEndStatus.STOPPED_EARLY, crashed=False, crash_reason=None)
+                elif state.stop_reason is not None:
+                    # NOT a crash, NOT a timeout.
+                    state.finalize(end_status_for(state.stop_reason), crashed=False, crash_reason=None)
                 else:
                     state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
             self._active_transport = None
@@ -1118,7 +1128,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         state: _ClaudeTurnState,
         query_kwargs: dict[str, Any],
         deadline: float | None,
-        should_stop: Callable[[], bool] | None,
+        should_stop: Callable[[], StopReason | None] | None,
     ) -> None:
         """Drive the SDK message stream for one turn (extracted from ``communicate``).
 
@@ -1130,7 +1140,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         - The wall-clock guard runs at the TOP, so an over-deadline message is
           DISCARDED — no append, no events. Do NOT move it to a post-loop check.
-        - The cooperative stop runs AFTER ``state.dispatch(message)``, so a watcher
+        - The cooperative stop runs AFTER ``state.dispatch(message)``, so the monitor
           can flip its flag on THIS message and the next is never pulled.
         """
         async for message in query(**query_kwargs):
@@ -1139,16 +1149,16 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 self._log.warning("Turn timeout reached mid-stream; breaking out of message loop")
                 break
             state.dispatch(message)
-            if should_stop is not None and should_stop():
-                state.stopped_early_hit = True
-                self._log.debug("Cooperative stop requested; ending message loop at this boundary")
+            reason = should_stop() if should_stop is not None else None
+            if reason is not None:
+                state.stop_reason = reason
+                self._log.debug("Stop requested (%s); ending message loop at this boundary", reason.value)
                 break
 
     def _build_claude_query(
         self,
         user_input: str,
         timeout: float | None,
-        max_turns: int | None,
         stderr_callback: Callable[[str], None],
     ) -> tuple[ClaudeAgentOptions, SubprocessCLITransport | None, str | None]:
         """Build the SDK options (+ a timeout-only transport) for one turn.
@@ -1160,8 +1170,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         """
         assert self.working_directory is not None  # guaranteed by communicate's guard above
 
-        # Process plugins: copy from config and replace env vars in paths.
-        plugins = process_plugins(self.config.plugins or [], log=self._log)  # type: ignore[arg-type]
+        plugins: list[SdkPluginConfig] = (
+            [{"type": "local", "path": str(self._plugin_root)}] if self._plugin_root is not None else []
+        )
 
         # Per-turn cost-correlation headers (LiteLLM only): the run/task tag plus
         # this turn's iteration, so the proxy-side cost log joins to the turn.
@@ -1198,8 +1209,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
             allowed_tools=self.config.allowed_tools or [],
             disallowed_tools=disallowed_tools,
             model=effective_model,
-            max_turns=max_turns,
-            plugins=plugins,  # type: ignore[arg-type]
+            plugins=plugins,
             stderr=stderr_callback,  # Capture stderr for better error messages
             env=env,
             # Recovers the CUMULATIVE output_tokens per emission from
@@ -1507,18 +1517,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         LiteLLM. The token buckets are left UNTOUCHED, so the reconciliation
         invariant is unaffected — only the cost scalar changes.
 
-        An unpriced model sets the cost to ``None`` **and warns**: a silent
-        ``None`` makes the orchestrator skip the ``max_usd`` gate with no
-        diagnostic.
+        An unpriced model sets the cost to ``None`` **and warns**, so the log names
+        the model when a ``max_usd`` task then finishes ``ERROR``.
 
         Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
         """
         cost = ClaudeCodeAgent._price_from_buckets(usage, model)
         usage.total_cost_usd = cost
         if cost is None:
-            logger.warning(
-                "No pricing for litellm model %r; turn cost left unset (max_usd gate will be skipped)", model
-            )
+            logger.warning("No pricing for litellm model %r; turn cost left unset", model)
 
     def get_sdk_options(self) -> dict[str, Any] | None:
         """Get the raw SDK options used for the last agent query.

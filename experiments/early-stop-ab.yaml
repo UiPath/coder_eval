@@ -1,7 +1,7 @@
 experiment_id: early-stop-ab
 description: |
   Smoke vs. e2e flavors from ONE task file via opt-in early-stop. Both variants
-  share the same tasks, criteria, and max_turns. Arming is per-criterion (the
+  share the same tasks, criteria, and max_tool_calls. Arming is per-criterion (the
   `stop_early:` blocks in the task file), so the `smoke` variant needs NO
   override at all — the armed criteria decide when it cuts off. The `e2e`
   variant throws the run-level kill switch (`run_limits.stop_early: false`,

@@ -90,7 +90,7 @@ def test_build_run_summary_buckets_every_status_by_category() -> None:
     assert summary.tasks_cost_budget_exceeded == 1
     # The two the hand-picked test omitted both classify as "failed".
     assert FinalStatus.COST_BUDGET_EXCEEDED.category == "failed"
-    assert FinalStatus.MAX_TURNS_EXHAUSTED.category == "failed"
+    assert FinalStatus.TOOL_CALLS_EXHAUSTED.category == "failed"
 
 
 def test_build_run_summary_threads_replicate_index() -> None:

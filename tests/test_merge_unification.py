@@ -81,10 +81,10 @@ class TestUnificationInvariant:
         assert a.agent.system_prompt is None
         assert a.agent.system_prompt_file == "p.txt"
 
-    def test_run_limits_max_turns(self):
-        a, _ = _resolve(_task(), variant=ExperimentVariant(variant_id="v", run_limits=RunLimits(max_turns=5)))
+    def test_run_limits_max_tool_calls(self):
+        a, _ = _resolve(_task(), variant=ExperimentVariant(variant_id="v", run_limits=RunLimits(max_tool_calls=5)))
         b, _ = _resolve(_task())
-        apply_overrides(b, {"run_limits.max_turns": 5})
+        apply_overrides(b, {"run_limits.max_tool_calls": 5})
         assert a.run_limits.model_dump() == b.run_limits.model_dump()
 
     def test_sandbox_driver(self):

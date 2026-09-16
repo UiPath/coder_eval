@@ -2,50 +2,59 @@
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+if TYPE_CHECKING:
+    from coder_eval.models.telemetry import TokenUsage
 
 
 DEFAULT_STOP_EARLY_GATE_THRESHOLD: Final[float] = 1.0
 """Default ``stop_early_gate_threshold``: reproduces strict-AND gating exactly.
 
-Single-sourced here so the field default below, the watcher's ``for_task``
+Single-sourced here so the field default below, the monitor's ``for_task``
 fallback, and the orchestrator's finalize fallback can never drift apart.
 """
+
+_BUDGET_OVERSHOOT: Final[str] = (
+    "Enforced live by the TurnMonitor; overshoot is soft by one usage report (see usage_granularity in "
+    "docs/agents/HARNESS_PARITY.md) plus any calls in flight. None = unlimited."
+)
 
 
 class RunLimits(BaseModel):
     """Run-time caps on a task.
 
-    Unifies structural caps (max_turns, task_timeout, turn_timeout) and
-    budget caps (tokens, USD). Structural caps stop the task. Budget caps are
-    checked after each completed agent turn and are cumulative across all
-    turns of a single task: a single-iteration task finishes and is then
-    marked over budget, and a dialog stops after the turn that crossed the
-    budget. Budgets apply to the subject agent only — judge and simulator
-    token spend are not counted.
+    Unifies structural caps (max_tool_calls, task_timeout, turn_timeout) and
+    budget caps (tokens, USD). Structural caps and budget caps stop the task at
+    the agent's next poll boundary; both are cumulative across every turn of the
+    task and apply to the subject agent only.
 
     Any subset of fields is valid; an empty block is legal.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    max_turns: int | None = Field(
+    max_tool_calls: int | None = Field(
         default=None,
         gt=0,
-        description="Max agent inner-loop turns per iteration. None = SDK default.",
+        description=(
+            "Hard cap on resolved tool calls across the whole task (every retry attempt and every "
+            "dialog turn). Enforced by the TurnMonitor at the agent's next poll boundary on every "
+            "harness: the round that reaches the cap is processed whole, so tool calls already in "
+            "flight can still land after it. The run finalizes cleanly as tool_calls_exhausted; "
+            "criteria are still checked. None = no cap."
+        ),
     )
-    expected_turns: int | None = Field(
+    expected_tool_calls: int | None = Field(
         default=None,
         ge=1,
         description=(
-            "Soft target for cumulative visible turns across a task. A 'turn' is one "
-            "entry in the Turn timeline: each tool call contributes 1, plus 1 for the "
-            "final reply when present. "
-            "When the running total exceeds this, the orchestrator logs a one-shot "
-            "warning and the report renders a badge — the run is NOT aborted "
-            "(use max_turns for a hard cap). None disables the check."
+            "Soft target for cumulative visible tool calls across a task (each resolved tool call "
+            "counts 1, plus 1 for the final reply when present). Exceeding it logs a one-shot warning "
+            "and badges the report; the run is NOT aborted (use max_tool_calls for a hard cap)."
         ),
     )
     task_timeout: int | None = Field(
@@ -61,25 +70,27 @@ class RunLimits(BaseModel):
     max_input_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Max cumulative input (prompt) tokens. None = unlimited.",
+        description="Max cumulative input (prompt) tokens across the task. " + _BUDGET_OVERSHOOT,
     )
     max_output_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Max cumulative output (completion) tokens. None = unlimited.",
+        description="Max cumulative output (completion) tokens across the task. " + _BUDGET_OVERSHOOT,
     )
     max_total_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Max cumulative input+output tokens. None = unlimited.",
+        description="Max cumulative input+output tokens across the task. " + _BUDGET_OVERSHOOT,
     )
     max_usd: float | None = Field(
         default=None,
         gt=0.0,
         description=(
-            "Max cumulative cost in USD. Requires per-turn cost reporting "
-            "(SDK-provided cost). Silently skipped if cost "
-            "is None for every turn."
+            "Max cumulative cost in USD across the task. Enforced live by the TurnMonitor: priced from the "
+            "harness's reported cost when it reports one, else from pricing.py for the reported model or "
+            "agent.model. A run that can do neither finishes ERROR at that turn's end (register_pricing adds a "
+            "plugin rate). Overshoot is soft by one usage report (see usage_granularity in "
+            "docs/agents/HARNESS_PARITY.md) plus any calls in flight."
         ),
     )
     count_cached_input: bool = Field(
@@ -104,7 +115,7 @@ class RunLimits(BaseModel):
         description=(
             "Run-level early-stop KILL SWITCH — there is no run-level master arm. Arming is "
             "per-criterion: a live-observable criterion's stop_early: block alone activates "
-            "the run's early-stop watcher. None (default): armed criteria decide; the run may "
+            "the run's TurnMonitor. None (default): armed criteria decide; the run may "
             "end early once they resolve mid-run (pass-stop when the on_pass=stop subset's "
             "weighted score is GUARANTEED to reach stop_early_gate_threshold regardless of "
             "any criterion still undecided, fail-stop when the armed set's weighted score is "
@@ -144,3 +155,12 @@ class RunLimits(BaseModel):
     # here. Whether a task is armed lives on the criteria, which RunLimits cannot
     # see, and post-merge is the only place with enough visibility.
     # Rationale: .claude/notes/orchestration.md § Why the guardrails are not model validators
+
+    def budgeted_tokens(self, usage: TokenUsage) -> tuple[int, int, int]:
+        """(input, output, total) as this block counts them: cache buckets join input only when flagged."""
+        input_tokens = usage.uncached_input_tokens
+        if self.count_cache_creation:
+            input_tokens += usage.cache_creation_input_tokens
+        if self.count_cached_input:
+            input_tokens += usage.cache_read_input_tokens
+        return input_tokens, usage.output_tokens, input_tokens + usage.output_tokens

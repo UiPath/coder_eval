@@ -2,8 +2,8 @@ experiment_id: smoke-variants
 description: |
   Smoke test for the 5-layer config-merge resolver: ensures multi-variant
   fan-out + variant-level overrides flow correctly from the experiment YAML
-  through ResolvedTask. Two variants override `max_turns` to different values
-  so the resolver bug "variants share the task's max_turns" would surface as a
+  through ResolvedTask. Two variants override `run_limits.max_tool_calls` to different
+  values so the resolver bug "variants share the task's cap" would surface as a
   count drift or behavior drift in the run.
 
 defaults:
@@ -14,11 +14,11 @@ defaults:
 
 variants:
   - variant_id: turns-low
-    description: "Variant overriding max_turns to a lower value."
+    description: "Variant overriding max_tool_calls to a lower value."
     run_limits:
-      max_turns: 1
+      max_tool_calls: 1
 
   - variant_id: turns-mid
-    description: "Variant overriding max_turns to a higher value."
+    description: "Variant overriding max_tool_calls to a higher value."
     run_limits:
-      max_turns: 2
+      max_tool_calls: 2

@@ -18,8 +18,12 @@ _ORIGINS = (
 )
 
 
-def test_spi_version_is_one() -> None:
-    assert spi.SPI_VERSION == 1
+def test_spi_version_is_two() -> None:
+    assert spi.SPI_VERSION == 2
+
+
+def test_the_stop_channel_is_exported() -> None:
+    assert {"StopReason", "end_status_for"} <= set(spi.__all__)
 
 
 def test_all_is_sorted_and_unique() -> None:

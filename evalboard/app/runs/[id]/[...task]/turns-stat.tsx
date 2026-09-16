@@ -22,8 +22,8 @@ export function TurnsStat({
                 className={`mt-0.5 tabular-nums font-medium ${turnsCellClasses(tint)}`}
                 title={
                     expectedTurns != null
-                        ? `expected_turns target: ${expectedTurns}`
-                        : "no expected_turns target set"
+                        ? `expected_tool_calls target: ${expectedTurns}`
+                        : "no expected_tool_calls target set"
                 }
             >
                 {fmtTurnsCount(turns)}

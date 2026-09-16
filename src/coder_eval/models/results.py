@@ -398,9 +398,9 @@ class TurnRecord(BaseModel):
             "ResultMessage (e.g. crash partial before the final message arrived)."
         ),
     )
-    max_turns_exhausted: bool = Field(
+    tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether the agent hit the max_turns limit without voluntarily completing",
+        description="Whether the tool-call cap ended this turn before the agent completed on its own",
     )
     result_summary: ResultSummary | None = Field(
         default=None,
@@ -455,6 +455,7 @@ class SimulationTelemetry(BaseModel):
         "criteria_passed",
         "stop_token",
         "max_turns",
+        "tool_call_cap",
         "budget",
         "error",
         "run_limit_exceeded",
@@ -484,7 +485,7 @@ class EarlyStopReason(StrEnum):
     through ``armed_criteria_passed``'s weighted gate.
     ``DECISION_BUDGET_EXCEEDED`` is a reporting label only: it marks a
     fail-stop whose deciding criterion timed out undecided past its
-    ``stop_early.decide_within`` (an *effective* fail latched by the watcher)
+    ``stop_early.decide_within`` (an *effective* fail latched by the monitor)
     rather than live-failing natively.
     """
 
@@ -496,7 +497,7 @@ class EarlyStopReason(StrEnum):
 class EarlyStopInfo(BaseModel):
     """Records why and when a run stopped early (``None`` when it ran to completion).
 
-    Populated by the orchestrator's ``EarlyStopWatcher`` at the moment the armed
+    Populated by the orchestrator's ``TurnMonitor`` at the moment the armed
     criteria are decided mid-run. ``early_stop is not None`` is itself the
     "stopped early" flag — no separate bool. Serialized as part of
     ``EvaluationResult`` to ``task.json``; defaults to ``None`` on old files, so
@@ -522,7 +523,7 @@ class EarlyStopInfo(BaseModel):
         + "advisory without re-deriving from task_config.",
     )
     sdk_turn_index: int = Field(
-        description="SDK inner-turn count at the stop (watcher counts TurnStartEvents). NOT the "
+        description="SDK inner-turn count at the stop (the monitor counts TurnStartEvents). NOT the "
         + "orchestrator iteration, which is always 1 in single-shot."
     )
     tool_call_index: int = Field(
@@ -532,10 +533,9 @@ class EarlyStopInfo(BaseModel):
         + "stop. Read it as 'which call decided', not as a count of fully-completed tool calls."
     )
     elapsed_seconds: float = Field(description="Wall-clock seconds from the first agent-start event to the stop.")
-    turns_remaining_at_stop: int | None = Field(
+    tool_calls_remaining_at_stop: int | None = Field(
         default=None,
-        description="max_turns - sdk_turn_index (an upper bound on turns avoided, not a measured "
-        + "saving); None when max_turns is unset.",
+        description="max_tool_calls - tool_call_index; None when the cap is unset.",
     )
     gate_threshold: float = Field(
         default=DEFAULT_STOP_EARLY_GATE_THRESHOLD,
@@ -597,9 +597,9 @@ class EvaluationResult(BaseModel):
 
     # Results
     final_status: FinalStatus = Field(description="Final status of the evaluation")
-    max_turns_exhausted: bool = Field(
+    tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether any iteration hit the agent max_turns limit without the agent voluntarily completing",
+        description="Whether the tool-call cap ended any iteration before the agent completed on its own",
     )
     weighted_score: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"
@@ -714,7 +714,7 @@ class EvaluationResult(BaseModel):
     )
 
     # Early-stop telemetry (only populated when the run was cut short by the
-    # armed-criteria watcher; None on a full run). See EarlyStopInfo.
+    # armed-criteria monitor; None on a full run). See EarlyStopInfo.
     early_stop: EarlyStopInfo | None = Field(
         default=None,
         description=(

@@ -72,10 +72,10 @@ agent:
   thinking_level: medium          # minimal | low | medium | high (default: medium)
   plugins:
     - type: local
-      path: "$SKILLS_PLUGIN_PATH"  # a directory of skills (SKILL.md), env-expanded
+      path: "$SKILLS_PLUGIN_PATH"  # a plugin root or a bare skills directory, env-expanded
 
 run_limits:
-  max_turns: 5
+  max_tool_calls: 5
   task_timeout: 360
   turn_timeout: 300
 
@@ -120,19 +120,13 @@ via the `claude_code` preset; Codex via `developer_instructions`).
 ### Skills (SKILL.md)
 
 Antigravity supports [Agent Skills](https://agentskills.io/specification)
-(`SKILL.md`) natively. Skill directories are discovered from:
-
-1. `agent.plugins` entries with `type: local` and a `path` (env vars in the path are
-   expanded at runtime), and
-2. the runtime plugin directory passed to `start()`.
-
-For each source, the harness is handed whichever of `<source>/skills` or `<source>`
-directly contains subdirectories with a `SKILL.md`. Unlike Codex — which symlinks
-skills into `.agents/skills/` — Antigravity is given the search-path roots directly
-via the SDK's `skills_paths`, and those roots are also added to the harness
-`workspaces` allowlist (otherwise the agent would find a skill but be denied the
-`SKILL.md` read as out-of-workspace). The agent logs a loud warning if a skills path
-can't be resolved or if zero skills are discovered.
+(`SKILL.md`) natively. Each `agent.plugins` entry with `type: local` names a plugin
+root or a bare skills directory (env vars in the path are expanded). coder-eval
+stages every entry into `<run_dir>/plugin_root` (see
+[Plugin staging](HARNESS_PARITY.md#plugin-staging)). The adapter hands
+`<plugin_root>/skills` to the SDK's `skills_paths` and adds the same path to the
+harness `workspaces` allowlist (otherwise the agent would find a skill but be denied
+the `SKILL.md` read as out-of-workspace). A path with no skill fails `coder-eval plan`.
 
 ## Permissions & tools — important differences
 
@@ -201,9 +195,9 @@ as every other agent.
    happens on the subsequent async `stop()`.
 4. **Denied tools stay visible.** A policy denial rejects the call after the model
    makes it, so a denied tool can still cost tokens on a retry.
-5. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
-   so the cap counts resolved tool calls instead, enforced on the step loop. See
-   [Run-Limit Parity](HARNESS_PARITY.md).
+5. **`max_tool_calls` counts resolved tool calls.** The adapter counts nothing itself.
+   The TurnMonitor owns the cap, as on every harness, and the adapter stops at its
+   next `should_stop` poll on the step loop. See [Run-Limit Parity](HARNESS_PARITY.md).
 6. **Shell commands over ~10s are moved to the background.** The localharness has a
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead

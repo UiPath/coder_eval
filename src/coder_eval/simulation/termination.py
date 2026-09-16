@@ -14,6 +14,7 @@ class DialogStopReason(StrEnum):
     CRITERIA_PASSED = "criteria_passed"
     STOP_TOKEN = "stop_token"
     MAX_TURNS = "max_turns"
+    TOOL_CALL_CAP = "tool_call_cap"
     BUDGET = "budget"
     ERROR = "error"
     RUN_LIMIT_EXCEEDED = "run_limit_exceeded"

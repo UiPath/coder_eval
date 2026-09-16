@@ -25,6 +25,10 @@ def test_flags_task_max_turns() -> None:
     assert _violations("x = task.max_turns")
 
 
+def test_flags_task_max_tool_calls() -> None:
+    assert _violations("x = task.max_tool_calls")
+
+
 def test_flags_self_task_max_turns() -> None:
     assert _violations("class C:\n    def m(self): x = self.task.max_turns")
 
@@ -66,9 +70,9 @@ def test_does_not_flag_run_limits_max_turns_anywhere() -> None:
     assert not _violations("x = rl.task_timeout")
 
 
-def test_does_not_flag_turn_max_turns_exhausted() -> None:
-    """`max_turns_exhausted` is a distinct TurnRecord field — must not collide."""
-    assert not _violations("x = turn.max_turns_exhausted")
+def test_does_not_flag_turn_tool_calls_exhausted() -> None:
+    """`tool_calls_exhausted` is a distinct TurnRecord field — must not collide."""
+    assert not _violations("x = turn.tool_calls_exhausted")
 
 
 def test_synthetic_regression_in_orchestrator_fires() -> None:

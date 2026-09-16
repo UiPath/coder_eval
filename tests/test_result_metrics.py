@@ -21,7 +21,7 @@ from coder_eval.models import (
 )
 from coder_eval.result_metrics import (
     TurnTimeBuckets,
-    expected_turns_overage,
+    expected_tool_calls_overage,
     has_final_reply,
     turn_time_buckets,
     visible_turn_count,
@@ -139,58 +139,64 @@ class TestExpectedTurnsOverage:
     def test_strict_greater_than(self):
         # 5 tools + reply = 6 visible turns. Budget 6 → no overage (equal).
         result = _make_result(
-            resolved={"run_limits": {"expected_turns": 6}},
+            resolved={"run_limits": {"expected_tool_calls": 6}},
             turns=[_turn_with_commands(commands=5, reply="done")],
         )
-        assert expected_turns_overage(result) is None
+        assert expected_tool_calls_overage(result) is None
 
         # 5 tools + reply = 6 visible turns. Budget 5 → overage (6 > 5).
         result = _make_result(
-            resolved={"run_limits": {"expected_turns": 5}},
+            resolved={"run_limits": {"expected_tool_calls": 5}},
             turns=[_turn_with_commands(commands=5, reply="done")],
         )
-        assert expected_turns_overage(result) == (6, 5)
+        assert expected_tool_calls_overage(result) == (6, 5)
 
     def test_missing_reply_skipped(self):
         # Tools across multiple iterations sum correctly; absent reply
         # contributes nothing (no +1).
         result = _make_result(
-            resolved={"run_limits": {"expected_turns": 5}},
+            resolved={"run_limits": {"expected_tool_calls": 5}},
             turns=[_turn_with_commands(commands=4), _turn_with_commands(commands=5)],
         )
-        assert expected_turns_overage(result) == (9, 5)
+        assert expected_tool_calls_overage(result) == (9, 5)
 
     def test_task_config_none(self):
         result = _make_result(task_config=False, turns=[_turn_with_commands(commands=10)])
-        assert expected_turns_overage(result) is None
+        assert expected_tool_calls_overage(result) is None
 
     def test_run_limits_missing(self):
         result = _make_result(resolved={}, turns=[_turn_with_commands(commands=10)])
-        assert expected_turns_overage(result) is None
+        assert expected_tool_calls_overage(result) is None
 
-    def test_expected_turns_unset(self):
+    def test_expected_tool_calls_unset(self):
         result = _make_result(resolved={"run_limits": {"max_turns": 10}}, turns=[_turn_with_commands(commands=20)])
-        assert expected_turns_overage(result) is None
+        assert expected_tool_calls_overage(result) is None
+
+    def test_the_historical_expected_turns_key_is_not_read(self):
+        result = _make_result(resolved={"run_limits": {"expected_turns": 5}}, turns=[_turn_with_commands(commands=20)])
+        assert expected_tool_calls_overage(result) is None
 
     def test_invalid_expected_type(self):
         result = _make_result(
-            resolved={"run_limits": {"expected_turns": "ten"}}, turns=[_turn_with_commands(commands=20)]
+            resolved={"run_limits": {"expected_tool_calls": "ten"}}, turns=[_turn_with_commands(commands=20)]
         )
-        assert expected_turns_overage(result) is None
+        assert expected_tool_calls_overage(result) is None
 
-    def test_expected_turns_zero_treated_as_invalid(self):
+    def test_expected_tool_calls_zero_treated_as_invalid(self):
         # Defensive: the model enforces ge=1, but a hand-rolled task.json could
         # still inject 0 — the helper must treat it as a disabled check.
-        result = _make_result(resolved={"run_limits": {"expected_turns": 0}}, turns=[_turn_with_commands(commands=10)])
-        assert expected_turns_overage(result) is None
+        result = _make_result(
+            resolved={"run_limits": {"expected_tool_calls": 0}}, turns=[_turn_with_commands(commands=10)]
+        )
+        assert expected_tool_calls_overage(result) is None
 
     def test_run_limits_not_a_dict(self):
         result = _make_result(resolved={"run_limits": "not-a-dict"}, turns=[_turn_with_commands(commands=10)])
-        assert expected_turns_overage(result) is None
+        assert expected_tool_calls_overage(result) is None
 
     def test_empty_turns(self):
-        result = _make_result(resolved={"run_limits": {"expected_turns": 1}}, turns=[])
-        assert expected_turns_overage(result) is None
+        result = _make_result(resolved={"run_limits": {"expected_tool_calls": 1}}, turns=[])
+        assert expected_tool_calls_overage(result) is None
 
 
 class TestTurnDefinitionMatchesDoc:

@@ -40,13 +40,11 @@ one thing only — a run from before the marker existed.
 
 
 class LocalPluginConfig(TypedDict):
-    """Vendor-neutral local plugin/skills source: a directory the agent scans for skills.
+    """Vendor-neutral local skills source: a plugin root or a bare skills directory.
 
-    Mirrors the runtime shape of claude_agent_sdk.SdkPluginConfig but carries no SDK
-    dependency, so the agnostic BaseAgentConfig can declare ``plugins`` without leaking a
-    Claude-Code type onto Codex / NoOp configs. Entries remain plain dicts at runtime
-    (TypedDict), so all consumers — Codex skill discovery, docker_runner auto-mount,
-    utils.process_plugins, and the Claude SDK pass-through — are unchanged.
+    Staged by ``orchestration.plugin_staging.stage_plugins`` into one canonical root
+    before the agent starts. A plain dict at runtime (TypedDict), so the agnostic
+    ``BaseAgentConfig`` declares ``plugins`` without an SDK type.
     """
 
     type: Literal["local"]
@@ -78,7 +76,6 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "stderr",
         "debug_stderr",
         "resume",
-        "max_turns",
         "session_id",
         "session_store",
         "session_store_flush",
@@ -88,6 +85,8 @@ _FRAMEWORK_OWNED_SDK_FIELDS: frozenset[str] = frozenset(
         "fork_session",
         # budgeting -- overlaps RunLimits, which the orchestrator enforces with
         # explicit FinalStatus codes. Two guards would disagree on counts.
+        # (`max_turns` is the SDK's own agent-loop cap; the framework cap is
+        # `run_limits.max_tool_calls`.)
         "max_budget_usd",
         "task_budget",
         # security-critical: arbitrary code injection or settings-bypass

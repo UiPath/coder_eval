@@ -7,7 +7,6 @@ subsystem can reuse them:
   ``dump_dataclass``).
 * Environment handling: ``$VAR`` expansion (``expand_env_vars``) and secret
   redaction (``redact_env``).
-* Plugin path processing (``process_plugins``).
 * Version / reproducibility capture (``get_version_info`` and the ``uip``
   helpers).
 """
@@ -37,67 +36,6 @@ def expand_env_vars(text: str) -> str:
     semantics), so callers can detect and warn about them afterwards.
     """
     return _ENV_VAR_PATTERN.sub(lambda m: os.environ.get(m.group(1) or m.group(2), m.group(0)), text)
-
-
-def process_plugins(
-    plugins: list[dict[str, Any]],
-    *,
-    log: logging.Logger | logging.LoggerAdapter[Any] = logger,
-) -> list[dict[str, Any]]:
-    """Process plugins by expanding environment variable placeholders in paths.
-
-    Expands any $VAR or ${VAR} patterns in plugin paths using environment variables.
-    Logs a warning if a path contains an env var reference that is not set.
-
-    Args:
-        plugins: List of plugin configuration dictionaries (with optional 'path' keys)
-        log: Logger (or adapter) for the undefined-env-var warning; defaults to
-            this module's logger.
-
-    Returns:
-        List of processed plugin configurations with env vars expanded
-    """
-    if not plugins:
-        return []
-
-    processed = []
-
-    for plugin in plugins:
-        # Create a copy to avoid modifying the original
-        processed_plugin = dict(plugin)
-
-        # Expand env vars in path if present
-        if "path" in processed_plugin:
-            path = processed_plugin["path"]
-            # Check for unset env vars before expansion (for better error messages)
-            for match in _ENV_VAR_PATTERN.finditer(path):
-                # group(1) is ${VAR}, group(2) is $VAR
-                var_name = match.group(1) or match.group(2)
-                if var_name not in os.environ:
-                    log.warning(f"Plugin path contains undefined environment variable ${var_name}: {path}")
-
-            # Expand all env vars in the path, then resolve relative paths
-            # against the process cwd (not the sandbox cwd) so plugins are found
-            expanded = expand_env_vars(path)
-            resolved = Path(expanded).resolve()
-            processed_plugin["path"] = str(resolved)
-
-            # HAZARD: a local plugin loads as a PLUGIN ROOT, so its skills must sit
-            # at <path>/skills/<name>/SKILL.md. One level deeper and the SDK loads
-            # NOTHING, with no error -- every positive row of an activation suite
-            # then scores 0, which reads exactly like a skill that never triggers.
-            # Warn rather than raise: a plugin may ship only agents/ or hooks/.
-            if plugin.get("type") == "local" and resolved.is_dir() and not (resolved / "skills").is_dir():
-                log.warning(
-                    f"Plugin path has no skills/ subdirectory, so it loads no skills: {resolved}. "
-                    + "A local plugin path must be a PLUGIN ROOT holding skills/ "
-                    + "(for .claude/skills/my-skill/SKILL.md that is .claude, not .claude/skills). "
-                    + "See docs/agents/HARNESS_PARITY.md."
-                )
-
-        processed.append(processed_plugin)
-
-    return processed
 
 
 SKIP = object()  # Sentinel marking values that serialize_value should drop from the result.

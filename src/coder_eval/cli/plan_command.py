@@ -72,9 +72,9 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
     check_api_keys()
 
     # Lazy import to avoid circular dependency at module level
-    from ..orchestration.early_stop import validate_early_stop
     from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
-    from ..orchestration.harness_contract import TaskResolutionError, validate_harness_contract
+    from ..orchestration.harness_contract import TaskResolutionError
+    from ..orchestration.resolution_checks import validate_resolved_task
     from ..orchestration.run_limits import validate_run_limits
 
     # Always load experiment (defaults to experiments/default.yaml)
@@ -142,9 +142,7 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
             for variant in exp_def.variants:
                 try:
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
-                    # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
-                    validate_early_stop(resolved)
-                    validate_harness_contract(resolved)
+                    validate_resolved_task(resolved)
                     for message in validate_run_limits(resolved):
                         console.print(
                             f"    [yellow]⚠[/yellow] [yellow]Variant '{variant.variant_id}': {message}[/yellow]"
