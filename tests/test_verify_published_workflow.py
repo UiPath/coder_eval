@@ -390,7 +390,6 @@ def test_monotonicity_guard_refuses_when_no_release_tag_exists(tmp_path: Path):
 
 # --------------------------------------------------------------------------------------
 # 6. the mechanics gate reasons over FinalStatus values as bare strings
-#
 # The gate's whole job is deciding which run.json `status` values mean "the published
 # action is broken". It spells them as string literals inside a heredoc, so a renamed
 # member, or a NEW member nobody classified here, is invisible to every other gate —

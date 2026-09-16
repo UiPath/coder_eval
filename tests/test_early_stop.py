@@ -2341,14 +2341,12 @@ class TestOrchestratorEarlyStopWiring:
         assert result.armed_criteria_passed(self._criteria()) is True  # armed gate passes
 
     async def test_decision_budget_exceeded_gates_through_armed_gate(self, tmp_path) -> None:
-        # A criterion capped at max_steps_to_decide=1 that never engages its
-        # skill fires a timeout fail-stop — and then gates through the SAME
-        # weighted armed gate as any other stop (no force-fail bypass). The
-        # mocked checker deliberately scores everything 1.0, so the armed gate
-        # passes: the stop truncates the run, the gate decides the verdict.
-        # (In a real run the frozen trajectory would score the undecided
-        # criterion 0.0 and the gate would fail — asserted separately below in
-        # test_decision_budget_exceeded_real_scores_fail_the_gate.)
+        # A criterion capped at max_steps_to_decide=1 that never engages its skill fires
+        # a timeout fail-stop, then gates through the SAME weighted armed gate as any
+        # other stop (no force-fail bypass). The mocked checker scores everything 1.0,
+        # so the gate passes: the stop truncates the run, the gate decides the verdict.
+        # With real scores the undecided criterion scores 0.0 and the gate fails:
+        # test_decision_budget_exceeded_real_scores_fail_the_gate.
         criteria = [
             _skill_crit(self._SKILL, self._SKILL, stop_on_pass=True, max_steps_to_decide=1),
             FileExistsCriterion(path="artifact.txt", description="artifact must exist"),

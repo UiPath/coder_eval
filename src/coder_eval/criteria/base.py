@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 # A criterion's verdict from a PARTIAL, mid-run trajectory (early-stop observability).
 # "undecided" means the outcome is not yet knowable from the events seen so far.
-#
 # Every live_verdict override must be DETERMINISTIC (a pure function of the
 # ``turn_records`` prefix, no hidden state) and MONOTONIC (a "pass"/"fail" holds for
 # every longer prefix; only "undecided" may change). CE036 replays every live

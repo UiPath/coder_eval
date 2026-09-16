@@ -1370,13 +1370,11 @@ SKILLS_REQUIRING_THE_CLI = {"init", "check-skill", "task"}
 RUBRIC_READERS = {"task", "lint-tasks", "init"}
 
 # Whether each skill must locate a repository's eval tree before it can do anything.
-# All six currently must. A per-skill hardcoded guess (`runs/latest`, `tasks/`) is
-# wrong in any repository that names the tree something else or nests it, so the
-# policy is declared once in reference/repo-layout.md and a reader that stops
-# pointing at it has forked it. A mapping rather than a set, mirroring
-# SKILL_DISABLE_MODEL_INVOCATION: a SEVENTH skill has to state whether it needs
-# discovery instead of silently defaulting to "no". `False` is a legitimate answer,
-# but it has to be written down.
+# A hardcoded guess (`runs/latest`, `tasks/`) is wrong in any repository that names or
+# nests the tree differently, so the policy lives once in reference/repo-layout.md. A
+# mapping rather than a set, mirroring SKILL_DISABLE_MODEL_INVOCATION: a new skill has
+# to state whether it needs discovery instead of defaulting to "no". `False` is a
+# legitimate answer, but it has to be written down.
 SKILL_NEEDS_EVAL_ROOT_DISCOVERY = {
     "analyze": True,
     "ci": True,
@@ -1734,8 +1732,7 @@ class TestPluginArtifacts:
 
     def test_skill_docs_surfaces_state_the_right_count(self):
         # The companion to the test above, which only checks that each NAME appears.
-        # These surfaces also state the count in prose, and adding the sixth skill meant
-        # hand-editing seven such sites across four files. Derived from disk: no count is
+        # These surfaces also state the count in prose. Derived from disk: no count is
         # written down here. Three phrasings are in use and all three are covered:
         # "<word> skills" / "<word> slash commands" (both READMEs, docs/PLUGIN.md),
         # "x <digit>" (CLAUDE.md's `SKILL.md` x 6), and "The other <word>" (the
@@ -1795,14 +1792,12 @@ class TestPluginArtifacts:
         ids=[str(p.relative_to(PLUGIN_ROOT)) for p in PLUGIN_TEXT_FILES if p.suffix == ".md"],
     )
     def test_bundled_markdown_fences_balance(self, doc: Path):
-        # A skill body is an instruction document; an unbalanced fence silently swallows
-        # everything after it. `analyze` shipped a ```markdown block containing a ```diff
-        # block, and because a closing fence may not carry an info string, the inner
-        # opener closed the outer block early — burying 32 lines including the whole
-        # Principles section, while staying valid YAML frontmatter and valid-ish
-        # Markdown. CommonMark rule applied here: a fence closes only on a run of
-        # backticks at least as long as the opener AND carrying no info string, so
-        # nesting requires the OUTER fence to be longer (````markdown wrapping ```diff).
+        # An unbalanced fence silently swallows everything after it. `analyze` shipped a
+        # ```markdown block containing a ```diff block; a closing fence may not carry an
+        # info string, so the inner opener closed the outer block early and buried 32
+        # lines. CommonMark: a fence closes only on a backtick run at least as long as the
+        # opener AND with no info string, so nesting needs a longer OUTER fence
+        # (````markdown wrapping ```diff).
         open_len = 0
         for n, raw in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             line = raw.strip()
@@ -3064,12 +3059,10 @@ _PATH_HEAD = re.compile(r"(?<![A-Za-z0-9_)\]])\.([A-Za-z_][A-Za-z0-9_]*)")
 
 # `analyze` carries a `| Current runs | Older runs | Where |` table, because a run written
 # before the rename spells two of these differently. The third cell is load-bearing: only
-# a TOP-LEVEL key is a model field with a `validation_alias`, so only those rows can be
-# checked against the schema. `max_iterations` is a key inside the free-form `task_config`
-# dict and appears in no `AliasChoices` at all — a guard that swept the whole table would
-# be unsatisfiable against the very prose it guards, and would get "fixed" by deleting the
-# row. Keeping the scoping visible in the shipped table rather than hidden in this file is
-# the point: an author adding a row has to say which kind of key it is.
+# a TOP-LEVEL key is a model field with a `validation_alias`. `max_iterations` is a key in
+# the free-form `task_config` dict and in no `AliasChoices`, so a guard over the whole table
+# would be unsatisfiable and get "fixed" by deleting the row. The shipped table keeps the
+# scoping visible: an author adding a row has to say which kind of key it is.
 _TOP_LEVEL_CELL = "top-level record key"
 
 

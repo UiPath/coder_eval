@@ -36,14 +36,12 @@ _REPLAY_LEAD_MS = 2
 # --- Notification factories (mirror test_codex_agent) -----------------------
 
 
-# Fixed epoch milliseconds, so every derived duration is deterministic and the
-# golden snapshots pin a real value rather than a scrubbed clock read. It is a
-# BASE, not a wall-clock claim: ``_rebase_notifications`` shifts the whole timeline
-# onto the replay's own clock before the scenario runs, so the SDK stamps and the
-# agent's own event stamps are commensurable. Left absolute, a codex replay
-# recorded a ``harness_startup_ms`` of ~126 DAYS — the agent
-# events are stamped ``now()`` while these sat in 2027 — which is a number no
-# presence-only assertion can catch.
+# Fixed epoch milliseconds, so every derived duration is deterministic and the golden
+# snapshots pin a real value. It is a BASE, not a wall-clock claim: ``_rebase_notifications``
+# shifts the timeline onto the replay's own clock, so SDK stamps and agent stamps are
+# commensurable. Left absolute, a codex replay recorded a ``harness_startup_ms`` of
+# ~126 DAYS (agent events stamped ``now()``, these in 2027), which no presence-only
+# assertion can catch.
 _T0_MS = 1_800_000_000_000
 
 

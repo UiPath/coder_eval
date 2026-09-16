@@ -138,7 +138,6 @@ class TestCodexTurnState:
 # notification and the agent discarded both, publishing the item's own `duration_ms`
 # instead — 0.0 for 70 of 211 commands in one nightly, absent for 25 more. All three
 # telemetry builders now derive their timing identically.
-#
 # Pure logic: the builders take plain SimpleNamespace roots, so these live here rather
 # than behind test_codex_agent.py's importorskip — otherwise a clean `make test`
 # (which syncs no codex extra) skips them entirely.

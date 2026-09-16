@@ -64,7 +64,9 @@ and catches the shape the total could not see; the total still catches a file th
 commentary however it is broken up.
 
 Measured when the cap was chosen: 78.5% of comment runs in the tree are 1-2 lines, 2.5% are
-6 or more, and the longest was 16. The four files above still sit at 100% of their total
+6 or more, and the longest was 16. After the essays moved out, 21 runs sat at exactly 8
+lines. They were cut to 7 or fewer so that no run starts at the cap, and an ordinary edit
+to one of them does not fail the gate. The four files above still sit at 100% of their total
 budget, so a comment added to one of them has to be paid for by deleting another.
 
 It is deliberately **not** a `CE` rule: `tests/lint/rules/` polices per-pattern invariants
@@ -80,5 +82,5 @@ number written down anywhere else is a second declaration that will be wrong.
 A rule's invariant, scope and blind spots live in its rule file under `tests/lint/rules/`
 (or its `@pytest.mark.lint` class in `tests/test_custom_lint.py`). Read that before you
 edit, suppress or widen a rule. The defect that motivated it lives in
-[lint-rules.md](lint-rules.md), under the rule's id. When the two disagree, the rule file
-is correct.
+[lint-rules.md](lint-rules.md), under the rule's id. That file does not repeat the
+invariant, scope or blind spots.

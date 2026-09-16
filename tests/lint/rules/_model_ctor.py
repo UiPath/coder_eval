@@ -40,14 +40,12 @@ def reaches_module(node: ast.ImportFrom, module_path: str) -> bool:
         return True
     if not node.level:
         return False
-    # A relative spelling carries only a TRAILING SLICE of the absolute path,
-    # and how much of it depends on the dot count: `from ..timing import` gives
-    # "timing", `from ..streaming.events import` gives "streaming.events". So
-    # match any suffix of the target, segment-wise, allowing the import to
-    # continue on into a submodule below it (`..models.criteria`). Comparing a
-    # single `rpartition` tail was right only while every target was
-    # one segment deep; it silently missed `coder_eval.streaming.events`
-    # entirely, which is a rule blind for a whole file rather than a near miss.
+    # A relative spelling carries only a TRAILING SLICE of the absolute path, and its
+    # length depends on the dot count: `from ..timing import` gives "timing",
+    # `from ..streaming.events import` gives "streaming.events". So match any suffix of
+    # the target, segment-wise, allowing the import to continue into a submodule below
+    # it (`..models.criteria`). A single `rpartition` tail missed a multi-segment target
+    # such as `coder_eval.streaming.events` entirely.
     segments = module_path.split(".")
     spelled = module.split(".")
     return any(spelled[: len(segments) - i] == segments[i:] for i in range(1, len(segments)))

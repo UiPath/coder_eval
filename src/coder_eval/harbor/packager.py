@@ -593,7 +593,6 @@ def _write_agent_phase_task_yaml(
         # runs the pre-agent phase for the CoderEvalAgent embed, unlike `post_run`,
         # which belongs to grading and never runs there. Commands are relative to the
         # sandbox cwd, resolved as template_sources are, so no path rewriting.
-        # Rationale: .claude/notes/reporting.md § Harbor export
         payload["pre_run"] = [c.model_dump(mode="json", exclude_none=True) for c in task.pre_run]
     if task.run_limits is not None:
         # `CoderEvalAgent.run()` invokes `coder-eval execute` against this

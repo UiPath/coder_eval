@@ -356,13 +356,11 @@ class TestRestrictPermissions:
         registry = _PermissionStack()
 
         # SCOPE the patches, do not lift them by hand. `signal.signal` is patched
-        # process-wide, and the async teardown restores SIGINT by calling
-        # `signal.signal(SIGINT, default_int_handler)` — which hits `_refuse` and raises
-        # `ValueError` out of teardown, failing the test for something it does not test.
-        # An explicit `undo()` after the calls fixed the happy path only: if
-        # `ensure_crash_handlers` itself raised — the very regression this test exists to
-        # catch — the undo would be skipped and the teardown ValueError would MASK the
-        # real failure. A context manager restores on every exit path.
+        # process-wide, and the async teardown restores SIGINT through it, which hits
+        # `_refuse` and raises `ValueError` out of teardown. A manual `undo()` is skipped
+        # if `ensure_crash_handlers` itself raises (the regression this test catches),
+        # and the teardown ValueError then MASKS the real failure. A context manager
+        # restores on every exit path.
         with monkeypatch.context() as mp:
             mp.setattr("coder_eval.fs_permissions.atexit.register", lambda _fn: None)
             mp.setattr("coder_eval.fs_permissions.signal.signal", _refuse)

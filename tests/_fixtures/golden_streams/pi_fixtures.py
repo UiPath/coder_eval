@@ -272,7 +272,6 @@ def _build_catalogue() -> list[PiScenario]:
 
     # (d) a tool the CLI opens and never resolves — force-closed as `unresolved` by the
     # orphan sweep at finalization.
-    #
     # READ THE SNAPSHOT: the command carries `execution_started_at` and NEITHER
     # `execution_completed_at` NOR `duration_ms`. Nothing observed this call finishing,
     # so stamping the sweep instant would manufacture a span the tool never occupied.
@@ -313,7 +312,6 @@ def _build_catalogue() -> list[PiScenario]:
     # reducer promises to survive, since pi retries internally. A spent
     # `turn_started_at` left in place reopens the next window at the PREVIOUS turn's
     # start: reproduced as 3000 ms of generation for a 2000 ms turn.
-    #
     # READ THE SNAPSHOT: both halves of that reset are in `on_turn_end`, and the second
     # assistant message carries no content block and an empty `tool_use_ids`.
     # Rationale: .claude/notes/timing.md § Where a reducer's window opens
