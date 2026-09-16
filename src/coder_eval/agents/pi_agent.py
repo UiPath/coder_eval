@@ -61,7 +61,7 @@ from coder_eval.models import (
     TurnRecord,
     UsageGranularity,
 )
-from coder_eval.pricing import calculate_cost
+from coder_eval.pricing import price_turn
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -575,38 +575,6 @@ class _PiTurnState:
             )
         )
 
-    def _rate_card_cost(self) -> float | None:
-        if not self.model or self.usage.is_empty():
-            return None
-        return calculate_cost(
-            self.model,
-            uncached_input_tokens=self.usage.uncached_input_tokens,
-            output_tokens=self.usage.output_tokens,
-            cache_creation_tokens=self.usage.cache_creation_input_tokens,
-            cache_read_tokens=self.usage.cache_read_input_tokens,
-        )
-
-    def _resolve_cost(self) -> float | None:
-        """Decide the turn's cost: the stream's own accounting vs the rate card.
-
-        Pi reports a real per-call ``cost.total``, which wins for any nonzero
-        total. It falls back to the rate card when the stream reported no cost at
-        all, or reported exactly ``$0`` on a model the rate card DOES price.
-
-        Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
-        """
-        rate = self._rate_card_cost()
-        if not self.saw_cost:
-            return rate
-        if self.cost_usd == 0.0 and rate:
-            logger.debug(
-                "pi: the stream reported $0 for a turn the rate card prices at $%.6f; using the rate card "
-                + "so the run total is not understated.",
-                rate,
-            )
-            return rate
-        return self.cost_usd
-
     def close_open_tools(self) -> None:
         """Force-close every tool still awaiting a result (crash/timeout orphans)."""
         for call_id in list(self.open_tools):
@@ -624,10 +592,8 @@ class _PiTurnState:
             return
         self.finalized = True
         self.close_open_tools()
-        usage = self.usage
-        cost = self._resolve_cost()
-        if cost is not None:
-            usage = usage.model_copy(update={"total_cost_usd": cost})
+        reported = self.usage.model_copy(update={"total_cost_usd": self.cost_usd if self.saw_cost else None})
+        usage = self.usage.model_copy(update={"total_cost_usd": price_turn(reported, (self.model,))})
         # A turn still open never received its `turn_end`; close it or the
         # one-pair-per-inner-turn contract breaks.
         if self.turn_open:

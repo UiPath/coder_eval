@@ -55,7 +55,7 @@ from coder_eval.models import (
     TurnRecord,
     UsageGranularity,
 )
-from coder_eval.pricing import calculate_cost
+from coder_eval.pricing import price_turn
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -182,14 +182,14 @@ def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
     thoughts = getattr(usage, "thoughts_token_count", 0) or 0
     uncached_input = max(prompt - cached, 0)
     output = candidates + thoughts
-    cost = calculate_cost(model, uncached_input, output, 0, cached) if model else None
-    return TokenUsage(
+    tokens = TokenUsage(
         uncached_input_tokens=uncached_input,
         output_tokens=output,
         cache_creation_input_tokens=0,
         cache_read_input_tokens=cached,
-        total_cost_usd=cost,
     )
+    tokens.total_cost_usd = price_turn(tokens, (model,))
+    return tokens
 
 
 @AgentRegistry.register(AgentKind.ANTIGRAVITY, AntigravityAgentConfig)

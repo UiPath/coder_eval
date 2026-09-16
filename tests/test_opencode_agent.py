@@ -316,14 +316,14 @@ class TestCostFallsBackToTheRateCard:
             ),
         ]
         patch_exec(_FakeProcess(stream))
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("DEBUG", logger="coder_eval.pricing"):
             record = await _run(_agent(), tmp_path)
 
         expected = calculate_cost("deepseek/deepseek-v4-pro", uncached_input_tokens=1000, output_tokens=500)
         assert expected is not None and expected > 0
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == pytest.approx(expected)
-        assert "not understated" in caplog.text
+        assert "using the rate card" in caplog.text
 
     async def test_zero_reported_cost_on_an_unpriced_model_stays_zero(self, patch_exec, tmp_path):
         """With no rate to fall back to, the stream's 0 is the best information we have."""

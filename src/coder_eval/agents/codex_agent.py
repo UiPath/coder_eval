@@ -41,7 +41,7 @@ from coder_eval.models import (
     UsageGranularity,
 )
 from coder_eval.orchestration.plugin_staging import link_or_copy
-from coder_eval.pricing import calculate_cost
+from coder_eval.pricing import price_turn
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -2080,18 +2080,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._thread_usage_baseline = cumulative
         # Fresh slice = full prompt minus the cached prefix.
         uncached = _fresh_input_tokens(turn.input, turn.cached)
-        cost = calculate_cost(
-            self._effective_model() or "",
-            uncached_input_tokens=uncached,
-            output_tokens=turn.output,
-            cache_read_tokens=turn.cached,
-        )
-        return TokenUsage(
+        usage = TokenUsage(
             uncached_input_tokens=uncached,
             output_tokens=turn.output,
             cache_read_input_tokens=turn.cached,
-            total_cost_usd=cost,
         )
+        usage.total_cost_usd = price_turn(usage, (self._effective_model(),))
+        return usage
 
     def _advance_usage_baseline(self, usage: TokenUsage | None) -> None:
         """Move the thread baseline past a turn whose SDK total never arrived.
@@ -2135,11 +2130,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # Each child generation on its own model, then sum. The total is unpriced
         # when any priced-from-tokens part is: a partial sum would read as the bill.
         child_costs = [
-            calculate_cost(
-                m.model or self._effective_model() or "",
-                uncached_input_tokens=_message_uncached_input(m),
-                output_tokens=m.output_tokens,
-                cache_read_tokens=m.cache_read_tokens,
+            price_turn(
+                TokenUsage(
+                    uncached_input_tokens=_message_uncached_input(m),
+                    output_tokens=m.output_tokens,
+                    cache_read_input_tokens=m.cache_read_tokens,
+                ),
+                (m.model or self._effective_model(),),
             )
             for m in children
         ]
@@ -2171,18 +2168,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         cache_read = sum(m.cache_read_tokens for m in assistant)
         if not (uncached or output or cache_read):
             return None
-        cost = calculate_cost(
-            self._effective_model() or "",
-            uncached_input_tokens=uncached,
-            output_tokens=output,
-            cache_read_tokens=cache_read,
-        )
-        return TokenUsage(
+        usage = TokenUsage(
             uncached_input_tokens=uncached,
             output_tokens=output,
             cache_read_input_tokens=cache_read,
-            total_cost_usd=cost,
         )
+        usage.total_cost_usd = price_turn(usage, (self._effective_model(),))
+        return usage
 
     @staticmethod
     async def _run_async(func: Any, *args: Any, **kwargs: Any) -> Any:

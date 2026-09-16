@@ -304,6 +304,7 @@ external = [
     "CE068",
     "CE069",
     "CE070",
+    "CE071",
 ]  # custom architectural lint rules (tests/lint/)
 
 [tool.ruff.lint.pylint]

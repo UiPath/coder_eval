@@ -297,6 +297,10 @@ them a CLI upgrade silently zeroes the run's tokens and cost and blinds the budg
 
 ## Cost: the stream versus the rate card
 
+`pricing.price_turn(usage, models)` is the one rule for a turn's cost. Every adapter and
+`TurnMonitor` call it, and CE071 keeps `calculate_cost` out of both, because five copies
+of the rule once let the `max_usd` stop and the persisted cost disagree on one turn.
+
 A non-zero cost the CLI reported always wins — it is the provider's own accounting, and on
 OpenRouter per-request routing makes it strictly better than a static headline rate. The
 rate card fills two gaps that would otherwise book tokens with no money:
@@ -309,13 +313,25 @@ rate card fills two gaps that would otherwise book tokens with no money:
   and understating cost silently defeats `max_usd`, which is the worse failure. A
   genuinely free model has an all-zero rate entry (or none), so it still resolves to 0.
 
+Empty usage returns the reported cost unchanged, `None` included: `EventCollector`
+publishes `token_usage=None` only for empty usage with no cost, so pricing an empty turn
+at `0.0` would publish a zero-cost usage row for a turn that spent nothing. So an empty
+turn reads `token_usage: null` on every harness (Codex, Antigravity and the LiteLLM route
+used to price it at `0.0` on a priced model). The monitor adds its own "an empty turn
+costs 0" in front, because it sums. A non-finite reported cost counts as unreported.
+
+The ORDER of `models` is the caller's decision. Adapters pass their one model. The monitor
+passes `agent.model`, then the model the agent resolved at start, then the last model a
+message reported: the configured model wins so that a sub-agent's model on the stream
+cannot reprice the run.
+
 The Claude SDK's own `costUSD` is a client-side estimate assuming Anthropic pricing, so it
 is wrong for an open-weight model behind LiteLLM and is repriced from the token buckets at
-the model's real rate. The buckets are untouched, so the reconciliation invariant holds —
-only the cost scalar changes. An unpriced model sets the cost to `None` (an honest N/A)
-**and warns**. When the task sets `max_usd`, the `TurnMonitor` then raises
-`BudgetUnenforceableError` at the turn end, so the row finishes `ERROR` and is never a
-silent skip.
+the model's real rate (`price_turn` with the report cleared). The buckets are untouched, so
+the reconciliation invariant holds — only the cost scalar changes. An unpriced model sets
+the cost to `None` (an honest N/A) **and warns**. When the task sets `max_usd`, the
+`TurnMonitor` then raises `BudgetUnenforceableError` at the turn end, so the row finishes
+`ERROR` and is never a silent skip.
 
 ## Codex rollout rebuild
 

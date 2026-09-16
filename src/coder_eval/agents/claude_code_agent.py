@@ -67,7 +67,7 @@ from coder_eval.models import (
 from coder_eval.models import (
     AssistantMessage as AssistantMessageTelemetry,
 )
-from coder_eval.pricing import calculate_cost
+from coder_eval.pricing import price_turn
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -1475,35 +1475,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         )
 
     @staticmethod
-    def _price_from_buckets(usage: TokenUsage, model: str | None) -> float | None:
-        """Price the four token buckets at ``model``'s list rate.
-
-        ``None`` when ``model`` is unset or absent from the rate card.
-        """
-        if not model:
-            return None
-        return calculate_cost(
-            model,
-            uncached_input_tokens=usage.uncached_input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_creation_tokens=usage.cache_creation_input_tokens,
-            cache_read_tokens=usage.cache_read_input_tokens,
-        )
-
-    @staticmethod
     def _backfill_cost(usage: TokenUsage, model: str | None) -> TokenUsage:
-        """Price the token buckets when the SDK gave no cost (timeout / kill).
+        """Price the turn in place with ``pricing.price_turn`` and return it.
 
         A timed-out or killed turn has no terminal ``ResultMessage``, so the cost
-        is absent even though the tokens are fully captured. A no-op when the cost
-        is already set or the model is unpriced.
+        is absent even though the tokens are fully captured; the rate card fills it.
         """
-        if usage.total_cost_usd is not None or not model:
-            return usage
-        cost = ClaudeCodeAgent._price_from_buckets(usage, model)
-        if cost is not None:
-            usage.total_cost_usd = cost
-        else:
+        reported = usage.total_cost_usd
+        usage.total_cost_usd = price_turn(usage, (model,))
+        if usage.total_cost_usd is None and reported is None and model and not usage.is_empty():
             # Not in the rate card, so the turn reverts to a null cost. Surface
             # it, or a stale pricing table silently reads as "Cost = —".
             logger.warning("No pricing for model %r; timeout/kill turn cost left unset", model)
@@ -1522,9 +1502,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
 
         Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
         """
-        cost = ClaudeCodeAgent._price_from_buckets(usage, model)
+        cost = price_turn(usage.model_copy(update={"total_cost_usd": None}), (model,))
         usage.total_cost_usd = cost
-        if cost is None:
+        if cost is None and not usage.is_empty():
             logger.warning("No pricing for litellm model %r; turn cost left unset", model)
 
     def get_sdk_options(self) -> dict[str, Any] | None:

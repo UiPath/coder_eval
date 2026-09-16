@@ -1050,7 +1050,7 @@ class TestExternalCancel:
 
 def _turn_end_no_cost(*, inp: int, out: int) -> str:
     """A `turn_end` whose usage object omits the `cost` key (provider/auth mode that
-    reports no cost) — so `_resolve_cost` must fall back to the rate card."""
+    reports no cost) — so `price_turn` must fall back to the rate card."""
     return json.dumps(
         {
             "type": "turn_end",
@@ -1104,7 +1104,7 @@ class TestCostFallsBackToTheRateCard:
         assert expected is not None and expected > 0
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == pytest.approx(expected)
-        assert "not understated" in caplog.text
+        assert "using the rate card" in caplog.text
 
     async def test_zero_reported_cost_on_an_unpriced_model_stays_zero(self, patch_exec, tmp_path):
         """With no rate to fall back to, the stream's 0 is the best information we have."""

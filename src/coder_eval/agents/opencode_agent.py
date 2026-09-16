@@ -53,7 +53,7 @@ from coder_eval.models import (
     TurnRecord,
     UsageGranularity,
 )
-from coder_eval.pricing import calculate_cost
+from coder_eval.pricing import price_turn
 from coder_eval.streaming.callbacks import StreamCallback, safe_emit
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -442,43 +442,6 @@ class _OpenCodeTurnState:
             )
         )
 
-    def _rate_card_cost(self) -> float | None:
-        """Price the captured buckets from the static rate card.
-
-        ``None`` when the model is unpinned or unpriced.
-        """
-        if not self.model or self.usage.is_empty():
-            return None
-        return calculate_cost(
-            self.model,
-            uncached_input_tokens=self.usage.uncached_input_tokens,
-            output_tokens=self.usage.output_tokens,
-            cache_creation_tokens=self.usage.cache_creation_input_tokens,
-            cache_read_tokens=self.usage.cache_read_input_tokens,
-        )
-
-    def _resolve_cost(self) -> float | None:
-        """Decide the turn's cost: the stream's own accounting vs the rate card.
-
-        A non-zero cost the CLI reported always wins. The rate card fills two gaps
-        that would otherwise book tokens with no money: no ``cost`` field at all,
-        and ``cost: 0`` for tokens the rate card prices above zero.
-
-        Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
-        """
-        rate = self._rate_card_cost()
-        if not self.saw_cost:
-            return rate
-        if self.cost_usd == 0.0 and rate:
-            logger.warning(
-                "opencode: the stream reported $0 for a turn the rate card prices at $%.6f "
-                + "(model unpriced in OpenCode's registry, or subscription auth); using the rate card "
-                + "so the run total is not understated.",
-                rate,
-            )
-            return rate
-        return self.cost_usd
-
     def _warn_token_shape(self, message: str, *args: Any) -> None:
         """Report a token-bucket surprise ONCE per turn (a broken stream repeats it)."""
         if self.warned_token_shape:
@@ -703,10 +666,8 @@ class _OpenCodeTurnState:
             return
         self.finalized = True
         self.close_open_tools()
-        usage = self.usage
-        cost = self._resolve_cost()
-        if cost is not None:
-            usage = usage.model_copy(update={"total_cost_usd": cost})
+        reported = self.usage.model_copy(update={"total_cost_usd": self.cost_usd if self.saw_cost else None})
+        usage = self.usage.model_copy(update={"total_cost_usd": price_turn(reported, (self.model,))})
         # A step still open never received its `step_finish`; close it or the
         # one-pair-per-inner-turn contract breaks. Completed steps already closed
         # themselves, so this fires ONLY for the straggler.

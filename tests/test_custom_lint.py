@@ -4054,6 +4054,51 @@ class TestCE044PluginManifestParity:
         (market_dir / "marketplace.json").write_text(json.dumps({"name": "demo", "plugins": [entry]}), encoding="utf-8")
 
 
+class TestCE071PriceTurnOnly:
+    """CE071 — adapters and the turn monitor price a turn only through ``price_turn``."""
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce071_price_turn_only import PriceTurnOnly
+
+        return list(PriceTurnOnly(filepath).check(ast.parse(source)))
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from coder_eval.pricing import calculate_cost",
+            "cost = calculate_cost(model, 1, 2)",
+            "cost = pricing.calculate_cost(model, 1, 2)",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "filepath",
+        ["/repo/src/coder_eval/agents/x_agent.py", "/repo/src/coder_eval/orchestration/turn_monitor.py"],
+    )
+    def test_calculate_cost_in_an_adapter_or_the_monitor_violates(self, source: str, filepath: str):
+        found = self._violations(source, filepath)
+        assert found
+        assert "price_turn" in found[0].message
+
+    @pytest.mark.parametrize(
+        "filepath",
+        [
+            "/repo/src/coder_eval/pricing.py",
+            "/repo/src/coder_eval/evaluation/judge_usage.py",
+            "/repo/src/coder_eval/orchestration/early_stop.py",
+        ],
+    )
+    def test_the_same_code_elsewhere_is_allowed(self, filepath: str):
+        source = "from coder_eval.pricing import calculate_cost\ncost = calculate_cost(model, 1, 2)"
+        assert not self._violations(source, filepath)
+
+    def test_price_turn_is_allowed_in_an_adapter(self):
+        source = "from coder_eval.pricing import price_turn\ncost = price_turn(usage, (model,))"
+        assert not self._violations(source, "/repo/src/coder_eval/agents/x_agent.py")
+
+
 class TestCE054EnvInfoKeyRoundTrip:
     """CE054 fires when an environment_info key is read with no writer anywhere.
 

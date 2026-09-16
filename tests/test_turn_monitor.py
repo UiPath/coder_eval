@@ -403,7 +403,21 @@ class TestUsdBudget:
 
         assert monitor.cost_usd() == pytest.approx(calculate_cost("claude-sonnet-4-6", 1_000_000, 0))
 
-    def test_a_non_finite_reported_cost_is_unpriceable(self) -> None:
+    def test_a_reported_zero_on_a_priced_model_is_priced_from_the_rate_card(self) -> None:
+        task = _task(limits=RunLimits(max_usd=0.50), model="claude-haiku-4-5")
+        monitor = TurnMonitor.for_task(task, arm=True)
+        _feed(monitor, _turn(TokenUsage(uncached_input_tokens=1_000_000, total_cost_usd=0.0)))
+        assert monitor.cost_usd() == pytest.approx(1.0)
+        assert monitor.should_stop() is StopReason.USD_BUDGET
+
+    def test_a_reported_zero_on_an_unpriced_model_is_an_enforceable_zero(self) -> None:
+        task = _task(limits=RunLimits(max_usd=0.10), model="openrouter/free/not-on-the-card")
+        monitor = TurnMonitor.for_task(task, arm=True)
+        _feed(monitor, _turn(TokenUsage(output_tokens=100, total_cost_usd=0.0)))
+        assert monitor.cost_usd() == 0.0
+        monitor.raise_if_over_budget(iteration=1)
+
+    def test_a_non_finite_reported_cost_on_an_unpriced_model_is_unpriceable(self) -> None:
         monitor = TurnMonitor.for_task(_task(limits=RunLimits(max_usd=0.10)), arm=True)
         _feed(monitor, _turn(TokenUsage(output_tokens=10, total_cost_usd=float("nan"))))
         with pytest.raises(BudgetUnenforceableError):

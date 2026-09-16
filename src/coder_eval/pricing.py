@@ -13,9 +13,19 @@ generated from it by ``make pricing-mirror`` and guarded by CE065. Never hand-ed
 generated file.
 """
 
-from collections.abc import Iterable, Mapping
+import logging
+import math
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from coder_eval.models import TokenUsage
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -244,3 +254,39 @@ def calculate_cost(
         + cache_creation_tokens * pricing.cache_write_per_mtok
         + cache_read_tokens * pricing.cache_read_per_mtok
     ) / 1_000_000
+
+
+def price_turn(usage: "TokenUsage", models: Sequence[str | None]) -> float | None:
+    """The cost of one turn: ``usage.total_cost_usd`` is what the harness reported.
+
+    In order: a finite, non-zero reported cost wins; empty usage returns the reported
+    cost unchanged (``None`` when nothing finite was reported); else the rate card for
+    the first model in ``models`` that it prices (falsy entries skipped); else a
+    reported ``0.0``; else ``None``. A non-finite reported cost counts as unreported.
+
+    Rationale: .claude/notes/agents.md § Cost: the stream versus the rate card
+    """
+    reported = usage.total_cost_usd
+    if reported is not None and not math.isfinite(reported):
+        reported = None
+    if reported:
+        return reported
+    if usage.is_empty():
+        return reported
+    for model in models:
+        if not model:
+            continue
+        cost = calculate_cost(
+            model,
+            usage.uncached_input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+        )
+        if cost is not None:
+            if reported == 0.0 and cost:
+                logger.debug(
+                    "a turn reported $0 that the rate card prices at $%.6f for %r; using the rate card", cost, model
+                )
+            return cost
+    return reported

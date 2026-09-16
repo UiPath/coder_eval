@@ -20,7 +20,6 @@ Rationale: .claude/notes/orchestration.md § Early stop on criterion
 from __future__ import annotations
 
 import logging
-import math
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +35,7 @@ from coder_eval.models import (
     TokenUsage,
 )
 from coder_eval.orchestration.early_stop import early_stop_active
-from coder_eval.pricing import calculate_cost
+from coder_eval.pricing import price_turn
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentEndEvent,
@@ -261,9 +260,9 @@ class TurnMonitor:
     def cost_usd(self) -> float | None:
         """Cumulative USD: every finished turn priced on its own, plus the priceable in-flight deltas.
 
-        A turn is priced from its reported cost, else from the rate card for the first
-        priced model of ``agent.model``, the model the agent resolved at start, and the
-        last model a message reported; a turn with no usage costs 0.
+        A turn is priced by ``pricing.price_turn`` with the models ``agent.model``, the
+        model the agent resolved at start, and the last model a message reported, in
+        that order; a turn with no usage and no reported cost costs 0.
         ``None`` once any finished turn could be priced none of these ways.
         """
         if self._unpriced_turn:
@@ -300,23 +299,9 @@ class TurnMonitor:
         self._in_flight = TokenUsage()
 
     def _price(self, usage: TokenUsage) -> float | None:
-        if usage.total_cost_usd is not None:
-            return usage.total_cost_usd if math.isfinite(usage.total_cost_usd) else None
-        if usage.is_empty():
+        if usage.is_empty() and usage.total_cost_usd is None:
             return 0.0
-        for model in (self._model, self._start_model, self._reported_model):
-            if model is None:
-                continue
-            cost = calculate_cost(
-                model,
-                usage.uncached_input_tokens,
-                usage.output_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
-            )
-            if cost is not None:
-                return cost
-        return None
+        return price_turn(usage, (self._model, self._start_model, self._reported_model))
 
     def _breach(self) -> tuple[str, float, float] | None:
         """The first budget over its cap as ``(budget name, actual, limit)``: input, output, total, usd."""
