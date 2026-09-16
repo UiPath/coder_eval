@@ -93,7 +93,7 @@ def validate_early_stop(task: TaskDefinition) -> None:
 
       1. ``run_limits.stop_early: true`` (master arm removed)
       2. armed together with ``simulation.enabled``
-      3. agent does not declare ``supports_cooperative_stop``
+      3. agent's contract does not declare ``cooperative_stop``
       4. degenerate ``stop_early_gate_threshold`` (``<= 0.0``)
 
     There are deliberately NO per-instance polarity guards, and no armed-but-empty
@@ -153,11 +153,11 @@ def validate_early_stop(task: TaskDefinition) -> None:
             + "not registered (is the providing plugin installed and loaded?). "
             + "Disarm with run_limits.stop_early: false to bypass this check."
         )
-    if not registration.agent_class.supports_cooperative_stop:
+    if not registration.agent_class.contract.cooperative_stop:
         supporting = ", ".join(
             kind
             for kind in AgentRegistry.list_kinds()
-            if (reg := AgentRegistry.get(kind)) is not None and reg.agent_class.supports_cooperative_stop
+            if (reg := AgentRegistry.get(kind)) is not None and reg.agent_class.contract.cooperative_stop
         )
         raise EarlyStopConfigError(
             "criterion-level stop_early arming requires an agent that supports cooperative stopping "

@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
@@ -33,7 +33,8 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
-    SystemPromptSemantics,
+    Enforcement,
+    HarnessContract,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -761,12 +762,18 @@ class _CodexTurnState:
 class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
-    # The pump has a between-items guard where `should_stop` runs.
-    supports_cooperative_stop: ClassVar[bool] = True
-
-    # `system_prompt` maps to developer_instructions, ON TOP of the base prompt.
+    # The pump has a between-items guard where `should_stop` runs; `system_prompt`
+    # maps to developer_instructions, ON TOP of the base prompt.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.UNSUPPORTED,
+        allowed_tools=Enforcement.UNSUPPORTED,
+        disallowed_tools=Enforcement.UNSUPPORTED,
+        cooperative_stop=True,
+    )
 
     def __init__(
         self,

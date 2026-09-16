@@ -11,7 +11,7 @@ from typing import Any, ClassVar, NoReturn, Protocol
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
 from .models import AgentState as AgentState
-from .models import BaseAgentConfig, SystemPromptSemantics, TurnRecord
+from .models import BaseAgentConfig, HarnessContract, TurnRecord
 from .streaming.callbacks import StreamCallback
 from .streaming.collector import EventCollector
 from .streaming.events import AgentEndStatus
@@ -70,22 +70,15 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     _iteration: int = 0
     _iteration_was_incremented: bool = False
 
-    # Whether this agent honors the cooperative ``should_stop`` interrupt. Default
-    # False: arming early-stop on an agent that does not set it True is rejected at
-    # resolution rather than silently never firing.
-    supports_cooperative_stop: ClassVar[bool] = False
-
     # Whether this agent's constructor accepts ``cost_log_tags``. The agent-agnostic
     # factory must only forward it to agents that set this True, or a route-driven
     # kwarg crashes every agent whose ``__init__`` lacks it.
     supports_cost_log_tags: ClassVar[bool] = False
 
-    # How this agent combines a configured ``system_prompt`` with its own default,
-    # recorded per run. Declared on the BASE so the marker is present on every run
-    # and "absent" reads as one thing only. An agent whose regime depends on its
-    # config overrides ``get_environment_info`` and emits the resolved value.
+    # Which uniform config fields this harness honors. No default: registration
+    # rejects a class that does not declare one.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "unknown"
+    contract: ClassVar[HarnessContract]
 
     def _begin_turn(self) -> None:
         """Mark the start of a ``communicate()`` turn: reset the pending slot and
@@ -224,7 +217,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 returned ``TurnRecord`` has ``max_turns_exhausted=True``.
                 None defers to the underlying SDK default.
             should_stop: Cooperative early-stop poll. An implementation with
-                ``supports_cooperative_stop=True`` calls it at each safe message
+                ``contract.cooperative_stop`` calls it at each safe message
                 boundary and, when it returns True, stops pulling further work and
                 finalizes the turn cleanly (``crashed=False``, no raise). Agents
                 that do not support it accept and ignore the argument.
@@ -322,12 +315,16 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         operators. The orchestrator merges this into ``environment_info`` after
         the agent starts.
 
-        The base emits ``system_prompt_semantics`` (from the ClassVar of the same
-        name) so every agent — including out-of-tree SPI agents — records the
-        regime. Overrides should spread ``super().get_environment_info()`` rather
+        The base emits ``system_prompt_semantics`` (the contract's class default, or
+        ``"unknown"`` when the harness does not honor a system prompt) and the
+        ``harness_contract`` itself, so every agent — including out-of-tree SPI
+        agents — records both. Overrides should spread ``super().get_environment_info()`` rather
         than returning a bare dict, or that guarantee is lost for that agent.
 
         Returns:
             A flat dict of JSON-serializable keys to merge.
         """
-        return {"system_prompt_semantics": self.system_prompt_semantics}
+        return {
+            "system_prompt_semantics": self.contract.system_prompt_semantics or "unknown",
+            "harness_contract": self.contract.model_dump(mode="json"),
+        }

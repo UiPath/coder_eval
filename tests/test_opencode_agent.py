@@ -911,6 +911,7 @@ class TestEnvironmentInfo:
         prompt, so the honest value is `unknown`."""
         info = _agent().get_environment_info()
         assert info["system_prompt_semantics"] == "unknown"
+        assert info["harness_contract"] == OpenCodeAgent.contract.model_dump(mode="json")
         assert info["opencode_model"] == "deepseek/deepseek-v4-pro"
         assert info["opencode_pure"] is True
 
@@ -1358,7 +1359,7 @@ class TestStderrIsDrainedConcurrently:
 
 class TestCooperativeStop:
     def test_capability_flag_is_declared(self):
-        assert OpenCodeAgent.supports_cooperative_stop is True
+        assert OpenCodeAgent.contract.cooperative_stop is True
 
     async def test_should_stop_ends_turn_cleanly(self, patch_exec, tmp_path):
         """A live subprocess must be torn down, and the turn must not be a crash."""

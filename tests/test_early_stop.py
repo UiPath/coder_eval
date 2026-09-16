@@ -47,7 +47,6 @@ from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import (
     AgentKind,
     ApiBackend,
-    BaseAgentConfig,
     CommandExecutedCriterion,
     CommandTelemetry,
     CriterionResult,
@@ -92,6 +91,7 @@ from coder_eval.streaming.events import (
     TurnStartEvent,
 )
 from tests._fixtures.live_criteria import FROZEN_TS, make_command, make_turn
+from tests.fixtures.harness_stubs import config_for_kind, stub_contract
 
 
 # --------------------------------------------------------------------------- #
@@ -144,26 +144,22 @@ def _task(
     )
 
 
-class _DummyNoStopConfig(BaseAgentConfig):
-    """Config for the dummy non-supporting agent registered by the fixture below."""
-
-
 class _DummyNoStopAgent:
-    """Agent stand-in that leaves ``supports_cooperative_stop`` at the default False.
+    """Agent stand-in whose contract declares ``cooperative_stop=False``.
 
-    ``validate_early_stop`` only reads the flag off the registered class, so no
+    ``validate_early_stop`` only reads the contract off the registered class, so no
     ``Agent`` machinery is needed. Guardrail 1 must keep rejecting agents that
     have not opted into the cooperative interrupt (all built-ins now support it).
     """
 
-    supports_cooperative_stop = False
+    contract = stub_contract(cooperative_stop=False)
 
 
 @pytest.fixture
 def dummy_no_stop_kind() -> Iterator[str]:
     """Register a non-supporting agent kind for guardrail-1 tests, then clean up."""
     kind = "dummy-no-stop"
-    AgentRegistry.register(kind, _DummyNoStopConfig)(_DummyNoStopAgent)
+    AgentRegistry.register(kind, config_for_kind(kind))(_DummyNoStopAgent)
     try:
         yield kind
     finally:
@@ -792,11 +788,14 @@ class TestValidateEarlyStop:
             validate_early_stop(task)
 
     def test_guardrail1_non_supporting_agent_rejected(self, dummy_no_stop_kind: str) -> None:
-        # Codex/antigravity now support the cooperative interrupt, so guardrail 1
-        # is exercised with a dummy agent that leaves the flag at False.
+        # Every built-in supports the cooperative interrupt, so guardrail 1 is
+        # exercised with a dummy agent whose contract declares cooperative_stop=False.
         task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=dummy_no_stop_kind)
-        with pytest.raises(EarlyStopConfigError, match="cooperative stopping"):
+        with pytest.raises(EarlyStopConfigError, match="cooperative stopping") as exc:
             validate_early_stop(task)
+        supporting = str(exc.value).split("(", 1)[1].split(")", 1)[0]
+        assert "claude-code" in supporting
+        assert dummy_no_stop_kind not in supporting
 
     def test_guardrail3_agentless_task_rejected(self) -> None:
         # An armed task with no agent block at all: the diagnosis must point at
@@ -809,7 +808,7 @@ class TestValidateEarlyStop:
         # An armed task whose agent type vanished from the registry (plugin not
         # installed/loaded) must fail with the plugin-pointing diagnosis.
         kind = "vanishing-agent"
-        AgentRegistry.register(kind, _DummyNoStopConfig)(_DummyNoStopAgent)
+        AgentRegistry.register(kind, config_for_kind(kind))(_DummyNoStopAgent)
         try:
             task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=kind)
         finally:

@@ -432,7 +432,7 @@ class TestAutoRetry:
 
 class TestCooperativeStop:
     def test_capability_flag_is_declared(self):
-        assert PiAgent.supports_cooperative_stop is True
+        assert PiAgent.contract.cooperative_stop is True
 
     async def test_should_stop_ends_turn_cleanly(self, patch_exec, tmp_path):
         proc = _RunningProcess(HAPPY_STREAM)

@@ -198,9 +198,16 @@ class TestCE046EnvInfoSpreadsSuper:
         # The base Agent.get_environment_info is the marker's source, not an override.
         src = (
             "class Agent:\n    def get_environment_info(self):\n"
-            "        return {'system_prompt_semantics': self.system_prompt_semantics}"
+            "        return {'system_prompt_semantics': self.contract.system_prompt_semantics}"
         )
         assert not self._run(src)
+
+    def test_flags_override_that_reads_contract_without_spread(self):
+        src = (
+            "class FooAgent:\n    def get_environment_info(self):\n"
+            "        return {'semantics': self.contract.system_prompt_semantics}"
+        )
+        assert self._run(src)
 
     def test_ignores_classes_without_the_method(self):
         assert not self._run("class FooAgent:\n    def other(self):\n        return {}")

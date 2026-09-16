@@ -65,4 +65,4 @@ def test_collector_visible_turn_count_matches_the_built_record():
 @pytest.mark.parametrize("agent_cls", [CodexAgent, AntigravityAgent])
 def test_both_capped_agents_declare_cooperative_stop(agent_cls):
     """The turn cap reuses the cooperative-stop boundary, so both must support it."""
-    assert agent_cls.supports_cooperative_stop is True
+    assert agent_cls.contract.cooperative_stop is True

@@ -599,6 +599,8 @@ field. **A trend dashboard must not pool scores across that boundary**, and an a
 marker reads as a pre-marker run — which is why every adapter spreads the base
 `get_environment_info()` first rather than emitting the marker conditionally (CE046).
 
+The class default is the `system_prompt_semantics` field of the agent's `HarnessContract`
+(the base emits `"unknown"` when the contract marks `system_prompt` unsupported).
 claude-code's is the only one derived per config rather than fixed, so it is computed
 from the resolved prompt value and never recomputed independently — the persisted regime
 cannot disagree with what was sent.

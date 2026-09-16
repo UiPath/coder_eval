@@ -338,7 +338,10 @@ class TestCodexEnvironmentInfo:
         emitted (Codex appends system_prompt as developer_instructions)."""
         monkeypatch.delenv("CODEX_BASE_URL", raising=False)
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
-        assert agent.get_environment_info() == {"system_prompt_semantics": "append"}
+        assert agent.get_environment_info() == {
+            "system_prompt_semantics": "append",
+            "harness_contract": CodexAgent.contract.model_dump(mode="json"),
+        }
 
     def test_azure_routing_recorded(self, monkeypatch):
         """Host (not full URL), wire_api, api-version, and the deployment-name marker
@@ -350,6 +353,7 @@ class TestCodexEnvironmentInfo:
         info = agent.get_environment_info()
         assert info == {
             "system_prompt_semantics": "append",
+            "harness_contract": CodexAgent.contract.model_dump(mode="json"),
             "codex_base_url_host": "my-res.openai.azure.com",
             "codex_wire_api": "responses",
             "codex_api_version": "2025-04-01-preview",

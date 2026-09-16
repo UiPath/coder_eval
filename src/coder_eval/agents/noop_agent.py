@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, ApiRoute, NoneAgentConfig, TurnRecord
+from coder_eval.models import AgentKind, ApiRoute, Enforcement, HarnessContract, NoneAgentConfig, TurnRecord
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -43,6 +43,15 @@ class NoOpAgent(Agent[NoneAgentConfig]):
     all ``COMPLETED``) and returns the empty turn the ``EventCollector`` reduces
     from it.
     """
+
+    contract = HarnessContract(
+        system_prompt=Enforcement.UNSUPPORTED,
+        plugin_skills=Enforcement.UNSUPPORTED,
+        permission_mode=Enforcement.UNSUPPORTED,
+        allowed_tools=Enforcement.UNSUPPORTED,
+        disallowed_tools=Enforcement.UNSUPPORTED,
+        cooperative_stop=False,
+    )
 
     def __init__(self, config: NoneAgentConfig, route: ApiRoute | None = None) -> None:
         self.config = config

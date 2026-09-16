@@ -91,6 +91,9 @@ from coder_eval.models.experiment import (
     VariantResult,
 )
 
+# Harness contract
+from coder_eval.models.harness_contract import Enforcement, HarnessContract
+
 # Judge
 from coder_eval.models.judge import JudgeVerdict
 
@@ -244,6 +247,9 @@ __all__ = [  # noqa: RUF022 - Keep grouped by category for readability
     "SystemPromptMode",
     "SystemPromptSemantics",
     "parse_agent_config",
+    # Harness contract
+    "Enforcement",
+    "HarnessContract",
     # Enums
     "AgentKind",
     "AgentState",

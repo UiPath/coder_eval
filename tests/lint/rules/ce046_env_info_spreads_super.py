@@ -1,7 +1,7 @@
 """CE046: a ``get_environment_info`` override must spread the base result.
 
 ``Agent.get_environment_info`` (agent.py) emits the ``system_prompt_semantics``
-run marker from the ClassVar of the same name, so EVERY run — including
+run marker from the agent's ``contract``, so EVERY run — including
 out-of-tree SPI agents — records which system-prompt regime built its prompts.
 Dashboards read an ABSENT marker as "a run from before the marker existed" and
 pool it into a legacy bucket, so an override that returns a bare dict does not
@@ -20,8 +20,8 @@ Fires on any method named ``get_environment_info`` defined directly in a class
 body that neither
 
   * calls ``super().get_environment_info()`` (the override contract), nor
-  * references ``self.system_prompt_semantics`` (the base itself, which emits
-    the marker directly — exempt so the rule does not flag its own source).
+  * is the ``Agent`` base itself, which emits the marker from ``self.contract``
+    directly — exempt so the rule does not flag its own source.
 
 ``# noqa: CE046`` if an agent genuinely must not record the marker (there is no
 such case today).
@@ -49,12 +49,14 @@ def _spreads_super(node: ast.FunctionDef) -> bool:
     return False
 
 
-def _emits_marker_directly(node: ast.FunctionDef) -> bool:
-    """True if the body reads ``self.system_prompt_semantics`` (the base itself)."""
+def _emits_marker_directly(cls: ast.ClassDef, node: ast.FunctionDef) -> bool:
+    """True if this is the ``Agent`` base reading ``self.contract``."""
+    if cls.name != "Agent":
+        return False
     for sub in ast.walk(node):
         if (
             isinstance(sub, ast.Attribute)
-            and sub.attr == "system_prompt_semantics"
+            and sub.attr == "contract"
             and isinstance(sub.value, ast.Name)
             and sub.value.id == "self"
         ):
@@ -71,7 +73,7 @@ class EnvInfoSpreadsSuper(BaseRule):
                 isinstance(stmt, ast.FunctionDef)
                 and stmt.name == _METHOD
                 and not _spreads_super(stmt)
-                and not _emits_marker_directly(stmt)
+                and not _emits_marker_directly(node, stmt)
             ):
                 self.violation(
                     stmt,

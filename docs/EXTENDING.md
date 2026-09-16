@@ -108,8 +108,8 @@ turn, and `ToolStart`/`ToolEnd` per tool call (close orphaned tools with
 `status=unresolved`). Fan events through an internal `EventCollector` — it builds the
 returned `TurnRecord`, the single agent-agnostic capture path.
 
-Set `supports_cooperative_stop: ClassVar[bool] = True` only if your `communicate()`
-actually honors `should_stop` (needed for criterion-level `stop_early:` arming). Leaving it
+Set `cooperative_stop=True` in your agent's `contract` only if your `communicate()`
+actually honors `should_stop` (needed for criterion-level `stop_early:` arming). Setting it
 `False` means early stop is rejected at resolution for your agent — which is correct
 if you can't stop cooperatively.
 

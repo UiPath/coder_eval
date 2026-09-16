@@ -27,7 +27,7 @@ import signal
 import time
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, ClassVar, Literal, NoReturn
+from typing import Any, Literal, NoReturn
 
 from coder_eval.agent import Agent
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
@@ -39,10 +39,11 @@ from coder_eval.models import (
     AssistantMessage,
     CommandTelemetry,
     ContentBlock,
+    Enforcement,
+    HarnessContract,
     OpenCodeAgentConfig,
     PermissionMode,
     ResultSummary,
-    SystemPromptSemantics,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -731,11 +732,16 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     """Runs the ``opencode`` CLI as a subprocess, one invocation per turn."""
 
     # `should_stop` is polled at every event boundary (tool-call granularity).
-    supports_cooperative_stop: ClassVar[bool] = True
-
     # No CLI knob for `system_prompt`, so the honest regime is `"unknown"`.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "unknown"
+    contract = HarnessContract(
+        system_prompt=Enforcement.UNSUPPORTED,
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.UNSUPPORTED,
+        allowed_tools=Enforcement.UNSUPPORTED,
+        disallowed_tools=Enforcement.UNSUPPORTED,
+        cooperative_stop=True,
+    )
 
     def __init__(
         self,

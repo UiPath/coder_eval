@@ -4,6 +4,7 @@ import pytest
 
 from coder_eval.agents.registry import AgentRegistry, create_agent
 from coder_eval.models import AgentKind, ClaudeCodeAgentConfig, parse_agent_config
+from tests.fixtures.harness_stubs import config_for_kind, stub_contract
 
 
 def test_register_decorator_preserves_class_type():
@@ -13,13 +14,17 @@ def test_register_decorator_preserves_class_type():
     # the type annotation erases to Any in the decorator signature.
 
     class FakeAgent:
+        contract = stub_contract()
+
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 
     # Register under a unique kind (not a built-in) to avoid the shadow-collision
     # guard, then roll it back so the process-global registry doesn't leak.
     try:
-        registration = AgentRegistry.register("fake-identity-kind", ClaudeCodeAgentConfig)(FakeAgent)
+        registration = AgentRegistry.register(
+            "fake-identity-kind", config_for_kind("fake-identity-kind", ClaudeCodeAgentConfig)
+        )(FakeAgent)
         assert registration is FakeAgent
     finally:
         AgentRegistry._registry.pop("fake-identity-kind", None)

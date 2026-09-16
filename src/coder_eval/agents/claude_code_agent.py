@@ -50,6 +50,8 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
+    Enforcement,
+    HarnessContract,
     LiteLLMRoute,
     ResultSummary,
     SystemPromptSemantics,
@@ -691,7 +693,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
     # The message loop has a between-messages guard where `should_stop` runs.
-    supports_cooperative_stop: ClassVar[bool] = True
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.ENFORCED,
+        allowed_tools=Enforcement.ENFORCED,
+        disallowed_tools=Enforcement.ENFORCED,
+        cooperative_stop=True,
+    )
 
     # __init__ accepts cost_log_tags and stamps them into ANTHROPIC_CUSTOM_HEADERS
     # for the proxy-side actual-cost join (LiteLLM backend).
@@ -1253,7 +1263,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         ``append`` = the claude_code preset with the configured prompt appended;
         ``replace`` = the configured prompt IS the entire system prompt (judge
         sub-agents). Unlike the other agents this is per-config, not fixed, so it
-        overrides the base ClassVar with the resolved value.
+        overrides the contract's class default with the resolved value.
 
         Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
         """

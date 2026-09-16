@@ -25,7 +25,7 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
@@ -45,7 +45,8 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
-    SystemPromptSemantics,
+    Enforcement,
+    HarnessContract,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -181,13 +182,19 @@ def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
 class AntigravityAgent(Agent[AntigravityAgentConfig]):
     """Implementation of the Agent interface for Google Antigravity (Gemini)."""
 
-    # The step loop has a between-steps guard where `should_stop` runs.
-    supports_cooperative_stop: ClassVar[bool] = True
-
+    # The step loop has a between-steps guard where `should_stop` runs;
     # TemplatedSystemInstructions wraps system_instructions around the harness's
     # own prompt, and always has — so runs ARE comparable across the marker.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.UNSUPPORTED,
+        allowed_tools=Enforcement.UNSUPPORTED,
+        disallowed_tools=Enforcement.UNSUPPORTED,
+        cooperative_stop=True,
+    )
 
     def __init__(
         self,

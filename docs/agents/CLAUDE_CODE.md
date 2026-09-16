@@ -205,7 +205,7 @@ carries a `stop_early:` block, a single-shot run ends cleanly at the next
 tool-call boundary once its **armed** criteria (those carrying a
 `stop_early:` block) are
 decided — so a raised `max_turns` isn't wasted on a smoke run. Early stop errors at
-resolution for any agent that does not declare `supports_cooperative_stop`. See the
+resolution for any agent whose contract does not declare `cooperative_stop`. See the
 [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) for the full contract.
 
 ## Telemetry
