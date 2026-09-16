@@ -122,9 +122,10 @@ budget again and re-hits the cap. `ended_cleanly` is the guard.
 `create_agent` calls `agent_class(config, route=route, **kwargs)` through a
 `cast(Any, ...)`, so pyright checks nothing at the call site; a `**_` sink would mean
 nothing checks it at runtime either. The orchestrator depends on that `TypeError` as a
-signal — it gates `cost_log_tags` on `supports_cost_log_tags` precisely because the
-agent-agnostic factory would otherwise forward it into constructors that do not declare
-it. A mis-gated kwarg must be loud, not silently dropped.
+signal: a kwarg forwarded into a constructor that does not declare it must be loud, not
+silently dropped. `cost_log_tags` is declared on the base `Agent.__init__` and every
+subclass forwards it, so the factory passes it on every LiteLLM route without a
+capability gate.
 
 `route` is accepted for factory parity and deliberately unused by the CLI-driven
 harnesses: those CLIs own their own provider configuration.

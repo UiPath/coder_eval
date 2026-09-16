@@ -15,6 +15,7 @@ from coder_eval.models import (
     ClaudeCodeAgentConfig,
     Enforcement,
     HarnessContract,
+    parse_agent_config,
 )
 from coder_eval.plugins import ensure_plugins_loaded
 from tests.fixtures.harness_stubs import config_for_kind, stub_contract
@@ -120,3 +121,13 @@ def test_every_builtin_declares_a_contract(kind: AgentKind) -> None:
     registration = AgentRegistry.get(kind)
     assert registration is not None
     assert isinstance(registration.agent_class.contract, HarnessContract)
+
+
+@pytest.mark.parametrize("kind", [k for k in AgentKind if k is not AgentKind.UNKNOWN])
+def test_every_builtin_accepts_cost_log_tags(kind: AgentKind) -> None:
+    ensure_plugins_loaded()
+    registration = AgentRegistry.get(kind)
+    assert registration is not None
+    tags = {"x-ce-run-id": "r"}
+    agent = registration.agent_class(parse_agent_config(type=kind), cost_log_tags=tags)
+    assert agent.cost_log_tags == tags

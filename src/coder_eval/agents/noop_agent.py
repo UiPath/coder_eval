@@ -53,9 +53,10 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         cooperative_stop=False,
     )
 
-    def __init__(self, config: NoneAgentConfig, route: ApiRoute | None = None) -> None:
-        self.config = config
-        self.route = route
+    def __init__(
+        self, config: NoneAgentConfig, route: ApiRoute | None = None, *, cost_log_tags: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(config, route, cost_log_tags=cost_log_tags)
 
     async def start(
         self,

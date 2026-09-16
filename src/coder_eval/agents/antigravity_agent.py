@@ -202,6 +202,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         route: ApiRoute | None = None,
         *,
         instance_name: str = "antigravity",
+        cost_log_tags: dict[str, str] | None = None,
     ):
         """Initialize the Antigravity agent.
 
@@ -210,9 +211,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             route: API routing configuration (unused — Antigravity authenticates via
                 GEMINI_API_KEY against the Gemini Developer API; kept for parity).
             instance_name: Short label used to prefix this instance's log records.
+            cost_log_tags: LiteLLM correlation headers; accepted for factory parity, unused.
         """
-        self.config = config
-        self.route = route or DirectRoute()
+        super().__init__(config, route or DirectRoute(), cost_log_tags=cost_log_tags)
         self.working_directory: Path | None = None
         # The live SDK Agent session + its AsyncExitStack. The exit-stack teardown
         # terminates the localharness subprocess, which is what stop()/kill() rely

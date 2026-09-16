@@ -781,6 +781,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         route: ApiRoute | None = None,
         *,
         instance_name: str = "codex",
+        cost_log_tags: dict[str, str] | None = None,
     ):
         """Initialize the Codex agent.
 
@@ -788,9 +789,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
             config: Agent configuration
             route: API routing configuration (unused for Codex, kept for interface compatibility)
             instance_name: Short label used to prefix this instance's log records
+            cost_log_tags: LiteLLM correlation headers; accepted for factory parity, unused
         """
-        self.config = config
-        self.route = route or DirectRoute()
+        super().__init__(config, route or DirectRoute(), cost_log_tags=cost_log_tags)
         self.codex_client: Any = None
         self.thread: Any = None
         # Thread-cumulative snapshot as of the END of the last finalized turn:

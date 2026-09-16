@@ -85,8 +85,8 @@ caller's move, not the agent's: only the caller knows a turn failed.
 Capabilities are declared rather than probed, on the agent's `HarnessContract`.
 `contract.cooperative_stop` gates arming early-stop, so arming it on an agent that ignores
 `should_stop` is rejected at resolution rather than silently never firing.
-`supports_cost_log_tags` and `contract.system_prompt_semantics` are declared for reasons of
-their own — see
+`contract.system_prompt_semantics` is declared for reasons of its own, and `cost_log_tags`
+is a base-constructor kwarg — see
 [agents.md](agents.md) § Why the constructors declare every kwarg and § The
 system_prompt_semantics marker.
 

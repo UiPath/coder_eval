@@ -556,29 +556,26 @@ class TestBuildSdkEnvCustom:
         env_d, _ = ClaudeCodeAgent._build_sdk_env(DirectRoute(), cost_log_tags=tags)
         assert "ANTHROPIC_CUSTOM_HEADERS" not in env_d
 
-    def test_cost_log_tags_gated_on_agent_capability_not_route(self):
-        """Regression: cost_log_tags is a Claude-only constructor kwarg, but the
-        route that triggers it (LiteLLM) is agent-independent. The agent-agnostic
-        create_agent factory must forward it ONLY to agents that declare
-        supports_cost_log_tags — otherwise a none/codex/antigravity task crashes
-        with TypeError under API_BACKEND=litellm."""
-        from coder_eval.agents import AgentRegistry, create_agent
-        from coder_eval.models import NoneAgentConfig
-        from coder_eval.plugins import ensure_plugins_loaded
+    @pytest.mark.parametrize("kind", [AgentKind.NONE, AgentKind.CODEX])
+    async def test_orchestrator_factory_forwards_tags_on_litellm(self, kind: AgentKind, tmp_path):
+        """The case the old capability gate protected: a none/codex task on a
+        LiteLLM route constructs with the forwarded tags instead of crashing."""
+        from coder_eval.models import FileExistsCriterion, SandboxConfig, TaskDefinition, parse_agent_config
+        from coder_eval.orchestrator import Orchestrator
 
-        ensure_plugins_loaded()
-        # Capability contract the orchestrator gate reads.
-        assert AgentRegistry.get(AgentKind.CLAUDE_CODE).agent_class.supports_cost_log_tags is True
-        assert AgentRegistry.get(AgentKind.NONE).agent_class.supports_cost_log_tags is False
-
-        route = LiteLLMRoute(model="deepseek/deepseek-v4-pro")
-        # A none-agent constructs fine on a LiteLLM route (the gate omits the kwarg)...
-        assert create_agent(AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route) is not None
-        # ...and it WOULD crash if the kwarg were forwarded — exactly what the gate prevents.
-        with pytest.raises(TypeError):
-            create_agent(
-                AgentKind.NONE, NoneAgentConfig(type=AgentKind.NONE), route=route, cost_log_tags={"x-ce-run-id": "r"}
-            )
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt=None if kind is AgentKind.NONE else "hi",
+            agent=parse_agent_config(type=kind),
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[FileExistsCriterion(description="c", path="x")],
+        )
+        orchestrator = Orchestrator(task=task, run_dir=tmp_path, variant_id="v")
+        orchestrator.route = LiteLLMRoute(model="m")
+        agent = await orchestrator._create_agent()
+        assert agent.cost_log_tags is not None
+        assert set(agent.cost_log_tags) == {"x-ce-run-id", "x-ce-task-id", "x-ce-attempt"}
 
     def test_cost_log_tags_reject_header_injection(self):
         # A task_id/variant_id carrying a CR/LF would inject extra headers into every

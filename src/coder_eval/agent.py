@@ -11,7 +11,7 @@ from typing import Any, ClassVar, NoReturn, Protocol
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
 from .models import AgentState as AgentState
-from .models import BaseAgentConfig, HarnessContract, TurnRecord
+from .models import ApiRoute, BaseAgentConfig, HarnessContract, TurnRecord
 from .streaming.callbacks import StreamCallback
 from .streaming.collector import EventCollector
 from .streaming.events import AgentEndStatus
@@ -70,15 +70,25 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     _iteration: int = 0
     _iteration_was_incremented: bool = False
 
-    # Whether this agent's constructor accepts ``cost_log_tags``. The agent-agnostic
-    # factory must only forward it to agents that set this True, or a route-driven
-    # kwarg crashes every agent whose ``__init__`` lacks it.
-    supports_cost_log_tags: ClassVar[bool] = False
-
     # Which uniform config fields this harness honors. No default: registration
     # rejects a class that does not declare one.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     contract: ClassVar[HarnessContract]
+
+    def __init__(
+        self, config: ConfigT, route: ApiRoute | None = None, *, cost_log_tags: dict[str, str] | None = None
+    ) -> None:
+        """Bind the resolved config and route.
+
+        Args:
+            config: The agent's resolved config.
+            route: API routing; harnesses that own their provider config ignore it.
+            cost_log_tags: LiteLLM-only correlation headers the factory forwards on
+                every LiteLLM route. An agent that cannot stamp them keeps them unused.
+        """
+        self.config = config
+        self.route = route
+        self.cost_log_tags = cost_log_tags
 
     def _begin_turn(self) -> None:
         """Mark the start of a ``communicate()`` turn: reset the pending slot and

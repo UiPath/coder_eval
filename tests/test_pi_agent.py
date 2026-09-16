@@ -662,9 +662,8 @@ class TestFactoryContract:
 
     def test_undeclared_kwarg_raises(self):
         config = PiAgentConfig(type="pi", model="openrouter/moonshotai/kimi-k3")
-        assert PiAgent.supports_cost_log_tags is False
         with pytest.raises(TypeError):
-            PiAgent(config, cost_log_tags={"x": "y"})  # type: ignore[call-arg]
+            PiAgent(config, not_a_kwarg={"x": "y"})  # type: ignore[call-arg]
 
 
 class TestRegistry:

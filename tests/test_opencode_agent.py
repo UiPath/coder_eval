@@ -573,15 +573,12 @@ class TestFactoryContract:
         assert OpenCodeAgent(config, None).route is None
 
     def test_an_undeclared_kwarg_raises_instead_of_vanishing(self):
-        """The orchestrator gates `cost_log_tags` on `supports_cost_log_tags`
-        precisely because an ungated forward must crash with TypeError. A `**_`
-        sink defeated that: a mis-gated kwarg would be silently dropped, yielding
-        runs with no cost correlation and no error.
+        """A `**_` sink would silently drop a kwarg the factory forwards by
+        mistake, yielding a run with no error; a declared signature raises.
         """
         config = OpenCodeAgentConfig(type="opencode", model="deepseek/deepseek-v4-pro")
-        assert OpenCodeAgent.supports_cost_log_tags is False
         with pytest.raises(TypeError):
-            OpenCodeAgent(config, cost_log_tags={"x-ce-run-id": "r1"})  # type: ignore[call-arg]
+            OpenCodeAgent(config, not_a_kwarg={"x-ce-run-id": "r1"})  # type: ignore[call-arg]
 
     def test_a_mistyped_task_id_raises_instead_of_defaulting(self):
         config = OpenCodeAgentConfig(type="opencode", model="deepseek/deepseek-v4-pro")

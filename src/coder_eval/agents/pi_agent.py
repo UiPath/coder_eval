@@ -699,6 +699,7 @@ class PiAgent(Agent[PiAgentConfig]):
         route: ApiRoute | None = None,
         *,
         task_id: str = "unknown",
+        cost_log_tags: dict[str, str] | None = None,
     ) -> None:
         """Every parameter the agent factory can pass is DECLARED, not absorbed.
 
@@ -708,8 +709,7 @@ class PiAgent(Agent[PiAgentConfig]):
 
         Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         """
-        self.config = config
-        self.route = route
+        super().__init__(config, route, cost_log_tags=cost_log_tags)
         self.task_id = task_id
         self.working_directory: str | None = None
         self._env_path_prepend: list[str] = []

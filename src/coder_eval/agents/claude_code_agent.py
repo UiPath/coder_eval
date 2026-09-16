@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
@@ -703,13 +703,12 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         cooperative_stop=True,
     )
 
-    # __init__ accepts cost_log_tags and stamps them into ANTHROPIC_CUSTOM_HEADERS
-    # for the proxy-side actual-cost join (LiteLLM backend).
-    supports_cost_log_tags: ClassVar[bool] = True
-
     # One warning per agent for a replace-mode config with no prompt: the resolver
     # runs on every query, and a per-turn repeat would bury the rest of task.log.
     _warned_prompt_mode_downgrade: bool = False
+
+    # Narrowed from the base: __init__ defaults a missing route to DirectRoute.
+    route: ApiRoute
 
     def __init__(
         self,
@@ -737,12 +736,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 attribute each call's real cost back to this run. None on
                 Direct/Bedrock.
         """
-        self.config = config
-        self.route = route or DirectRoute()
+        super().__init__(config, route or DirectRoute(), cost_log_tags=cost_log_tags)
         self._extra_mcp_servers = extra_mcp_servers or {}
-        # Correlation headers stamped on every SDK->proxy request (LiteLLM only).
-        # This turn's iteration is appended per-communicate().
-        self._cost_log_tags = cost_log_tags
         self.client: ClaudeSDKClient | None = None
         self.working_directory: Path | None = None
         # Turn-lifecycle bookkeeping lives on the Agent base class.
@@ -1166,8 +1161,8 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         # Per-turn cost-correlation headers (LiteLLM only): the run/task tag plus
         # this turn's iteration, so the proxy-side cost log joins to the turn.
         cost_log_tags: dict[str, str] | None = None
-        if self._cost_log_tags is not None:
-            cost_log_tags = {**self._cost_log_tags, "x-ce-iteration": str(self._iteration)}
+        if self.cost_log_tags is not None:
+            cost_log_tags = {**self.cost_log_tags, "x-ce-iteration": str(self._iteration)}
         env, route_model = self._build_sdk_env(
             self.route,
             path_prepend=self._env_path_prepend,
