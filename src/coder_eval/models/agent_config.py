@@ -325,9 +325,10 @@ class OpenCodeAgentConfig(BaseAgentConfig):
     on stdout. ``model`` is OpenCode's ``provider/model`` form (e.g.
     ``deepseek/deepseek-v4-pro``) and is passed through verbatim via ``-m``.
 
-    Permission handling is derived from the inherited ``permission_mode``: every
-    mode except :attr:`PermissionMode.PLAN` passes ``--auto`` so an unattended
-    eval run never blocks on an interactive approval prompt.
+    Every run passes ``--auto``. ``allowed_tools`` / ``disallowed_tools`` and
+    ``permission_mode: plan`` (read-only) become explicit ``permission`` denies, and
+    ``system_prompt`` is appended as an ``instructions`` file, both merged into
+    ``OPENCODE_CONFIG_CONTENT``. See ``docs/agents/OPENCODE.md``.
     """
 
     type: Literal[AgentKind.OPENCODE]  # type: ignore[assignment]
@@ -376,11 +377,10 @@ class PiAgentConfig(BaseAgentConfig):
     Each ``communicate()`` is one ``pi`` subprocess, so a dialog task relies on a
     per-agent ``--session-dir`` + stable ``--session-id`` for continuity.
 
-    ``system_prompt`` IS enforced. ``allowed_tools`` / ``disallowed_tools`` are NOT
-    forwarded (the shared defaults name Claude-namespaced tools that do not exist in
-    Pi's toolset, so forwarding them would strip the agent of ALL tools), nor is
-    ``permission_mode``, nor is ``system_prompt_file`` read -- both warned about at
-    ``start()``. ``plugins`` skills ARE injected. See ``docs/agents/PI.md``.
+    ``system_prompt`` is appended (``--append-system-prompt``). ``allowed_tools`` /
+    ``disallowed_tools`` become ``--tools`` / ``--exclude-tools`` over Pi's lowercase
+    built-ins, and ``permission_mode: plan`` denies the Write, Edit and Bash
+    equivalents. ``plugins`` skills are injected. See ``docs/agents/PI.md``.
 
     Rationale: .claude/notes/agents.md § Pi
     """

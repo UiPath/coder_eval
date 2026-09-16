@@ -72,8 +72,9 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
     check_api_keys()
 
     # Lazy import to avoid circular dependency at module level
-    from ..orchestration.early_stop import EarlyStopConfigError, validate_early_stop
+    from ..orchestration.early_stop import validate_early_stop
     from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
+    from ..orchestration.harness_contract import TaskResolutionError, validate_harness_contract
     from ..orchestration.run_limits import validate_run_limits
 
     # Always load experiment (defaults to experiments/default.yaml)
@@ -143,6 +144,7 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
                     resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
                     # Early-stop guardrails (no-op unless a criterion carries a stop_early: block).
                     validate_early_stop(resolved)
+                    validate_harness_contract(resolved)
                     for message in validate_run_limits(resolved):
                         console.print(
                             f"    [yellow]⚠[/yellow] [yellow]Variant '{variant.variant_id}': {message}[/yellow]"
@@ -151,10 +153,10 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
                     agent_model = resolved.agent.model if resolved.agent else None
                     model_str = f" ({agent_model})" if agent_model else ""
                     console.print(f"    [dim]Variant '{variant.variant_id}': {agent_type}{model_str}[/dim]")
-                except EarlyStopConfigError as e:
+                except TaskResolutionError as e:
                     # A hard config error (unlike generic per-variant resolution
                     # failures, which stay soft): flip the plan exit code.
-                    console.print(f"    [red]Variant '{variant.variant_id}': early-stop config error - {e}[/red]")
+                    console.print(f"    [red]Variant '{variant.variant_id}': config error - {e}[/red]")
                     all_valid = False
                 except Exception as e:
                     console.print(f"    [red]Variant '{variant.variant_id}': resolution failed - {e}[/red]")

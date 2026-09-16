@@ -473,12 +473,16 @@ def test_environment_info_reports_system_prompt_semantics():
     trend dashboards can segment runs by prompt regime instead of pooling
     pre-/post-append-semantics scores."""
     default_agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
-    assert default_agent.get_environment_info() == {"system_prompt_semantics": "append"}
+    info = default_agent.get_environment_info()
+    assert info["system_prompt_semantics"] == "append"
+    assert info["harness_contract"] == ClaudeCodeAgent.contract.model_dump(mode="json")
 
     judge_like = ClaudeCodeAgent(
         parse_agent_config(type=AgentKind.CLAUDE_CODE, system_prompt="grader", system_prompt_mode="replace")
     )
-    assert judge_like.get_environment_info() == {"system_prompt_semantics": "replace"}
+    judge_info = judge_like.get_environment_info()
+    assert judge_info["system_prompt_semantics"] == "replace"
+    assert judge_info["harness_contract"]["cooperative_stop"] is True
 
 
 def test_every_registered_agent_reports_prompt_semantics():
@@ -499,6 +503,7 @@ def test_every_registered_agent_reports_prompt_semantics():
 
     assert PluginAgent(parse_agent_config(type=AgentKind.NONE)).get_environment_info() == {
         "system_prompt_semantics": "unknown",
+        "harness_contract": NoOpAgent.contract.model_dump(mode="json"),
         "plugin_endpoint": "example.invalid",
     }
 

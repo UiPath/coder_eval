@@ -9,7 +9,6 @@ tags:
 agent:
   type: codex
   model: gpt-5.5
-  permission_mode: acceptEdits
   plugins:
     - type: local
       path: "$PLUGIN_PATH"

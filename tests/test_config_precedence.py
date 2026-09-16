@@ -399,8 +399,8 @@ def test_resolve_route_bedrock_missing_token_asserts():
 @pytest.mark.parametrize(
     ("var_name", "replacement"),
     [
-        ("DEFAULT_AGENT_MODEL", "agent.model"),
-        ("DEFAULT_PERMISSION_MODE", "agent.permission_mode"),
+        ("DEFAULT_AGENT_MODEL", "agent.by_type.claude-code.model"),
+        ("DEFAULT_PERMISSION_MODE", "agent.by_type.claude-code.permission_mode"),
         ("DEFAULT_MAX_TURNS", "run_limits.max_turns"),
     ],
 )

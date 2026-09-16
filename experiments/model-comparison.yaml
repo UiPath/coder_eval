@@ -10,7 +10,9 @@ description: "Compare Sonnet 4.6 vs Opus 4.6 on coding tasks"
 defaults:
   agent:
     type: claude-code
-    permission_mode: bypassPermissions
+    by_type:
+      claude-code:
+        permission_mode: bypassPermissions
 
   # Drop <sandbox>/{node_modules,.npm-prefix} so preserved artifacts stay slim (MST-9674).
   post_run:

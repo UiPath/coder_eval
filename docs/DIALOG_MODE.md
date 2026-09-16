@@ -57,8 +57,9 @@ The mechanics:
   from its persona and goal — closer to a cold-start user.
 - Each exchange is one user message plus the agent's full response (the agent may make many tool
   calls inside a single exchange).
-- The simulator is a **tools-disabled Claude Code agent** with `allowed_tools: []`, an explicit
-  deny-list, and no plugins or settings sources. It is pure text-in / text-out, and it **cannot see
+- The simulator is a **tools-disabled Claude Code agent**: an explicit deny-list of every
+  built-in tool, and no plugins or settings sources. (Its `allowed_tools: []` restricts
+  nothing on Claude Code; the deny-list is the safeguard.) It is pure text-in / text-out, and it **cannot see
   the sandbox** — no files, no terminal, no agent reasoning. Only what the agent writes in the chat.
 - The simulator resolves its own `ApiRoute` independently of `checker_context.api_route` (that
   override is judge-only — see [Checker Context](TASK_DEFINITION_GUIDE.md#checker-context)) — same

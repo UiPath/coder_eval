@@ -35,7 +35,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, ClassVar, Literal, NoReturn
+from typing import Any, Literal, NoReturn
 from uuid import uuid4
 
 from coder_eval.agent import Agent
@@ -43,16 +43,20 @@ from coder_eval.agents._skills import _plugin_skill_dirs  # shared plugin->skill
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
+    READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AgentState,
     ApiRoute,
     AssistantMessage,
     CommandTelemetry,
     ContentBlock,
+    Enforcement,
+    HarnessContract,
+    PermissionMode,
     PiAgentConfig,
     ResultSummary,
-    SystemPromptSemantics,
     TokenUsage,
+    ToolNameMap,
     TranscriptMessage,
     TurnRecord,
 )
@@ -134,20 +138,10 @@ _PI_ARG_RENAME: dict[str, dict[str, str]] = {
     },
 }
 
-# Config fields Pi does NOT enforce. `experiments/default.yaml` sets
-# `permission_mode` and `allowed_tools` on every task, so start() warns once
-# rather than letting a task believe it constrained the agent. `system_prompt`
-# and `plugins` ARE supported, so neither is here. Per-harness table:
-# docs/agents/HARNESS_PARITY.md.
-_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
-    "permission_mode",
-    "system_prompt_file",
-    # Forwarding these to --tools would allowlist nonexistent tools and strip the
-    # agent of ALL tools: Pi's built-ins are lowercase.
-    # Rationale: .claude/notes/agents.md § Harness run-limit parity
-    "allowed_tools",
-    "disallowed_tools",
-)
+# The canonical tool names Pi has no tool for.
+_PI_NO_EQUIVALENT: frozenset[str] = frozenset({"NotebookEdit", "Skill", "ToolSearch", "WebSearch"})
+
+_TOOL_NAMES = ToolNameMap.from_inverse(_TOOL_NAME_MAP, no_equivalent=_PI_NO_EQUIVALENT)
 
 # The full recognized Pi vocabulary (from `pi` 0.84.4). A clean exit that
 # recognized NOTHING from this set is vocabulary drift and is crashed, not scored.
@@ -679,12 +673,20 @@ class _PiTurnState:
 class PiAgent(Agent[PiAgentConfig]):
     """Runs the ``pi`` CLI as a subprocess, one invocation per turn."""
 
-    # `should_stop` is polled at every event boundary (tool-call granularity).
-    supports_cooperative_stop: ClassVar[bool] = True
-
+    # `should_stop` is polled at every event boundary (tool-call granularity);
     # `--append-system-prompt` appends to, never replaces, the CLI's own prompt.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.ENFORCED,
+        allowed_tools=Enforcement.ENFORCED,
+        disallowed_tools=Enforcement.ENFORCED,
+        cooperative_stop=True,
+        permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
+    )
+    tool_names = _TOOL_NAMES
 
     def __init__(
         self,
@@ -692,6 +694,7 @@ class PiAgent(Agent[PiAgentConfig]):
         route: ApiRoute | None = None,
         *,
         task_id: str = "unknown",
+        cost_log_tags: dict[str, str] | None = None,
     ) -> None:
         """Every parameter the agent factory can pass is DECLARED, not absorbed.
 
@@ -701,8 +704,7 @@ class PiAgent(Agent[PiAgentConfig]):
 
         Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         """
-        self.config = config
-        self.route = route
+        super().__init__(config, route, cost_log_tags=cost_log_tags)
         self.task_id = task_id
         self.working_directory: str | None = None
         self._env_path_prepend: list[str] = []
@@ -734,13 +736,6 @@ class PiAgent(Agent[PiAgentConfig]):
             raise RuntimeError(
                 "The 'pi' CLI was not found on PATH."
                 + " Install it with `npm install -g @earendil-works/pi-coding-agent` (see https://pi.dev/)."
-            )
-        ignored = [f for f in _UNSUPPORTED_CONFIG_FIELDS if getattr(self.config, f, None)]
-        if ignored:
-            logger.warning(
-                "pi: %s set but NOT enforced — the CLI has no equivalent knob in JSON print mode, so the run is "
-                + "unconstrained by them; do not rely on them as a boundary (see docs/agents/PI.md).",
-                ", ".join(ignored),
             )
         # Resolve `agent.plugins` -> skills dirs and load them via `pi --skill`.
         # Loudly logs when plugins were declared but nothing resolved (the run
@@ -857,13 +852,27 @@ class PiAgent(Agent[PiAgentConfig]):
             # Additive skill load (from agent.plugins): Pi lists each skill's
             # name+description in the system prompt and reads SKILL.md on demand.
             argv += ["--skill", skill_dir]
-        # allowed_tools / disallowed_tools are NOT forwarded — see
-        # _UNSUPPORTED_CONFIG_FIELDS. Pi runs with its full native toolset.
+        argv += self._tool_flags()
         if self.config.system_prompt:
             argv += ["--append-system-prompt", self.config.system_prompt]
         # user_input is a distinct argv element after `--` (never shell-interpolated).
         argv += ["--", user_input]
         return argv
+
+    def _tool_flags(self) -> list[str]:
+        """``--tools`` / ``--no-tools`` / ``--exclude-tools`` from the uniform tool fields.
+
+        A deny always wins: denied names are subtracted from the allowlist, and
+        ``permission_mode: plan`` denies the Write, Edit and Bash equivalents.
+        """
+        deny_names = list(self.config.disallowed_tools or [])
+        if self.config.permission_mode is PermissionMode.PLAN:
+            deny_names += READ_ONLY_DENIED_TOOLS
+        deny = {pi for name in deny_names for pi in _TOOL_NAMES.names[name]}
+        if self.config.allowed_tools:
+            allow = {pi for name in self.config.allowed_tools for pi in _TOOL_NAMES.names[name]} - deny
+            return ["--tools", ",".join(sorted(allow))] if allow else ["--no-tools"]
+        return ["--exclude-tools", ",".join(sorted(deny))] if deny else []
 
     def _build_env(self) -> dict[str, str]:
         """The CLI's full environment: the host's, plus the sandbox's contributions.
@@ -986,10 +995,9 @@ class PiAgent(Agent[PiAgentConfig]):
                     if not line:
                         break
 
-                    self._handle_line(line, state)
+                    self._handle_line(line, state, max_turns=max_turns)
 
-                    if max_turns is not None and state.turn_count > max_turns:
-                        state.max_turns_exhausted = True
+                    if state.max_turns_exhausted:
                         await self.kill()
                         break
                     if should_stop is not None and should_stop():
@@ -1143,11 +1151,12 @@ class PiAgent(Agent[PiAgentConfig]):
         finally:
             self._capture_partial_turn(collector)
 
-    def _handle_line(self, line: bytes, state: _PiTurnState) -> None:
+    def _handle_line(self, line: bytes, state: _PiTurnState, *, max_turns: int | None = None) -> None:
         """Parse one nd-JSON line and dispatch it. Never raises on bad input.
 
         ``agent_end`` is NOT terminal — only ``agent_settled`` / stdout EOF is — so
-        it is recognized, ignored, and the read loop keeps going.
+        it is recognized, ignored, and the read loop keeps going. A ``turn_start``
+        past ``max_turns`` sets ``state.max_turns_exhausted`` instead of opening a turn.
         """
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
@@ -1168,7 +1177,9 @@ class PiAgent(Agent[PiAgentConfig]):
         elif len(state.unrecognized_types) < _MAX_UNRECOGNIZED_TYPES:
             state.unrecognized_types.add(event_type or "<missing type>")
 
-        if event_type == "turn_start":
+        if event_type == "turn_start" and max_turns is not None and state.turn_count >= max_turns:
+            state.max_turns_exhausted = True
+        elif event_type == "turn_start":
             state.on_turn_start()
         elif event_type == "message_update":
             state.on_message_update(obj)

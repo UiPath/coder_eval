@@ -34,6 +34,7 @@ from coder_eval.models import (
     LiveSuccessCriterion,
     StopEarlyPolicy,
 )
+from coder_eval.orchestration.harness_contract import TaskResolutionError, registration_for
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
     AgentStartEvent,
@@ -57,13 +58,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class EarlyStopConfigError(ValueError):
+class EarlyStopConfigError(TaskResolutionError):
     """Raised when a task arms early-stop in a way v1 cannot honor.
 
-    Subclasses ``ValueError`` so the run path's resolve -> ``typer.BadParameter``
-    conversion covers it transparently; the ``plan`` command catches this
-    subclass specifically to flip its exit code (generic per-variant resolution
-    failures intentionally stay soft).
+    A ``TaskResolutionError`` (so a ``ValueError``): the run path aborts on it and
+    the ``plan`` command flips its exit code, while generic per-variant resolution
+    failures stay soft.
     """
 
 
@@ -93,7 +93,7 @@ def validate_early_stop(task: TaskDefinition) -> None:
 
       1. ``run_limits.stop_early: true`` (master arm removed)
       2. armed together with ``simulation.enabled``
-      3. agent does not declare ``supports_cooperative_stop``
+      3. agent's contract does not declare ``cooperative_stop``
       4. degenerate ``stop_early_gate_threshold`` (``<= 0.0``)
 
     There are deliberately NO per-instance polarity guards, and no armed-but-empty
@@ -103,6 +103,7 @@ def validate_early_stop(task: TaskDefinition) -> None:
 
     Raises:
         EarlyStopConfigError: on any unsupported armed configuration.
+        HarnessContractError: an armed task has no agent type, or an unregistered one.
     """
     limits = task.run_limits
     # (1) The master arm no longer exists; arming moved onto the criteria. A
@@ -128,36 +129,21 @@ def validate_early_stop(task: TaskDefinition) -> None:
             + "for dialog-mode criteria stopping, or disarm with run_limits.stop_early: false."
         )
 
-    # (3) The agent must honor the cooperative interrupt. Lazily import the
-    # registry + plugin loader so this module stays free of runtime coder_eval
-    # imports at load time.
+    # (3) The agent must honor the cooperative interrupt.
     from coder_eval.agents.registry import AgentRegistry
-    from coder_eval.plugins import ensure_plugins_loaded
 
-    ensure_plugins_loaded()
-    agent_type = str(task.agent.type) if task.agent is not None and task.agent.type is not None else None
-    if agent_type is None:
-        # Distinct from an unregistered type: there is no agent block at all,
-        # so pointing at plugin loading would send the user the wrong way.
-        raise EarlyStopConfigError(
-            "criterion-level stop_early arming requires an agent block with a registered type; "
-            + "this task resolves without one. "
-            + "Disarm with run_limits.stop_early: false to bypass this check."
-        )
-    registration = AgentRegistry.get(agent_type)
-    if registration is None:
-        # Not the same failure as an agent that opted out of cooperative stop:
-        # an unregistered type usually means a plugin is not installed/loaded.
-        raise EarlyStopConfigError(
-            f"criterion-level stop_early arming requires a registered agent type; {agent_type!r} is "
-            + "not registered (is the providing plugin installed and loaded?). "
-            + "Disarm with run_limits.stop_early: false to bypass this check."
-        )
-    if not registration.agent_class.supports_cooperative_stop:
+    registration = registration_for(
+        task,
+        requirement="criterion-level stop_early arming",
+        hint="Disarm with run_limits.stop_early: false to bypass this check.",
+    )
+    assert task.agent is not None
+    agent_type = str(task.agent.type)
+    if not registration.agent_class.contract.cooperative_stop:
         supporting = ", ".join(
             kind
             for kind in AgentRegistry.list_kinds()
-            if (reg := AgentRegistry.get(kind)) is not None and reg.agent_class.supports_cooperative_stop
+            if (reg := AgentRegistry.get(kind)) is not None and reg.agent_class.contract.cooperative_stop
         )
         raise EarlyStopConfigError(
             "criterion-level stop_early arming requires an agent that supports cooperative stopping "
@@ -371,6 +357,9 @@ class EarlyStopWatcher:
         gate_threshold`` means the gate is mathematically guaranteed to fail no
         matter how the trajectory continues.
         """
+        if self._armed_weight <= 0.0:
+            # Fails closed, as `armed_criteria_passed` does for the same unreachable case.
+            return 0.0
         return sum(c.weight for (c, _checker), v in zip(self._armed, verdicts, strict=True) if v != "fail") / (
             self._armed_weight
         )

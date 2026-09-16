@@ -67,6 +67,7 @@ from .models import (
 )
 from .orchestration.early_stop import EarlyStopWatcher, early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
+from .orchestration.harness_contract import validate_harness_contract
 from .orchestration.run_limits import validate_run_limits
 from .path_utils import (
     TASK_JSON_FILENAME,
@@ -1496,6 +1497,10 @@ class Orchestrator:
             self._record_route_environment_info()
             return
 
+        # After the evaluate-only return: a re-grade builds no agent, so a recorded
+        # config from before the contract existed stays gradable.
+        validate_harness_contract(self.task)
+
         # validate_api_keys exempts the no-op agent internally — it makes no API
         # call, so it needs no agent keys.
         assert self.task.agent is not None and self.task.agent.type is not None
@@ -1844,7 +1849,7 @@ class Orchestrator:
             ValueError: If agent type is not supported
             TypeError: If config doesn't match agent's expected type
         """
-        from coder_eval.agents import AgentRegistry, create_agent
+        from coder_eval.agents import create_agent
         from coder_eval.plugins import ensure_plugins_loaded
 
         # create_agent no longer self-loads (keeping plugins -> registry one-way),
@@ -1853,18 +1858,11 @@ class Orchestrator:
         assert self.task.agent is not None
         assert self.task.agent.type is not None
         # LiteLLM only: correlation headers so a proxy-side cost callback can
-        # attribute each call back to this task-run. GATED ON AGENT CAPABILITY, not
-        # on the route — the route is settings-derived and independent of agent
-        # type, so the agent-agnostic factory would otherwise forward the kwarg
-        # into constructors that do not declare it.
+        # attribute each call back to this task-run. Every agent accepts the kwarg
+        # through the base constructor.
         # Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         kwargs: dict[str, Any] = {}
-        registration = AgentRegistry.get(self.task.agent.type)
-        if (
-            isinstance(self.route, LiteLLMRoute)
-            and registration is not None
-            and registration.agent_class.supports_cost_log_tags
-        ):
+        if isinstance(self.route, LiteLLMRoute):
             kwargs["cost_log_tags"] = {
                 "x-ce-run-id": self._cost_correlation_run_id,
                 "x-ce-task-id": self._log_task_id,

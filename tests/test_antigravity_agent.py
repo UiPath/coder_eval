@@ -490,6 +490,7 @@ def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
     hooks = ModuleType("google.antigravity.hooks")
     hooks.policy = SimpleNamespace(
         allow_all=lambda: SimpleNamespace(kind="allow_all"),
+        deny_all=lambda: SimpleNamespace(kind="deny_all"),
         deny=lambda tool, **kw: SimpleNamespace(kind="deny", tool=tool),
         allow=lambda tool, **kw: SimpleNamespace(kind="allow", tool=tool),
     )
@@ -1086,6 +1087,69 @@ async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_
     assert tr.agent_output == "second turn"
 
 
+async def test_a_failed_harness_teardown_is_logged_and_stop_still_completes(caplog):
+    """The SDK's exit stack pops each callback before running it, so a failed close
+    cannot be retried; it must at least be visible, since the harness may be left running."""
+    import logging
+    from contextlib import AsyncExitStack
+
+    closes = 0
+
+    async def _failing_close(*_exc: object) -> None:
+        nonlocal closes
+        closes += 1
+        raise OSError("harness did not exit")
+
+    stack = AsyncExitStack()
+    stack.push_async_exit(_failing_close)
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent._exit_stack = stack
+    agent._sdk_agent = SimpleNamespace(conversation=None, is_started=True)
+
+    with caplog.at_level(logging.WARNING):
+        await agent.stop()
+        await agent.stop()
+
+    assert closes == 1
+    assert "harness did not exit" in caplog.text
+    assert agent.get_state() == agent_module.AgentState.FINISHED
+
+
+async def test_a_runtime_error_after_a_step_is_not_retried_as_reentrancy(monkeypatch):
+    """Only an error raised before the first step is the re-entrancy window. A
+    RuntimeError while processing a pulled step is a real failure: retrying it would
+    re-pull the stream and emit the same steps again."""
+    from coder_eval.errors import AgentCrashError
+
+    conversation_pulls = 0
+
+    class _Conversation:
+        last_response = ""
+
+        async def send(self, prompt, **kwargs):
+            return None
+
+        async def receive_steps(self):
+            nonlocal conversation_pulls
+            conversation_pulls += 1
+            yield _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(5, 0, 1, 0))
+
+        async def cancel(self):
+            return None
+
+    def _boom(self, step):
+        raise RuntimeError("reducer bug")
+
+    monkeypatch.setattr(agent_module._AntigravityTurnState, "process_step", _boom)
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = __import__("pathlib").Path("/tmp")
+    agent._sdk_agent = SimpleNamespace(conversation=_Conversation(), is_started=True)
+
+    with pytest.raises(AgentCrashError, match="reducer bug"):
+        await agent.communicate("do it")
+    assert conversation_pulls == 1
+
+
 async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_path(monkeypatch):
     """A watchdog timeout landing during the poll loop's re-drain (not the first
     drain) must surface as TurnTimeoutError via the SAME existing exception
@@ -1329,26 +1393,54 @@ async def test_start_omits_env_when_no_mock_dirs(monkeypatch, tmp_path):
     assert configs[0].env is None
 
 
-# --- permission_mode ----------------------------------------------------------------
-#
-# The local harness has one mode: policies are hardcoded to allow_all, so no
-# permission_mode confines it. These pin that as intended behavior rather than an
-# oversight — the write boundary is the sandbox driver, and a headless eval has
-# nobody to approve anything.
+# --- permission_mode and tool fields --------------------------------------------------
 
 
 def _agent(**cfg) -> AntigravityAgent:
     return AntigravityAgent(parse_agent_config(type="antigravity", **cfg))
 
 
-@pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
-async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path, mode: str):
-    """permission_mode is not honored here: every mode stays fully autonomous.
+def _policy_pairs(**cfg) -> list[tuple[str, str | None]]:
+    policy = SimpleNamespace(
+        allow_all=lambda: SimpleNamespace(kind="allow_all"),
+        deny_all=lambda: SimpleNamespace(kind="deny_all"),
+        deny=lambda tool: SimpleNamespace(kind="deny", tool=tool),
+        allow=lambda tool: SimpleNamespace(kind="allow", tool=tool),
+    )
+    return [(p.kind, getattr(p, "tool", None)) for p in _agent(**cfg)._policies(policy)]
 
-    coder_eval's write boundary is the driver (docker container / ephemeral tempdir),
-    not the agent — same deliberate stance as Codex. A mode that silently switched the
-    policy list would make an A/B across harnesses incomparable.
-    """
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        ({}, [("allow_all", None)]),
+        ({"allowed_tools": ["Bash"]}, [("deny_all", None), ("allow", "finish"), ("allow", "run_command")]),
+        ({"disallowed_tools": ["Bash"]}, [("allow_all", None), ("deny", "run_command")]),
+        (
+            {"permission_mode": "plan"},
+            [("allow_all", None), ("deny", "create_file"), ("deny", "edit_file"), ("deny", "run_command")],
+        ),
+        ({"allowed_tools": ["Skill"]}, [("deny_all", None), ("allow", "finish")]),
+        ({"allowed_tools": []}, [("allow_all", None)]),
+        (
+            {"allowed_tools": ["Bash", "Read"], "disallowed_tools": ["Bash"]},
+            [
+                ("deny_all", None),
+                ("allow", "finish"),
+                ("allow", "run_command"),
+                ("allow", "view_file"),
+                ("deny", "run_command"),
+            ],
+        ),
+    ],
+)
+def test_policies_map_the_uniform_fields(cfg: dict[str, Any], expected: list[tuple[str, str | None]]):
+    assert _policy_pairs(**cfg) == expected
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "bypassPermissions"])
+async def test_non_plan_modes_stay_autonomous(monkeypatch, tmp_path, mode: str):
+    """Only `plan` confines the harness; every other mode approves every call."""
     configs: list[Any] = []
 
     class _FakeSdkAgent:
@@ -1366,6 +1458,42 @@ async def test_permission_mode_never_confines_the_harness(monkeypatch, tmp_path,
     await _agent(permission_mode=mode).start(str(tmp_path))
 
     assert [p.kind for p in configs[0].policies] == ["allow_all"]
+
+
+async def test_start_hands_the_policies_to_the_sdk(monkeypatch, tmp_path):
+    configs: list[Any] = []
+
+    class _FakeSdkAgent:
+        def __init__(self, cfg):
+            configs.append(cfg)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    _install_fake_sdk(monkeypatch, _FakeSdkAgent)
+
+    await _agent(allowed_tools=["Bash"], permission_mode="plan").start(str(tmp_path))
+
+    assert [(p.kind, getattr(p, "tool", None)) for p in configs[0].policies] == [
+        ("deny_all", None),
+        ("allow", "finish"),
+        ("allow", "run_command"),
+        ("deny", "create_file"),
+        ("deny", "edit_file"),
+        ("deny", "run_command"),
+    ]
+
+
+def test_tool_names_cover_the_canonical_vocabulary():
+    from coder_eval.models import CANONICAL_TOOL_NAMES
+
+    assert AntigravityAgent.tool_names is not None
+    assert set(AntigravityAgent.tool_names.names) == CANONICAL_TOOL_NAMES
+    assert "Finish" not in AntigravityAgent.tool_names.names
+    assert AntigravityAgent.tool_names.names["Bash"] == ("run_command",)
 
 
 # --- max_turns visible-turn cap -----------------------------------------------------

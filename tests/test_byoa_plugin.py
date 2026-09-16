@@ -89,3 +89,17 @@ def test_create_agent_wrong_config_type_raises(discovered_demo_plugin):
     claude_cfg = parse_agent_config(type="claude-code")
     with pytest.raises(TypeError, match=r"--type.*mismatch"):
         create_agent("byoa-demo", claude_cfg)
+
+
+def test_sdk_options_override_is_accepted_for_a_plugin_config_that_declares_it(discovered_demo_plugin):
+    from coder_eval.orchestration.overrides import apply_overrides
+
+    task = TaskDefinition(
+        task_id="t1",
+        description="d",
+        initial_prompt="hi",
+        agent={"type": "claude-code"},
+        success_criteria=CRIT,
+    )
+    apply_overrides(task, {"agent.sdk_options.effort": "high"}, agent_type="byoa-demo")
+    assert task.agent is not None and task.agent.sdk_options == {"effort": "high"}  # type: ignore[attr-defined]

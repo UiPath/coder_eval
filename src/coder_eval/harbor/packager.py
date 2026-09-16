@@ -574,7 +574,9 @@ def _write_agent_phase_task_yaml(
     sandbox_dict["driver"] = "tempdir"
     sandbox_dict.pop("docker", None)
     agent_dict = (
-        task.agent.model_dump(mode="json", exclude_none=True) if task.agent is not None else {"type": "claude-code"}
+        task.agent.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+        if task.agent is not None
+        else {"type": "claude-code"}
     )
     payload: dict[str, object] = {
         "task_id": task.task_id,

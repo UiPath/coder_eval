@@ -338,7 +338,10 @@ class TestCodexEnvironmentInfo:
         emitted (Codex appends system_prompt as developer_instructions)."""
         monkeypatch.delenv("CODEX_BASE_URL", raising=False)
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
-        assert agent.get_environment_info() == {"system_prompt_semantics": "append"}
+        assert agent.get_environment_info() == {
+            "system_prompt_semantics": "append",
+            "harness_contract": CodexAgent.contract.model_dump(mode="json"),
+        }
 
     def test_azure_routing_recorded(self, monkeypatch):
         """Host (not full URL), wire_api, api-version, and the deployment-name marker
@@ -350,6 +353,7 @@ class TestCodexEnvironmentInfo:
         info = agent.get_environment_info()
         assert info == {
             "system_prompt_semantics": "append",
+            "harness_contract": CodexAgent.contract.model_dump(mode="json"),
             "codex_base_url_host": "my-res.openai.azure.com",
             "codex_wire_api": "responses",
             "codex_api_version": "2025-04-01-preview",
@@ -393,33 +397,14 @@ class TestThreadOptions:
         assert options["sandbox"] == Sandbox.full_access
         assert options["approval_mode"] == ApprovalMode.deny_all
 
-    def test_build_thread_options_with_allowed_tools(self):
-        """_build_thread_options includes enabled_tools from allowed_tools."""
-        config = parse_agent_config(
-            type=AgentKind.CODEX,
-            allowed_tools=["Bash", "Read", "Write"],
-        )
-        agent = CodexAgent(config)
+    def test_allowed_tools_do_not_reach_the_thread_config(self, monkeypatch):
+        """No top-level Codex config key restricts its built-in tools, so nothing is forwarded."""
+        monkeypatch.delenv("CODEX_BASE_URL", raising=False)
+        config = parse_agent_config(type=AgentKind.CODEX, allowed_tools=["Bash"], disallowed_tools=["Write"])
 
-        options = agent._build_thread_options()
+        options = CodexAgent(config)._build_thread_options()
 
-        assert options is not None
-        assert "config" in options
-        assert options["config"]["enabled_tools"] == ["shell", "shell", "apply_patch"]
-
-    def test_build_thread_options_with_disallowed_tools(self):
-        """_build_thread_options includes disabled_tools from disallowed_tools."""
-        config = parse_agent_config(
-            type=AgentKind.CODEX,
-            disallowed_tools=["Write", "Edit", "Bash"],
-        )
-        agent = CodexAgent(config)
-
-        options = agent._build_thread_options()
-
-        assert options is not None
-        assert "config" in options
-        assert options["config"]["disabled_tools"] == ["apply_patch", "apply_patch", "shell"]
+        assert "config" not in options
 
     def test_build_thread_options_with_no_permission_mode(self):
         """_build_thread_options is full-access/deny_all even without a permission_mode."""
@@ -435,7 +420,7 @@ class TestThreadOptions:
         assert options["approval_mode"] == ApprovalMode.deny_all
 
     def test_build_thread_options_with_permission_and_tools(self):
-        """_build_thread_options combines permission_mode and tool config."""
+        """permission_mode plan with tools set still runs full-access."""
         from openai_codex.api import ApprovalMode, Sandbox  # pyright: ignore[reportPrivateImportUsage]
 
         config = parse_agent_config(
@@ -450,7 +435,6 @@ class TestThreadOptions:
         assert options is not None
         assert options["sandbox"] == Sandbox.full_access
         assert options["approval_mode"] == ApprovalMode.deny_all
-        assert options["config"]["enabled_tools"] == ["shell", "shell"]
 
 
 @pytest.mark.asyncio

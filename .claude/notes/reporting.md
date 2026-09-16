@@ -82,10 +82,11 @@ right after the counter bump at the top of `communicate()` and consumed by
 when partial-record assembly leaves `pending_turn` at None. That is why rollback is the
 caller's move, not the agent's: only the caller knows a turn failed.
 
-Capability flags are declared rather than probed. `supports_cooperative_stop` gates
-arming early-stop, so arming it on an agent that ignores `should_stop` is rejected at
-resolution rather than silently never firing. `supports_cost_log_tags` and
-`system_prompt_semantics` are declared for reasons of their own — see
+Capabilities are declared rather than probed, on the agent's `HarnessContract`.
+`contract.cooperative_stop` gates arming early-stop, so arming it on an agent that ignores
+`should_stop` is rejected at resolution rather than silently never firing.
+`contract.system_prompt_semantics` is declared for reasons of its own, and `cost_log_tags`
+is a base-constructor kwarg — see
 [agents.md](agents.md) § Why the constructors declare every kwarg and § The
 system_prompt_semantics marker.
 

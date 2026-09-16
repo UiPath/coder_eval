@@ -5,8 +5,8 @@ was the field that broke that promise hardest: Claude Code enforced it, and Code
 Antigravity accepted it and never read it, so `max_turns: 6` ran capped on one
 backend and unbounded on the other two.
 
-This page is the contract for what each run limit means per harness, plus the shared
-`agent` fields whose meaning still differs across them.
+This page is the contract for what each run limit means per harness, plus what each
+shared `agent` field means on each harness.
 
 ## The table
 
@@ -16,6 +16,54 @@ This page is the contract for what each run limit means per harness, plus the sh
 | `run_limits.turn_timeout` | watchdog, SIGKILL on the CLI subprocess | watchdog + cooperative interrupt | watchdog, plus an earlier internal poll deadline at 80% of it (see below) | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group | deadline enforced in-loop and on the final reap; SIGTERM→SIGKILL on the CLI's whole process group |
 | `run_limits.task_timeout` | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic | orchestrator-level, agent-agnostic |
 | `run_limits.stop_early` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` | cooperative `should_stop` (event granularity) | cooperative `should_stop` (event granularity — Pi streams incrementally) |
+
+## Agent-field contract
+
+Generated from each agent class's `contract` by `make parity-table`; CE069 fails the build on drift.
+
+<!-- harness-contract:start -->
+| field | claude-code | codex | antigravity | opencode | pi | none |
+| --- | --- | --- | --- | --- | --- | --- |
+| `system_prompt` | enforced | enforced | enforced | enforced | enforced | unsupported |
+| `system_prompt_semantics` | append | append | append | append | append | — |
+| `plugin_skills` | enforced | enforced | enforced | enforced | enforced | unsupported |
+| `permission_mode` | enforced | unsupported | enforced | enforced | enforced | unsupported |
+| `allowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
+| `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
+| `cooperative_stop` | yes | yes | yes | yes | yes | no |
+| `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
+<!-- harness-contract:end -->
+
+A task that sets a field a harness marks `unsupported`, or a `permission_mode` value
+outside that harness's `permission_modes`, is rejected at resolution and `coder-eval plan`
+exits non-zero. `system_prompt_semantics` `append` / `replace` mean the system or
+developer instruction channel of the model request, never the user turn.
+
+### Tool names
+
+Every `allowed_tools` / `disallowed_tools` name must be one of these canonical names.
+Each cell is the native tool the name restricts on that harness; `none` means the
+harness has no such tool, so the name permits or denies nothing there. Generated from
+each agent class's `tool_names` by `make parity-table`.
+
+<!-- harness-tools:start -->
+| tool | claude-code | antigravity | opencode | pi |
+| --- | --- | --- | --- | --- |
+| `Agent` | `Agent` | `start_subagent` | `task` | `task` |
+| `Bash` | `Bash` | `run_command` | `bash` | `bash` |
+| `Edit` | `Edit` | `edit_file` | `edit`, `multiedit`, `patch` | `edit`, `multiedit`, `patch` |
+| `Glob` | `Glob` | `find_file` | `glob` | `find` |
+| `Grep` | `Grep` | `search_directory` | `grep` | `grep` |
+| `NotebookEdit` | `NotebookEdit` | none | none | none |
+| `Read` | `Read` | `view_file` | `read` | `read` |
+| `Skill` | `Skill` | none | `skill` | none |
+| `Task` | `Task` | `start_subagent` | `task` | `task` |
+| `TodoWrite` | `TodoWrite` | none | `todowrite` | `todowrite` |
+| `ToolSearch` | `ToolSearch` | none | none | none |
+| `WebFetch` | `WebFetch` | `read_url_content` | `webfetch` | `webfetch` |
+| `WebSearch` | `WebSearch` | `search_web` | `websearch` | none |
+| `Write` | `Write` | `create_file` | `apply_patch`, `write` | `write` |
+<!-- harness-tools:end -->
 
 ## Timing capture
 
@@ -703,30 +751,6 @@ local plugin root to its `skills.paths`; Pi maps each to a `--skill <dir>` argum
 both via the same `_plugin_skill_dirs` resolver — so both **can** run activation
 suites. A plugin's non-skill assets (agents/hooks/commands/MCP servers) are dropped on
 both. See [OpenCode](OPENCODE.md) and [Pi § plugins](PI.md#known-limitations).
-
-## Pi enforces `system_prompt` but not the tool allowlists
-
-- **`system_prompt` is ENFORCED** (`--append-system-prompt`, semantics `append`) — a
-  small win over OpenCode, which drops it.
-- **`allowed_tools` / `disallowed_tools` are NOT enforced.** Pi's built-in tools are
-  lowercase (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`), but the shared config
-  default (`experiments/default.yaml`) sets Claude-namespaced names
-  (`Bash`/`Read`/`Write`/…). Forwarding those to `--tools` would allowlist tools that
-  do not exist in Pi and strip the agent of ALL tools — so, like OpenCode (drops them),
-  Codex (forwards `disallowed_tools` without SDK enforcement), and Antigravity (does not
-  read them), Pi ignores them and runs with its full native toolset. A task that needs a
-  restricted Pi toolset would have to name Pi's lowercase tools — a documented follow-up.
-- **`permission_mode` is NOT enforced** — Pi headless print mode auto-runs tools and
-  exposes only project-file trust (`--approve` / `--no-approve`), no tool-approval
-  mode; the sandbox driver is the isolation boundary (same as Codex/Antigravity).
-- **`system_prompt_file` is NOT read** (use inline `system_prompt`), matching
-  Codex/Antigravity.
-- **Built-in auto-retry.** Pi retries a transient/provider error *internally* (another
-  `agent_start` cycle in the same invocation, flagged `willRetry: true`), which the
-  harness folds into one turn. The internal retry is bounded by
-  `turn_timeout` / `task_timeout`.
-
-Full detail: [Pi](PI.md).
 
 ## Reproducing
 

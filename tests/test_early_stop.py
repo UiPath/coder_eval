@@ -47,7 +47,6 @@ from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import (
     AgentKind,
     ApiBackend,
-    BaseAgentConfig,
     CommandExecutedCriterion,
     CommandTelemetry,
     CriterionResult,
@@ -77,6 +76,7 @@ from coder_eval.orchestration.early_stop import (
     validate_early_stop,
 )
 from coder_eval.orchestration.experiment import load_experiment, resolve_all_tasks
+from coder_eval.orchestration.harness_contract import HarnessContractError
 from coder_eval.orchestrator import Orchestrator, build_task_event
 from coder_eval.reports import ReportGenerator
 from coder_eval.reports.html import _render_criteria, _render_header
@@ -92,6 +92,7 @@ from coder_eval.streaming.events import (
     TurnStartEvent,
 )
 from tests._fixtures.live_criteria import FROZEN_TS, make_command, make_turn
+from tests.fixtures.harness_stubs import config_for_kind, stub_contract
 
 
 # --------------------------------------------------------------------------- #
@@ -144,26 +145,22 @@ def _task(
     )
 
 
-class _DummyNoStopConfig(BaseAgentConfig):
-    """Config for the dummy non-supporting agent registered by the fixture below."""
-
-
 class _DummyNoStopAgent:
-    """Agent stand-in that leaves ``supports_cooperative_stop`` at the default False.
+    """Agent stand-in whose contract declares ``cooperative_stop=False``.
 
-    ``validate_early_stop`` only reads the flag off the registered class, so no
+    ``validate_early_stop`` only reads the contract off the registered class, so no
     ``Agent`` machinery is needed. Guardrail 1 must keep rejecting agents that
     have not opted into the cooperative interrupt (all built-ins now support it).
     """
 
-    supports_cooperative_stop = False
+    contract = stub_contract(cooperative_stop=False)
 
 
 @pytest.fixture
 def dummy_no_stop_kind() -> Iterator[str]:
     """Register a non-supporting agent kind for guardrail-1 tests, then clean up."""
     kind = "dummy-no-stop"
-    AgentRegistry.register(kind, _DummyNoStopConfig)(_DummyNoStopAgent)
+    AgentRegistry.register(kind, config_for_kind(kind))(_DummyNoStopAgent)
     try:
         yield kind
     finally:
@@ -792,29 +789,32 @@ class TestValidateEarlyStop:
             validate_early_stop(task)
 
     def test_guardrail1_non_supporting_agent_rejected(self, dummy_no_stop_kind: str) -> None:
-        # Codex/antigravity now support the cooperative interrupt, so guardrail 1
-        # is exercised with a dummy agent that leaves the flag at False.
+        # Every built-in supports the cooperative interrupt, so guardrail 1 is
+        # exercised with a dummy agent whose contract declares cooperative_stop=False.
         task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=dummy_no_stop_kind)
-        with pytest.raises(EarlyStopConfigError, match="cooperative stopping"):
+        with pytest.raises(EarlyStopConfigError, match="cooperative stopping") as exc:
             validate_early_stop(task)
+        supporting = str(exc.value).split("(", 1)[1].split(")", 1)[0]
+        assert "claude-code" in supporting
+        assert dummy_no_stop_kind not in supporting
 
     def test_guardrail3_agentless_task_rejected(self) -> None:
         # An armed task with no agent block at all: the diagnosis must point at
         # the missing agent block, not at plugin loading.
         task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)]).model_copy(update={"agent": None})
-        with pytest.raises(EarlyStopConfigError, match="agent block"):
+        with pytest.raises(HarnessContractError, match="agent block"):
             validate_early_stop(task)
 
     def test_guardrail3_unregistered_agent_type_rejected(self) -> None:
         # An armed task whose agent type vanished from the registry (plugin not
         # installed/loaded) must fail with the plugin-pointing diagnosis.
         kind = "vanishing-agent"
-        AgentRegistry.register(kind, _DummyNoStopConfig)(_DummyNoStopAgent)
+        AgentRegistry.register(kind, config_for_kind(kind))(_DummyNoStopAgent)
         try:
             task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=kind)
         finally:
             AgentRegistry._registry.pop(kind, None)
-        with pytest.raises(EarlyStopConfigError, match="not registered"):
+        with pytest.raises(HarnessContractError, match="not registered"):
             validate_early_stop(task)
 
     def test_guardrail1_armed_codex_accepts(self) -> None:
@@ -1068,7 +1068,7 @@ class TestGuardrailResolutionSurfaces:
         task_file = _write_task_yaml(tmp_path, criterion_yaml=_UNARMED_CRITERION, stop_early=True)
         printed, exit_code = self._run_plan(task_file, tmp_path)
         assert exit_code == 1
-        assert "early-stop config error" in printed
+        assert "config error" in printed
         assert "has been removed" in printed
 
     def test_plan_surface_accepts_valid_armed_task(self, tmp_path: Path) -> None:
@@ -1718,6 +1718,15 @@ class TestEarlyStopWatcher:
         assert watcher.should_stop() is True
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
+
+    def test_zero_armed_weight_fails_closed_instead_of_dividing_by_zero(self) -> None:
+        """The model rejects weight=0 on an armed criterion; a copy that skips validation
+        must still not crash the watcher, and must agree with the final gate (closed)."""
+        armed = _skill_crit("date-teller", "date-teller", stop_on_fail=True).model_copy(update={"weight": 0.0})
+        watcher = EarlyStopWatcher(
+            "t", [(armed, _watcher([_skill_crit("x", "x", stop_on_fail=True)])._armed[0][1])], max_turns=20
+        )
+        assert watcher._ceiling(["undecided"]) == 0.0
 
     def test_default_gate_threshold_fires_fail_stop_on_any_weight(self) -> None:
         # At the default gate_threshold=1.0, even the low-weight criterion's

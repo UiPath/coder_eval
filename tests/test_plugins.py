@@ -7,6 +7,7 @@ import pytest
 import coder_eval.plugins as plugins
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import AgentKind, ClaudeCodeAgentConfig
+from tests.fixtures.harness_stubs import config_for_kind, stub_contract
 
 
 PLUGIN_ENTRY_POINT_GROUP = plugins.PLUGIN_ENTRY_POINT_GROUP
@@ -136,15 +137,16 @@ def test_registry_string_and_enum_keys_are_equivalent():
 def test_register_accepts_raw_string_kind():
     """Plugins register a kind that is not an AgentKind enum member."""
 
-    class _Cfg(ClaudeCodeAgentConfig):
-        pass
+    cfg = config_for_kind("totally-custom-kind", ClaudeCodeAgentConfig)
 
     class _Agent:
+        contract = stub_contract()
+
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 
     try:
-        AgentRegistry.register("totally-custom-kind", _Cfg)(_Agent)
+        AgentRegistry.register("totally-custom-kind", cfg)(_Agent)
         reg = AgentRegistry.get("totally-custom-kind")
         assert reg is not None
         assert reg.agent_class is _Agent
@@ -158,24 +160,25 @@ def test_register_rejects_conflicting_kind_collision():
     last-write-win (which agent runs would then depend on entry-point discovery
     order — a reproducibility hole). The second registration raises."""
 
-    class _CfgA(ClaudeCodeAgentConfig):
-        pass
-
-    class _CfgB(ClaudeCodeAgentConfig):
-        pass
+    cfg_a = config_for_kind("collide-kind", ClaudeCodeAgentConfig)
+    cfg_b = config_for_kind("collide-kind", ClaudeCodeAgentConfig)
 
     class _AgentA:
+        contract = stub_contract()
+
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 
     class _AgentB:
+        contract = stub_contract()
+
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 
     try:
-        AgentRegistry.register("collide-kind", _CfgA)(_AgentA)
+        AgentRegistry.register("collide-kind", cfg_a)(_AgentA)
         with pytest.raises(ValueError, match="already registered"):
-            AgentRegistry.register("collide-kind", _CfgB)(_AgentB)
+            AgentRegistry.register("collide-kind", cfg_b)(_AgentB)
         # The incumbent is untouched — the conflict did not overwrite it.
         reg = AgentRegistry.get("collide-kind")
         assert reg is not None and reg.agent_class is _AgentA
@@ -187,16 +190,17 @@ def test_register_same_kind_same_classes_is_idempotent():
     """Re-registering the IDENTICAL classes (e.g. load_plugins(force=True) re-running
     register_builtins) is a legitimate no-op, not a collision."""
 
-    class _Cfg(ClaudeCodeAgentConfig):
-        pass
+    cfg = config_for_kind("idem-kind", ClaudeCodeAgentConfig)
 
     class _Agent:
+        contract = stub_contract()
+
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 
     try:
-        AgentRegistry.register("idem-kind", _Cfg)(_Agent)
-        AgentRegistry.register("idem-kind", _Cfg)(_Agent)  # no raise
+        AgentRegistry.register("idem-kind", cfg)(_Agent)
+        AgentRegistry.register("idem-kind", cfg)(_Agent)  # no raise
         reg = AgentRegistry.get("idem-kind")
         assert reg is not None and reg.agent_class is _Agent
     finally:

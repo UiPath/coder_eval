@@ -78,7 +78,7 @@ class VariantSeries(NamedTuple):
 # bookkeeping the reader did not ask for — `command_base_path` is a full PATH
 # string on every row, and the graded_by_* provenance keys only appear on a
 # re-graded row where they would read as facts about the run itself.
-ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest"})
+ENV_TABLE_EXCLUDE = frozenset({"installed_tools", "command_base_path", "reference_digest", "harness_contract"})
 
 
 def is_env_table_key(key: str) -> bool:

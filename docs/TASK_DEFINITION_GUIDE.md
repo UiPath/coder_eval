@@ -107,9 +107,9 @@ sandbox, no API call. Use it to park a task that is blocked on something outside
 (an upstream bug, a missing service) without deleting the YAML and losing its history.
 
 ```yaml
-task_id: "codex_disallowed_tools_test"
-# Blocked: the Codex SDK doesn't enforce disallowed_tools via config. Re-enable
-# once upstream ships the fix.
+task_id: "flaky_upstream_service"
+# Blocked: the mocked service times out under CI load (issue #123). Re-enable
+# once the mock is fixed.
 skip: true
 ```
 
@@ -185,10 +185,26 @@ an error.
 **Permission Modes:**
 - `default` — Default permission handling
 - `acceptEdits` — Auto-accept file edits (recommended for evaluations)
-- `plan` — Agent proposes changes, waits for approval
+- `plan` — Read-only: the Write, Edit and Bash tools are denied
 - `bypassPermissions` — No permission checks (use with caution)
 
-> **Codex note:** `permission_mode` confines the **`claude-code`** agent only. The **`codex`** agent always runs full-access regardless of the mode — its in-process OS sandbox is redundant given Coder Eval's docker/tempdir isolation and unusable on our CI hosts (and on Windows). Run adversarial or untrusted Codex evals under the **docker driver**, which is the OS-level write boundary; the tempdir/host driver is a working directory, not a confinement boundary.
+**Fields a harness cannot honor are rejected.** Every agent declares which of
+`system_prompt`, `plugins`, `permission_mode`, `allowed_tools` and
+`disallowed_tools` it honors. A task that sets one of them on a harness that marks
+it unsupported fails at resolution, and `coder-eval plan` exits non-zero. A field
+whose value is the schema default counts only if a layer wrote it; `null` and an empty
+tool list never count. Values are checked too: a `permission_mode` value the harness does not
+honor (for example `acceptEdits` on Pi, OpenCode or Antigravity, which honor only
+`plan` and `bypassPermissions`) is rejected, and every `allowed_tools` /
+`disallowed_tools` name must be a canonical tool name (`Agent`, `Bash`, `Edit`,
+`Glob`, `Grep`, `NotebookEdit`, `Read`, `Skill`, `Task`, `TodoWrite`, `ToolSearch`,
+`WebFetch`, `WebSearch`, `Write`). Claude Code alone also accepts `mcp__<server>` /
+`mcp__<server>__<tool>` names and permission rules such as `Bash(git status:*)`.
+A task that sets `permission_mode: acceptEdits` for Claude Code is therefore rejected
+when run with `--type pi`; move the value under `by_type.claude-code` instead.
+Put harness-specific values under `by_type` in the experiment (see
+[A/B Experiments](AB_EXPERIMENTS.md#per-kind-defaults-with-by_type)). Per-harness table:
+[Harness Parity](agents/HARNESS_PARITY.md).
 
 **Agent Types:**
 - `claude-code` (default) — Claude Code SDK agent. Supports `sdk_options`, `claude_settings`, and all permission modes.
@@ -227,7 +243,10 @@ Contract (enforced at load): a `type: none` task must declare no `initial_prompt
 / `initial_prompt_file` and no enabled `simulation` (no agent reads them), and
 every criterion must be agent-independent — criteria that inspect the agent
 trajectory (`command_executed`, `skill_triggered`, `reference_comparison`,
-`commands_efficiency`) are rejected. A worked example lives at
+`commands_efficiency`) are rejected. The no-op agent honors none of the gated agent
+fields, so a `type: none` task that sets `plugins`, `system_prompt`,
+`permission_mode`, `allowed_tools` or `disallowed_tools` is rejected too. A worked
+example lives at
 [`tasks/agentless_smoke_test.yaml`](https://github.com/UiPath/coder_eval/blob/main/tasks/agentless_smoke_test.yaml).
 
 ## Run Limits

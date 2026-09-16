@@ -82,6 +82,12 @@ intentionally brief and out of scope; trimming for DISPLAY belongs in the render
   table's to state, not this file's. Full table + rationale:
   docs/agents/HARNESS_PARITY.md.
 
+  The agent-field half of parity is now the `HarnessContract` each agent class declares:
+  a field, `permission_mode` value or tool name a harness cannot honor is a resolution
+  error, and `make parity-table` renders the contract (CE069 checks it), so the page can no
+  longer drift from the adapters. The run-limit half is still the hand-written table above;
+  Plan 2 moves it onto the contract.
+
 ## Shared turn lifecycle
 
 Every adapter drives the same skeleton, on the base class: `_begin_turn()` resets the
@@ -122,9 +128,10 @@ budget again and re-hits the cap. `ended_cleanly` is the guard.
 `create_agent` calls `agent_class(config, route=route, **kwargs)` through a
 `cast(Any, ...)`, so pyright checks nothing at the call site; a `**_` sink would mean
 nothing checks it at runtime either. The orchestrator depends on that `TypeError` as a
-signal — it gates `cost_log_tags` on `supports_cost_log_tags` precisely because the
-agent-agnostic factory would otherwise forward it into constructors that do not declare
-it. A mis-gated kwarg must be loud, not silently dropped.
+signal: a kwarg forwarded into a constructor that does not declare it must be loud, not
+silently dropped. `cost_log_tags` is declared on the base `Agent.__init__` and every
+subclass forwards it, so the factory passes it on every LiteLLM route without a
+capability gate.
 
 `route` is accepted for factory parity and deliberately unused by the CLI-driven
 harnesses: those CLIs own their own provider configuration.
@@ -473,6 +480,9 @@ shell-aware `parameters["command"]` extraction in `criteria/command_executed.py`
 to raw-JSON matching — so the same task scores differently per harness. Unknown names pass
 through unchanged.
 
+The Claude-to-native maps the uniform tool fields use are derived by inverting these, never
+written twice.
+
 Three cases are worth knowing:
 
 - **OpenCode's tool set varies by MODEL within the one harness.** A live 174-task run
@@ -493,6 +503,47 @@ any key that FIRST appears at DONE is treated as a result — which matters beca
 `skill_triggered` substring-searches every parameter value, so a leaked result could
 false-positive.
 
+## The uniform fields, per harness
+
+`permission_mode`, `allowed_tools` and `disallowed_tools` stay on `BaseAgentConfig` as one
+interface, and each harness honors them where the pinned CLI or SDK has a verified mechanism
+(spike of 2026-09-16). Their meaning is the same everywhere: an allowlist permits only the
+named tools, a deny always wins, and `plan` denies the Write, Edit and Bash equivalents
+(`READ_ONLY_DENIED_TOOLS`, one declaration for every adapter). An empty `allowed_tools: []`
+restricts nothing, because Claude Code passes `[]` as "no `--allowedTools` flag"; the same
+YAML must not mean "all tools" on one harness and "no tools" on the others.
+
+One meaning per field is not enough; each VALUE needs one too (`c/harness-architecture-comparison.md`
+§ 6, P0-1 and P0-2). Two defects made that concrete. The inverse tool maps were read with
+`.get(name, ())`, so a typo or a name the harness lacks silently restricted nothing. And
+`permission_mode: default` meant "ask for approval" on Claude Code but "run autonomously" on the
+other harnesses. So the contract lists the `permission_modes` a harness honors, and `tool_names` is a
+`ToolNameMap` that is total and closed over `CANONICAL_TOOL_NAMES`: a canonical name the harness has
+no tool for maps to `()` explicitly, and a missing row fails at adapter import. `Task` and `Agent` both
+name the subagent tool (`TOOL_NAME_ALIASES`), so `from_inverse` gives `Task` the natives of `Agent`;
+otherwise the older spelling, which the corpus still uses, would restrict nothing. Pi, OpenCode and
+Antigravity honor only `plan` and `bypassPermissions` until a native mechanism with the Claude Code
+meaning of `default` / `acceptEdits` is verified.
+
+- **Pi** (0.85.1): `--tools <csv>` is an allowlist and `--exclude-tools <csv>` a denylist over
+  the lowercase built-ins. The denied set is subtracted before `--tools` is emitted, and an
+  allowlist that maps to nothing becomes `--no-tools`.
+- **OpenCode** (1.18.30): the `permission` config accepts `"*": "deny"` plus per-key
+  `allow` / `deny`, and `--auto` approves only what is not explicitly denied — so `plan` is
+  explicit denies and `--auto` is passed on every run. `instructions` files are read by
+  `session/instruction.ts::system()` and spread into the SYSTEM messages, so
+  `system_prompt` is a temp file listed there (append). The file lives outside the sandbox
+  for the same reason as the skill paths below. The permission keys are coarser than tool
+  names (`edit` governs every write-shaped tool); that four-entry table is the one literal.
+  `"*"` also matches non-tool permissions (`external_directory`, `doom_loop`), which the CLI
+  merges before config rules and `--auto` used to approve, so an allowlist re-allows them.
+  OpenCode applies the LAST matching rule, so our rules are placed after inherited ones.
+- **Antigravity** (0.1.8): `hooks/policy.py` buckets specific rules above wildcard ones and
+  deny above allow, so rule order does not matter. `finish` is always allowed under an
+  allowlist because the harness ends a turn with it; whether `deny_all()` reaches it could
+  not be probed offline, and allowing it is the safe direction.
+- **Codex**: no mechanism (next section), so all three rows are unsupported.
+
 ## Codex runs full-access on every permission mode
 
 `coder_eval` owns the isolation boundary either way — a docker container or an ephemeral
@@ -504,10 +555,15 @@ and scores 0 with no loud error. Dropping to full-access matches claude-code and
 Antigravity, which run with no in-agent OS sandbox; it also keeps network on, so tool
 installs work without extra sandbox config.
 
-The consequence is stated loudly at `start()` for EVERY mode, not just
-`bypassPermissions`, so operators are not misled that plan/acceptEdits/default confine
-Codex — none of them do. Adversarial or untrusted evals belong on the docker driver; the
-tempdir/host driver is a working directory, not a confinement boundary.
+Codex's contract therefore marks `permission_mode` unsupported, so a Codex task that sets
+any mode is rejected at resolution rather than believing plan/acceptEdits/default confine
+it. Adversarial or untrusted evals belong on the docker driver; the tempdir/host driver is
+a working directory, not a confinement boundary.
+
+Tool restriction is not available either. `strings` on the pinned codex-cli 0.39.0 binary
+shows `enabled_tools` / `disabled_tools` only inside `RawMcpServerConfig` (beside
+`bearer_token_env_var`, `startup_timeout_sec`); there is no top-level key. The adapter's old
+top-level `config.enabled_tools` forward therefore never restricted a tool, and was deleted.
 
 Approval mode is `deny_all` on every permission mode too. The SDK offers only two:
 `auto_review`, which puts a SERVER-SIDE reviewer in the loop that can spuriously return
@@ -599,6 +655,8 @@ field. **A trend dashboard must not pool scores across that boundary**, and an a
 marker reads as a pre-marker run — which is why every adapter spreads the base
 `get_environment_info()` first rather than emitting the marker conditionally (CE046).
 
+The class default is the `system_prompt_semantics` field of the agent's `HarnessContract`
+(the base emits `"unknown"` when the contract marks `system_prompt` unsupported).
 claude-code's is the only one derived per config rather than fixed, so it is computed
 from the resolved prompt value and never recomputed independently — the persisted regime
 cannot disagree with what was sent.

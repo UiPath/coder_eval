@@ -113,6 +113,30 @@ it (the unification invariant). The per-field strategy is:
 Variants set the sandbox driver via `driver:` and add templates via
 `template_sources:` (top-level fields); they don't set a full `sandbox:` block.
 
+### Per-kind defaults with by_type
+
+Layers 1 and 2 may carry `by_type:` inside their `agent:` block. Each entry is a
+sub-layer that applies only when the resolved agent kind matches, and it sits
+directly above its own layer, so it stays **below the task**:
+
+```yaml
+defaults:
+  agent:
+    type: claude-code
+    by_type:
+      claude-code:
+        model: claude-sonnet-4-6
+        permission_mode: acceptEdits
+      pi:
+        model: openrouter/moonshotai/kimi-k3
+```
+
+The kind is the final `agent.type` across all five layers, so `--type pi` selects
+the `pi` entry and never inherits the `claude-code` one. An entry for a kind that is
+not installed is ignored. `by_type` is not allowed on a task or a variant (a task
+knows its kind; a variant sets its fields directly), and an entry must not set
+`type`. Lineage records such a value with `source_detail: by_type.<kind>`.
+
 ## What a Variant Can Override
 
 From `ExperimentVariant` (`coder_eval/models/experiment.py`):

@@ -11,10 +11,13 @@ from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.models import TurnRecord
+from tests.fixtures.harness_stubs import stub_contract
 
 
 class TextStubAgent(Agent):
     """Canned-response Agent fake. Records every ``communicate`` prompt."""
+
+    contract = stub_contract()
 
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)

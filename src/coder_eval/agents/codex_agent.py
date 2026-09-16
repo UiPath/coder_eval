@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
@@ -33,7 +33,8 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
-    SystemPromptSemantics,
+    Enforcement,
+    HarnessContract,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -58,16 +59,6 @@ from coder_eval.utils import expand_env_vars
 
 
 logger = logging.getLogger(__name__)
-
-# Tool name mapping: Claude Code SDK names → Codex SDK names
-_CLAUDE_TO_CODEX_TOOL_MAP: dict[str, str] = {
-    "Bash": "shell",
-    "Write": "apply_patch",
-    "Edit": "apply_patch",
-    "Read": "shell",
-    "Grep": "shell",
-    "Glob": "shell",
-}
 
 # Approval mode — the SAME for every permission mode. Despite the name this is
 # the "run autonomously, never prompt, no reviewer" mode: in-sandbox operations
@@ -761,12 +752,18 @@ class _CodexTurnState:
 class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
-    # The pump has a between-items guard where `should_stop` runs.
-    supports_cooperative_stop: ClassVar[bool] = True
-
-    # `system_prompt` maps to developer_instructions, ON TOP of the base prompt.
+    # The pump has a between-items guard where `should_stop` runs; `system_prompt`
+    # maps to developer_instructions, ON TOP of the base prompt.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.UNSUPPORTED,
+        allowed_tools=Enforcement.UNSUPPORTED,
+        disallowed_tools=Enforcement.UNSUPPORTED,
+        cooperative_stop=True,
+    )
 
     def __init__(
         self,
@@ -774,6 +771,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         route: ApiRoute | None = None,
         *,
         instance_name: str = "codex",
+        cost_log_tags: dict[str, str] | None = None,
     ):
         """Initialize the Codex agent.
 
@@ -781,9 +779,9 @@ class CodexAgent(Agent[CodexAgentConfig]):
             config: Agent configuration
             route: API routing configuration (unused for Codex, kept for interface compatibility)
             instance_name: Short label used to prefix this instance's log records
+            cost_log_tags: LiteLLM correlation headers; accepted for factory parity, unused
         """
-        self.config = config
-        self.route = route or DirectRoute()
+        super().__init__(config, route or DirectRoute(), cost_log_tags=cost_log_tags)
         self.codex_client: Any = None
         self.thread: Any = None
         # Thread-cumulative snapshot as of the END of the last finalized turn:
@@ -849,9 +847,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
             # Set up skills from plugin_tools_dir or plugins config
             self._setup_skills(plugin_tools_dir)
-
-            # Log permission and tool configuration
-            self._log_config_enforcement()
 
         except ImportError as e:
             raise RuntimeError("Codex SDK not installed. Install with: pip install 'coder-eval[codex]'") from e
@@ -1375,40 +1370,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
         if self.config.system_prompt is not None:
             options["developer_instructions"] = self.config.system_prompt
 
-        permission_mode = self.config.permission_mode.value
-        approval_mode_str = _CODEX_APPROVAL_MODE
-
-        # ALWAYS full-access: permission_mode does NOT confine Codex. The docker
-        # driver is the only OS-level write boundary; the tempdir/host driver is a
-        # working directory, not a confinement boundary, so adversarial or
-        # untrusted evals belong on docker. _log_config_enforcement says so.
+        # ALWAYS full-access: Codex honors no permission_mode (its contract rejects
+        # the field). The docker driver is the only OS-level write boundary; the
+        # tempdir/host driver is a working directory, not a confinement boundary, so
+        # adversarial or untrusted evals belong on docker.
         # Rationale: .claude/notes/agents.md § Codex runs full-access on every permission mode
         options["sandbox"] = Sandbox.full_access
-        options["approval_mode"] = ApprovalMode(approval_mode_str)
+        options["approval_mode"] = ApprovalMode(_CODEX_APPROVAL_MODE)
 
-        # For logging, use the enum names (which use underscores)
-        sandbox_name = options["sandbox"].name
-        approval_name = options["approval_mode"].name
-
-        self._log.debug(f"Permission mode {permission_mode} → sandbox={sandbox_name}, approval_mode={approval_name}")
-
-        # Build config dict for tool enforcement
         tool_config: dict[str, Any] = {}
-
-        if self.config.allowed_tools:
-            enabled_tools = [_CLAUDE_TO_CODEX_TOOL_MAP.get(tool, tool) for tool in self.config.allowed_tools]
-            tool_config["enabled_tools"] = enabled_tools
-            normalized = ", ".join(enabled_tools)
-            self._log.debug(f"Allowed tools (normalized): {normalized}")
-
-        if self.config.disallowed_tools:
-            disabled_tools = [_CLAUDE_TO_CODEX_TOOL_MAP.get(tool, tool) for tool in self.config.disallowed_tools]
-            tool_config["disabled_tools"] = disabled_tools
-            normalized = ", ".join(disabled_tools)
-            self._log.warning(
-                f"disallowed_tools ({normalized}) is passed to Codex but NOT enforced by the SDK; "
-                + "do not rely on it as a security boundary."
-            )
 
         # The codex binary has no base-URL env var: a model provider must be
         # defined in config and selected, with env_key naming the key's variable.
@@ -1444,24 +1414,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
             options["config"] = tool_config
 
         return options
-
-    def _log_config_enforcement(self) -> None:
-        """Log configuration settings."""
-        if self.config.allowed_tools:
-            self._log.debug(f"Allowed tools: {', '.join(self.config.allowed_tools)}")
-
-        if self.config.disallowed_tools:
-            self._log.debug(f"Disallowed tools: {', '.join(self.config.disallowed_tools)}")
-
-        self._log.debug(f"Permission mode: {self.config.permission_mode.value}")
-        # Fires for EVERY mode, not just bypassPermissions, so operators are not
-        # misled that plan/acceptEdits/default confine Codex — none of them do.
-        self._log.warning(
-            "[SECURITY] Codex runs full-access on every permission_mode "
-            + f"(configured: {self.config.permission_mode.value}); permission_mode does not confine it. "
-            + "OS-level isolation of untrusted code is the docker driver's job — use it for "
-            + "adversarial or untrusted evals; the tempdir/host driver is not a confinement boundary."
-        )
 
     def _format_turn_result(self, turn_result: Any) -> str:
         """Format a Codex Turn to a readable string — fallback when no text streamed.

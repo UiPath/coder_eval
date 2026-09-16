@@ -251,19 +251,12 @@ class TestArgvConstruction:
         assert argv[-2] == "--"
         assert argv[-1] == "do the thing"
 
-    async def test_tools_are_not_forwarded_but_system_prompt_is(self, patch_exec, tmp_path):
-        """allowed_tools/disallowed_tools are NOT forwarded: the shared config default
-        sets Claude-namespaced tool names (Bash/Read/...) that do not exist in Pi
-        (lowercase bash/read/...), so `--tools` would strip the agent of ALL tools.
-        Only `system_prompt` (a free-text string with no namespace) is forwarded."""
+    async def test_tool_flags_and_system_prompt_are_forwarded(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await _run(
-            _agent(allowed_tools=["Read", "Write"], disallowed_tools=["Bash"], system_prompt="be terse"),
-            tmp_path,
-        )
+        await _run(_agent(allowed_tools=["Read", "Bash"], system_prompt="be terse"), tmp_path)
         argv = captured["argv"]
-        assert "--tools" not in argv
-        assert "--exclude-tools" not in argv
+        assert argv[argv.index("--tools") + 1] == "bash,read"
+        assert argv.index("--tools") > argv.index("--thinking")
         assert argv[argv.index("--append-system-prompt") + 1] == "be terse"
 
     async def test_user_input_is_a_post_dashdash_argv_element(self, patch_exec, tmp_path):
@@ -278,6 +271,43 @@ class TestArgvConstruction:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert captured["kwargs"]["limit"] > 64 * 1024
+
+
+class TestToolFlags:
+    def test_allowlist_maps_claude_names_to_pi_tools(self):
+        assert _agent(allowed_tools=["Bash", "Read"])._tool_flags() == ["--tools", "bash,read"]
+
+    def test_denylist_expands_to_every_equivalent(self):
+        assert _agent(disallowed_tools=["Edit"])._tool_flags() == ["--exclude-tools", "edit,multiedit,patch"]
+
+    def test_plan_denies_write_edit_and_bash(self):
+        assert _agent(permission_mode="plan")._tool_flags() == [
+            "--exclude-tools",
+            "bash,edit,multiedit,patch,write",
+        ]
+
+    def test_allowlist_with_no_pi_equivalent_disables_every_tool(self):
+        assert _agent(allowed_tools=["Skill"])._tool_flags() == ["--no-tools"]
+
+    def test_deny_wins_over_allow_without_a_separate_exclude(self):
+        assert _agent(allowed_tools=["Bash", "Read"], disallowed_tools=["Bash"])._tool_flags() == ["--tools", "read"]
+
+    def test_plan_wins_over_an_allowed_bash(self):
+        assert _agent(allowed_tools=["Bash", "Read"], permission_mode="plan")._tool_flags() == ["--tools", "read"]
+
+    def test_no_fields_emit_no_flags(self):
+        assert _agent()._tool_flags() == []
+
+    def test_empty_allowlist_restricts_nothing(self):
+        assert _agent(allowed_tools=[])._tool_flags() == []
+
+    def test_tool_names_cover_the_canonical_vocabulary(self):
+        from coder_eval.models import CANONICAL_TOOL_NAMES
+
+        assert PiAgent.tool_names is not None
+        assert set(PiAgent.tool_names.names) == CANONICAL_TOOL_NAMES
+        assert PiAgent.tool_names.names["Edit"] == ("edit", "multiedit", "patch")
+        assert PiAgent.tool_names.names["Skill"] == ()
 
 
 class TestSessionContinuity:
@@ -367,14 +397,7 @@ class TestSandboxEnvironment:
         assert captured["kwargs"]["env"]["OPENROUTER_API_KEY"] == "sk-test"
 
 
-class TestUnsupportedConfigIsAnnounced:
-    async def test_start_warns_about_unenforced_fields(self, patch_exec, tmp_path, caplog):
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(permission_mode="plan").start(str(tmp_path))
-        assert "permission_mode" in caplog.text
-        assert "NOT enforced" in caplog.text
-
+class TestPluginWarnings:
     async def test_plugins_that_do_not_resolve_warn_loudly(self, patch_exec, tmp_path, caplog):
         """plugins IS supported now (-> --skill), but a path that resolves to no skills
         must warn — else the run silently measures the model WITHOUT the skill."""
@@ -382,22 +405,6 @@ class TestUnsupportedConfigIsAnnounced:
         with caplog.at_level("WARNING"):
             await _agent(plugins=[{"type": "local", "path": "/no/such/dir"}]).start(str(tmp_path))
         assert "0 skill dir(s) resolved" in caplog.text or "did not resolve" in caplog.text
-        # plugins is no longer named in the "NOT enforced" warning.
-        assert "plugins" not in "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
-
-    async def test_unenforced_fields_warn_but_system_prompt_does_not(self, patch_exec, tmp_path, caplog):
-        """allowed_tools/disallowed_tools are unenforced (Claude-namespaced default cannot
-        map to Pi's lowercase toolset) and MUST warn when set. `system_prompt` IS enforced
-        (--append-system-prompt) and must never appear in the unenforced-fields warning."""
-        patch_exec(_FakeProcess(HAPPY_STREAM))
-        with caplog.at_level("WARNING"):
-            await _agent(allowed_tools=["Read"], disallowed_tools=["Bash"], system_prompt="be terse").start(
-                str(tmp_path)
-            )
-        warning = "".join(r.message for r in caplog.records if "NOT enforced" in r.message)
-        assert "allowed_tools" in warning
-        assert "disallowed_tools" in warning
-        assert "system_prompt" not in warning  # the enforced field is never named
 
 
 class TestAutoRetry:
@@ -432,7 +439,7 @@ class TestAutoRetry:
 
 class TestCooperativeStop:
     def test_capability_flag_is_declared(self):
-        assert PiAgent.supports_cooperative_stop is True
+        assert PiAgent.contract.cooperative_stop is True
 
     async def test_should_stop_ends_turn_cleanly(self, patch_exec, tmp_path):
         proc = _RunningProcess(HAPPY_STREAM)
@@ -477,6 +484,19 @@ class TestMaxTurns:
         assert usage is not None
         assert usage.uncached_input_tokens == 406  # turn 1's input exactly
         assert usage.output_tokens == 77  # 69 + 8 reasoning
+
+    async def test_the_turn_past_the_cap_is_never_admitted(self, patch_exec, tmp_path):
+        """The cap stops at the (N+1)th `turn_start`, before it is counted or emitted."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
+
+        assert record.max_turns_exhausted is True
+        assert record.assistant_turn_count == 1
+        starts = [e for e in recorder.events if isinstance(e, TurnStartEvent)]
+        ends = [e for e in recorder.events if isinstance(e, TurnEndEvent)]
+        assert len(starts) == 1
+        assert len(ends) == 1
 
     async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
@@ -662,9 +682,8 @@ class TestFactoryContract:
 
     def test_undeclared_kwarg_raises(self):
         config = PiAgentConfig(type="pi", model="openrouter/moonshotai/kimi-k3")
-        assert PiAgent.supports_cost_log_tags is False
         with pytest.raises(TypeError):
-            PiAgent(config, cost_log_tags={"x": "y"})  # type: ignore[call-arg]
+            PiAgent(config, not_a_kwarg={"x": "y"})  # type: ignore[call-arg]
 
 
 class TestRegistry:

@@ -12,12 +12,6 @@ tags:
 agent:
   type: codex
   model: gpt-5.5
-  permission_mode: acceptEdits
-  allowed_tools:
-    - Bash
-    - Read
-    - Write
-    - Grep
 
 initial_prompt: |
   Create a Python module named `string_utils.py` with the following functions:

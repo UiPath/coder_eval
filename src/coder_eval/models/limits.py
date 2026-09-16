@@ -16,13 +16,15 @@ fallback, and the orchestrator's finalize fallback can never drift apart.
 
 
 class RunLimits(BaseModel):
-    """Run-time caps that abort a task when exceeded.
+    """Run-time caps on a task.
 
     Unifies structural caps (max_turns, task_timeout, turn_timeout) and
-    budget caps (tokens, USD). Budget caps are checked after each completed
-    agent turn and are cumulative across all turns of a single task; they
-    apply to the subject agent only — judge and simulator token spend are
-    not counted.
+    budget caps (tokens, USD). Structural caps stop the task. Budget caps are
+    checked after each completed agent turn and are cumulative across all
+    turns of a single task: a single-iteration task finishes and is then
+    marked over budget, and a dialog stops after the turn that crossed the
+    budget. Budgets apply to the subject agent only — judge and simulator
+    token spend are not counted.
 
     Any subset of fields is valid; an empty block is legal.
     """

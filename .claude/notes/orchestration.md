@@ -26,6 +26,26 @@
   agent.type=…` last-win rather than hard-error (the `-D` value wins). Tools, plugins,
   and SDK options are `-D`-only.
 
+- **Per-kind defaults (`by_type`)**: an experiment's `defaults.agent` may carry
+  `by_type: {<kind>: {...}}`. Each entry is inserted as its own layer directly above the
+  experiment layer that carries it, so it stays BELOW the task. The entry is selected by the
+  FINAL kind across all five layers (`cli_agent_type` gives the CLI half), so `--type pi`
+  never inherits Claude-only values, which would otherwise be rejected by the contract
+  check. A kind that is not installed is tolerated (DEBUG log): a shared experiment YAML
+  can name a plugin kind that only some hosts have. It is not allowed on a task or a
+  variant, since both already know their kind.
+
+- **The harness contract check** is the second hard resolution-time rejection, beside
+  early stop. Both raise a `TaskResolutionError`, which `resolve_all_tasks` re-raises
+  instead of demoting to a skipped task and `plan` turns into a non-zero exit. A field
+  counts as SET only if a layer wrote it with a non-null value, so a model default and
+  the default experiment's `plugins: null` never trip it. For a set field on an enforcing
+  harness it also checks the VALUE: a `permission_mode` outside `contract.permission_modes`
+  and a tool name outside `CANONICAL_TOOL_NAMES` are rejected, because the adapters index
+  their total `ToolNameMap` and would otherwise meet the name mid-run. A `-D
+  agent.system_prompt_file` is inlined against `Path.cwd()` after layer 5, so no adapter
+  and no container mount ever sees a prompt file.
+
 ## Execute vs. run: the grading switch
 
 - **Execute vs. run (the grading switch)**: `coder-eval execute` is `coder-eval run`

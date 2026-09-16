@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, ApiRoute, NoneAgentConfig, TurnRecord
+from coder_eval.models import AgentKind, ApiRoute, Enforcement, HarnessContract, NoneAgentConfig, TurnRecord
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
@@ -44,9 +44,19 @@ class NoOpAgent(Agent[NoneAgentConfig]):
     from it.
     """
 
-    def __init__(self, config: NoneAgentConfig, route: ApiRoute | None = None) -> None:
-        self.config = config
-        self.route = route
+    contract = HarnessContract(
+        system_prompt=Enforcement.UNSUPPORTED,
+        plugin_skills=Enforcement.UNSUPPORTED,
+        permission_mode=Enforcement.UNSUPPORTED,
+        allowed_tools=Enforcement.UNSUPPORTED,
+        disallowed_tools=Enforcement.UNSUPPORTED,
+        cooperative_stop=False,
+    )
+
+    def __init__(
+        self, config: NoneAgentConfig, route: ApiRoute | None = None, *, cost_log_tags: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(config, route, cost_log_tags=cost_log_tags)
 
     async def start(
         self,

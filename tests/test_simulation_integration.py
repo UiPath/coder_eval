@@ -25,6 +25,7 @@ from coder_eval.models import (
 )
 from coder_eval.orchestrator import Orchestrator
 from coder_eval.simulation.user_simulator import UserSimulator
+from tests.fixtures.harness_stubs import stub_contract
 from tests.fixtures.mock_agent import MockAgent
 from tests.fixtures.text_stub_agent import TextStubAgent
 
@@ -104,6 +105,8 @@ class _TokenizedTextStub(TextStubAgent):
 
 class _ExplodingAgent(Agent):
     """Agent fake whose communicate() always raises — exercises error-path handling."""
+
+    contract = stub_contract()
 
     def __init__(self, message: str = "simulator exploded") -> None:
         self._message = message

@@ -70,7 +70,8 @@ auto-qualified to a regional inference profile (`eu.` / `us.` / `apac.` / `globa
 ## Agent config surface
 
 All fields live under `agent:` in a task (or an experiment variant). Only `type` is
-required; everything else has a default.
+required; everything else has a default. What each uniform field means on every
+harness (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract).
 
 ```yaml
 agent:
@@ -205,7 +206,7 @@ carries a `stop_early:` block, a single-shot run ends cleanly at the next
 tool-call boundary once its **armed** criteria (those carrying a
 `stop_early:` block) are
 decided — so a raised `max_turns` isn't wasted on a smoke run. Early stop errors at
-resolution for any agent that does not declare `supports_cooperative_stop`. See the
+resolution for any agent whose contract does not declare `cooperative_stop`. See the
 [Task Definition Guide](../TASK_DEFINITION_GUIDE.md) for the full contract.
 
 ## Telemetry

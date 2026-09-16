@@ -303,3 +303,30 @@ def test_execute_help_explains_the_refused_flags() -> None:
     output = _strip_ansi(result.output)
     for flag in _DELIBERATELY_ABSENT_FROM_EXECUTE:
         assert flag in output, f"execute's help should explain why {flag} is unavailable"
+
+
+@pytest.mark.parametrize("kind", ["pi", "codex", "none"])
+async def test_staged_task_reloads_without_claiming_model_defaults(tmp_path: Path, kind: str) -> None:
+    """The container reloads task.yaml and re-runs the harness contract check, so the
+    stage must not write a model default (permission_mode) as if a layer had set it."""
+    from coder_eval.isolation.docker_runner import DockerRunner
+    from coder_eval.models import ResolvedTask, TaskDefinition
+    from coder_eval.orchestration.harness_contract import validate_harness_contract
+    from coder_eval.orchestration.task_loader import load_task
+
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        initial_prompt=None if kind == "none" else "p",
+        agent={"type": kind},
+        sandbox={"driver": "docker"},
+        success_criteria=[{"type": "file_exists", "path": "x.txt", "description": "x"}],
+    )
+    rt = ResolvedTask(
+        task=task, task_file=tmp_path / "t.yaml", run_dir=tmp_path / "run", variant_id="default", original_task_id="t"
+    )
+    staged = tmp_path / "input"
+    staged.mkdir()
+    await DockerRunner(rt)._stage_inputs(staged)
+    reloaded, _ = load_task(staged / "task.yaml")
+    validate_harness_contract(reloaded)

@@ -293,6 +293,8 @@ class TestNoneAgentRun:
         assert orch.result.agent_config is not None and orch.result.agent_config.type == AgentKind.NONE
         assert len(orch.result.success_criteria_results) == 3
         assert all(r.score >= 0.9 for r in orch.result.success_criteria_results)
+        assert orch.result.environment_info is not None
+        assert orch.result.environment_info["harness_contract"] == NoOpAgent.contract.model_dump(mode="json")
 
     async def test_run_executes_pre_run(self, tmp_path: Path, monkeypatch) -> None:
         """pre_run still runs with the no-op agent — it's the only thing touching the sandbox.

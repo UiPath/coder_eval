@@ -173,6 +173,23 @@ class TestVerifierTaskYaml:
         emitted = yaml.safe_load((out_dir / "tests" / "task.yaml").read_text(encoding="utf-8"))
         assert emitted["agent"]["type"] != "none"
 
+    @pytest.mark.parametrize("kind", ["pi", "codex"])
+    def test_reloaded_agent_config_passes_the_harness_contract(self, tmp_path: Path, kind: str) -> None:
+        """`coder-eval execute` re-runs the contract check on this file, so a model default
+        (permission_mode) must not be written as if a layer had set it."""
+        from coder_eval.orchestration.harness_contract import validate_harness_contract
+        from coder_eval.orchestration.task_loader import load_task
+
+        task_file = _write_task(tmp_path, {"agent": {"type": kind}})
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
+        assert "permission_mode" not in emitted["agent"]
+        reloaded, _ = load_task(out_dir / "environment" / "task.yaml")
+        validate_harness_contract(reloaded)
+
     def test_reloads_as_a_valid_task_definition(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"

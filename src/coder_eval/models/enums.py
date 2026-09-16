@@ -1,7 +1,7 @@
 """Enumeration types for coder_eval."""
 
 from enum import StrEnum
-from typing import Literal
+from typing import Final, Literal
 
 
 class FinalStatus(StrEnum):
@@ -117,6 +117,41 @@ class PermissionMode(StrEnum):
     ACCEPT_EDITS = "acceptEdits"
     PLAN = "plan"
     BYPASS_PERMISSIONS = "bypassPermissions"
+
+
+CANONICAL_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "Agent",
+        "Bash",
+        "Edit",
+        "Glob",
+        "Grep",
+        "NotebookEdit",
+        "Read",
+        "Skill",
+        "Task",
+        "TodoWrite",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Write",
+    }
+)
+"""The tool names ``allowed_tools`` / ``disallowed_tools`` accept.
+
+The coding tools the Claude Code CLI 2.1.216 (claude-agent-sdk 0.2.124) lists in its
+``system/init`` message, plus ``Agent``, ``Glob``, ``Grep`` and ``TodoWrite``, which
+that CLI does not list but the task corpus names. ``Task`` and ``Agent`` both name the
+subagent tool.
+"""
+
+TOOL_NAME_ALIASES: Final[dict[str, str]] = {"Task": "Agent"}
+"""Canonical tool name -> the canonical name of the same tool (an older spelling)."""
+
+READ_ONLY_DENIED_TOOLS: Final[tuple[str, ...]] = ("Write", "Edit", "Bash")
+"""The Claude tool names every harness that maps ``permission_mode: plan`` denies."""
+
+assert set(READ_ONLY_DENIED_TOOLS) <= CANONICAL_TOOL_NAMES, "READ_ONLY_DENIED_TOOLS must be canonical tool names"
 
 
 class PreservationMode(StrEnum):

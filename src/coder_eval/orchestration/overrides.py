@@ -26,7 +26,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from ..models import AgentKind, ConfigLineageEntry, TaskDefinition
+from ..models import ConfigLineageEntry, TaskDefinition
 from .config_merge import ALLOWED_OVERRIDE_ROOTS, Layer, MergeError, RootName, resolve_root
 
 
@@ -89,6 +89,29 @@ def _assign_nested(patch: dict[str, Any], segments: list[str], value: Any) -> No
     cursor[segments[-1]] = value
 
 
+def cli_agent_type(overrides: Mapping[str, Any], agent_type: str | None) -> str | None:
+    """The agent kind layer 5 selects: an explicit ``-D agent.type`` beats ``--type``; None if neither."""
+    kind = overrides.get("agent.type", agent_type)
+    return None if kind is None else str(kind)
+
+
+def _check_sdk_options_supported(kind: str | None) -> None:
+    """Reject ``-D agent.sdk_options.*`` unless the becoming kind's config class declares ``sdk_options``."""
+    from coder_eval.agents.registry import AgentRegistry
+    from coder_eval.plugins import ensure_plugins_loaded
+
+    ensure_plugins_loaded()
+    registration = AgentRegistry.get(kind) if kind is not None else None
+    if registration is None or "sdk_options" not in registration.config_class.model_fields:
+        supporting = ", ".join(
+            k
+            for k in AgentRegistry.list_kinds()
+            if (reg := AgentRegistry.get(k)) is not None and "sdk_options" in reg.config_class.model_fields
+        )
+        where = "no agent type is set" if kind is None else f"the {kind!r} agent config"
+        raise OverrideError(f"sdk_options is not a field of {where}; it is supported by: {supporting}.")
+
+
 def apply_overrides(
     task: TaskDefinition,
     overrides: Mapping[str, Any],
@@ -132,16 +155,10 @@ def apply_overrides(
 
     if agent_patch:
         assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
-        # Preserve the friendly "sdk_options only for claude-code" message before
-        # reconstruction, keyed on the type the agent is *becoming*.
+        # A friendly message before reconstruction, keyed on the kind the agent is *becoming*.
         if "sdk_options" in agent_patch:
-            becoming = agent_patch.get("type", task.agent.type)
-            type_value = becoming.value if isinstance(becoming, AgentKind) else becoming
-            if type_value != AgentKind.CLAUDE_CODE.value:
-                where = "no agent type is set" if type_value is None else f"agent type {type_value}"
-                raise OverrideError(
-                    f"sdk_options cannot be used with {where}. This option is only supported for claude-code agents."
-                )
+            becoming = cli_agent_type(overrides, agent_type) or task.agent.type
+            _check_sdk_options_supported(None if becoming is None else str(becoming))
         # Seed with only the explicitly-set fields (exclude_unset) so switching the
         # agent subclass via --type doesn't drag subclass-only defaults into a model
         # that forbids them.

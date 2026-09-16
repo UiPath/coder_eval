@@ -24,26 +24,31 @@ import logging
 import os
 import shutil
 import signal
+import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, ClassVar, Literal, NoReturn
+from pathlib import Path
+from typing import Any, Literal, NoReturn
 
 from coder_eval.agent import Agent
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import (
+    READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AgentState,
     ApiRoute,
     AssistantMessage,
     CommandTelemetry,
     ContentBlock,
+    Enforcement,
+    HarnessContract,
     OpenCodeAgentConfig,
     PermissionMode,
     ResultSummary,
-    SystemPromptSemantics,
     TokenUsage,
+    ToolNameMap,
     TranscriptMessage,
     TurnRecord,
 )
@@ -118,6 +123,7 @@ _TOOL_NAME_MAP: dict[str, str] = {
     "grep": "Grep",
     "list": "LS",
     "webfetch": "WebFetch",
+    "websearch": "WebSearch",
     "todowrite": "TodoWrite",
     "todoread": "TodoRead",
     "task": "Agent",
@@ -148,22 +154,37 @@ _OPENCODE_ARG_RENAME: dict[str, dict[str, str]] = {
     "Skill": {"name": "skill"},
 }
 
-# Config fields the OpenCode CLI has no equivalent knob for. `experiments/default.yaml`
-# sets `allowed_tools` on every task, so start() warns once rather than letting a
-# task believe it constrained the agent. `plugins` is NOT here: its skills half is
-# honored. Per-harness table: docs/agents/HARNESS_PARITY.md.
-_UNSUPPORTED_CONFIG_FIELDS: tuple[str, ...] = (
-    "system_prompt",
-    "system_prompt_file",
-    "allowed_tools",
-    "disallowed_tools",
-)
+# OpenCode's permission keys are coarser than its tool names: `edit` governs every
+# write-shaped tool.
+_PERMISSION_KEY_FOR_TOOL: dict[str, str] = {
+    "write": "edit",
+    "patch": "edit",
+    "multiedit": "edit",
+    "apply_patch": "edit",
+}
 
-# Skill injection: each plugin root's skills dir is merged into `skills.paths`
-# through this variable, which OpenCode applies as a final local-scope layer.
+# Permissions `"*"` also matches that are not tools. An allowlist re-allows them, so it
+# restricts tools only.
+_NON_TOOL_PERMISSIONS: tuple[str, ...] = ("external_directory", "doom_loop")
+
+# The canonical tool names OpenCode has no tool for.
+_OPENCODE_NO_EQUIVALENT: frozenset[str] = frozenset({"NotebookEdit", "ToolSearch"})
+
+_TOOL_NAMES = ToolNameMap.from_inverse(_TOOL_NAME_MAP, no_equivalent=_OPENCODE_NO_EQUIVALENT)
+
+# Each canonical tool name -> the permission keys that govern its OpenCode tools.
+_CLAUDE_TO_OPENCODE_PERMISSION: dict[str, tuple[str, ...]] = {
+    canonical: tuple(sorted({_PERMISSION_KEY_FOR_TOOL.get(tool, tool) for tool in natives}))
+    for canonical, natives in _TOOL_NAMES.names.items()
+}
+
+# Skill paths, the system-prompt `instructions` file and tool `permission` rules are
+# merged through this variable, which OpenCode applies as a final local-scope layer.
 # Only the SKILLS half of a plugin is honored.
 # Rationale: .claude/notes/agents.md § Skills, per harness
 _CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
+
+_PROMPT_FILE_NAME = "system_prompt.md"
 
 # ToolEndStatus -> CommandTelemetry.result_status (the persisted tri-state).
 _RESULT_STATUS: dict[ToolEndStatus, Literal["success", "error", "unknown"]] = {
@@ -730,12 +751,20 @@ class _OpenCodeTurnState:
 class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
     """Runs the ``opencode`` CLI as a subprocess, one invocation per turn."""
 
-    # `should_stop` is polled at every event boundary (tool-call granularity).
-    supports_cooperative_stop: ClassVar[bool] = True
-
-    # No CLI knob for `system_prompt`, so the honest regime is `"unknown"`.
+    # `should_stop` is polled at every event boundary (tool-call granularity);
+    # `system_prompt` joins the CLI's own system messages as an `instructions` file.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "unknown"
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.ENFORCED,
+        allowed_tools=Enforcement.ENFORCED,
+        disallowed_tools=Enforcement.ENFORCED,
+        cooperative_stop=True,
+        permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
+    )
+    tool_names = _TOOL_NAMES
 
     def __init__(
         self,
@@ -743,6 +772,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         route: ApiRoute | None = None,
         *,
         task_id: str = "unknown",
+        cost_log_tags: dict[str, str] | None = None,
     ) -> None:
         """Every parameter the agent factory can pass is DECLARED, not absorbed.
 
@@ -753,13 +783,15 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
 
         Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         """
-        self.config = config
-        self.route = route
+        super().__init__(config, route, cost_log_tags=cost_log_tags)
         self.task_id = task_id
         self.working_directory: str | None = None
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
         self._skill_dirs: list[str] = []
+        # Holds the system prompt as an `instructions` file; created in start(),
+        # removed in stop(). Never inside the sandbox.
+        self._prompt_dir: str | None = None
         self._session_id: str | None = None
         self._process: asyncio.subprocess.Process | None = None
         # Process-group ids of every invocation this agent spawned, swept on
@@ -782,13 +814,6 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 "The 'opencode' CLI was not found on PATH."
                 + " Install it with `npm install -g opencode-ai` (or see https://opencode.ai/docs/)."
             )
-        ignored = [f for f in _UNSUPPORTED_CONFIG_FIELDS if getattr(self.config, f, None)]
-        if ignored:
-            logger.warning(
-                "opencode: %s set but NOT enforced — the CLI has no equivalent knob, so the run is "
-                + "unconstrained by them; do not rely on them as a boundary (see docs/agents/OPENCODE.md).",
-                ", ".join(ignored),
-            )
         self._skill_dirs = _plugin_skill_dirs(self.config.plugins, log=logger)
         if self._skill_dirs:
             logger.info(
@@ -805,6 +830,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 + "WITHOUT them (see docs/agents/OPENCODE.md).",
                 len(self.config.plugins),
             )
+        await asyncio.to_thread(self._write_prompt_file)
         self.working_directory = working_directory
         self._env_path_prepend = list(env_path_prepend or [])
         self._plugin_tools_dir = plugin_tools_dir
@@ -813,7 +839,19 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
 
     async def stop(self) -> None:
         await self.kill()
+        self._remove_prompt_dir()
         self._mark_stopped()
+
+    def _write_prompt_file(self) -> None:
+        self._remove_prompt_dir()
+        if self.config.system_prompt:
+            self._prompt_dir = tempfile.mkdtemp(prefix="coder-eval-opencode-")
+            Path(self._prompt_dir, _PROMPT_FILE_NAME).write_text(self.config.system_prompt, encoding="utf-8")
+
+    def _remove_prompt_dir(self) -> None:
+        if self._prompt_dir is not None:
+            shutil.rmtree(self._prompt_dir, ignore_errors=True)
+            self._prompt_dir = None
 
     async def kill(self) -> None:
         proc = self._process
@@ -880,10 +918,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             argv += ["--variant", self.config.variant]
         if self.config.pure:
             argv.append("--pure")
-        # PLAN is the one mode that must not auto-approve side effects; every
-        # other runs unattended, where an approval prompt would simply hang.
-        if self.config.permission_mode is not PermissionMode.PLAN:
-            argv.append("--auto")
+        # Auto-approves only what `permission` does not explicitly deny; an
+        # approval prompt would hang an unattended run.
+        argv.append("--auto")
         if self._session_id:
             argv += ["--session", self._session_id]
         argv.append("--")
@@ -910,17 +947,37 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
             env["PATH"] = os.pathsep.join([*self._env_path_prepend, env.get("PATH", "")])
         if self._plugin_tools_dir and "PLUGIN_TOOLS_DIR" not in env:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
-        self._inject_skill_paths(env)
+        self._inject_config_content(env)
         return env
 
-    def _inject_skill_paths(self, env: dict[str, str]) -> None:
-        """Merge the resolved skill directories into ``OPENCODE_CONFIG_CONTENT``.
+    def _permission_config(self) -> dict[str, str] | None:
+        """OpenCode ``permission`` rules for the uniform tool fields; None when none is set.
 
-        No plugins means the variable is left exactly as inherited. An inherited
-        value is appended to, never clobbered: the host may legitimately configure
-        OpenCode through the same seam.
+        An allowlist denies ``*`` and allows the mapped keys. Denies are written
+        last, so a disallowed or ``plan``-denied key always wins.
         """
-        if not self._skill_dirs:
+        deny_names = list(self.config.disallowed_tools or [])
+        if self.config.permission_mode is PermissionMode.PLAN:
+            deny_names += READ_ONLY_DENIED_TOOLS
+        permission: dict[str, str] = {}
+        if self.config.allowed_tools:
+            permission["*"] = "deny"
+            permission.update(dict.fromkeys(_NON_TOOL_PERMISSIONS, "allow"))
+            for name in self.config.allowed_tools:
+                permission.update(dict.fromkeys(_CLAUDE_TO_OPENCODE_PERMISSION[name], "allow"))
+        for name in deny_names:
+            permission.update(dict.fromkeys(_CLAUDE_TO_OPENCODE_PERMISSION[name], "deny"))
+        return permission or None
+
+    def _inject_config_content(self, env: dict[str, str]) -> None:
+        """Merge skill paths, the prompt file and permission rules into ``OPENCODE_CONFIG_CONTENT``.
+
+        With none of the three the variable is left exactly as inherited. An
+        inherited value is merged, never clobbered: the host may legitimately
+        configure OpenCode through the same seam. Our entries win per key.
+        """
+        permission = self._permission_config()
+        if not (self._skill_dirs or self._prompt_dir or permission):
             return
         config: dict[str, Any] = {}
         inherited = env.get(_CONFIG_CONTENT_ENV)
@@ -929,7 +986,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 parsed = json.loads(inherited)
             except json.JSONDecodeError:
                 logger.warning(
-                    "opencode: inherited %s is not valid JSON; replacing it with the injected skill paths.",
+                    "opencode: inherited %s is not valid JSON; replacing it with the injected config.",
                     _CONFIG_CONTENT_ENV,
                 )
             else:
@@ -937,14 +994,29 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     config = parsed
                 else:
                     logger.warning(
-                        "opencode: inherited %s is not a JSON object; replacing it with the injected skill paths.",
+                        "opencode: inherited %s is not a JSON object; replacing it with the injected config.",
                         _CONFIG_CONTENT_ENV,
                     )
-        skills = config.get("skills")
-        skills = dict(skills) if isinstance(skills, dict) else {}
-        existing = [path for path in skills.get("paths", []) if isinstance(path, str)]
-        skills["paths"] = existing + [path for path in self._skill_dirs if path not in existing]
-        config["skills"] = skills
+        if self._skill_dirs:
+            skills = config.get("skills")
+            skills = dict(skills) if isinstance(skills, dict) else {}
+            existing = [path for path in skills.get("paths", []) if isinstance(path, str)]
+            skills["paths"] = existing + [path for path in self._skill_dirs if path not in existing]
+            config["skills"] = skills
+        if self._prompt_dir is not None:
+            prompt_file = str(Path(self._prompt_dir, _PROMPT_FILE_NAME))
+            inherited_files = config.get("instructions")
+            inherited_files = inherited_files if isinstance(inherited_files, list) else []
+            config["instructions"] = [f for f in inherited_files if isinstance(f, str) and f != prompt_file] + [
+                prompt_file
+            ]
+        if permission:
+            # OpenCode applies the LAST matching rule, so ours go after every inherited one.
+            # A host rule for a non-tool key is kept: a tool allowlist must not loosen it.
+            inherited_rules = config.get("permission")
+            inherited = inherited_rules if isinstance(inherited_rules, dict) else {}
+            ours = {k: v for k, v in permission.items() if not (k in _NON_TOOL_PERMISSIONS and k in inherited)}
+            config["permission"] = {**{k: v for k, v in inherited.items() if k not in ours}, **ours}
         env[_CONFIG_CONTENT_ENV] = json.dumps(config)
 
     # --- the turn ----------------------------------------------------------
@@ -1048,10 +1120,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     if not line:
                         break
 
-                    self._handle_line(line, state)
+                    self._handle_line(line, state, max_turns=max_turns)
 
-                    if max_turns is not None and state.step_count > max_turns:
-                        state.max_turns_exhausted = True
+                    if state.max_turns_exhausted:
                         await self.kill()
                         break
                     if should_stop is not None and should_stop():
@@ -1237,8 +1308,11 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         finally:
             self._capture_partial_turn(collector)
 
-    def _handle_line(self, line: bytes, state: _OpenCodeTurnState) -> None:
-        """Parse one nd-JSON line and dispatch it. Never raises on bad input."""
+    def _handle_line(self, line: bytes, state: _OpenCodeTurnState, *, max_turns: int | None = None) -> None:
+        """Parse one nd-JSON line and dispatch it. Never raises on bad input.
+
+        A ``step_start`` past ``max_turns`` sets ``state.max_turns_exhausted`` instead of opening a step.
+        """
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
             return
@@ -1266,7 +1340,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 state.thread_id = session_id
             self._session_id = session_id
 
-        if event_type == _STEP_START:
+        if event_type == _STEP_START and max_turns is not None and state.step_count >= max_turns:
+            state.max_turns_exhausted = True
+        elif event_type == _STEP_START:
             state.on_step_start(part)
         elif event_type == _TEXT:
             state.on_text(part)

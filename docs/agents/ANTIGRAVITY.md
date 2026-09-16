@@ -136,18 +136,33 @@ can't be resolved or if zero skills are discovered.
 
 ## Permissions & tools — important differences
 
-**Antigravity ignores `permission_mode`, `allowed_tools`, and `disallowed_tools`.**
-The local harness runs in a single unconditional mode: every tool call (including
-`run_command`) is approved via an allow-all policy, and file tools are restricted to
-the configured `workspaces` (the sandbox working directory plus any skill roots).
+Per-field contract and tool names (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract).
 
-The trust boundary for an Antigravity run is therefore the **sandbox**, not the
-agent config. Run untrusted tasks under the [Docker driver](../DOCKER_ISOLATION.md);
-the `tempdir` driver is not a security boundary. This mirrors the reality that the
-`bypassPermissions`-equivalent behavior is always on for this backend.
+The uniform fields become SDK tool-call policies (`google.antigravity.hooks.policy`):
 
-Those inherited fields still exist on the config for schema uniformity but have no
-runtime effect here — don't rely on them to gate Antigravity.
+| Field | Policies |
+|---|---|
+| none set | `allow_all()` — every tool call, including `run_command`, is approved |
+| `allowed_tools` | `deny_all()`, then `allow(tool)` for each mapped tool and for `finish` |
+| `disallowed_tools` | `deny(tool)` for each mapped tool |
+| `permission_mode: plan` | `deny` on `create_file`, `edit_file` and `run_command` (read-only) |
+| `permission_mode: bypassPermissions` | no extra rule |
+
+`default` and `acceptEdits` have no Antigravity meaning and are rejected at resolution.
+
+Claude tool names map to harness tools by inverting the telemetry map (`Bash` →
+`run_command`, `Write` → `create_file`, `Edit` → `edit_file`, `Read` → `view_file`,
+…). A specific rule outranks the wildcard one in the SDK, and a specific deny
+outranks a specific allow, so a denied tool stays denied. `finish` is always allowed
+under an allowlist and never denied, because the harness ends a turn with it. An empty
+`allowed_tools: []` restricts nothing, as on Claude Code. A name with no
+Antigravity equivalent restricts nothing. File tools also stay restricted to the
+configured `workspaces` (the sandbox working directory plus any skill roots); an
+out-of-workspace path is a specific deny.
+
+Policies decide which calls run; a denied tool is still visible to the model. They do
+not confine what a permitted `run_command` can do, so the trust boundary for an
+untrusted run is still the **sandbox**: use the [Docker driver](../DOCKER_ISOLATION.md).
 
 ## Telemetry
 
@@ -159,7 +174,7 @@ as every other agent.
   canonical Claude-style names so cross-agent criteria work: `run_command` → `Bash`,
   `create_file` → `Write`, `edit_file` → `Edit`, `view_file` → `Read`,
   `search_directory` → `Grep`, `find_file` → `Glob`, `list_directory` → `LS`,
-  `start_subagent` → `Task`, `search_web` → `WebSearch`. Argument keys are also
+  `start_subagent` → `Agent`, `search_web` → `WebSearch`. Argument keys are also
   normalized (e.g. `command_line` → `command`) so `command_executed` criteria key on
   the same params across agents.
 - **Tokens.** Gemini usage maps to Coder Eval's four buckets: uncached input, cache
@@ -184,16 +199,12 @@ as every other agent.
 3. **`kill_sync()` is best-effort.** The SDK's cancel/disconnect are async-only, so
    the watchdog's synchronous kill only flips agent state to `ERROR`; real teardown
    happens on the subsequent async `stop()`.
-4. **`permission_mode` does not confine the harness.** Every mode runs
-   `policy.allow_all()`; coder_eval's write boundary is the sandbox driver, and a
-   headless eval has no human to approve anything.
-5. **`allowed_tools` / `disallowed_tools` are not read.** The harness runs with its
-   full builtin tool set, so an Antigravity run has tools (web search, subagents,
-   URL fetch) that the same task file denies on Claude Code and Codex.
-6. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
+4. **Denied tools stay visible.** A policy denial rejects the call after the model
+   makes it, so a denied tool can still cost tokens on a retry.
+5. **`max_turns` counts visible turns.** One `communicate()` is a single SDK turn here,
    so the cap counts resolved tool calls instead, enforced on the step loop. See
    [Run-Limit Parity](HARNESS_PARITY.md).
-7. **Shell commands over ~10s are moved to the background.** The localharness has a
+6. **Shell commands over ~10s are moved to the background.** The localharness has a
    10-second maximum synchronous wait; past it the command becomes a background task
    and the model gets a task id, not a result. The turn polls for that result instead
    of finalizing on an idle step stream, so slow work does complete — but the wait is

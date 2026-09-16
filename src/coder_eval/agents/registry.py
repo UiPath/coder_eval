@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, get_args
 
 
 # TYPE_CHECKING-only imports, so this module imports nothing from coder_eval at
-# runtime and the dependency edge stays one-way (CodeQL py/cyclic-import).
+# module load and the dependency edge stays one-way (CodeQL py/cyclic-import).
 # Rationale: .claude/notes/agents.md § Why the registry rejects a re-registration
 if TYPE_CHECKING:
     from coder_eval.agent import Agent
@@ -19,6 +19,49 @@ if TYPE_CHECKING:
 
 MethodConfigT = TypeVar("MethodConfigT", bound="BaseAgentConfig")
 AgentClassT = TypeVar("AgentClassT")
+
+
+def _validate_registration(kind: str, agent_cls: type, config_class: type) -> None:
+    """Reject an ``(agent class, config class)`` pair the resolver cannot trust.
+
+    Raises:
+        TypeError: the agent class declares no ``HarnessContract``, its ``tool_names``
+            presence does not match the contract's tool-list rows, or the config
+            class is not a ``BaseAgentConfig`` with ``extra="forbid"`` whose ``type``
+            Literal names ``kind``.
+    """
+    from coder_eval.models import BaseAgentConfig, Enforcement, HarnessContract, ToolNameMap
+
+    agent_name = agent_cls.__name__
+    config_name = config_class.__name__
+    contract = getattr(agent_cls, "contract", None)
+    if not isinstance(contract, HarnessContract):
+        raise TypeError(
+            f"Agent kind {kind!r}: {agent_name} must declare `contract = HarnessContract(...)` "
+            + "as a class attribute, so the resolver knows which agent fields the harness honors."
+        )
+    lists_enforced = Enforcement.ENFORCED in (contract.allowed_tools, contract.disallowed_tools)
+    tool_names = getattr(agent_cls, "tool_names", None)
+    has_map = isinstance(tool_names, ToolNameMap) if lists_enforced else tool_names is None
+    if not has_map:
+        raise TypeError(
+            f"Agent kind {kind!r}: {agent_name} must declare `tool_names = ToolNameMap(...)` exactly when its "
+            + "contract enforces allowed_tools or disallowed_tools, and leave it None otherwise."
+        )
+    if not issubclass(config_class, BaseAgentConfig):
+        raise TypeError(f"Agent kind {kind!r}: config class {config_name} must subclass BaseAgentConfig.")
+    if config_class.model_config.get("extra") != "forbid":
+        raise TypeError(
+            f"Agent kind {kind!r}: config class {config_name} must keep extra='forbid', "
+            + "so an unknown agent key in YAML is an error rather than silently dropped."
+        )
+    type_field = config_class.model_fields.get("type")
+    literal_kinds = {str(arg) for arg in get_args(type_field.annotation)} if type_field is not None else set()
+    if kind not in literal_kinds:
+        raise TypeError(
+            f"Agent kind {kind!r}: config class {config_name} must declare "
+            + f"`type: Literal[{kind!r}]` (its `type` annotation admits {sorted(literal_kinds)})."
+        )
 
 
 @dataclass
@@ -64,6 +107,7 @@ class AgentRegistry:
 
         def decorator(agent_cls: type[AgentClassT]) -> type[AgentClassT]:
             kind = str(agent_kind)
+            _validate_registration(kind, agent_cls, config_class)
             existing = cls._registry.get(kind)
             # Re-registering the SAME classes is legitimate (an idempotent
             # built-in reload); a DIFFERENT implementation for the same kind is a

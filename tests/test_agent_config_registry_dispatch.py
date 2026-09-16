@@ -20,6 +20,7 @@ from coder_eval.models import (
     parse_agent_config,
 )
 from coder_eval.orchestration.config_merge import MergeError, validate_paths
+from tests.fixtures.harness_stubs import stub_contract
 
 
 def _now():
@@ -146,6 +147,8 @@ def _registered_plugin_kind():
     from coder_eval.agents.registry import AgentRegistry
 
     class _PluginAgent:
+        contract = stub_contract()
+
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 

@@ -1132,3 +1132,67 @@ class TestSdkOptionsMerge:
                 prompt="grade",
                 agent=parse_agent_config(type="claude-code", sdk_options={"hooks": {}}),
             )
+
+
+def _write_task(tmp_path, body: str):
+    task_file = tmp_path / "task.yaml"
+    task_file.write_text(
+        "task_id: contract-task\ndescription: d\ninitial_prompt: do it\nsandbox:\n  driver: tempdir\n"
+        + body
+        + "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: c\n"
+    )
+    return task_file
+
+
+def _resolve_all(tmp_path, task_file, **config):
+    from coder_eval.orchestration.config import BatchRunConfig
+    from coder_eval.orchestration.experiment import resolve_all_tasks
+
+    single = [ExperimentVariant(variant_id="default")]
+    return resolve_all_tasks(
+        task_files=[task_file],
+        experiment=ExperimentDefinition(experiment_id="exp", variants=single),
+        default_experiment=ExperimentDefinition(experiment_id="default", variants=single),
+        config=BatchRunConfig(run_dir=tmp_path / "runs", **config),
+    )
+
+
+class TestHarnessContractAtResolution:
+    def test_unsupported_field_aborts_instead_of_skipping(self, tmp_path):
+        from coder_eval.orchestration.harness_contract import HarnessContractError
+
+        task_file = _write_task(tmp_path, "agent:\n  type: codex\n  permission_mode: acceptEdits\n")
+        with pytest.raises(HarnessContractError, match=r"agent\.permission_mode.*'codex'"):
+            _resolve_all(tmp_path, task_file)
+
+    def test_undeclared_permission_value_aborts(self, tmp_path):
+        from coder_eval.orchestration.harness_contract import HarnessContractError
+
+        task_file = _write_task(tmp_path, "agent:\n  type: pi\n  permission_mode: acceptEdits\n")
+        with pytest.raises(HarnessContractError, match=r"permission_mode='acceptEdits'.*'pi'"):
+            _resolve_all(tmp_path, task_file)
+
+    def test_unknown_tool_name_aborts(self, tmp_path):
+        from coder_eval.orchestration.harness_contract import HarnessContractError
+
+        task_file = _write_task(tmp_path, "agent:\n  type: opencode\n  allowed_tools: [Bassh]\n")
+        with pytest.raises(HarnessContractError, match="did you mean 'Bash'"):
+            _resolve_all(tmp_path, task_file)
+
+    def test_cli_prompt_file_is_inlined_after_layer_five(self, tmp_path, monkeypatch):
+        (tmp_path / "prompt.md").write_text("be terse\n")
+        monkeypatch.chdir(tmp_path)
+        task_file = _write_task(tmp_path, "agent:\n  type: claude-code\n")
+        resolved, skipped = _resolve_all(tmp_path, task_file, overrides={"agent.system_prompt_file": "prompt.md"})
+        assert not skipped
+        agent = resolved[0].task.agent
+        assert agent is not None
+        assert agent.system_prompt == "be terse"
+        assert agent.system_prompt_file is None
+
+    def test_missing_cli_prompt_file_is_a_resolution_failure(self, tmp_path, monkeypatch):
+        """An ordinary per-task failure: with no other task left, resolution refuses the empty run."""
+        monkeypatch.chdir(tmp_path)
+        good = _write_task(tmp_path, "agent:\n  type: claude-code\n")
+        with pytest.raises(ValueError, match="system_prompt_file not found"):
+            _resolve_all(tmp_path, good, overrides={"agent.system_prompt_file": "missing.md"})

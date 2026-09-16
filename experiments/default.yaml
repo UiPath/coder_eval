@@ -43,22 +43,6 @@ defaults:
     # none (plus any plugin-registered kind). claude-code is the run-wide default.
     type: claude-code
 
-    # Permission mode for agent actions:
-    #   default        - ask for confirmation on each action
-    #   acceptEdits    - auto-accept file edits, confirm other actions
-    #   plan           - read-only, no file modifications allowed
-    #   bypassPermissions - auto-accept all actions (use with caution)
-    permission_mode: acceptEdits
-
-    # Specific model to use (null = defer to Claude Code CLI default)
-    # Examples: claude-sonnet-4-6, claude-opus-4-6
-    model: claude-sonnet-4-6
-
-    # Allowed tools — restrict which tools the agent can use (null = all tools)
-    # Most tasks use ["Bash"] or ["Bash", "Read", "Write"]. This default
-    # provides the common set needed for general-purpose coding tasks.
-    allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
-
     # Claude Code plugins to load (null = none)
     # `path` must be a PLUGIN ROOT: a directory holding skills/, so the skill sits at
     # <path>/skills/<name>/SKILL.md. One level deeper loads nothing on claude-code.
@@ -68,6 +52,26 @@ defaults:
     # Additional patterns to ignore during file change detection (beyond defaults)
     # Example: ["*.log", "__pycache__"]
     ignore_patterns: []
+
+    # Per-kind defaults. Applied only when the resolved `type` matches, BELOW the
+    # task, so `--type pi` does not inherit Claude-only values.
+    by_type:
+      claude-code:
+        # Permission mode for agent actions:
+        #   default        - ask for confirmation on each action
+        #   acceptEdits    - auto-accept file edits, confirm other actions
+        #   plan           - read-only, no file modifications allowed
+        #   bypassPermissions - auto-accept all actions (use with caution)
+        permission_mode: acceptEdits
+
+        # Specific model to use (null = defer to Claude Code CLI default)
+        # Examples: claude-sonnet-4-6, claude-opus-4-6
+        model: claude-sonnet-4-6
+
+        # Allowed tools — restrict which tools the agent can use (null = all tools)
+        # Most tasks use ["Bash"] or ["Bash", "Read", "Write"]. This default
+        # provides the common set needed for general-purpose coding tasks.
+        allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill"]
 
     # Claude Code SDK pass-through options — anything coder_eval doesn't own
     # directly (e.g. `effort`, `max_thinking_tokens`). Keys must be

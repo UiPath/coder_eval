@@ -198,9 +198,16 @@ class TestCE046EnvInfoSpreadsSuper:
         # The base Agent.get_environment_info is the marker's source, not an override.
         src = (
             "class Agent:\n    def get_environment_info(self):\n"
-            "        return {'system_prompt_semantics': self.system_prompt_semantics}"
+            "        return {'system_prompt_semantics': self.contract.system_prompt_semantics}"
         )
         assert not self._run(src)
+
+    def test_flags_override_that_reads_contract_without_spread(self):
+        src = (
+            "class FooAgent:\n    def get_environment_info(self):\n"
+            "        return {'semantics': self.contract.system_prompt_semantics}"
+        )
+        assert self._run(src)
 
     def test_ignores_classes_without_the_method(self):
         assert not self._run("class FooAgent:\n    def other(self):\n        return {}")
@@ -2153,6 +2160,89 @@ class TestCE004CatchesBothImportSpellings:
         there closes a cli -> orchestration -> reports -> cli cycle. It was exempt
         only because CE004 borrowed CE066's core predicate."""
         assert self._violations("from ..cli import run_command", "/repo/src/coder_eval/reports/markdown.py")
+
+
+@pytest.mark.lint
+class TestCE069HarnessParityTable:
+    """CE069 — the agent-field contract tables are generated from the agent classes."""
+
+    REPO_ROOT = Path(__file__).parent.parent
+
+    def test_repo_tables_match_generated_output(self):
+        from tests.lint.harness_parity import check
+
+        findings = check(self.REPO_ROOT)
+        assert not findings, (
+            "\nThe agent-field contract tables drifted from the agent classes — run `make parity-table` "
+            "to regenerate:\n\n" + "\n\n".join(f"{path}:\n{diff}" for path, diff in sorted(findings.items()))
+        )
+
+    def test_both_marker_pairs_exist(self):
+        from tests.lint.harness_parity import CONTRACT_END, CONTRACT_START, TOOLS_END, TOOLS_START
+
+        text = (self.REPO_ROOT / "docs/agents/HARNESS_PARITY.md").read_text(encoding="utf-8")
+        for marker in (CONTRACT_START, CONTRACT_END, TOOLS_START, TOOLS_END):
+            assert marker in text
+
+    def test_render_pins_the_header_and_a_known_cell(self):
+        from tests.lint.harness_parity import render_table
+
+        lines = render_table().splitlines()
+        assert lines[0] == "| field | claude-code | codex | antigravity | opencode | pi | none |"
+        system_prompt = next(line for line in lines if line.startswith("| `system_prompt` |"))
+        assert system_prompt.split(" | ")[5] == "enforced"
+
+
+@pytest.mark.lint
+class TestCE068NoKindNamesInKernel:
+    """CE068 — orchestration/, streaming/ and timing.py name no concrete agent kind."""
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce068_no_kind_names_in_kernel import NoKindNamesInKernel
+
+        return list(NoKindNamesInKernel(filepath).check(ast.parse(source)))
+
+    ORCHESTRATION = "/repo/src/coder_eval/orchestration/x.py"
+    STREAMING = "/repo/src/coder_eval/streaming/x.py"
+    TIMING = "/repo/src/coder_eval/timing.py"
+
+    def test_a_concrete_config_import_in_orchestration_violates(self):
+        found = self._violations("from coder_eval.models import ClaudeCodeAgentConfig", self.ORCHESTRATION)
+        assert len(found) == 1
+        assert "registry" in found[0].message
+
+    def test_the_relative_spelling_violates_too(self):
+        assert self._violations("from ..models import CodexAgentConfig", self.ORCHESTRATION)
+
+    @pytest.mark.parametrize("path", [STREAMING, TIMING])
+    def test_a_kind_member_read_violates(self, path: str):
+        assert self._violations("x = AgentKind.CLAUDE_CODE", path)
+
+    def test_the_unknown_sentinel_is_allowed(self):
+        assert not self._violations("x = AgentKind.UNKNOWN", self.ORCHESTRATION)
+
+    def test_the_base_config_and_the_union_alias_are_allowed(self):
+        assert not self._violations("from coder_eval.models import AgentConfig, BaseAgentConfig", self.ORCHESTRATION)
+
+    def test_bare_agent_kind_use_is_allowed(self):
+        assert not self._violations("ok = isinstance(x, AgentKind)", self.ORCHESTRATION)
+
+    @pytest.mark.parametrize("path", ["/repo/src/coder_eval/agents/x.py", "/repo/src/coder_eval/cli/x.py"])
+    def test_outside_the_kernel_is_allowed(self, path: str):
+        assert not self._violations("from coder_eval.models import ClaudeCodeAgentConfig\nx = AgentKind.PI", path)
+
+    def test_the_config_class_set_is_derived_from_the_union(self):
+        import typing
+
+        from coder_eval.models import AgentConfig
+        from tests.lint.rules.ce068_no_kind_names_in_kernel import CONFIG_CLASS_NAMES
+
+        members = typing.get_args(typing.get_args(AgentConfig.__value__)[0])
+        assert {cls.__name__ for cls in members} == CONFIG_CLASS_NAMES
+        assert "PiAgentConfig" in CONFIG_CLASS_NAMES
 
 
 @pytest.mark.lint

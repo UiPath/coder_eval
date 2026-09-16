@@ -25,7 +25,7 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
@@ -38,6 +38,7 @@ from coder_eval.errors import (
     truncate_crash_message,
 )
 from coder_eval.models import (
+    READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AntigravityAgentConfig,
     ApiRoute,
@@ -45,8 +46,11 @@ from coder_eval.models import (
     CommandTelemetry,
     ContentBlock,
     DirectRoute,
-    SystemPromptSemantics,
+    Enforcement,
+    HarnessContract,
+    PermissionMode,
     TokenUsage,
+    ToolNameMap,
     TranscriptMessage,
     TurnRecord,
 )
@@ -113,12 +117,21 @@ _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP: dict[str, str] = {
     "search_directory": "Grep",
     "find_file": "Glob",
     "list_directory": "LS",
-    "start_subagent": "Task",
+    "start_subagent": "Agent",
     "search_web": "WebSearch",
+    "read_url_content": "WebFetch",
     "generate_image": "GenerateImage",
     "ask_question": "AskUser",
     "finish": "Finish",
 }
+
+# The canonical tool names Antigravity has no tool for.
+_ANTIGRAVITY_NO_EQUIVALENT: frozenset[str] = frozenset({"NotebookEdit", "Skill", "TodoWrite", "ToolSearch"})
+
+_TOOL_NAMES = ToolNameMap.from_inverse(_ANTIGRAVITY_TO_CLAUDE_TOOL_MAP, no_equivalent=_ANTIGRAVITY_NO_EQUIVALENT)
+
+# The harness ends a turn by calling `finish`, so an allowlist never denies it.
+_TURN_END_TOOL = "finish"
 
 # Tool-call arg keys the harness ADDS at completion (the result payload), not
 # model-supplied inputs. The STATIC backstop; ``_params`` also strips any key
@@ -181,13 +194,21 @@ def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
 class AntigravityAgent(Agent[AntigravityAgentConfig]):
     """Implementation of the Agent interface for Google Antigravity (Gemini)."""
 
-    # The step loop has a between-steps guard where `should_stop` runs.
-    supports_cooperative_stop: ClassVar[bool] = True
-
+    # The step loop has a between-steps guard where `should_stop` runs;
     # TemplatedSystemInstructions wraps system_instructions around the harness's
     # own prompt, and always has — so runs ARE comparable across the marker.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
-    system_prompt_semantics: ClassVar[SystemPromptSemantics] = "append"
+    contract = HarnessContract(
+        system_prompt=Enforcement.ENFORCED,
+        system_prompt_semantics="append",
+        plugin_skills=Enforcement.ENFORCED,
+        permission_mode=Enforcement.ENFORCED,
+        allowed_tools=Enforcement.ENFORCED,
+        disallowed_tools=Enforcement.ENFORCED,
+        cooperative_stop=True,
+        permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
+    )
+    tool_names = _TOOL_NAMES
 
     def __init__(
         self,
@@ -195,6 +216,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         route: ApiRoute | None = None,
         *,
         instance_name: str = "antigravity",
+        cost_log_tags: dict[str, str] | None = None,
     ):
         """Initialize the Antigravity agent.
 
@@ -203,9 +225,9 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             route: API routing configuration (unused — Antigravity authenticates via
                 GEMINI_API_KEY against the Gemini Developer API; kept for parity).
             instance_name: Short label used to prefix this instance's log records.
+            cost_log_tags: LiteLLM correlation headers; accepted for factory parity, unused.
         """
-        self.config = config
-        self.route = route or DirectRoute()
+        super().__init__(config, route or DirectRoute(), cost_log_tags=cost_log_tags)
         self.working_directory: Path | None = None
         # The live SDK Agent session + its AsyncExitStack. The exit-stack teardown
         # terminates the localharness subprocess, which is what stop()/kill() rely
@@ -300,6 +322,24 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         merged = os.pathsep.join([*self._env_path_prepend, os.environ.get(path_key) or ""])
         return {path_key: merged}
 
+    def _policies(self, policy: Any) -> list[Any]:
+        """Tool-call policies from the uniform tool fields, built with the SDK's ``policy`` module.
+
+        No allowlist approves every call (autonomous execution; the SDK default
+        would deny ``run_command``). A specific deny outranks a specific allow in
+        the SDK, so a denied or ``plan``-denied tool stays denied.
+        """
+        if not self.config.allowed_tools:
+            policies = [policy.allow_all()]
+        else:
+            allowed = {t for name in self.config.allowed_tools for t in _TOOL_NAMES.names[name]}
+            policies = [policy.deny_all(), *(policy.allow(t) for t in sorted(allowed | {_TURN_END_TOOL}))]
+        deny_names = list(self.config.disallowed_tools or [])
+        if self.config.permission_mode is PermissionMode.PLAN:
+            deny_names += READ_ONLY_DENIED_TOOLS
+        denied = {t for name in deny_names for t in _TOOL_NAMES.names[name]} - {_TURN_END_TOOL}
+        return policies + [policy.deny(t) for t in sorted(denied)]
+
     async def start(
         self,
         working_directory: str,
@@ -345,12 +385,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 # workspace_only policy — see _resolve_workspaces for why the skill
                 # roots must be in here and not only in ``skills_paths``.
                 workspaces=self._resolve_workspaces(skills_paths),
-                # Autonomous execution: approve every tool call, which the default
-                # policy would deny. ``permission_mode`` is deliberately NOT mapped
-                # here — it does not confine this agent, exactly as on Codex, and
-                # docs/agents/HARNESS_PARITY.md says so rather than leaving it
-                # silent. The isolation boundary is the driver.
-                policies=[policy.allow_all()],
+                policies=self._policies(policy),
                 system_instructions=self.config.system_prompt or None,
                 # Skill discovery: the search-path roots that parent the skill dirs.
                 skills_paths=skills_paths,
@@ -389,14 +424,18 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         A cooperative-stop ``break`` can leave the SDK connection "receiving" for
         a short bounded window, and the NEXT ``receive_steps()`` call raises
         ``RuntimeError`` inside it. The retry below yields an event-loop turn for
-        the already-scheduled generator finalizer to run.
+        the already-scheduled generator finalizer to run. Only an error raised
+        before this attempt pulled a step is retried; a later one is a real failure,
+        and retrying it would pull and emit the same steps again.
 
         Rationale: .claude/notes/agents.md § The receive_steps re-entrancy window
         """
         for attempt in range(_RECEIVE_STEPS_REENTRY_RETRIES):
+            pulled = False
             try:
                 async with contextlib.aclosing(conversation.receive_steps()) as steps:
                     async for step in steps:
+                        pulled = True
                         state.process_step(step)
                         if should_stop is not None and should_stop():
                             state.stopped_early_hit = True
@@ -414,7 +453,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             break
                 return
             except RuntimeError:
-                if attempt == _RECEIVE_STEPS_REENTRY_RETRIES - 1:
+                if pulled or attempt == _RECEIVE_STEPS_REENTRY_RETRIES - 1:
                     raise
                 self._log.debug(
                     "receive_steps() re-entrancy guard still set from a prior drain; retrying (attempt %d)",
@@ -660,13 +699,22 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         return None
 
     async def _teardown(self) -> None:
-        """Close the SDK Agent context (reaps the localharness subprocess)."""
+        """Close the SDK Agent context (reaps the localharness subprocess).
+
+        Never raises. A failed close is logged: the exit stack has already popped
+        its callbacks, so it cannot be retried, and the harness may still be running.
+        """
         stack = self._exit_stack
         self._exit_stack = None
         self._sdk_agent = None
-        if stack is not None:
-            with contextlib.suppress(Exception):
-                await stack.aclose()
+        if stack is None:
+            return
+        try:
+            await stack.aclose()
+        except Exception:
+            self._log.warning(
+                "Antigravity harness teardown failed; the harness process may still be running", exc_info=True
+            )
 
 
 class _AntigravityTurnState:

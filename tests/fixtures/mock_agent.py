@@ -9,6 +9,7 @@ from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.models import TaskDefinition, TurnRecord
+from tests.fixtures.harness_stubs import stub_contract
 
 
 class MockAgent(Agent):
@@ -23,6 +24,8 @@ class MockAgent(Agent):
     - "failure": Doesn't create any files (task fails)
     - "partial": Creates files but with incorrect content
     """
+
+    contract = stub_contract()
 
     def __init__(self, task: TaskDefinition, scenario: str = "success"):
         """Initialize mock agent with task definition.

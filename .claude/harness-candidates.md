@@ -962,3 +962,6 @@ re-derive from scratch.
   leaves them stale with nothing failing. Needs a backtick-path extractor scoped to
   one section, which is the narrow case of the prose-path candidate above. — caught
   during the reports consolidation rebase.
+- [ ] A `TaskDefinition` serialized for a later reload (docker `_stage_inputs`, Harbor `environment/task.yaml`) must dump `agent` with `exclude_unset=True`, or the reload marks model defaults as set and the harness contract check rejects the task — two round-trip tests guard today's two sites, but nothing flags a third `task.model_dump(` written for reload; needs a call-site classifier, not a name match — caught in the harness-contract final review.
+- [ ] A real-SDK Antigravity policy test: run `policy.enforce(agent._policies(real_policy))` to prove deny-beats-allow and `finish` approval against the installed SDK instead of a SimpleNamespace fake — nothing exercises the SDK's own bucket precedence; needs study of the hook-evaluation API — caught in the harness-contract Phase 3 review.
+- [ ] OpenCode: warn when an inherited `OPENCODE_CONFIG_CONTENT` `permission` / `instructions` value is not a dict / list and is replaced — today it is dropped silently; small, but needs a decision on warn vs. keep — caught in the harness-contract Phase 3 review.

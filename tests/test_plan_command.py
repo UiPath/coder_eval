@@ -311,3 +311,45 @@ class TestPlanCommandValidation:
 
         printed = " ".join(str(call) for call in mock_console.print.call_args_list)
         assert "Bad experiment" in printed
+
+
+class TestPlanCommandHarnessContract:
+    @staticmethod
+    def _plan(tmp_path: Path, agent_yaml: str) -> tuple[int, str]:
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text(
+            "task_id: contract-task\ndescription: d\ninitial_prompt: do it\n"
+            + agent_yaml
+            + "sandbox:\n  driver: tempdir\n"
+            + "success_criteria:\n  - type: file_exists\n    path: out.txt\n    description: c\n"
+        )
+        exp_file = tmp_path / "experiment.yaml"
+        exp_file.write_text("experiment_id: contract\nvariants:\n  - variant_id: default\n")
+        exit_code = 0
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch(f"{_EXP}.DEFAULT_EXPERIMENT_PATH", tmp_path / "missing.yaml"),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+        ):
+            try:
+                run_plan(task_files=[task_file], experiment=exp_file)
+            except typer.Exit as exc:
+                exit_code = exc.exit_code
+        return exit_code, " ".join(str(call) for call in mock_console.print.call_args_list)
+
+    def test_unsupported_agent_field_flips_the_exit_code(self, tmp_path: Path) -> None:
+        exit_code, printed = self._plan(tmp_path, "agent:\n  type: codex\n  permission_mode: acceptEdits\n")
+        assert exit_code == 1
+        assert "config error" in printed
+        assert "agent.permission_mode" in printed
+
+    def test_undeclared_permission_value_flips_the_exit_code(self, tmp_path: Path) -> None:
+        exit_code, printed = self._plan(tmp_path, "agent:\n  type: pi\n  permission_mode: acceptEdits\n")
+        assert exit_code == 1
+        assert "has no documented meaning" in printed
+
+    def test_declared_permission_value_is_valid(self, tmp_path: Path) -> None:
+        exit_code, printed = self._plan(tmp_path, "agent:\n  type: pi\n  permission_mode: plan\n")
+        assert exit_code == 0
+        assert "All tasks are valid!" in printed

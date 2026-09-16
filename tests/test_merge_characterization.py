@@ -306,7 +306,10 @@ class TestLayer5Current:
 
     def test_sdk_options_on_codex_raises_friendly(self):
         task = _live_task(agent={"type": "codex"})
-        with pytest.raises(OverrideError, match="only supported for claude-code"):
+        with pytest.raises(
+            OverrideError,
+            match="sdk_options is not a field of the 'codex' agent config; it is supported by: claude-code",
+        ):
             apply_overrides(task, {"agent.sdk_options.effort": "high"})
 
     def test_lineage_cli_source_for_touched_paths_only(self):

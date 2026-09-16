@@ -85,13 +85,6 @@ Specify Codex in task YAML:
 ```yaml
 agent:
   type: codex
-  permission_mode: acceptEdits
-  allowed_tools:
-    - Bash
-    - Read
-    - Write
-  disallowed_tools:
-    - Edit
   plugins:
     - type: local
       path: "$PLUGIN_PATH"
@@ -102,11 +95,9 @@ success_criteria:
     description: "Solution file must exist"
 ```
 
-Valid `permission_mode` values:
-- `default` - Standard access, requires approval on failure
-- `acceptEdits` - Automatically accept file edits, no filesystem restrictions
-- `plan` - Read-only sandbox, approval required for any changes
-- `bypassPermissions` - Full access, no approvals needed
+A Codex task that sets `permission_mode`, `allowed_tools` or `disallowed_tools` is
+rejected at resolution: Codex honors none of them (see
+[Permission and Tool Mapping](#permission-and-tool-mapping)).
 
 ### Skills (SKILL.md)
 
@@ -179,18 +170,14 @@ On failure, the agent:
 
 ### Permission and Tool Mapping
 
-The agent maps `permission_mode` to the Codex SDK's `Sandbox`. The approval mode is **uniformly `deny_all`** for every mode — the trust boundary is the sandbox, which does vary by mode:
+Per-field contract (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract). `permission_mode`, `allowed_tools` and
+`disallowed_tools` are rejected at resolution on Codex.
 
-| `permission_mode` | `sandbox` | `approval_mode` |
-|-------------------|-----------|-----------------|
-| `bypassPermissions` | `full-access` | `deny_all` |
-| `acceptEdits` | `workspace-write` | `deny_all` |
-| `default` | `workspace-write` | `deny_all` |
-| `plan` | `read-only` | `deny_all` |
+Codex runs with `sandbox: full-access` and `approval_mode: deny_all` on every run. Its own OS sandbox fails silently on the hosts Coder Eval runs on, so the isolation boundary is the task's driver: use `driver: docker` for untrusted evals.
 
-`deny_all` means *run autonomously, never prompt, no server-side reviewer*: in-sandbox operations execute directly and only escalations beyond the sandbox are refused. Coder Eval uses it for every mode because the alternative (`auto_review`) adds a server-side reviewer that can spuriously return `declined` under gateway load.
+`deny_all` means *run autonomously, never prompt, no server-side reviewer*. Coder Eval uses it because the alternative (`auto_review`) adds a server-side reviewer that can spuriously return `declined` under gateway load.
 
-`allowed_tools` / `disallowed_tools` are normalized (`Bash` → `shell`, `Write`/`Edit` → `apply_patch`, etc.) and passed as `enabled_tools` / `disabled_tools` in the thread `config`. **Note:** the Codex SDK does not currently enforce `disabled_tools`; do not rely on it as a security boundary (the agent logs a warning when it is set).
+Codex honors none of `permission_mode`, `allowed_tools` and `disallowed_tools`. Its config has no top-level key that restricts the built-in `shell` / `apply_patch` tools (`enabled_tools` / `disabled_tools` exist only per MCP server), so Coder Eval forwards nothing for them.
 
 ### Skills Discovery
 
@@ -215,8 +202,7 @@ The Codex SDK is synchronous. The agent uses `_run_async()` helper to detect and
 | **Model Selection** | Direct via `--model` or config | `agent.model` pinned into `thread_start` |
 | **System prompt** | `system_prompt` appended to the default prompt (SDK `claude_code` preset) | `system_prompt` passed as `developer_instructions` on top of the Codex base prompt |
 | **Session Resume** | `--resume {session_id}` | Via thread ID |
-| **Permissions** | `permission_mode` + `allowed_tools` | `permission_mode` → sandbox/approval + `allowed_tools`/`disallowed_tools` → thread config |
-| **Tool Enforcement** | Not enforced by Coder Eval wrapper | `enabled_tools` honored; `disabled_tools` NOT enforced by the SDK |
+| **Permissions** | `permission_mode` + `allowed_tools` + `disallowed_tools` | Not supported; always full-access |
 | **`max_turns`** | Native SDK turn cap (assistant messages) | Visible-turn cap (tool calls), enforced on the notification pump |
 | **Early stop** | Supported (cooperative `should_stop`, polled between messages) | Supported — polled after each streamed notification; the in-flight turn is interrupted best-effort |
 
@@ -226,7 +212,7 @@ Run-limit semantics per harness: [Run-Limit Parity](HARNESS_PARITY.md).
 
 1. **Tool-name collapse** - Codex reports shell tools (`Read`/`Grep`/`Bash`) all as shell commands, surfaced as `Bash` telemetry; name-keyed criteria that distinguish these tools aren't meaningful across agents.
 2. **`skill_triggered` criterion** - Codex has no distinct `Skill` tool (it engages a skill by reading its files via shell), so the criterion detects Codex engagement from that file-read signal (a command referencing `skills/<name>/`) instead of a `Skill` tool call. The file-read signal is weaker than Claude's explicit invocation.
-3. **`disallowed_tools`** - passed to the SDK but not enforced; not a security boundary.
+3. **`permission_mode`, `allowed_tools`, `disallowed_tools`** - Codex honors none of them; a Codex task that sets any of them is rejected at resolution.
 4. **Authentication** - Requires `CODEX_API_KEY` in the environment (point it at whichever endpoint's key you use — OpenAI, gateway, or Azure); the agent calls `login_api_key` when a key is present. `OPENAI_API_KEY`/`AZURE_OPENAI_API_KEY` are NOT read.
 5. **Model field** - `TurnRecord.model_used` reflects the pinned `agent.model`; the Codex `Turn` payload itself doesn't carry the resolved model.
 6. **Skills with Windows paths** - Symlink creation may fail on Windows; agent falls back to copying (slower).
@@ -259,53 +245,9 @@ Run the included test tasks:
 # Basic functionality test
 coder-eval run tasks/agents/codex_hello_world.yaml
 
-# Tool restriction test (verifies disallowed_tools enforcement)
-coder-eval run tasks/agents/codex_disallowed_tools_test.yaml
-
 # Skills discovery test (requires PLUGIN_PATH environment variable)
 export PLUGIN_PATH=~/path/to/skills
 coder-eval run tasks/agents/codex_skills_test.yaml
-```
-
-Example unit test to verify agent setup:
-
-```python
-import pytest
-from coder_eval.models import AgentKind, AgentConfig
-from coder_eval.agents.codex_agent import CodexAgent
-from coder_eval.agent import AgentState
-
-def test_codex_agent_initialization():
-    """Verify CodexAgent can be instantiated with valid config."""
-    config = AgentConfig(
-        type=AgentKind.CODEX,
-        permission_mode="acceptEdits",
-        allowed_tools=["Bash", "Read", "Write"],
-    )
-    agent = CodexAgent(config)
-    assert agent.get_state() == AgentState.WORKING
-    assert agent.config.type == AgentKind.CODEX
-
-def test_tool_name_mapping():
-    """Verify Claude Code tool names map to Codex SDK names."""
-    from coder_eval.agents.codex_agent import _CLAUDE_TO_CODEX_TOOL_MAP
-
-    assert _CLAUDE_TO_CODEX_TOOL_MAP["Bash"] == "shell"
-    assert _CLAUDE_TO_CODEX_TOOL_MAP["Write"] == "apply_patch"
-    assert _CLAUDE_TO_CODEX_TOOL_MAP["Edit"] == "apply_patch"
-    assert _CLAUDE_TO_CODEX_TOOL_MAP["Read"] == "shell"
-
-def test_permission_mode_mapping():
-    """Verify permission_mode maps to a sandbox; approval is uniformly deny_all."""
-    from coder_eval.agents.codex_agent import (
-        _CODEX_APPROVAL_MODE,
-        _PERMISSION_MODE_TO_SANDBOX,
-    )
-
-    assert _PERMISSION_MODE_TO_SANDBOX["acceptEdits"] == "workspace-write"
-    assert _PERMISSION_MODE_TO_SANDBOX["plan"] == "read-only"
-    # Approval is the same for every permission mode — no per-mode mapping.
-    assert _CODEX_APPROVAL_MODE == "deny_all"
 ```
 
 ## References

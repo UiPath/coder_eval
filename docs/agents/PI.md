@@ -25,14 +25,10 @@ and lets `EventCollector` build the `TurnRecord`, exactly like every other
 harness.
 
 Because Pi is model-agnostic, this is a cheap way to evaluate a broad set of
-open-weight models (Kimi, DeepSeek, GLM, …) through a single agent. Pi **enforces
-`system_prompt`** (via `--append-system-prompt`) — a small win over OpenCode. It
-does **not** enforce `allowed_tools` / `disallowed_tools`: the shared config
-default uses Claude-namespaced tool names (`Bash`/`Read`/`Write`/…) that do not
-match Pi's lowercase built-ins (`bash`/`read`/`write`/…), so forwarding them would
-leave the agent with no tools at all. Like OpenCode / Codex / Antigravity, Pi
-therefore runs with its full native toolset and warns that these fields are
-unenforced.
+open-weight models (Kimi, DeepSeek, GLM, …) through a single agent. Pi honors
+`system_prompt` (via `--append-system-prompt`), `allowed_tools`,
+`disallowed_tools` and `permission_mode: plan` (via `--tools` /
+`--exclude-tools`).
 
 ## Setup
 
@@ -82,7 +78,7 @@ agent:
   type: "pi"
   # provider-prefixed model id; no separate --provider needed.
   model: "openrouter/moonshotai/kimi-k3"
-  permission_mode: "acceptEdits"
+  permission_mode: "bypassPermissions"
   thinking_level: "medium"   # optional: reasoning effort (see below)
 ```
 
@@ -112,38 +108,33 @@ Pi's reasoning effort, forwarded as `--thinking`. Accepts the seven-value set
 `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` (a strict
 superset of the Antigravity `thinking_level`), defaulting to `medium`.
 
-### Enforced config fields
+### Config fields and their Pi flags
 
-Pi forwards these config knobs to real CLI flags:
+Per-field contract and tool names (generated): [Harness Parity § Agent-field contract](HARNESS_PARITY.md#agent-field-contract).
 
 | Field | Pi flag |
 |---|---|
 | `system_prompt` | `--append-system-prompt <text>` (appended, semantics `append`) |
+| `allowed_tools` | `--tools <csv>`, or `--no-tools` when no name has a Pi equivalent |
+| `disallowed_tools` | `--exclude-tools <csv>` (subtracted from `--tools` when both are set) |
+| `permission_mode: plan` | the Write, Edit and Bash equivalents added to the denied set |
 | `thinking_level` | `--thinking <level>` |
 | `model` | `--model <provider/id>` |
+| `plugins` | `--skill <dir>` per resolved skills dir |
 
-### Unenforced config fields
-
-`allowed_tools` / `disallowed_tools` are **not** forwarded. The shared config
-default (`experiments/default.yaml`) sets Claude-namespaced tool names
-(`Bash`/`Read`/`Write`/`Edit`/`Glob`/`Grep`/`Skill`), but Pi's built-in tools are
-lowercase and differently named (`bash`/`read`/`write`/`edit`/`grep`/`find`/`ls`).
-Passing the PascalCase names to `--tools` would allowlist tools that do not exist
-in Pi, leaving the agent with **zero** tools. So — like OpenCode, Codex, and
-Antigravity — Pi ignores these fields, runs with its full native toolset, and
-warns at `start()` that they are unenforced. `permission_mode` and
-`system_prompt_file` are unenforced too (see below); `plugins` **is** honored for
-its skills half (each resolved skills dir → a `--skill <dir>` arg).
+Claude tool names map to Pi's lowercase built-ins by inverting the telemetry map
+(`Bash` → `bash`, `Edit` → `edit,multiedit,patch`, `Glob` → `find`, …). A canonical
+name with no Pi equivalent restricts nothing; an allowlist of only such names disables
+every tool. Pi's `ls` has no canonical name, so any allowlist denies it. An empty `allowed_tools: []` restricts nothing, as on
+Claude Code.
 
 ## Permissions
 
-Pi headless print mode auto-runs tools; it exposes only project-file trust
-(`--approve` / `--no-approve`), not a tool-approval mode. Coder Eval always
-passes `--no-approve` so the run never blocks. **`permission_mode` is therefore
-not enforced** — the sandbox driver is the isolation boundary (the same posture
-as Codex and Antigravity). `start()` logs a warning naming `permission_mode`
-(and any other unenforced field it saw) so a task never silently believes it was
-constrained.
+`permission_mode: plan` is read-only: the Write, Edit and Bash equivalents are
+denied. `permission_mode: bypassPermissions` runs every permitted tool without
+approval. `default` and `acceptEdits` have no Pi meaning and are rejected at
+resolution. Pi headless print mode auto-runs tools, and Coder Eval always passes
+`--no-approve` so the run never blocks.
 
 ## Multi-turn and simulation
 
@@ -226,16 +217,14 @@ export OPENROUTER_API_KEY="sk-or-..."
 uv run coder-eval run tasks/pi_smoke_test.yaml --driver docker
 ```
 
-**Docker is the recommended driver for untrusted / adversarial Pi runs.** Pi's
-`permission_mode` is unenforced — headless print mode auto-runs tools — so the
-**container is the confinement boundary**. Under `tempdir` there is no such
+**Docker is the recommended driver for untrusted / adversarial Pi runs.** Tool
+restrictions limit which tools the model may call, not what a permitted `bash`
+call can do, so the **container is the confinement boundary**. Under `tempdir` there is no such
 boundary; the agent runs with the host's own permissions. Prefer `--driver
 docker` whenever the task prompt or workspace is not fully trusted.
 
 ## Known limitations
 
-- **`permission_mode` is not enforced.** Pi headless print mode auto-runs tools;
-  the sandbox driver is the isolation boundary (same as Codex/Antigravity).
 - **`plugins` skills are injected via `--skill`.** Each `type: local` plugin root
   is resolved to its skills dir (`<root>/skills`, holding `<name>/SKILL.md`) and
   passed to the CLI as a `--skill <dir>` argument — the same `_plugin_skill_dirs`
@@ -249,9 +238,8 @@ docker` whenever the task prompt or workspace is not fully trusted.
   suite scores recall 0 even though the skill ran — see
   [Harness Parity § plugin-path depth](HARNESS_PARITY.md). A plugin's non-skill
   assets (agents/hooks/commands/MCP) are not wired.
-- **`system_prompt_file` is not read.** Use `system_prompt` (inline) instead — it
-  is enforced via `--append-system-prompt`. `system_prompt_file` is warned about
-  at `start()` (matching Codex/Antigravity, which also do not read the file form).
+- **`system_prompt_file` is not read by the adapter.** Use `system_prompt` (inline)
+  instead — it is enforced via `--append-system-prompt`.
 - **`max_turns` counts Pi's native agent-loop turns.** One `turn_start` = one
   agent-loop step; `max_turns: N` allows N complete turns, then the run finalizes
   cleanly as `max_turns_exhausted`. See
