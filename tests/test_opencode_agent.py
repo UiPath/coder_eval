@@ -1516,6 +1516,17 @@ class TestCooperativeStop:
         assert usage.cache_creation_input_tokens == 5
         assert usage.cache_read_input_tokens == 10
 
+    async def test_the_step_past_the_cap_is_never_admitted(self, patch_exec, tmp_path):
+        """The cap stops at the (N+1)th `step_start`, before it is counted or emitted."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
+
+        assert record.max_turns_exhausted is True
+        assert record.assistant_turn_count == 1
+        assert len([e for e in recorder.events if isinstance(e, TurnStartEvent)]) == 1
+        assert len([e for e in recorder.events if isinstance(e, TurnEndEvent)]) == 1
+
 
 class _HangingProcess(_FakeProcess):
     """Emits nothing and never exits until it is signaled.

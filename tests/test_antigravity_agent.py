@@ -1087,6 +1087,69 @@ async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_
     assert tr.agent_output == "second turn"
 
 
+async def test_a_failed_harness_teardown_is_logged_and_stop_still_completes(caplog):
+    """The SDK's exit stack pops each callback before running it, so a failed close
+    cannot be retried; it must at least be visible, since the harness may be left running."""
+    import logging
+    from contextlib import AsyncExitStack
+
+    closes = 0
+
+    async def _failing_close(*_exc: object) -> None:
+        nonlocal closes
+        closes += 1
+        raise OSError("harness did not exit")
+
+    stack = AsyncExitStack()
+    stack.push_async_exit(_failing_close)
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent._exit_stack = stack
+    agent._sdk_agent = SimpleNamespace(conversation=None, is_started=True)
+
+    with caplog.at_level(logging.WARNING):
+        await agent.stop()
+        await agent.stop()
+
+    assert closes == 1
+    assert "harness did not exit" in caplog.text
+    assert agent.get_state() == agent_module.AgentState.FINISHED
+
+
+async def test_a_runtime_error_after_a_step_is_not_retried_as_reentrancy(monkeypatch):
+    """Only an error raised before the first step is the re-entrancy window. A
+    RuntimeError while processing a pulled step is a real failure: retrying it would
+    re-pull the stream and emit the same steps again."""
+    from coder_eval.errors import AgentCrashError
+
+    conversation_pulls = 0
+
+    class _Conversation:
+        last_response = ""
+
+        async def send(self, prompt, **kwargs):
+            return None
+
+        async def receive_steps(self):
+            nonlocal conversation_pulls
+            conversation_pulls += 1
+            yield _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(5, 0, 1, 0))
+
+        async def cancel(self):
+            return None
+
+    def _boom(self, step):
+        raise RuntimeError("reducer bug")
+
+    monkeypatch.setattr(agent_module._AntigravityTurnState, "process_step", _boom)
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = __import__("pathlib").Path("/tmp")
+    agent._sdk_agent = SimpleNamespace(conversation=_Conversation(), is_started=True)
+
+    with pytest.raises(AgentCrashError, match="reducer bug"):
+        await agent.communicate("do it")
+    assert conversation_pulls == 1
+
+
 async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_path(monkeypatch):
     """A watchdog timeout landing during the poll loop's re-drain (not the first
     drain) must surface as TurnTimeoutError via the SAME existing exception

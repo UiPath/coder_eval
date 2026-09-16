@@ -1120,10 +1120,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                     if not line:
                         break
 
-                    self._handle_line(line, state)
+                    self._handle_line(line, state, max_turns=max_turns)
 
-                    if max_turns is not None and state.step_count > max_turns:
-                        state.max_turns_exhausted = True
+                    if state.max_turns_exhausted:
                         await self.kill()
                         break
                     if should_stop is not None and should_stop():
@@ -1309,8 +1308,11 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         finally:
             self._capture_partial_turn(collector)
 
-    def _handle_line(self, line: bytes, state: _OpenCodeTurnState) -> None:
-        """Parse one nd-JSON line and dispatch it. Never raises on bad input."""
+    def _handle_line(self, line: bytes, state: _OpenCodeTurnState, *, max_turns: int | None = None) -> None:
+        """Parse one nd-JSON line and dispatch it. Never raises on bad input.
+
+        A ``step_start`` past ``max_turns`` sets ``state.max_turns_exhausted`` instead of opening a step.
+        """
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
             return
@@ -1338,7 +1340,9 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
                 state.thread_id = session_id
             self._session_id = session_id
 
-        if event_type == _STEP_START:
+        if event_type == _STEP_START and max_turns is not None and state.step_count >= max_turns:
+            state.max_turns_exhausted = True
+        elif event_type == _STEP_START:
             state.on_step_start(part)
         elif event_type == _TEXT:
             state.on_text(part)

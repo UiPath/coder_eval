@@ -424,14 +424,18 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         A cooperative-stop ``break`` can leave the SDK connection "receiving" for
         a short bounded window, and the NEXT ``receive_steps()`` call raises
         ``RuntimeError`` inside it. The retry below yields an event-loop turn for
-        the already-scheduled generator finalizer to run.
+        the already-scheduled generator finalizer to run. Only an error raised
+        before this attempt pulled a step is retried; a later one is a real failure,
+        and retrying it would pull and emit the same steps again.
 
         Rationale: .claude/notes/agents.md § The receive_steps re-entrancy window
         """
         for attempt in range(_RECEIVE_STEPS_REENTRY_RETRIES):
+            pulled = False
             try:
                 async with contextlib.aclosing(conversation.receive_steps()) as steps:
                     async for step in steps:
+                        pulled = True
                         state.process_step(step)
                         if should_stop is not None and should_stop():
                             state.stopped_early_hit = True
@@ -449,7 +453,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                             break
                 return
             except RuntimeError:
-                if attempt == _RECEIVE_STEPS_REENTRY_RETRIES - 1:
+                if pulled or attempt == _RECEIVE_STEPS_REENTRY_RETRIES - 1:
                     raise
                 self._log.debug(
                     "receive_steps() re-entrancy guard still set from a prior drain; retrying (attempt %d)",
@@ -695,13 +699,22 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         return None
 
     async def _teardown(self) -> None:
-        """Close the SDK Agent context (reaps the localharness subprocess)."""
+        """Close the SDK Agent context (reaps the localharness subprocess).
+
+        Never raises. A failed close is logged: the exit stack has already popped
+        its callbacks, so it cannot be retried, and the harness may still be running.
+        """
         stack = self._exit_stack
         self._exit_stack = None
         self._sdk_agent = None
-        if stack is not None:
-            with contextlib.suppress(Exception):
-                await stack.aclose()
+        if stack is None:
+            return
+        try:
+            await stack.aclose()
+        except Exception:
+            self._log.warning(
+                "Antigravity harness teardown failed; the harness process may still be running", exc_info=True
+            )
 
 
 class _AntigravityTurnState:

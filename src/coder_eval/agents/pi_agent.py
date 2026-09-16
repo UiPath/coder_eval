@@ -995,10 +995,9 @@ class PiAgent(Agent[PiAgentConfig]):
                     if not line:
                         break
 
-                    self._handle_line(line, state)
+                    self._handle_line(line, state, max_turns=max_turns)
 
-                    if max_turns is not None and state.turn_count > max_turns:
-                        state.max_turns_exhausted = True
+                    if state.max_turns_exhausted:
                         await self.kill()
                         break
                     if should_stop is not None and should_stop():
@@ -1152,11 +1151,12 @@ class PiAgent(Agent[PiAgentConfig]):
         finally:
             self._capture_partial_turn(collector)
 
-    def _handle_line(self, line: bytes, state: _PiTurnState) -> None:
+    def _handle_line(self, line: bytes, state: _PiTurnState, *, max_turns: int | None = None) -> None:
         """Parse one nd-JSON line and dispatch it. Never raises on bad input.
 
         ``agent_end`` is NOT terminal — only ``agent_settled`` / stdout EOF is — so
-        it is recognized, ignored, and the read loop keeps going.
+        it is recognized, ignored, and the read loop keeps going. A ``turn_start``
+        past ``max_turns`` sets ``state.max_turns_exhausted`` instead of opening a turn.
         """
         raw = line.decode("utf-8", "replace").strip()
         if not raw:
@@ -1177,7 +1177,9 @@ class PiAgent(Agent[PiAgentConfig]):
         elif len(state.unrecognized_types) < _MAX_UNRECOGNIZED_TYPES:
             state.unrecognized_types.add(event_type or "<missing type>")
 
-        if event_type == "turn_start":
+        if event_type == "turn_start" and max_turns is not None and state.turn_count >= max_turns:
+            state.max_turns_exhausted = True
+        elif event_type == "turn_start":
             state.on_turn_start()
         elif event_type == "message_update":
             state.on_message_update(obj)

@@ -485,6 +485,19 @@ class TestMaxTurns:
         assert usage.uncached_input_tokens == 406  # turn 1's input exactly
         assert usage.output_tokens == 77  # 69 + 8 reasoning
 
+    async def test_the_turn_past_the_cap_is_never_admitted(self, patch_exec, tmp_path):
+        """The cap stops at the (N+1)th `turn_start`, before it is counted or emitted."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        record = await _run(_agent(), tmp_path, max_turns=1, stream_callback=recorder)
+
+        assert record.max_turns_exhausted is True
+        assert record.assistant_turn_count == 1
+        starts = [e for e in recorder.events if isinstance(e, TurnStartEvent)]
+        ends = [e for e in recorder.events if isinstance(e, TurnEndEvent)]
+        assert len(starts) == 1
+        assert len(ends) == 1
+
     async def test_no_cap_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
         record = await _run(_agent(), tmp_path)

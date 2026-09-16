@@ -357,6 +357,9 @@ class EarlyStopWatcher:
         gate_threshold`` means the gate is mathematically guaranteed to fail no
         matter how the trajectory continues.
         """
+        if self._armed_weight <= 0.0:
+            # Fails closed, as `armed_criteria_passed` does for the same unreachable case.
+            return 0.0
         return sum(c.weight for (c, _checker), v in zip(self._armed, verdicts, strict=True) if v != "fail") / (
             self._armed_weight
         )

@@ -1719,6 +1719,15 @@ class TestEarlyStopWatcher:
         assert watcher.info is not None
         assert watcher.info.reason == EarlyStopReason.CRITERION_FAILED
 
+    def test_zero_armed_weight_fails_closed_instead_of_dividing_by_zero(self) -> None:
+        """The model rejects weight=0 on an armed criterion; a copy that skips validation
+        must still not crash the watcher, and must agree with the final gate (closed)."""
+        armed = _skill_crit("date-teller", "date-teller", stop_on_fail=True).model_copy(update={"weight": 0.0})
+        watcher = EarlyStopWatcher(
+            "t", [(armed, _watcher([_skill_crit("x", "x", stop_on_fail=True)])._armed[0][1])], max_turns=20
+        )
+        assert watcher._ceiling(["undecided"]) == 0.0
+
     def test_default_gate_threshold_fires_fail_stop_on_any_weight(self) -> None:
         # At the default gate_threshold=1.0, even the low-weight criterion's
         # failure alone must still fire — byte-for-byte the pre-weighting rule.
