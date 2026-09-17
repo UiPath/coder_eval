@@ -1,10 +1,11 @@
 """SDK-independent unit tests for CodexAgent.
 
-These tests exercise pure-logic seams of ``codex_agent.py`` — the per-turn
-``_CodexTurnState`` list-mutation contract — that need NO Codex SDK. ``codex_agent`` imports ``openai_codex``
-only lazily (inside ``start`` / ``_build_thread_options`` / the turn-completed
-handler), so the module imports cleanly without the extra and these tests run
-in the base Quality Gate.
+These tests exercise pure-logic seams of ``codex_agent.py`` — ``_CodexDecoder``
+driven over a real ``TurnEmitter`` and the telemetry builders — that need NO
+Codex SDK. ``codex_agent`` imports ``openai_codex`` only lazily (inside
+``start`` / ``_build_thread_options`` / the turn-completed handler), so the
+module imports cleanly without the extra and these tests run in the base
+Quality Gate.
 
 The SDK-dependent tests (anything constructing real SDK notification/Turn
 types or driving ``communicate``) stay in ``test_codex_agent.py`` behind that
@@ -13,79 +14,81 @@ module's ``importorskip("openai_codex")``.
 
 from __future__ import annotations
 
-import time
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
-from coder_eval.agents.codex_agent import CodexAgent
-from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.agents.codex_agent import CodexAgent, _CodexDecoder
+from coder_eval.models import AgentKind, TimingBasis, parse_agent_config
+from coder_eval.streaming.emitter import TurnEmitter
+from coder_eval.streaming.events import AgentEndStatus
+from coder_eval.testing import ScriptedClock
 
 
 def _item_notification(method: str, root: SimpleNamespace) -> SimpleNamespace:
     return SimpleNamespace(method=method, payload=SimpleNamespace(item=SimpleNamespace(root=root)))
 
 
-class TestCodexTurnState:
-    """Unit tests for the per-turn state object extracted from _run_turn_with_streaming."""
+class TestCodexDecoder:
+    """Unit tests for the per-turn decoder that ``_run_turn_with_streaming`` feeds."""
 
     @staticmethod
-    def _state(agent):
-        from coder_eval.agents.codex_agent import _CodexTurnState
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
-        from coder_eval.streaming.collector import EventCollector
-
-        commands: list = []
-        messages: list = []
-        collector = EventCollector()
-        state = _CodexTurnState(
-            agent,
-            emit=CompositeStreamCallback([collector]),
+    def _decoder() -> _CodexDecoder:
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
+        emitter = TurnEmitter(
             task_id="codex",
-            turn_id="codex-1",
-            collector=collector,
-            commands=commands,
-            messages=messages,
-            user_input="go",
             iteration=1,
-            turn_start_time=time.monotonic(),
+            prompt="go",
+            model="gpt-5-codex",
+            basis=TimingBasis.CLI_EPOCH_MS,
+            clock=ScriptedClock(datetime(2026, 1, 1)),
+            sinks=[],
         )
-        return state, commands, messages
+        emitter.begin()
+        return _CodexDecoder(agent, emitter, turn_id="codex-1")
 
-    def test_holds_commands_and_messages_by_identity(self):
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
-        state, commands, messages = self._state(agent)
-        # The state must hold the caller's SAME list objects (no copy) so a
-        # mid-turn crash keeps the partial transcript.
-        assert state.commands is commands
-        assert state.messages is messages
+    def test_a_crash_keeps_the_partial_transcript(self):
+        # A mid-turn crash must keep what the turn already produced: the flushed
+        # message and the completed command both reach the crashed record.
+        decoder = self._decoder()
+        cmd_root = SimpleNamespace(
+            type="commandExecution", id="c1", command="echo hi", exit_code=0, aggregated_output="hi\n", duration_ms=5
+        )
+        decoder(_item_notification("item/started", cmd_root))
+        decoder(_item_notification("item/completed", cmd_root))
+        decoder.flush(SimpleNamespace(input_tokens=10, cached_input_tokens=0, output_tokens=5))
 
-    def test_command_dispatch_mutates_lists_in_place(self):
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
-        state, commands, _messages = self._state(agent)
+        outcome = decoder.end(AgentEndStatus.CRASHED, reason="stream blew up")
+
+        assert outcome.record.crashed is True
+        assert [m.message_id for m in outcome.record.messages if m.role == "assistant"] == ["codex-1-msg-0"]
+        assert [m.message_id for m in decoder.messages] == ["codex-1-msg-0"]
+        assert [c.tool_id for c in outcome.record.commands] == ["c1"]
+
+    def test_command_dispatch_reaches_the_record(self):
+        decoder = self._decoder()
 
         cmd_root = SimpleNamespace(
             type="commandExecution", id="c1", command="echo hi", exit_code=0, aggregated_output="hi\n", duration_ms=5
         )
-        state.on_item_started(_item_notification("item/started", cmd_root))
-        state.on_item_completed(_item_notification("item/completed", cmd_root))
+        decoder(_item_notification("item/started", cmd_root))
+        decoder(_item_notification("item/completed", cmd_root))
 
-        # Telemetry recorded into the SAME commands list, by identity.
-        assert commands is state.commands
+        assert decoder.opened_tools == {"c1"}
+        # A tool_use block was recorded into the open buffer (cut at the next
+        # tokenUsage flush, not here), joinable to the command by tool_id.
+        assert any(b.block_type == "tool_use" and b.tool_use_id == "c1" for b in decoder.open_blocks)
+        commands = decoder.end(AgentEndStatus.COMPLETED).record.commands
         assert len(commands) == 1
         assert commands[0].tool_name == "Bash"
         assert commands[0].result_status == "success"
-        # A tool_use block was recorded into the open buffer (cut at the next
-        # tokenUsage flush, not here), joinable to the command by tool_id.
-        assert any(b.block_type == "tool_use" and b.tool_use_id == "c1" for b in state.open_blocks)
 
     def test_command_output_recorded_whole_not_truncated(self):
         # Regression for the Codex `output[:100]` bug (CE043): result_summary must
         # carry the FULL command output so result_tokens reflects real tool-output
         # size instead of being pinned at a ~31-token, 100-char cap.
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5-codex"))
-        state, commands, _messages = self._state(agent)
+        decoder = self._decoder()
 
         big_output = "X" * 4000  # far beyond the old 100-char clip
         cmd_root = SimpleNamespace(
@@ -96,10 +99,10 @@ class TestCodexTurnState:
             aggregated_output=big_output,
             duration_ms=5,
         )
-        state.on_item_started(_item_notification("item/started", cmd_root))
-        state.on_item_completed(_item_notification("item/completed", cmd_root))
+        decoder(_item_notification("item/started", cmd_root))
+        decoder(_item_notification("item/completed", cmd_root))
 
-        cmd = commands[0]
+        cmd = decoder.end(AgentEndStatus.COMPLETED).record.commands[0]
         assert big_output in (cmd.result_summary or ""), "full output must be recorded, not truncated"
         # result_tokens (ceil(len/4)) must scale with the real output, not ~31.
         assert cmd.result_tokens >= len(big_output) // 4
@@ -176,17 +179,39 @@ _BUILDERS = [
 _BUILDERS_WITH_SDK_DURATION = [_BUILDERS[0], _BUILDERS[2]]
 
 
+class TestResultStatus:
+    """A completed item is a resolved call: its status is the tool end status, never ``unknown``."""
+
+    @pytest.mark.parametrize(
+        ("root", "expected"),
+        [
+            pytest.param(
+                SimpleNamespace(type="commandExecution", id="c1", command="rm x", exit_code=None, status="declined"),
+                "error",
+                id="declined-command",
+            ),
+            pytest.param(SimpleNamespace(type="webSearch", id="w1", query="q"), "success", id="no-status-field"),
+        ],
+    )
+    def test_a_completed_item_records_a_resolved_status(self, root, expected):
+        assert TestExecutionBoundsFromSdkStamps._build(root, root.type).result_status == expected
+
+
 class TestExecutionBoundsFromSdkStamps:
-    """All three builders derive bounds and duration from the SDK stamps."""
+    """For all three item kinds, the recorded command's bounds and duration come from the SDK stamps."""
 
     @staticmethod
     def _build(root, root_type, *, started_ms=None, completed_ms=None):
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
-        telemetry, _ = agent._telemetry_for_item(
-            root, root_type, getattr(root, "id", "x"), 0, started_ms=started_ms, completed_ms=completed_ms
-        )
-        assert telemetry is not None
-        return telemetry
+        """The command the turn record keeps after the decoder saw the item start and complete."""
+        del root_type
+        decoder = TestCodexDecoder._decoder()
+        for method, stamps in (
+            ("item/started", {"started_at_ms": started_ms}),
+            ("item/completed", {"completed_at_ms": completed_ms}),
+        ):
+            decoder(SimpleNamespace(method=method, payload=SimpleNamespace(item=SimpleNamespace(root=root), **stamps)))
+        (command,) = decoder.emitter.finalize(AgentEndStatus.COMPLETED).record.commands
+        return command
 
     @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
     def test_both_stamps_give_bounds_and_an_exact_duration(self, factory, root_type):
@@ -207,8 +232,9 @@ class TestExecutionBoundsFromSdkStamps:
         # _ms_to_dt(None) is datetime.now(), so pairing a real stamp with a
         # missing one would invent an interval running to the present moment.
         tel = self._build(factory(), root_type, started_ms=_EPOCH_MS, completed_ms=None)
-        assert tel.execution_started_at is None
+        assert tel.execution_started_at == datetime.fromtimestamp(_EPOCH_MS / 1000)
         assert tel.execution_completed_at is None
+        assert tel.duration_ms is None
 
     @pytest.mark.parametrize(("factory", "root_type"), _BUILDERS)
     def test_a_backwards_pair_clamps_but_keeps_both_bounds(self, factory, root_type):

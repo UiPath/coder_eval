@@ -1,5 +1,5 @@
 {
-  "agent_output": "",
+  "agent_output": "partial",
   "assistant_turn_count": 1,
   "commands": [],
   "crash_reason": "Codex turn failed: Turn did not complete (no turn/completed notification received)",

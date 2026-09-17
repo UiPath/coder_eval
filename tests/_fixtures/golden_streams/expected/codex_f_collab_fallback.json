@@ -106,7 +106,7 @@
       ],
       "generation_duration_ms": null,
       "input_tokens": 0,
-      "message_id": "codex-1-subagent-1",
+      "message_id": "codex-1-subagent-0",
       "model": "gpt-5.5",
       "output_tokens": 0,
       "parent_tool_use_id": "call_spawn",
@@ -119,7 +119,12 @@
   ],
   "model_used": "gpt-5-codex",
   "num_turns": 1,
-  "result_summary": null,
+  "result_summary": {
+    "is_error": false,
+    "result": null,
+    "stop_reason": null,
+    "subtype": "completed"
+  },
   "timestamp": "<scrubbed>",
   "token_usage": null,
   "tool_calls_exhausted": false,

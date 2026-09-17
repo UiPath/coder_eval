@@ -225,7 +225,7 @@ class TurnEmitter:
         started_at: datetime | None = _UNSET,
         generation_completed: bool = False,
     ) -> None:
-        """Record a tool call's start.
+        """Record a tool call's start; ``timestamp`` is the execution start, else the clock.
 
         Raises:
             TypeError: ``started_at`` passed under ``TURN_CLOCK``, or omitted on a
@@ -234,13 +234,14 @@ class TurnEmitter:
         if self._ended():
             return
         now = self.now()
+        execution_started_at = self._stamp("started_at", started_at, now, parent_tool_id)
         telemetry = CommandTelemetry(
             tool_name=name,
             tool_id=tool_id,
-            timestamp=now,
+            timestamp=execution_started_at or now,
             parameters=params,
             sequence_number=self._next_sequence(),
-            execution_started_at=self._stamp("started_at", started_at, now, parent_tool_id),
+            execution_started_at=execution_started_at,
             generation_completed_at=now if generation_completed else None,
         )
         turn_id = self._turn_id or ""
@@ -258,27 +259,34 @@ class TurnEmitter:
         parameters: dict[str, Any] | None = None,
         completed_at: datetime | None = _UNSET,
         started_at: datetime | None = None,
+        reported_duration_ms: float | None = None,
     ) -> None:
         """Record a tool call's end; an unknown id synthesizes a ``tool_name="unknown"`` call.
 
         Only a resolved call is timed: ``UNRESOLVED`` keeps ``execution_started_at``
         and sets no completion stamp and no duration. ``started_at`` is a CLI start
         stamp that arrived only with the result (``CLI_EPOCH_MS``); it fills a call
-        opened without one and never replaces an existing start.
+        opened without one and never replaces an existing start. ``reported_duration_ms``
+        is a duration the CLI reported for a call with no stamps; a positive value is
+        used only when the stamps measure none.
 
         Raises:
             TypeError: the same basis rule as ``open_tool``, for ``completed_at``; or
-                ``started_at`` given under ``TURN_CLOCK``.
+                ``started_at`` / ``reported_duration_ms`` given under ``TURN_CLOCK``.
         """
         if self._ended():
             return
-        if started_at is not None and self._basis is TimingBasis.TURN_CLOCK:
-            raise TypeError("started_at= is not accepted under TimingBasis.TURN_CLOCK: the emitter stamps the clock")
+        if self._basis is TimingBasis.TURN_CLOCK and (started_at is not None or reported_duration_ms is not None):
+            raise TypeError(
+                "started_at= and reported_duration_ms= are not accepted under TimingBasis.TURN_CLOCK: "
+                + "the emitter stamps the clock"
+            )
         opened = self._open_tools.get(tool_id)
         stamp = self._stamp("completed_at", completed_at, self.now(), opened.parent_tool_id if opened else None)
         if opened is not None and started_at is not None and opened.telemetry.execution_started_at is None:
             opened.telemetry.execution_started_at = started_at
-        self._close(tool_id, status, summary, error, result_data, parameters, stamp)
+            opened.telemetry.timestamp = started_at
+        self._close(tool_id, status, summary, error, result_data, parameters, stamp, reported_duration_ms)
 
     def add_generation(
         self,
@@ -455,6 +463,7 @@ class TurnEmitter:
         result_data: dict[str, Any] | list[Any] | None,
         parameters: dict[str, Any] | None,
         stamp: datetime | None,
+        reported_duration_ms: float | None = None,
     ) -> None:
         now = self.now()
         opened = self._open_tools.pop(tool_id, None)
@@ -471,6 +480,13 @@ class TurnEmitter:
             telemetry.execution_completed_at = stamp
             if telemetry.execution_started_at is not None:
                 telemetry.duration_ms = max(0.0, (stamp - telemetry.execution_started_at).total_seconds() * 1000)
+        if (
+            status is not ToolEndStatus.UNRESOLVED
+            and telemetry.duration_ms is None
+            and reported_duration_ms is not None
+            and reported_duration_ms > 0
+        ):
+            telemetry.duration_ms = reported_duration_ms
         telemetry.result_status = _RESULT_STATUS[status]
         telemetry.result_summary = summary
         telemetry.error_message = error

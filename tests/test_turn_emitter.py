@@ -177,6 +177,28 @@ class TestToolBasis:
         assert commands["late"].duration_ms == pytest.approx(500.0)
         assert commands["kept"].execution_started_at == at(100)
 
+    def test_a_reported_duration_times_a_call_the_stamps_do_not(self) -> None:
+        emitter, _, _ = _emitter(TimingBasis.CLI_EPOCH_MS)
+        for tool_id in ("reported", "zero", "stamped", "orphan"):
+            emitter.open_tool(tool_id, "Bash", {}, started_at=at(100) if tool_id == "stamped" else None)
+        emitter.close_tool("reported", status=ToolEndStatus.OK, completed_at=None, reported_duration_ms=12.0)
+        emitter.close_tool("zero", status=ToolEndStatus.OK, completed_at=None, reported_duration_ms=0.0)
+        emitter.close_tool("stamped", status=ToolEndStatus.OK, completed_at=at(400), reported_duration_ms=12.0)
+        emitter.close_tool("orphan", status=ToolEndStatus.UNRESOLVED, completed_at=None, reported_duration_ms=12.0)
+        commands = {c.tool_id: c for c in emitter.finalize(AgentEndStatus.COMPLETED).record.commands}
+        assert {tool_id: c.duration_ms for tool_id, c in commands.items()} == {
+            "reported": 12.0,
+            "zero": None,
+            "stamped": pytest.approx(300.0),
+            "orphan": None,
+        }
+
+    def test_a_reported_duration_is_refused_under_the_turn_clock(self) -> None:
+        emitter, _, _ = _emitter()
+        emitter.open_tool("c1", "Bash", {})
+        with pytest.raises(TypeError, match="TURN_CLOCK"):
+            emitter.close_tool("c1", status=ToolEndStatus.OK, reported_duration_ms=5.0)
+
     def test_a_start_at_the_result_is_refused_under_the_turn_clock(self) -> None:
         emitter, _, _ = _emitter()
         emitter.open_tool("c1", "Bash", {})

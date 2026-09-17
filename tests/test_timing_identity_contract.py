@@ -26,13 +26,10 @@ therefore one the harness computed, against a span the test declared.
 
 A ported harness is driven through ``coder_eval.testing.replay``: its decoder runs
 on a real ``TurnEmitter`` whose ``ScriptedClock`` moves on each ``Tick`` (pi,
-antigravity), or on scripted CLI epoch stamps under ``cli_epoch_ms`` (opencode). The
-harnesses not yet ported keep their older idioms: an injected ``TurnClock`` with
-``time.monotonic`` patched on top for claude-code, whose deadline and measured tool
-durations still read it.
-
-Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
-from any host clock, so its case scripts those stamps directly.
+antigravity), or on scripted CLI epoch stamps under ``cli_epoch_ms`` (opencode, and
+codex, whose stamps are the SDK's epoch milliseconds). The harness not yet ported
+keeps its older idiom: an injected ``TurnClock`` with ``time.monotonic`` patched on
+top for claude-code, whose deadline and measured tool durations still read it.
 """
 
 from __future__ import annotations
@@ -282,7 +279,7 @@ def _antigravity_replay() -> Replay:
 # --------------------------------------------------------------------------
 
 
-def _codex_turn() -> Turn:
+def _codex_replay() -> Replay:
     """Two tiled windows, the first SPLIT across two sub-messages.
 
     Codex is the only harness that cuts one window into several messages
@@ -290,59 +287,60 @@ def _codex_turn() -> Turn:
     one pair of bounds. The identity has to close over the GROUP, so this case
     drives that split deliberately rather than the simpler one-message shape.
 
-    Its stamps are the SDK's own epoch milliseconds, unreachable from any host
-    clock, so ``_flush_message`` is driven with them set by hand — the idiom
-    ``tests/test_codex_agent.py::TestFlushMessageWindowBounds`` already uses.
+    Under ``cli_epoch_ms`` every window and tool bound is the SDK's own epoch
+    millisecond stamp on the item notification; only the bracket reads the clock.
     """
-    from coder_eval.agents.codex_agent import CodexAgent, _CodexTurnState, _ms_to_dt
-    from coder_eval.models import ContentBlock
+    from coder_eval.agents.codex_agent import CodexAgent, _CodexDecoder
+    from coder_eval.models import TimingBasis
 
-    agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
-    collector = EventCollector()
-    state = _CodexTurnState(
-        agent,
-        emit=CompositeStreamCallback([collector]),
-        task_id="t",
-        turn_id="turn",
-        collector=collector,
-        commands=[],
-        messages=[],
-        user_input="go",
-        iteration=1,
-        turn_start_time=0.0,
-    )
-    command = CommandTelemetry(
-        tool_name="bash",
-        tool_id="c1",
-        timestamp=_ms_to_dt(EPOCH_MS + 700),
-        execution_started_at=_ms_to_dt(EPOCH_MS + 700),
-        execution_completed_at=_ms_to_dt(EPOCH_MS + 1200),
-        duration_ms=500.0,
-        result_status="success",
-    )
-    state.commands.append(command)
+    def item(method: str, root: SimpleNamespace, **stamps: int) -> SimpleNamespace:
+        payload = {f"{key}_at_ms": EPOCH_MS + at_ms for key, at_ms in stamps.items()}
+        return SimpleNamespace(method=method, payload=SimpleNamespace(item=SimpleNamespace(root=root), **payload))
 
-    # Window 1 — no mark yet, so it opens at its own first item (+500): the CLI
-    # boot before that is head. Thinking + text, so the flush cuts two
-    # sub-messages sharing the window.
-    state.open_blocks = [
-        ContentBlock(block_type="thinking", sequence=0, thinking="plan"),
-        ContentBlock(block_type="text", sequence=0, text="answer"),
+    def usage(output: int, reasoning: int) -> SimpleNamespace:
+        last = SimpleNamespace(
+            input_tokens=500, cached_input_tokens=0, output_tokens=output, reasoning_output_tokens=reasoning
+        )
+        return SimpleNamespace(
+            method="thread/tokenUsage/updated", payload=SimpleNamespace(token_usage=SimpleNamespace(last=last))
+        )
+
+    reasoning = SimpleNamespace(type="reasoning", id="r1", content=["plan"], summary=[])
+    command = SimpleNamespace(
+        type="commandExecution", id="c1", command="ls", exit_code=0, aggregated_output="", duration_ms=None
+    )
+    stream = [
+        # Window 1 — no mark yet, so it opens at its own first item (+500): the CLI
+        # boot before that is head. Thinking + action, so the flush cuts two
+        # sub-messages sharing the window, which holds the command.
+        Tick(500),
+        item("item/started", reasoning, started=500),
+        Tick(700),
+        item("item/started", command, started=700),
+        Tick(1200),
+        item("item/completed", command, completed=1200),
+        item("item/completed", reasoning, completed=1500),
+        Tick(2000),
+        item("item/completed", SimpleNamespace(type="agentMessage", id="m1", text="answer"), completed=2000),
+        usage(output=100, reasoning=80),
+        # Window 2 — tiles back from the mark (+2000), covering the gap before its
+        # own first item at +2600.
+        Tick(2600),
+        item("item/started", SimpleNamespace(type="agentMessage", id="m2", text="more"), started=2600),
+        Tick(3000),
+        item("item/completed", SimpleNamespace(type="agentMessage", id="m2", text="more"), completed=3000),
+        usage(output=5, reasoning=0),
+        Tick(3500),  # teardown after the last generation: tail
     ]
-    state.open_start_ms = EPOCH_MS + 500
-    state.open_end_ms = EPOCH_MS + 2000
-    state._flush_message(
-        SimpleNamespace(input_tokens=500, cached_input_tokens=0, output_tokens=100, reasoning_output_tokens=80)
+    agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+    return replay(
+        stream,
+        lambda emitter: _CodexDecoder(agent, emitter, turn_id="turn"),
+        clock=ScriptedClock(BASE),
+        basis=TimingBasis.CLI_EPOCH_MS,
+        model="gpt-5.5",
+        end=lambda decoder: decoder.end(AgentEndStatus.COMPLETED),
     )
-
-    # Window 2 — tiles back from the mark (+2000), covering the gap before its
-    # own first item at +2600.
-    state.open_blocks = [ContentBlock(block_type="text", sequence=0, text="more")]
-    state.open_start_ms = EPOCH_MS + 2600
-    state.open_end_ms = EPOCH_MS + 3000
-    state._flush_message(SimpleNamespace(input_tokens=10, cached_input_tokens=0, output_tokens=5))
-
-    return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=[command])
 
 
 # --------------------------------------------------------------------------
@@ -554,7 +552,13 @@ def test_antigravity_buckets_tile_the_turn():
 
 
 def test_codex_buckets_tile_the_turn():
-    _assert_closes(_codex_turn())
+    result = _codex_replay()
+    generations = [m for m in result.record.messages if isinstance(m, AssistantMessage)]
+    assert len(generations) == 3, "window 1 splits into a thinking and an action part; window 2 is one"
+    assert generations[0].started_at == generations[1].started_at == at(500)
+    assert generations[2].started_at == generations[1].completed_at == at(2000)
+    assert [c.duration_ms for c in result.record.commands] == [500.0]
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 def test_claude_code_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):

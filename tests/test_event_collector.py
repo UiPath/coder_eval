@@ -986,7 +986,7 @@ class TestAPublishedWindowMustMatchItsOwnBounds:
         assert out[0].generation_duration_ms == pytest.approx(1000.0)
 
     def test_codexs_split_passes_when_the_parts_sum_to_the_window(self):
-        """Built with `_flush_message`'s own idiom, not a hand-picked pair.
+        """Built with `flush`'s own idiom, not a hand-picked pair.
 
         Codex divides one window across two sub-messages by output-token share,
         rounding every share but the last to 6 places and giving the last the

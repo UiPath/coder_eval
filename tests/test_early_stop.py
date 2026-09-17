@@ -36,7 +36,7 @@ import typer
 
 from coder_eval.agents.antigravity_agent import AntigravityAgent
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.agents.codex_agent import CodexAgent, _CodexTurnState
+from coder_eval.agents.codex_agent import CodexAgent, _CodexDecoder
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.cli.plan_command import run_plan
 from coder_eval.config import settings
@@ -2895,7 +2895,7 @@ def _codex_completed() -> SimpleNamespace:
 
 
 def _stub_on_turn_completed(self: Any, notification: Any) -> bool:
-    """Stand-in for ``_CodexTurnState.on_turn_completed`` (the real one isinstance-
+    """Stand-in for ``_CodexDecoder.on_turn_completed`` (the real one isinstance-
     checks an openai_codex type). Sets the terminal turn and breaks the pump."""
     self.turn_result = notification.payload
     return True
@@ -2935,7 +2935,7 @@ async def _run_codex_communicate(
         should_stop = None
 
     sink = _EventSink()
-    with patch.object(_CodexTurnState, "on_turn_completed", _stub_on_turn_completed):
+    with patch.object(_CodexDecoder, "on_turn_completed", _stub_on_turn_completed):
         outcome = await agent.communicate(
             "prompt", iteration=1, stream_callback=sink, timeout=timeout, should_stop=should_stop
         )
@@ -2998,17 +2998,19 @@ class TestCodexCooperativeStopSeam:
         # Both signals in one turn: the watchdog fires (timeout_hit) AND should_stop
         # returns a reason. The post-pump timeout check must win — TIMEOUT, crashed=True.
         class _FiringWatchdog:
+            fired = True
+
             def __init__(self, *, on_timeout: Callable[[], None], **_kwargs: Any) -> None:
                 self._on_timeout = on_timeout
 
             def __enter__(self) -> _FiringWatchdog:
-                self._on_timeout()  # watchdog fired: state.timeout_hit = True
+                self._on_timeout()  # watchdog fired: decoder.timeout_hit = True
                 return self
 
             def __exit__(self, *_exc: Any) -> bool:
                 return False
 
-        monkeypatch.setattr("coder_eval.agents.codex_agent.ThreadedWatchdog", _FiringWatchdog)
+        monkeypatch.setattr("coder_eval.agents.watchdog.ThreadedWatchdog", _FiringWatchdog)
         agent = _codex_agent()
         stream = _FakeCodexStream([_codex_delta(0), _codex_delta(1)])
         agent.thread = SimpleNamespace(turn=lambda _prompt: _FakeCodexTurnHandle(stream))
@@ -3027,13 +3029,13 @@ class TestCodexCooperativeStopSeam:
 
     async def test_post_stop_exception_stays_clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The retry-poisoning gap: an exception AFTER the cooperative break (here:
-        # the pump's finally-side cleanup) must NOT crash-finalize the turn — a
+        # the pump's finally-side trailing flush) must NOT crash the turn — a
         # crash would trigger the orchestrator retry with the monitor's decision
         # still latched, stopping the retry at turn 0.
-        def _boom(self: Any) -> None:
+        def _boom(self: Any, _last: Any) -> None:
             raise RuntimeError("post-stop cleanup boom")
 
-        monkeypatch.setattr(_CodexTurnState, "close_open_tools", _boom)
+        monkeypatch.setattr(_CodexDecoder, "flush", _boom)
         notifications = [_codex_delta(0), _codex_delta(1)]
         _agent, outcome, sink, _stream, _handle = await _run_codex_communicate(
             notifications=notifications, stop_after=1
@@ -3051,10 +3053,10 @@ class TestCodexCooperativeStopSeam:
     ) -> None:
         # The guard is scoped to stopped turns only: the same cleanup exception on
         # a NON-stopped turn keeps crashing (no behavior change for real failures).
-        def _boom(self: Any) -> None:
+        def _boom(self: Any, _last: Any) -> None:
             raise RuntimeError("cleanup boom")
 
-        monkeypatch.setattr(_CodexTurnState, "close_open_tools", _boom)
+        monkeypatch.setattr(_CodexDecoder, "flush", _boom)
         agent = _codex_agent()
         stream = _FakeCodexStream([_codex_delta(0)])
         agent.thread = SimpleNamespace(turn=lambda _prompt: _FakeCodexTurnHandle(stream))
@@ -3071,15 +3073,15 @@ class TestCodexCooperativeStopSeam:
         recover = AsyncMock()
         captured: dict[str, Any] = {}
 
-        original_init = _CodexTurnState.__init__
+        original_init = _CodexDecoder.__init__
 
         def _capturing_init(self: Any, *args: Any, **kwargs: Any) -> None:
             original_init(self, *args, **kwargs)
             self.spawned_children = [("child-thread", "tool-1", None)]
-            captured["state"] = self
+            captured["decoder"] = self
 
         with (
-            patch.object(_CodexTurnState, "__init__", _capturing_init),
+            patch.object(_CodexDecoder, "__init__", _capturing_init),
             patch.object(CodexAgent, "_recover_subagent_tool_calls", recover),
         ):
             await agent.communicate(
@@ -3088,7 +3090,7 @@ class TestCodexCooperativeStopSeam:
                 stream_callback=_EventSink(),
                 should_stop=lambda: StopReason.EARLY_CRITERION if stream.iter.pulled >= 1 else None,
             )
-        assert captured["state"].stop_reason is StopReason.EARLY_CRITERION
+        assert captured["decoder"].stop_reason is StopReason.EARLY_CRITERION
         recover.assert_not_awaited()
 
 

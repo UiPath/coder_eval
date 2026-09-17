@@ -56,11 +56,12 @@ NO_GENERATION_WINDOW: frozenset[str] = frozenset(
         # deadline flips) so the deadline break is deterministic. The window
         # is zero by fixture construction, not by anything the harness did.
         "claude_i_in_loop_deadline_break",
+        "codex_a_agent_message_only",  # the SDK stream carries no item stamps: an unmeasured generation
         "codex_g_items_rebuild",  # rollout rebuild: Turn items carry no timestamps
         # Codex emissions whose ENTIRE measurable window was tool execution.
         # The window is subtracted down to 0 because that is the honest
         # answer, not because nothing was recorded — see the generation-window
-        # subtraction in codex_agent._flush_message.
+        # subtraction in codex_agent.flush.
         "codex_d_cross_flush_is_error",  # flush lands before the tool completes: zero-width window
         "codex_e_orphan_tool",  # the tool never completes, so the window never opens
     }
@@ -81,7 +82,7 @@ def _expect_window(harness: str, scenario_name: str) -> bool:
 # scenario, and the codex/opencode ones that inject nothing — is checked.
 #
 # The last two entries were ADDED to buy stability, and the trade is worth
-# stating. They previously injected NO stamps at all, so `_flush_message` took
+# stating. They previously injected NO stamps at all, so `flush` took
 # `_ms_to_dt(None)` for both window bounds — two adjacent `datetime.now()`
 # reads, which collide at microsecond resolution often enough that
 # `assert_timing_captured`'s `completed_at > started_at` failed roughly one run

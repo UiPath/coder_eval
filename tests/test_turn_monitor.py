@@ -482,3 +482,52 @@ class TestSubAgentScope:
             ],
         )
         assert monitor.should_stop() is StopReason.TOKEN_BUDGET
+
+    async def test_a_recovered_codex_sub_agent_tool_does_not_reach_the_cap(self, tmp_path, monkeypatch) -> None:
+        """Codex's rollout recovery tags each inner call with its spawning call; the monitor counts only the spawn."""
+        import json
+        from datetime import datetime
+
+        from coder_eval.agents.codex_agent import CodexAgent, _CodexDecoder
+        from coder_eval.models import TimingBasis
+        from coder_eval.streaming.emitter import TurnEmitter
+        from coder_eval.testing import ScriptedClock
+
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-aaaa-7000-8000-00000000000a"
+        sessions = tmp_path / "sessions" / "2026" / "09" / "16"
+        sessions.mkdir(parents=True)
+        (sessions / f"rollout-2026-09-16T00-00-00-{child}.jsonl").write_text(
+            "\n".join(
+                json.dumps({"type": "response_item", "payload": item})
+                for item in (
+                    {"type": "function_call", "name": "exec_command", "call_id": "c1", "arguments": '{"cmd":"ls"}'},
+                    {"type": "function_call_output", "call_id": "c1", "output": "a"},
+                    {"type": "function_call", "name": "exec_command", "call_id": "c2", "arguments": '{"cmd":"pwd"}'},
+                    {"type": "function_call_output", "call_id": "c2", "output": "/"},
+                )
+            )
+        )
+        monitor = TurnMonitor.for_task(_task(max_tool_calls=2), arm=True)
+        emitter = TurnEmitter(
+            task_id="t",
+            iteration=1,
+            prompt="go",
+            model="gpt-5.5",
+            basis=TimingBasis.CLI_EPOCH_MS,
+            clock=ScriptedClock(datetime(2026, 9, 16)),
+            sinks=[monitor],
+        )
+        emitter.begin()
+        emitter.open_tool("call_spawn", "Agent", {}, started_at=None)
+        emitter.close_tool("call_spawn", status=ToolEndStatus.OK, completed_at=None)
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        decoder = _CodexDecoder(agent, emitter, turn_id="codex-1")
+        decoder.spawned_children = [(child, "call_spawn", None)]
+
+        await agent._recover_subagent_tool_calls(decoder)
+
+        assert monitor.tool_calls == 1
+        assert monitor.should_stop() is None
+        nested = {c.tool_id for c in monitor._collector.build_turn_record().commands} - {"call_spawn"}
+        assert nested == {f"sub:{child}:c1", f"sub:{child}:c2"}
