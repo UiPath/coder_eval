@@ -468,6 +468,12 @@ def run_pipeline(
     # --resume needs an explicit run dir to resume into (auto-generated dirs are always fresh).
     if resume and run_dir is None:
         raise typer.BadParameter("--resume requires --run-dir pointing at the run to continue.")
+    # --workspace-dir writes the finalized task.json flat at run_dir (batch.py's
+    # effective_run_dir); --resume's bookkeeping (clear_rerun_artifacts,
+    # _load_completed_result) reads/clears the nested per-task run_dir instead, so a
+    # resumed workspace-dir run would never recognize its own prior result.
+    if resume and workspace_dir is not None:
+        raise typer.BadParameter("--resume is not supported together with --workspace-dir.")
     # Without --resume this flag parsed, was accepted, and did nothing at all. Its
     # sibling mode-scoped flag (`evaluate --workspace`) hard-errors on exactly this.
     if allow_host_grading and not resume:
