@@ -36,7 +36,6 @@ class Scenario:
 
     name: str
     task_file: Path
-    allow_credentials: bool = False
 
 
 SCENARIOS: list[Scenario] = [
@@ -45,14 +44,26 @@ SCENARIOS: list[Scenario] = [
     # export -> CoderEvalAgent -> --workspace-dir -> verifier round trip.
     Scenario("baseline", REPO_ROOT / "tests/harbor_e2e/fixtures/docker_baseline.yaml"),
     # llm_judge: real model call inside the VERIFIER phase, not just the agent.
-    Scenario("llm_judge", REPO_ROOT / "tests/harbor_e2e/fixtures/llm_judge.yaml", allow_credentials=True),
+    Scenario("llm_judge", REPO_ROOT / "tests/harbor_e2e/fixtures/llm_judge.yaml"),
     # Custom (BYOD) Docker image via dockerfile_path -- reuses the in-tree
     # byod_smoke_test task/image rather than duplicating it.
     Scenario("docker_custom_image", REPO_ROOT / "tasks/byod_smoke_test.yaml"),
     # template_sources: TemplateDirSource copy-in + rewritten path, plus
     # sandbox.python.env_packages surviving the agent-phase task.yaml merge.
     Scenario("template_sources", REPO_ROOT / "tests/harbor_e2e/fixtures/template_sources.yaml"),
+    # command_executed: catches a regression where the verifier phase grades
+    # against a directory with no trajectory data -- reward could still land on
+    # 1.0 "by luck" from unrelated criteria while this one silently scores 0.0,
+    # so `assert_scenario_artifacts` checks its own criterion score directly
+    # rather than trusting the aggregate reward alone.
+    Scenario("trajectory_criteria", REPO_ROOT / "tests/harbor_e2e/fixtures/trajectory_criteria.yaml"),
 ]
+
+# Criteria types that can only score correctly if the verifier phase actually
+# hydrated the agent phase's trajectory (see portability.py's NEEDS_TRAJECTORY
+# class). Checked by name per scenario below rather than globally, since only
+# `trajectory_criteria` declares one.
+_TRAJECTORY_CRITERION_TYPES = frozenset({"command_executed", "commands_efficiency", "skill_triggered"})
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -64,8 +75,6 @@ def export_task(scenario: Scenario, out_dir: Path) -> None:
     if out_dir.exists():
         shutil.rmtree(out_dir)
     cmd = ["coder-eval", "export", str(scenario.task_file), "-o", str(out_dir)]
-    if scenario.allow_credentials:
-        cmd.append("--allow-credentials")
     result = _run(cmd)
     print(result.stdout)
     print(result.stderr, file=sys.stderr)
@@ -128,9 +137,27 @@ def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
     if not verifier_task_json.is_file():
         raise RuntimeError(f"[{scenario.name}] missing {verifier_task_json}")
 
+    # An overall reward of 1.0 does not prove a trajectory criterion was
+    # actually graded -- it could pass "by luck" from unrelated criteria while
+    # this one silently scored 0.0 against an ungraded/empty trajectory. Check
+    # each trajectory-dependent criterion's OWN score directly.
+    verifier_result = json.loads(verifier_task_json.read_text(encoding="utf-8"))
+    trajectory_results = [
+        r
+        for r in verifier_result.get("success_criteria_results", [])
+        if r.get("criterion_type") in _TRAJECTORY_CRITERION_TYPES
+    ]
+    for r in trajectory_results:
+        if r.get("score") != 1.0:
+            raise RuntimeError(
+                f"[{scenario.name}] {r.get('criterion_type')} criterion did not score 1.0 "
+                + f"(got {r.get('score')!r}); trajectory hydration likely broken: {r.get('details')!r}"
+            )
+
     print(
         f"[{scenario.name}] OK: reward=1.0, trajectory.json present, "
         + f"{len(agent_task_jsons)} agent task.json + verifier/task.json present"
+        + (f", {len(trajectory_results)} trajectory criterion/criteria verified" if trajectory_results else "")
     )
 
 

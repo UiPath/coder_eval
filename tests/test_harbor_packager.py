@@ -60,7 +60,7 @@ class TestStructuralRefusals:
             tmp_path,
             {
                 "success_criteria": [
-                    {"type": "skill_triggered", "expected_skill": "s", "skill_name": "s", "description": "d"},
+                    {"type": "cli_called", "verb": "v", "description": "d"},
                 ]
             },
         )
@@ -69,12 +69,27 @@ class TestStructuralRefusals:
             export_task(task_file, out_dir)
         assert not out_dir.exists(), "a refused export must not leave a partial directory behind"
 
-    def test_credentials_criteria_can_be_allowed_explicitly(self, tmp_path: Path) -> None:
+    def test_trajectory_criteria_now_export_cleanly(self, tmp_path: Path) -> None:
+        """NEEDS_TRAJECTORY is no longer blocking -- test.sh always wires /logs/agent/trajectory.json."""
+        task_file = _write_task(
+            tmp_path,
+            {
+                "success_criteria": [
+                    {"type": "skill_triggered", "expected_skill": "s", "skill_name": "s", "description": "d"},
+                ]
+            },
+        )
+        result = export_task(task_file, tmp_path / "out")
+        assert result.out_dir.exists()
+
+    def test_credentials_criteria_export_cleanly(self, tmp_path: Path) -> None:
+        """NEEDS_CREDENTIALS never blocks -- the operator is assumed to provision
+        model access inside the verifier container themselves."""
         task_file = _write_task(
             tmp_path,
             {"success_criteria": [{"type": "llm_judge", "prompt": "grade it", "description": "d"}]},
         )
-        result = export_task(task_file, tmp_path / "out", allow_credentials=True)
+        result = export_task(task_file, tmp_path / "out")
         assert result.out_dir.exists()
 
 
@@ -105,10 +120,12 @@ class TestEmittedDirectoryStructure:
         emitted = yaml.safe_load((out_dir / "environment" / "task.yaml").read_text(encoding="utf-8"))
         assert emitted["initial_prompt"] == "Write 'hello' to greeting.txt."  # the real prompt lives here instead
 
-    def test_test_sh_is_executable_and_resolves_workdir_dynamically(self, tmp_path: Path) -> None:
-        """test.sh must be workdir-agnostic: it uses `$(pwd)`, not a value baked in at
-        export time, so it works regardless of whether the task pinned a workdir or
-        left it to the image's own default (see packager.py's `_write_environment`)."""
+    def test_test_sh_is_executable_and_grades_the_run_directory(self, tmp_path: Path) -> None:
+        """test.sh must be workdir-agnostic: it grades `/logs/agent` as a run
+        directory (its own recorded sandbox_path locates the workspace), not a
+        `$(pwd)` guess baked in at export time -- so it works regardless of
+        whether the task pinned a workdir or left it to the image's own default
+        (see packager.py's `_write_environment`)."""
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"
 
@@ -118,7 +135,7 @@ class TestEmittedDirectoryStructure:
         if os.name != "nt":  # NTFS has no chmod executable bit
             assert test_sh.stat().st_mode & 0o111, "test.sh must be executable"
         content = test_sh.read_text(encoding="utf-8")
-        assert 'coder-eval evaluate /tests/task.yaml "$(pwd)"' in content
+        assert "coder-eval evaluate /tests/task.yaml /logs/agent --in-place --run-dir /logs/verifier" in content
         assert "coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json" in content
 
     def test_task_toml_parses_and_carries_the_mapped_fields(self, tmp_path: Path) -> None:
@@ -283,8 +300,9 @@ class TestAgentPhaseTaskYaml:
 class TestDockerfileWorkdirResolution:
     def test_dockerfile_with_no_workdir_is_left_unset_and_untouched(self, tmp_path: Path) -> None:
         """No WORKDIR line is fabricated and appended anymore: the built image simply
-        inherits its base image's own default, and tests/test.sh finds the real cwd
-        at run time via `$(pwd)` regardless (see packager.py's `_write_environment`)."""
+        inherits its base image's own default. CoderEvalAgent's own `--workspace-dir
+        "$(pwd)"` finds the real cwd at run time regardless (see packager.py's
+        `_write_environment`); the verifier phase doesn't depend on it at all."""
         original = "FROM ubuntu:24.04\nRUN apt-get update\n"
         env_dir = tmp_path / "environment"
         env_dir.mkdir()
@@ -327,10 +345,12 @@ class TestDockerfileWorkdirResolution:
         volumes = compose["services"]["main"]["volumes"]
         assert any(v.endswith(":/opt/coder-eval-task/task.yaml:ro") for v in volumes)
         assert not any("declared no WORKDIR" in w for w in result.warnings)
-        # test.sh no longer needs to agree on a literal value -- it resolves the real
-        # cwd itself via `$(pwd)` -- but task.toml still surfaces the Dockerfile's own
-        # explicit WORKDIR so Harbor's `docker exec -w` pins the same path deliberately.
-        assert 'coder-eval evaluate /tests/task.yaml "$(pwd)"' in (out_dir / "tests" / "test.sh").read_text(
+        # test.sh no longer needs to agree on a literal value -- it grades
+        # /logs/agent as a run directory -- but task.toml still surfaces the
+        # Dockerfile's own explicit WORKDIR so the AGENT phase's `docker exec
+        # -w` (and CoderEvalAgent's own `--workspace-dir "$(pwd)"`) pin the
+        # same path deliberately.
+        assert "coder-eval evaluate /tests/task.yaml /logs/agent" in (out_dir / "tests" / "test.sh").read_text(
             encoding="utf-8"
         )
         doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))

@@ -148,7 +148,16 @@ async def run_batch(
         task_callback = stream_callback_factory(stream_label) if stream_callback_factory else None
         async with semaphore:
             try:
-                rt.run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
+                # --workspace-dir mode (Harbor CoderEvalAgent, single task): write
+                # task.json/task.html/task.log/artifacts flat at the top-level run_dir
+                # instead of the usual <variant>/<task_id>/<NN> nesting. The guard above
+                # already guarantees exactly one resolved task here, so that nesting only
+                # exists to disambiguate sibling tasks that can never occur in this mode —
+                # and a flat run_dir means trajectory.json (written by
+                # emit_trajectories_for_run as task.json's sibling) lands at a fixed,
+                # predictable path instead of requiring a recursive glob to find it.
+                effective_run_dir = config.run_dir if config.workspace_dir is not None else rt.run_dir
+                effective_run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
                 sandbox_cfg = rt.task.sandbox
                 # HERE, where the original driver is still visible: the
                 # in-container orchestrator sees it forced to tempdir.
@@ -187,7 +196,7 @@ async def run_batch(
                 else:
                     orchestrator = Orchestrator(
                         task=rt.task,
-                        run_dir=rt.run_dir,
+                        run_dir=effective_run_dir,
                         preservation_mode=preservation_mode,
                         task_file=rt.task_file,
                         stream_callback=task_callback,

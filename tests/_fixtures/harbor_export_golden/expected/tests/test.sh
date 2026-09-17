@@ -13,11 +13,20 @@
 # always reach it.
 set -u
 
-# `$(pwd)` -- not a baked-in path -- so this script is agnostic of whatever
-# WORKDIR the agent's container actually used (task.toml's `environment.workdir`
-# when the task set one explicitly, or the image's own built-in WORKDIR
-# otherwise; see _write_environment). `docker exec` (or `-w`, when set) always
-# lands this shell's cwd there, so `pwd` is authoritative at run time -- no
-# export-time guess needed, and nothing to drift if the image changes later.
-coder-eval evaluate /tests/task.yaml "$(pwd)" --in-place --run-dir /logs/verifier || true
+# `/tests/task.yaml /logs/agent` -- an explicit task file over a RUN DIRECTORY,
+# not a plain workdir. CoderEvalAgent's `coder-eval execute --run-dir /logs/agent
+# ...` always finishes with `/logs/agent/task.json` (this task's own recorded
+# trajectory) and `/logs/agent/artifacts/<task_id>/` (the workspace it produced),
+# so `coder-eval evaluate` recognizes /logs/agent as a run directory and grades
+# against it directly -- no `$(pwd)` guess of the agent's WORKDIR needed (the
+# workspace is located from task.json's own recorded sandbox_path instead), and
+# no ATIF trajectory.json round-trip either (task.json already carries the same
+# trajectory natively). Passing the task file explicitly (rather than the bare
+# run directory alone) makes coder-eval grade with THIS file -- the exported
+# contract -- instead of rebuilding the task from the run's own recorded config,
+# which is also what keeps this off the untrusted-recorded-config path: that
+# path exists for a shared run directory whose config is not to be trusted
+# without --allow-recorded-commands, and does not apply once an explicit,
+# operator-supplied task file is in hand.
+coder-eval evaluate /tests/task.yaml /logs/agent --in-place --run-dir /logs/verifier || true
 coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json

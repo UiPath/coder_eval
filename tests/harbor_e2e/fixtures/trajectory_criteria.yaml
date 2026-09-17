@@ -1,0 +1,32 @@
+task_id: "harbor_e2e_trajectory_criteria"
+description: >
+  Harbor E2E trajectory criteria: exercises command_executed (and, by the same
+  mechanism, commands_efficiency/skill_triggered would work identically) --
+  criteria that can only score correctly if the verifier phase actually reads
+  the agent phase's recorded trajectory. Catches a regression where the
+  verifier grades against a directory with no trajectory data at all (which
+  would silently score 0.0 here rather than fail loudly).
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash"]
+
+sandbox:
+  driver: docker
+  docker:
+    image: coder-eval-agent:latest
+
+initial_prompt: >
+  Create a file named done.txt containing the single word "done", then run
+  `touch done.txt` again to confirm it exists.
+
+success_criteria:
+  - type: "file_exists"
+    path: "done.txt"
+    description: "The file done.txt must be created."
+  - type: "command_executed"
+    tool_name: "Bash"
+    command_pattern: "touch\\s+done\\.txt"
+    min_count: 1
+    description: "The agent must have run touch done.txt (requires trajectory hydration to grade)."

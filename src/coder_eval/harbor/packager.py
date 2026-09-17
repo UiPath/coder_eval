@@ -61,13 +61,22 @@ _TEST_SH_TEMPLATE = """#!/bin/sh
 # always reach it.
 set -u
 
-# `$(pwd)` -- not a baked-in path -- so this script is agnostic of whatever
-# WORKDIR the agent's container actually used (task.toml's `environment.workdir`
-# when the task set one explicitly, or the image's own built-in WORKDIR
-# otherwise; see _write_environment). `docker exec` (or `-w`, when set) always
-# lands this shell's cwd there, so `pwd` is authoritative at run time -- no
-# export-time guess needed, and nothing to drift if the image changes later.
-coder-eval evaluate /tests/task.yaml "$(pwd)" --in-place --run-dir /logs/verifier || true
+# `/tests/task.yaml /logs/agent` -- an explicit task file over a RUN DIRECTORY,
+# not a plain workdir. CoderEvalAgent's `coder-eval execute --run-dir /logs/agent
+# ...` always finishes with `/logs/agent/task.json` (this task's own recorded
+# trajectory) and `/logs/agent/artifacts/<task_id>/` (the workspace it produced),
+# so `coder-eval evaluate` recognizes /logs/agent as a run directory and grades
+# against it directly -- no `$(pwd)` guess of the agent's WORKDIR needed (the
+# workspace is located from task.json's own recorded sandbox_path instead), and
+# no ATIF trajectory.json round-trip either (task.json already carries the same
+# trajectory natively). Passing the task file explicitly (rather than the bare
+# run directory alone) makes coder-eval grade with THIS file -- the exported
+# contract -- instead of rebuilding the task from the run's own recorded config,
+# which is also what keeps this off the untrusted-recorded-config path: that
+# path exists for a shared run directory whose config is not to be trusted
+# without --allow-recorded-commands, and does not apply once an explicit,
+# operator-supplied task file is in hand.
+coder-eval evaluate /tests/task.yaml /logs/agent --in-place --run-dir /logs/verifier || true
 coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json
 """
 
@@ -84,12 +93,7 @@ class CriteriaNotExportableError(Exception):
         lines = "\n".join(
             f"  - {i.criterion_description!r} ({i.criterion_type}): {i.portability.value}" for i in issues
         )
-        super().__init__(
-            f"{len(issues)} criterion/criteria cannot export to Harbor v1:\n{lines}\n"
-            + "Remove them, or pass allow_credentials=True (--allow-credentials on the CLI) for the "
-            + "NEEDS_CREDENTIALS ones if you have already provisioned model access inside the verifier "
-            + "container yourself."
-        )
+        super().__init__(f"{len(issues)} criterion/criteria cannot export to Harbor v1:\n{lines}\nRemove them.")
 
 
 @dataclass(frozen=True)
@@ -104,8 +108,6 @@ class ExportResult:
 def export_task(
     task_file: Path,
     out_dir: Path,
-    *,
-    allow_credentials: bool = False,
 ) -> ExportResult:
     """Emit a Harbor task directory at ``out_dir`` from the coder-eval task at ``task_file``.
 
@@ -118,15 +120,13 @@ def export_task(
             portability audit.
     """
     task, _raw_yaml = load_task(task_file)
-    return export_resolved_task(task, task_file, out_dir, allow_credentials=allow_credentials)
+    return export_resolved_task(task, task_file, out_dir)
 
 
 def export_resolved_task(
     task: TaskDefinition,
     task_file: Path,
     out_dir: Path,
-    *,
-    allow_credentials: bool = False,
 ) -> ExportResult:
     """Emit a Harbor task directory from an already-loaded/resolved ``TaskDefinition``.
 
@@ -142,7 +142,7 @@ def export_resolved_task(
 
     Raises the same two errors as ``export_task``, for the same reasons.
     """
-    issues = audit_criteria(task.success_criteria, allow_credentials=allow_credentials)
+    issues = audit_criteria(task.success_criteria)
     if issues:
         raise CriteriaNotExportableError(issues)
 
@@ -245,8 +245,12 @@ def _write_environment(
 
     ``workdir`` is an EXPLICIT override only — ``sandbox.docker.working_dir`` or a
     Dockerfile's own ``WORKDIR`` line. ``None`` otherwise, so Harbor's ``docker exec``
-    gets no ``-w`` and lands wherever the image's OWN ``WORKDIR`` already puts it;
-    ``tests/test.sh`` resolves the real cwd itself at run time via ``$(pwd)``.
+    gets no ``-w`` and lands wherever the image's OWN ``WORKDIR`` already puts it. This
+    still matters for the AGENT phase: ``CoderEvalAgent.run()`` shells out with
+    ``--workspace-dir "$(pwd)"``, so wherever ``docker exec`` actually lands decides
+    what that captures. The VERIFIER phase no longer depends on it at all —
+    ``tests/test.sh`` grades against ``/logs/agent`` as a run directory (its own
+    recorded ``sandbox_path``), not a live cwd.
 
     ``docker_image`` is set only when no ``environment/Dockerfile`` was written, so
     ``task.toml``'s ``[environment].docker_image`` points at the pre-built image;
@@ -274,8 +278,8 @@ def _write_environment(
         shutil.copy2(source_dockerfile, dest_dockerfile)
         # No fabricated WORKDIR appended when the Dockerfile declares none --
         # the built image just inherits its base image's own default, and
-        # tests/test.sh finds it at run time via `$(pwd)` either way (see
-        # _TEST_SH_TEMPLATE and this function's docstring).
+        # CoderEvalAgent's own `--workspace-dir "$(pwd)"` (agent.py) finds it
+        # at run time either way (see this function's docstring).
         workdir = docker_cfg.working_dir or _find_workdir(dest_dockerfile)
         if not _from_line_mentions_coder_eval_agent(dest_dockerfile):
             warnings.append(_MISSING_CODER_EVAL_WARNING)
@@ -567,9 +571,9 @@ def _write_agent_phase_task_yaml(
 
 
 def _write_test_sh(out_dir: Path) -> None:
-    # No task-controlled value is interpolated into the template anymore --
-    # `$(pwd)` is a fixed literal (see _TEST_SH_TEMPLATE) -- so there is no
-    # longer an injection surface here to shlex.quote against.
+    # No task-controlled value is interpolated into the template anymore -- it
+    # is a fixed literal (see _TEST_SH_TEMPLATE) -- so there is no longer an
+    # injection surface here to shlex.quote against.
     path = out_dir / "tests" / "test.sh"
     path.write_text(_TEST_SH_TEMPLATE, encoding="utf-8")
     path.chmod(0o755)
