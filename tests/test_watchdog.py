@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
 
 import pytest
 
-from coder_eval.agents.watchdog import ThreadedWatchdog
+from coder_eval.agents.watchdog import ThreadedWatchdog, WatchdogFired, run_with_watchdog
 
 
 def test_watchdog_fires_and_invokes_callback() -> None:
@@ -107,6 +108,16 @@ def test_watchdog_double_fire_protected_by_lock() -> None:
     assert count == 1
 
 
+def test_a_timer_callback_that_starts_after_exit_does_nothing() -> None:
+    """``Timer.cancel`` cannot stop a callback already running: the closed guard does."""
+    calls: list[int] = []
+    wd = ThreadedWatchdog(timeout_seconds=None, on_timeout=lambda: calls.append(1), label="late")
+    with wd:
+        pass
+    wd._fire()
+    assert (wd.fired, calls) == (False, [])
+
+
 def test_watchdog_logger_emits_warning(caplog: pytest.LogCaptureFixture) -> None:
     """Firing emits a WARNING log containing the label."""
     with caplog.at_level(logging.WARNING, logger="coder_eval.agents.watchdog"):
@@ -116,3 +127,71 @@ def test_watchdog_logger_emits_warning(caplog: pytest.LogCaptureFixture) -> None
 
     assert wd.fired is True
     assert any("my-label" in rec.message and rec.levelname == "WARNING" for rec in caplog.records)
+
+
+async def _sleep(seconds: float) -> str:
+    await asyncio.sleep(seconds)
+    return "done"
+
+
+class TestRunWithWatchdog:
+    """The turn body runs as a child task, so a watchdog timeout never lands a cancel on the caller."""
+
+    async def test_a_fired_watchdog_raises_and_leaves_the_caller_uncancelled(self) -> None:
+        async def caller() -> str:
+            fired: list[bool] = []
+            try:
+                async with asyncio.timeout(0.6):
+                    with pytest.raises(WatchdogFired):
+                        await run_with_watchdog(
+                            _sleep(5), timeout_seconds=0.1, on_timeout=lambda: fired.append(True), label="t"
+                        )
+                    task = asyncio.current_task()
+                    assert task is not None and task.cancelling() == 0
+                    assert fired == [True]
+                    await asyncio.sleep(5)
+            except TimeoutError:
+                return "enclosing timeout raised TimeoutError"
+            return "no timeout"
+
+        assert await asyncio.ensure_future(caller()) == "enclosing timeout raised TimeoutError"
+
+    async def test_cancelling_the_caller_propagates_and_cancels_the_body(self) -> None:
+        started = asyncio.Event()
+        bodies: list[asyncio.Task[object]] = []
+
+        async def body() -> str:
+            task = asyncio.current_task()
+            assert task is not None
+            bodies.append(task)
+            started.set()
+            await asyncio.sleep(5)
+            return "done"
+
+        outer = asyncio.ensure_future(run_with_watchdog(body(), timeout_seconds=10, on_timeout=lambda: None, label="t"))
+        await started.wait()
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        await asyncio.sleep(0)
+        assert bodies[0].cancelled()
+
+    async def test_a_body_finishing_at_the_deadline_leaks_no_late_cancel(self) -> None:
+        async def caller() -> str:
+            value = await run_with_watchdog(_sleep(0.19), timeout_seconds=0.2, on_timeout=lambda: None, label="t")
+            await asyncio.sleep(0.3)
+            return value
+
+        for _ in range(20):
+            with contextlib.suppress(WatchdogFired):
+                assert await asyncio.ensure_future(caller()) == "done"
+
+    async def test_a_body_exception_propagates_unchanged(self) -> None:
+        async def body() -> str:
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError, match="boom"):
+            await run_with_watchdog(body(), timeout_seconds=5, on_timeout=lambda: None, label="t")
+
+    async def test_no_timeout_still_runs_the_body(self) -> None:
+        assert await run_with_watchdog(_sleep(0), timeout_seconds=None, on_timeout=lambda: None, label="t") == "done"

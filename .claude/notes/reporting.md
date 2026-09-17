@@ -15,7 +15,8 @@
 
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits`
   (`RunLimits` model) is the single namespace for all *task-level* run-time caps —
-  `max_tool_calls` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` /
+  `max_tool_calls` / `max_turns` / `task_timeout` / `turn_timeout` (structural, with the
+  soft targets `expected_tool_calls` / `expected_turns`) and `max_input_tokens` /
   `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD
   breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED`
   (both `category == "failed"`). Structural caps are set from the CLI via `-D
@@ -75,12 +76,10 @@ authoring walkthrough is [docs/EXTENDING.md](../../docs/EXTENDING.md) and the fi
 numbered lifecycle requirements are in CLAUDE.md § Adding a New Agent; what follows is
 why the seams are shaped the way they are.
 
-The turn-lifecycle bookkeeping lives on the BASE class as class-level defaults, so a
-subclass gets the behaviour without re-declaring it. `_iteration_was_incremented` is set
-right after the counter bump at the top of `communicate()` and consumed by
-`discard_pending_turn()`, which rolls the counter back exactly once per failed turn — even
-when partial-record assembly leaves `pending_turn` at None. That is why rollback is the
-caller's move, not the agent's: only the caller knows a turn failed.
+`communicate` returns a `TurnOutcome` and takes the `iteration` from its caller, so no
+turn bookkeeping lives on the agent between attempts: only the caller knows a turn failed
+and whether it retries it. A cancelled turn ends through `fail(CRASHED, "turn cancelled")`
+before the cancel propagates. Why: [agents.md](agents.md) § Shared turn lifecycle.
 
 Capabilities are declared rather than probed, on the agent's `HarnessContract`.
 `contract.cooperative_stop` gates arming early-stop, so arming it on an agent that ignores

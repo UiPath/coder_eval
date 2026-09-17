@@ -22,7 +22,6 @@ from typing import Literal
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import ClaudeCodeAgentConfig
-from coder_eval.spi import SPI_VERSION
 
 
 DEMO_KIND = "byoa-demo"
@@ -44,5 +43,4 @@ def register(registry: type[AgentRegistry]) -> None:
 
     ``registry`` is the ``AgentRegistry`` class (not an instance).
     """
-    assert SPI_VERSION == 2, f"byoa_demo supports coder_eval SPI 2, not {SPI_VERSION}"
-    registry.register(DEMO_KIND, DemoAgentConfig)(DemoAgent)
+    registry.register(DEMO_KIND, DemoAgentConfig, spi_version=1)(DemoAgent)

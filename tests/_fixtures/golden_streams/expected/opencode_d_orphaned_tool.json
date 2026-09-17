@@ -3,10 +3,10 @@
   "assistant_turn_count": 1,
   "commands": [
     {
-      "assistant_turn_index": 1,
+      "assistant_turn_index": 0,
       "duration_ms": null,
-      "error_message": "no result observed",
-      "execution_completed_at": "<scrubbed>",
+      "error_message": null,
+      "execution_completed_at": null,
       "execution_started_at": null,
       "generation_completed_at": null,
       "parameters": {
@@ -16,7 +16,7 @@
       "result_status": "unknown",
       "result_summary": null,
       "result_tokens": 0,
-      "sequence_number": 1,
+      "sequence_number": 0,
       "timestamp": "<scrubbed>",
       "tool_id": "call_1",
       "tool_name": "Bash"

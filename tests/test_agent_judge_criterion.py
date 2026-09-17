@@ -36,6 +36,8 @@ from coder_eval.models import (
 )
 from coder_eval.models.routing import DirectRoute
 from coder_eval.sandbox import Sandbox
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus
 
 
 # ClaudeCodeAgent is now imported inside SubAgentRunner; tests patch the runner's binding.
@@ -62,10 +64,14 @@ def _make_turn(agent_output: str, duration: float = 1.5) -> TurnRecord:
     )
 
 
+def _make_outcome(record: TurnRecord) -> TurnOutcome:
+    return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
+
+
 def _make_mock_agent(agent_output: str) -> MagicMock:
     agent = MagicMock()
     agent.start = AsyncMock(return_value=None)
-    agent.communicate = AsyncMock(return_value=_make_turn(agent_output))
+    agent.communicate = AsyncMock(return_value=_make_outcome(_make_turn(agent_output)))
     agent.stop = AsyncMock(return_value=None)
     agent.kill = AsyncMock(return_value=None)
     return agent
@@ -215,11 +221,11 @@ def test_agent_judge_no_verdict_surfaces_untrusted_output(sandbox: Sandbox, dire
 
 
 def test_agent_judge_turn_timeout_maps_to_zero(sandbox: Sandbox, direct_route: DirectRoute) -> None:
-    from coder_eval.errors.timeout import TurnTimeoutError
-
     criterion = AgentJudgeCriterion(description="x", prompt="grade", turn_timeout=30)
     mock_agent = _make_mock_agent("irrelevant")
-    mock_agent.communicate.side_effect = TurnTimeoutError(30.0, task_id="t", iteration=1)
+    mock_agent.communicate.return_value = TurnOutcome(
+        record=_make_turn("irrelevant"), status=AgentEndStatus.TIMEOUT, error="timed out"
+    )
 
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)
@@ -831,7 +837,7 @@ def test_agent_judge_transcript_captures_tool_calls(sandbox: Sandbox, direct_rou
     mock_agent = MagicMock()
     mock_agent.start = AsyncMock(return_value=None)
     mock_agent.communicate = AsyncMock(
-        return_value=_make_turn_with_commands('{"score": 0.9, "rationale": "ok"}', [cmd1, cmd2])
+        return_value=_make_outcome(_make_turn_with_commands('{"score": 0.9, "rationale": "ok"}', [cmd1, cmd2]))
     )
     mock_agent.stop = AsyncMock(return_value=None)
     mock_agent.kill = AsyncMock(return_value=None)
@@ -943,11 +949,11 @@ def test_agent_judge_round_trips_through_evaluation_result(sandbox: Sandbox, dir
 def test_agent_judge_timeout_uses_base_criterion_result(sandbox: Sandbox, direct_route: DirectRoute) -> None:
     """Timeout path returns a base CriterionResult (no transcript / verdict fields)
     because no turn was produced — there's nothing to capture."""
-    from coder_eval.errors.timeout import TurnTimeoutError
-
     criterion = AgentJudgeCriterion(description="x", prompt="grade", turn_timeout=30)
     mock_agent = _make_mock_agent("irrelevant")
-    mock_agent.communicate.side_effect = TurnTimeoutError(30.0, task_id="t", iteration=1)
+    mock_agent.communicate.return_value = TurnOutcome(
+        record=_make_turn("irrelevant"), status=AgentEndStatus.TIMEOUT, error="timed out"
+    )
 
     with patch(_AGENT_PATCH_PATH, return_value=mock_agent):
         result = SuccessChecker(sandbox, init_registry=False, route=direct_route).check(criterion)

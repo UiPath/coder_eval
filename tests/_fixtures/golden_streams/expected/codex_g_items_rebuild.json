@@ -39,7 +39,12 @@
   ],
   "model_used": "gpt-5-codex",
   "num_turns": 1,
-  "result_summary": null,
+  "result_summary": {
+    "is_error": false,
+    "result": "rebuilt from items",
+    "stop_reason": null,
+    "subtype": "completed"
+  },
   "timestamp": "<scrubbed>",
   "token_usage": null,
   "tool_calls_exhausted": false,

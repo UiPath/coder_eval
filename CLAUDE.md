@@ -33,7 +33,8 @@ data-driven analysis.
   import from `coder_eval.models`, never from its submodules.
 - **`criteria/`** auto-discovers one checker per type via `pkgutil`.
 - **`cli/`** holds Typer commands; each has a plain-Python twin (CE048).
-- **`timing.py`** owns the single subtraction seam (CE063).
+- **`timing.py`** owns the single subtraction seam and `Window`, the bounds of one
+  generation window.
 - **`argv_match.py`** is a STDLIB-ONLY sidecar copied beside the recorder (CE057).
 - **`fs_permissions.py`** is `set_permissions`, the stacked chmod window.
 - **`path_utils.py`** owns run ids, atomic writes and tree digests — and every run-record
@@ -50,7 +51,11 @@ data-driven analysis.
 - **`durations.py`** is `format_ms`, split from `formatting.py` so the reports layer
   does not reach through an SDK-shaped module for it.
 - **`isolation/`** is `driver: docker`, one container per task.
-- **`streaming/`** is the event protocol and `EventCollector`.
+- **`streaming/`** is the event protocol and `EventCollector`; **`streaming/emitter.py`**
+  is `TurnEmitter`, the per-turn kernel every agent writes its turn through.
+- **`testing.py`** is `coder_eval.testing`, the adapter test sensors (`replay`,
+  `assert_identity_closes`, `assert_stream_balanced`, `conformance`, `stop_conformance`). In-tree suites and
+  plugins use the same module.
 
 Outside the package: `tasks/`, `experiments/`, `templates/`, `tests/`, `docs/`,
 `evalboard/`, `plugins/coder-eval/` (the published plugin), `action.yml` (the published
@@ -65,8 +70,8 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
 - **Strategy pattern**: `Agent` ABC, implementations in `agents/`.
 - **Separation of concerns**: `models/` is pure Pydantic; logic lives in `criteria/`,
   `evaluation/`, `orchestration/`.
-- **Callback streaming**: the agent is the sole emitter of the event protocol;
-  `EventCollector` reduces the stream into a `TurnRecord`. Never hand-assemble one.
+- **Callback streaming**: `TurnEmitter` is the sole writer of the event protocol (CE072);
+  its `EventCollector` reduces the stream into a `TurnRecord`. Never hand-assemble one.
 - **All core models import from `coder_eval.models`** — never from submodules.
 - **Single declarative merge resolver**: all five config layers (default → experiment
   defaults → task → variant → CLI) merge through `orchestration/config_merge.py`.
@@ -80,18 +85,19 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
   `aggregate()`; classification criteria layer accuracy / P/R/F1.
 - **Reconciliation message**: summing token buckets across `TurnRecord.messages`
   equals `token_usage` exactly, on every backend. `EventCollector` is the single writer.
-- **Timing has one subtraction seam** (`timing.py`); agents must not do their own
-  (CE063). An unmeasured duration is `None`, never `0.0` (CE058).
+- **Timing has one subtraction seam** (`timing.py`); agents must not do their own.
+  `TurnEmitter` stamps the turn from one clock. An unmeasured duration is `None`, never `0.0` (CE058).
 - **Reference solutions are directory-only** and chmod-shielded during `communicate`.
   Defense-in-depth, not a boundary — the known gaps are documented in the notes.
   Authoring reference: [Reference Solutions](docs/TASK_DEFINITION_GUIDE.md#reference-solutions).
 - **Harness run-limit parity**: every structural cap and budget is one `TurnMonitor`
-  answer on the `should_stop` channel, in tool calls or tokens, on every harness;
+  answer on the `should_stop` channel, in tool calls, model turns or tokens, on every harness;
   `run_limits` and agent-field meanings are both generated tables in
   [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Every agent declares a
   `HarnessContract`; a base field the harness marks unsupported is rejected at
   resolution. Caps are authored under [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
-- **Plugin staging**: `stage_plugins` hands every harness one canonical plugin root;
+- **Plugin staging**: `stage_plugins` hands every harness one staged plugin root (a skills
+  index, plus each plugin whole for Claude Code);
   `skills_offered` is the positive control `skill_triggered` checks.
 - **Execute vs. run**: `execute` is `run` with grading off — rows finalize as
   `NOT_GRADED` and leave both sides of every rate. Per-command behaviour:
@@ -136,9 +142,9 @@ CLI → ExperimentRunner (task × variant, 5-layer merge) → run_batch → Orch
 
 Per-task (single iteration; simulation mode runs a multi-turn dialog):
   1. Orchestrator._communicate_with_retry(prompt, iteration) → TurnRecord
-     (wraps agent.communicate with retry, per-attempt turn_timeout, the task's
-      TurnMonitor as the should_stop poll, and on_attempt_error → preserves
-      crashed=True partial TurnRecords)
+     (wraps agent.communicate(..., iteration=) → TurnOutcome with retry, per-attempt
+      turn_timeout, the task's TurnMonitor as the should_stop poll; a CRASHED/TIMEOUT
+      outcome's crashed=True record is appended before it is raised)
   2. SuccessChecker.check_all_async() → List[CriterionResult]
 
 Cleanup: stop agent, save EvaluationResult, generate reports.
@@ -228,6 +234,13 @@ A few rules constrain routine edits, so they are worth knowing before you start:
 - **CE070** keeps agent adapters from counting caps (`max_tool_calls`, `RunLimits`,
   `tool_calls_exhausted`, …) or scanning for `SKILL.md`: the `TurnMonitor` owns caps and
   `orchestration/plugin_staging.py` owns skill discovery.
+- **CE071** keeps `calculate_cost` out of `agents/` and `orchestration/turn_monitor.py`.
+  Call `pricing.price_turn`: one rule for the cost of a turn.
+- **CE072** keeps agent adapters from constructing the events (`AgentStartEvent`,
+  `ToolEndEvent`, …), an `AssistantMessage` (an import alias too) or an `EventCollector`.
+  Call `TurnEmitter` instead.
+- **CE073** requires every asyncio subprocess spawn in `src/` to pass `stdin=`. An
+  inherited stdin stopped a CLI turn with no events until its timeout.
 
 **Docs index SSOT.** `nav:` plus `extra.docs_index` in `mkdocs.yml` are the single
 source of truth for `README.md`'s Documentation table, `docs/index.md`'s "Where to go
@@ -266,7 +279,10 @@ A live criterion also needs `ContractCase`s (CE036) and `make plugin-reference`.
 **A new agent**: agents register through the plugin SPI (entry-point group
 `coder_eval.plugins`) — there is no closed enum or dispatch to edit, and in-tree and
 third-party agents take the same path. It declares a `HarnessContract` (registration
-fails without one) and imports from `coder_eval.spi`. A new agent must be named on every
+fails without one) and imports from `coder_eval.spi`. It writes each turn through one
+`TurnEmitter` from `Agent._open_emitter` and returns its `TurnOutcome`; a JSONL CLI
+subclasses `SubprocessJsonlAgent`. Test it with the `coder_eval.testing` sensors. A new
+agent must be named on every
 onboarding surface CE047 tracks, and its run-limit behaviour recorded in
 [Run-Limit Parity](docs/agents/HARNESS_PARITY.md).
 

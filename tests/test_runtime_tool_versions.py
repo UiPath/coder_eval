@@ -303,18 +303,19 @@ def test_override_filters_nonversion_junk_cli():
 
 
 def test_sandbox_refresh_plugin_tools_dir_real_plumbing(tmp_path: Path):
-    """uip_search_path + refresh_plugin_tools_dir re-derive from the agent-aligned PATH."""
+    """uip_search_path + refresh_plugin_tools_dir re-derive from the mock-dir PATH prefix."""
     from coder_eval.models import SandboxConfig
     from coder_eval.sandbox import Sandbox
 
-    dist = tmp_path / "node_modules" / "@uipath" / "cli" / "dist"
+    workspace = tmp_path.resolve()
+    dist = workspace / "node_modules" / "@uipath" / "cli" / "dist"
     _make_fake_uip(dist, "9.9.9")
-    sandbox = Sandbox(config=SandboxConfig(), task_id="t")
+    sandbox = Sandbox(config=SandboxConfig(mock_path_dirs=["node_modules/@uipath/cli/dist"]), task_id="t")
 
-    sandbox.set_command_base_path(str(dist))
+    sandbox.adopt(workspace)
 
     assert sandbox.uip_search_path.startswith(f"{dist}{os.pathsep}")
-    assert sandbox.plugin_tools_dir == str(tmp_path / "node_modules" / "@uipath")
+    assert sandbox.plugin_tools_dir == str(workspace / "node_modules" / "@uipath")
 
 
 # ---------- version-string validation (junk-envelope guard) ----------

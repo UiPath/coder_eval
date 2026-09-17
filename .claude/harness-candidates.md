@@ -647,6 +647,8 @@ divergences, so the deferred-work record is one place. Measurements in
   kwarg rule ever lands, extract `tests/lint/rules/_message_calls.py` at that
   point rather than sooner.
   Caught in: the CE060 / antigravity `message_id` run.
+  UPDATE: CE059 and CE060 are retired. CE072 bans an `AssistantMessage` call in
+  `agents/`, alias included, so only CE058's name list is still open.
 
 - [ ] **Nothing pins that `message_id` is only ever a WITHIN-TURN identity.** Ids
   repeat across retry attempts of one turn on every synthetic-id harness —
@@ -808,8 +810,8 @@ re-derive from scratch.
   PRESENT at the call site (`ce059_generation_window_is_two_reads.py:68`), so
   removing the kwarg makes `claims_a_window` true at the three legitimate
   placeholder sites and forces a rule REWRITE rather than a retirement. Net
-  cost: five reducers, a regeneration of every golden, and a CE059 rework; net
-  benefit: SSOT alone. **Deferring it is safe because the seam assertion in
+  cost: five reducers, a regeneration of every golden, and a CE059 rework (CE059
+  is now retired, so that part of the cost is gone); net benefit: SSOT alone. **Deferring it is safe because the seam assertion in
   `timing.subtract_tool_time` now checks the property at runtime** — a group's
   raw total must equal the span its own bounds describe — which also covers a
   third-party agent registered through the `coder_eval.plugins` SPI, where no
@@ -826,7 +828,8 @@ re-derive from scratch.
   case was never about the clamp but about the head being measured against the
   wrong instant. REVISIT IF: an inversion is observed on a live run after
   CE064, which would mean a basis is still mixed somewhere the rule cannot see
-  (the plugin SPI, or a harness whose spans come from a CLI).
+  (the plugin SPI, or a harness whose spans come from a CLI). CE064 is now
+  retired: `TurnEmitter` stamps the bracket from the turn's one clock.
 
 - [ ] **`test_codex_golden[a_agent_message_only]` is FLAKY, ~5% — measured, and
   pre-existing.** Forty consecutive runs on an unmodified tree (`-n 0`): 2
@@ -967,6 +970,16 @@ re-derive from scratch.
 - [ ] OpenCode: warn when an inherited `OPENCODE_CONFIG_CONTENT` `permission` / `instructions` value is not a dict / list and is replaced — today it is dropped silently; small, but needs a decision on warn vs. keep — caught in the harness-contract Phase 3 review.
 - [ ] CE070 blind spot: an adapter that counts `ToolEndEvent`s (or tokens) under a new name to cap or stop a run itself — the rule matches identifiers only; needs a data-flow check that a counter in `agents/` feeds a break or an end status — caught in the central-enforcement plan (Phase 5).
 - [ ] CE070 blind spot: an adapter that re-grows a skill scanner through `glob("*.md")`, `rglob`, or a file name built from parts — the rule matches the literal `"SKILL.md"` only; needs a filesystem-walk classifier scoped to `agents/` — caught in the central-enforcement plan (Phase 5).
-- [ ] Every harness's `TurnEndEvent.tokens` must be a per-report DELTA: over a turn, their sum per bucket must not exceed `AgentEndEvent.usage` (the TurnMonitor latches budgets on the sum) — nothing checks it; the golden-stream runners return only the TurnRecord, so each of the five `run_*_scenario` helpers needs an event sink first — caught in the central-enforcement final review (Claude re-reported an interleaved message id's tokens).
-- [ ] Live tests (`-m live`) are neither run nor type-checked in `make verify`, so an SPI signature change (`communicate(max_turns=)`, bool `should_stop`) leaves them broken until someone runs them with credentials — needs pyright over `tests/*_live.py` or an import-time signature smoke test — caught in the central-enforcement live verification (Phase 6).
+- [x] ~~Every harness's `TurnEndEvent.tokens` must be a per-report DELTA: over a turn, their sum per bucket must not exceed `AgentEndEvent.usage` (the TurnMonitor latches budgets on the sum) — nothing checks it; the golden-stream runners return only the TurnRecord, so each of the five `run_*_scenario` helpers needs an event sink first — caught in the central-enforcement final review (Claude re-reported an interleaved message id's tokens).~~ **DONE.** Closed by the emitter plus `assert_stream_balanced`: `TurnEmitter` is the one per-turn accumulator on every harness and logs a WARNING when a bucket of the summed `TurnEndEvent.tokens` exceeds the published usage, and `coder_eval.testing.assert_stream_balanced` fails on the same condition over a replayed or live event stream.
+- [x] ~~Live tests (`-m live`) are neither run nor type-checked in `make verify`, so an SPI signature change (`communicate(max_turns=)`, bool `should_stop`) leaves them broken until someone runs them with credentials — needs pyright over `tests/*_live.py` or an import-time signature smoke test — caught in the central-enforcement live verification (Phase 6).~~ **DONE.** Closed by pyright over live tests in `make verify` (a second pass whose generated config includes `tests/*_live.py` and the byoa demo fixture) plus `tests/test_harness_live.py`, which runs one tiny turn per installed harness through `communicate` and checks it with `assert_stream_balanced` and the bucket sums.
 
+- [ ] `SubprocessJsonlAgent` drains stderr with one unbounded `read()`: a CLI that floods stderr grows evaluator memory without limit — needs a bounded tail that keeps the crash message useful — caught in the turn-emitter final review (pre-existing in Pi/OpenCode).
+- [ ] `TurnMonitor._resolved_tool_ids` and `EventCollector._commands` key on the raw `tool_id` for the whole task, while adapters mint fallback ids per invocation (Pi `call_N`): a reused id across dialog turns or retries is counted once and overwrites the earlier command — needs per-invocation scoping and a decision on what a retry counts — caught in the turn-emitter final review (pre-existing).
+- [ ] `coder_eval.testing.assert_stream_balanced` tracks ONE open inner turn across threads, so a Claude sub-agent turn interleaved with a main-thread turn in a live stream would read as unbalanced — needs per-`parent_thread_id` tracking plus a replay fixture of the interleaving — caught in the turn-emitter Phase 9 review.
+- [ ] CE072 matches a banned class by attribute name alone (`sdk_types.AssistantMessage(...)` false positive) and misses `model_validate` / `model_construct` / star imports — needs module-binding resolution for the attribute form — caught in the turn-emitter Phase 9 review.
+- [ ] The budget smoke fixtures (`smoke_budget_exceeded.yaml`, `smoke_cost_budget_exceeded.yaml`) carry Claude-only `permission_mode` / `allowed_tools`, so a cross-harness run needs `-D` overrides (Codex cannot unset `permission_mode` at all) — needs a decision to make them multi-harness fixtures under the `tests/test_harness_contract.py` retype check — caught in the turn-emitter live verification (Phase 10).
+- [ ] Claude Code: a tool result for an unknown id is synthesized as a main-thread call even when its user message carries `parent_tool_use_id`, so it counts toward `max_tool_calls` — needs the parent read from the result message — caught in the turn-emitter final review.
+- [ ] A symlink fallback that catches a broad `OSError` around `symlink_to` and then copies hides EEXIST/ENOENT and can write into a source tree (the staging copy wrote plugin B into plugin A on a case-folding filesystem) — `link_or_copy` is the one site today and now re-raises; a rule needs an except-clause classifier around filesystem link calls — caught in the max-turns plan Phase 5 review.
+- [ ] A config-derived name used as a directory entry must be one path segment and unique ignoring case — `plugin_staging._claim_name` is the one check for plugin and skill names; nothing flags a new `staging_dir / <config name>` join — needs taint tracking from YAML/manifest/frontmatter values to `Path` joins — caught in the max-turns plan Phase 5 review.
+- [ ] A plugin root that contains the run directory (`path: .`) is linked whole under `<run_dir>/plugin_root/plugins/<name>`, which makes a directory cycle; today's run-dir walkers do not follow symlinks, but nothing guards a new `copytree(symlinks=False)` / `os.walk(followlinks=True)` / uploader over a run dir — needs a run-dir walker rule or a refusal decision — caught in the max-turns plan final review.
+- [ ] `TurnMonitor.on_event` catches every exception (collector, cap counters, `_commit` pricing), not only the armed criteria its docstring names, so a raising collector silently under-counts a cap and a raising price mid-`_commit` can double-count tokens; `_tool_call_index` also advances on a re-emitted resolved `ToolEndEvent` that `tool_calls` dedupes — needs a narrower fail-open boundary plus tests — caught in the max-turns plan final review (pre-existing).

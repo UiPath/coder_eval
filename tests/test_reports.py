@@ -1247,10 +1247,12 @@ def _summary_with_notes(
     *,
     tool_calls_exhausted: bool = False,
     expected_tool_calls_overage: list[int] | None = None,
+    expected_turns_overage: list[int] | None = None,
 ) -> RunSummary:
     task = _make_task_result("t1", "SUCCESS", 1.0, 10.0)
     task["tool_calls_exhausted"] = tool_calls_exhausted
     task["expected_tool_calls_overage"] = expected_tool_calls_overage
+    task["expected_turns_overage"] = expected_turns_overage
     return RunSummary(
         run_id="r",
         start_time=datetime(2026, 5, 21, 12, 0, 0),
@@ -1272,6 +1274,13 @@ def test_generate_markdown_renders_expected_tool_calls_marker_when_exceeded():
     assert "## Run-time Notes" in report_md
     assert "expected_tool_calls exceeded" in report_md
     assert "7/5" in report_md
+
+
+def test_generate_markdown_renders_expected_turns_marker_when_exceeded():
+    summary = _summary_with_notes(expected_turns_overage=[5, 3])
+    report_md = ReportGenerator.generate_markdown(summary)
+    assert "## Run-time Notes" in report_md
+    assert "expected_turns exceeded: 5/3 (cumulative model turns)" in report_md
 
 
 def test_generate_markdown_no_expected_tool_calls_marker_when_under():

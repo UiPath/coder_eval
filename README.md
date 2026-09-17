@@ -19,8 +19,9 @@ agents and their skills** — built for benchmark authors, CLI builders, and ski
 builders — with sandboxing, reproducibility, and data-driven analysis. It runs a real
 agent — **Claude Code**, **OpenAI Codex**, **Google Antigravity (Gemini)**,
 **OpenCode**, or **Pi** — in a sandbox against declarative YAML tasks, then scores the files and
-commands it actually produced. Changing harness is one field (`agent.type`); the
-tasks, criteria, scoring, telemetry, and reports stay the same.
+commands it actually produced. Changing harness is one field (`agent.type`); a field
+the target harness cannot honor fails at load, and every harness records its turn
+through one kernel, so the telemetry means the same thing on every harness.
 
 Reach for it when you want to **benchmark agents on your own domain tasks**,
 **test whether a skill triggers** in the agent you ship for, **A/B-test Claude Code

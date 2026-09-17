@@ -133,14 +133,13 @@ Agent (ABC)
 ### Key Methods
 
 - **`start(working_directory)`** - Initialize Codex client and set working directory
-- **`communicate(user_input, timeout, stream_callback)`** - Execute one turn with Codex
+- **`communicate(user_input, iteration, timeout, stream_callback)`** - Execute one turn with Codex and return its `TurnOutcome`
 - **`stop()`** - Clean up resources
 - **`get_state()`** - Return current agent state
-- **`discard_pending_turn()`** - Rollback on failure
 
 ### TurnRecord Format
 
-Each turn returns a `TurnRecord` with:
+Each turn's outcome carries a `TurnRecord` with:
 - `iteration` - Turn number
 - `user_input` - The prompt sent
 - `agent_output` - assembled from the streamed `agentMessage` deltas
@@ -154,14 +153,13 @@ Each turn returns a `TurnRecord` with:
 
 ### Timeout Handling
 
-The agent uses a `ThreadedWatchdog` to enforce wall-clock timeouts. If a turn exceeds the deadline, a `TurnTimeoutError` is raised with a partial `TurnRecord` preserved in `pending_turn`.
+The agent uses a `ThreadedWatchdog` to enforce wall-clock timeouts. If a turn exceeds the deadline, `communicate` returns a `TIMEOUT` outcome whose record is the `crashed=True` partial turn.
 
 ### Error Recovery
 
-On failure, the agent:
-1. Sets `pending_turn` to a `crashed=True` TurnRecord with captured telemetry
-2. Raises `AgentCrashError` or `TurnTimeoutError`
-3. The orchestrator reads `pending_turn` and calls `discard_pending_turn()` to roll back state
+On failure, the agent returns a `CRASHED` or `TIMEOUT` outcome whose record is a
+`crashed=True` `TurnRecord` with the captured telemetry. The orchestrator appends that
+record to the result, then retries a crash and ends the task on a timeout.
 
 ### Permission and Tool Mapping
 

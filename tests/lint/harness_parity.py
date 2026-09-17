@@ -87,15 +87,30 @@ def _budget_cell(contract: HarnessContract) -> str:
 
 _RUN_LIMIT_CELLS: dict[str, Callable[[HarnessContract], str]] = {
     "max_tool_calls": lambda c: (
-        "TurnMonitor at the should_stop poll, resolved tool calls" if c.cooperative_stop else "not polled (never fires)"
+        "TurnMonitor at the should_stop poll, main-thread resolved tool calls"
+        if c.cooperative_stop
+        else "not polled (never fires)"
+    ),
+    "max_turns": lambda c: (
+        "TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts"
+        if c.counts_model_turns
+        else "rejected at resolution"
     ),
     "expected_tool_calls": lambda _c: "orchestrator, cumulative visible tool calls, warns only",
+    "expected_turns": lambda c: (
+        "orchestrator, cumulative model turns (TurnMonitor count), warns only"
+        if c.counts_model_turns
+        else "rejected at resolution"
+    ),
     "task_timeout": lambda _c: "orchestrator, agent-agnostic",
     "turn_timeout": lambda _c: "agent watchdog (see Timeouts)",
     "max_input_tokens": _budget_cell,
     "max_output_tokens": _budget_cell,
     "max_total_tokens": _budget_cell,
-    "max_usd": _budget_cell,
+    "max_usd": lambda c: (
+        _budget_cell(c)
+        + ("; priced by the harness" if c.reports_cost else "; needs a priced agent.model (checked at resolution)")
+    ),
     "count_cached_input": lambda _c: "TurnMonitor bucket rule",
     "count_cache_creation": lambda _c: "TurnMonitor bucket rule",
     "stop_early": lambda c: "cooperative should_stop" if c.cooperative_stop else "rejected at resolution",

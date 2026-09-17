@@ -24,27 +24,14 @@ messages and commands it produced through a real ``EventCollector`` — the same
 seam production uses to compute the head and the tail. Every number asserted is
 therefore one the harness computed, against a span the test declared.
 
-Three clock-injection styles are needed, and all three already exist in the
-per-harness suites (this module reuses their idiom rather than inventing a
-fourth):
-
-* an injected ``TurnClock`` — pi, antigravity and claude-code take ``clock=``
-  / build one through a patched ``TurnClock`` factory;
-* a ``datetime`` SUBCLASS monkeypatched onto the module — opencode, which also
-  calls ``datetime.fromtimestamp`` through the same global (see
-  ``tests/test_opencode_agent.py``'s ``_SteppedClock`` for why a stub breaks);
-* ``time.monotonic`` patched ON TOP of an injected clock — claude-code, whose
-  ``turn_start_time``, turn deadline and measured tool durations still read
-  ``time.monotonic()``, so scripting only the clock leaves the reducer
-  straddling a real clock and a scripted one.
-
-Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
-from any host clock, so its case scripts those stamps directly.
+Every harness is driven through ``coder_eval.testing.replay``: its decoder runs on a
+real ``TurnEmitter`` whose ``ScriptedClock`` moves on each ``Tick`` (pi, antigravity,
+claude-code), or on scripted CLI epoch stamps under ``cli_epoch_ms`` (opencode, and
+codex, whose stamps are the SDK's epoch milliseconds).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -54,22 +41,12 @@ import pytest
 from coder_eval.models import (
     AgentKind,
     AssistantMessage,
-    CommandTelemetry,
-    TokenUsage,
-    TranscriptMessage,
-    TurnRecord,
     parse_agent_config,
 )
-from coder_eval.streaming.callbacks import CompositeStreamCallback
-from coder_eval.streaming.collector import EventCollector
 from coder_eval.streaming.events import (
-    AgentEndEvent,
     AgentEndStatus,
-    AgentStartEvent,
-    ToolEndEvent,
-    ToolEndStatus,
 )
-from coder_eval.timing import main_thread_tool_spans, union_ms
+from coder_eval.testing import Replay, ScriptedClock, Tick, assert_identity_closes, replay
 
 
 # The two CLI harnesses (opencode, codex) report their stamps as epoch
@@ -85,122 +62,12 @@ def at(ms: float) -> datetime:
     return BASE + timedelta(milliseconds=ms)
 
 
-@dataclass(frozen=True)
-class Turn:
-    """What one harness case produces: a scripted span plus what it recorded.
-
-    ``started_ms`` / ``ended_ms`` are the turn's own bounds — where the
-    ``AgentStartEvent`` and ``AgentEndEvent`` land. Everything else came out of
-    the reducer.
-    """
-
-    started_ms: float
-    ended_ms: float
-    messages: list[TranscriptMessage]
-    commands: list[CommandTelemetry]
-
-
-def _record(turn: Turn) -> TurnRecord:
-    """Reduce a scripted turn through the production collector seam.
-
-    Deliberately the real ``EventCollector`` rather than a direct
-    ``decompose_turn`` call: the head and the tail are only as correct as the
-    arguments that seam builds for them, and those (the main-thread generation
-    filter, the command span set) are half of what this file is asserting.
-    """
-    collector = EventCollector()
-    collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=at(turn.started_ms)))
-    for command in turn.commands:
-        collector.on_event(ToolEndEvent(task_id="t", turn_id="turn", tool=command, status=ToolEndStatus.OK))
-    collector.on_event(
-        AgentEndEvent(
-            task_id="t",
-            status=AgentEndStatus.COMPLETED,
-            iteration=1,
-            user_input="go",
-            messages=turn.messages,
-            usage=TokenUsage(),
-            duration_seconds=(turn.ended_ms - turn.started_ms) / 1000.0,
-            timestamp=at(turn.ended_ms),
-        )
-    )
-    return collector.build_turn_record()
-
-
-def assert_identity_closes(turn: Turn) -> None:
-    """head + Σ generation + UNION(tool) + tail == the scripted span, EXACTLY.
-
-    ``pytest.approx`` rather than an order-of-magnitude bound: every input is
-    scripted, so the only slack is float representation. A bound wide enough to
-    absorb a real defect is the sensor this module exists to replace.
-
-    MAIN THREAD ONLY on both sides, and both through production's own helpers:
-    a sub-agent's generations bubble into the same stream, and the spawning
-    Agent call's own interval already spans them and their tools.
-    """
-    record = _record(turn)
-    span_ms = turn.ended_ms - turn.started_ms
-
-    generation_ms = sum(
-        m.generation_duration_ms or 0.0
-        for m in record.messages
-        if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None
-    )
-    # The PRODUCTION selector, not a re-derivation of it. Unioning every command
-    # would assert a different identity than the collector computes: production,
-    # the golden sensor, the live residual gate and the HTML report all exclude
-    # a sub-agent's own tools (the spawning Agent call's interval already spans
-    # them). No case here has a child command yet, so a local copy stayed green
-    # while quietly testing something else — and the first sub-agent case added
-    # would have reported a false regression.
-    tool_ms = union_ms(main_thread_tool_spans(record.messages, record.commands))
-    assert record.harness_startup_ms is not None, "a turn that generated has a measured head"
-    assert record.harness_teardown_ms is not None, "a turn that generated has a measured tail"
-    # The STORED bucket must equal the one just computed independently. Without
-    # this the ms-exact sensor would cover three of the four buckets and read
-    # the fourth from a re-derivation, leaving the published field unchecked on
-    # every harness — which is how a stored value and its consumers drift.
-    # `None` only when no bounded span exists, in which case the union is 0.0.
-    stored_tool_ms = record.tool_union_ms if record.tool_union_ms is not None else 0.0
-    assert stored_tool_ms == pytest.approx(tool_ms), (
-        f"TurnRecord.tool_union_ms is {record.tool_union_ms}, but this turn's main-thread "
-        f"command spans union to {tool_ms:.4f} ms. The collector writes the field from the same "
-        "span set it measures the head and the tail against, so a disagreement means the stored "
-        "value and the selection rule have come apart."
-    )
-    bucket_sum = record.harness_startup_ms + generation_ms + tool_ms + record.harness_teardown_ms
-
-    assert bucket_sum == pytest.approx(span_ms), (
-        f"the four buckets sum to {bucket_sum:.4f} ms against a {span_ms:.4f} ms turn "
-        f"(off by {bucket_sum - span_ms:+.4f} ms): head={record.harness_startup_ms:.4f}, "
-        f"generation={generation_ms:.4f}, tool_union={tool_ms:.4f}, tail={record.harness_teardown_ms:.4f}. "
-        "They tile the turn, so a sum UNDER it means some interval is booked nowhere — the "
-        "defect class the golden corpus cannot see — and a sum OVER it means one is booked twice."
-    )
-
-
 # --------------------------------------------------------------------------
-# pi — an injected TurnClock
+# pi — a scripted clock
 # --------------------------------------------------------------------------
 
 
-class _InjectedClock:
-    """A ``TurnClock`` stand-in the test moves by hand, in ms from ``BASE``.
-
-    Injected rather than monkeypatched: pi and antigravity derive every wall
-    stamp from their per-turn clock, so patching the module's ``datetime``
-    would no longer reach them and the case would quietly measure the real
-    clock and pass by accident.
-    """
-
-    def __init__(self, at_ms: float = 0.0) -> None:
-        self.at_ms = at_ms
-
-    def now(self) -> datetime:
-        return at(self.at_ms)
-
-
-def _pi_turn(*, untile: bool = False) -> Turn:
+def _pi_replay(*, untile: bool = False) -> Replay:
     """Two tiled windows around a tool, with a real head and a real tail.
 
     The tool closes INSIDE the first window rather than across the boundary —
@@ -213,35 +80,32 @@ def _pi_turn(*, untile: bool = False) -> Turn:
     so that the sensor can be shown to catch it. See
     ``test_the_sensor_sees_a_window_that_stops_tiling``.
     """
-    from coder_eval.agents.pi_agent import _PiTurnState
+    from coder_eval.agents.pi_agent import _PiDecoder
 
-    payload = {"message": {"role": "assistant", "usage": {"input": 10, "output": 5}, "stopReason": "stop"}}
-    clock = _InjectedClock()
-    state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-    commands: list[CommandTelemetry] = []
-    state.bind(lambda e: commands.append(e.tool) if isinstance(e, ToolEndEvent) else None)
+    payload = {"type": "turn_end", "message": {"role": "assistant", "usage": {"input": 10, "output": 5}}}
 
-    clock.at_ms = 500  # CLI boot: head
-    state.on_turn_start()
-    clock.at_ms = 700
-    state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
-    clock.at_ms = 1200
-    state.on_tool_execution_end({"toolCallId": "c1", "result": "ok"})
-    clock.at_ms = 2000
-    state.on_turn_end(payload)
-    clock.at_ms = 2600  # the inter-turn gap, which window 2 tiles back over
-    state.on_turn_start()
-    if untile:
-        state.gen_mark = None
-    clock.at_ms = 3000
-    state.on_turn_end(payload)
+    class _Untiling(_PiDecoder):
+        def on_turn_start(self) -> None:
+            super().on_turn_start()
+            if untile:
+                self.gen_mark = None
 
-    return Turn(
-        started_ms=0.0,
-        ended_ms=3500.0,  # process teardown after the last turn: tail
-        messages=list(state.messages),
-        commands=commands,
-    )
+    stream = [
+        Tick(500),  # CLI boot: head
+        {"type": "turn_start"},
+        Tick(700),
+        {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "bash", "args": {}},
+        Tick(1200),
+        {"type": "tool_execution_end", "toolCallId": "c1", "result": "ok"},
+        Tick(2000),
+        payload,
+        Tick(2600),  # the inter-turn gap, which window 2 tiles back over
+        {"type": "turn_start"},
+        Tick(3000),
+        payload,
+        Tick(3500),  # process teardown after the last turn: tail
+    ]
+    return replay(stream, _Untiling, clock=ScriptedClock(BASE), end=lambda d: d.end(AgentEndStatus.COMPLETED))
 
 
 # --------------------------------------------------------------------------
@@ -249,52 +113,45 @@ def _pi_turn(*, untile: bool = False) -> Turn:
 # --------------------------------------------------------------------------
 
 
-class _SteppedDatetime(datetime):
-    """A clock the test moves by hand, in ms from ``BASE``.
+def _opencode_replay() -> Replay:
+    """The same two-window shape, driven through OpenCode's step stream on the CLI's own stamps.
 
-    Subclasses ``datetime`` rather than stubbing it, because the reducer also
-    calls ``datetime.fromtimestamp`` through the same module global to convert
-    the CLI's epoch stamps, and that must keep resolving to the real
-    implementation — the CLI's stamps and the reducer's own ``now()`` reads
-    have to land on ONE timeline for the arithmetic to mean anything.
+    Under ``cli_epoch_ms`` the windows are bounded by each event's envelope
+    ``timestamp`` and the tool by ``state.time``; only the bracket reads the clock.
     """
+    from coder_eval.agents.opencode_agent import _OpenCodeDecoder
+    from coder_eval.models import TimingBasis
 
-    at_ms = 0.0
+    def event(event_type: str, at_ms: int, **part: Any) -> dict[str, Any]:
+        return {"type": event_type, "timestamp": EPOCH_MS + at_ms, "part": part}
 
-    @staticmethod
-    def now(tz: Any = None) -> datetime:  # type: ignore[override]
-        return at(_SteppedDatetime.at_ms)
-
-
-def _opencode_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
-    """The same two-window shape, driven through OpenCode's step stream."""
-    from coder_eval.agents import opencode_agent as opencode_module
-    from coder_eval.agents.opencode_agent import _OpenCodeTurnState
-
-    monkeypatch.setattr(opencode_module, "datetime", _SteppedDatetime)
-    state = _OpenCodeTurnState(task_id="t", iteration=1, user_input="go", model="m")
-    commands: list[CommandTelemetry] = []
-    state.bind(lambda e: commands.append(e.tool) if isinstance(e, ToolEndEvent) else None)
     finish = {"reason": "stop", "tokens": {"input": 10, "output": 5}}
-
-    _SteppedDatetime.at_ms = 500  # Node boot: head
-    state.on_step_start({"messageID": "m1"})
-    _SteppedDatetime.at_ms = 1200
-    state.on_tool_use(
-        {
-            "callID": "c1",
-            "tool": "bash",
-            "state": {"status": "completed", "time": {"start": EPOCH_MS + 700, "end": EPOCH_MS + 1200}},
-        }
+    stream = [
+        Tick(500),
+        event("step_start", 500, messageID="m1"),  # Node boot before it: head
+        Tick(1200),
+        event(
+            "tool_use",
+            1200,
+            callID="c1",
+            tool="bash",
+            state={"status": "completed", "time": {"start": EPOCH_MS + 700, "end": EPOCH_MS + 1200}},
+        ),
+        Tick(2000),
+        event("step_finish", 2000, **finish),
+        Tick(2600),
+        event("step_start", 2600, messageID="m2"),
+        Tick(3000),
+        event("step_finish", 3000, **finish),
+        Tick(3500),
+    ]
+    return replay(
+        stream,
+        _OpenCodeDecoder,
+        clock=ScriptedClock(BASE),
+        basis=TimingBasis.CLI_EPOCH_MS,
+        end=lambda d: d.end(AgentEndStatus.COMPLETED),
     )
-    _SteppedDatetime.at_ms = 2000
-    state.on_step_finish(finish)
-    _SteppedDatetime.at_ms = 2600
-    state.on_step_start({"messageID": "m2"})
-    _SteppedDatetime.at_ms = 3000
-    state.on_step_finish(finish)
-
-    return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=commands)
 
 
 # --------------------------------------------------------------------------
@@ -302,59 +159,44 @@ def _opencode_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
 # --------------------------------------------------------------------------
 
 
-def _antigravity_turn() -> Turn:
+def _antigravity_replay() -> Replay:
     """One interleaved window per generation, with a tool inside the first.
 
-    Driven at ``_AntigravityTurnState`` rather than through ``communicate()``:
-    the fake conversation yields with no delay, so an end-to-end run cannot
-    distinguish a window that opened at the turn's start from one that opened
-    later. The state's own ``_gen_mark_wall`` is stamped at construction, so
-    constructing it AFTER the scripted agent start is what gives this harness a
-    measurable head at all.
+    Driven at the decoder: the fake conversation yields with no delay, so an
+    end-to-end run cannot distinguish a window that opened at the turn's start
+    from one that opened later. The first MODEL Step seeds the first window.
     """
-    from coder_eval.agents.antigravity_agent import AntigravityAgent, _AntigravityTurnState
+    from coder_eval.agents.antigravity_agent import _AntigravityDecoder
     from tests._fixtures.golden_streams.antigravity_fixtures import _step, _tc, _usage
 
-    agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, model="gemini-3.5-flash"))
-    collector = EventCollector()
-    clock = _InjectedClock(at_ms=500)  # dispatch before the first Step: head
-    state = _AntigravityTurnState(
-        agent=agent,
-        emit=CompositeStreamCallback([collector]),
-        task_id="t",
-        turn_id="turn",
-        collector=collector,
-        user_input="go",
-        iteration=1,
-        model="gemini-3.5-flash",
-        turn_start_time=0.0,
-        clock=clock,
-    )
-
-    clock.at_ms = 700
-    state.process_step(
+    stream = [
+        Tick(700),  # dispatch before the first Step: head
         _step(
             "TOOL_CALL",
             "ACTIVE",
             target="TARGET_ENVIRONMENT",
             tool_calls=[_tc("run_command", "c1", {"command_line": "ls"})],
-        )
-    )
-    clock.at_ms = 1200
-    state.process_step(
+        ),
+        Tick(1200),
         _step(
             "TOOL_CALL",
             "DONE",
             target="TARGET_ENVIRONMENT",
             tool_calls=[_tc("run_command", "c1", {"command_line": "ls", "exit_code": 0})],
-        )
+        ),
+        Tick(2000),
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+        Tick(3000),
+        _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)),
+        Tick(3500),
+    ]
+    return replay(
+        stream,
+        _AntigravityDecoder,
+        clock=ScriptedClock(BASE),
+        model="gemini-3.5-flash",
+        end=lambda d: d.end(AgentEndStatus.COMPLETED),
     )
-    clock.at_ms = 2000
-    state.process_step(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)))
-    clock.at_ms = 3000
-    state.process_step(_step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)))
-
-    return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=list(state.commands))
 
 
 # --------------------------------------------------------------------------
@@ -362,7 +204,7 @@ def _antigravity_turn() -> Turn:
 # --------------------------------------------------------------------------
 
 
-def _codex_turn() -> Turn:
+def _codex_replay() -> Replay:
     """Two tiled windows, the first SPLIT across two sub-messages.
 
     Codex is the only harness that cuts one window into several messages
@@ -370,247 +212,152 @@ def _codex_turn() -> Turn:
     one pair of bounds. The identity has to close over the GROUP, so this case
     drives that split deliberately rather than the simpler one-message shape.
 
-    Its stamps are the SDK's own epoch milliseconds, unreachable from any host
-    clock, so ``_flush_message`` is driven with them set by hand — the idiom
-    ``tests/test_codex_agent.py::TestFlushMessageWindowBounds`` already uses.
+    Under ``cli_epoch_ms`` every window and tool bound is the SDK's own epoch
+    millisecond stamp on the item notification; only the bracket reads the clock.
     """
-    from coder_eval.agents.codex_agent import CodexAgent, _CodexTurnState, _ms_to_dt
-    from coder_eval.models import ContentBlock
+    from coder_eval.agents.codex_agent import CodexAgent, _CodexDecoder
+    from coder_eval.models import TimingBasis
 
-    agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
-    collector = EventCollector()
-    state = _CodexTurnState(
-        agent,
-        emit=CompositeStreamCallback([collector]),
-        task_id="t",
-        turn_id="turn",
-        collector=collector,
-        commands=[],
-        messages=[],
-        user_input="go",
-        iteration=1,
-        turn_start_time=0.0,
-    )
-    command = CommandTelemetry(
-        tool_name="bash",
-        tool_id="c1",
-        timestamp=_ms_to_dt(EPOCH_MS + 700),
-        execution_started_at=_ms_to_dt(EPOCH_MS + 700),
-        execution_completed_at=_ms_to_dt(EPOCH_MS + 1200),
-        duration_ms=500.0,
-        result_status="success",
-    )
-    state.commands.append(command)
+    def item(method: str, root: SimpleNamespace, **stamps: int) -> SimpleNamespace:
+        payload = {f"{key}_at_ms": EPOCH_MS + at_ms for key, at_ms in stamps.items()}
+        return SimpleNamespace(method=method, payload=SimpleNamespace(item=SimpleNamespace(root=root), **payload))
 
-    # Window 1 — no mark yet, so it opens at its own first item (+500): the CLI
-    # boot before that is head. Thinking + text, so the flush cuts two
-    # sub-messages sharing the window.
-    state.open_blocks = [
-        ContentBlock(block_type="thinking", sequence=0, thinking="plan"),
-        ContentBlock(block_type="text", sequence=0, text="answer"),
+    def usage(output: int, reasoning: int) -> SimpleNamespace:
+        last = SimpleNamespace(
+            input_tokens=500, cached_input_tokens=0, output_tokens=output, reasoning_output_tokens=reasoning
+        )
+        return SimpleNamespace(
+            method="thread/tokenUsage/updated", payload=SimpleNamespace(token_usage=SimpleNamespace(last=last))
+        )
+
+    reasoning = SimpleNamespace(type="reasoning", id="r1", content=["plan"], summary=[])
+    command = SimpleNamespace(
+        type="commandExecution", id="c1", command="ls", exit_code=0, aggregated_output="", duration_ms=None
+    )
+    stream = [
+        # Window 1 — no mark yet, so it opens at its own first item (+500): the CLI
+        # boot before that is head. Thinking + action, so the flush cuts two
+        # sub-messages sharing the window, which holds the command.
+        Tick(500),
+        item("item/started", reasoning, started=500),
+        Tick(700),
+        item("item/started", command, started=700),
+        Tick(1200),
+        item("item/completed", command, completed=1200),
+        item("item/completed", reasoning, completed=1500),
+        Tick(2000),
+        item("item/completed", SimpleNamespace(type="agentMessage", id="m1", text="answer"), completed=2000),
+        usage(output=100, reasoning=80),
+        # Window 2 — tiles back from the mark (+2000), covering the gap before its
+        # own first item at +2600.
+        Tick(2600),
+        item("item/started", SimpleNamespace(type="agentMessage", id="m2", text="more"), started=2600),
+        Tick(3000),
+        item("item/completed", SimpleNamespace(type="agentMessage", id="m2", text="more"), completed=3000),
+        usage(output=5, reasoning=0),
+        Tick(3500),  # teardown after the last generation: tail
     ]
-    state.open_start_ms = EPOCH_MS + 500
-    state.open_end_ms = EPOCH_MS + 2000
-    state._flush_message(
-        SimpleNamespace(input_tokens=500, cached_input_tokens=0, output_tokens=100, reasoning_output_tokens=80)
+    agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+    return replay(
+        stream,
+        lambda emitter: _CodexDecoder(agent, emitter, turn_id="turn"),
+        clock=ScriptedClock(BASE),
+        basis=TimingBasis.CLI_EPOCH_MS,
+        model="gpt-5.5",
+        end=lambda decoder: decoder.end(AgentEndStatus.COMPLETED),
     )
 
-    # Window 2 — tiles back from the mark (+2000), covering the gap before its
-    # own first item at +2600.
-    state.open_blocks = [ContentBlock(block_type="text", sequence=0, text="more")]
-    state.open_start_ms = EPOCH_MS + 2600
-    state.open_end_ms = EPOCH_MS + 3000
-    state._flush_message(SimpleNamespace(input_tokens=10, cached_input_tokens=0, output_tokens=5))
-
-    return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=[command])
-
 
 # --------------------------------------------------------------------------
-# claude-code — an injected TurnClock, plus the monotonic global
+# claude-code — a scripted clock
 # --------------------------------------------------------------------------
 
 
-def _claude_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
+def _claude_replay(stream: list[Any]) -> Replay:
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeDecoder
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+    return replay(
+        stream,
+        lambda emitter: _ClaudeDecoder(agent, emitter, effective_model=None),
+        clock=ScriptedClock(BASE),
+        end=lambda decoder: decoder.end(AgentEndStatus.COMPLETED),
+    )
+
+
+def _claude_turn() -> Replay:
     """A tool call between two emissions, with a real head and a real tail.
-
-    The clock is INJECTED, like pi's and antigravity's: every wall stamp this
-    reducer records now derives from the turn's ``TurnClock``, and a derived
-    stamp escapes a monkeypatched module ``datetime`` entirely — the case would
-    quietly measure the real clock and pass by accident. ``time.monotonic`` is
-    still patched off the same counter, because ``turn_start_time``, the
-    deadline and the tool call's own measured duration read it; leaving it real
-    leaves the reducer straddling a scripted clock and a live one, and the tool
-    span (a monotonic duration subtracted back off a clock reading) would be
-    nonsense.
 
     The first `message_start` re-seeds the window, so the CLI spawn and the
     query build before it are head rather than msg0's generation. That a LATER
-    one must not re-seed is asserted directly in
-    `tests/test_agent_telemetry.py`; here it shows up as the windows still
-    tiling.
+    one must not re-seed is asserted directly in `tests/test_agent_telemetry.py`;
+    here it shows up as the windows still tiling.
 
-    Its windows TILE across the tool result, and this case only proved that by
-    accident until the reducer was fixed. The mark used to be reset when the
-    result arrived, so the interval between the emission that ISSUED the call
-    and the result landed in no bucket. Here that interval IS the tool's
-    execution exactly — the case scripts the result at the instant the tool
-    ends — so the tool bucket happened to claim the same milliseconds and the
-    identity closed anyway. On a real turn the two differ: a 21.5 ms `Write`
-    can be followed by a 2.5 s round trip, and 21% of the turn goes missing.
-    `test_a_slow_tool_result_round_trip_is_not_lost` is the case that
-    discriminates; this one deliberately keeps the coincident shape so the two
-    read as a pair.
+    The result is scripted at the instant the tool ends, so the interval between
+    the emission that ISSUED the call and the result is the tool's execution
+    exactly. `_claude_slow_result_turn` is the case that discriminates a window
+    that stops tiling across the result; this one keeps the coincident shape so
+    the two read as a pair.
     """
-    from coder_eval.agents import claude_code_agent as claude_module
-    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
-    from coder_eval.streaming.events import AgentEndStatus as _AgentEndStatus
     from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
     from tests._fixtures.golden_streams.claude_fixtures import ToolUseBlock, UserMessage, message_start
 
-    clock = _InjectedClock()
-
-    def _monotonic() -> float:
-        return clock.at_ms / 1000.0
-
-    monkeypatch.setattr(claude_module, "time", SimpleNamespace(monotonic=_monotonic))
-
-    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
-    collector = EventCollector()
-    commands: list[CommandTelemetry] = []
-
-    clock.at_ms = 500  # the turn state is built here; the head runs past it
-    state = _ClaudeTurnState(
-        agent,
-        emit=CompositeStreamCallback(
-            [
-                collector,
-                SimpleNamespace(on_event=lambda e: commands.append(e.tool) if isinstance(e, ToolEndEvent) else None),
-            ]
-        ),
-        collector=collector,
-        task_id="t",
-        user_input="go",
-        iteration=1,
-        log=agent._log,
-        turn_start_time=_monotonic(),
-        deadline=None,
-        clock=clock,
+    return _claude_replay(
+        [
+            # The stream puts `message_start` before the emission it announces, and
+            # the FIRST one is what re-seeds the window.
+            Tick(800),
+            message_start("m1"),
+            Tick(1000),
+            SdkAssistantMessage(
+                [ToolUseBlock("c1", "Bash", {"command": "ls"})],
+                usage={"input_tokens": 10, "output_tokens": 5},
+                message_id="m1",
+            ),
+            Tick(1800),  # the tool ran for the whole gap
+            UserMessage("c1", False, "ok"),
+            Tick(2000),
+            message_start("m2"),  # does NOT re-seed: once per turn
+            Tick(2500),
+            SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id="m2"),
+            Tick(3000),
+        ]
     )
 
-    # The stream really does put `message_start` before the emission it
-    # announces — the recorded corpus shows it and the SDK guarantees it — and
-    # the FIRST one is what re-seeds the window, so an ordering this case got
-    # wrong would silently stop exercising the re-seed at all.
-    clock.at_ms = 800
-    state.on_stream_event(message_start("m1"))
-    clock.at_ms = 1000
-    state.on_assistant_message(
-        SdkAssistantMessage(
-            [ToolUseBlock("c1", "Bash", {"command": "ls"})],
-            usage={"input_tokens": 10, "output_tokens": 5},
-            message_id="m1",
-        )
-    )
-    clock.at_ms = 1800  # the tool ran for the whole gap
-    state.on_user_message(UserMessage("c1", False, "ok"))
-    clock.at_ms = 2000
-    state.on_stream_event(message_start("m2"))  # does NOT re-seed: once per turn
-    clock.at_ms = 2500
-    state.on_assistant_message(SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id="m2"))
-    state.finalize(_AgentEndStatus.COMPLETED)
 
-    return Turn(started_ms=0.0, ended_ms=3000.0, messages=list(state.sdk_messages), commands=commands)
-
-
-def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
+def _claude_slow_result_turn() -> Replay:
     """A FAST tool followed by a SLOW result round trip — the shape that hid a defect.
 
-    ``_claude_turn`` above scripts the tool result at the instant the tool
-    finishes, so the un-tiled interval and the tool's own span were the same
-    milliseconds and the identity closed even while the mark was being reset.
-    Every live probe had the same blind spot from the other direction: three
-    concurrent ``sleep 3`` calls make the tool union so large that the round
-    trip rounds away (measured: 0.05% residual).
-
-    Here the tool runs for 20 ms and its result takes 2000 ms to come back,
-    which is `tasks/dataset_example.yaml` — the task CI actually runs, where a
-    21.5 ms ``Write`` met a 2511.7 ms round trip and 21% of the turn was
-    accounted to nothing. The identity closing here is the whole point: the
-    window after the result must tile from the previous emission, not open
-    when the result lands.
+    The tool runs for 20 ms and its result round trip takes 2000 ms, which is
+    `tasks/dataset_example.yaml`, where a 21.5 ms ``Write`` met a 2511.7 ms round
+    trip and 21% of the turn was accounted to nothing. The window after the
+    result must tile from the previous emission, not open when the result lands.
     """
-    from coder_eval.agents import claude_code_agent as claude_module
-    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
-    from coder_eval.streaming.events import AgentEndStatus as _AgentEndStatus
     from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
     from tests._fixtures.golden_streams.claude_fixtures import ToolUseBlock, UserMessage, message_start
 
-    clock = _InjectedClock()
-
-    def _monotonic() -> float:
-        return clock.at_ms / 1000.0
-
-    monkeypatch.setattr(claude_module, "time", SimpleNamespace(monotonic=_monotonic))
-
-    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
-    collector = EventCollector()
-    commands: list[CommandTelemetry] = []
-
-    clock.at_ms = 200
-    state = _ClaudeTurnState(
-        agent,
-        emit=CompositeStreamCallback(
-            [
-                collector,
-                SimpleNamespace(on_event=lambda e: commands.append(e.tool) if isinstance(e, ToolEndEvent) else None),
-            ]
-        ),
-        collector=collector,
-        task_id="t",
-        user_input="go",
-        iteration=1,
-        log=agent._log,
-        turn_start_time=_monotonic(),
-        deadline=None,
-        clock=clock,
+    return _claude_replay(
+        [
+            Tick(500),
+            message_start("m1"),
+            Tick(980),
+            SdkAssistantMessage(
+                [ToolUseBlock("c1", "Write", {"file_path": "out.txt"})],
+                usage={"input_tokens": 10, "output_tokens": 5},
+                message_id="m1",
+            ),
+            Tick(1000),
+            UserMessage("c1", False, "written"),
+            # The live stream delivers a SECOND user message ~2 s later with NO
+            # tool-result block; a mark reset on it would drop those 2 s.
+            Tick(3000),
+            SimpleNamespace(content=[], tool_use_result=None),
+            message_start("m2"),
+            Tick(3400),
+            SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id="m2"),
+            Tick(3800),
+        ]
     )
-
-    clock.at_ms = 500
-    state.on_stream_event(message_start("m1"))
-    clock.at_ms = 980
-    state.on_assistant_message(
-        SdkAssistantMessage(
-            [ToolUseBlock("c1", "Write", {"file_path": "out.txt"})],
-            usage={"input_tokens": 10, "output_tokens": 5},
-            message_id="m1",
-        )
-    )
-    # The tool itself is 20 ms. What follows is the shape a live turn actually
-    # has, traced off `tasks/dataset_example.yaml`: the SDK delivers TWO user
-    # messages, the second ~2 s after the first. The old code reset the mark on
-    # each, so the next window opened at the LAST one and that 2 s vanished.
-    #
-    # One user message is not enough to catch it, and that is exactly why this
-    # shipped: claude-code reconstructs `execution_started_at` by subtracting
-    # the measured duration from the resolve instant, so with a single message
-    # the discarded interval and the tool's own span are the SAME milliseconds
-    # — `subtract_tool_time` removes them either way and the identity closes
-    # with or without the bug. The second message is what separates them.
-    clock.at_ms = 1000
-    state.on_user_message(UserMessage("c1", False, "written"))
-    clock.at_ms = 3000
-    # The second one carries NO tool-result block, which is what the live
-    # stream does — the traced turn kept its 21.5 ms Write span across it. A
-    # duplicate RESULT would instead re-resolve the call and stretch the tool
-    # span over the very interval this case exists to expose, which is a third
-    # way to write a test that cannot fail.
-    state.on_user_message(SimpleNamespace(content=[], tool_use_result=None))
-    state.on_stream_event(message_start("m2"))
-    clock.at_ms = 3400
-    state.on_assistant_message(SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id="m2"))
-    state.finalize(_AgentEndStatus.COMPLETED)
-
-    return Turn(started_ms=0.0, ended_ms=3800.0, messages=list(state.sdk_messages), commands=commands)
 
 
 # --------------------------------------------------------------------------
@@ -619,33 +366,46 @@ def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
 
 
 def test_pi_buckets_tile_the_turn():
-    assert_identity_closes(_pi_turn())
+    result = _pi_replay()
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
-def test_opencode_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
-    assert_identity_closes(_opencode_turn(monkeypatch))
+def test_opencode_buckets_tile_the_turn():
+    result = _opencode_replay()
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 def test_antigravity_buckets_tile_the_turn():
-    assert_identity_closes(_antigravity_turn())
+    result = _antigravity_replay()
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 def test_codex_buckets_tile_the_turn():
-    assert_identity_closes(_codex_turn())
+    result = _codex_replay()
+    generations = [m for m in result.record.messages if isinstance(m, AssistantMessage)]
+    assert len(generations) == 3, "window 1 splits into a thinking and an action part; window 2 is one"
+    assert generations[0].started_at == generations[1].started_at == at(500)
+    assert generations[2].started_at == generations[1].completed_at == at(2000)
+    assert [c.duration_ms for c in result.record.commands] == [500.0]
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
-def test_claude_code_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
-    assert_identity_closes(_claude_turn(monkeypatch))
+def test_claude_code_buckets_tile_the_turn():
+    result = _claude_turn()
+    assert [c.duration_ms for c in result.record.commands] == [800.0]
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
-def test_a_slow_tool_result_round_trip_is_not_lost(monkeypatch: pytest.MonkeyPatch):
+def test_a_slow_tool_result_round_trip_is_not_lost():
     """The discriminating case: a fast tool whose result takes 2 s to come back.
 
-    Reverting the fix (re-adding `last_event_wall = self.clock.now()` to
-    `on_user_message`) fails THIS and leaves every other case in the file
-    green, which is exactly what happened in production.
+    Re-adding `last_event_wall = self.emitter.now()` to `on_user_message` fails
+    THIS and leaves every other case in the file green, which is exactly what
+    happened in production.
     """
-    assert_identity_closes(_claude_slow_result_turn(monkeypatch))
+    result = _claude_slow_result_turn()
+    assert [c.duration_ms for c in result.record.commands] == [20.0]
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 def test_every_built_in_harness_has_a_case():
@@ -681,12 +441,12 @@ def test_the_sensor_sees_a_window_that_stops_tiling():
     600 ms is the scripted gap between one ``turn_end`` and the next
     ``turn_start`` — real model time, which untiling books to nothing.
     """
-    healthy = _pi_turn()
-    mutated = _pi_turn(untile=True)
+    healthy = _pi_replay()
+    mutated = _pi_replay(untile=True)
 
-    def _generation_ms(turn: Turn) -> float:
-        return sum(m.generation_duration_ms or 0.0 for m in turn.messages if isinstance(m, AssistantMessage))
+    def _generation_ms(result: Replay) -> float:
+        return sum(m.generation_duration_ms or 0.0 for m in result.record.messages if isinstance(m, AssistantMessage))
 
     assert _generation_ms(healthy) - _generation_ms(mutated) == pytest.approx(600.0)
     with pytest.raises(AssertionError, match="booked nowhere"):
-        assert_identity_closes(mutated)
+        assert_identity_closes(mutated.record, started_at=mutated.started_at, ended_at=mutated.ended_at)

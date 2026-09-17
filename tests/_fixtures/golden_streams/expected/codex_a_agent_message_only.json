@@ -5,8 +5,8 @@
   "crash_reason": null,
   "crashed": false,
   "duration_seconds": "<scrubbed>",
-  "harness_startup_ms": "<scrubbed>",
-  "harness_teardown_ms": "<scrubbed>",
+  "harness_startup_ms": null,
+  "harness_teardown_ms": null,
   "iteration": 1,
   "messages": [
     {
@@ -24,7 +24,7 @@
           "tool_use_id": null
         }
       ],
-      "generation_duration_ms": "<scrubbed>",
+      "generation_duration_ms": null,
       "input_tokens": 92,
       "message_id": "codex-1-msg-0",
       "model": "gpt-5-codex",
@@ -39,7 +39,12 @@
   ],
   "model_used": "gpt-5-codex",
   "num_turns": 1,
-  "result_summary": null,
+  "result_summary": {
+    "is_error": false,
+    "result": "Hello world",
+    "stop_reason": null,
+    "subtype": "completed"
+  },
   "timestamp": "<scrubbed>",
   "token_usage": {
     "cache_creation_input_tokens": 0,

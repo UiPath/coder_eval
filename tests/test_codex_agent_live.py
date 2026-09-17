@@ -22,7 +22,7 @@ import pytest
 pytest.importorskip("openai_codex")
 
 from coder_eval.agents.codex_agent import CodexAgent
-from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.models import AgentKind, CodexAgentConfig, parse_agent_config
 
 
 _live = pytest.mark.live
@@ -42,6 +42,7 @@ def _make_agent() -> CodexAgent:
         permission_mode="bypassPermissions",  # full access so it can run shell + write files
         model=os.getenv("CODEX_MODEL"),
     )
+    assert isinstance(config, CodexAgentConfig)
     return CodexAgent(config, instance_name="codex-live")
 
 
@@ -51,10 +52,13 @@ async def test_codex_live_produces_text(tmp_path):
     agent = _make_agent()
     await agent.start(str(tmp_path))
     try:
-        record = await agent.communicate(
-            "Reply with exactly the word PONG and nothing else.",
-            timeout=120,
-        )
+        record = (
+            await agent.communicate(
+                "Reply with exactly the word PONG and nothing else.",
+                iteration=1,
+                timeout=120,
+            )
+        ).record
     finally:
         await agent.stop()
 
@@ -69,10 +73,13 @@ async def test_codex_live_runs_shell_command_captured_as_telemetry(tmp_path):
     agent = _make_agent()
     await agent.start(str(tmp_path))
     try:
-        record = await agent.communicate(
-            "Run the shell command `echo coder-eval-live` and report its output.",
-            timeout=120,
-        )
+        record = (
+            await agent.communicate(
+                "Run the shell command `echo coder-eval-live` and report its output.",
+                iteration=1,
+                timeout=120,
+            )
+        ).record
     finally:
         await agent.stop()
 
@@ -93,10 +100,13 @@ async def test_codex_live_edits_file_and_records_telemetry(tmp_path):
     agent = _make_agent()
     await agent.start(str(tmp_path))
     try:
-        record = await agent.communicate(
-            "Create a file named hello.txt in the current directory containing the text 'hi'.",
-            timeout=120,
-        )
+        record = (
+            await agent.communicate(
+                "Create a file named hello.txt in the current directory containing the text 'hi'.",
+                iteration=1,
+                timeout=120,
+            )
+        ).record
     finally:
         await agent.stop()
 
@@ -127,19 +137,21 @@ async def test_codex_live_cooperative_stop_ends_turn_promptly(tmp_path):
     agent = _make_agent()
     await agent.start(str(tmp_path))
     try:
-        record = await agent.communicate(
-            "Run `echo one`, then `echo two`, then `echo three`, each as a separate shell command, "
-            "then create three files a.txt, b.txt and c.txt.",
-            timeout=180,
-            stream_callback=sink,
-            should_stop=lambda: StopReason.EARLY_CRITERION if sink.tool_started else None,
-        )
+        record = (
+            await agent.communicate(
+                "Run `echo one`, then `echo two`, then `echo three`, each as a separate shell command, "
+                + "then create three files a.txt, b.txt and c.txt.",
+                iteration=1,
+                timeout=180,
+                stream_callback=sink,
+                should_stop=lambda: StopReason.EARLY_CRITERION if sink.tool_started else None,
+            )
+        ).record
     finally:
         await agent.stop()
 
     # Clean cooperative stop: no crash, no pending partial, STOPPED_EARLY status.
     assert record.crashed is False
-    assert agent.pending_turn is None
     assert sink.ends, "expected an AgentEndEvent"
     assert sink.ends[-1].status == AgentEndStatus.STOPPED_EARLY
 
@@ -150,7 +162,7 @@ async def test_codex_live_token_usage_populated(tmp_path):
     agent = _make_agent()
     await agent.start(str(tmp_path))
     try:
-        record = await agent.communicate("Say hello.", timeout=120)
+        record = (await agent.communicate("Say hello.", iteration=1, timeout=120)).record
     finally:
         await agent.stop()
 

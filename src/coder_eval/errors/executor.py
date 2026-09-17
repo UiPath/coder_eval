@@ -5,7 +5,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .categories import RETRY_CONFIG, RetryConfig
+from .agent import AgentCrashError
+from .categories import RETRY_CONFIG, ErrorCategory, RetryConfig
 from .categorization import categorize_error
 from .retry import get_error_tip, get_retry_delay, should_retry
 
@@ -18,12 +19,12 @@ async def execute_with_retry(
     operation_name: str,
     context: dict[str, Any],
     max_attempts: int | None = None,
-    on_attempt_error: Callable[[Exception, int], Awaitable[None]] | None = None,
 ) -> Any:
     """Execute an operation with automatic retry on transient errors.
 
     Retries only what ``errors/categorization.py`` classifies as retryable;
-    everything else raises on the first attempt.
+    everything else raises on the first attempt. An ``AGENT_CRASH`` from an
+    ``AgentCrashError`` with ``tool_calls`` is never retried.
 
     Rationale: .claude/notes/agents.md § Shared turn lifecycle
 
@@ -32,11 +33,6 @@ async def execute_with_retry(
         operation_name: Human-readable name, for logging only.
         context: Requires ``task_id``; ``component`` and ``agent_name`` are optional.
         max_attempts: Overrides the safety limit of 10.
-        on_attempt_error: Async ``(exception, zero_indexed_attempt) -> None`` invoked
-            after every failed attempt, including the final non-retryable one, and
-            before the backoff. Its own exceptions are logged and swallowed so they
-            cannot mask the original. The orchestrator uses it to drain
-            ``agent.pending_turn`` and call ``agent.discard_pending_turn()``.
 
     Returns:
         Whatever ``operation`` returned.
@@ -46,7 +42,7 @@ async def execute_with_retry(
 
     Example:
         >>> async def flaky_api_call():
-        ...     return await agent.communicate(prompt)
+        ...     return (await agent.communicate(prompt, iteration=1)).record_or_raise()
         >>>
         >>> result = await execute_with_retry(
         ...     operation=flaky_api_call,
@@ -73,22 +69,16 @@ async def execute_with_retry(
         except Exception as e:
             last_error = e
 
-            # Fire callback before the retry decision so partial telemetry
-            # is captured even on the final non-retryable attempt.
-            if on_attempt_error is not None:
-                try:
-                    await on_attempt_error(e, attempt)
-                except Exception:
-                    logger.exception(
-                        "[%s] on_attempt_error callback raised for %s (attempt %d); ignoring",
-                        task_id,
-                        operation_name,
-                        attempt + 1,
-                    )
-
             # Categorize error
             category = categorize_error(e, context)
             config = RETRY_CONFIG.get(category, RetryConfig())
+
+            if category is ErrorCategory.AGENT_CRASH and isinstance(e, AgentCrashError) and e.tool_calls:
+                logger.error(
+                    f"[{task_id}] {operation_name} failed (not retried, the attempt made {e.tool_calls} tool calls): "
+                    + f"{category.value} - {e}"
+                )
+                raise
 
             # Check if we should retry (handles both non-retryable categories and exhausted attempts)
             if not should_retry(category, attempt):

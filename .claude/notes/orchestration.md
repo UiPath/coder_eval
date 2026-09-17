@@ -462,18 +462,61 @@ nothing to defer for and fail-stops on the first misfire.
 
 `EarlyStopWatcher` answered one question on the `should_stop` channel. Every harness
 also counted its own turn cap in its own unit, and the budgets were checked by the
-orchestrator after a turn had already spent the money. `TurnMonitor` answers all four
-reasons (`EARLY_CRITERION`, `TOOL_CALL_CAP`, `TOKEN_BUDGET`, `USD_BUDGET`) from ONE
-collector, so a cap means the same number of resolved tool calls on every harness and a
-budget stops the agent at its next poll. It is cumulative because one instance serves
+orchestrator after a turn had already spent the money. `TurnMonitor` answers all five
+reasons (`EARLY_CRITERION`, `TOOL_CALL_CAP`, `MODEL_TURN_CAP`, `TOKEN_BUDGET`,
+`USD_BUDGET`) from ONE collector, so a cap means the same count on every harness that
+accepts it and a budget stops the agent at its next poll. It is cumulative because one instance serves
 every retry attempt and every dialog turn of a task: the cap, the budgets and
 `expected_tool_calls` all measure the task, not an attempt. On one round the armed stop
-wins, then the cap, then the token budgets, then USD, and the first latched reason is
+wins, then the tool-call cap, then the token budgets, then USD (the model-turn cap latches
+on a turn start, which carries no tool and no tokens, so it never competes), and the first latched reason is
 final, so the status an adapter finalizes with cannot flip after the fact. Fail-open
 covers only the armed criteria: a raising `live_verdict` is agent-output-dependent code,
 while the cap and budgets read counters and must keep running on a run that has lost its
 criteria. `result.tool_calls_exhausted` still comes from the turn's end status, not the
 latch, because a cap latched after the agent's last poll stopped nothing.
+
+### The model-turn cap counts turn starts
+
+`run_limits.max_turns` and `expected_turns` came back (decisions 2026-09-16) with one unit:
+main-thread model turns across the whole task. `MODEL_TURN_CAP` reuses `AgentEndStatus.TOOL_CALLS_EXHAUSTED` so that no status,
+resume rule or report label forks. The counter is the monitor's existing `_sdk_turn_index`:
+a main-thread `TurnStartEvent` counts once per turn id per `communicate()` (the id set
+clears on each main-thread `AgentStartEvent`), cumulatively across attempts and dialog
+turns, and the cap latches when turn N+1 STARTS, so a run of exactly N turns is not
+capped. It counts starts, not ends: Claude Code closes main turn A when a sub-agent
+message arrives and re-opens A for its next block, so an end-based rule latched with cap 1
+before A's second tool was dispatched. On Claude Code the stop lands when response N+1
+arrives: that message is recorded and its tools stay unresolved. Pi counts its own
+provider-error retry as a turn (it opens a new `turn_{n}` id); Claude Code and OpenCode
+retry below the stream, so their retries count zero.
+
+Which harnesses accept the fields is derived, not declared:
+`HarnessContract.counts_model_turns` is `cooperative_stop` and a `usage_granularity`
+other than `turn`. A harness that reports once per `communicate()` would count calls, a
+different meaning, so it rejects both fields at resolution. Codex and Antigravity were
+that harness until 2026-09-17; each now opens one inner turn per generation
+(agents.md § One inner turn per generation on Codex and Antigravity), so only `none`
+rejects. The count is persisted as
+`EvaluationResult.model_turns` because reports are rebuilt from `task.json` and a detached
+grade has an inert monitor; re-deriving it from `TurnRecord.messages` over-counts on
+Claude Code (a spike stream showed 5 for 3 main responses). The dialog loop writes it
+before the budget gate, so a budget abort keeps it. `main`-era records used
+`expected_turns` for visible entries, so the row reports `expected_turns` only beside a
+`model_turns` count, and the evalboard reads `expected_turns` as the tool-call target only
+on a row with no `expected_tool_calls` key.
+
+### The monitor scopes to the main thread
+
+A sub-agent's events arrive tagged with `parent_thread_id`. The cap and the armed criteria
+count and evaluate MAIN-THREAD resolved tool calls only, and a nested `TurnStartEvent`
+never becomes the reported model. The cap once tripped on a Claude sub-agent's `Bash`
+call before the main thread wrote its answer (decision 2026-09-16): the author capped the
+agent they configured, and a sub-agent's calls are already covered by the spawning `Agent`
+call. A nested `ToolEndEvent` still reaches the monitor's collector, so its command set
+equals the authoritative one, and `TurnRecord.commands` keeps sub-agent calls. Budgets
+still add a nested `TurnEndEvent`'s tokens: money a sub-agent spends is spent.
+`expected_tool_calls` is a post-run warning over `TurnRecord.commands` and is unchanged.
 
 ### Inert triggers are by design, and the watcher fails open
 
@@ -593,37 +636,6 @@ skipping cleanup (tempdir leaked) AND result finalization (`task.json` lost, so 
 silently drops out of the run). The interrupt is caught, the full teardown runs, and it is
 re-raised at the end so callers observe the same exception. The watchdog cancels exactly
 once, so the awaits after the catch run normally.
-
-## Restoring a PATH from a run directory
-
-A run dir is a shareable artifact — that is the whole point of detached grading — and
-under `driver: docker` it is bind-mounted writable into the container the agent runs in.
-The PATH recorded in its own `task.json` is PREPENDED ahead of the host PATH, so taken
-verbatim it lets a run dir decide which binary `pytest` resolves to on the grader's host.
-
-Four filters, all about what PATH parity actually needs:
-
-- **Absolute only.** A relative entry resolves against the grader's current working
-  directory, which has nothing to do with the run, so `evilbin` becomes `$PWD/evilbin` at
-  the front of every criterion subprocess's PATH. It also cannot be the toolchain location
-  it claims to be, since the run resolved it somewhere else.
-- Drop anything that is not an existing directory — a dead entry buys no parity.
-- Drop any entry inside the WORKSPACE being graded: that tree is agent-writable, so a shim
-  dropped there would shadow a real tool.
-- Drop any entry inside the RUN DIRECTORY as a whole. The workspace is only part of it;
-  `artifacts/`, a sibling replicate's tree and the run root all travel in the same shared
-  artifact and are equally attacker-chosen.
-
-The PATH is captured only on the per-turn happy path, after a successful turn, which
-leaves three gaps: an agent crash or turn timeout (the sync never runs, and a crashed
-agent's SDK PATH may itself be unreliable), evaluate-only mode, and the window before the
-first turn. Persisting it is what closes the evaluate-only gap for a LATER detached grade,
-which would otherwise resolve `run_command` criteria against ambient PATH and could reach
-a different verdict than the run it claims to be grading.
-
-A sandbox-setup-time sync was considered and rejected: the agent SDK's effective PATH is
-only knowable after the SDK initializes, so it would capture the configured prepends
-rather than the full agent environment.
 
 ## The dialog loop
 

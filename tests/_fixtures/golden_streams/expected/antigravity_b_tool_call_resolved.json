@@ -3,7 +3,7 @@
   "assistant_turn_count": 1,
   "commands": [
     {
-      "assistant_turn_index": null,
+      "assistant_turn_index": 0,
       "duration_ms": "<scrubbed>",
       "error_message": null,
       "execution_completed_at": "<scrubbed>",
@@ -70,7 +70,12 @@
   ],
   "model_used": "gemini-3.5-flash",
   "num_turns": 1,
-  "result_summary": null,
+  "result_summary": {
+    "is_error": false,
+    "result": "done",
+    "stop_reason": null,
+    "subtype": "completed"
+  },
   "timestamp": "<scrubbed>",
   "token_usage": {
     "cache_creation_input_tokens": 0,

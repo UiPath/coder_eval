@@ -24,8 +24,9 @@ from typing import Any
 from unittest.mock import patch
 
 from coder_eval.agents.pi_agent import PiAgent
-from coder_eval.errors import AgentCrashError
 from coder_eval.models import PiAgentConfig
+from coder_eval.streaming.events import AgentEndStatus, StreamEvent
+from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
 # tests/_fixtures/golden_streams/ -> tests/fixtures/ (this module moved two
@@ -191,8 +192,8 @@ def _agent() -> PiAgent:
 class PiScenario:
     """One recorded CLI event stream.
 
-    ``expects`` names the exception a scenario is supposed to raise, and the
-    runner then snapshots ``pending_turn`` instead of the returned record —
+    ``expects`` names the failed end status a scenario is supposed to reach, and the
+    runner asserts that end status and snapshots the crashed record —
     the same knob ``ClaudeScenario`` carries, for the same reason: the partial
     a crash preserves is a real capture path, and one nobody was comparing
     against a snapshot on this harness.
@@ -200,12 +201,12 @@ class PiScenario:
 
     name: str
     lines: list[str]
-    expects: type[BaseException] | None = None
+    expects: AgentEndStatus | None = None
 
 
-async def run_pi_scenario(scenario: PiScenario, working_dir: str) -> dict[str, Any]:
+async def run_pi_scenario(scenario: PiScenario, working_dir: str) -> tuple[dict[str, Any], list[StreamEvent]]:
     """Replay one scenario and return the resulting record as a plain dump."""
-    import pytest
+    recorder = EventRecorder()
 
     proc = _FakeProcess(scenario.lines)
 
@@ -220,14 +221,11 @@ async def run_pi_scenario(scenario: PiScenario, working_dir: str) -> dict[str, A
         patch.object(os, "killpg", lambda _pgid, _sig: None, create=True),
     ):
         await agent.start(working_dir)
-        if scenario.expects is not None:
-            with pytest.raises(scenario.expects):
-                await agent.communicate("do it")
-            record = agent.pending_turn
-            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
-        else:
-            record = await agent.communicate("do it")
-    return record.model_dump(mode="json")
+        outcome = await agent.communicate("do it", iteration=1, stream_callback=recorder)
+        expected = scenario.expects or AgentEndStatus.COMPLETED
+        assert outcome.status is expected, f"{scenario.name}: ended {outcome.status}, expected {expected}"
+        record = outcome.record
+    return record.model_dump(mode="json"), recorder.events
 
 
 def _build_catalogue() -> list[PiScenario]:
@@ -280,7 +278,7 @@ def _build_catalogue() -> list[PiScenario]:
     # the pair then read as a measured span that the collector subtracted from
     # a generation window the tool never occupied. One bound alone forms no
     # span (`main_thread_tool_spans` requires both), so the window is left
-    # whole. Same rule as claude-code's `_finalize_commands`: unknown status
+    # whole. The emitter's sweep applies it on every harness: unknown status
     # and unknown duration are one fact (CE058).
     scenarios.append(
         PiScenario(
@@ -296,7 +294,7 @@ def _build_catalogue() -> list[PiScenario]:
 
     # (e) the provider error pi's internal retries could not clear, AFTER a
     # complete generation. The CLI still exits 0, so `_settle_turn` crashes on
-    # `stopReason=error` alone — and the partial `pending_turn` must still carry
+    # `stopReason=error` alone — and the crashed record must still carry
     # that generation and its head/tail. A crash does not un-measure what was
     # measured before it.
     scenarios.append(
@@ -309,7 +307,7 @@ def _build_catalogue() -> list[PiScenario]:
                 _turn_start(),
                 _turn_end_error("provider returned 529 after 5 retries"),
             ],
-            expects=AgentCrashError,
+            expects=AgentEndStatus.CRASHED,
         )
     )
 

@@ -81,7 +81,7 @@ you want to iterate on afterwards. Grade the results later with
 budget breach still reports `ERROR` / `TIMEOUT` / `TOKEN_BUDGET_EXCEEDED` and still
 exits non-zero, exactly as under `run`.
 
-Exhausting `max_tool_calls` is the one fact that does *not* become a status here. Under
+Exhausting `max_tool_calls` or `max_turns` is the one fact that does *not* become a status here. Under
 `run` it decides the outcome only when the criteria fail — a capped trajectory
 whose criteria pass is `SUCCESS` — so it is not knowable without grading. `execute`
 records `tool_calls_exhausted: true` on the row and finalizes `NOT_GRADED`; the later
@@ -189,9 +189,9 @@ expansion are already baked into `resolved`, so re-loading the source would
 silently grade a *different* task. The run's trajectory is restored too, so
 criteria that read the agent's tool calls (`command_executed`, `skill_triggered`,
 judges with trajectory) score exactly as they would have during the run.
-A run recorded before `run_limits.max_turns` became `run_limits.max_tool_calls` carries
-the old key, which no longer validates, so `evaluate` re-grades it from the source task
-YAML and prints its fallback warning.
+A run recorded by an older release with `run_limits.max_turns` validates again, so
+`evaluate` re-grades it from its recorded config. The re-grade skips the harness checks,
+so a recorded Codex or Antigravity run with that key re-grades too.
 
 It writes the verdict back into the run's `task.json` and keeps the pre-grade
 record beside it as `task.execute.json`. Writing back in place is what makes

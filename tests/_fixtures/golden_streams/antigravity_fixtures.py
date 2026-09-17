@@ -22,6 +22,8 @@ from unittest.mock import patch
 from coder_eval.agents import antigravity_agent
 from coder_eval.agents.antigravity_agent import AntigravityAgent
 from coder_eval.models import parse_agent_config
+from coder_eval.streaming.events import StreamEvent
+from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
 def _usage(prompt: int, cached: int, candidates: int, thoughts: int) -> SimpleNamespace:
@@ -135,8 +137,11 @@ class AntigravityScenario:
     steps: list[Any]
 
 
-async def run_antigravity_scenario(scenario: AntigravityScenario, working_dir: str) -> dict[str, Any]:
+async def run_antigravity_scenario(
+    scenario: AntigravityScenario, working_dir: str
+) -> tuple[dict[str, Any], list[StreamEvent]]:
     """Replay one scenario and return the resulting record as a plain dump."""
+    recorder = EventRecorder()
     agent = _agent_with_steps(scenario.steps)
     agent.working_directory = pathlib.Path(working_dir)
     # Neutralize the orphan poll loop's real 5s sleeps. `d_orphaned_tool`
@@ -144,8 +149,8 @@ async def run_antigravity_scenario(scenario: AntigravityScenario, working_dir: s
     # up to 120 cycles, i.e. ten minutes of wall clock in a unit test. The
     # loop's LOGIC is what the scenario records; the waiting is not.
     with patch.object(antigravity_agent.asyncio, "sleep", _no_sleep):
-        record = await agent.communicate("do it")
-    return record.model_dump(mode="json")
+        record = (await agent.communicate("do it", iteration=1, stream_callback=recorder)).record
+    return record.model_dump(mode="json"), recorder.events
 
 
 def _build_catalogue() -> list[AntigravityScenario]:
@@ -268,6 +273,26 @@ def _build_catalogue() -> list[AntigravityScenario]:
                     content_delta="third",
                     complete=True,
                     usage=_usage(120, 0, 14, 0),
+                ),
+            ],
+        )
+    )
+
+    # (f) the user's prompt arrives as a TEXT_RESPONSE Step with source USER (captured
+    # live, 2026-09-16). It is not the model talking to the user, so it must never
+    # become assistant text or `agent_output`; the model's reply after it must.
+    scenarios.append(
+        AntigravityScenario(
+            name="f_user_prompt_step",
+            steps=[
+                _step("TEXT_RESPONSE", "DONE", source="USER", target="UNKNOWN", content="do it"),
+                _step(
+                    "TEXT_RESPONSE",
+                    "DONE",
+                    content="DONE.",
+                    content_delta="DONE.",
+                    complete=True,
+                    usage=_usage(100, 0, 5, 0),
                 ),
             ],
         )

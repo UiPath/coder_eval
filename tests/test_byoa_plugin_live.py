@@ -81,10 +81,13 @@ async def test_byoa_plugin_agent_runs_real_turn(demo_plugin_registered, tmp_path
 
     await agent.start(str(tmp_path))
     try:
-        record = await agent.communicate(
-            "Reply with exactly the word PONG and nothing else.",
-            timeout=120,
-        )
+        record = (
+            await agent.communicate(
+                "Reply with exactly the word PONG and nothing else.",
+                iteration=1,
+                timeout=120,
+            )
+        ).record
     finally:
         await agent.stop()
 

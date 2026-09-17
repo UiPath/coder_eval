@@ -281,24 +281,20 @@ CriterionResultUnion = Annotated[
 
 
 class ResultSummary(BaseModel):
-    """Diagnostic fields lifted from the SDK's final ResultMessage.
+    """How a clean turn ended, on every harness.
 
-    Powers the agent's debug log and the error-path formatter that
-    surfaces a useful detail string when the CLI crashes. Persisted on
-    ``TurnRecord`` for clean turns only — on a crash the agent raises
-    before the TurnRecord is constructed, so post-mortem persistence on
-    error turns is out of scope here.
-
-    Mirrors the diagnostic-bearing subset of
-    ``claude_agent_sdk.ResultMessage``; pure accounting fields
-    (``num_turns``, ``duration_ms``) live on ``TurnRecord`` /
-    ``TokenUsage``.
+    Persisted on ``TurnRecord`` for clean turns only; a crashed or timed-out turn
+    carries none, and its failure is in ``crash_reason``. ``result`` is the agent's
+    final reply: the text of the last main-thread assistant message when that
+    message calls no tool. A harness with its own final summary may pass that
+    instead. Accounting fields (``num_turns``, durations) live on
+    ``TurnRecord`` / ``TokenUsage``.
     """
 
-    is_error: bool = Field(description="Whether the SDK reported the turn as errored")
-    subtype: str = Field(description="Coarse classification (e.g. 'success', 'error_during_execution')")
+    is_error: bool = Field(description="Whether the harness reported the finished turn as errored")
+    subtype: str = Field(description="Coarse classification: the end status, or the harness's own subtype")
     stop_reason: str | None = Field(default=None, description="Why the model stopped, if reported")
-    result: str | None = Field(default=None, description="Free-form result/error text from the SDK")
+    result: str | None = Field(default=None, description="The agent's final reply text, or the harness's result text")
 
 
 class TurnRecord(BaseModel):
@@ -400,11 +396,12 @@ class TurnRecord(BaseModel):
     )
     tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether the tool-call cap ended this turn before the agent completed on its own",
+        description="Whether a structural cap (max_tool_calls or max_turns) ended this turn before the agent "
+        + "completed on its own",
     )
     result_summary: ResultSummary | None = Field(
         default=None,
-        description="SDK ResultMessage summary, when one was emitted (clean turns or partials that got one).",
+        description="How a clean turn ended, including the agent's final reply; None on a crashed or timed-out turn.",
     )
     provider_call_costs: list[ProviderCallCost] = Field(
         default_factory=list,
@@ -523,7 +520,7 @@ class EarlyStopInfo(BaseModel):
         + "advisory without re-deriving from task_config.",
     )
     sdk_turn_index: int = Field(
-        description="SDK inner-turn count at the stop (the monitor counts TurnStartEvents). NOT the "
+        description="Main-thread model turns started at the stop (each turn id once per communicate()). NOT the "
         + "orchestrator iteration, which is always 1 in single-shot."
     )
     tool_call_index: int = Field(
@@ -599,7 +596,8 @@ class EvaluationResult(BaseModel):
     final_status: FinalStatus = Field(description="Final status of the evaluation")
     tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether the tool-call cap ended any iteration before the agent completed on its own",
+        description="Whether a structural cap (max_tool_calls or max_turns) ended any iteration before the agent "
+        + "completed on its own",
     )
     weighted_score: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"
@@ -682,6 +680,14 @@ class EvaluationResult(BaseModel):
     total_assistant_turns: int | None = Field(
         default=None,
         description="Total assistant turns across all orchestrator iterations",
+    )
+    model_turns: int | None = Field(
+        default=None,
+        description=(
+            "Main-thread model turns across the task, counted by the TurnMonitor (each turn id once per "
+            "communicate()). None when the harness does not count model turns, when no turn finished, or on a "
+            "run recorded before the field."
+        ),
     )
 
     # Commands efficiency (orchestrator-level tracking)

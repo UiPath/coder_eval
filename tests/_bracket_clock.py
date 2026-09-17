@@ -1,10 +1,8 @@
-"""A ``TurnClock`` stand-in anchored far from real time, for the CE064 tests.
+"""A ``TurnClock`` stand-in anchored far from real time, for the turn-bracket tests.
 
-CE064 checks only that ``timestamp=`` is PRESENT on an ``AgentStartEvent`` /
-``AgentEndEvent`` emit — its own declared blind spot is that it cannot tell
-``self.clock.now()`` from a ``datetime.now()`` written out at the call site.
-This is the guard for the SOURCE of that stamp, on the three harnesses that own
-a clock.
+``TurnEmitter`` stamps the ``AgentStartEvent`` / ``AgentEndEvent`` bracket from the
+turn's clock. This is the guard for the SOURCE of that stamp, on the three harnesses
+that run on a ``TurnClock``.
 
 ANCHORED FAR FROM NOW, and that is the whole trick. A bracket left on
 ``StreamEvent.timestamp``'s ``default_factory=datetime.now`` lands within
@@ -17,7 +15,7 @@ It advances on the REAL monotonic clock instead of stepping by hand, which is
 what lets the same fixture assert the second half: with the bracket and the
 window bounds finally on one basis, ``decompose_turn``'s head and tail come out
 as small positive measurements rather than as the clamped ``0.0`` a cross-basis
-subtraction produced (see ``ce064_turn_bracket_on_the_clock``'s measured probe).
+subtraction produced (the measured probe is in ``docs/agents/HARNESS_PARITY.md``).
 """
 
 import time
@@ -60,7 +58,7 @@ def assert_bracket_on_the_clock(events: list[StreamEvent]) -> None:
             f"{type(event).__name__}.timestamp is {event.timestamp}, which is not from the turn's "
             f"clock (anchored at {ANCHOR}). It fell back to StreamEvent's default_factory=datetime.now, "
             "so the turn bracket and the generation-window bounds sit on two bases inside one "
-            "`decompose_turn` subtraction — see CE064."
+            "`decompose_turn` subtraction."
         )
     assert ends[0].timestamp >= starts[0].timestamp
 
@@ -93,5 +91,5 @@ def assert_overhead_is_measured(record: TurnRecord) -> None:
     )
     assert 0.0 < record.harness_teardown_ms < 60_000.0, (
         f"harness_teardown_ms is {record.harness_teardown_ms} ms — a 0.0 here is the clamped "
-        "inversion CE064 exists to remove, not an instant teardown"
+        "inversion of a bracket off the turn clock, not an instant teardown"
     )

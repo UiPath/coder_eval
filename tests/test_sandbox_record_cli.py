@@ -131,7 +131,6 @@ class TestGeneration:
         try:
             sandbox_dir = sandbox.setup()
             recorder = str((sandbox_dir / RECORD_CLI_DIR).resolve())
-            sandbox.set_command_base_path(f"{recorder}{os.pathsep}{os.environ.get('PATH', '')}")
             assert recorder in sandbox.uip_search_path.split(os.pathsep)
             assert recorder not in sandbox._plugin_discovery_path().split(os.pathsep)
         finally:

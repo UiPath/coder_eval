@@ -15,6 +15,7 @@ from coder_eval.models import (
     PermissionMode,
     ToolNameMap,
 )
+from coder_eval.pricing import is_priced
 
 
 if TYPE_CHECKING:
@@ -43,6 +44,8 @@ _GATED: dict[str, str] = {
     "allowed_tools": "allowed_tools",
     "disallowed_tools": "disallowed_tools",
 }
+
+MODEL_TURN_LIMITS: tuple[str, ...] = ("max_turns", "expected_turns")
 
 
 def registration_for(task: TaskDefinition, *, requirement: str, hint: str = "") -> AgentRegistration[Any]:
@@ -78,13 +81,16 @@ def registration_for(task: TaskDefinition, *, requirement: str, hint: str = "") 
 def validate_harness_contract(task: TaskDefinition) -> None:
     """Reject agent config the task's harness cannot honor with its documented meaning.
 
-    Three checks, in order: a gated field set on a harness whose contract marks it
+    Five checks, in order: a gated field set on a harness whose contract marks it
     unsupported; a ``permission_mode`` value outside the contract's
     ``permission_modes``; a tool-list name outside ``CANONICAL_TOOL_NAMES`` (or an
-    ``mcp__`` name the harness cannot address). A field is set when a config layer
-    wrote it with a value other than None or an empty tool list (which restricts
-    nothing). A task without an agent type returns
-    silently; the layer-5 type guard reports that.
+    ``mcp__`` name the harness cannot address); a non-None model-turn run limit
+    (``MODEL_TURN_LIMITS``) on a harness whose contract does not count model turns;
+    ``run_limits.max_usd`` on a harness that does not report cost, with an
+    ``agent.model`` the rate card cannot price.
+    An agent field is set when a config layer wrote it with a value other than None
+    or an empty tool list (which restricts nothing). A task without an agent type
+    returns silently; the layer-5 type guard reports that.
 
     Raises:
         HarnessContractError: on the first violation, or an unregistered kind.
@@ -110,6 +116,36 @@ def validate_harness_contract(task: TaskDefinition) -> None:
     for field in ("allowed_tools", "disallowed_tools"):
         if field in set_fields and tool_names is not None:
             _check_tool_names(field, getattr(task.agent, field), tool_names, kind)
+    _check_model_turn_limits(task, contract, kind)
+    _check_max_usd_priceable(task, contract, kind)
+
+
+def _check_model_turn_limits(task: TaskDefinition, contract: HarnessContract, kind: str) -> None:
+    limits = task.run_limits
+    if limits is None or contract.counts_model_turns:
+        return
+    for field in MODEL_TURN_LIMITS:
+        if getattr(limits, field) is not None:
+            raise HarnessContractError(
+                f"run_limits.{field} is set but the {kind!r} harness reports no per-response turn boundary "
+                + f"(usage_granularity={contract.usage_granularity.value}; see docs/agents/HARNESS_PARITY.md). "
+                + "Remove the field, or set it only in a variant for a harness that counts model turns "
+                + f"({_honoring_kinds(lambda c: c.counts_model_turns)})."
+            )
+
+
+def _check_max_usd_priceable(task: TaskDefinition, contract: HarnessContract, kind: str) -> None:
+    if task.run_limits is None or task.run_limits.max_usd is None or contract.reports_cost:
+        return
+    model = task.agent.model if task.agent is not None else None
+    if model and is_priced(model):
+        return
+    subject = f"agent.model {model!r} has no rate in coder_eval.pricing" if model else "agent.model is not set"
+    raise HarnessContractError(
+        f"run_limits.max_usd is set but the {kind!r} harness does not report its own cost and {subject}, "
+        + "so the budget cannot be priced. Pin a priced agent.model, register a rate with register_pricing, "
+        + f"or remove max_usd. Harnesses that report their own cost: {_honoring_kinds(lambda c: c.reports_cost)}."
+    )
 
 
 def _is_set(agent: BaseAgentConfig, field: str) -> bool:

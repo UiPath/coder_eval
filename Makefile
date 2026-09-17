@@ -47,13 +47,13 @@ docs-budget:  ## Report the docstring/comment prose budget and check it against 
 
 typecheck:  ## Run type checking with pyright
 	uv run pyright
-	# The CE036 contract engine executes checker code and feeds the early-stop
-	# design; it is the one tests/ surface worth type-checking. It needs its own
-	# config: pyproject.toml excludes "tests", and pyright's `exclude` beats BOTH
+	# The second pass type-checks the tests/ surfaces that break silently: the CE036
+	# contract engine and the live tests (an SPI change fails here, without
+	# credentials). It needs its own config: pyproject.toml excludes "tests", and pyright's `exclude` beats BOTH
 	# an explicitly-passed CLI file arg AND an `include` entry naming the file --
 	# either shortcut analyzes ZERO files and exits 0, a gate that checks nothing.
-	# The config below is DERIVED from [tool.pyright] (same rules, only
-	# include/exclude swapped), so the two passes cannot drift apart.
+	# The config below is DERIVED from [tool.pyright] (same rules; only
+	# include/exclude and extraPaths differ), so the two passes cannot drift apart.
 	uv run python -m tests.lint.pyright_config .pyright-tests.json
 	uv run pyright -p .pyright-tests.json
 
@@ -72,6 +72,8 @@ verify:  ## Run all verification steps (CI equivalent)
 	uv run ruff format --check $(LINT_PATHS)
 	uv run ruff check $(LINT_PATHS)
 	uv run pyright
+	uv run python -m tests.lint.pyright_config .pyright-tests.json
+	uv run pyright -p .pyright-tests.json
 	uv run pytest tests/test_custom_lint.py -v --tb=short --no-header -p no:warnings
 	uv run python -m tests.lint.prose_budget
 	# uv run pip-audit --desc --skip-editable

@@ -39,12 +39,7 @@
   ],
   "model_used": "deepseek/deepseek-v4-pro",
   "num_turns": 1,
-  "result_summary": {
-    "is_error": true,
-    "result": "OpenCode error: 401 from the provider",
-    "stop_reason": "stop",
-    "subtype": "crashed"
-  },
+  "result_summary": null,
   "timestamp": "<scrubbed>",
   "token_usage": {
     "cache_creation_input_tokens": 0,

@@ -23,6 +23,8 @@ from openai_codex.generated.v2_all import Turn, TurnCompletedNotification
 
 from coder_eval.agents.codex_agent import CodexAgent
 from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.streaming.events import AgentEndStatus, StreamEvent
+from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
 CODEX_MODEL = "gpt-5-codex"
@@ -170,11 +172,10 @@ def _collab(
 class CodexScenario:
     name: str
     notifications: list[Any]
-    expects: type[BaseException] | None = None
+    expects: AgentEndStatus | None = None
 
 
 def _build_catalogue() -> list[CodexScenario]:
-    from coder_eval.errors import AgentCrashError
 
     scenarios: list[CodexScenario] = []
 
@@ -221,21 +222,13 @@ def _build_catalogue() -> list[CodexScenario]:
         CodexScenario(
             name="c_reasoning_placeholder",
             notifications=[
-                # Real bounds, and they are load-bearing rather than decorative:
-                # with none, `_flush_message` takes `_ms_to_dt(None)` for BOTH
-                # ends, which is two adjacent `datetime.now()` reads. Those
-                # collide at microsecond resolution often enough that this
-                # scenario failed `assert_timing_captured`'s
-                # `completed_at > started_at` roughly one run in twenty under
-                # parallel load, naming a different scenario each time.
-                _item("item/completed", _reasoning(text=""), started_at_ms=_T0_MS, completed_at_ms=_T0_MS + 40),
+                # Real bounds: without a start stamp the generation is unmeasured.
+                # The SDK carries `started_at_ms` only on item/started.
+                _item("item/started", _reasoning(text=""), started_at_ms=_T0_MS),
+                _item("item/completed", _reasoning(text=""), completed_at_ms=_T0_MS + 40),
                 _delta("final answer"),
-                _item(
-                    "item/completed",
-                    _agent_message("final answer"),
-                    started_at_ms=_T0_MS + 40,
-                    completed_at_ms=_T0_MS + 300,
-                ),
+                _item("item/started", _agent_message("final answer"), started_at_ms=_T0_MS + 40),
+                _item("item/completed", _agent_message("final answer"), completed_at_ms=_T0_MS + 300),
                 _token_usage(inp=100, out=50, cached=8, reasoning=20),
                 _turn_completed(),
             ],
@@ -307,15 +300,11 @@ def _build_catalogue() -> list[CodexScenario]:
             notifications=[
                 _delta("partial"),
                 # Bounded for the same reason as (c) above.
-                _item(
-                    "item/completed",
-                    _agent_message("partial"),
-                    started_at_ms=_T0_MS,
-                    completed_at_ms=_T0_MS + 200,
-                ),
+                _item("item/started", _agent_message("partial"), started_at_ms=_T0_MS),
+                _item("item/completed", _agent_message("partial"), completed_at_ms=_T0_MS + 200),
                 _token_usage(inp=100, out=40, cached=8),
             ],
-            expects=AgentCrashError,
+            expects=AgentEndStatus.CRASHED,
         )
     )
 
@@ -378,9 +367,9 @@ def _rebase_notifications(notifications: list[Any]) -> list[Any]:
     return rebased
 
 
-async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> dict[str, Any]:
-    """Run ``scenario`` with fakes and return the TurnRecord/pending_turn dump."""
-    import pytest
+async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> tuple[dict[str, Any], list[StreamEvent]]:
+    """Run ``scenario`` with fakes and return the outcome record's dump and the events."""
+    recorder = EventRecorder()
 
     config = parse_agent_config(type=AgentKind.CODEX, model=CODEX_MODEL)
     agent = CodexAgent(config)
@@ -391,12 +380,9 @@ async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> dict[
     # Point CODEX_HOME at a sessions-less dir so sub-agent rollout recovery
     # short-circuits instead of polling the real ~/.codex.
     with patch.dict(os.environ, {"CODEX_HOME": working_dir}):
-        if scenario.expects is not None:
-            with pytest.raises(scenario.expects):
-                await agent.communicate("do it")
-            record = agent.pending_turn
-            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
-        else:
-            record = await agent.communicate("do it")
+        outcome = await agent.communicate("do it", iteration=1, stream_callback=recorder)
+        expected = scenario.expects or AgentEndStatus.COMPLETED
+        assert outcome.status is expected, f"{scenario.name}: ended {outcome.status}, expected {expected}"
+        record = outcome.record
 
-    return record.model_dump(mode="json")
+    return record.model_dump(mode="json"), recorder.events

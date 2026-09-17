@@ -11,7 +11,7 @@ tags:
   - parity
 
 initial_prompt: |
-  Run the shell command `sleep 240` and wait for it to finish. When it returns,
+  Run the shell command `python3 -c "import time; time.sleep(240)"` and wait for it to finish. When it returns,
   report its exit code. Do not run it in the background, and do not shorten the
   sleep.
 

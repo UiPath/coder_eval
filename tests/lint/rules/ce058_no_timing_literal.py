@@ -34,7 +34,7 @@ produced:
 3. ``x if x is not None else 0.0`` (and the ``is None`` mirror);
 4. ``if x.duration_ms is None: x.duration_ms = 0.0`` — the form no existing
    rule shape covers, and where the live Claude instance was hiding
-   (``_finalize_commands`` set it on every command force-closed without a
+   (its former command finalizer set it on every command force-closed without a
    tool result, in the one harness a timing audit had called healthy);
 5. ``model_copy(update={"duration_ms": 0.0})`` — a keyword rule is blind to a
    dict, and the dict is how ``CommandTelemetry.duration_ms`` is actually
@@ -45,7 +45,7 @@ produced:
 
 Form 6 exists because form 4 was passing the live defect by coincidence. Form 4
 keys on the ``if`` test naming a timing attribute, and the shipped
-``_finalize_commands`` bug happened to spell it that way
+Claude command-finalizer bug happened to spell it that way
 (``if cmd.duration_ms is None:``) — but the assignment sat inside an outer
 ``if cmd.result_status is None:`` block, and rewriting it to set the literal
 under THAT guard instead, which reads just as naturally and books the identical

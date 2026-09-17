@@ -28,14 +28,15 @@ each turn re-anchors. That is intended — do not "fix" it by re-reading the wal
 which is the property being removed.
 
 One per turn, never module-level and never reused: a long run would accumulate drift
-between the pair and real wall time. The turn-state constructors take it as an argument
-so the lifetime is visible in the signature, and so a unit test can pass a fake straight
-in. An end-to-end test driving `communicate()` cannot — the state is built inside it, out
-of the caller's reach — so those replace the class through the agent module instead
-(`tests/_bracket_clock.py`). Both reach the same object.
+between the pair and real wall time. `Agent._open_emitter` is the one place an agent
+constructs it: it gives a fresh `TurnClock` to the turn's `TurnEmitter` under
+`TimingBasis.TURN_CLOCK`, and the host wall clock under `CLI_EPOCH_MS`. The emitter stamps
+every event from that clock, the `AgentStartEvent` / `AgentEndEvent` bracket included, so
+an adapter cannot put the bracket on a different basis from its window bounds. A
+decoder-level test passes a `ScriptedClock` through `coder_eval.testing.replay`; a test
+driving `communicate()` replaces the class through `coder_eval.agent.TurnClock`.
 
-Which harnesses use it — for their window bounds and, since **CE064**, for their turn
-bracket — is stated in `docs/agents/HARNESS_PARITY.md` (the `clock basis for recorded
+Which harnesses use it — for their window bounds and their turn bracket — is stated in `docs/agents/HARNESS_PARITY.md` (the `clock basis for recorded
 stamps` and `turn bracket` rows), the designated SSOT for per-harness composition.
 Asserting it anywhere else is the drift that put a wrong OpenCode row in that table for
 months.
@@ -109,9 +110,12 @@ never push the window start past the first item and invert the span. claude-code
 none — its stream carries no per-emission item start — so its window opens exactly at the
 mark.
 
-It deliberately does not return `completed`. The window always ends at `now`, which the
-caller passed in, so handing it back would be an argument returned unchanged —
-redundancy dressed as symmetry.
+It returns a `Window`: a frozen dataclass that holds the two bounds and nothing else.
+`duration_ms` is a property computed from them, `completed_at - started_at` clamped at
+`0.0`, so an inverted window keeps its real bounds and reads as a measured zero. A caller
+cannot set a duration apart from the bounds, because there is no field to set.
+`TurnEmitter.add_generation` accepts only a `Window`, and in-tree only `close_window` returns
+one, so every measured `generation_duration_ms` comes from this shape.
 
 ## decompose_turn
 
@@ -183,7 +187,7 @@ itself: when to reset a span list, when to clear a start stamp, when to advance 
 reducer now publishes the RAW window and keeps only the genuinely harness-shaped decision,
 which is where its window opens.
 
-Non-mutating for aliasing reasons rather than repeated calls. Every agent builds its
+Non-mutating for aliasing reasons rather than repeated calls. `TurnEmitter` builds the
 terminal event as `AgentEndEvent(messages=list(...))` — that copies the LIST, not the
 message objects — so writing in place would reach back into the agent's own live state
 from the collector, which is exactly the layering "the collector is the sole capture seam"
@@ -202,20 +206,19 @@ keying on the id would silently collapse every id-less message of a turn into on
 
 That equality is what lets `generation_duration_ms` stay a PUBLISHED field rather than one
 the collector derives from the bounds. Deriving it instead was considered and cut — it
-would cost five reducers, a regeneration of every golden and a rewrite of CE059, whose
-exemption keys on the kwarg being present at the call site — and the assertion is the
+would cost five reducers and a regeneration of every golden — and the assertion is the
 sensor that makes deferring that safe. A mismatch means a reducer narrowed or widened a
 window without moving its bounds, which is the drift
 `tests/_fixtures/golden_streams/_scrub.py::assert_timing_captured`'s "bounds that span it"
 check catches one replay at a time.
 
-It OVERLAPS with CE061 and is kept anyway. All five reducers build the window with
-`close_window(mark=…, now=…)` and write `started_at=started, completed_at=now`, and CE061
-— now exemption-free — forces that shape statically, so the equality is largely true by
-construction. What the runtime check adds is the half an import-level check cannot see: a
-reducer that bypasses `close_window`, and a third-party agent registered through the
-`coder_eval.plugins` SPI, which lives outside `src/coder_eval/agents/` where no lint rule
-reaches it. It is not load-bearing on its own.
+It OVERLAPS with `TurnEmitter` and is kept anyway. All five reducers pass
+`TurnEmitter.add_generation` a `Window` from `close_window(mark=…, now=…)`, and the emitter
+writes the bounds and the duration from that one object, so the equality is largely true by
+construction. What the runtime check adds is the half the emitter cannot see: a
+third-party agent registered through the `coder_eval.plugins` SPI that builds an
+`AssistantMessage` itself, outside `src/coder_eval/agents/` where CE072 does not reach. It
+is not load-bearing on its own.
 
 Raising kills the turn, and that is accepted — the same trade `_require_same_awareness`
 makes at this seam. The condition is unreachable without a reducer bug; all five are
@@ -223,8 +226,8 @@ exercised by the golden corpus and by the ms-exact identity contract.
 
 ### Why the zero-total skip runs before the equality check
 
-`close_window` clamps an inverted window — `now` before `mark`, two clocks disagreeing —
-to `0.0` while the bounds it writes still say `completed_at < started_at`, so the bounds
+`Window.duration_ms` clamps an inverted window — `now` before `mark`, two clocks disagreeing —
+to `0.0` while its bounds still say `completed_at < started_at`, so the bounds
 span is NEGATIVE and the equality fails. That is a measured inversion, the case
 `decompose_turn` deliberately clamps because both ends were observed; raising on it would
 kill turns on exactly the shape the clamp exists to tolerate. The cost is that a `0.0`
@@ -247,13 +250,13 @@ carries no timestamps at all, so indexing the raw list would measure the wrong t
 raise.
 
 A message whose `generation_duration_ms` is `None` is skipped. That field is the
-codebase's own marker for "no window was measurable here", and every producer of one
-stamps `started_at == completed_at == datetime.now()` at *append* time as an admitted
-placeholder — Codex's rollout rebuild (`_messages_from_items`), both Codex sub-agent
-recovery builders, and Claude's `_synthesize_subagent_terminal_message`. Reading those
+codebase's own marker for "no window was measurable here", and its only in-tree writer is
+`TurnEmitter.add_unmeasured_generation`, which stamps `started_at == completed_at ==
+clock.now()` at *append* time as an admitted placeholder. Its callers are Codex's rollout rebuild (`_messages_from_items`), both Codex sub-agent
+recovery builders, and Claude's synthesized sub-agent terminal (`_subagent_terminal_part`). Reading those
 stamps as window bounds turns a placeholder into a measurement: a Codex turn rebuilt from
 its rollout stamps every message at turn END, which would book the entire turn as harness
-startup. It is the same exemption CE059 makes for the same reason.
+startup.
 
 `min` / `max` rather than the first and last list entries, because the list is not ordered
 by time — Codex appends recovered sub-agent messages after the parent's last flush.

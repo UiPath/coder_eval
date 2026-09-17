@@ -7,13 +7,15 @@ description: |
   would let the runner hang up to the GitHub-Actions job timeout (10 min)
   and burn a real budget — this guards against that silently happening.
 initial_prompt: |
-  Run this Bash command and wait for it to finish: `sleep 300`
+  Run this Bash command and wait for it to finish: `python3 -c "import time; time.sleep(300)"`
 
 # task_timeout enforced by an orchestrator watchdog. Minimum allowed value
 # per the TaskDefinition validator (ge=30) is 30s — anything shorter would
 # constitute a misuse warning at load time. Wall-clock cost in CI is ~30s.
 # Sleep is 300s (10× task_timeout) so a regression that lets the agent run
 # through but kills it on the SDK-level turn timeout would also miscount.
+# The sleep is spelled through python3 because Claude Code refuses a standalone
+# `sleep N` and the turn would then end before any timeout fires.
 # max_tool_calls stays out of reach: a retried or backgrounded `sleep` must not
 # end the run on the cap before the watchdog fires.
 run_limits:

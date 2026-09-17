@@ -26,7 +26,8 @@ from coder_eval.models import (
     TurnRecord,
 )
 from coder_eval.orchestrator import Orchestrator
-from coder_eval.streaming.events import AgentEndEvent, AgentStartEvent
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
 
 
 def _make_task(*, run_limits: RunLimits | None = None) -> TaskDefinition:
@@ -90,12 +91,12 @@ def _reporting_agent(*turns: TurnRecord) -> AsyncMock:
     """A fake agent whose each ``communicate`` reports its turn's usage on the stream, as real agents do."""
     remaining = list(turns)
 
-    async def communicate(user_input, *, stream_callback=None, timeout=None, should_stop=None):
+    async def communicate(user_input, *, iteration, stream_callback=None, timeout=None, should_stop=None):
         turn = remaining.pop(0) if len(remaining) > 1 else remaining[0]
         assert stream_callback is not None
         stream_callback.on_event(AgentStartEvent(task_id="budget_test", prompt=user_input))
         stream_callback.on_event(AgentEndEvent(task_id="budget_test", usage=turn.token_usage or TokenUsage()))
-        return turn
+        return TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
 
     agent = AsyncMock()
     agent.communicate = communicate
@@ -325,6 +326,7 @@ class TestSimulationBudgetAbort:
         task = task.model_copy(update={"simulation": sim, "initial_prompt": "first message"})
 
         orch = _make_orchestrator(task, tmp_path)
+        orch._counts_model_turns = True
         # The agent's first turn reports tokens above the budget.
         orch.agent = _reporting_agent(_make_turn(input_tokens=200, output_tokens=10))
 
@@ -357,6 +359,8 @@ class TestSimulationBudgetAbort:
         assert orch.result.simulation is not None
         assert orch.result.simulation.stop_reason == "run_limit_exceeded"
         assert orch.result.simulation.total_turns == 1
+        # The model-turn count is recorded before the budget gate raises.
+        assert orch.result.model_turns == 0
         # Simulator must not have been asked for another message after the budget trip.
         mock_simulator.next_user_message.assert_not_called()
 
@@ -389,13 +393,13 @@ class TestSimulationBudgetAbort:
 
 
 class TestCheckExpectedTurnsUnit:
-    """Direct unit tests of Orchestrator._check_expected_tool_calls."""
+    """Direct unit tests of Orchestrator._check_expected_targets."""
 
     def test_noop_when_run_limits_is_none(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(), tmp_path)
         orch.result.iterations.append(_make_turn(commands=100))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=1)
+            orch._check_expected_targets(iteration=1)
         assert "expected_tool_calls" not in caplog.text.lower()
         assert orch._expected_tool_calls_warning_emitted is False
 
@@ -403,7 +407,7 @@ class TestCheckExpectedTurnsUnit:
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(max_tool_calls=10)), tmp_path)
         orch.result.iterations.append(_make_turn(commands=20))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=1)
+            orch._check_expected_targets(iteration=1)
         assert "expected_tool_calls" not in caplog.text.lower()
         assert orch._expected_tool_calls_warning_emitted is False
 
@@ -413,7 +417,7 @@ class TestCheckExpectedTurnsUnit:
         orch.result.iterations.append(_make_turn(iteration=1, commands=3))
         orch.result.iterations.append(_make_turn(iteration=2, commands=2, reply="done"))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=2)
+            orch._check_expected_targets(iteration=2)
         assert "Visible turns" not in caplog.text
         assert orch._expected_tool_calls_warning_emitted is False
 
@@ -423,13 +427,13 @@ class TestCheckExpectedTurnsUnit:
         orch.result.iterations.append(_make_turn(iteration=1, commands=2))
         orch.result.iterations.append(_make_turn(iteration=2, commands=2))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=2)
+            orch._check_expected_targets(iteration=2)
         assert "Visible turns" not in caplog.text
 
         # +3 tools = 7 visible turns, over 5 → fires.
         orch.result.iterations.append(_make_turn(iteration=3, commands=3))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=3)
+            orch._check_expected_targets(iteration=3)
         assert "Visible tool calls (7) exceeded expected_tool_calls (5)" in caplog.text
         assert orch._expected_tool_calls_warning_emitted is True
 
@@ -437,7 +441,7 @@ class TestCheckExpectedTurnsUnit:
         caplog.clear()
         orch.result.iterations.append(_make_turn(iteration=4, commands=5))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=4)
+            orch._check_expected_targets(iteration=4)
         assert "Visible turns" not in caplog.text
 
     def test_warning_counts_reply_as_one(self, tmp_path, caplog):
@@ -448,14 +452,41 @@ class TestCheckExpectedTurnsUnit:
         orch.result.iterations.append(_make_turn(iteration=1, commands=2))
         orch.result.iterations.append(_make_turn(iteration=2, commands=2, reply="ok"))
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=2)
+            orch._check_expected_targets(iteration=2)
         assert "Visible tool calls (5) exceeded expected_tool_calls (3)" in caplog.text
+
+    def test_expected_turns_warns_once_when_model_turns_exceed_it(self, tmp_path, caplog):
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_turns=2)), tmp_path)
+        orch.result.model_turns = 2
+        with caplog.at_level(logging.WARNING):
+            orch._check_expected_targets(iteration=1)
+        assert "expected_turns" not in caplog.text
+
+        orch.result.model_turns = 3
+        with caplog.at_level(logging.WARNING):
+            orch._check_expected_targets(iteration=2)
+        assert "Model turns (3) exceeded expected_turns (2)" in caplog.text
+
+        caplog.clear()
+        orch.result.model_turns = 5
+        with caplog.at_level(logging.WARNING):
+            orch._check_expected_targets(iteration=3)
+        assert "expected_turns" not in caplog.text
+
+    def test_expected_turns_is_silent_without_a_model_turn_count(self, tmp_path, caplog):
+        orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_tool_calls=1, expected_turns=1)), tmp_path)
+        orch.result.iterations.append(_make_turn(commands=3))
+        with caplog.at_level(logging.WARNING):
+            orch._check_expected_targets(iteration=1)
+        assert "exceeded expected_tool_calls" in caplog.text
+        assert "expected_turns" not in caplog.text
+        assert orch._expected_turns_warning_emitted is False
 
     def test_noop_when_result_is_none(self, tmp_path, caplog):
         orch = _make_orchestrator(_make_task(run_limits=RunLimits(expected_tool_calls=1)), tmp_path)
         orch.result = None
         with caplog.at_level(logging.WARNING):
-            orch._check_expected_tool_calls(iteration=1)
+            orch._check_expected_targets(iteration=1)
         assert "Visible turns" not in caplog.text
 
 
@@ -470,7 +501,9 @@ class TestExpectedTurnsSingleShot:
 
         orch = _make_orchestrator(task, tmp_path)
         mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
+        mock_agent.communicate = AsyncMock(
+            return_value=TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
+        )
         orch.agent = mock_agent
         mock_checker = MagicMock()
         mock_checker.check_all_async = AsyncMock(
@@ -515,7 +548,9 @@ class TestExpectedTurnsSimulation:
         # Each agent turn = 1 tool call → cumulative still under 3 after one turn.
         turn = _make_turn(commands=1)
         mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
+        mock_agent.communicate = AsyncMock(
+            return_value=TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
+        )
         orch.agent = mock_agent
 
         mock_checker = MagicMock()
@@ -571,7 +606,9 @@ class TestExpectedTurnsSimulation:
         # 4 tools + reply = 5 visible turns, exceeds 2.
         turn = _make_turn(commands=4, reply="done")
         mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
+        mock_agent.communicate = AsyncMock(
+            return_value=TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
+        )
         orch.agent = mock_agent
 
         mock_checker = MagicMock()

@@ -3,7 +3,7 @@
 This is the safety net for decomposing ``ClaudeCodeAgent.communicate`` and
 ``CodexAgent._run_turn_with_streaming``: each scenario replays a recorded SDK
 event stream through ``communicate()`` and asserts the resulting
-``TurnRecord`` / ``pending_turn`` is byte-identical (post-scrub) to a committed
+``TurnRecord`` (crashed or not) is byte-identical (post-scrub) to a committed
 JSON snapshot. The decomposition must not change any snapshot.
 
 Regenerate the snapshots after an INTENTIONAL behavior change with::
@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from coder_eval.models import AgentKind
+from coder_eval.testing import assert_stream_balanced
 from tests._fixtures.golden_streams import assert_reconciliation, assert_timing_captured, scrub
 from tests._fixtures.golden_streams.antigravity_fixtures import ANTIGRAVITY_SCENARIOS, run_antigravity_scenario
 from tests._fixtures.golden_streams.claude_fixtures import CLAUDE_SCENARIOS, run_claude_scenario
@@ -55,33 +56,14 @@ NO_GENERATION_WINDOW: frozenset[str] = frozenset(
         # deadline flips) so the deadline break is deterministic. The window
         # is zero by fixture construction, not by anything the harness did.
         "claude_i_in_loop_deadline_break",
+        "codex_a_agent_message_only",  # the SDK stream carries no item stamps: an unmeasured generation
         "codex_g_items_rebuild",  # rollout rebuild: Turn items carry no timestamps
         # Codex emissions whose ENTIRE measurable window was tool execution.
         # The window is subtracted down to 0 because that is the honest
         # answer, not because nothing was recorded — see the generation-window
-        # subtraction in codex_agent._flush_message.
+        # subtraction in codex_agent.flush.
         "codex_d_cross_flush_is_error",  # flush lands before the tool completes: zero-width window
         "codex_e_orphan_tool",  # the tool never completes, so the window never opens
-        # Same shape, reached from the opposite direction. This scenario injects
-        # a 5 ms CLI tool interval into a replay whose whole turn is well under
-        # one millisecond, so the tool spans BOTH windows entirely and the
-        # central subtraction takes each down to a measured 0.0. It is the tool
-        # interval that is fictional, not the subtraction — which is why the
-        # scenario is in FICTIONAL_DURATIONS too.
-        #
-        # BE HONEST ABOUT WHAT IS LEFT. With both exemptions on, this snapshot
-        # asserts neither the identity nor a positive window, and it does NOT
-        # record the tiling the scenario is named for — `SCRUB_KEYS` masks
-        # `started_at`, `completed_at` and `generation_duration_ms`, so nothing
-        # about where a window opened survives into the JSON. What it still
-        # pins is the STRUCTURE: two assistant messages, their content blocks,
-        # their token buckets, and one resolved command. OpenCode's tiling is
-        # asserted where it can be — `tests/test_timing_identity_contract.py`
-        # (scripted clock, ms-exact) and
-        # `tests/test_opencode_agent.py::TestGenerationWindowsTileTheTurn`.
-        # `pi_c_multi_turn_tiling` is the same scenario shape on a harness whose
-        # stamps come from its own clock, and it needs neither exemption.
-        "opencode_c_multi_step_tiling",
     }
 )
 
@@ -100,7 +82,7 @@ def _expect_window(harness: str, scenario_name: str) -> bool:
 # scenario, and the codex/opencode ones that inject nothing — is checked.
 #
 # The last two entries were ADDED to buy stability, and the trade is worth
-# stating. They previously injected NO stamps at all, so `_flush_message` took
+# stating. They previously injected NO stamps at all, so `flush` took
 # `_ms_to_dt(None)` for both window bounds — two adjacent `datetime.now()`
 # reads, which collide at microsecond resolution often enough that
 # `assert_timing_captured`'s `completed_at > started_at` failed roughly one run
@@ -117,6 +99,13 @@ FICTIONAL_DURATIONS: frozenset[str] = frozenset(
         "codex_f_collab_fallback",  # 900 ms collab wait
         "codex_h_no_turn_completed_crash",  # 200 ms of item time — see below
         "opencode_b_tool_call_resolved",  # 17 ms tool interval
+        # OpenCode bounds every window and tool on the CLI's own envelope and
+        # `state.time` epoch stamps (timing_basis cli_epoch_ms), scripted in whole
+        # milliseconds, while the host bracket spans a sub-millisecond replay.
+        "opencode_a_single_text_turn",
+        "opencode_d_orphaned_tool",
+        "opencode_e_error_after_generation",
+        "opencode_f_captured_stream",  # a real 2.3 s CLI timeline
         # 5 ms tool interval, injected as CLI epoch stamps. OpenCode takes its
         # tool bounds from the CLI payload rather than from its own clock, so
         # every scenario of this harness that resolves a tool injects them —
@@ -161,7 +150,7 @@ def _compare_or_regen(name: str, actual_scrubbed: dict[str, Any]) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", CLAUDE_SCENARIOS, ids=lambda s: s.name)
 async def test_claude_golden(scenario, tmp_path):
-    raw = await run_claude_scenario(scenario, str(tmp_path))
+    raw, _ = await run_claude_scenario(scenario, str(tmp_path))
     # Reconciliation is asserted on the UNscrubbed dump (token buckets are never
     # scrubbed, but cost/timestamps are — assert before masking to be explicit).
     assert_reconciliation(raw)
@@ -177,7 +166,7 @@ async def test_claude_golden(scenario, tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", CODEX_SCENARIOS, ids=lambda s: s.name)
 async def test_codex_golden(scenario, tmp_path):
-    raw = await run_codex_scenario(scenario, str(tmp_path))
+    raw, _ = await run_codex_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -191,7 +180,7 @@ async def test_codex_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", CLAUDE_SCENARIOS, ids=lambda s: s.name)
 async def test_claude_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Claude snapshot."""
-    raw = await run_claude_scenario(scenario, str(tmp_path))
+    raw, _ = await run_claude_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
 
 
@@ -200,14 +189,14 @@ async def test_claude_reconciliation_invariant(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", CODEX_SCENARIOS, ids=lambda s: s.name)
 async def test_codex_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Codex snapshot."""
-    raw = await run_codex_scenario(scenario, str(tmp_path))
+    raw, _ = await run_codex_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ANTIGRAVITY_SCENARIOS, ids=lambda s: s.name)
 async def test_antigravity_golden(scenario, tmp_path):
-    raw = await run_antigravity_scenario(scenario, str(tmp_path))
+    raw, _ = await run_antigravity_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -221,13 +210,13 @@ async def test_antigravity_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", ANTIGRAVITY_SCENARIOS, ids=lambda s: s.name)
 async def test_antigravity_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Antigravity snapshot."""
-    assert_reconciliation(await run_antigravity_scenario(scenario, str(tmp_path)))
+    assert_reconciliation((await run_antigravity_scenario(scenario, str(tmp_path)))[0])
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", OPENCODE_SCENARIOS, ids=lambda s: s.name)
 async def test_opencode_golden(scenario, tmp_path):
-    raw = await run_opencode_scenario(scenario, str(tmp_path))
+    raw, _ = await run_opencode_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -241,13 +230,13 @@ async def test_opencode_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", OPENCODE_SCENARIOS, ids=lambda s: s.name)
 async def test_opencode_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every OpenCode snapshot."""
-    assert_reconciliation(await run_opencode_scenario(scenario, str(tmp_path)))
+    assert_reconciliation((await run_opencode_scenario(scenario, str(tmp_path)))[0])
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", PI_SCENARIOS, ids=lambda s: s.name)
 async def test_pi_golden(scenario, tmp_path):
-    raw = await run_pi_scenario(scenario, str(tmp_path))
+    raw, _ = await run_pi_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -261,7 +250,39 @@ async def test_pi_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", PI_SCENARIOS, ids=lambda s: s.name)
 async def test_pi_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Pi snapshot."""
-    assert_reconciliation(await run_pi_scenario(scenario, str(tmp_path)))
+    assert_reconciliation((await run_pi_scenario(scenario, str(tmp_path)))[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", CLAUDE_SCENARIOS, ids=lambda s: s.name)
+async def test_claude_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_claude_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.skipif(not _HAS_CODEX, reason="openai_codex extra not installed")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", CODEX_SCENARIOS, ids=lambda s: s.name)
+async def test_codex_stream_balanced(scenario, tmp_path):
+    assert run_codex_scenario is not None
+    assert_stream_balanced((await run_codex_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ANTIGRAVITY_SCENARIOS, ids=lambda s: s.name)
+async def test_antigravity_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_antigravity_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", OPENCODE_SCENARIOS, ids=lambda s: s.name)
+async def test_opencode_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_opencode_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", PI_SCENARIOS, ids=lambda s: s.name)
+async def test_pi_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_pi_scenario(scenario, str(tmp_path)))[1])
 
 
 # The ONE place a harness is listed for golden coverage. Derived from AgentKind
@@ -404,9 +425,8 @@ class TestAssertTimingCaptured:
     def test_collapsed_bounds_raise_even_with_a_healthy_duration(self):
         # Two harnesses take the duration from a MONOTONIC clock and the
         # bounds from the wall clock, so a reducer can report a real duration
-        # beside two stamps that collapsed to one instant. CE059 sees that
-        # statically only when both bounds are the same ast.Name; this is the
-        # check for when they are two different names holding one value.
+        # beside two stamps that collapsed to one instant; this is the check
+        # for that.
         with pytest.raises(AssertionError, match="bounds that span it"):
             assert_timing_captured(self._record(windows=[500.0], bounds_collapse=True), expect_generation_window=True)
 

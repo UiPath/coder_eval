@@ -166,12 +166,14 @@ template's copy rather than writing a second declaration.
 
 Otherwise, fill it in. **`path` names a plugin root or a bare skills directory**: the skill
 sits at `<path>/skills/<skill-name>/SKILL.md` or at `<path>/<skill-name>/SKILL.md`. Both are
-staged. Only skills are staged, so a sibling `agents/`, `commands/` or `hooks/` directory
-does not reach the evaluated agent. For `.claude/skills/pdf-forms/SKILL.md`, `.claude` works
-and `.claude/skills` works too:
+staged. Claude Code loads the whole plugin (agents, commands, hooks); other harnesses get its
+skills. To measure the skill alone, point `path` at the skills directory. For
+`.claude/skills/pdf-forms/SKILL.md`, use `.claude/skills`. `.claude` also works, but on
+Claude Code it also loads the project's agents and commands, which can answer the request
+instead of the skill:
 
 ```bash
-export SKILL_SOURCE_PATH="$(pwd)/.claude"
+export SKILL_SOURCE_PATH="$(pwd)/.claude/skills"
 ```
 
 Keep it an environment variable rather than baking an absolute path into the YAML — the

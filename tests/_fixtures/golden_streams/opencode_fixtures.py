@@ -26,12 +26,14 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 from coder_eval.agents.opencode_agent import OpenCodeAgent
-from coder_eval.errors import AgentCrashError
 from coder_eval.models import OpenCodeAgentConfig
+from coder_eval.streaming.events import AgentEndStatus, StreamEvent
+from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
 SESSION = "ses_test123"
@@ -49,10 +51,20 @@ _T0_MS = 1_786_663_016_802
 _REPLAY_LEAD_MS = 2
 
 
-def _evt(event_type: str, part: dict[str, Any]) -> str:
-    """One CLI event line: payload under ``part``, sessionID on the envelope."""
+def _evt(event_type: str, part: dict[str, Any], *, at_ms: int = 0) -> str:
+    """One CLI event line: payload under ``part``; sessionID and the CLI's own stamp on the envelope.
+
+    ``at_ms`` places the event on the recorded timeline: the envelope stamp is what
+    bounds a generation window on this harness, so a scenario that should measure
+    one gives its events increasing stamps.
+    """
     return json.dumps(
-        {"type": event_type, "timestamp": _T0_MS, "sessionID": SESSION, "part": {"sessionID": SESSION, **part}}
+        {
+            "type": event_type,
+            "timestamp": _T0_MS + at_ms,
+            "sessionID": SESSION,
+            "part": {"sessionID": SESSION, **part},
+        }
     )
 
 
@@ -80,6 +92,27 @@ def _rebase_lines(lines: list[str]) -> list[str]:
 _STAMP_KEYS = frozenset({"timestamp", "start", "end"})
 
 
+def _starting_at_t0(lines: list[str]) -> list[str]:
+    """Shift a captured stream's stamps so its first envelope ``timestamp`` is ``_T0_MS``."""
+    first = json.loads(lines[0])["timestamp"]
+
+    def shift(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {
+                k: (v - first + _T0_MS if k in _STAMP_KEYS and isinstance(v, int) else shift(v))
+                for k, v in node.items()
+            }
+        if isinstance(node, list):
+            return [shift(v) for v in node]
+        return node
+
+    return [json.dumps(shift(json.loads(line))) for line in lines]
+
+
+_CAPTURED = Path(__file__).resolve().parents[2] / "fixtures" / "opencode_happy_stream.jsonl"
+CAPTURED_STREAM = _CAPTURED.read_text(encoding="utf-8").splitlines()
+
+
 def _tokens(inp: int, out: int, *, write: int = 0, read: int = 0, reasoning: int = 0) -> dict[str, Any]:
     """Token payload in the NESTED convention (total = input+output+reasoning, cache
     counted inside `input`); see TestTokenShapeIsObservable for the flat one."""
@@ -93,7 +126,7 @@ def _tokens(inp: int, out: int, *, write: int = 0, read: int = 0, reasoning: int
 
 
 HAPPY_STREAM = [
-    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
+    _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}, at_ms=1400),
     _evt(
         "tool_use",
         {
@@ -109,6 +142,7 @@ HAPPY_STREAM = [
                 "time": {"start": 1786663018214, "end": 1786663018231},
             },
         },
+        at_ms=1435,
     ),
     _evt(
         "step_finish",
@@ -119,9 +153,10 @@ HAPPY_STREAM = [
             "cost": 0.001,
             "tokens": _tokens(100, 20, write=5, read=10),
         },
+        at_ms=1440,
     ),
-    _evt("step_start", {"id": "prt_4", "messageID": "msg_2", "type": "step-start"}),
-    _evt("text", {"id": "prt_5", "messageID": "msg_2", "type": "text", "text": "Created the file."}),
+    _evt("step_start", {"id": "prt_4", "messageID": "msg_2", "type": "step-start"}, at_ms=1450),
+    _evt("text", {"id": "prt_5", "messageID": "msg_2", "type": "text", "text": "Created the file."}, at_ms=1460),
     _evt(
         "step_finish",
         {
@@ -131,6 +166,7 @@ HAPPY_STREAM = [
             "cost": 0.002,
             "tokens": _tokens(50, 30, read=40, reasoning=7),
         },
+        at_ms=1470,
     ),
 ]
 
@@ -202,8 +238,8 @@ def _agent() -> OpenCodeAgent:
 class OpenCodeScenario:
     """One recorded CLI event stream.
 
-    ``expects`` names the exception a scenario is supposed to raise, and the
-    runner then snapshots ``pending_turn`` instead of the returned record —
+    ``expects`` names the failed end status a scenario is supposed to reach, and the
+    runner asserts that end status and snapshots the crashed record —
     the same knob ``ClaudeScenario`` carries, for the same reason: the partial
     a crash preserves is a real capture path, and one nobody was comparing
     against a snapshot on this harness.
@@ -211,12 +247,14 @@ class OpenCodeScenario:
 
     name: str
     lines: list[str]
-    expects: type[BaseException] | None = None
+    expects: AgentEndStatus | None = None
 
 
-async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) -> dict[str, Any]:
+async def run_opencode_scenario(
+    scenario: OpenCodeScenario, working_dir: str
+) -> tuple[dict[str, Any], list[StreamEvent]]:
     """Replay one scenario and return the resulting record as a plain dump."""
-    import pytest
+    recorder = EventRecorder()
 
     proc = _FakeProcess(_rebase_lines(scenario.lines))
 
@@ -231,14 +269,11 @@ async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) ->
         patch.object(os, "killpg", lambda _pgid, _sig: None, create=True),
     ):
         await agent.start(working_dir)
-        if scenario.expects is not None:
-            with pytest.raises(scenario.expects):
-                await agent.communicate("do it")
-            record = agent.pending_turn
-            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
-        else:
-            record = await agent.communicate("do it")
-    return record.model_dump(mode="json")
+        outcome = await agent.communicate("do it", iteration=1, stream_callback=recorder)
+        expected = scenario.expects or AgentEndStatus.COMPLETED
+        assert outcome.status is expected, f"{scenario.name}: ended {outcome.status}, expected {expected}"
+        record = outcome.record
+    return record.model_dump(mode="json"), recorder.events
 
 
 def _build_catalogue() -> list[OpenCodeScenario]:
@@ -249,8 +284,8 @@ def _build_catalogue() -> list[OpenCodeScenario]:
         OpenCodeScenario(
             name="a_single_text_turn",
             lines=[
-                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
-                _evt("text", {"id": "prt_2", "messageID": "msg_1", "text": "All done."}),
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}, at_ms=0),
+                _evt("text", {"id": "prt_2", "messageID": "msg_1", "text": "All done."}, at_ms=1),
                 _evt(
                     "step_finish",
                     {
@@ -260,6 +295,7 @@ def _build_catalogue() -> list[OpenCodeScenario]:
                         "cost": 0.001,
                         "tokens": _tokens(100, 20),
                     },
+                    at_ms=3,
                 ),
             ],
         )
@@ -280,7 +316,7 @@ def _build_catalogue() -> list[OpenCodeScenario]:
         OpenCodeScenario(
             name="c_multi_step_tiling",
             lines=[
-                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}, at_ms=0),
                 _evt(
                     "tool_use",
                     {
@@ -295,16 +331,19 @@ def _build_catalogue() -> list[OpenCodeScenario]:
                             "time": {"start": _T0_MS, "end": _T0_MS + 5},
                         },
                     },
+                    at_ms=5,
                 ),
                 _evt(
                     "step_finish",
                     {"id": "prt_3", "messageID": "msg_1", "reason": "tool-calls", "tokens": _tokens(100, 20)},
+                    at_ms=6,
                 ),
-                _evt("step_start", {"id": "prt_4", "messageID": "msg_2"}),
-                _evt("text", {"id": "prt_5", "messageID": "msg_2", "text": "Listed it."}),
+                _evt("step_start", {"id": "prt_4", "messageID": "msg_2"}, at_ms=8),
+                _evt("text", {"id": "prt_5", "messageID": "msg_2", "text": "Listed it."}, at_ms=9),
                 _evt(
                     "step_finish",
                     {"id": "prt_6", "messageID": "msg_2", "reason": "stop", "tokens": _tokens(50, 30)},
+                    at_ms=12,
                 ),
             ],
         )
@@ -323,7 +362,7 @@ def _build_catalogue() -> list[OpenCodeScenario]:
         OpenCodeScenario(
             name="d_orphaned_tool",
             lines=[
-                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}, at_ms=0),
                 _evt(
                     "tool_use",
                     {
@@ -333,41 +372,51 @@ def _build_catalogue() -> list[OpenCodeScenario]:
                         "callID": "call_1",
                         "state": {"status": "pending", "input": {"command": "sleep 600"}},
                     },
+                    at_ms=1,
                 ),
-                _evt("text", {"id": "prt_3", "messageID": "msg_1", "text": "Waiting."}),
+                _evt("text", {"id": "prt_3", "messageID": "msg_1", "text": "Waiting."}, at_ms=2),
                 _evt(
                     "step_finish",
                     {"id": "prt_4", "messageID": "msg_1", "reason": "stop", "tokens": _tokens(100, 20)},
+                    at_ms=4,
                 ),
             ],
         )
     )
 
     # (e) the CLI's own structured error AFTER a complete generation. `_settle_turn`
-    # crashes on it, and the partial `pending_turn` must still carry that
+    # crashes on it, and the crashed record must still carry that
     # generation and its head/tail — a crash does not un-measure what was
     # measured before it.
     scenarios.append(
         OpenCodeScenario(
             name="e_error_after_generation",
             lines=[
-                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}),
-                _evt("text", {"id": "prt_2", "messageID": "msg_1", "text": "Starting."}),
+                _evt("step_start", {"id": "prt_1", "messageID": "msg_1"}, at_ms=0),
+                _evt("text", {"id": "prt_2", "messageID": "msg_1", "text": "Starting."}, at_ms=1),
                 _evt(
                     "step_finish",
                     {"id": "prt_3", "messageID": "msg_1", "reason": "stop", "tokens": _tokens(100, 20)},
+                    at_ms=3,
                 ),
                 json.dumps(
                     {
                         "type": "error",
+                        "timestamp": _T0_MS + 4,
                         "sessionID": SESSION,
                         "error": {"name": "ProviderAuthError", "data": {"message": "401 from the provider"}},
                     }
                 ),
             ],
-            expects=AgentCrashError,
+            expects=AgentEndStatus.CRASHED,
         )
     )
+
+    # (f) a real stream captured from `opencode run --format json` (1.18.30, Haiku via
+    # OpenRouter): two steps, a `write` and a `bash` call, the CLI's own envelope and
+    # `state.time` stamps. Session id and paths are scrubbed. The stamps are moved so
+    # the stream starts at `_T0_MS`, which `_rebase_lines` puts on the replay clock.
+    scenarios.append(OpenCodeScenario(name="f_captured_stream", lines=_starting_at_t0(CAPTURED_STREAM)))
 
     return scenarios
 

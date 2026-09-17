@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from coder_eval import orchestrator as orchestrator_module
+from coder_eval.errors import AgentCrashError
 from coder_eval.models import (
     AgentKind,
     BedrockRoute,
@@ -329,142 +330,6 @@ def test_finalize_result_score_mismatch_marks_error_and_writes_task_json(tmp_pat
     assert orchestrator.report_path.exists()
 
 
-class _SdkOptionsAgent(MockAgent):
-    """``MockAgent`` subclass that returns a configurable ``get_sdk_options``.
-
-    Used by the PATH-sync tests so the dummy agent satisfies the full
-    ``Agent`` ABC (``start`` / ``communicate`` / ``stop`` / ``get_state``)
-    rather than only the one method ``_sync_…`` happens to call today —
-    keeps the test surface aligned with the production contract.
-    """
-
-    def __init__(self, task, sdk_options):
-        super().__init__(task)
-        self._sdk_options = sdk_options
-
-    def get_sdk_options(self):
-        return self._sdk_options
-
-
-class _AsyncSdkOptionsAgent(MockAgent):
-    """Returns a fresh coroutine every call — mimics ``AsyncMock`` leakage."""
-
-    def get_sdk_options(self):
-        async def _coro():
-            return {"env": {"PATH": "/agent/bin"}}
-
-        return _coro()
-
-
-@pytest.fixture
-def path_sync_orchestrator(tmp_path):
-    """Yield ``(orchestrator, task)`` ready for PATH-sync helper tests.
-
-    Removes the boilerplate (load task, build orchestrator, setup sandbox,
-    cleanup in finally) that the per-test body would otherwise repeat.
-    """
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-    task.sandbox = SandboxConfig(driver="tempdir", python=None)
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
-    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
-    orchestrator.sandbox.setup()
-    try:
-        yield orchestrator, task
-    finally:
-        orchestrator.sandbox.cleanup()
-
-
-def test_sync_sandbox_command_path_from_agent_sdk_options(path_sync_orchestrator, monkeypatch, tmp_path):
-    """Happy path: agent SDK PATH wins for criteria ``run_command`` resolution."""
-    from tests._path_helpers import write_uip_shim
-
-    orchestrator, task = path_sync_orchestrator
-    stale_bin = tmp_path / "stale"
-    agent_bin = tmp_path / "agent"
-    stale_bin.mkdir()
-    agent_bin.mkdir()
-    write_uip_shim(stale_bin, "stale")
-    write_uip_shim(agent_bin, "agent")
-    monkeypatch.setenv("PATH", str(stale_bin))
-
-    orchestrator.agent = _SdkOptionsAgent(task, {"env": {"PATH": f"{agent_bin}{os.pathsep}{stale_bin}"}})
-    orchestrator._sync_sandbox_command_path_with_agent()
-
-    exit_code, stdout, _stderr = orchestrator.sandbox.run_command("uip")
-    assert exit_code == 0
-    assert stdout.strip() == "agent"
-
-
-def test_sync_sandbox_command_path_preserves_host_path_for_system_bins(path_sync_orchestrator, monkeypatch, tmp_path):
-    """The agent's narrow PATH must not clobber the host PATH for system bins.
-
-    Locks in the prepend (not replace) semantics flagged HIGH in the
-    multi-model review (PR #249 thread). If a future refactor accidentally
-    re-introduces ``env['PATH'] = base_path`` (replace), this fails because
-    the host's ``/usr/bin``-style binary becomes unreachable.
-    """
-    from tests._path_helpers import write_uip_shim
-
-    orchestrator, task = path_sync_orchestrator
-    # Host PATH carries a `uip` named "host". Agent PATH carries no `uip`.
-    host_bin = tmp_path / "host"
-    agent_bin = tmp_path / "agent"  # intentionally empty
-    host_bin.mkdir()
-    agent_bin.mkdir()
-    write_uip_shim(host_bin, "host")
-    monkeypatch.setenv("PATH", str(host_bin))
-
-    orchestrator.agent = _SdkOptionsAgent(task, {"env": {"PATH": str(agent_bin)}})
-    orchestrator._sync_sandbox_command_path_with_agent()
-
-    # Agent PATH wins for binaries it provides; falls through to host PATH
-    # for binaries it does not. A replace-style implementation would return
-    # exit_code == 1 with the "not found" message.
-    exit_code, stdout, _stderr = orchestrator.sandbox.run_command("uip")
-    assert exit_code == 0
-    assert stdout.strip() == "host"
-
-
-def test_sync_sandbox_command_path_awaitable_sdk_options_is_closed_and_noops(path_sync_orchestrator, caplog):
-    """AsyncMock-style coroutine returns: close, do not leak warnings."""
-    orchestrator, task = path_sync_orchestrator
-    orchestrator.agent = _AsyncSdkOptionsAgent(task)
-    with caplog.at_level("DEBUG", logger="coder_eval.orchestrator"):
-        orchestrator._sync_sandbox_command_path_with_agent()
-    assert orchestrator.sandbox.command_base_path is None
-    # Logged at DEBUG (test-fixture concern), not WARNING.
-    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
-    assert any("awaitable" in r.message for r in debug_records)
-    assert not any(r.levelname == "WARNING" for r in caplog.records)
-
-
-@pytest.mark.parametrize(
-    "sdk_options, warn_substring",
-    [
-        pytest.param(None, None, id="none-sdk-options"),
-        pytest.param(["unexpected"], "non-dict", id="non-dict-sdk-options"),
-        pytest.param({"env": {"HOME": "/tmp"}}, None, id="missing-path-key"),
-        pytest.param({"env": "not-a-dict"}, None, id="env-not-a-dict"),
-    ],
-)
-def test_sync_sandbox_command_path_contract_edge_cases_are_noops(
-    path_sync_orchestrator, caplog, sdk_options, warn_substring
-):
-    """Edge inputs leave ``command_base_path`` unset, with the right log level."""
-    orchestrator, task = path_sync_orchestrator
-    orchestrator.agent = _SdkOptionsAgent(task, sdk_options)
-    with caplog.at_level("WARNING", logger="coder_eval.orchestrator"):
-        orchestrator._sync_sandbox_command_path_with_agent()
-    assert orchestrator.sandbox.command_base_path is None
-    if warn_substring is None:
-        # Silent no-op — these are valid pre-communicate / sparse-env states.
-        assert not any(r.levelname == "WARNING" for r in caplog.records)
-    else:
-        # Contract violation — must be visible at WARNING.
-        assert any(r.levelname == "WARNING" and warn_substring in r.message for r in caplog.records)
-
-
 def test_orchestrator_load_task():
     """Test loading a task from YAML."""
     task_file = Path("tasks/hello_date.yaml")
@@ -768,6 +633,9 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
             # carries agent markers like system_prompt_semantics into run.json.
             return {"system_prompt_semantics": "append"}
 
+        async def harness_version(self):
+            return "dummy 1.2.3"
+
     async def create_dummy_agent(_self):
         return DummyAgent()
 
@@ -798,9 +666,12 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
 
     await orchestrator._setup()
 
+    assert orchestrator._counts_model_turns is True
+
     # An agent-supplied environment_info key survives the merge into the
     # run record (the cross-repo contract seam external consumers read).
     assert orchestrator.result.environment_info["system_prompt_semantics"] == "append"
+    assert orchestrator.result.environment_info["harness_version"] == "dummy 1.2.3"
 
     assert isinstance(orchestrator.sandbox, Sandbox)
     assert orchestrator.sandbox.sandbox_dir is not None
@@ -950,6 +821,60 @@ async def test_workspace_dir_staleness_warning_keys_on_in_container_not_field(
     assert warned is expect_warning
 
     await orchestrator._cleanup()
+
+
+@pytest.mark.asyncio
+async def test_criterion_path_gets_the_mock_dirs_the_agent_gets(tmp_path, monkeypatch):
+    """The agent's ``env_path_prepend`` and the criterion PATH come from one list, before any turn.
+
+    Harness-independent on purpose: each harness's own tests prove it puts
+    ``env_path_prepend`` first on its PATH, so this is the one remaining link.
+    """
+    from datetime import datetime
+
+    from coder_eval.models import ApiBackend, DirectRoute, EvaluationResult
+
+    captured: dict[str, list[str] | None] = {}
+
+    class DummyAgent:
+        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root=None):
+            captured["env_path_prepend"] = env_path_prepend
+
+        def get_environment_info(self):
+            return {}
+
+    async def create_dummy_agent(_self):
+        return DummyAgent()
+
+    task, _ = load_task(Path("tasks/mock_path_dirs_smoke.yaml"))
+    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="v")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="v",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+    monkeypatch.setattr(orchestrator_module.settings, "api_backend", ApiBackend.DIRECT)
+    monkeypatch.setattr(type(orchestrator_module.settings), "validate_api_keys", lambda _self, _agent_type: None)
+    monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _settings: DirectRoute(judge_transport=None))
+    monkeypatch.setattr(Orchestrator, "_create_agent", create_dummy_agent)
+
+    await orchestrator._setup()
+    try:
+        assert orchestrator.sandbox is not None
+        assert orchestrator.sandbox.sandbox_dir is not None
+        mocks = str((orchestrator.sandbox.sandbox_dir / "mocks").resolve())
+        assert captured["env_path_prepend"] == [mocks]
+        assert orchestrator.sandbox.command_base_path == mocks
+        exit_code, stdout, _stderr = orchestrator.sandbox.run_command("say_hello criterion")
+        assert exit_code == 0
+        assert "MOCK_PATH_OK" in stdout
+    finally:
+        orchestrator.sandbox.cleanup()
 
 
 @pytest.mark.asyncio
@@ -1776,13 +1701,14 @@ async def test_overrides_apply_max_tool_calls_field_merge(tmp_path):
     assert task.run_limits.expected_tool_calls == baseline_expected_tool_calls
 
 
-def test_overrides_reject_removed_run_limits_max_turns():
-    """run_limits.max_turns no longer exists; the schema-validated override rejects it."""
-    from coder_eval.orchestration.overrides import OverrideError, apply_overrides
+def test_overrides_set_run_limits_max_turns():
+    from coder_eval.orchestration.overrides import apply_overrides
 
     task, _ = load_task(Path("tasks/hello_date.yaml"))
-    with pytest.raises(OverrideError, match="max_turns"):
-        apply_overrides(task, {"run_limits.max_turns": 42})
+    apply_overrides(task, {"run_limits.max_turns": 42})
+
+    assert task.run_limits is not None
+    assert task.run_limits.max_turns == 42
 
 
 # ==================== Duplicate Task ID Validation Tests ====================
@@ -1838,7 +1764,13 @@ success_criteria:
 # --- Evaluation loop: tool-call cap via the TurnMonitor ---
 
 
-def _cap_task(task_id: str, max_tool_calls: int) -> TaskDefinition:
+def _cap_task(
+    task_id: str,
+    max_tool_calls: int | None = None,
+    *,
+    max_turns: int | None = None,
+    expected_turns: int | None = None,
+) -> TaskDefinition:
     from coder_eval.models import RunLimits
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
@@ -1857,7 +1789,7 @@ def _cap_task(task_id: str, max_tool_calls: int) -> TaskDefinition:
         agent=agent_cfg,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
-        run_limits=RunLimits(max_tool_calls=max_tool_calls),
+        run_limits=RunLimits(max_tool_calls=max_tool_calls, max_turns=max_turns, expected_turns=expected_turns),
         task_timeout=None,
         reference=None,
     )
@@ -1899,7 +1831,8 @@ class _CooperativeToolAgent:
     """Fake agent that emits resolved tool calls and polls ``should_stop`` at each boundary.
 
     ``plan`` holds one entry per ``communicate`` attempt: the number of tool calls the
-    attempt intends to make, and whether it then crashes with a partial turn. ``host``
+    attempt intends to make, and whether it then crashes with a partial turn. The crash
+    is a rate limit, which retries after tool calls. ``host``
     is the ``AsyncMock`` the orchestrator talks to; its ``communicate`` is this fake's.
     """
 
@@ -1913,19 +1846,21 @@ class _CooperativeToolAgent:
         self._tool_seq = 0
         self.host = AsyncMock()
         self.host.communicate = self.communicate
-        self.host.pending_turn = None
 
-    async def communicate(self, user_input, *, stream_callback=None, timeout=None, should_stop=None):
+    async def communicate(self, user_input, *, iteration=1, stream_callback=None, timeout=None, should_stop=None):
         from datetime import datetime
 
-        from coder_eval.errors import AgentCrashError
         from coder_eval.models import CommandTelemetry, TurnRecord
+        from coder_eval.streaming.emitter import TurnOutcome
         from coder_eval.streaming.events import (
             AgentEndEvent,
+            AgentEndStatus,
             AgentStartEvent,
             StopReason,
             ToolEndEvent,
             ToolStartEvent,
+            TurnEndEvent,
+            TurnStartEvent,
             end_status_for,
         )
 
@@ -1934,35 +1869,43 @@ class _CooperativeToolAgent:
         intended, crash = self._plan[self.attempt]
         self.attempt += 1
         self.should_stop_callables.append(should_stop)
-        stream_callback.on_event(AgentStartEvent(task_id="t", prompt=user_input, iteration=1))
+        stream_callback.on_event(AgentStartEvent(task_id="t", prompt=user_input, iteration=iteration))
 
         commands: list[CommandTelemetry] = []
         reason: StopReason | None = should_stop()
         while reason is None and len(commands) < intended:
             self._tool_seq += 1
+            stream_callback.on_event(TurnStartEvent(task_id="t", turn_id=f"turn-{self._tool_seq}"))
+            reason = should_stop()
+            if reason is not None:
+                break
             tool = CommandTelemetry(tool_name="Bash", tool_id=f"tool-{self._tool_seq}", timestamp=datetime.now())
             stream_callback.on_event(ToolStartEvent(task_id="t", tool=tool))
             stream_callback.on_event(ToolEndEvent(task_id="t", tool=tool))
+            stream_callback.on_event(TurnEndEvent(task_id="t", turn_id=f"turn-{self._tool_seq}"))
             commands.append(tool)
             reason = should_stop()
         self.emitted_per_attempt.append(len(commands))
 
         if crash:
-            self.host.pending_turn = TurnRecord(
-                iteration=1, user_input=user_input, agent_output="<partial>", commands=commands, crashed=True
+            partial = TurnRecord(
+                iteration=iteration, user_input=user_input, agent_output="<partial>", commands=commands, crashed=True
             )
-            raise AgentCrashError("mid-turn failure")
+            return TurnOutcome(record=partial, status=AgentEndStatus.CRASHED, error="429 rate limit")
 
         status = end_status_for(reason) if reason is not None else None
         if status is not None:
-            stream_callback.on_event(AgentEndEvent(task_id="t", status=status, iteration=1, user_input=user_input))
-        return TurnRecord(
-            iteration=1,
+            stream_callback.on_event(
+                AgentEndEvent(task_id="t", status=status, iteration=iteration, user_input=user_input)
+            )
+        record = TurnRecord(
+            iteration=iteration,
             user_input=user_input,
             agent_output="stopped",
             commands=commands,
-            tool_calls_exhausted=reason is StopReason.TOOL_CALL_CAP,
+            tool_calls_exhausted=status is AgentEndStatus.TOOL_CALLS_EXHAUSTED,
         )
+        return TurnOutcome(record=record, status=status or AgentEndStatus.COMPLETED, error=None)
 
 
 @pytest.mark.asyncio
@@ -1996,14 +1939,16 @@ async def test_a_latched_cap_the_agent_did_not_stop_on_is_not_labelled_exhausted
     from unittest.mock import AsyncMock, patch
 
     from coder_eval.models import CommandTelemetry, TurnRecord
-    from coder_eval.streaming.events import StopReason, ToolEndEvent
+    from coder_eval.streaming.emitter import TurnOutcome
+    from coder_eval.streaming.events import AgentEndStatus, StopReason, ToolEndEvent
 
     orchestrator = _cap_orchestrator(_cap_task("late_latch_test", max_tool_calls=1), tmp_path)
 
-    async def _communicate(user_input, *, stream_callback=None, timeout=None, should_stop=None):
+    async def _communicate(user_input, *, iteration=1, stream_callback=None, timeout=None, should_stop=None):
         tool = CommandTelemetry(tool_name="Bash", tool_id="late", timestamp=datetime.now())
         stream_callback.on_event(ToolEndEvent(task_id="t", tool=tool))
-        return TurnRecord(iteration=1, user_input=user_input, agent_output="done", commands=[tool])
+        record = TurnRecord(iteration=iteration, user_input=user_input, agent_output="done", commands=[tool])
+        return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
     mock_agent = AsyncMock()
     mock_agent.communicate = _communicate
@@ -2066,18 +2011,19 @@ async def test_tool_call_cap_counts_a_crashed_attempts_calls_toward_the_retry(tm
 
 
 @pytest.mark.asyncio
-async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
-    """First agent.communicate raises AgentCrashError with a partial; retry succeeds.
+@pytest.mark.parametrize("tool_calls", [0, 1])
+async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path, tool_calls):
+    """First agent.communicate outcome is CRASHED with a partial.
 
-    Locks the orchestrator wiring between `execute_with_retry` and the
-    `_preserve_partial_on_failure` callback: the partial record reaches
-    `result.iterations` before the successful retry's record, and both share the
-    same iteration number (per the agent-side rollback contract).
+    Locks the orchestrator wiring in `_communicate_with_retry`: a CRASHED
+    outcome's record reaches `result.iterations` before it is raised. With no
+    tool call it is retried, the partial lands before the successful retry's
+    record, and both share the same iteration number. With a tool call it is
+    not retried.
     """
     from datetime import datetime
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from coder_eval.errors import AgentCrashError
     from coder_eval.models import (
         CommandTelemetry,
         CriterionResult,
@@ -2085,6 +2031,8 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
         SandboxConfig,
         TurnRecord,
     )
+    from coder_eval.streaming.emitter import TurnOutcome
+    from coder_eval.streaming.events import AgentEndStatus
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
@@ -2132,7 +2080,7 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
         iteration=1,
         user_input="p",
         agent_output="<partial>",
-        commands=[partial_cmd],
+        commands=[partial_cmd] * tool_calls,
         duration_seconds=0.1,
         crashed=True,
         crash_reason="mid-turn failure",
@@ -2151,9 +2099,8 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     async def crash_then_succeed_impl(_prompt, **kwargs):
         call_index[0] += 1
         if call_index[0] == 1:
-            mock_agent.pending_turn = partial_record
-            raise AgentCrashError("mid-turn failure")
-        return success_record
+            return TurnOutcome(record=partial_record, status=AgentEndStatus.CRASHED, error="mid-turn failure")
+        return TurnOutcome(record=success_record, status=AgentEndStatus.COMPLETED, error=None)
 
     mock_agent.communicate.side_effect = crash_then_succeed_impl
     orchestrator.agent = mock_agent
@@ -2173,16 +2120,24 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
         patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        success = await orchestrator._evaluation_loop()
+        if tool_calls:
+            with pytest.raises(AgentCrashError):
+                await orchestrator._evaluation_loop()
+        else:
+            assert await orchestrator._evaluation_loop() is True
 
-    assert success is True
+    if tool_calls:
+        assert mock_agent.communicate.call_count == 1
+        [preserved] = orchestrator.result.iterations
+        assert preserved.crashed is True
+        assert preserved.commands[0].tool_name == "Skill"
+        return
     # communicate called twice: once crashing, once clean.
     assert mock_agent.communicate.call_count == 2
     # Both records reach result.iterations: partial first (via callback), then successful (via main flow).
     assert len(orchestrator.result.iterations) == 2
     preserved, clean = orchestrator.result.iterations
     assert preserved.crashed is True
-    assert preserved.commands[0].tool_name == "Skill"
     assert clean.crashed is False
     # Orchestrator-visible iteration number matches across both records.
     assert preserved.iteration == clean.iteration == 1
@@ -2207,6 +2162,8 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
         SandboxConfig,
         TurnRecord,
     )
+    from coder_eval.streaming.emitter import TurnOutcome
+    from coder_eval.streaming.events import AgentEndStatus
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
@@ -2255,8 +2212,9 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     mock_agent = AsyncMock()
 
     async def timeout_impl(_prompt, **kwargs):
-        mock_agent.pending_turn = partial_record
-        raise TurnTimeoutError(600.0, iteration=1)
+        return TurnOutcome(
+            record=partial_record, status=AgentEndStatus.TIMEOUT, error="Agent turn timed out after 600s"
+        )
 
     mock_agent.communicate.side_effect = timeout_impl
     orchestrator.agent = mock_agent
@@ -2275,9 +2233,9 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     with (
         patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
-        # TurnTimeoutError is non-retryable, so the loop re-raises after the
-        # on_attempt_error callback has already stamped + appended the partial.
-        # We only care about the side-effect, so suppress the re-raise.
+        # TurnTimeoutError is non-retryable, so the loop re-raises after
+        # `_communicate_with_retry` has already appended the TIMEOUT outcome's
+        # partial. We only care about the side-effect, so suppress the re-raise.
         pytest.raises(TurnTimeoutError),
     ):
         await orchestrator._evaluation_loop()
@@ -2691,12 +2649,15 @@ class _PluginRootAgent(MockAgent):
         from datetime import datetime
 
         from coder_eval.models import CommandTelemetry, TurnRecord
+        from coder_eval.streaming.emitter import TurnOutcome
+        from coder_eval.streaming.events import AgentEndStatus
 
         self._iteration += 1
         skill = CommandTelemetry(
             tool_name="Skill", tool_id="s1", timestamp=datetime.now(), parameters={"skill": "probe-skill"}
         )
-        return TurnRecord(iteration=self._iteration, user_input=user_input, agent_output="done", commands=[skill])
+        record = TurnRecord(iteration=self._iteration, user_input=user_input, agent_output="done", commands=[skill])
+        return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
 
 def _patch_routes(monkeypatch) -> None:
@@ -2735,7 +2696,7 @@ def _spy_check_all_async(monkeypatch) -> list[object]:
 
 @pytest.mark.asyncio
 async def test_setup_stages_plugins_and_records_skills_offered(tmp_path, monkeypatch):
-    """Staging writes the canonical root, records the offer, and hands the root to the agent and the checker."""
+    """Staging writes the plugin root, records the offer, and hands the root to the agent and the checker."""
     from coder_eval.models import FinalStatus
     from coder_eval.path_utils import PLUGIN_ROOT_DIRNAME
 
@@ -2831,3 +2792,67 @@ async def test_evaluate_only_reads_skills_offered_from_the_prior_result(tmp_path
     assert seen and all(offered == ("probe-skill",) for offered in seen)
     assert result.final_status == FinalStatus.ERROR
     assert "absent-skill" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_evaluation_loop_breaks_on_model_turn_cap(tmp_path):
+    """Turn N+1 starting latches the model-turn cap; the run records the cap fact like the tool-call cap."""
+    from unittest.mock import patch
+
+    from coder_eval.streaming.events import StopReason
+
+    orchestrator = _cap_orchestrator(_cap_task("model_turn_cap_test", max_turns=3), tmp_path)
+    agent = _CooperativeToolAgent([(10, False)])
+    orchestrator.agent = agent.host
+
+    with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is False
+    assert agent.emitted_per_attempt == [3]
+    assert orchestrator._monitor is not None
+    assert orchestrator._monitor.stop_reason is StopReason.MODEL_TURN_CAP
+    assert orchestrator._monitor.model_turns == 4
+    assert orchestrator.result is not None
+    assert orchestrator.result.tool_calls_exhausted is True
+
+
+@pytest.mark.asyncio
+async def test_model_turns_is_recorded_and_expected_turns_warns(tmp_path, caplog):
+    import logging
+    from unittest.mock import patch
+
+    orchestrator = _cap_orchestrator(_cap_task("expected_turns_test", expected_turns=2), tmp_path)
+    orchestrator._counts_model_turns = True
+    orchestrator.agent = _CooperativeToolAgent([(3, False)]).host
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+    ):
+        await orchestrator._evaluation_loop()
+
+    assert orchestrator.result is not None
+    assert orchestrator.result.model_turns == 3
+    assert caplog.text.count("exceeded expected_turns") == 1
+    assert orchestrator.result.tool_calls_exhausted is False
+
+
+@pytest.mark.asyncio
+async def test_model_turns_is_none_where_the_harness_does_not_count_them(tmp_path, caplog):
+    import logging
+    from unittest.mock import patch
+
+    orchestrator = _cap_orchestrator(_cap_task("expected_turns_uncounted", expected_turns=2), tmp_path)
+    orchestrator._counts_model_turns = False
+    orchestrator.agent = _CooperativeToolAgent([(3, False)]).host
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+    ):
+        await orchestrator._evaluation_loop()
+
+    assert orchestrator.result is not None
+    assert orchestrator.result.model_turns is None
+    assert "exceeded expected_turns" not in caplog.text

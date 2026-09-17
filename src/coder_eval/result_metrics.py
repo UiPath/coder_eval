@@ -153,23 +153,30 @@ def visible_turn_count(result: EvaluationResult) -> int:
     return commands + (1 if has_final_reply(result) else 0)
 
 
-def expected_tool_calls_overage(result: EvaluationResult) -> tuple[int, int] | None:
-    """Return ``(visible_turns, expected)`` when the visible-events turn
-    count strictly exceeds ``run_limits.expected_tool_calls``; else ``None``.
-
-    Safe against missing ``task_config``, missing ``run_limits``, and
-    non-int ``expected_tool_calls`` values.
-    """
+def recorded_run_limit(result: EvaluationResult, name: str) -> int | None:
+    """The positive int ``run_limits.<name>`` from the recorded resolved config, else None."""
     task_cfg = result.task_config
-    if task_cfg is None:
-        return None
-    run_limits = (task_cfg.resolved or {}).get("run_limits") or {}
-    if not isinstance(run_limits, dict):
-        return None
-    expected = run_limits.get("expected_tool_calls")
-    if not isinstance(expected, int) or expected < 1:
+    run_limits = (task_cfg.resolved or {}).get("run_limits") if task_cfg is not None else None
+    value = run_limits.get(name) if isinstance(run_limits, dict) else None
+    return value if isinstance(value, int) and value >= 1 else None
+
+
+def expected_tool_calls_overage(result: EvaluationResult) -> tuple[int, int] | None:
+    """``(visible_turns, expected)`` when the visible-events count strictly exceeds
+    ``run_limits.expected_tool_calls``; else ``None``.
+    """
+    expected = recorded_run_limit(result, "expected_tool_calls")
+    if expected is None:
         return None
     actual = visible_turn_count(result)
     if actual > expected:
         return actual, expected
     return None
+
+
+def expected_turns_overage(result: EvaluationResult) -> tuple[int, int] | None:
+    """``(model_turns, expected)`` when recorded model turns strictly exceed ``run_limits.expected_turns``."""
+    expected = recorded_run_limit(result, "expected_turns")
+    if expected is None or result.model_turns is None or result.model_turns <= expected:
+        return None
+    return result.model_turns, expected

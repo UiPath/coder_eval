@@ -4,8 +4,8 @@
 for system / canary checks that reuse the eval infrastructure (sandbox,
 ``pre_run``, reports, evalboard, ADX) without running a coding agent. Its
 ``start`` / ``communicate`` / ``stop`` are no-ops and it makes no model API
-call; ``communicate`` emits the standardized event protocol for a single empty
-turn and returns the ``EventCollector``'s reduction (an empty
+call; ``communicate`` writes a single empty turn through its ``TurnEmitter`` and
+returns its outcome (an empty
 :class:`~coder_eval.models.results.TurnRecord`), so the orchestrator's normal
 lifecycle runs unmodified and then checks the success criteria directly against
 the sandbox.
@@ -19,39 +19,30 @@ from collections.abc import Callable
 from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.models import (
     AgentKind,
     ApiRoute,
     Enforcement,
     HarnessContract,
     NoneAgentConfig,
-    TurnRecord,
+    TimingBasis,
     UsageGranularity,
 )
-from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
-from coder_eval.streaming.collector import EventCollector
-from coder_eval.streaming.events import (
-    AgentEndEvent,
-    AgentEndStatus,
-    AgentStartEvent,
-    StopReason,
-    TurnEndEvent,
-    TurnEndStatus,
-    TurnStartEvent,
-)
+from coder_eval.streaming.callbacks import StreamCallback
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus, StopReason
 
 
-@AgentRegistry.register(AgentKind.NONE, NoneAgentConfig)
+@AgentRegistry.register(AgentKind.NONE, NoneAgentConfig, spi_version=SPI_VERSION)
 class NoOpAgent(Agent[NoneAgentConfig]):
     """Agent that does nothing — every lifecycle method is a no-op.
 
     Created and driven by the orchestrator exactly like any other agent, so no
     ``agentless`` branching is needed: the single signal is ``agent.type ==
-    AgentKind.NONE``. ``communicate`` is the SOLE emitter of one clean, balanced
-    event tree (``AgentStart`` -> ``TurnStart`` -> ``TurnEnd`` -> ``AgentEnd``,
-    all ``COMPLETED``) and returns the empty turn the ``EventCollector`` reduces
-    from it.
+    AgentKind.NONE``. ``communicate`` writes one clean, balanced event tree
+    (``AgentStart`` -> ``TurnStart`` -> ``TurnEnd`` -> ``AgentEnd``, all
+    ``COMPLETED``) and returns its outcome.
     """
 
     contract = HarnessContract(
@@ -61,7 +52,9 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=False,
+        reports_cost=True,
         usage_granularity=UsageGranularity.TURN,
+        timing_basis=TimingBasis.TURN_CLOCK,
     )
 
     def __init__(
@@ -84,43 +77,27 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         self,
         user_input: str,
         *,
+        iteration: int,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         should_stop: Callable[[], StopReason | None] | None = None,
-    ) -> TurnRecord:
-        """Return an empty turn without contacting any model.
+    ) -> TurnOutcome:
+        """Return one empty, completed turn without contacting any model.
 
-        ``should_stop`` is accepted for ``Agent.communicate`` override
-        compatibility and ignored — a no-op turn has nothing to interrupt.
-
-        Honors the streaming contract — sole emitter of a balanced event tree
-        (``AgentStart`` -> ``TurnStart`` -> ``TurnEnd`` -> ``AgentEnd``) — so the
-        task-log handler and renderers see a clean turn boundary. The returned
-        ``TurnRecord`` is the ``EventCollector``'s reduction of those events.
+        ``timeout`` and ``should_stop`` are accepted and ignored: a no-op turn has
+        nothing to interrupt.
         """
-        self._begin_turn()
-
-        task_id = str(self.config.type)  # str() so a plugin subclass with a non-enum kind also works
-        turn_id = f"none-{self._iteration}"
-        collector = EventCollector()
-        emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
-
-        emit.on_event(AgentStartEvent(task_id=task_id, prompt=user_input, iteration=self._iteration))
-        emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id))
-        emit.on_event(TurnEndEvent(task_id=task_id, turn_id=turn_id, status=TurnEndStatus.COMPLETED))
-        emit.on_event(
-            AgentEndEvent(
-                task_id=task_id,
-                status=AgentEndStatus.COMPLETED,
-                iteration=self._iteration,
-                user_input=user_input,
-                agent_output="",
-                assistant_turn_count=0,
-            )
+        emitter = self._open_emitter(
+            prompt=user_input,
+            iteration=iteration,
+            model=None,
+            task_id=str(self.config.type),  # str() so a plugin subclass with a non-enum kind also works
+            stream_callback=stream_callback,
         )
-
-        self._end_turn_ok()
-        return collector.build_turn_record()
+        emitter.begin()
+        emitter.begin_inner_turn(f"none-{iteration}")
+        emitter.end_inner_turn()
+        return emitter.finalize(AgentEndStatus.COMPLETED, assistant_turn_count=0, num_turns=None, result_summary=None)
 
     async def stop(self) -> None:
         """No-op: nothing to tear down."""

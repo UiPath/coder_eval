@@ -213,7 +213,8 @@ class SubAgentRunner:
         """
         try:
             await agent.start(str(judge_dir), plugin_tools_dir=plugin_tools_dir)
-            return await agent.communicate(user_msg, timeout=turn_timeout)
+            outcome = await agent.communicate(user_msg, iteration=1, timeout=turn_timeout)
+            return outcome.record_or_raise(timeout_seconds=turn_timeout)
         except BaseException:
             with contextlib.suppress(Exception):
                 await agent.kill()

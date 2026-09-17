@@ -8,7 +8,6 @@ import os
 import shlex
 import shutil
 import tempfile
-import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -17,47 +16,28 @@ from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
-from coder_eval.agents.registry import AgentRegistry
-from coder_eval.agents.watchdog import ThreadedWatchdog
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
+from coder_eval.agents.watchdog import WatchdogFired, run_with_watchdog
 from coder_eval.config import settings
-from coder_eval.errors import (
-    AgentCrashError,
-    TurnTimeoutError,
-    truncate_crash_message,
-)
+from coder_eval.errors.agent import format_timeout_reason
 from coder_eval.models import (
     AgentKind,
     ApiRoute,
     AssistantMessage,
     CodexAgentConfig,
-    CommandTelemetry,
     ContentBlock,
     DirectRoute,
     Enforcement,
     HarnessContract,
+    TimingBasis,
     TokenUsage,
-    TranscriptMessage,
-    TurnRecord,
     UsageGranularity,
 )
 from coder_eval.orchestration.plugin_staging import link_or_copy
-from coder_eval.pricing import calculate_cost
-from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
-from coder_eval.streaming.collector import EventCollector
-from coder_eval.streaming.events import (
-    AgentEndEvent,
-    AgentEndStatus,
-    AgentStartEvent,
-    StopReason,
-    TextChunkEvent,
-    ToolEndEvent,
-    ToolEndStatus,
-    ToolStartEvent,
-    TurnEndEvent,
-    TurnEndStatus,
-    TurnStartEvent,
-    end_status_for,
-)
+from coder_eval.pricing import price_turn
+from coder_eval.streaming.callbacks import StreamCallback
+from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus, StopReason, ToolEndStatus, TurnEndStatus, end_status_for
 from coder_eval.timing import close_window
 
 
@@ -140,31 +120,34 @@ _ROLLOUT_TOOL_OUTPUT_TYPES = frozenset({"function_call_output", "custom_tool_cal
 _STREAM_DONE = object()
 
 
-def _ms_to_dt(ms: int | None) -> datetime:
-    """Convert a Codex Unix-millisecond timestamp to a datetime (now() if absent)."""
-    if ms is None:
-        return datetime.now()
+def _ms_to_dt(ms: int) -> datetime:
+    """Convert a Codex Unix-millisecond timestamp to a datetime."""
     return datetime.fromtimestamp(ms / 1000)
 
 
 class _ItemTiming(NamedTuple):
-    """When a Codex tool item ran, as the four fields CommandTelemetry records."""
+    """When a Codex tool item ran: the CLI bounds, and the duration they or the SDK give."""
 
-    timestamp: datetime
     execution_started_at: datetime | None
     execution_completed_at: datetime | None
     duration_ms: float | None
 
 
+class _ToolEnd(NamedTuple):
+    """What a completed Codex tool item tells ``TurnEmitter.close_tool``."""
+
+    is_error: bool
+    summary: str | None
+    error: str | None
+    result_data: Any
+    parameters: dict[str, Any]
+    timing: _ItemTiming
+
+
 def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_ms: float | None) -> _ItemTiming:
     """Resolve a tool item's timing from the SDK's millisecond stamps.
 
-    One helper for all three telemetry builders, so a command, a file change and
-    an MCP call cannot disagree about what a missing stamp means.
-
-    BOTH stamps or neither: pairing a real stamp with ``_ms_to_dt(None)`` — which
-    is ``datetime.now()`` — fabricates an interval out of one reading and the
-    current time, so the raw values are checked BEFORE conversion.
+    BOTH stamps or neither: one stamp is no interval.
 
     Without them, the SDK item's own ``duration_ms`` is used only when it reports
     something. A ``0`` there is an UNREPORTED duration, not an instant command (70
@@ -178,7 +161,6 @@ def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_
     if started_ms is not None and completed_ms is not None:
         started = _ms_to_dt(started_ms)
         return _ItemTiming(
-            timestamp=started,
             execution_started_at=started,
             execution_completed_at=_ms_to_dt(completed_ms),
             # Clamped for clock skew; both bounds stay as reported so the
@@ -189,7 +171,6 @@ def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_
     # CE058 coalesce read backwards, and hides the decision being made.
     duration = None if sdk_duration_ms is None or sdk_duration_ms <= 0 else float(sdk_duration_ms)
     return _ItemTiming(
-        timestamp=datetime.now(),
         execution_started_at=None,
         execution_completed_at=None,
         duration_ms=duration,
@@ -241,6 +222,18 @@ class _ThreadTotals(NamedTuple):
         )
 
 
+def _generation_tokens(last: Any) -> TokenUsage:
+    """One generation's usage from the SDK's ``last`` breakdown; empty when ``last`` is None."""
+    if not last:
+        return TokenUsage()
+    cached = getattr(last, "cached_input_tokens", 0) or 0
+    return TokenUsage(
+        uncached_input_tokens=_fresh_input_tokens(getattr(last, "input_tokens", 0) or 0, cached),
+        output_tokens=getattr(last, "output_tokens", 0) or 0,
+        cache_read_input_tokens=cached,
+    )
+
+
 def _message_uncached_input(m: AssistantMessage) -> int:
     """A captured generation's fresh (uncached) input.
 
@@ -279,225 +272,58 @@ def _get_item_root(notification: Any) -> Any:
     return getattr(item, "root", None)
 
 
-class _CodexTurnState:
-    """Per-turn mutable scratch state for one ``CodexAgent.communicate`` call.
+class _CodexDecoder:
+    """One turn's reducer: Codex SDK notifications in, ``TurnEmitter`` calls out.
 
-    Holds the stream-pump locals and the transcript reconstruction buffers, with
-    one method per notification kind plus ``dispatch`` (True on ``turn/completed``
-    to break the pump), ``_flush_message`` and ``finalize``.
-
-    ``commands`` and ``messages`` are the SAME list objects ``communicate`` owns,
-    held by identity (no copy), so a mid-turn crash keeps the partial transcript.
-
-    The finalize inputs are COMMITTED by ``communicate`` only after the pump
-    returns cleanly, defaulting to None/None/"" — so a crashed turn finalizes from
-    the captured messages, and the live pump scratch is intentionally NOT what
-    finalize reads.
+    Timing is the SDK's own epoch milliseconds. A generation is cut at each
+    ``thread/tokenUsage/updated``; its window runs from the previous cut to the last
+    item's completion, and it is split into a thinking and an action sub-message.
+    Each generation is one inner turn: opened at its first item or text, closed at
+    its cut with the SDK's ``last`` delta as the turn's tokens.
     """
 
-    def __init__(
-        self,
-        agent: "CodexAgent",
-        *,
-        emit: CompositeStreamCallback,
-        task_id: str,
-        turn_id: str,
-        collector: EventCollector,
-        commands: list[CommandTelemetry],
-        messages: list[TranscriptMessage],
-        user_input: str,
-        iteration: int,
-        turn_start_time: float,
-    ) -> None:
+    def __init__(self, agent: "CodexAgent", emitter: TurnEmitter, *, turn_id: str) -> None:
         self._agent = agent
-        self.emit = emit
-        self.task_id = task_id
+        self.emitter = emitter
         self.turn_id = turn_id
-        self.collector = collector
-        self.commands = commands
-        self.messages = messages
-        self.user_input = user_input
-        self.iteration = iteration
-        self.turn_start_time = turn_start_time
         self.timeout_hit = False
         self.stop_reason: StopReason | None = None
-        self.finalized = False
-
-        # Live pump scratch (set during streaming).
         self.turn_result: Any = None
         self.latest_token_usage: Any = None
         self.agent_message_chunks: list[str] = []
-        # Sequence per executable item, assigned at item/started and reused at
-        # item/completed via this id->seq map.
-        self.next_sequence = 0
-        self.seq_by_id: dict[str, int] = {}
+        # Every AssistantMessage this turn added, in order; the crash fallback sums them.
+        self.messages: list[AssistantMessage] = []
+        self.opened_tools: set[str] = set()
+        # An id-less tool item's id, minted once at item/started, per item type in order.
+        self._pending_idless: dict[str, list[str]] = {}
+        self._minted = 0
         # Spawned sub-agent child thread id -> spawning Agent call tool_use_id.
         self.collab_spawn_by_thread: dict[str, str] = {}
         # (child_thread_id, spawning Agent tool_use_id, spawned model) per spawn.
         self.spawned_children: list[tuple[str, str, str | None]] = []
         # child thread id -> returned message (fallback when the rollout is absent).
         self.collab_results: dict[str, str] = {}
-
-        # Assistant-transcript reconstruction buffers (one AssistantMessage per gen).
         self.open_blocks: list[ContentBlock] = []
         self.open_start_ms: int | None = None
         self.open_end_ms: int | None = None
         # Where the NEXT generation window starts: the previous flush's end. None
-        # until the first flush, which falls back to its own first item — the SDK
-        # gives no "turn began" stamp, and inventing one from time.time() would
-        # mix our clock with the SDK's inside one subtraction.
+        # until the first flush, which falls back to its own first item.
         # Rationale: .claude/notes/agents.md § Per-harness generation marks
         self.gen_mark_ms: int | None = None
         self.start_ms_by_id: dict[str, int] = {}
         self.blocks_by_id: dict[str, ContentBlock] = {}
-        # Tools that emitted item/started but not item/completed; whatever remains
-        # at turn end is an orphan, force-closed unresolved.
-        self.open_tools: dict[str, CommandTelemetry] = {}
-        # Text-less reasoning blocks, resolved at flush once reasoning tokens known.
+        # Text-less reasoning blocks, resolved at flush once reasoning tokens are known.
         self.reasoning_placeholders: list[ContentBlock] = []
         self.gen_index = 0
-
-        # Finalize inputs, COMMITTED by communicate after a clean pump return.
-        # Defaults are the crash values (no terminal usage; format from messages).
-        self.sdk_token_usage: Any = None
-        self.result_turn: Any = None
-        self.result_text: str = ""
-
-    def _record_block(self, block: ContentBlock, item_id: str, completed_ms: int | None) -> None:
-        self.open_blocks.append(block)
-        start_ms = self.start_ms_by_id.get(item_id)
-        if start_ms is not None and (self.open_start_ms is None or start_ms < self.open_start_ms):
-            self.open_start_ms = start_ms
-        if completed_ms is not None and (self.open_end_ms is None or completed_ms > self.open_end_ms):
-            self.open_end_ms = completed_ms
-
-    def _flush_message(self, last: Any) -> None:
-        """Cut the open buffer into AssistantMessage(s) for one generation.
-
-        ``last`` is the SDK breakdown for the generation that produced these
-        blocks (None for a safety flush). Emits ONE sub-message per block kind,
-        all sharing this generation's ``message_id``.
-
-        Rationale: .claude/notes/agents.md § Why the generation is split into sub-messages
-        """
-        if not self.open_blocks:
-            self.reasoning_placeholders = []
-            return
-        # Per-generation tokens from the matching tokenUsage `last` delta.
-        cached = (getattr(last, "cached_input_tokens", 0) or 0) if last else 0
-        raw_input = (getattr(last, "input_tokens", 0) or 0) if last else 0
-        total_output = (getattr(last, "output_tokens", 0) or 0) if last else 0
-        # OpenAI bills no separate cache-write fee, so cache_creation is 0.
-        gen_input = _fresh_input_tokens(raw_input, cached)
-        gen_cache_write = 0
-        reasoning_tok = (getattr(last, "reasoning_output_tokens", 0) or 0) if last else 0
-        # A text-less reasoning block becomes a placeholder when reasoning was
-        # billed, and is dropped otherwise.
-        if self.reasoning_placeholders:
-            if reasoning_tok > 0:
-                for blk in self.reasoning_placeholders:
-                    blk.thinking = "_Reasoning hidden by OpenAI policy_"
-            else:
-                for blk in self.reasoning_placeholders:
-                    if blk in self.open_blocks:
-                        self.open_blocks.remove(blk)
-            self.reasoning_placeholders = []
-        if not self.open_blocks:
-            self.open_start_ms = self.open_end_ms = None
-            return
-
-        thinking_blocks = [b for b in self.open_blocks if b.block_type == "thinking"]
-        action_blocks = [b for b in self.open_blocks if b.block_type != "thinking"]
-        # From the PREVIOUS flush's end, not this generation's first item: the
-        # SDK stamps an item with the moment it began EXECUTING, so seeding there
-        # discards the model time that produced it.
-        mark_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
-        window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
-        mark = _ms_to_dt(mark_ms)
-        completed = _ms_to_dt(window_end_ms)
-        # The RAW window, extended to the LAST item's completion — so a
-        # generation containing a tool call already CONTAINS its execution, and
-        # the collector takes it back out. That is also what makes the sub-message
-        # split safe: the two specs SHARE these bounds, so the overlap is
-        # subtracted once rather than once per part.
-        started, gen_ms = close_window(
-            mark=mark,
-            now=completed,
-            item_start=_ms_to_dt(self.open_start_ms) if self.open_start_ms is not None else None,
-        )
-        message_id = f"{self.turn_id}-msg-{self.gen_index}"
-
-        # Output split: reasoning portion to the thinking row, the remainder to
-        # the action row. With only one kind present, that kind gets all output.
-        think_out = reasoning_tok if action_blocks else total_output
-        action_out = max(total_output - reasoning_tok, 0) if thinking_blocks else total_output
-
-        # Thinking first. The FIRST carries the gen's input/cache: per-CALL
-        # billing figures that must not be split. Generation TIME is a property
-        # of the content, so it IS apportioned below.
-        specs: list[tuple[list[ContentBlock], int, int]] = []
-        if thinking_blocks:
-            specs.append((thinking_blocks, think_out, reasoning_tok))
-        if action_blocks:
-            specs.append((action_blocks, action_out, 0))
-
-        # By OUTPUT-TOKEN share, the last taking the remainder so the parts
-        # reconstruct gen_ms to float precision (shares round to 1e-6 ms, so do
-        # not assert exact equality on a measured window). With no output anywhere,
-        # split evenly. The evalboard's twin weighs by CONTENT SIZE instead, which
-        # is deliberate, not an oversight to unify.
-        out_total = sum(out_tok for _, out_tok, _ in specs)
-        gen_parts: list[float] = []
-        assigned = 0.0
-        for idx, (_, out_tok, _) in enumerate(specs):
-            if idx == len(specs) - 1:
-                gen_parts.append(gen_ms - assigned)
-            else:
-                share = round(gen_ms * (out_tok / out_total if out_total > 0 else 1 / len(specs)), 6)
-                gen_parts.append(share)
-                assigned += share
-
-        for idx, (blocks, out_tok, reas_tok) in enumerate(specs):
-            for i, blk in enumerate(blocks):
-                blk.sequence = i
-            first = idx == 0
-            self.messages.append(
-                AssistantMessage(
-                    started_at=started,
-                    completed_at=completed,
-                    generation_duration_ms=gen_parts[idx],
-                    content_blocks=blocks,
-                    tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
-                    input_tokens=gen_input if first else 0,
-                    output_tokens=out_tok,
-                    cache_creation_tokens=gen_cache_write if first else 0,
-                    cache_read_tokens=cached if first else 0,
-                    reasoning_tokens=reas_tok,
-                    model=self._agent._effective_model(),
-                    message_id=message_id,
-                )
-            )
-        self.gen_index += 1
-        # A message was appended, so the next window starts where this one
-        # ended. Both early returns above leave the mark alone on purpose.
-        if window_end_ms is not None:
-            self.gen_mark_ms = window_end_ms
-        self.open_blocks = []
-        self.open_start_ms = None
-        self.open_end_ms = None
+        self.subagent_index = 0
 
     @property
     def ended_cleanly(self) -> bool:
-        """True once the pump broke on a ``should_stop`` reason.
-
-        A non-crash termination, so an exception raised while tearing the stream
-        down afterwards must not be escalated into a retry.
-        """
+        """True once the pump broke on a ``should_stop`` reason: a later teardown exception is not a crash."""
         return self.stop_reason is not None
 
-    def dispatch(self, notification: Any) -> bool:
-        """Route a notification to its handler. Returns True on ``turn/completed``
-        (a valid TurnCompletedNotification) so the pump loop breaks."""
+    def __call__(self, notification: Any) -> bool:
+        """Route a notification; True on a valid ``turn/completed`` so the pump breaks."""
         root = _get_item_root(notification)
         method = notification.method
         log_raw_sdk_event(
@@ -519,83 +345,97 @@ class _CodexTurnState:
             return self.on_turn_completed(notification)
         return False
 
+    def _open_generation(self) -> None:
+        """Open the inner turn for the generation now arriving; a no-op while one is open."""
+        if not self.emitter.inner_turn_open:
+            self.emitter.begin_inner_turn(f"{self.turn_id}-msg-{self.gen_index}")
+
+    def _record_block(self, block: ContentBlock, item_id: str, completed_ms: int | None) -> None:
+        self.open_blocks.append(block)
+        start_ms = self.start_ms_by_id.get(item_id)
+        if start_ms is not None and (self.open_start_ms is None or start_ms < self.open_start_ms):
+            self.open_start_ms = start_ms
+        if completed_ms is not None and (self.open_end_ms is None or completed_ms > self.open_end_ms):
+            self.open_end_ms = completed_ms
+
+    def _tool_id(self, root: Any, root_type: str, *, starting: bool) -> str:
+        item_id = getattr(root, "id", None)
+        if item_id:
+            return str(item_id)
+        pending = self._pending_idless.setdefault(root_type, [])
+        if not starting and pending:
+            return pending.pop(0)
+        minted = f"{root_type}_{self._minted}"
+        self._minted += 1
+        if starting:
+            pending.append(minted)
+        return minted
+
     def on_item_started(self, notification: Any) -> None:
-        """Emit ToolStartEvent + record the tool_use block for every tool-like item."""
+        """Open a tool call and record its tool_use block, for every tool-like item."""
         root = _get_item_root(notification)
         if root is None:
             return
-        # Record the start time for every item kind so flushed messages get real timing.
         item_id = getattr(root, "id", None)
         started_at_ms = getattr(notification.payload, "started_at_ms", None)
         if item_id is not None and started_at_ms is not None:
             self.start_ms_by_id[item_id] = started_at_ms
         root_type = getattr(root, "type", None)
-        # Any item that isn't transcript content is a tool call (generic capture).
-        if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
-            tool_id = item_id or f"{root_type}_{self.next_sequence}"
-            self.seq_by_id[tool_id] = self.next_sequence
-            # Recorded on the START telemetry too: close_open_tools publishes
-            # this object verbatim for an orphan, and without it an unresolved
-            # call cannot be placed on a timeline at all.
-            started_at = _ms_to_dt(started_at_ms) if started_at_ms is not None else None
-            start_tel = CommandTelemetry(
-                tool_name=self._agent._tool_name(root_type),
-                tool_id=tool_id,
-                timestamp=started_at or datetime.now(),
-                execution_started_at=started_at,
-                parameters=self._agent._tool_parameters(root, root_type),
-                sequence_number=self.next_sequence,
-            )
-            self.open_tools[tool_id] = start_tel
-            self.emit.on_event(ToolStartEvent(task_id=self.task_id, turn_id=self.turn_id, tool=start_tel))
-            self.next_sequence += 1
-            # is_error is patched at item/completed even after the message is
-            # flushed, because the block is held by reference.
-            block = ContentBlock(block_type="tool_use", sequence=0, tool_use_id=tool_id)
-            self.blocks_by_id[tool_id] = block
-            self._record_block(block, tool_id, None)
+        if root_type is None:
+            return
+        self._open_generation()
+        if root_type in _CONTENT_ITEM_TYPES:
+            return
+        tool_id = self._tool_id(root, root_type, starting=True)
+        if started_at_ms is not None:
+            self.start_ms_by_id[tool_id] = started_at_ms
+        self.opened_tools.add(tool_id)
+        self.emitter.open_tool(
+            tool_id,
+            self._agent._tool_name(root_type),
+            self._agent._tool_parameters(root, root_type),
+            started_at=_ms_to_dt(started_at_ms) if started_at_ms is not None else None,
+        )
+        # is_error is patched at item/completed even after the message is flushed,
+        # because the block is held by reference.
+        block = ContentBlock(block_type="tool_use", sequence=0, tool_use_id=tool_id)
+        self.blocks_by_id[tool_id] = block
+        self._record_block(block, tool_id, None)
 
     def on_item_completed(self, notification: Any) -> None:
-        """Emit ToolEndEvent + capture telemetry / sub-agents / transcript blocks."""
+        """Close a tool call, or capture a reasoning / agent message block."""
         root = _get_item_root(notification)
         if root is None:
             return
         completed_ms = getattr(notification.payload, "completed_at_ms", None)
         root_type = getattr(root, "type", None)
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
-            tool_id = getattr(root, "id", None) or f"{root_type}_{self.next_sequence}"
-            seq = self.seq_by_id.get(tool_id, self.next_sequence)
-            # This tool is now resolved — drop it from the orphan set.
-            self.open_tools.pop(tool_id, None)
-
-            # `on_item_started` banked the start; passing both in is what lets
-            # the builders record real bounds instead of the SDK's frequent 0.
-            telemetry, is_error = self._agent._telemetry_for_item(
-                root,
-                root_type,
-                tool_id,
-                seq,
-                started_ms=self.start_ms_by_id.get(tool_id),
-                completed_ms=completed_ms,
-            )
-            if telemetry:
-                self.commands.append(telemetry)
-            self.emit.on_event(
-                ToolEndEvent(
-                    task_id=self.task_id,
-                    turn_id=self.turn_id,
-                    tool=telemetry
-                    or CommandTelemetry(
-                        tool_name=self._agent._tool_name(root_type),
-                        tool_id=tool_id,
-                        timestamp=datetime.now(),
-                        sequence_number=seq,
-                    ),
-                    status=ToolEndStatus.ERROR if is_error else ToolEndStatus.OK,
+            tool_id = self._tool_id(root, root_type, starting=False)
+            if tool_id not in self.opened_tools:
+                # A result landing after the cut is not a new model turn; an unseen call is.
+                self._open_generation()
+                self.opened_tools.add(tool_id)
+                self.emitter.open_tool(
+                    tool_id,
+                    self._agent._tool_name(root_type),
+                    self._agent._tool_parameters(root, root_type),
+                    started_at=None,
                 )
+            end = self._agent._tool_end_for_item(
+                root, root_type, started_ms=self.start_ms_by_id.get(tool_id), completed_ms=completed_ms
             )
-            # Patch the block recorded at item/started, and extend the still-open
-            # message's end time.
+            is_error = end is not None and end.is_error
+            self.emitter.close_tool(
+                tool_id,
+                status=ToolEndStatus.ERROR if is_error else ToolEndStatus.OK,
+                summary=end.summary if end else None,
+                error=end.error if end else None,
+                result_data=end.result_data if end else None,
+                parameters=end.parameters if end else None,
+                completed_at=end.timing.execution_completed_at if end else None,
+                started_at=end.timing.execution_started_at if end else None,
+                reported_duration_ms=end.timing.duration_ms if end else None,
+            )
             if tool_id in self.blocks_by_id:
                 self.blocks_by_id[tool_id].is_error = is_error
             if (
@@ -604,58 +444,49 @@ class _CodexTurnState:
                 and (self.open_end_ms is None or completed_ms > self.open_end_ms)
             ):
                 self.open_end_ms = completed_ms
-
-            # Codex's native multi-agent calls land here as collabAgentToolCall items.
             if root_type == "collabAgentToolCall":
                 self._agent._handle_collab_completion(
-                    root,
-                    tool_id,
-                    self.collab_spawn_by_thread,
-                    self.spawned_children,
-                    self.collab_results,
+                    root, tool_id, self.collab_spawn_by_thread, self.spawned_children, self.collab_results
                 )
-
         elif root_type == "reasoning":
+            self._open_generation()
             # OpenAI never returns raw CoT, so a text-less item becomes a
             # placeholder, resolved with its token count at flush.
-            reasoning_id = getattr(root, "id", f"reasoning_{self.next_sequence}")
+            reasoning_id = getattr(root, "id", f"reasoning_{len(self.open_blocks)}")
             parts = getattr(root, "content", None) or getattr(root, "summary", None) or []
             text = "\n".join(p for p in parts if p)
             block = ContentBlock(block_type="thinking", sequence=0, thinking=text or None)
             self._record_block(block, reasoning_id, completed_ms)
             if not text:
                 self.reasoning_placeholders.append(block)
-
         elif root_type == "agentMessage":
-            # The message is cut at the following tokenUsage event (the
-            # generation boundary), not here.
-            message_item_id = getattr(root, "id", f"msg_{self.next_sequence}")
+            self._open_generation()
+            # Cut at the following tokenUsage event (the generation boundary), not here.
+            message_item_id = getattr(root, "id", f"msg_{len(self.open_blocks)}")
             text = getattr(root, "text", "") or ""
             if text:
                 self._record_block(
-                    ContentBlock(block_type="text", sequence=0, text=text),
-                    message_item_id,
-                    completed_ms,
+                    ContentBlock(block_type="text", sequence=0, text=text), message_item_id, completed_ms
                 )
 
     def on_agent_message_delta(self, notification: Any) -> None:
-        """Emit TextChunkEvent for streaming assistant text."""
         if notification.payload:
             delta = getattr(notification.payload, "delta", None)
             if delta:
+                self._open_generation()
                 self.agent_message_chunks.append(delta)
-                self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=delta))
+                self.emitter.text(delta)
 
     def on_token_usage_updated(self, notification: Any) -> None:
-        """One per generation → cut a message. Carries `total` (cumulative over the
-        whole THREAD, i.e. every turn so far) and `last` (this generation's delta)."""
+        """One per generation: cut a message and close its inner turn. ``last`` is this generation's delta."""
         if notification.payload:
             self.latest_token_usage = getattr(notification.payload, "token_usage", None)
-            self._flush_message(getattr(self.latest_token_usage, "last", None))
+            last = getattr(self.latest_token_usage, "last", None)
+            if not _generation_tokens(last).is_empty():
+                self._open_generation()
+            self.flush(last)
 
     def on_turn_completed(self, notification: Any) -> bool:
-        """Capture the final Turn. Returns True (break the pump) iff the payload is
-        a valid TurnCompletedNotification."""
         from openai_codex.generated.v2_all import TurnCompletedNotification
 
         if isinstance(notification.payload, TurnCompletedNotification):
@@ -663,85 +494,131 @@ class _CodexTurnState:
             return True
         return False
 
-    def close_open_tools(self) -> None:
-        """Force-close any tool that started but never completed (an orphan) as
-        ``unresolved``, so its transcript block keeps a real tool name + count."""
-        for start_tel in sorted(self.open_tools.values(), key=lambda t: getattr(t, "sequence_number", 0)):
-            start_tel.result_status = "unknown"
-            self.emit.on_event(
-                ToolEndEvent(
-                    task_id=self.task_id,
-                    turn_id=self.turn_id,
-                    tool=start_tel,
-                    status=ToolEndStatus.UNRESOLVED,
+    def flush(self, last: Any) -> None:
+        """Cut the open buffer into one generation and close its inner turn.
+
+        ``last`` is the SDK breakdown for the generation; its delta becomes the inner
+        turn's tokens. ``None`` is a safety flush at the end of the pump: it adds the
+        message but leaves the inner turn open for the turn's own end status.
+
+        Rationale: .claude/notes/agents.md § Why the generation is split into sub-messages
+        """
+        before = self.gen_index
+        self._cut(last)
+        if last is None or not self.emitter.inner_turn_open:
+            return
+        self.emitter.end_inner_turn(TurnEndStatus.COMPLETED, tokens=_generation_tokens(last))
+        if self.gen_index == before:
+            # A billed cut with no message still spends its id, or the next turn would reuse it.
+            self.gen_index += 1
+
+    def _cut(self, last: Any) -> None:
+        if not self.open_blocks:
+            self.reasoning_placeholders = []
+            return
+        cached = (getattr(last, "cached_input_tokens", 0) or 0) if last else 0
+        raw_input = (getattr(last, "input_tokens", 0) or 0) if last else 0
+        total_output = (getattr(last, "output_tokens", 0) or 0) if last else 0
+        reasoning_tok = (getattr(last, "reasoning_output_tokens", 0) or 0) if last else 0
+        # A text-less reasoning block becomes a placeholder when reasoning was billed.
+        if self.reasoning_placeholders:
+            if reasoning_tok > 0:
+                for blk in self.reasoning_placeholders:
+                    blk.thinking = "_Reasoning hidden by OpenAI policy_"
+            else:
+                for blk in self.reasoning_placeholders:
+                    if blk in self.open_blocks:
+                        self.open_blocks.remove(blk)
+            self.reasoning_placeholders = []
+        if not self.open_blocks:
+            self.open_start_ms = self.open_end_ms = None
+            return
+
+        thinking_blocks = [b for b in self.open_blocks if b.block_type == "thinking"]
+        action_blocks = [b for b in self.open_blocks if b.block_type != "thinking"]
+        think_out = reasoning_tok if action_blocks else total_output
+        action_out = max(total_output - reasoning_tok, 0) if thinking_blocks else total_output
+        # The FIRST part carries the generation's input/cache: per-call billing that is not split.
+        billed = TokenUsage(
+            uncached_input_tokens=_fresh_input_tokens(raw_input, cached), cache_read_input_tokens=cached
+        )
+        parts: list[Generation] = []
+        for blocks, out_tok, reas_tok in (
+            (thinking_blocks, think_out, reasoning_tok),
+            (action_blocks, action_out, 0),
+        ):
+            if not blocks:
+                continue
+            for i, blk in enumerate(blocks):
+                blk.sequence = i
+            tokens = billed if not parts else TokenUsage()
+            parts.append(
+                Generation(
+                    blocks=blocks,
+                    tokens=tokens.model_copy(update={"output_tokens": out_tok}),
+                    reasoning_tokens=reas_tok,
                 )
             )
-        self.open_tools.clear()
 
-    def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
-        """Emit the terminal TurnEnd + AgentEnd and, on a crash, build the partial
-        TurnRecord. Idempotent. Reads the COMMITTED finalize inputs (None/"" on a
-        crash) so a crashed turn under-reports nothing it didn't actually commit."""
-        if self.finalized:
-            return
-        self.finalized = True
+        message_id = f"{self.turn_id}-msg-{self.gen_index}"
+        # From the PREVIOUS flush's end, not this generation's first item: the SDK
+        # stamps an item with the moment it began EXECUTING. The window runs to the
+        # LAST item's completion, so its tool execution comes back out centrally.
+        mark_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
+        window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
+        if mark_ms is None or window_end_ms is None:
+            for part in parts:
+                self.messages.append(self.emitter.add_unmeasured_generation(message_id=message_id, part=part))
+        else:
+            window = close_window(
+                mark=_ms_to_dt(mark_ms),
+                now=_ms_to_dt(window_end_ms),
+                item_start=_ms_to_dt(self.open_start_ms) if self.open_start_ms is not None else None,
+            )
+            self.messages.extend(self.emitter.add_generation(message_id=message_id, window=window, parts=parts))
+        self.gen_index += 1
+        if window_end_ms is not None:
+            self.gen_mark_ms = window_end_ms
+        self.open_blocks = []
+        self.open_start_ms = None
+        self.open_end_ms = None
 
-        # On crash/timeout the SDK total stays None, so fall back to the
-        # per-generation tokens on the messages — but the thread baseline still
-        # has to move past them, or the NEXT turn's delta re-books this one.
-        token_usage = self._agent._token_usage_from_sdk(self.sdk_token_usage)
+    def end(
+        self,
+        status: AgentEndStatus,
+        *,
+        reason: str | None = None,
+        sdk_token_usage: Any = None,
+        result_turn: Any = None,
+        result_text: str = "",
+    ) -> TurnOutcome:
+        """Book the turn's tokens once and end it.
+
+        ``sdk_token_usage``, ``result_turn`` and ``result_text`` are what a CLEAN pump
+        return committed; a crash passes none, so its tokens come from the flushed
+        messages and the thread baseline still advances past them.
+        """
+        agent = self._agent
+        token_usage = agent._token_usage_from_sdk(sdk_token_usage)
         if token_usage is None:
-            token_usage = self._agent._token_usage_from_messages(self.messages)
-            self._agent._advance_usage_baseline(token_usage)
-        # AFTER the baseline advance: the SDK total covers the parent thread only,
-        # so child tokens must not shift the parent's baseline.
-        token_usage = self._agent._fold_subagent_tokens(token_usage, self.messages)
-
-        self.emit.on_event(
-            TurnEndEvent(
-                task_id=self.task_id,
-                turn_id=self.turn_id,
-                status=TurnEndStatus(status.value),
-                tokens=token_usage,
-            )
-        )
-
-        model_used = getattr(self.result_turn, "model", None) or self._agent.config.model
+            token_usage = agent._token_usage_from_messages(self.messages)
+            agent._advance_usage_baseline(token_usage)
+        # AFTER the baseline advance: the SDK total covers the parent thread only.
+        token_usage = agent._fold_subagent_tokens(token_usage, self.messages)
         usage = token_usage or TokenUsage()
-        # Real assistant text arrives as agentMessage deltas; fall back to the raw
-        # Turn dump only when nothing streamed.
-        agent_output = self.result_text or (
-            self._agent._format_turn_result(self.result_turn) if self.result_turn is not None else ""
-        )
-
-        self.emit.on_event(
-            AgentEndEvent(
-                task_id=self.task_id,
-                status=status,
-                usage=usage,
-                iteration=self.iteration,
-                user_input=self.user_input,
-                agent_output=agent_output,
-                model_used=model_used,
-                assistant_turn_count=1,
-                messages=self.messages,
-                num_turns=1,
-                crashed=crashed,
-                crash_reason=crash_reason,
-                duration_seconds=time.monotonic() - self.turn_start_time,
-            )
-        )
-
-        if crashed:
-            self._agent._capture_partial_turn(self.collector)
+        agent_output = result_text or (agent._format_turn_result(result_turn) if result_turn is not None else None)
+        if status is AgentEndStatus.CRASHED or status is AgentEndStatus.TIMEOUT:
+            return self.emitter.fail(status, reason or status.value, usage=usage, agent_output=agent_output)
+        return self.emitter.finalize(status, usage=usage, agent_output=agent_output, model_used=agent.config.model)
 
 
-@AgentRegistry.register(AgentKind.CODEX, CodexAgentConfig)
+@AgentRegistry.register(AgentKind.CODEX, CodexAgentConfig, spi_version=SPI_VERSION)
 class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
     # The pump has a between-items guard where `should_stop` runs; `system_prompt`
-    # maps to developer_instructions, ON TOP of the base prompt.
+    # maps to developer_instructions, ON TOP of the base prompt. Usage is one
+    # `thread/tokenUsage/updated` per model generation, each closing one inner turn.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     contract = HarnessContract(
         system_prompt=Enforcement.ENFORCED,
@@ -751,7 +628,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=True,
-        usage_granularity=UsageGranularity.TURN,
+        usage_granularity=UsageGranularity.GENERATION,
+        timing_basis=TimingBasis.CLI_EPOCH_MS,
     )
 
     def __init__(
@@ -779,8 +657,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self.working_directory: Path | None = None
         self._env_path_prepend: list[str] = []
         self._login_shell_home: Path | None = None
-        # _state / _iteration / _iteration_was_incremented / pending_turn lifecycle
-        # bookkeeping lives on the Agent base class (shared defaults + helpers).
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
         # Live handle to the in-flight turn, so kill()/kill_sync() can interrupt a
         # stuck one: the watchdog's task.cancel() lands only at an await point,
@@ -847,151 +723,88 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self,
         user_input: str,
         *,
+        iteration: int,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         should_stop: Callable[[], StopReason | None] | None = None,
-    ) -> TurnRecord:
-        """Send a message to Codex and receive its response.
+    ) -> TurnOutcome:
+        """Run one Codex turn; see ``Agent.communicate``.
 
-        Args:
-            user_input: The message/prompt to send
-            stream_callback: Optional callback for real-time event streaming
-            timeout: Hard wall-clock deadline in seconds
-            should_stop: The run's stop poll, called after each dispatched
-                notification. On a reason the pump breaks, the in-flight turn is
-                interrupted (best-effort) and the turn finalizes cleanly with
-                ``end_status_for(reason)`` (``crashed=False``).
-
-        Returns:
-            TurnRecord containing the complete interaction
-
-        Raises:
-            RuntimeError: If agent is not started
-            TurnTimeoutError: Timeout elapsed
-            AgentCrashError: SDK/CLI failed mid-turn
+        ``should_stop`` is polled after each dispatched notification; on a reason the
+        pump breaks, the in-flight turn is interrupted (best-effort) and the turn ends
+        with ``end_status_for(reason)``.
         """
         if not self.working_directory or not self.codex_client:
             raise RuntimeError("Agent not started. Call start() first.")
-
         assert self.config.type is not None, "CodexAgent requires AgentConfig.type to be set before communicate()"
 
-        # Reset the pending slot + bump the iteration counter (shared lifecycle).
-        self._begin_turn()
-
-        turn_start_time = time.monotonic()
-
-        # The agent is the SOLE emitter: events fan out to an internal
-        # EventCollector and the caller's stream_callback.
-        task_id = str(self.config.type)  # str() so a plugin subclass with a non-enum kind also works
-        collector = EventCollector()
-        emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
-
-        # Codex has no per-API-call boundary: one thread.turn() == one turn_id.
-        turn_id = f"codex-{self._iteration}"
-        # The same commands/messages lists flow through the pump and finalize.
-        # `timeout_hit` is written by the watchdog callback (atomic bool).
-        state = _CodexTurnState(
-            self,
-            emit=emit,
-            task_id=task_id,
-            turn_id=turn_id,
-            collector=collector,
-            commands=[],
-            messages=[],
-            user_input=user_input,
-            iteration=self._iteration,
-            turn_start_time=turn_start_time,
+        emitter = self._open_emitter(
+            prompt=user_input,
+            iteration=iteration,
+            model=self._effective_model(),
+            task_id=str(self.config.type),  # str() so a plugin subclass with a non-enum kind also works
+            stream_callback=stream_callback,
         )
+        emitter.begin()
+        decoder = _CodexDecoder(self, emitter, turn_id=f"codex-{iteration}")
+
+        def _on_turn_timeout() -> None:
+            decoder.timeout_hit = True
 
         try:
-            emit.on_event(
-                AgentStartEvent(
-                    task_id=task_id,
-                    prompt=user_input,
-                    iteration=self._iteration,
-                    model=self._effective_model(),
-                )
-            )
-
             if self.thread is None:
                 thread_kwargs = self._build_thread_options()
-                # Add working directory
                 if self.working_directory:
                     thread_kwargs["cwd"] = str(self.working_directory)
                 self.thread = await self._run_async(self.codex_client.thread_start, **thread_kwargs)
                 # A fresh thread counts its cumulative total from zero.
                 self._thread_usage_baseline = _ThreadTotals()
-
-            def _on_turn_timeout() -> None:
-                state.timeout_hit = True
-
-            with ThreadedWatchdog(
+            self._log.debug("Starting Codex turn...")
+            committed = await run_with_watchdog(
+                self._run_turn_with_streaming(user_input, decoder, should_stop),
                 timeout_seconds=timeout,
                 on_timeout=_on_turn_timeout,
-                asyncio_task_to_cancel=asyncio.current_task(),
                 label=f"Turn timeout ({timeout:g}s)" if timeout else "turn_timeout",
-            ):
-                self._log.debug("Starting Codex turn...")
-                emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=self._effective_model()))
-
-                try:
-                    # Committed only on a CLEAN return; a crash skips this, so
-                    # finalize reads the defaults and falls back to the messages.
-                    state.result_turn, state.sdk_token_usage, state.result_text = await self._run_turn_with_streaming(
-                        state, should_stop
-                    )
-                except asyncio.CancelledError:
-                    if state.timeout_hit:
-                        self._finalize_and_raise_timeout(state.finalize, timeout or 0)
-                    raise
-                except Exception as e:
-                    if state.timeout_hit:
-                        self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
-                    if state.ended_cleanly:
-                        # Already stopped on purpose — do not escalate.
-                        # Rationale: .claude/notes/agents.md § Why a post-stop exception is not a crash
-                        self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
-                    else:
-                        self._finalize_and_raise_crash(
-                            state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
-                        )
-
-            if state.timeout_hit:
-                # Watchdog fired but the pump finished before the cancel landed.
-                # Routed through the shared kernel so this path sets _state=ERROR
-                # like every other timeout path.
-                assert timeout is not None
-                self._finalize_and_raise_timeout(state.finalize, timeout)
-        except (AgentCrashError, TurnTimeoutError):
-            # Already funneled through finalize by the inner handlers.
-            raise
+            )
+        except WatchdogFired:
+            return self._fail(decoder, AgentEndStatus.TIMEOUT, format_timeout_reason(timeout or 0))
         except asyncio.CancelledError:
-            # External, or during thread_start before the watchdog block. Close
-            # the AgentStart so the event tree stays balanced; finalize is
-            # idempotent, so the timeout case is a no-op here.
-            if not state.finalized:
-                self._finalize_external_cancel(state.finalize)
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling() == 0:
+                # Not a cancel from outside: the SDK raised it inside the turn body.
+                return self._fail(decoder, AgentEndStatus.CRASHED, "Codex turn failed: the SDK was cancelled")
+            self._state = AgentState.ERROR
+            decoder.end(AgentEndStatus.CRASHED, reason="turn cancelled")
             raise
         except Exception as e:
-            # Failures OUTSIDE the inner turn block, notably thread_start. Without
-            # this they escape bare: the orchestrator never drains pending_turn
-            # and _iteration stays incremented.
-            if state.ended_cleanly and not state.timeout_hit:
-                # Same retry-poisoning guard as the inner handler.
-                self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
-            else:
-                self._finalize_and_raise_crash(
-                    state.finalize, truncate_crash_message(f"Codex turn failed: {e!s}"), cause=e
-                )
+            if decoder.timeout_hit:
+                return self._fail(decoder, AgentEndStatus.TIMEOUT, format_timeout_reason(timeout or 0))
+            if not decoder.ended_cleanly:
+                return self._fail(decoder, AgentEndStatus.CRASHED, f"Codex turn failed: {e!s}")
+            # Already stopped on purpose — do not escalate.
+            # Rationale: .claude/notes/agents.md § Why a post-stop exception is not a crash
+            self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
+            committed = (None, None, "")
+        result_turn, sdk_token_usage, result_text = committed
+        if decoder.timeout_hit:
+            # The watchdog fired but the pump finished before the cancel landed.
+            self._state = AgentState.ERROR
+            return decoder.end(
+                AgentEndStatus.TIMEOUT,
+                reason=format_timeout_reason(timeout or 0),
+                sdk_token_usage=sdk_token_usage,
+                result_turn=result_turn,
+                result_text=result_text,
+            )
 
         self._state = AgentState.WORKING
-        self._end_turn_ok()
+        # Precedence: timeout (above) > the stop reason > done.
+        status = end_status_for(decoder.stop_reason) if decoder.stop_reason is not None else AgentEndStatus.COMPLETED
+        return decoder.end(status, sdk_token_usage=sdk_token_usage, result_turn=result_turn, result_text=result_text)
 
-        # Precedence: timeout (raised above) > the stop reason > done.
-        # Rationale: .claude/notes/agents.md § Shared turn lifecycle
-        status = end_status_for(state.stop_reason) if state.stop_reason is not None else AgentEndStatus.COMPLETED
-        state.finalize(status, crashed=False, crash_reason=None)
-        return collector.build_turn_record()
+    def _fail(self, decoder: _CodexDecoder, status: AgentEndStatus, reason: str) -> TurnOutcome:
+        self._state = AgentState.ERROR
+        return decoder.end(status, reason=reason)
 
     async def stop(self) -> None:
         """Stop the agent and tear down the Codex SDK session.
@@ -1038,6 +851,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return
         with contextlib.suppress(Exception):
             client.close()
+
+    async def harness_version(self) -> str | None:
+        """The ``openai-codex`` SDK version, and the app-server version from its initialize handshake."""
+        from importlib.metadata import version
+
+        server = None
+        if self.codex_client is not None:
+            with contextlib.suppress(Exception):
+                info = self.codex_client.metadata.serverInfo
+                server = info.version if info is not None else None
+        return f"openai-codex {version('openai-codex')}; codex app-server {server or 'unknown'}"
 
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Codex routing so runs are auditable/comparable.
@@ -1335,20 +1159,14 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return str(turn_result)
 
     async def _run_turn_with_streaming(
-        self, state: _CodexTurnState, should_stop: Callable[[], StopReason | None] | None = None
+        self, user_input: str, decoder: _CodexDecoder, should_stop: Callable[[], StopReason | None] | None = None
     ) -> tuple[Any, Any, str]:
-        """Drive ``turn.stream()`` through the per-turn state, emitting the standard
-        event protocol; returns ``(turn_result, latest_token_usage, agent_text)``.
+        """Drive ``turn.stream()`` through the decoder; returns ``(turn_result, latest_token_usage, agent_text)``.
 
-        ``communicate()`` owns the TurnStart/TurnEnd/AgentEnd boundaries; this
-        drives the inner pump. ``state`` is mutated IN PLACE, so a mid-turn crash
-        keeps the partial.
-
-        ``should_stop`` runs AFTER ``state.dispatch`` (the emission the monitor
-        latches on) and BEFORE the next notification is pulled.
+        ``should_stop`` runs AFTER the decoder handles a notification and BEFORE the
+        next one is pulled.
         """
-        # Starts the turn without blocking, and opens the event stream.
-        turn_handle = await self._run_async(self.thread.turn, state.user_input)
+        turn_handle = await self._run_async(self.thread.turn, user_input)
         self._active_turn_handle = turn_handle
         stream = await self._run_async(turn_handle.stream)
 
@@ -1356,85 +1174,69 @@ class CodexAgent(Agent[CodexAgentConfig]):
         try:
             while True:
                 # Offloaded so the event loop stays free (parallel agents do not
-                # serialize) and the watchdog's task.cancel() can land here.
+                # serialize) and the watchdog's cancel can land here.
                 notification: Any = await asyncio.to_thread(next, stream_iter, _STREAM_DONE)
                 if notification is _STREAM_DONE:
                     break
-                if state.dispatch(notification):  # True on a valid turn/completed
+                if decoder(notification):  # True on a valid turn/completed
                     break
                 reason = should_stop() if should_stop is not None else None
                 if reason is not None:
-                    state.stop_reason = reason
+                    decoder.stop_reason = reason
                     self._log.debug("Stop requested (%s); ending notification pump at this boundary", reason.value)
                     self._interrupt_active_turn()  # best-effort; stops server-side spend
                     break
         finally:
             self._active_turn_handle = None
-            # Close orphan tools, flush trailing blocks no tokenUsage event
-            # closed, then close the stream. Runs on EVERY exit path.
-            state.close_open_tools()
-            state._flush_message(None)
+            # Flush trailing blocks no tokenUsage event closed, then close the stream.
+            decoder.flush(None)
             with contextlib.suppress(Exception):
                 await self._run_async(stream.close)
 
-        if state.turn_result is None and not state.ended_cleanly:
+        if decoder.turn_result is None and not decoder.ended_cleanly:
             raise RuntimeError("Turn did not complete (no turn/completed notification received)")
 
-        # If streaming surfaced no transcript, rebuild it from the terminal
-        # Turn's ordered item list.
-        if not state.messages:
-            state.messages.extend(self._messages_from_items(getattr(state.turn_result, "items", None), state.turn_id))
+        # If streaming surfaced no transcript, rebuild it from the terminal Turn's items.
+        if not decoder.messages:
+            self._messages_from_items(getattr(decoder.turn_result, "items", None), decoder)
 
         # RUNS on a cap or budget stop, because recovery is also the only writer of
-        # the `parent_tool_use_id`-tagged messages `_fold_subagent_tokens` sums — so
-        # skipping it drops the child threads' spend from the run's cost entirely.
-        # Still SKIPPED on an early-criterion stop: an armed gate has already
-        # decided the run, and children may have no rollout yet.
+        # the child-thread messages `_fold_subagent_tokens` sums. Still SKIPPED on an
+        # early-criterion stop: an armed gate has already decided the run.
         # Rationale: .claude/notes/agents.md § Codex rollout rebuild
-        if state.spawned_children and state.stop_reason is not StopReason.EARLY_CRITERION:
-            await self._recover_subagent_tool_calls(
-                state.spawned_children,
-                state.collab_results,
-                state.messages,
-                state.commands,
-                state.emit,
-                state.task_id,
-                state.turn_id,
-            )
+        if decoder.spawned_children and decoder.stop_reason is not StopReason.EARLY_CRITERION:
+            await self._recover_subagent_tool_calls(decoder)
 
-        return state.turn_result, state.latest_token_usage, "".join(state.agent_message_chunks)
+        return decoder.turn_result, decoder.latest_token_usage, "".join(decoder.agent_message_chunks)
 
-    def _messages_from_items(self, items: Any, turn_id: str) -> list[AssistantMessage]:
+    def _messages_from_items(self, items: Any, decoder: _CodexDecoder) -> None:
         """Rebuild the assistant transcript from a Turn's ``items`` list (fallback).
 
         Same item->block mapping as the streaming path, but Turn items carry no
-        per-item timestamps, so there is no window to measure: the bounds fall back
-        to now() and ``generation_duration_ms`` is None, never 0.0 (CE058).
+        per-item timestamps, so there is no window to measure: each rebuilt message is
+        an unmeasured generation (CE058).
         """
         if not items:
-            return []
-
-        rebuilt: list[AssistantMessage] = []
+            return
         open_blocks: list[ContentBlock] = []
+        rebuilt = 0
 
         def _flush() -> None:
-            nonlocal open_blocks
+            nonlocal open_blocks, rebuilt
             if not open_blocks:
                 return
             for i, blk in enumerate(open_blocks):
                 blk.sequence = i
-            now = datetime.now()
-            rebuilt.append(
-                AssistantMessage(
-                    started_at=now,
-                    completed_at=now,
-                    generation_duration_ms=None,
-                    content_blocks=open_blocks,
-                    tool_use_ids=[b.tool_use_id for b in open_blocks if b.block_type == "tool_use" and b.tool_use_id],
-                    model=self._effective_model(),
-                    message_id=f"{turn_id}-msg-{len(rebuilt)}",
+            message_id = f"{decoder.turn_id}-msg-{rebuilt}"
+            if not decoder.emitter.inner_turn_open:
+                decoder.emitter.begin_inner_turn(message_id)
+            decoder.messages.append(
+                decoder.emitter.add_unmeasured_generation(
+                    message_id=message_id, part=Generation(blocks=open_blocks, tokens=TokenUsage())
                 )
             )
+            decoder.emitter.end_inner_turn(TurnEndStatus.COMPLETED)
+            rebuilt += 1
             open_blocks = []
 
         for item in items:
@@ -1442,7 +1244,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
             root_type = getattr(root, "type", None)
             item_id = getattr(root, "id", "")
             if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
-                # Any tool-like item, mirroring the streaming path's broad capture.
                 status = _status_value(getattr(root, "status", "completed"))
                 exit_code = getattr(root, "exit_code", None)
                 is_error = (
@@ -1466,7 +1267,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 _flush()
 
         _flush()
-        return rebuilt
 
     @staticmethod
     def _tool_name(root_type: str | None) -> str:
@@ -1508,75 +1308,50 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return {"prompt": getattr(root, "revised_prompt", None) or ""}
         return {}
 
-    def _telemetry_for_item(
+    def _tool_end_for_item(
         self,
         root: Any,
         root_type: str | None,
-        tool_id: str,
-        seq: int,
         *,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> tuple[CommandTelemetry | None, bool]:
-        """Build (telemetry, is_error) for a completed tool item.
+    ) -> _ToolEnd | None:
+        """What a completed tool item reports, or None if it cannot be read.
 
         commandExecution/fileChange keep their rich extractors; every other kind
-        routes through the generic builder so it still produces countable
-        telemetry. The SDK's millisecond stamps arrive as ARGUMENTS rather than
-        being read back out of the reducer, so each builder stays pure.
+        routes through the generic one so it still closes a countable call. The
+        SDK's millisecond stamps arrive as ARGUMENTS, so each extractor stays pure.
         """
         if root_type == "commandExecution":
-            exit_code = getattr(root, "exit_code", None)
-            return self._extract_command_telemetry(root, seq, started_ms, completed_ms), exit_code != 0
+            return self._command_tool_end(root, started_ms, completed_ms)
         if root_type == "fileChange":
             changes = getattr(root, "changes", []) or []
-            status_str = _status_value(getattr(root, "status", "completed"))
-            failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
-            return (
-                self._extract_file_change_telemetry(tool_id, changes, status_str, seq, started_ms, completed_ms),
-                failed,
-            )
-        return self._extract_generic_telemetry(root, root_type, tool_id, seq, started_ms, completed_ms)
+            return self._file_change_tool_end(changes, getattr(root, "status", "completed"), started_ms, completed_ms)
+        return self._generic_tool_end(root, root_type, started_ms, completed_ms)
 
-    def _extract_generic_telemetry(
+    def _generic_tool_end(
         self,
         root: Any,
         root_type: str | None,
-        tool_id: str,
-        seq: int,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> tuple[CommandTelemetry | None, bool]:
-        """CommandTelemetry for any tool item without a dedicated extractor.
-
-        Reads status / duration / error generically, so MCP calls, web searches,
-        collab-agent spawns and future kinds all render and count uniformly.
-        """
+    ) -> _ToolEnd | None:
+        """A tool item without a dedicated extractor: status, duration and error read generically."""
         try:
             status_str = _status_value(getattr(root, "status", "") or "")
             err = getattr(root, "error", None)
             success = getattr(root, "success", None)
-            is_error = bool(err) or success is False or status_str in _FILE_CHANGE_FAILURE_STATUSES
-            timing = _item_timing(started_ms, completed_ms, getattr(root, "duration_ms", None))
-            return (
-                CommandTelemetry(
-                    tool_name=self._tool_name(root_type),
-                    tool_id=tool_id,
-                    timestamp=timing.timestamp,
-                    execution_started_at=timing.execution_started_at,
-                    execution_completed_at=timing.execution_completed_at,
-                    duration_ms=timing.duration_ms,
-                    parameters=self._tool_parameters(root, root_type),
-                    result_status="error" if is_error else ("success" if status_str else "unknown"),
-                    result_summary=self._summarize_tool_item(root, root_type),
-                    error_message=str(err) if err else None,
-                    sequence_number=seq,
-                ),
-                is_error,
+            return _ToolEnd(
+                is_error=bool(err) or success is False or status_str in _FILE_CHANGE_FAILURE_STATUSES,
+                summary=self._summarize_tool_item(root, root_type),
+                error=str(err) if err else None,
+                result_data=None,
+                parameters=self._tool_parameters(root, root_type),
+                timing=_item_timing(started_ms, completed_ms, getattr(root, "duration_ms", None)),
             )
         except Exception as e:
             self._log.debug(f"Failed to extract generic tool telemetry ({root_type}): {e}")
-            return None, False
+            return None
 
     @staticmethod
     def _summarize_tool_item(root: Any, root_type: str | None) -> str:
@@ -1628,65 +1403,46 @@ class CodexAgent(Agent[CodexAgentConfig]):
             if message and thread_id in spawn_by_thread:
                 collab_results[str(thread_id)] = str(message)
 
-    async def _recover_subagent_tool_calls(
-        self,
-        spawned_children: list[tuple[str, str, str | None]],
-        collab_results: dict[str, str],
-        messages: list[TranscriptMessage],
-        commands: list[CommandTelemetry],
-        emit: StreamCallback,
-        task_id: str,
-        turn_id: str,
-    ) -> None:
-        """Recover each spawned sub-agent's INNER tool calls AND token usage.
+    async def _recover_subagent_tool_calls(self, decoder: _CodexDecoder) -> None:
+        """Recover each spawned sub-agent's INNER tool calls AND token usage, tagged to its spawning call.
 
-        Per inner call, emits one ``CommandTelemetry`` (so the tool row resolves)
-        plus one nested ``AssistantMessage`` parented to the spawning Agent call
-        (so the evalboard renders it as an expandable child), carrying that
-        generation's real tokens. ``finalize`` folds those into the turn total.
-
-        Best-effort: any failure is swallowed, so a recovery hiccup never fails the
-        turn.
+        Per inner call: one nested tool call (so the tool row resolves), plus one
+        nested unmeasured generation carrying that generation's real tokens, which
+        the turn's end folds into the total. Best-effort: a failure never fails the turn.
 
         Rationale: .claude/notes/agents.md § Codex rollout rebuild
         """
         home = self._codex_home()
-        for thread_id, parent_tool_id, model in spawned_children:
+        emitter = decoder.emitter
+        for thread_id, parent_tool_id, model in decoder.spawned_children:
             try:
                 path = await self._await_rollout_file(home, thread_id)
                 if path is None:
-                    # No rollout to mine: nest just the returned message (if any) so
-                    # the sub-agent's answer still shows, tokenless.
+                    # No rollout to mine: nest just the returned message, tokenless.
                     self._log.debug("CodexAgent: no rollout found for sub-agent thread %s", thread_id)
-                    result = collab_results.get(thread_id)
+                    result = decoder.collab_results.get(thread_id)
                     if result:
-                        messages.append(
-                            self._subagent_text_message(result, parent_tool_id, model, turn_id, len(messages))
+                        self._add_subagent_message(
+                            decoder,
+                            [ContentBlock(block_type="text", sequence=0, text=result)],
+                            None,
+                            parent_tool_id,
+                            model,
                         )
                     continue
-                gens = self._parse_rollout_generations(path)
-                # Rebuild the sub-agent's generations in order — each a nested
-                # message parented to the spawn, carrying its real per-generation
-                # tokens (fresh slice is plain input, cache_creation=0 — Codex has
-                # no separate cache-write fee) and its blocks.
-                for gi, gen in enumerate(gens):
-                    blocks, tools = self._subagent_generation_blocks(gen, thread_id)
+                for gen in self._parse_rollout_generations(path):
+                    blocks, calls = self._subagent_generation_blocks(gen, thread_id)
                     if not blocks:
                         continue
-                    for tel in tools:
-                        commands.append(tel)
-                        emit.on_event(ToolStartEvent(task_id=task_id, turn_id=turn_id, tool=tel))
-                        emit.on_event(
-                            ToolEndEvent(
-                                task_id=task_id,
-                                turn_id=turn_id,
-                                tool=tel,
-                                status=ToolEndStatus.ERROR if tel.result_status == "error" else ToolEndStatus.OK,
-                            )
+                    for tool_id, call in calls:
+                        emitter.open_tool(tool_id, call["tool_name"], call["parameters"], parent_tool_id=parent_tool_id)
+                        emitter.close_tool(
+                            tool_id,
+                            status=ToolEndStatus.ERROR if call["is_error"] else ToolEndStatus.OK,
+                            summary=call["result_summary"],
                         )
-                    messages.append(self._subagent_generation_message(blocks, gen, parent_tool_id, model, turn_id, gi))
+                    self._add_subagent_message(decoder, blocks, gen["tokens"], parent_tool_id, model)
             except Exception as exc:
-                # Best-effort: a recovery hiccup must never fail the turn.
                 self._log.debug("CodexAgent: sub-agent recovery failed for %s: %s", thread_id, exc)
 
     @staticmethod
@@ -1860,15 +1616,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
 
     def _subagent_generation_blocks(
         self, gen: dict[str, Any], thread_id: str
-    ) -> tuple[list[ContentBlock], list[CommandTelemetry]]:
-        """Content blocks + tool telemetry for one recovered sub-agent generation.
+    ) -> tuple[list[ContentBlock], list[tuple[str, dict[str, Any]]]]:
+        """Content blocks and ``(tool_id, call)`` pairs for one recovered sub-agent generation.
 
-        Each tool call gets a ``tool_use`` block whose id matches a
-        ``CommandTelemetry``, so the evalboard tool row resolves. Inner ids are
-        THREAD-PREFIXED to stay unique across the parent's own tools.
+        Inner ids are THREAD-PREFIXED to stay unique across the parent's own tools.
         """
         blocks: list[ContentBlock] = []
-        telemetries: list[CommandTelemetry] = []
+        calls: list[tuple[str, dict[str, Any]]] = []
         for seq, item in enumerate(gen["items"]):
             if item["kind"] == "tool":
                 call = item["call"]
@@ -1876,98 +1630,52 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 blocks.append(
                     ContentBlock(block_type="tool_use", sequence=seq, tool_use_id=tool_id, is_error=call["is_error"])
                 )
-                telemetries.append(
-                    CommandTelemetry(
-                        tool_name=call["tool_name"],
-                        tool_id=tool_id,
-                        timestamp=datetime.now(),
-                        parameters=call["parameters"],
-                        result_status="error" if call["is_error"] else "success",
-                        result_summary=call["result_summary"],
-                    )
-                )
+                calls.append((tool_id, call))
             elif item["kind"] == "text":
                 blocks.append(ContentBlock(block_type="text", sequence=seq, text=item["text"]))
-        return blocks, telemetries
+        return blocks, calls
 
-    def _subagent_generation_message(
+    def _add_subagent_message(
         self,
+        decoder: _CodexDecoder,
         blocks: list[ContentBlock],
-        gen: dict[str, Any],
+        tokens: tuple[int, int, int, int] | None,
         parent_tool_use_id: str,
         model: str | None,
-        turn_id: str,
-        index: int,
-    ) -> AssistantMessage:
-        """A nested sub-agent generation as an AssistantMessage with real tokens.
-
-        Parented to the spawning Agent call so it nests in the transcript. Tokens
-        come from the child's per-generation ``token_count``.
-        """
-        raw_input, cached, output, reasoning = gen["tokens"] or (0, 0, 0, 0)
-        fresh = _fresh_input_tokens(raw_input, cached)
-        now = datetime.now()
-        return AssistantMessage(
-            started_at=now,
-            completed_at=now,
-            generation_duration_ms=None,
-            content_blocks=blocks,
-            tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
-            input_tokens=fresh,
-            output_tokens=output,
-            cache_creation_tokens=0,
-            cache_read_tokens=cached,
-            reasoning_tokens=reasoning,
-            model=model or self._effective_model(),
-            message_id=f"{turn_id}-subagent-{index}",
-            parent_tool_use_id=parent_tool_use_id,
+    ) -> None:
+        """One nested sub-agent generation, parented to its spawning Agent call, with its real tokens."""
+        raw_input, cached, output, reasoning = tokens or (0, 0, 0, 0)
+        decoder.messages.append(
+            decoder.emitter.add_unmeasured_generation(
+                message_id=f"{decoder.turn_id}-subagent-{decoder.subagent_index}",
+                part=Generation(
+                    blocks=blocks,
+                    tokens=TokenUsage(
+                        uncached_input_tokens=_fresh_input_tokens(raw_input, cached),
+                        output_tokens=output,
+                        cache_read_input_tokens=cached,
+                    ),
+                    reasoning_tokens=reasoning,
+                ),
+                model=model or self._effective_model(),
+                parent_tool_id=parent_tool_use_id,
+            )
         )
+        decoder.subagent_index += 1
 
-    def _subagent_text_message(
-        self, text: str, parent_tool_use_id: str, model: str | None, turn_id: str, index: int
-    ) -> AssistantMessage:
-        """Fallback nested message: just the sub-agent's returned text, tokenless.
-
-        Used only when the child's rollout cannot be found. ``model`` is the
-        SPAWNED sub-agent's model, not the parent's, matching the other path."""
-        now = datetime.now()
-        return AssistantMessage(
-            started_at=now,
-            completed_at=now,
-            generation_duration_ms=None,
-            content_blocks=[ContentBlock(block_type="text", sequence=0, text=text)],
-            tool_use_ids=[],
-            input_tokens=0,
-            output_tokens=0,
-            cache_creation_tokens=0,
-            cache_read_tokens=0,
-            model=model or self._effective_model(),
-            message_id=f"{turn_id}-subagent-{index}",
-            parent_tool_use_id=parent_tool_use_id,
-        )
-
-    def _extract_command_telemetry(
+    def _command_tool_end(
         self,
         command_item: Any,
-        sequence: int,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> CommandTelemetry | None:
-        """Extract CommandTelemetry from a CommandExecutionThreadItem.
+    ) -> _ToolEnd | None:
+        """What a CommandExecutionThreadItem reports.
 
         Rationale: .claude/notes/agents.md § Tool-name and argument normalization
         """
-
         try:
-            # Extract basic info
-            command = getattr(command_item, "command", "")
-            command_id = getattr(command_item, "id", f"cmd_{sequence}")
-            duration_ms = getattr(command_item, "duration_ms", None)
             exit_code = getattr(command_item, "exit_code", None)
             output = getattr(command_item, "aggregated_output", None)
-
-            # Determine result status from exit code
-            result_status = "success" if exit_code == 0 else "error" if exit_code is not None else "unknown"
 
             # Store the output WHOLE: result_summary is the untruncated tool-result
             # body and its length drives result_tokens, so trimming here
@@ -1976,73 +1684,51 @@ class CodexAgent(Agent[CodexAgentConfig]):
             summary_parts = [f"Exit code: {exit_code}" if exit_code is not None else "Command executed"]
             if output and len(output.strip()) > 0:
                 summary_parts.append(f"Output: {output}")
-            result_summary = " | ".join(summary_parts)
 
-            # Try to parse output as JSON
             result_data = None
             if output:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     result_data = json.loads(output)
 
-            # Build parameters from command string
-            parameters = {"command": command}
-
-            timing = _item_timing(started_ms, completed_ms, duration_ms)
-            return CommandTelemetry(
-                tool_name="Bash",
-                tool_id=command_id,
-                timestamp=timing.timestamp,
-                execution_started_at=timing.execution_started_at,
-                execution_completed_at=timing.execution_completed_at,
-                duration_ms=timing.duration_ms,
-                parameters=parameters,
-                result_status=result_status,
-                result_summary=result_summary,
-                error_message=None if exit_code == 0 else output or f"Exit code {exit_code}",
+            return _ToolEnd(
+                is_error=exit_code != 0,
+                summary=" | ".join(summary_parts),
+                error=None if exit_code == 0 else output or f"Exit code {exit_code}",
                 result_data=result_data,
-                sequence_number=sequence,
+                parameters={"command": getattr(command_item, "command", "")},
+                timing=_item_timing(started_ms, completed_ms, getattr(command_item, "duration_ms", None)),
             )
         except Exception as e:
             self._log.debug(f"Failed to extract command telemetry: {e}")
             return None
 
-    def _extract_file_change_telemetry(
+    def _file_change_tool_end(
         self,
-        change_id: str,
         changes: Any,
         status: Any,
-        sequence: int,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> CommandTelemetry | None:
-        """Build CommandTelemetry for a Codex fileChange item.
+    ) -> _ToolEnd | None:
+        """What a Codex fileChange item reports; a failed or declined apply_patch is an error.
 
-        Recorded as a ``Write`` so cross-agent criteria see the same signal they
-        get from Claude's Write/Edit calls. A failed or declined apply_patch is an
-        ``error``, never a successful write.
+        Recorded as a ``Write`` so cross-agent criteria see the same signal they get
+        from Claude's Write/Edit calls.
         """
         try:
             paths = [str(c.path) for c in changes if hasattr(c, "path")] if changes else []
             status_str = _status_value(status)
             failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
-            timing = _item_timing(started_ms, completed_ms, None)
-            return CommandTelemetry(
-                tool_name="Write",
-                tool_id=change_id,
-                timestamp=timing.timestamp,
-                execution_started_at=timing.execution_started_at,
-                execution_completed_at=timing.execution_completed_at,
-                duration_ms=timing.duration_ms,
-                parameters={"paths": paths},
-                result_status="error" if failed else "success",
-                result_summary=(
+            return _ToolEnd(
+                is_error=failed,
+                summary=(
                     f"{len(paths)} file(s) changed"
                     if not failed
                     else f"apply_patch {status_str}: {len(paths)} file(s) not written"
                 ),
-                error_message=f"apply_patch {status_str}" if failed else None,
+                error=f"apply_patch {status_str}" if failed else None,
                 result_data=None,
-                sequence_number=sequence,
+                parameters={"paths": paths},
+                timing=_item_timing(started_ms, completed_ms, None),
             )
         except Exception as e:
             self._log.debug(f"Failed to extract file-change telemetry: {e}")
@@ -2080,18 +1766,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         self._thread_usage_baseline = cumulative
         # Fresh slice = full prompt minus the cached prefix.
         uncached = _fresh_input_tokens(turn.input, turn.cached)
-        cost = calculate_cost(
-            self._effective_model() or "",
-            uncached_input_tokens=uncached,
-            output_tokens=turn.output,
-            cache_read_tokens=turn.cached,
-        )
-        return TokenUsage(
+        usage = TokenUsage(
             uncached_input_tokens=uncached,
             output_tokens=turn.output,
             cache_read_input_tokens=turn.cached,
-            total_cost_usd=cost,
         )
+        usage.total_cost_usd = price_turn(usage, (self._effective_model(),))
+        return usage
 
     def _advance_usage_baseline(self, usage: TokenUsage | None) -> None:
         """Move the thread baseline past a turn whose SDK total never arrived.
@@ -2112,7 +1793,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             cached=base.cached + usage.cache_read_input_tokens,
         )
 
-    def _fold_subagent_tokens(self, parent: TokenUsage | None, messages: list[TranscriptMessage]) -> TokenUsage | None:
+    def _fold_subagent_tokens(self, parent: TokenUsage | None, messages: list[AssistantMessage]) -> TokenUsage | None:
         """Add recovered sub-agent (child-thread) tokens to the parent turn total.
 
         Codex bills children on separate threads, so the parent's streamed total
@@ -2135,11 +1816,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         # Each child generation on its own model, then sum. The total is unpriced
         # when any priced-from-tokens part is: a partial sum would read as the bill.
         child_costs = [
-            calculate_cost(
-                m.model or self._effective_model() or "",
-                uncached_input_tokens=_message_uncached_input(m),
-                output_tokens=m.output_tokens,
-                cache_read_tokens=m.cache_read_tokens,
+            price_turn(
+                TokenUsage(
+                    uncached_input_tokens=_message_uncached_input(m),
+                    output_tokens=m.output_tokens,
+                    cache_read_input_tokens=m.cache_read_tokens,
+                ),
+                (m.model or self._effective_model(),),
             )
             for m in children
         ]
@@ -2153,7 +1836,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             total_cost_usd=None if unpriced else (base_cost or 0.0) + sum(c or 0.0 for c in child_costs),
         )
 
-    def _token_usage_from_messages(self, messages: list[TranscriptMessage]) -> TokenUsage | None:
+    def _token_usage_from_messages(self, messages: list[AssistantMessage]) -> TokenUsage | None:
         """Sum per-generation tokens off the captured assistant messages.
 
         Crash/timeout fallback: when the stream raises before returning the SDK
@@ -2171,18 +1854,13 @@ class CodexAgent(Agent[CodexAgentConfig]):
         cache_read = sum(m.cache_read_tokens for m in assistant)
         if not (uncached or output or cache_read):
             return None
-        cost = calculate_cost(
-            self._effective_model() or "",
-            uncached_input_tokens=uncached,
-            output_tokens=output,
-            cache_read_tokens=cache_read,
-        )
-        return TokenUsage(
+        usage = TokenUsage(
             uncached_input_tokens=uncached,
             output_tokens=output,
             cache_read_input_tokens=cache_read,
-            total_cost_usd=cost,
         )
+        usage.total_cost_usd = price_turn(usage, (self._effective_model(),))
+        return usage
 
     @staticmethod
     async def _run_async(func: Any, *args: Any, **kwargs: Any) -> Any:

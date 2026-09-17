@@ -2198,6 +2198,16 @@ class TestCE069HarnessParityTable:
         cap = next(line for line in lines if line.startswith("| `max_tool_calls` |"))
         assert cap.endswith("| not polled (never fires) |")
 
+    def test_run_limits_render_pins_the_model_turn_cells(self):
+        from tests.lint.harness_parity import render_run_limits_table
+
+        rows = render_run_limits_table(["max_turns", "expected_turns"]).splitlines()[2:]
+        assert len(rows) == 2
+        for row in rows:
+            cells = [cell.strip() for cell in row.strip("|").split("|")]
+            assert "TurnMonitor" in cells[1]
+            assert cells[-1] == "rejected at resolution"
+
     def test_a_run_limits_field_without_a_cell_rule_fails_the_render(self):
         from tests.lint.harness_parity import render_run_limits_table
 
@@ -2219,7 +2229,7 @@ class TestCE069HarnessParityTable:
         system_prompt = next(line for line in lines if line.startswith("| `system_prompt` |"))
         assert system_prompt.split(" | ")[5] == "enforced"
         granularity = next(line for line in lines if line.startswith("| `usage_granularity` |"))
-        assert granularity == "| `usage_granularity` | generation | turn | turn | step | step | turn |"
+        assert granularity == "| `usage_granularity` | generation | generation | generation | step | step | turn |"
 
 
 @pytest.mark.lint
@@ -2294,6 +2304,7 @@ class TestCE070NoCapOrSkillScanInAdapters:
         [
             "n = self.max_tool_calls",
             "state.max_turns_hit = True",
+            "x = limits.expected_turns",
             "limits: RunLimits | None = None",
             "from coder_eval.utils import expand_env_vars",
             "def communicate(self, max_turns=None): ...",
@@ -4054,6 +4065,159 @@ class TestCE044PluginManifestParity:
         (market_dir / "marketplace.json").write_text(json.dumps({"name": "demo", "plugins": [entry]}), encoding="utf-8")
 
 
+class TestCE071PriceTurnOnly:
+    """CE071 — adapters and the turn monitor price a turn only through ``price_turn``."""
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce071_price_turn_only import PriceTurnOnly
+
+        return list(PriceTurnOnly(filepath).check(ast.parse(source)))
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from coder_eval.pricing import calculate_cost",
+            "cost = calculate_cost(model, 1, 2)",
+            "cost = pricing.calculate_cost(model, 1, 2)",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "filepath",
+        ["/repo/src/coder_eval/agents/x_agent.py", "/repo/src/coder_eval/orchestration/turn_monitor.py"],
+    )
+    def test_calculate_cost_in_an_adapter_or_the_monitor_violates(self, source: str, filepath: str):
+        found = self._violations(source, filepath)
+        assert found
+        assert "price_turn" in found[0].message
+
+    @pytest.mark.parametrize(
+        "filepath",
+        [
+            "/repo/src/coder_eval/pricing.py",
+            "/repo/src/coder_eval/evaluation/judge_usage.py",
+            "/repo/src/coder_eval/orchestration/early_stop.py",
+        ],
+    )
+    def test_the_same_code_elsewhere_is_allowed(self, filepath: str):
+        source = "from coder_eval.pricing import calculate_cost\ncost = calculate_cost(model, 1, 2)"
+        assert not self._violations(source, filepath)
+
+    def test_price_turn_is_allowed_in_an_adapter(self):
+        source = "from coder_eval.pricing import price_turn\ncost = price_turn(usage, (model,))"
+        assert not self._violations(source, "/repo/src/coder_eval/agents/x_agent.py")
+
+
+class TestCE072EmitterSoleWriter:
+    """CE072 — an adapter writes the event protocol only through ``TurnEmitter``."""
+
+    AGENT = "/repo/src/coder_eval/agents/x_agent.py"
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce072_emitter_sole_writer import EmitterSoleWriter
+
+        return list(EmitterSoleWriter(filepath).check(ast.parse(source)))
+
+    @pytest.mark.parametrize(
+        ("imported", "module"),
+        [
+            ("AgentStartEvent", "coder_eval.streaming.events"),
+            ("AgentEndEvent", "coder_eval.streaming.events"),
+            ("TurnStartEvent", "coder_eval.streaming.events"),
+            ("TurnEndEvent", "coder_eval.streaming.events"),
+            ("ToolStartEvent", "coder_eval.streaming.events"),
+            ("ToolEndEvent", "coder_eval.streaming.events"),
+            ("TextChunkEvent", "coder_eval.streaming.events"),
+            ("AssistantMessage", "coder_eval.models"),
+            ("EventCollector", "coder_eval.streaming.collector"),
+        ],
+    )
+    def test_each_banned_constructor_in_an_adapter_violates(self, imported: str, module: str):
+        found = self._violations(f"from {module} import {imported}\nx = {imported}()\n", self.AGENT)
+        assert len(found) == 1
+        assert "TurnEmitter" in found[0].message
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from coder_eval.models import AssistantMessage as Msg\nx = Msg(content_blocks=[])\n",
+            "from ..models import AssistantMessage as Msg\nx = Msg()\n",
+            "from ..streaming.events import ToolEndEvent as End\nx = End()\n",
+            "import coder_eval.models as models\nx = models.AssistantMessage()\n",
+            "from coder_eval.streaming import EventCollector as Collector\nx = Collector()\n",
+            "from ..streaming import TurnEndEvent\nx = TurnEndEvent()\n",
+            "from coder_eval.streaming import events\nx = events.ToolEndEvent()\n",
+            "from ...streaming.collector import EventCollector as C\nx = C()\n",
+        ],
+    )
+    def test_an_alias_a_relative_import_or_an_attribute_violates(self, source: str):
+        assert len(self._violations(source, self.AGENT)) == 1
+
+    def test_a_type_only_import_and_command_telemetry_are_allowed(self):
+        source = (
+            "from coder_eval.models import AssistantMessage, CommandTelemetry\n"
+            "def f(m: AssistantMessage) -> None:\n"
+            "    CommandTelemetry(tool_name='Bash', tool_id='t', timestamp=now)\n"
+        )
+        assert not self._violations(source, self.AGENT)
+
+    def test_the_same_calls_in_the_emitter_pass(self):
+        source = "from coder_eval.streaming.events import AgentEndEvent\nx = AgentEndEvent()\n"
+        assert not self._violations(source, "/repo/src/coder_eval/streaming/emitter.py")
+
+    def test_the_live_tree_has_no_violations(self):
+        from tests.lint.runner import check_file
+
+        root = Path(__file__).parent.parent / "src" / "coder_eval"
+        assert [str(v) for path in sorted(root.rglob("*.py")) for v in check_file(path) if v.rule_id == "CE072"] == []
+
+
+class TestCE073CreateSubprocessExplicitStdin:
+    """CE073 — every asyncio subprocess spawn under src/coder_eval decides its stdin."""
+
+    SRC = "/repo/src/coder_eval/agents/x_agent.py"
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce073_create_subprocess_explicit_stdin import CreateSubprocessExplicitStdin
+
+        return list(CreateSubprocessExplicitStdin(filepath).check(ast.parse(source)))
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "p = await asyncio.create_subprocess_exec('pi', stdout=PIPE, limit=1)",
+            "p = await asyncio.create_subprocess_shell('ls', limit=1)",
+            "p = await create_subprocess_exec('pi', limit=1)",
+            "p = await create_subprocess_shell('ls', limit=1)",
+        ],
+    )
+    def test_a_spawn_without_stdin_violates(self, source: str):
+        found = self._violations(source, self.SRC)
+        assert found
+        assert "stdin=" in found[0].message
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "p = await asyncio.create_subprocess_exec('pi', stdin=asyncio.subprocess.DEVNULL, limit=1)",
+            "p = await asyncio.create_subprocess_shell('ls', stdin=asyncio.subprocess.PIPE, limit=1)",
+        ],
+    )
+    def test_an_explicit_stdin_passes(self, source: str):
+        assert not self._violations(source, self.SRC)
+
+    def test_outside_src_is_out_of_scope(self):
+        assert not self._violations("p = await asyncio.create_subprocess_exec('x')", "/repo/tests/test_x.py")
+
+
 class TestCE054EnvInfoKeyRoundTrip:
     """CE054 fires when an environment_info key is read with no writer anywhere.
 
@@ -4270,130 +4434,6 @@ class TestCE052ProcessLethalMustBeContainerGated:
         source = path.read_text(encoding="utf-8")
         assert not self._run(source, filepath=str(path))
         assert "_os._exit(137)" in source, "the guarded call must still exist"
-
-
-class TestCE061WindowViaCloseWindow:
-    """CE061 flags a reducer that computes a generation window of its own.
-
-    Every source string carries its own import line: the rule derives its
-    constructor set from the module's own `coder_eval.models` imports (shared
-    with CE060 via `_model_ctor`), so a bare `AssistantMessage(...)` with no
-    import is correctly invisible to it.
-    """
-
-    _IMPORT = "from coder_eval.models import AssistantMessage\n"
-    _HELPER = "from coder_eval.timing import close_window\n"
-
-    @staticmethod
-    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
-        import ast
-
-        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
-
-        return WindowViaCloseWindow(filepath).check(ast.parse(src))
-
-    def test_flags_a_measured_window_without_the_helper(self):
-        assert len(self._run(self._IMPORT + "m = AssistantMessage(generation_duration_ms=x)")) == 1
-
-    def test_allows_a_measured_window_when_the_helper_is_imported(self):
-        assert not self._run(self._IMPORT + self._HELPER + "m = AssistantMessage(generation_duration_ms=x)")
-
-    def test_allows_an_explicit_none(self):
-        # "Never measured" is an honest claim and needs no window arithmetic —
-        # codex's rollout rebuild and claude-code's sub-agent synthesis.
-        assert not self._run(self._IMPORT + "m = AssistantMessage(generation_duration_ms=None)")
-
-    def test_allows_the_kwarg_absent(self):
-        # Defaults to None, which is the same honest claim.
-        assert not self._run(self._IMPORT + "m = AssistantMessage(model=model)")
-
-    def test_flags_an_arbitrary_alias(self):
-        # The gap CE058 concedes: a name list guards the in-tree spelling by
-        # coincidence and misses `as Msg` outright.
-        assert (
-            len(self._run("from coder_eval.models import AssistantMessage as Msg\nm = Msg(generation_duration_ms=x)"))
-            == 1
-        )
-
-    def test_flags_the_module_attribute_spelling(self):
-        assert (
-            len(self._run("import coder_eval.models as models\nm = models.AssistantMessage(generation_duration_ms=x)"))
-            == 1
-        )
-
-    def test_accepts_a_relative_helper_import(self):
-        # `agents/` uses relative imports; matching only the absolute path
-        # would leave the rule blind for a whole file.
-        assert not self._run(
-            self._IMPORT + "from ..timing import close_window\nm = AssistantMessage(generation_duration_ms=x)"
-        )
-
-    def test_accepts_the_module_import_spelling_of_the_helper(self):
-        # `timing.close_window(...)` is a working call site; a rule that saw
-        # only the from-import would tell its author to change it.
-        assert not self._run(
-            self._IMPORT + "from coder_eval import timing\nm = AssistantMessage(generation_duration_ms=x)"
-        )
-
-    def test_an_unrelated_timing_import_does_not_disarm_the_rule(self):
-        # `from somewhere.else import timing` is not this module; accepting any
-        # name spelled `timing` would switch the rule off for a whole file.
-        assert (
-            len(
-                self._run(
-                    self._IMPORT + "from vendor.sdk import timing\nm = AssistantMessage(generation_duration_ms=x)"
-                )
-            )
-            == 1
-        )
-
-    def test_ignores_a_file_outside_agents(self):
-        assert not self._run(
-            self._IMPORT + "m = AssistantMessage(generation_duration_ms=x)",
-            filepath="src/coder_eval/streaming/collector.py",
-        )
-
-    def test_keys_on_the_helper_name_rather_than_a_literal(self):
-        from coder_eval.timing import close_window as _helper
-        from tests.lint.rules import ce061_window_via_close_window as rule_mod
-
-        assert _helper.__name__ == rule_mod._HELPER
-
-    def test_the_real_agents_tree_is_clean(self):
-        # After claude-code's single permanent suppression. Antigravity
-        # carried a temporary one until it moved onto `close_window`.
-        import pathlib
-
-        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
-        from tests.lint.runner import check_file
-
-        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "coder_eval" / "agents"
-        found = [v for path in sorted(root.glob("*.py")) for v in check_file(path, [WindowViaCloseWindow])]
-        assert not found, found
-
-    def test_the_rule_is_now_exemption_free(self):
-        """No reducer needs a `# noqa: CE061` any more, and the set is PINNED empty.
-
-        A noqa nobody needs is a noqa that outlives its reason, so this asserts
-        the exact set rather than merely that it shrank. It has earned that
-        twice: antigravity carried a TEMPORARY suppression until it moved onto
-        `close_window`, and claude-code carried a permanent one until the tool
-        subtraction moved to `timing.subtract_tool_time` — at which
-        point it could call the same shrunken helper as the other four. This
-        test is what failed each time the reason expired.
-        """
-        import ast
-        import pathlib
-
-        from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
-
-        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "coder_eval" / "agents"
-        suppressed = {
-            path.name
-            for path in sorted(root.glob("*.py"))
-            if WindowViaCloseWindow(str(path)).check(ast.parse(path.read_text(encoding="utf-8")))
-        }
-        assert suppressed == set()
 
 
 @pytest.mark.lint
@@ -4901,8 +4941,8 @@ class TestCE058NoTimingLiteral:
         assert not self._run("cfg = TurnRecord(tool_union_ms_limit=0)")
 
     # Form 6 — the PLAIN assignment. Form 4 without the `is None` guard, or
-    # under a guard that tests something else. The live `_finalize_commands`
-    # defect was caught by form 4 only because it happened to spell its guard
+    # under a guard that tests something else. The live defect in the
+    # Claude adapter's former command finalizer was caught by form 4 only because it happened to spell its guard
     # `if cmd.duration_ms is None:`; written under the enclosing
     # `if cmd.result_status is None:` instead — which reads just as naturally
     # and books the identical lie — it was invisible to forms 1-5.
@@ -4966,330 +5006,14 @@ class TestCE058NoTimingLiteral:
         assert not [v for v in check_file(path) if v.rule_id == "CE058"]
 
 
-class TestCE059GenerationWindowIsTwoReads:
-    """CE059 flags a generation window built from one clock read."""
-
-    @staticmethod
-    def _run(src: str, filepath: str = "src/coder_eval/agents/antigravity_agent.py"):
-        import ast
-
-        from tests.lint.rules.ce059_generation_window_is_two_reads import GenerationWindowIsTwoReads
-
-        return GenerationWindowIsTwoReads(filepath).check(ast.parse(src))
-
-    def test_flags_the_same_name_for_both_bounds(self):
-        assert self._run("m = AssistantMessage(started_at=now, completed_at=now, generation_duration_ms=0.0)")
-
-    def test_flags_an_omitted_duration_too(self):
-        # An omitted duration is not a disclaimer; the field defaults to None
-        # but the call has not said so, and the bounds still read as a window.
-        assert self._run("m = AssistantMessage(started_at=now, completed_at=now)")
-
-    def test_flags_the_alias_spelling_too(self):
-        assert self._run("m = AssistantMessageTelemetry(started_at=now, completed_at=now, generation_duration_ms=g)")
-
-    def test_allows_collapsed_bounds_when_the_call_says_no_window_exists(self):
-        # Passing None in the field built to say "unmeasurable" is the honest
-        # record, not a claim the two stamps have to support.
-        assert not self._run("m = AssistantMessage(started_at=now, completed_at=now, generation_duration_ms=None)")
-
-    def test_allows_two_different_names(self):
-        assert not self._run("m = AssistantMessage(started_at=started, completed_at=completed)")
-
-    def test_ignores_attribute_expressions(self):
-        # `self.a` vs `self.b` cannot be compared without guessing.
-        assert not self._run("m = AssistantMessage(started_at=self.mark, completed_at=self.mark)")
-
-    def test_ignores_a_call_expression(self):
-        assert not self._run("m = AssistantMessage(started_at=datetime.now(), completed_at=datetime.now())")
-
-    def test_ignores_an_unrelated_constructor(self):
-        assert not self._run("s = Span(started_at=now, completed_at=now)")
-
-    def test_is_out_of_scope_outside_agents(self):
-        assert not self._run(
-            "m = AssistantMessage(started_at=now, completed_at=now)",
-            filepath="src/coder_eval/orchestrator.py",
-        )
-
-    def test_noqa_suppresses(self):
-        from tests.lint.runner import check_file
-
-        # The Antigravity flush carries the only live instance, noqa'd until
-        # Phase 3 replaces it with a real measured window.
-        path = SRC / "coder_eval/agents/antigravity_agent.py"
-        assert path.is_file(), "the noqa fixture file must exist or this test passes vacuously"
-        assert not [v for v in check_file(path) if v.rule_id == "CE059"]
-
-
-class TestCE060MessageIdDeclared:
-    """CE060 flags an assistant message built without an identity.
-
-    Every source string carries its own import line: the rule derives its
-    constructor set from the module's own `coder_eval.models` imports, so a
-    bare `AssistantMessage(...)` with no import is correctly invisible to it.
-    """
-
-    _IMPORT = "from coder_eval.models import AssistantMessage\n"
-
-    @staticmethod
-    def _run(src: str, filepath: str = "src/coder_eval/agents/antigravity_agent.py"):
-        import ast
-
-        from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
-
-        return MessageIdDeclared(filepath).check(ast.parse(src))
-
-    def test_flags_an_omitted_message_id(self):
-        assert self._run(self._IMPORT + "m = AssistantMessage(model=model, output_tokens=3)")
-
-    def test_flags_an_explicit_none(self):
-        # Passing None is a claim that no id exists, which is never true for a
-        # harness that can synthesize one.
-        assert self._run(self._IMPORT + "m = AssistantMessage(model=model, message_id=None)")
-
-    def test_flags_the_in_tree_alias_spelling(self):
-        assert self._run(
-            "from coder_eval.models import AssistantMessage as AssistantMessageTelemetry\n"
-            "m = AssistantMessageTelemetry(model=model)"
-        )
-
-    def test_flags_an_arbitrary_alias(self):
-        # The case a hardcoded name list misses entirely — the whole reason
-        # CE060 resolves aliases instead.
-        assert self._run("from coder_eval.models import AssistantMessage as Msg\nm = Msg(model=model)")
-
-    def test_flags_the_module_alias_spelling(self):
-        # The realistic way to write `models.AssistantMessage(...)`: the class
-        # itself is never bound, so only the attribute is left to match on.
-        assert self._run("import coder_eval.models as models\nm = models.AssistantMessage(model=model)")
-
-    def test_flags_the_attribute_spelling_beside_a_direct_import(self):
-        assert self._run(self._IMPORT + "m = models.AssistantMessage(model=model)")
-
-    def test_flags_a_relative_import(self):
-        # `agents/` does use relative imports, and the absolute path test alone
-        # left the rule silently blind for a whole file.
-        assert self._run("from ..models import AssistantMessage\nm = AssistantMessage(model=model)")
-
-    def test_keys_on_the_model_name_rather_than_a_literal(self):
-        # The constant moved into the shared resolver when CE061 was added; it
-        # is still derived from the model, which is the property under test.
-        from coder_eval.models import AssistantMessage as _Model
-        from tests.lint.rules import _model_ctor
-
-        assert _Model.__name__ == _model_ctor.ASSISTANT_MESSAGE
-
-    def test_flags_a_star_expanded_call(self):
-        # `**fields` has not declared the field at the site.
-        assert self._run(self._IMPORT + "m = AssistantMessage(**fields)")
-
-    def test_allows_a_literal_id(self):
-        assert not self._run(self._IMPORT + 'm = AssistantMessage(message_id="x")')
-
-    def test_allows_an_fstring_id(self):
-        assert not self._run(self._IMPORT + 'm = AssistantMessage(message_id=f"{turn_id}-msg-{i}")')
-
-    def test_allows_a_fallback_expression(self):
-        # The runtime-None blind spot, exempted deliberately: passing a
-        # fallback expression IS deciding what the id is.
-        assert not self._run(self._IMPORT + "m = AssistantMessage(message_id=str(x) or None)")
-
-    def test_allows_a_star_expanded_call_that_also_passes_the_field(self):
-        assert not self._run(self._IMPORT + "m = AssistantMessage(**fields, message_id=mid)")
-
-    def test_ignores_an_unrelated_constructor(self):
-        assert not self._run(self._IMPORT + "s = Span(model=model)")
-
-    def test_ignores_a_module_with_no_matching_import(self):
-        # Nothing is bound, so the rule claims nothing here. A construction
-        # site has to import the class to reach it.
-        assert not self._run("m = AssistantMessage(model=model)")
-
-    def test_is_out_of_scope_outside_agents(self):
-        assert not self._run(
-            self._IMPORT + "m = AssistantMessage(model=model)",
-            filepath="src/coder_eval/orchestrator.py",
-        )
-
-    def test_the_real_antigravity_flush_declares_its_id(self):
-        from tests.lint.runner import check_file
-
-        path = SRC / "coder_eval/agents/antigravity_agent.py"
-        assert path.is_file(), "the fixture file must exist or this test passes vacuously"
-        assert not [v for v in check_file(path) if v.rule_id == "CE060"]
-
-
-class TestCE063NoBusyMsInAgents:
-    """CE063 flags a reducer that would subtract tool time itself.
-
-    The subtraction lives once, in
-    `coder_eval.timing.subtract_tool_time`. A reducer that also
-    does it has its tool time taken out TWICE — once by itself, once by the
-    collector — which under-reports generation on that harness alone.
-    """
-
-    @staticmethod
-    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
-        import ast
-
-        from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
-
-        return NoBusyMsInAgents(filepath).check(ast.parse(src))
-
-    def test_flags_the_bare_name_import(self):
-        assert len(self._run("from coder_eval.timing import busy_ms")) == 1
-
-    def test_flags_it_under_an_alias(self):
-        # The import is what is banned, whatever it is bound to.
-        assert len(self._run("from coder_eval.timing import busy_ms as union")) == 1
-
-    def test_flags_it_alongside_an_allowed_import(self):
-        assert len(self._run("from coder_eval.timing import busy_ms, close_window")) == 1
-
-    def test_flags_a_relative_import(self):
-        # `agents/` uses relative imports; matching only the absolute path
-        # would leave the rule blind for a whole file.
-        assert len(self._run("from ..timing import busy_ms")) == 1
-
-    def test_flags_the_module_attribute_spelling(self):
-        assert len(self._run("from coder_eval import timing\nx = timing.busy_ms(s, lo, hi)")) == 1
-
-    def test_does_not_fire_on_close_window_through_the_module(self):
-        """The exact false positive a naive inversion of CE061's resolver gives.
-
-        `_imports_the_helper` returns True for a bare module import so that
-        `timing.close_window(...)` counts as reaching the helper. Inverted into
-        a ban, that branch flags every reducer importing the module — which
-        after the migration is four of the five.
-        """
-        assert not self._run("from coder_eval import timing\nx = timing.close_window(mark=m, now=n)")
-
-    def test_does_not_fire_on_close_window_by_name(self):
-        assert not self._run("from coder_eval.timing import close_window\nx = close_window(mark=m, now=n)")
-
-    def test_does_not_fire_on_an_unrelated_attribute_named_busy_ms(self):
-        # `self.busy_ms` is not `timing.busy_ms`; only the module spelling counts.
-        assert not self._run("x = self.busy_ms")
-
-    def test_does_not_fire_outside_agents(self):
-        # The collector is where the subtraction belongs, so it must import it.
-        assert not self._run("from coder_eval.timing import busy_ms", filepath="src/coder_eval/streaming/collector.py")
-
-    def test_is_suppressible(self, tmp_path):
-        from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
-        from tests.lint.runner import check_file
-
-        agents = tmp_path / "src" / "coder_eval" / "agents"
-        agents.mkdir(parents=True)
-        target = agents / "pi_agent.py"
-        target.write_text("from coder_eval.timing import busy_ms  # noqa: CE063\n", encoding="utf-8")
-        assert not check_file(target, [NoBusyMsInAgents])
-
-
-class TestCE064TurnBracketOnTheClock:
-    """CE064 flags a clocked reducer that lets its turn BRACKET default.
-
-    `decompose_turn` subtracts a generation-window bound from an
-    AgentStart/AgentEnd timestamp. A harness that derives the first from a
-    `TurnClock` and lets the second fall back to `StreamEvent.timestamp`'s
-    `default_factory=datetime.now` puts two bases inside one subtraction.
-    Measured on antigravity: a tail of -0.017 ms, an agent end stamped 17 us
-    before its own last message finished, clamped to the `0.0` that means
-    "measured, and instant".
-    """
-
-    CLOCKED = "from coder_eval.timing import TurnClock\n"
-    START = "from coder_eval.streaming.events import AgentStartEvent\n"
-    END = "from coder_eval.streaming.events import AgentEndEvent\n"
-
-    @staticmethod
-    def _run(src: str, filepath: str = "src/coder_eval/agents/pi_agent.py"):
-        import ast
-
-        from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
-
-        return TurnBracketOnTheClock(filepath).check(ast.parse(src))
-
-    def test_flags_a_defaulted_agent_start(self):
-        assert len(self._run(self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t', prompt='p')")) == 1
-
-    def test_flags_a_defaulted_agent_end(self):
-        assert len(self._run(self.CLOCKED + self.END + "e = AgentEndEvent(task_id='t', status=s)")) == 1
-
-    def test_flags_both_brackets_in_one_module(self):
-        src = (
-            self.CLOCKED + self.START + self.END + "a = AgentStartEvent(task_id='t')\nb = AgentEndEvent(task_id='t')\n"
-        )
-        assert len(self._run(src)) == 2
-
-    def test_accepts_an_explicit_timestamp(self):
-        src = self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t', timestamp=state.clock.now())"
-        assert not self._run(src)
-
-    def test_accepts_it_through_any_clock_expression(self):
-        """Presence, not spelling — see the rule's BLIND SPOT note.
-
-        Three harnesses reach their clock three ways (a `communicate` local,
-        `state.clock`, `self.clock`); pinning a spelling would make the rule a
-        syntax check on their internal structure.
-        """
-        for expr in ("clock.now()", "self.clock.now()", "state.clock.now()"):
-            src = self.CLOCKED + self.END + f"e = AgentEndEvent(task_id='t', timestamp={expr})"
-            assert not self._run(src), expr
-
-    def test_does_not_fire_on_an_unclocked_harness(self):
-        """Codex and OpenCode take their spans from the CLI's epoch stamps.
-
-        They deliberately have no `TurnClock`, so a raw `datetime.now()`
-        bracket is CONSISTENT with their bounds. Firing here would push them
-        toward the mixed basis the rule exists to prevent.
-        """
-        assert not self._run(self.START + "e = AgentStartEvent(task_id='t', prompt='p')")
-
-    def test_starts_applying_the_day_an_unclocked_harness_adopts_one(self):
-        # Scope is derived from the import, never a hardcoded harness list.
-        src = self.START + "e = AgentStartEvent(task_id='t')"
-        assert not self._run(src, filepath="src/coder_eval/agents/codex_agent.py")
-        assert len(self._run(self.CLOCKED + src, filepath="src/coder_eval/agents/codex_agent.py")) == 1
-
-    def test_resolves_an_aliased_import(self):
-        src = self.CLOCKED + "from coder_eval.streaming.events import AgentEndEvent as Done\n" + "e = Done(task_id='t')"
-        assert len(self._run(src)) == 1
-
-    def test_resolves_an_aliased_clock_import(self):
-        """The scope side of the same question: `TurnClock as Clock` still clocks the module.
-
-        A harness reaching its clock through an alias is still a clocked
-        harness; missing the binding would put it silently out of scope, which
-        is the half a hardcoded harness list would also get wrong.
-        """
-        src = "from coder_eval.timing import TurnClock as Clock\n" + self.START + "e = AgentStartEvent(task_id='t')"
-        assert len(self._run(src)) == 1
-
-    def test_resolves_a_relative_import(self):
-        src = (
-            "from ..timing import TurnClock\nfrom ..streaming.events import AgentStartEvent\ne = AgentStartEvent(t='t')"
-        )
-        assert len(self._run(src)) == 1
-
-    def test_does_not_fire_outside_agents(self):
-        src = self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t')"
-        assert not self._run(src, filepath="src/coder_eval/streaming/collector.py")
-
-    def test_does_not_fire_on_an_unrelated_event(self):
-        src = self.CLOCKED + "from coder_eval.streaming.events import ToolEndEvent\ne = ToolEndEvent(task_id='t')"
-        assert not self._run(src)
-
-    def test_is_suppressible(self, tmp_path):
-        from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
-        from tests.lint.runner import check_file
-
-        agents = tmp_path / "src" / "coder_eval" / "agents"
-        agents.mkdir(parents=True)
-        target = agents / "pi_agent.py"
-        target.write_text(
-            self.CLOCKED + self.START + "e = AgentStartEvent(task_id='t')  # noqa: CE064\n",
-            encoding="utf-8",
-        )
-        assert not check_file(target, [TurnBracketOnTheClock])
+@pytest.mark.lint
+class TestPyrightConfigCoversLiveTests:
+    def test_include_names_every_live_test_and_the_byoa_demo(self):
+        from tests.lint.pyright_config import REPO_ROOT, build_config
+
+        include = build_config()["include"]
+        assert isinstance(include, list)
+        live = sorted(p.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "tests").glob("*_live.py"))
+        assert live, "no tests/*_live.py found, so this test would pass vacuously"
+        missing = [p for p in [*live, "tests/fixtures/byoa_demo_plugin/byoa_demo.py"] if p not in include]
+        assert not missing, f"the second pyright pass skips {missing}"

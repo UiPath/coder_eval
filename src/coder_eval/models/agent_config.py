@@ -42,8 +42,8 @@ one thing only — a run from before the marker existed.
 class LocalPluginConfig(TypedDict):
     """Vendor-neutral local skills source: a plugin root or a bare skills directory.
 
-    Staged by ``orchestration.plugin_staging.stage_plugins`` into one canonical root
-    before the agent starts. A plain dict at runtime (TypedDict), so the agnostic
+    Staged by ``orchestration.plugin_staging.stage_plugins`` before the agent starts, into a
+    root that holds each plugin whole plus a skills index. A plain dict at runtime (TypedDict), so the agnostic
     ``BaseAgentConfig`` declares ``plugins`` without an SDK type.
     """
 

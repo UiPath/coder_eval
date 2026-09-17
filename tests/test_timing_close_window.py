@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from coder_eval.timing import busy_ms, close_window, decompose_turn, main_thread_tool_spans, union_ms
+from coder_eval.timing import Window, busy_ms, close_window, decompose_turn, main_thread_tool_spans, union_ms
 
 
 MARK = datetime(2026, 9, 11, 12, 0, 0)
@@ -45,28 +45,33 @@ class TestCloseWindow:
     """
 
     def test_the_window_is_the_whole_span_from_the_mark(self):
-        started, span_ms = close_window(mark=MARK, now=_at(1000))
-        assert started == MARK
-        assert span_ms == pytest.approx(1000.0)
+        window = close_window(mark=MARK, now=_at(1000))
+        assert window == Window(started_at=MARK, completed_at=_at(1000))
+        assert window.duration_ms == pytest.approx(1000.0)
 
     def test_item_start_before_the_mark_wins(self):
         # A stamp that went backwards: the window must cover the item, so the
         # min() moves the start back rather than inverting the span.
-        started, span_ms = close_window(mark=MARK, now=_at(1000), item_start=_at(-200))
-        assert started == _at(-200)
-        assert span_ms == pytest.approx(1200.0)
+        window = close_window(mark=MARK, now=_at(1000), item_start=_at(-200))
+        assert window.started_at == _at(-200)
+        assert window.duration_ms == pytest.approx(1200.0)
 
     def test_item_start_after_the_mark_keeps_the_mark(self):
         # The normal tiling case: the gap between the previous close and this
         # item's first stamp IS model time and belongs inside the window.
-        started, span_ms = close_window(mark=MARK, now=_at(1000), item_start=_at(400))
-        assert started == MARK
-        assert span_ms == pytest.approx(1000.0)
+        window = close_window(mark=MARK, now=_at(1000), item_start=_at(400))
+        assert window.started_at == MARK
+        assert window.duration_ms == pytest.approx(1000.0)
 
     def test_an_inverted_window_clamps_to_zero_rather_than_going_negative(self):
-        started, span_ms = close_window(mark=_at(1000), now=MARK)
-        assert started == _at(1000)
-        assert span_ms == 0.0
+        window = close_window(mark=_at(1000), now=MARK)
+        assert (window.started_at, window.completed_at) == (_at(1000), MARK)
+        assert window.duration_ms == 0.0
+
+    def test_a_window_is_frozen(self):
+        window = close_window(mark=MARK, now=_at(1000))
+        with pytest.raises(AttributeError):
+            window.started_at = _at(5)  # type: ignore[misc]
 
     def test_mark_is_keyword_only_and_has_no_default(self):
         # A reducer cannot open a window without STATING what it tiles from.

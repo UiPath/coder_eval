@@ -3,40 +3,20 @@
 # by-design model-hub ↔ registry type-level cycle; runtime imports are lazy per CE017
 # pyright: reportImportCycles=false
 
-import logging
+import asyncio
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, NoReturn, Protocol
+from typing import Any, ClassVar
 
-from .errors import AgentCrashError, TurnTimeoutError
-from .errors.agent import format_timeout_reason, truncate_crash_message
 from .models import AgentState as AgentState
-from .models import ApiRoute, BaseAgentConfig, HarnessContract, ToolNameMap, TurnRecord
+from .models import ApiRoute, BaseAgentConfig, HarnessContract, TimingBasis, ToolNameMap
 from .streaming.callbacks import StreamCallback
-from .streaming.collector import EventCollector
-from .streaming.events import AgentEndStatus, StopReason
-
-
-logger = logging.getLogger(__name__)
-
-
-class _FinalizeFn(Protocol):
-    """The per-turn ``finalize`` callback shared by every agent's turn-state.
-
-    Pinning the exact keyword-only signature here (instead of a loose
-    ``Callable[..., None]``) lets pyright catch a future ``Agent`` subclass that
-    wires an incompatible ``finalize`` into the shared mid-turn failure kernels.
-    """
-
-    def __call__(
-        self,
-        status: AgentEndStatus,
-        *,
-        crashed: bool = ...,
-        crash_reason: str | None = ...,
-    ) -> None:
-        """Finalize the current turn with the given end status."""
+from .streaming.emitter import Clock, TurnEmitter, TurnOutcome
+from .streaming.events import StopReason
+from .timing import TurnClock
 
 
 class Agent[ConfigT: BaseAgentConfig](ABC):
@@ -53,23 +33,7 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     This ensures mypy enforces the correct config type for each agent.
     """
 
-    pending_turn: TurnRecord | None = None
-    """Side-channel for partial turn records from failed ``communicate()`` calls.
-
-    Implementations must set this to a ``crashed=True`` TurnRecord before
-    raising any mid-turn exception that carries captured telemetry. Callers
-    must read this slot after every failed ``communicate()`` call, then call
-    ``discard_pending_turn()`` to clear it. Outside ``communicate()``, this
-    slot is always None.
-    """
-
-    # Class-level defaults so a subclass gets the behaviour without re-declaring it.
-    # `_iteration_was_incremented` is consumed by `discard_pending_turn()`, which
-    # rolls the counter back exactly once per failed turn.
-    # Rationale: .claude/notes/reporting.md § The Agent ABC contract
     _state: AgentState = AgentState.WORKING
-    _iteration: int = 0
-    _iteration_was_incremented: bool = False
 
     # Which uniform config fields this harness honors. No default: registration
     # rejects a class that does not declare one.
@@ -95,95 +59,9 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         self.route = route
         self.cost_log_tags = cost_log_tags
 
-    def _begin_turn(self) -> None:
-        """Mark the start of a ``communicate()`` turn: reset the pending slot and
-        bump the iteration counter so a mid-turn failure can be rolled back.
-
-        Call once at the top of every ``communicate()`` implementation.
-        """
-        self.pending_turn = None
-        self._iteration += 1
-        self._iteration_was_incremented = True
-
-    def _end_turn_ok(self) -> None:
-        """Mark a turn as cleanly completed so its iteration bump stands.
-
-        Call on the success path of ``communicate()`` (before returning).
-        """
-        self._iteration_was_incremented = False
-
     def _mark_stopped(self) -> None:
-        """Common ``stop()`` tail: clear the pending slot and enter FINISHED.
-
-        Subclasses call this after their own resource teardown.
-        """
-        self.pending_turn = None
+        """Common ``stop()`` tail: enter FINISHED. Subclasses call this after their own teardown."""
         self._state = AgentState.FINISHED
-
-    # --- Shared mid-turn failure kernels --------------------------------------
-    #
-    # Each agent keeps its OWN outer try/except/finally bracket -- the brackets
-    # genuinely differ -- and calls these from inside its existing branches. They
-    # take the agent's own ``finalize`` callable, so the helper never needs to know
-    # how each agent assembles its end-event payload.
-
-    def _finalize_and_raise_timeout(
-        self, finalize: _FinalizeFn, timeout: float, *, cause: BaseException | None = None
-    ) -> NoReturn:
-        """Mark ERROR, finalize the turn as a timed-out crash, raise TurnTimeoutError.
-
-        Reproduces the per-branch ``_state=ERROR -> finalize(TIMEOUT) -> raise`` triple
-        that appears three times in Claude plus once in Codex. When called from inside
-        an ``except ... as e`` block, pass ``cause=e`` to preserve the explicit
-        ``__cause__`` link; otherwise Python's implicit ``__context__`` chaining stands.
-        """
-        self._state = AgentState.ERROR
-        finalize(AgentEndStatus.TIMEOUT, crashed=True, crash_reason=format_timeout_reason(timeout))
-        if cause is not None:
-            raise TurnTimeoutError(timeout, iteration=self._iteration) from cause
-        raise TurnTimeoutError(timeout, iteration=self._iteration)
-
-    def _finalize_and_raise_crash(
-        self, finalize: _FinalizeFn, message: str, *, cause: BaseException | None = None
-    ) -> NoReturn:
-        """Mark ERROR, finalize the turn as a crash, raise AgentCrashError.
-
-        ``message`` is the agent-built error string (the helper does NOT construct
-        it). ``crash_reason`` is truncated for storage while the raised
-        ``AgentCrashError`` carries ``message`` as passed (truncation is idempotent,
-        so an already-truncated message round-trips unchanged). When called from
-        inside an ``except ... as e`` block, pass ``cause=e`` to preserve the explicit
-        ``__cause__`` link; otherwise Python's implicit ``__context__`` chaining stands.
-        """
-        self._state = AgentState.ERROR
-        finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason=truncate_crash_message(message))
-        if cause is not None:
-            raise AgentCrashError(message) from cause
-        raise AgentCrashError(message)
-
-    def _finalize_external_cancel(self, finalize: _FinalizeFn) -> None:
-        """Finalize a turn cancelled from outside (the task watchdog) as a crash. Does NOT raise.
-
-        Only the ``crashed`` branch parks the record on ``pending_turn``; finalizing
-        as ``COMPLETED`` drops it, and the unwinding frame takes the return value
-        with it, so a killed turn's telemetry survives only via this path. The caller
-        re-raises the ``CancelledError`` afterwards.
-        """
-        self._state = AgentState.ERROR
-        finalize(AgentEndStatus.CRASHED, crashed=True, crash_reason="turn cancelled")
-
-    def _capture_partial_turn(self, collector: EventCollector) -> None:
-        """Build the crashed partial ``TurnRecord`` into ``pending_turn`` (best-effort).
-
-        Shared crash-tail of each agent's ``finalize``: if assembling the partial
-        record itself raises, swallow it and leave ``pending_turn`` None rather than
-        masking the original mid-turn failure.
-        """
-        try:
-            self.pending_turn = collector.build_turn_record()
-        except Exception:
-            logger.exception("Failed to build partial turn record")
-            self.pending_turn = None
 
     @abstractmethod
     async def start(
@@ -206,8 +84,10 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 instead of walking up from CWD. An external ``PLUGIN_TOOLS_DIR`` in
                 the process environment still wins. Implementations that don't shell
                 out may ignore this argument.
-            plugin_root: The staged canonical plugin root (``<root>/skills/<name>/SKILL.md``),
-                or None when the task sets no plugins. Deliver it the harness's native way.
+            plugin_root: The staged plugin root, or None when the task sets no plugins. It holds
+                ``<root>/skills/<name>/SKILL.md`` (every harness) and ``<root>/plugins/<name>`` (each
+                authored plugin whole, for a harness that loads full plugins). Deliver it the
+                harness's native way.
         """
         pass
 
@@ -216,50 +96,64 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         self,
         user_input: str,
         *,
+        iteration: int,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         should_stop: Callable[[], StopReason | None] | None = None,
-    ) -> TurnRecord:
-        """Send a message to the agent and receive its response.
+    ) -> TurnOutcome:
+        """Run one turn and return its outcome; a crash or timeout is an outcome, not an exception.
 
         Args:
             user_input: The message/prompt to send to the agent
+            iteration: The caller's turn number, stamped on the record; a retry of
+                the same turn passes the same number.
             stream_callback: Optional callback for real-time event streaming
-            timeout: Hard wall-clock deadline in seconds. When exceeded the
-                agent must force-terminate any in-flight subprocess and raise
-                TurnTimeoutError. Do not rely solely on asyncio cancellation --
-                some SDKs swallow it.
+            timeout: Hard wall-clock deadline in seconds. When exceeded the agent
+                force-terminates any in-flight subprocess and returns a ``TIMEOUT``
+                outcome. Do not rely solely on asyncio cancellation -- some SDKs
+                swallow it.
             should_stop: The run's single stop poll. An implementation with
                 ``contract.cooperative_stop`` calls it at each safe boundary; a
-                non-None reason means stop pulling work, remember the reason, and
-                finalize with ``end_status_for(reason)`` (``crashed=False``, no
-                raise). Agents that do not support it accept and ignore it.
+                non-None reason means stop pulling work and finalize with
+                ``end_status_for(reason)``. Agents that do not support it ignore it.
 
         Returns:
-            TurnRecord containing the complete interaction
+            The ``TurnOutcome`` from the turn's ``TurnEmitter``: ``finalize(...)`` for a
+            clean status, ``fail(...)`` for ``CRASHED`` / ``TIMEOUT`` (its record is
+            ``crashed=True``).
 
         Raises:
-            RuntimeError: If agent is not started or communication fails.
-            TurnTimeoutError: Timeout elapsed; implementations must set
-                ``self.pending_turn`` to a ``crashed=True`` partial TurnRecord
-                before raising if telemetry was captured.
-            AgentCrashError: Agent failed mid-turn; same ``pending_turn`` contract.
+            asyncio.CancelledError: the turn was cancelled from outside. The agent
+                ends the turn first with ``fail(CRASHED, "turn cancelled")``, then
+                re-raises. Any other exception is a harness bug.
 
-        On success ``pending_turn`` must be None. On failure it holds the partial
-        record, and only ``discard_pending_turn`` — which the caller invokes after
-        every failed call — rolls back per-turn bookkeeping.
-
-        The agent is the SOLE emitter of the event protocol. Emit exactly one
-        ``AgentStartEvent`` at entry and one matching ``AgentEndEvent`` from
-        ``finally`` on every exit path, one ``TurnStartEvent`` / ``TurnEndEvent``
-        pair per inner turn, and a ``ToolStartEvent`` closed by a ``ToolEndEvent``
-        for every tool call (``status=unresolved`` when a crash orphans one). Fan
-        every event through an internal ``EventCollector``, which builds the
-        returned ``TurnRecord``, and through the caller's ``stream_callback``.
+        Open one ``TurnEmitter`` per turn with ``_open_emitter``; it is the sole writer
+        of the event protocol.
 
         Rationale: .claude/notes/agents.md § Shared turn lifecycle
         """
         pass
+
+    def _open_emitter(
+        self,
+        *,
+        prompt: str,
+        iteration: int,
+        model: str | None,
+        task_id: str,
+        stream_callback: StreamCallback | None,
+    ) -> TurnEmitter:
+        """The turn's emitter, on a fresh ``TurnClock`` or the wall clock per ``contract.timing_basis``."""
+        clock: Clock = TurnClock() if self.contract.timing_basis is TimingBasis.TURN_CLOCK else datetime
+        return TurnEmitter(
+            task_id=task_id,
+            iteration=iteration,
+            prompt=prompt,
+            model=model,
+            basis=self.contract.timing_basis,
+            clock=clock,
+            sinks=[stream_callback] if stream_callback is not None else [],
+        )
 
     @abstractmethod
     async def stop(self) -> None:
@@ -274,24 +168,6 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         cancellation. Default implementation is a no-op.
         """
         return None
-
-    async def discard_pending_turn(self) -> None:
-        """Clear ``pending_turn`` and roll back the iteration counter.
-
-        Rolls back when either signal says a turn was attempted: the
-        ``_iteration_was_incremented`` flag (survives partial-record assembly
-        swallowing an exception, which leaves ``pending_turn=None`` — so the
-        flag, not ``pending_turn``, is the reliable signal) or a non-None
-        ``pending_turn`` (for callers, e.g. tests, that set it directly).
-
-        Idempotent: after the first call both signals are cleared. Call only
-        after a failed ``communicate()``; never after a success.
-        """
-        should_rollback = self._iteration_was_incremented or self.pending_turn is not None
-        self.pending_turn = None
-        self._iteration_was_incremented = False
-        if should_rollback and self._iteration > 0:
-            self._iteration -= 1
 
     def kill_sync(self) -> None:
         """Synchronous variant of ``kill`` for callers on non-asyncio threads.
@@ -319,6 +195,14 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         """
         return None
 
+    async def harness_version(self) -> str | None:
+        """The version of the CLI or SDK this agent drives, read after ``start``; ``None`` when unknown.
+
+        The orchestrator records it as ``environment_info.harness_version``. It runs where
+        the agent runs, so under ``driver: docker`` it reads the container's harness.
+        """
+        return None
+
     def get_environment_info(self) -> dict[str, Any]:
         """Agent-specific routing/environment details to persist into the run's
         ``EvaluationResult.environment_info``.
@@ -341,3 +225,31 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
             "system_prompt_semantics": self.contract.system_prompt_semantics or "unknown",
             "harness_contract": self.contract.model_dump(mode="json"),
         }
+
+
+_VERSION_PROBE_SECONDS = 10.0
+_VERSION_PROBE_LIMIT_BYTES = 1024 * 1024
+
+
+async def command_version(argv: list[str], env: dict[str, str] | None = None) -> str | None:
+    """The first non-empty stdout line of ``argv`` (a ``--version`` call), or ``None`` on any failure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            limit=_VERSION_PROBE_LIMIT_BYTES,
+        )
+    except OSError:
+        return None
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_VERSION_PROBE_SECONDS)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        return None
+    if proc.returncode != 0:
+        return None
+    return next((line.strip() for line in stdout.decode("utf-8", "replace").splitlines() if line.strip()), None)

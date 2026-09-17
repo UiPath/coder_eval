@@ -116,6 +116,11 @@ agent:
 > trips the turn ends `COMPLETED` with `result_summary.subtype == "error_max_turns"`,
 > while `run_limits.max_tool_calls` is the framework's cap on resolved tool calls
 > (the `TurnMonitor` enforces it, as on every harness); both apply.
+>
+> `run_limits.max_turns` counts main-thread API responses across the whole task, not SDK
+> turns per call. A sub-agent's responses do not count, and a response interrupted by its
+> sub-agent counts once. The stop lands when response N+1 arrives, so that response is
+> recorded in part and its tools do not run. `sdk_options.max_turns` is unrelated.
 
 > **System-prompt reproducibility.** In `append` mode the preset's *dynamic
 > sections* (working directory, git status, auto-memory) are excluded so the system
@@ -189,9 +194,11 @@ simulator force `[]` for the same reason.)
 - **Plugins** are supplied as `plugins: [{type: local, path: …}]`. Point `path` at a
   plugin root (`<path>/skills/<name>/SKILL.md`) or at a bare skills directory
   (`<path>/<name>/SKILL.md`). coder-eval stages both into `<run_dir>/plugin_root` and
-  hands that root to the SDK. A path with no skill fails `plan`. Only skills are
-  staged: a plugin's `agents/`, `commands/` and `hooks/` do not reach the evaluated
-  agent. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
+  hands the SDK one local plugin per entry. A plugin root loads whole under its own name
+  (`<plugin>:<skill>`), with its agents, commands, hooks and MCP servers; a bare skills
+  directory loads its skills only. Plugins that offer no skill at all fail `plan`. To measure a skill
+  alone, point `path` at the skills directory. See
+  [Plugin staging](HARNESS_PARITY.md#plugin-staging).
 - **`PLUGIN_TOOLS_DIR`** pins the canonical `node_modules/@uipath` directory for
   UiPath CLI plugin discovery; when unset the sandbox derives it from the resolved
   `uip` binary. See [User Guide → Environment Variables](../USER_GUIDE.md#environment-variables).
@@ -237,10 +244,11 @@ event to the task log.
   advances on clean (non-error) turns.
 - **Timeouts** are enforced by a `ThreadedWatchdog` (an OS-thread timer immune to
   event-loop stalls) plus an in-loop wall-clock guard; on breach it SIGKILLs the CLI
-  subprocess and raises `TurnTimeoutError` with a partial `TurnRecord` preserved.
-- **Crashes** raise `AgentCrashError` with assembled stderr; the orchestrator drains
-  the partial turn and rolls back. Cost is backfilled from the rate card when a run
-  is killed before a terminal result message arrives.
+  subprocess and `communicate` returns a `TIMEOUT` outcome whose record is the
+  `crashed=True` partial turn.
+- **Crashes** return a `CRASHED` outcome with assembled stderr as the reason; the
+  orchestrator appends the partial record and retries. Cost is backfilled from the rate
+  card when a run is killed before a terminal result message arrives.
 
 ## References
 

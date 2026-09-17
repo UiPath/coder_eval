@@ -898,8 +898,9 @@ def _result_with_expected_tool_calls(
     commands_per_turn: list[int] | None = None,
     final_reply: str | None = None,
     task_config: bool = True,
+    model_turns: int | None = None,
 ) -> EvaluationResult:
-    """Build an EvaluationResult that exercises expected_tool_calls_overage.
+    """Build an EvaluationResult that exercises expected_tool_calls_overage and expected_turns_overage.
 
     Visible turns = sum(commands_per_turn) + (1 if final_reply else 0).
     """
@@ -930,12 +931,25 @@ def _result_with_expected_tool_calls(
             )
         )
     result = _make_result(iterations=turns)
+    result.model_turns = model_turns
     if task_config:
         resolved: dict = {}
         if resolved_run_limits is not None:
             resolved["run_limits"] = resolved_run_limits
         result.task_config = TaskConfigRecord(resolved=resolved, source_yaml="")
     return result
+
+
+def test_task_html_renders_expected_turns_badge_when_exceeded():
+    result = _result_with_expected_tool_calls({"expected_turns": 3}, model_turns=5)
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "expected_turns exceeded (5/3)" in html
+
+
+def test_task_html_no_expected_turns_badge_when_under():
+    result = _result_with_expected_tool_calls({"expected_turns": 5}, model_turns=5)
+    html = HTMLReportGenerator.generate_task_html(result)
+    assert "expected_turns exceeded" not in html
 
 
 def test_task_html_renders_expected_tool_calls_badge_when_exceeded():

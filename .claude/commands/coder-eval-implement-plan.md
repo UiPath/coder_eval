@@ -57,10 +57,10 @@ The plan's Master Acceptance Checklist and the **Review Criteria** below are the
 
 - **All models import from `coder_eval.models`** — never from submodules (lint-guarded). New models are exported from `models/__init__.py`.
 - **New criterion → two edits.** The `@register_criterion` checker in `criteria/` **and** the `SuccessCriterion` discriminated union in `models/criteria.py`. Discriminated unions use `Field(discriminator="type")` — a bare `A | B` union silently coerces.
-- **New agent → plugin SPI, not enum dispatch.** Register via a `register(registry)` hook exposed through the `coder_eval.plugins` entry-point group; do **not** edit `Orchestrator._create_agent` (it already delegates to the registry's `create_agent()` factory) or the `AgentKind` enum (known built-in kinds only). Use the shared turn lifecycle (`_begin_turn`/`_end_turn_ok`/`_mark_stopped`) and emit the standardized event protocol through `EventCollector`.
+- **New agent → plugin SPI, not enum dispatch.** Register via a `register(registry)` hook exposed through the `coder_eval.plugins` entry-point group; do **not** edit `Orchestrator._create_agent` (it already delegates to the registry's `create_agent()` factory) or the `AgentKind` enum (known built-in kinds only). Write the turn through one `TurnEmitter` (`_open_emitter`) and return its `TurnOutcome`; `stop()` calls `_mark_stopped`.
 - **Ripple completeness.** Adding/removing/renaming a model field, config key, or CLI flag means tracing every reference — task YAMLs in `tasks/`, experiment YAMLs in `experiments/`, `experiments/default.yaml`, `.claude/commands/`, docs, and `models/__init__.py`.
 - **Config merge.** New list/dict fields declare their `MergeField` strategy (CE014). New `ResolvedTask`/`AgentConfig` fields need coverage across all 5 layers and a matching `-D` override path.
-- **Crash/retry hygiene.** On `AgentCrashError` / `TurnTimeoutError`, set the partial `crashed=True` TurnRecord on `pending_turn`, then raise bare; reset `_session_id`, `pending_turn`, watchdog refs, streaming `ContextVar`s, and iteration counters before the next attempt.
+- **Crash/retry hygiene.** A failed turn returns an outcome with `record.crashed=True`; cancellation ends the turn with `fail(CRASHED, ...)` before it propagates; no cross-attempt state lives on the agent (reset `_session_id`, watchdog refs and streaming `ContextVar`s before the next attempt).
 - **`extra="forbid"`** on config models that consume YAML/CLI; **Haiku/Sonnet, never Opus** in tests (cost).
 
 ## Reference blocks

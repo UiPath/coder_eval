@@ -35,31 +35,32 @@ my_plugin = "my_plugin:register"
 ```
 
 At CLI init, `load_plugins()` imports each entry point and calls it with the
-`AgentRegistry` **class** (not an instance). A third-party hook that raises is logged
-and skipped; only a failing *built-in* registration is fatal.
+`AgentRegistry` **class** (not an instance). A hook that raises stops the load with a
+`PluginLoadError` that names the entry point, so every command fails until the plugin is
+fixed or uninstalled. A broken plugin is never skipped.
 
 ### The `register` hook
 
-Import everything from `coder_eval.spi`, the stable plugin surface, and check its
-version in the hook. `SPI_VERSION` changes whenever an exported name changes its
-signature.
+Import everything from `coder_eval.spi`, the stable plugin surface. `SPI_VERSION`
+changes whenever an exported name changes its signature. Every `register` call must
+pass the SPI version the agent was written against, as the literal number: registration
+raises `TypeError` when it is not the version this coder_eval provides.
 
 ```python
-from coder_eval.spi import SPI_VERSION, AgentRegistry
+from coder_eval.spi import AgentRegistry
 
 def register(registry: type[AgentRegistry]) -> None:
-    assert SPI_VERSION == 2, f"my-agent supports coder_eval SPI 2, not {SPI_VERSION}"
-    # Bind type string → config class → agent class.
-    registry.register("my-agent", MyAgentConfig)(MyAgent)
+    # Bind type string → config class → agent class, for SPI 1.
+    registry.register("my-agent", MyAgentConfig, spi_version=1)(MyAgent)
     # Optionally contribute pricing here too (see §3):
     # register_pricing(MY_RATES)
 ```
 
-`AgentRegistry.register(agent_kind, config_class)` returns a decorator, so the
-decorator form works too:
+`AgentRegistry.register(agent_kind, config_class, *, spi_version)` returns a decorator,
+so the decorator form works too:
 
 ```python
-@AgentRegistry.register("my-agent", MyAgentConfig)
+@AgentRegistry.register("my-agent", MyAgentConfig, spi_version=1)
 class MyAgent(Agent[MyAgentConfig]):
     ...
 ```
@@ -99,7 +100,15 @@ at resolution, so `coder-eval plan` fails before any run. This is a JSONL CLI ag
 that appends a system prompt and honors `plan` and tool lists natively:
 
 ```python
-from coder_eval.spi import Agent, Enforcement, HarnessContract, PermissionMode, ToolNameMap, UsageGranularity
+from coder_eval.spi import (
+    Agent,
+    Enforcement,
+    HarnessContract,
+    PermissionMode,
+    TimingBasis,
+    ToolNameMap,
+    UsageGranularity,
+)
 
 # native tool name -> canonical (Claude) name; also used for telemetry
 _TOOL_NAME_MAP = {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "task": "Agent"}
@@ -115,6 +124,7 @@ class MyAgent(Agent[MyAgentConfig]):
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
         usage_granularity=UsageGranularity.STEP,
+        timing_basis=TimingBasis.TURN_CLOCK,
     )
     tool_names = ToolNameMap.from_inverse(
         _TOOL_NAME_MAP,
@@ -129,6 +139,9 @@ class MyAgent(Agent[MyAgentConfig]):
   meaning (`plan` is read-only, `bypassPermissions` runs every permitted tool).
 - `tool_names` is required exactly when a tool-list row is `ENFORCED`. It must map every
   canonical name; list a name your harness has no tool for in `no_equivalent`.
+- `timing_basis` says who stamps the turn. `TURN_CLOCK`: the `TurnEmitter` stamps every
+  tool and the turn bracket from one clock. `CLI_EPOCH_MS`: your harness reports its own
+  stamps, and you pass them for every main-thread tool and window.
 - Set `cooperative_stop=True` only if your `communicate()` honors `should_stop`
   (needed for criterion-level `stop_early:` arming and for `run_limits.max_tool_calls`
   to cut a turn). `False` means early stop is rejected at resolution for your agent.
@@ -142,11 +155,12 @@ it on every LiteLLM route.
 Implement these three abstract methods:
 
 - [ ] `async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root: Path | None = None) -> None`
-- [ ] `async def communicate(self, user_input, *, stream_callback=None, timeout=None, should_stop: Callable[[], StopReason | None] | None = None) -> TurnRecord`
+- [ ] `async def communicate(self, user_input, *, iteration: int, stream_callback=None, timeout=None, should_stop: Callable[[], StopReason | None] | None = None) -> TurnOutcome`
 - [ ] `async def stop(self) -> None`
 
-`plugin_root` is the staged plugin root (`<root>/skills/<name>/SKILL.md`), or `None` when
-the task sets no plugins. Deliver it the harness's native way; do not scan for skills.
+`plugin_root` is the staged plugin root, or `None` when the task sets no plugins. It holds
+`<root>/skills/<name>/SKILL.md` (every harness) and `<root>/plugins/<name>` (each authored
+plugin whole, for a harness that loads full plugins). Deliver it the harness's native way; do not scan for skills.
 
 `should_stop` is the run's single stop poll. The `TurnMonitor` owns it: it reads your
 event stream and decides every stop (armed criteria, the tool-call cap, the token and USD
@@ -158,28 +172,186 @@ often you report them as `usage_granularity`. With `cooperative_stop=True`:
 - [ ] Call `should_stop()` at each safe boundary (for example, after each resolved
       tool call, before you pull the next unit of work).
 - [ ] When it returns a `StopReason`, stop pulling work and remember the reason.
-- [ ] Finalize the turn with `AgentEndStatus` `end_status_for(reason)` (both names
-      come from `coder_eval.spi`), with `crashed=False`. Do not raise.
+- [ ] End the turn with `emitter.finalize(end_status_for(reason))` (both names come
+      from `coder_eval.spi`). Do not raise.
 
 Optional overrides (sensible defaults exist): `kill()`, `kill_sync()` (called from a
-non-asyncio watchdog thread — must **not** await), `discard_pending_turn()`.
+non-asyncio watchdog thread — must **not** await).
 
-Follow the shared turn lifecycle (do **not** hand-assemble a `TurnRecord`):
+Write the turn through one `TurnEmitter` (do **not** build events, messages or a
+`TurnRecord` yourself):
 
-- [ ] Call `self._begin_turn()` at the top of `communicate()`.
-- [ ] Call `self._end_turn_ok()` on the success path.
+- [ ] Open it with `emitter = self._open_emitter(prompt=user_input, iteration=iteration,
+      model=..., task_id=..., stream_callback=stream_callback)` and call `emitter.begin()`.
+- [ ] Report what the harness did: `begin_inner_turn` / `end_inner_turn(tokens=delta)`,
+      `text`, `open_tool` / `close_tool`, and `add_generation(message_id=..., window=close_window(...), parts=[Generation(...)])`.
+- [ ] Return `emitter.finalize(status, ...)` for a clean end, or
+      `emitter.fail(AgentEndStatus.CRASHED | TIMEOUT, reason)` for a failed one. A crash or
+      timeout is an outcome, not an exception; an exception out of `communicate` is a bug.
+- [ ] On an `asyncio.CancelledError` from outside (`asyncio.current_task().cancelling()` is
+      not 0), call `emitter.fail(AgentEndStatus.CRASHED, "turn cancelled")`, then re-raise: the
+      orchestrator recovers the record from its own collector. A `CancelledError` your SDK
+      raised inside the turn (`cancelling()` is 0) is a failure of the turn: return
+      `emitter.fail(AgentEndStatus.CRASHED, reason)` and do not re-raise, or the task row is lost.
+- [ ] Run an SDK turn body under `run_with_watchdog(...)`, and return
+      `emitter.fail(AgentEndStatus.TIMEOUT, format_timeout_reason(timeout))` on `WatchdogFired`.
 - [ ] Call `self._mark_stopped()` in `stop()` after your own teardown.
-- [ ] Before raising on a mid-turn failure, set `self.pending_turn` to a
-      `crashed=True` `TurnRecord` (built from an `EventCollector`), then raise
-      `AgentCrashError` / `TurnTimeoutError` (bare — no payload). The orchestrator
-      drains it and calls `discard_pending_turn()`.
 
-Emit the standardized event protocol (you are the **sole emitter**): one
-`AgentStartEvent` at the top of `communicate()` and one matching `AgentEndEvent` on
-**every** exit path (emit from `finally`), a `TurnStart`/`TurnEnd` pair per inner
-turn, and `ToolStart`/`ToolEnd` per tool call (close orphaned tools with
-`status=unresolved`). Fan events through an internal `EventCollector` — it builds the
-returned `TurnRecord`, the single agent-agnostic capture path.
+The emitter owns the event protocol: one `AgentStartEvent`, one `AgentEndEvent` on every
+exit, balanced inner turns and tool calls (orphans closed `unresolved`), and the record.
+That is why `coder_eval.spi` exports no event class and no `EventCollector`. What a turn
+needs from it:
+
+```python
+from coder_eval.spi import (
+    AgentEndStatus,        # the status you pass to finalize / fail
+    Generation,            # one part of a model generation: blocks + its own token delta
+    JsonlDecoder,          # the per-turn reducer of a SubprocessJsonlAgent
+    StopReason,
+    SubprocessJsonlAgent,  # the base for a CLI that streams nd-JSON on stdout
+    TokenUsage,
+    ToolEndStatus,
+    TurnClock,
+    TurnEmitter,
+    TurnEndStatus,
+    TurnOutcome,
+    WatchdogFired,
+    Window,                # the bounds of one generation window; close_window returns it
+    close_window,
+    end_status_for,
+    run_with_watchdog,
+)
+```
+
+### A JSONL CLI agent: `SubprocessJsonlAgent`
+
+If your harness is a CLI that runs one process per turn and prints nd-JSON events on
+stdout, subclass `SubprocessJsonlAgent`. The base owns the transport: the spawn (with
+`stdin` on `/dev/null`), the stderr drain, the read loop against the turn deadline, the
+cooperative stop, the crash and timeout outcomes, and the reap. You supply the argv, the
+environment, and a `JsonlDecoder` that turns one event into emitter calls:
+
+```python
+import os
+from typing import Any
+
+from coder_eval.spi import (
+    AgentEndStatus,
+    Generation,
+    JsonlDecoder,
+    SubprocessJsonlAgent,
+    TimingBasis,
+    TokenUsage,
+    ToolEndStatus,
+    TurnEmitter,
+    TurnOutcome,
+    close_window,
+)
+
+
+class MyDecoder(JsonlDecoder):
+    def __init__(self, emitter: TurnEmitter) -> None:
+        super().__init__(emitter)
+        self.mark = emitter.now()  # where the next generation window opens
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "message":
+            now = self.emitter.now()
+            tokens = TokenUsage(output_tokens=int(event.get("output_tokens", 0)))
+            self.emitter.add_generation(
+                message_id=event.get("id"),
+                window=close_window(mark=self.mark, now=now),
+                parts=[Generation(blocks=[], tokens=tokens)],
+            )
+            self.mark = now
+        elif kind == "text":
+            self.emitter.text(str(event.get("text", "")))
+        elif kind == "tool_start":
+            self.emitter.open_tool(str(event["id"]), str(event["name"]), event.get("args") or {})
+        elif kind == "tool_end":
+            status = ToolEndStatus.ERROR if event.get("is_error") else ToolEndStatus.OK
+            self.emitter.close_tool(str(event["id"]), status=status, summary=event.get("output"))
+        elif kind == "error":
+            self.error = str(event.get("message"))  # the base crashes the turn on it
+
+    def end(self, status: AgentEndStatus, *, reason: str | None = None) -> TurnOutcome:
+        if status is AgentEndStatus.CRASHED or status is AgentEndStatus.TIMEOUT:
+            return self.emitter.fail(status, reason or status.value)
+        return self.emitter.finalize(status)
+
+
+class MyAgent(SubprocessJsonlAgent[MyAgentConfig]):
+    contract = HarnessContract(..., timing_basis=TimingBasis.TURN_CLOCK)  # the emitter stamps the tools
+    cli_name = "MyCli"
+    docs_page = "docs/agents/MY_CLI.md"
+    recognized_events = frozenset({"message", "text", "tool_start", "tool_end", "error"})
+    decoder = MyDecoder
+
+    def argv(self, prompt: str) -> list[str]:
+        return ["my-cli", "--json", "--model", self.config.model or "default", prompt]
+
+    def env(self) -> dict[str, str]:
+        return dict(os.environ)
+
+    async def start(self, working_directory: str, **_: Any) -> None:
+        self.working_directory = working_directory
+
+    async def stop(self) -> None:
+        await self.kill()
+        self._mark_stopped()
+```
+
+A clean exit that produced no event named in `recognized_events` crashes the turn as
+format drift. The in-tree example is `src/coder_eval/agents/pi_agent.py`.
+
+### The sixth-harness checklist
+
+- [ ] A `HarnessContract` (every field, `timing_basis` included).
+- [ ] A config class and its registration.
+- [ ] A translation from config to the harness's native call that delivers the staged
+      `plugin_root`.
+- [ ] A decoder: one object per turn that takes the harness's events and calls the emitter.
+- [ ] `async def harness_version(self)`: the CLI or SDK version the agent drives, recorded as
+      `environment_info.harness_version`. A `SubprocessJsonlAgent` gets `<executable> --version`
+      from its `executable` class attribute.
+- [ ] The `coder_eval.testing` sensors in your own tests: `replay` your decoder over a
+      recorded stream, `assert_identity_closes` on the replay, `assert_stream_balanced` on
+      its events, `conformance(kind, probes)` for the contract, and
+      `stop_conformance(kind, probe)` when the contract declares `cooperative_stop`.
+
+### Test your adapter: `coder_eval.testing`
+
+The in-tree suites and a plugin's tests call the same module. It does not import
+`pytest`: each check raises `AssertionError`.
+
+| Sensor | What it checks |
+|---|---|
+| `replay(stream, make_decoder, clock=ScriptedClock(origin), end=...)` | Drives your decoder over a recorded stream through a real `TurnEmitter`. A `Tick(at_ms)` element moves the clock. Returns the record, the events and the bracket stamps. |
+| `assert_identity_closes(record, started_at=..., ended_at=...)` | Head + generation + tool union + tail equals the turn's span. |
+| `assert_stream_balanced(events)` | Every opened inner turn and tool call closes, and one turn has one start and one end. |
+| `await conformance(kind, probes)` | Your agent rejects every field its contract marks unsupported, and `probes` has one check for each enforced cell. |
+| `await stop_conformance(kind, probe)` | For every `StopReason`, your agent ends the turn with that reason's status at the first boundary. `probe(stop, reason)` runs one `communicate()` over a scripted harness that calls `FIRST_TOOL_ID` then `SECOND_TOOL_ID`, passes `stop` (a `StopAfterFirstTool`) as both `stream_callback` and `should_stop`, and returns the tool ids your agent pulled. |
+
+```python
+from datetime import datetime
+
+from coder_eval.spi import AgentEndStatus
+from coder_eval.testing import ScriptedClock, Tick, assert_identity_closes, assert_stream_balanced, replay
+
+
+def test_a_recorded_turn_balances_and_closes():
+    stream = [
+        Tick(10), {"type": "tool_start", "id": "t1", "name": "Bash"},
+        Tick(50), {"type": "tool_end", "id": "t1"},
+        Tick(80), {"type": "message", "id": "m1", "output_tokens": 12},
+        Tick(90),
+    ]
+    result = replay(stream, MyDecoder, clock=ScriptedClock(datetime(2026, 1, 1)),
+                    end=lambda d: d.end(AgentEndStatus.COMPLETED))
+    assert_stream_balanced(result.events)
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
+```
 
 ### Worked example
 
@@ -327,7 +499,7 @@ MY_RATES = {
 }
 
 def register(registry):
-    registry.register("my-agent", MyAgentConfig)(MyAgent)
+    registry.register("my-agent", MyAgentConfig, spi_version=1)(MyAgent)
     register_pricing(MY_RATES)
 ```
 

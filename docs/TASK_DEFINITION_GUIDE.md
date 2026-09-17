@@ -259,7 +259,9 @@ valid and an empty block is legal — every field defaults to "no limit".
 run_limits:
   # Structural caps
   max_tool_calls: 20                  # hard cap on resolved tool calls across the whole task
+  max_turns: 15                       # hard cap on model turns (Claude Code, OpenCode, Pi)
   expected_tool_calls: 8              # SOFT efficiency budget (visible tool calls) — never aborts
+  expected_turns: 8                   # SOFT target on model turns — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
 
@@ -274,13 +276,15 @@ run_limits:
 | Field | Default | Constraint | Description |
 |-------|---------|------------|-------------|
 | `max_tool_calls` | *unset* | `> 0` | Hard cap on resolved tool calls across the whole task: every retry attempt and every dialog turn count. The TurnMonitor enforces it at the agent's next poll boundary, on every harness. The round that reaches the cap is processed whole, so tool calls already in flight can still land after it. The run finalizes cleanly as `tool_calls_exhausted`, and the criteria are still checked. Unset means no cap. |
+| `max_turns` | *unset* | `> 0` | Hard cap on model turns (main-thread model responses) across the whole task: every retry attempt and every dialog turn count; a sub-agent's turns do not. The TurnMonitor stops the agent at its next poll once turn N+1 starts, so part of that turn can still land; a run that ends at exactly N turns is not capped. Every built-in harness accepts it; a harness that reports one turn per `communicate()` call rejects it at resolution (see [Run-Limit Parity](agents/HARNESS_PARITY.md)). The run finalizes as `tool_calls_exhausted`, like `max_tool_calls`. Unset means no cap. |
 | `expected_tool_calls` | *unset* | `>= 1` | **Soft** target for cumulative visible tool calls. Exceeding it warns and badges the report; it never aborts. See [`expected_tool_calls`](#expected_tool_calls-soft-efficiency-budget). |
+| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative model turns, counted like `max_turns`. Exceeding it warns and badges the report; it never aborts. Every built-in harness accepts it. For a target on visible tool calls, use `expected_tool_calls`. |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
 | `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
 | `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
-| `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. Requires per-turn SDK cost reporting. |
+| `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. On a harness that does not report its own cost, `agent.model` must have a rate (checked at resolution). |
 | `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
@@ -308,11 +312,17 @@ model.
   `FinalStatus.COST_BUDGET_EXCEEDED` (`max_usd`). Both categorize as `failed` — see
   [Report Schema](REPORT_SCHEMA.md).
 - **`max_usd` is priced from the harness's reported cost**, else from the rate card in
-  `coder_eval.pricing` for the model the harness reports (then `agent.model`). A turn with no usage
-  costs nothing. A run that can price a turn neither way finishes **`ERROR`** at that turn's end with
-  the message "run_limits.max_usd could not be enforced". It is never skipped. Add a rate with
-  `register_pricing`, pin a priced model, or remove `max_usd`. Mid-turn usage reports rarely carry a
-  cost, so when the model has no rate the USD cap is checked once the turn's reported cost arrives.
+  `coder_eval.pricing` for `agent.model` (then the model the harness reports). A turn with no usage
+  costs nothing. It is never skipped:
+  - On a harness whose contract does not set `reports_cost` (see
+    [Run-Limit Parity](agents/HARNESS_PARITY.md)), a task with `max_usd` and no priced
+    `agent.model` is **rejected at resolution**, so `coder-eval plan` fails.
+  - A run that still cannot price a turn finishes **`ERROR`** with the message
+    "run_limits.max_usd could not be enforced". On a harness that does not report cost, this
+    happens at the first unpriced usage report, mid-turn.
+  - Add a rate with `register_pricing`, pin a priced model, or remove `max_usd`. On a harness
+    that reports cost, mid-turn usage reports rarely carry a cost, so when the model has no rate
+    the USD cap is checked once the turn's reported cost arrives.
 - **Cached-read and cache-creation tokens are excluded by default.** `count_cache_creation: true` is
   what makes an input-token budget meaningful for **Codex**, which buckets its fresh (full-price)
   prompt slice into `cache_creation`; with the default `false`, a Codex token budget effectively
@@ -338,9 +348,9 @@ coder-eval run task.yaml -D run_limits.max_usd=2.50 -D run_limits.max_total_toke
 > the agent model's `extra="forbid"` raises a clear validation error.
 > `turn_timeout` and `task_timeout` must live under `run_limits:`. (A
 > deprecation shim hoisted them automatically until it was removed on
-> 2026-06-01.) `max_turns` under `run_limits:` is rejected too: use
-> `run_limits.max_tool_calls`, which counts resolved tool calls, not agent
-> inner-loop turns.
+> 2026-06-01.) Under `run_limits:`, `max_turns` now counts model turns
+> across the whole task, not SDK turns per call; to cap tool calls instead,
+> use `max_tool_calls`.
 
 ### `expected_tool_calls` (soft efficiency budget)
 
@@ -1565,7 +1575,9 @@ pre_run:
 | `timeout` | 30 | Maximum seconds to wait (1–300) |
 | `fail_on_error` | `true` | When true, failure aborts evaluation with `FinalStatus.ERROR` |
 
-Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are
+Commands run sequentially with `cwd` set to the sandbox directory, with stdin on
+`/dev/null`: a command that reads stdin gets end-of-file at once instead of waiting for
+input nobody can type. stdout and stderr are
 captured in `pre_run_results` on the evaluation result (truncated to 100KB each). When a
 command fails with `fail_on_error: true`, remaining commands are skipped.
 

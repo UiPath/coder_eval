@@ -29,50 +29,30 @@ from typing import Any
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
-from coder_eval.agents.registry import AgentRegistry
-from coder_eval.agents.watchdog import ThreadedWatchdog
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
+from coder_eval.agents.watchdog import WatchdogFired, run_with_watchdog
 from coder_eval.config import settings
-from coder_eval.errors import (
-    AgentCrashError,
-    TurnTimeoutError,
-    truncate_crash_message,
-)
+from coder_eval.errors.agent import format_timeout_reason
 from coder_eval.models import (
     READ_ONLY_DENIED_TOOLS,
     AgentKind,
     AntigravityAgentConfig,
     ApiRoute,
-    AssistantMessage,
-    CommandTelemetry,
     ContentBlock,
     DirectRoute,
     Enforcement,
     HarnessContract,
     PermissionMode,
+    TimingBasis,
     TokenUsage,
     ToolNameMap,
-    TranscriptMessage,
-    TurnRecord,
     UsageGranularity,
 )
-from coder_eval.pricing import calculate_cost
-from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
-from coder_eval.streaming.collector import EventCollector
-from coder_eval.streaming.events import (
-    AgentEndEvent,
-    AgentEndStatus,
-    AgentStartEvent,
-    StopReason,
-    TextChunkEvent,
-    ToolEndEvent,
-    ToolEndStatus,
-    ToolStartEvent,
-    TurnEndEvent,
-    TurnEndStatus,
-    TurnStartEvent,
-    end_status_for,
-)
-from coder_eval.timing import TurnClock, close_window
+from coder_eval.pricing import price_turn
+from coder_eval.streaming.callbacks import StreamCallback
+from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus, StopReason, ToolEndStatus, TurnEndStatus, end_status_for
+from coder_eval.timing import close_window
 
 
 logger = logging.getLogger(__name__)
@@ -182,23 +162,251 @@ def _to_token_usage(usage: Any, model: str | None) -> TokenUsage:
     thoughts = getattr(usage, "thoughts_token_count", 0) or 0
     uncached_input = max(prompt - cached, 0)
     output = candidates + thoughts
-    cost = calculate_cost(model, uncached_input, output, 0, cached) if model else None
-    return TokenUsage(
+    tokens = TokenUsage(
         uncached_input_tokens=uncached_input,
         output_tokens=output,
         cache_creation_input_tokens=0,
         cache_read_input_tokens=cached,
-        total_cost_usd=cost,
     )
+    tokens.total_cost_usd = price_turn(tokens, (model,))
+    return tokens
 
 
-@AgentRegistry.register(AgentKind.ANTIGRAVITY, AntigravityAgentConfig)
+class _AntigravityDecoder:
+    """One turn's reducer: Antigravity ``Step`` objects in, ``TurnEmitter`` calls out.
+
+    Step-stream shape (observed): each ``step_index`` is yielded repeatedly through
+    ACTIVE -> DONE transitions; ``usage_metadata`` lands once per generation on a
+    DONE/terminal step (summing them == the turn total); a tool call carries a stable
+    ``id`` and its result is folded into expanded ``args`` at DONE. Each generation
+    is one inner turn: opened at the first MODEL Step that brings new content or an
+    unseen tool call, closed at its ``usage_metadata`` with that usage as its tokens.
+    """
+
+    def __init__(self, emitter: TurnEmitter, *, turn_id: str = "antigravity-1") -> None:
+        self.emitter = emitter
+        self.turn_id = turn_id
+        self.timeout_hit = False
+        self.stop_reason: StopReason | None = None
+        self.total_usage = TokenUsage()
+        self.output_parts: list[str] = []
+        self.generations = 0
+        self._seen_tools: set[str] = set()
+        self._closed_tools: set[str] = set()
+        # Arg keys present when a tool was first seen (its model-supplied inputs),
+        # used at DONE to tell them from harness-appended result fields.
+        self._tool_input_keys: dict[str, set[str]] = {}
+        self._tool_names: dict[str, str] = {}
+        # Most recently seen StepStatus per tool id, for has_orphaned_tool_call.
+        self._tool_last_status: dict[str, Any] = {}
+        # Content blocks accumulated since the last per-generation flush.
+        self._blocks: list[ContentBlock] = []
+        # Where the CURRENT generation started, advanced only by a flush that
+        # actually added a message.
+        self._gen_mark: datetime = emitter.now()
+        # Re-seeded ONCE, at the first observed MODEL Step.
+        self._first_output_seen = False
+
+    @property
+    def ended_cleanly(self) -> bool:
+        """True once the loop broke on a ``should_stop`` reason: a later exception is not a crash."""
+        return self.stop_reason is not None
+
+    def _seed_first_generation_window(self, source: Any) -> None:
+        """Move the first window's mark to the first observed MODEL output, once per turn.
+
+        Gated on ``source``: a turn can open with a SYSTEM or USER Step, and seeding
+        on one would put the mark before the model spoke.
+
+        Rationale: .claude/notes/agents.md § First-generation window seeding
+        """
+        if self._first_output_seen or _enum_value(source) != _SOURCE_MODEL:
+            return
+        self._first_output_seen = True
+        self._gen_mark = self.emitter.now()
+
+    @staticmethod
+    def _is_reply(stype: Any, ssource: Any, starget: Any) -> bool:
+        """The ONE test for "the model talking to the user"; a USER-source prompt echo is not."""
+        return stype == _TYPE_TEXT_RESPONSE and ssource == _SOURCE_MODEL and starget == _TARGET_USER
+
+    def _open_generation(self) -> None:
+        """Open the inner turn for the generation now arriving; a no-op while one is open."""
+        if not self.emitter.inner_turn_open:
+            self.emitter.begin_inner_turn(f"{self.turn_id}-msg-{self.generations}")
+
+    def _starts_generation(self, step: Any, ssource: Any) -> bool:
+        """True when ``step`` is the model speaking: new content, new usage, or a tool call not seen before.
+
+        A DONE Step for a call already open is its result landing, not a model turn.
+        """
+        if ssource != _SOURCE_MODEL:
+            return False
+        if step.tool_calls:
+            return any(self._call_id(call, step, i) not in self._seen_tools for i, call in enumerate(step.tool_calls))
+        return bool(
+            step.thinking
+            or step.thinking_delta
+            or step.content
+            or step.content_delta
+            or step.usage_metadata is not None
+        )
+
+    def __call__(self, step: Any) -> None:
+        """Route one streamed ``Step`` to the emitter."""
+        stype = _enum_value(step.type)
+        sstatus = _enum_value(step.status)
+        ssource = _enum_value(step.source)
+        self._seed_first_generation_window(ssource)
+        if self._starts_generation(step, ssource):
+            self._open_generation()
+        starget = _enum_value(step.target)
+        done = sstatus in (_STATUS_DONE, _STATUS_ERROR)
+        reply = self._is_reply(stype, ssource, starget)
+
+        if step.content_delta and reply:
+            self.emitter.text(step.content_delta)
+
+        for call_index, call in enumerate(step.tool_calls):
+            self._handle_tool_call(call, step, done, sstatus, call_index)
+
+        if done:
+            if stype == _TYPE_THINKING and step.thinking:
+                self._blocks.append(ContentBlock(block_type="thinking", sequence=0, thinking=step.thinking))
+            elif reply and step.content:
+                self.output_parts.append(step.content)
+                self._blocks.append(ContentBlock(block_type="text", sequence=0, text=step.content))
+
+        if step.usage_metadata is not None:
+            gen = _to_token_usage(step.usage_metadata, self.emitter.model)
+            self.total_usage = self.total_usage + gen
+            self._flush_generation(gen, getattr(step.usage_metadata, "thoughts_token_count", 0) or 0)
+
+    @staticmethod
+    def _call_id(call: Any, step: Any, call_index: int) -> str:
+        # call.id is usually present but the SDK types it optional. The fallback
+        # mirrors the SDK's own `trajectory_id:step_index` scheme; call_index
+        # further disambiguates multiple id-less calls within one step.
+        # Rationale: .claude/notes/agents.md § Why the tool-call id falls back the way it does
+        trajectory_id = getattr(step, "trajectory_id", "") or ""
+        step_key = f"{trajectory_id}:{step.step_index}" if trajectory_id else str(step.step_index)
+        return call.id or f"{_enum_value(call.name)}_{step_key}_{call_index}"
+
+    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
+        raw_name = _enum_value(call.name)
+        cid = self._call_id(call, step, call_index)
+        self._tool_last_status[cid] = sstatus
+        if cid not in self._seen_tools:
+            self._seen_tools.add(cid)
+            tool_name = _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.get(raw_name, str(raw_name))
+            self._tool_names[cid] = tool_name
+            self._tool_input_keys[cid] = set(call.args)
+            self.emitter.open_tool(cid, tool_name, self._params(tool_name, call.args, self._tool_input_keys[cid]))
+
+        if done and cid not in self._closed_tools:
+            self._closed_tools.add(cid)
+            exit_code = call.args.get("exit_code")
+            errored = (sstatus == _STATUS_ERROR) or (exit_code not in (None, 0))
+            result_text = (
+                call.args.get("combined_output")
+                or call.args.get("diff_block")
+                or call.args.get("output")
+                or call.args.get("results")
+                or call.args.get("summary")
+                or step.content
+                or None
+            )
+            tool_name = self._tool_names[cid]
+            self.emitter.close_tool(
+                cid,
+                status=ToolEndStatus.ERROR if errored else ToolEndStatus.OK,
+                summary=str(result_text) if result_text is not None else None,
+                error=(step.error or "tool failed") if errored else None,
+                parameters=self._params(tool_name, call.args, self._tool_input_keys.get(cid)),
+            )
+            self._blocks.append(ContentBlock(block_type="tool_use", sequence=0, tool_use_id=cid))
+
+    @staticmethod
+    def _params(tool_name: str, args: dict[str, Any], input_keys: set[str] | None) -> dict[str, Any]:
+        """Model-supplied inputs only, renamed to canonical cross-agent keys.
+
+        A key is a (dropped) result field when it is in the static
+        ``_RESULT_ARG_KEYS`` backstop OR first appeared at DONE, given the
+        input-key snapshot taken at tool start. Survivors are renamed to the
+        canonical vocabulary.
+        """
+        rename = _ANTIGRAVITY_ARG_RENAME.get(tool_name, {})
+        out: dict[str, Any] = {}
+        for k, v in args.items():
+            if k in _RESULT_ARG_KEYS:
+                continue
+            if input_keys is not None and k not in input_keys:
+                continue  # appeared only at DONE → harness result payload
+            out[rename.get(k, k)] = v
+        return out
+
+    def _flush_generation(
+        self, gen: TokenUsage, reasoning_tokens: int, *, status: TurnEndStatus = TurnEndStatus.COMPLETED
+    ) -> None:
+        """Cut the accumulated blocks into one generation carrying this step's tokens, and close its inner turn."""
+        if not self._blocks and gen.is_empty():
+            return
+        self._open_generation()
+        now = self.emitter.now()
+        # Do NOT "simplify" this to resetting the mark when a tool ends: this
+        # harness interleaves a tool INTO a window rather than tiling around it,
+        # so the RAW window legitimately contains time that is not model time.
+        # Rationale: .claude/notes/agents.md § Per-harness generation marks
+        for i, block in enumerate(self._blocks):
+            block.sequence = i
+        self.emitter.add_generation(
+            # The Step stream carries no message id; one per generation.
+            message_id=f"{self.turn_id}-msg-{self.generations}",
+            window=close_window(mark=self._gen_mark, now=now),
+            parts=[Generation(blocks=list(self._blocks), tokens=gen, reasoning_tokens=reasoning_tokens)],
+        )
+        self.generations += 1
+        self._blocks = []
+        self._gen_mark = now
+        self.emitter.end_inner_turn(status, tokens=gen)
+
+    def has_orphaned_tool_call(self) -> bool:
+        """True if any NOT-YET-CLOSED tool call's most recently seen status is
+        ACTIVE — the structural signature of a backgrounded task the model went
+        idle on without waiting for. See ``AntigravityAgent._poll_background_work``.
+
+        An ALLOWLIST on ACTIVE, never a denylist on "not yet closed": the SDK also
+        has WAITING_FOR_USER, CANCELED and UNKNOWN, none of which the poll loop
+        should wait out. The `not in _closed_tools` guard is layered on top as a
+        monotonicity backstop, not a substitute.
+
+        Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
+        """
+        return any(cid not in self._closed_tools and s == _STATUS_ACTIVE for cid, s in self._tool_last_status.items())
+
+    def end(self, status: AgentEndStatus, *, reason: str | None = None, agent_output: str | None = None) -> TurnOutcome:
+        """Flush trailing blocks as an unbilled generation and end the turn.
+
+        Every billed generation already closed its own inner turn; the emitter closes
+        one still open with ``status``. ``agent_output`` is the fallback when the
+        stream carried no reply text.
+        """
+        if self._blocks:
+            self._flush_generation(TokenUsage(), 0, status=TurnEndStatus(status.value))
+        output = "".join(self.output_parts) if self.output_parts else (agent_output or "")
+        if status is AgentEndStatus.CRASHED or status is AgentEndStatus.TIMEOUT:
+            return self.emitter.fail(status, reason or status.value, usage=self.total_usage, agent_output=output)
+        return self.emitter.finalize(status, usage=self.total_usage, agent_output=output)
+
+
+@AgentRegistry.register(AgentKind.ANTIGRAVITY, AntigravityAgentConfig, spi_version=SPI_VERSION)
 class AntigravityAgent(Agent[AntigravityAgentConfig]):
     """Implementation of the Agent interface for Google Antigravity (Gemini)."""
 
     # The step loop has a between-steps guard where `should_stop` runs;
     # TemplatedSystemInstructions wraps system_instructions around the harness's
     # own prompt, and always has — so runs ARE comparable across the marker.
+    # Usage is one `usage_metadata` per model generation, each closing one inner turn.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     contract = HarnessContract(
         system_prompt=Enforcement.ENFORCED,
@@ -208,7 +416,8 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
-        usage_granularity=UsageGranularity.TURN,
+        usage_granularity=UsageGranularity.GENERATION,
+        timing_basis=TimingBasis.TURN_CLOCK,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES
@@ -240,7 +449,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         # Dirs prepended to PATH so sandbox mock CLIs shadow real ones for the
         # harness's run_command tool (see _harness_env).
         self._env_path_prepend: list[str] = []
-        # Turn-lifecycle bookkeeping lives on the Agent base class.
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
 
     def _effective_model(self) -> str:
@@ -372,10 +580,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     async def _drain(
         self,
         conversation: Any,
-        state: "_AntigravityTurnState",
+        decoder: _AntigravityDecoder,
         should_stop: Callable[[], StopReason | None] | None,
     ) -> None:
-        """Consume one ``receive_steps()`` cycle onto ``state``, honoring a
+        """Consume one ``receive_steps()`` cycle into ``decoder``, honoring a
         cooperative stop mid-stream. Shared by the initial drain and each poll
         cycle's re-drain, so this shape lives in one place.
 
@@ -394,10 +602,10 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
                 async with contextlib.aclosing(conversation.receive_steps()) as steps:
                     async for step in steps:
                         pulled = True
-                        state.process_step(step)
+                        decoder(step)
                         reason = should_stop() if should_stop is not None else None
                         if reason is not None:
-                            state.stop_reason = reason
+                            decoder.stop_reason = reason
                             self._log.debug("Stop requested (%s); ending step loop at this boundary", reason.value)
                             break
                 return
@@ -414,181 +622,143 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         self,
         user_input: str,
         *,
+        iteration: int,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         should_stop: Callable[[], StopReason | None] | None = None,
-    ) -> TurnRecord:
-        """Send a message to the Antigravity agent and receive its response.
+    ) -> TurnOutcome:
+        """Send the prompt, drain the Step stream until the turn goes idle, and end the turn.
 
-        ``should_stop`` is the run's stop poll, called after each processed step.
-        On a reason the step loop breaks, the conversation is cancelled
-        (best-effort) and the turn finalizes cleanly with ``end_status_for(reason)``
-        (``crashed=False``).
-
-        Drives one logical turn: ``conversation.send(prompt)`` then iterate
-        ``receive_steps()`` until the turn goes idle.
-
-        Raises:
-            RuntimeError: If the agent is not started.
-            TurnTimeoutError: Timeout elapsed (partial TurnRecord on pending_turn).
-            AgentCrashError: SDK/harness failed mid-turn (same pending_turn contract).
+        ``should_stop`` is polled after each processed Step; on a reason the loop
+        breaks, the conversation is cancelled (best-effort) and the turn ends with
+        ``end_status_for(reason)``. See ``Agent.communicate``.
         """
         if not self.working_directory or self._sdk_agent is None:
             raise RuntimeError("Agent not started. Call start() first.")
-
         assert self.config.type is not None, "AntigravityAgent requires AgentConfig.type before communicate()"
 
-        self._begin_turn()
-        # Raw monotonic, deliberately NOT the turn clock: this seeds the poll
-        # deadline and `duration_seconds`, neither of which may move when the wall
-        # clock steps. `TurnClock` is for the RECORDED stamps.
-        turn_start_time = time.monotonic()
-        # ONE clock per turn, so the window bounds and the tool intervals
-        # subtracted from them share a basis.
-        clock = TurnClock()
-        task_id = str(self.config.type)
-        model = self._effective_model()
-        collector = EventCollector()
-        emit = CompositeStreamCallback([c for c in (collector, stream_callback) if c is not None])
-        turn_id = f"antigravity-{self._iteration}"
-
-        state = _AntigravityTurnState(
-            agent=self,
-            emit=emit,
-            task_id=task_id,
-            turn_id=turn_id,
-            collector=collector,
-            user_input=user_input,
-            iteration=self._iteration,
-            model=model,
-            turn_start_time=turn_start_time,
-            clock=clock,
+        emitter = self._open_emitter(
+            prompt=user_input,
+            iteration=iteration,
+            model=self._effective_model(),
+            task_id=str(self.config.type),
+            stream_callback=stream_callback,
         )
+        emitter.begin()
+        turn_id = f"antigravity-{iteration}"
+        decoder = _AntigravityDecoder(emitter, turn_id=turn_id)
+
+        def _on_turn_timeout() -> None:
+            decoder.timeout_hit = True
 
         try:
-            # From the TURN CLOCK, not the model's raw `datetime.now()` default:
-            # this bound is subtracted against window bounds the same clock
-            # produced, and two bases in one subtraction clamped this harness's
-            # -0.017 ms tail to a measured 0.0 (CE058).
-            emit.on_event(
-                AgentStartEvent(
-                    task_id=task_id,
-                    prompt=user_input,
-                    iteration=self._iteration,
-                    model=model,
-                    timestamp=clock.now(),
+            try:
+                await run_with_watchdog(
+                    self._run_turn(user_input, decoder, timeout, should_stop),
+                    timeout_seconds=timeout,
+                    on_timeout=_on_turn_timeout,
+                    label=f"Turn timeout ({timeout:g}s)" if timeout else "turn_timeout",
                 )
-            )
-
-            def _on_turn_timeout() -> None:
-                state.timeout_hit = True
-
-            with ThreadedWatchdog(
-                timeout_seconds=timeout,
-                on_timeout=_on_turn_timeout,
-                asyncio_task_to_cancel=asyncio.current_task(),
-                label=f"Turn timeout ({timeout:g}s)" if timeout else "turn_timeout",
-            ):
-                emit.on_event(TurnStartEvent(task_id=task_id, turn_id=turn_id, model=model))
-                conversation = self._sdk_agent.conversation
-                poll_count = 0
-                # Bound the poll loop's OWN exit earlier than the watchdog's, so
-                # its graceful path reliably wins that race. `timeout=None` has
-                # nothing to take a fraction of, so the cycle cap is the sole bound.
-                poll_deadline = turn_start_time + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
-                try:
-                    await conversation.send(user_input)
-                    # should_stop runs AFTER process_step (the emission the monitor
-                    # latches on) and BEFORE the next step is pulled.
-                    await self._drain(conversation, state, should_stop)
-
-                    # The model may background a run_command and go idle, so
-                    # receive_steps() exhausts with that call still open. Gated on
-                    # the orphaned-tool signal, so a normal turn takes this branch
-                    # zero times.
-                    # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
-                    while (
-                        state.stop_reason is None
-                        and not state.timeout_hit
-                        and state.has_orphaned_tool_call()
-                        and (
-                            poll_count < _MAX_BACKGROUND_POLLS
-                            if poll_deadline is None
-                            else time.monotonic() < poll_deadline
-                        )
-                    ):
-                        poll_count += 1
-                        self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
-                        await asyncio.sleep(_BACKGROUND_POLL_INTERVAL_SECONDS)
-                        if state.timeout_hit or (poll_deadline is not None and time.monotonic() >= poll_deadline):
-                            # Skip the re-drain, which could itself await
-                            # indefinitely on genuinely non-idle work.
-                            break
-                        reason = should_stop() if should_stop is not None else None
-                        if reason is not None:
-                            state.stop_reason = reason
-                            break
-                        await self._drain(conversation, state, should_stop)
-
-                    if state.has_orphaned_tool_call() and state.stop_reason is None and not state.timeout_hit:
-                        # Exited via this loop's OWN bound, not an external
-                        # stop/timeout: the call is force-closed as unresolved and
-                        # the turn is still graded normally on everything else.
-                        bound = (
-                            f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
-                            if poll_deadline is not None
-                            else f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
-                        )
-                        msg = "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE."
-                        self._log.warning(msg, bound, poll_count)
-
-                    if state.stop_reason is not None:
-                        # Best-effort server-side cancel. One check point, so it
-                        # fires exactly once whichever drain stopped.
-                        with contextlib.suppress(Exception):
-                            await conversation.cancel()
-                except asyncio.CancelledError:
-                    if state.timeout_hit:
-                        self._finalize_and_raise_timeout(state.finalize, timeout or 0)
-                    raise
-                except Exception as e:
-                    if state.timeout_hit:
-                        self._finalize_and_raise_timeout(state.finalize, timeout or 0, cause=e)
-                    if state.ended_cleanly:
-                        # Already stopped on purpose — do not escalate.
-                        # Rationale: .claude/notes/agents.md § Why a post-stop exception is not a crash
-                        self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
-                    else:
-                        self._finalize_and_raise_crash(
-                            state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
-                        )
-
-            if state.timeout_hit:
-                # Watchdog fired but the pump finished before the cancel landed.
-                assert timeout is not None
-                self._finalize_and_raise_timeout(state.finalize, timeout)
-        except (AgentCrashError, TurnTimeoutError):
-            raise
-        except asyncio.CancelledError:
-            if not state.finalized:
-                self._finalize_external_cancel(state.finalize)
-            raise
-        except Exception as e:
-            if state.ended_cleanly and not state.timeout_hit:
-                # Same retry-poisoning guard as the inner handler.
+            except WatchdogFired:
+                return self._fail(decoder, AgentEndStatus.TIMEOUT, format_timeout_reason(timeout or 0))
+            except Exception as e:
+                if decoder.timeout_hit:
+                    return self._fail(decoder, AgentEndStatus.TIMEOUT, format_timeout_reason(timeout or 0))
+                if not decoder.ended_cleanly:
+                    return self._fail(decoder, AgentEndStatus.CRASHED, f"Antigravity turn failed: {e!s}")
+                # Already stopped on purpose — do not escalate.
+                # Rationale: .claude/notes/agents.md § Why a post-stop exception is not a crash
                 self._log.warning("Ignoring post-stop exception; finalizing cleanly: %s", e)
-            else:
-                self._finalize_and_raise_crash(
-                    state.finalize, truncate_crash_message(f"Antigravity turn failed: {e!s}"), cause=e
-                )
+            if decoder.timeout_hit:
+                # The watchdog fired but the body finished before the cancel landed.
+                return self._fail(decoder, AgentEndStatus.TIMEOUT, format_timeout_reason(timeout or 0))
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling() == 0:
+                # Not a cancel from outside: the SDK raised it inside the turn body.
+                return self._fail(decoder, AgentEndStatus.CRASHED, "Antigravity turn failed: the SDK was cancelled")
+            self._state = AgentState.ERROR
+            decoder.end(AgentEndStatus.CRASHED, reason="turn cancelled", agent_output=self._last_response())
+            raise
 
         self._state = AgentState.WORKING
-        self._end_turn_ok()
-        # Precedence: timeout (raised above) > the stop reason > done.
-        # Rationale: .claude/notes/agents.md § Shared turn lifecycle
-        status = end_status_for(state.stop_reason) if state.stop_reason is not None else AgentEndStatus.COMPLETED
-        state.finalize(status, crashed=False, crash_reason=None)
-        return collector.build_turn_record()
+        # Precedence: timeout (above) > the stop reason > done.
+        status = end_status_for(decoder.stop_reason) if decoder.stop_reason is not None else AgentEndStatus.COMPLETED
+        return decoder.end(status, agent_output=self._last_response())
+
+    async def _run_turn(
+        self,
+        user_input: str,
+        decoder: _AntigravityDecoder,
+        timeout: float | None,
+        should_stop: Callable[[], StopReason | None] | None,
+    ) -> None:
+        """Send the prompt, drain, and poll a backgrounded tool call until the turn goes idle."""
+        conversation = self._sdk_agent.conversation
+        turn_start = time.monotonic()
+        # Bound the poll loop's OWN exit earlier than the watchdog's, so its graceful
+        # path reliably wins that race. `timeout=None` leaves the cycle cap as the bound.
+        poll_deadline = turn_start + timeout * _POLL_DEADLINE_TIMEOUT_FRACTION if timeout else None
+        try:
+            await conversation.send(user_input)
+            await self._drain(conversation, decoder, should_stop)
+            await self._poll_background_work(conversation, decoder, timeout, should_stop, poll_deadline)
+        finally:
+            if decoder.stop_reason is not None:
+                # Best-effort server-side cancel, once, whichever drain stopped.
+                with contextlib.suppress(Exception):
+                    await conversation.cancel()
+
+    async def _poll_background_work(
+        self,
+        conversation: Any,
+        decoder: _AntigravityDecoder,
+        timeout: float | None,
+        should_stop: Callable[[], StopReason | None] | None,
+        poll_deadline: float | None,
+    ) -> None:
+        poll_count = 0
+
+        # The model may background a run_command and go idle, so receive_steps()
+        # exhausts with that call still open. Gated on the orphaned-tool signal, so a
+        # normal turn takes this branch zero times.
+        # Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
+        while (
+            decoder.stop_reason is None
+            and not decoder.timeout_hit
+            and decoder.has_orphaned_tool_call()
+            and (poll_count < _MAX_BACKGROUND_POLLS if poll_deadline is None else time.monotonic() < poll_deadline)
+        ):
+            poll_count += 1
+            self._log.debug("Polling for backgrounded work (orphaned tool call); attempt %d", poll_count)
+            await asyncio.sleep(_BACKGROUND_POLL_INTERVAL_SECONDS)
+            if decoder.timeout_hit or (poll_deadline is not None and time.monotonic() >= poll_deadline):
+                # Skip the re-drain, which could itself await indefinitely.
+                break
+            reason = should_stop() if should_stop is not None else None
+            if reason is not None:
+                decoder.stop_reason = reason
+                break
+            await self._drain(conversation, decoder, should_stop)
+
+        if decoder.has_orphaned_tool_call() and decoder.stop_reason is None and not decoder.timeout_hit:
+            bound = (
+                f"poll_deadline ({_POLL_DEADLINE_TIMEOUT_FRACTION:.0%} of {timeout:g}s turn timeout)"
+                if poll_deadline is not None
+                else f"_MAX_BACKGROUND_POLLS ({_MAX_BACKGROUND_POLLS})"
+            )
+            self._log.warning(
+                "Poll budget exhausted (%s, poll_count=%d) with a tool call still ACTIVE.", bound, poll_count
+            )
+
+    def _fail(self, decoder: _AntigravityDecoder, status: AgentEndStatus, reason: str) -> TurnOutcome:
+        self._state = AgentState.ERROR
+        return decoder.end(status, reason=reason, agent_output=self._last_response())
+
+    def _last_response(self) -> str:
+        with contextlib.suppress(Exception):
+            return str(self._sdk_agent.conversation.last_response or "")
+        return ""
 
     async def stop(self) -> None:
         """Stop the agent and tear down the local harness session."""
@@ -611,6 +781,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         ``stop()`` exit-stack close. This hook only records intent.
         """
         self._state = AgentState.ERROR
+
+    async def harness_version(self) -> str | None:
+        """The ``google-antigravity`` SDK version; its localharness ships inside the package."""
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return f"google-antigravity {version('google-antigravity')}"
+        except PackageNotFoundError:
+            return None
 
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Gemini model + thinking level for auditability."""
@@ -645,347 +824,3 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             self._log.warning(
                 "Antigravity harness teardown failed; the harness process may still be running", exc_info=True
             )
-
-
-class _AntigravityTurnState:
-    """Per-turn mutable scratch for one ``AntigravityAgent.communicate`` call.
-
-    Maps the Gemini step stream onto the standardized event protocol and
-    reconstructs the assistant transcript. The same ``messages`` / ``commands``
-    accumulate live, so a mid-turn crash keeps the partial transcript (the
-    agent's shared crash kernel builds ``pending_turn`` from ``collector``).
-
-    Step-stream shape this consumes (observed): each ``step_index`` is yielded
-    repeatedly through ACTIVE -> DONE transitions; ``usage_metadata`` lands once
-    per generation on a DONE/terminal step (summing them == the turn total); a
-    tool call carries a stable ``id`` and its result is folded into expanded
-    ``args`` at DONE.
-    """
-
-    def __init__(
-        self,
-        *,
-        agent: AntigravityAgent,
-        emit: CompositeStreamCallback,
-        task_id: str,
-        turn_id: str,
-        collector: EventCollector,
-        user_input: str,
-        iteration: int,
-        model: str,
-        turn_start_time: float,
-        clock: TurnClock,
-    ) -> None:
-        self._agent = agent
-        self.emit = emit
-        self.task_id = task_id
-        self.turn_id = turn_id
-        self.collector = collector
-        self.user_input = user_input
-        self.iteration = iteration
-        self.model = model
-        self.turn_start_time = turn_start_time
-        # Injected, not read from a module global, so a test supplies a fake
-        # instead of monkeypatching `datetime` out from under the reducer.
-        self.clock = clock
-
-        self.timeout_hit = False
-        self.stop_reason: StopReason | None = None
-        self.finalized = False
-
-        self.total_usage = TokenUsage()
-        self.messages: list[TranscriptMessage] = []
-        self.commands: list[CommandTelemetry] = []
-        self._output_parts: list[str] = []
-        self._assistant_turns = 0
-
-        # ToolStart on first sight of an id; ToolEnd at DONE.
-        self._next_seq = 0
-        self._seen_tools: set[str] = set()
-        self._closed_tools: set[str] = set()
-        self._open_tools: dict[str, CommandTelemetry] = {}
-        # Arg keys present when a tool was first seen (its model-supplied
-        # inputs), used at DONE to tell them from harness-appended result fields.
-        self._tool_input_keys: dict[str, set[str]] = {}
-        # Most recently seen StepStatus per tool id, for has_orphaned_tool_call.
-        # Separate from _closed_tools, which tracks only DONE/ERROR.
-        self._tool_last_status: dict[str, Any] = {}
-        # Content blocks accumulated since the last per-generation flush.
-        self._blocks: list[ContentBlock] = []
-        # Where the CURRENT generation started, advanced only by a flush that
-        # actually emitted a message.
-        self._gen_mark_wall: datetime = clock.now()
-        # Re-seeded ONCE, at the first observed Step. See
-        # `_seed_first_generation_window`.
-        self._first_output_seen: bool = False
-
-    @property
-    def ended_cleanly(self) -> bool:
-        """True once the loop broke on a ``should_stop`` reason.
-
-        A non-crash termination, so a stray exception raised while unwinding the
-        step generator afterwards must not be escalated.
-        """
-        return self.stop_reason is not None
-
-    def _seed_first_generation_window(self, source: Any) -> None:
-        """Move the first window's mark to the first observed MODEL output.
-
-        GATED ON ``source``, because ``harness_startup_ms`` is defined as model
-        output and the SDK streams Steps that are not: a turn can legitimately open
-        with a SYSTEM or USER Step, and seeding on one would put the mark BEFORE
-        the model spoke. The same gate guards text streaming below.
-
-        ONCE PER TURN, and that is the whole contract: re-seeding would stop the
-        windows tiling. The flag needs no reset — a fresh turn state is built per
-        ``communicate()``. A turn that streams no MODEL Step keeps the turn-entry
-        mark and clamps to ``0.0``, which is the correct degradation.
-
-        Rationale: .claude/notes/agents.md § First-generation window seeding
-        """
-        if self._first_output_seen or _enum_value(source) != _SOURCE_MODEL:
-            return
-        self._first_output_seen = True
-        self._gen_mark_wall = self.clock.now()
-
-    def process_step(self, step: Any) -> None:
-        """Route one streamed ``Step`` to events + transcript reconstruction."""
-        stype = _enum_value(step.type)
-        sstatus = _enum_value(step.status)
-        ssource = _enum_value(step.source)
-        self._seed_first_generation_window(ssource)
-        starget = _enum_value(step.target)
-        done = sstatus in (_STATUS_DONE, _STATUS_ERROR)
-
-        # Stream visible assistant text deltas.
-        if step.content_delta and ssource == _SOURCE_MODEL and starget == _TARGET_USER and stype == _TYPE_TEXT_RESPONSE:
-            self.emit.on_event(TextChunkEvent(task_id=self.task_id, turn_id=self.turn_id, text=step.content_delta))
-
-        # Tool calls: ToolStart on first sight, ToolEnd when the owning step is DONE.
-        for call_index, call in enumerate(step.tool_calls):
-            self._handle_tool_call(call, step, done, sstatus, call_index)
-
-        # Capture content blocks on the terminal transition of a step.
-        if done:
-            if stype == _TYPE_THINKING and step.thinking:
-                self._blocks.append(ContentBlock(block_type="thinking", sequence=0, thinking=step.thinking))
-            elif stype == _TYPE_TEXT_RESPONSE and step.content:
-                self._output_parts.append(step.content)
-                self._blocks.append(ContentBlock(block_type="text", sequence=0, text=step.content))
-
-        # Per-generation usage: fold into the turn total and cut an AssistantMessage.
-        if step.usage_metadata is not None:
-            gen = _to_token_usage(step.usage_metadata, self.model)
-            self.total_usage = self.total_usage + gen
-            self._flush_generation(gen, getattr(step.usage_metadata, "thoughts_token_count", 0) or 0)
-
-    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
-        raw_name = _enum_value(call.name)
-        # call.id is usually present but the SDK types it optional. The fallback
-        # mirrors the SDK's own `trajectory_id:step_index` scheme; call_index
-        # further disambiguates multiple id-less calls within one step.
-        # Rationale: .claude/notes/agents.md § Why the tool-call id falls back the way it does
-        trajectory_id = getattr(step, "trajectory_id", "") or ""
-        step_key = f"{trajectory_id}:{step.step_index}" if trajectory_id else str(step.step_index)
-        cid = call.id or f"{raw_name}_{step_key}_{call_index}"
-        self._tool_last_status[cid] = sstatus
-        if cid not in self._seen_tools:
-            self._seen_tools.add(cid)
-            seq = self._next_seq
-            self._next_seq += 1
-            tool_name = _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP.get(raw_name, str(raw_name))
-            self._tool_input_keys[cid] = set(call.args)
-            now = self.clock.now()
-            tel = CommandTelemetry(
-                tool_name=tool_name,
-                tool_id=cid,
-                timestamp=now,
-                parameters=self._params(tool_name, call.args, self._tool_input_keys[cid]),
-                sequence_number=seq,
-                execution_started_at=now,
-            )
-            self._open_tools[cid] = tel
-            self.emit.on_event(ToolStartEvent(task_id=self.task_id, turn_id=self.turn_id, tool=tel))
-
-        if done and cid in self._open_tools and cid not in self._closed_tools:
-            self._closed_tools.add(cid)
-            start_tel = self._open_tools[cid]
-            exit_code = call.args.get("exit_code")
-            errored = (sstatus == _STATUS_ERROR) or (exit_code not in (None, 0))
-            result_text = (
-                call.args.get("combined_output")
-                or call.args.get("diff_block")
-                or call.args.get("output")
-                or call.args.get("results")
-                or call.args.get("summary")
-                or step.content
-                or None
-            )
-            completed = self.clock.now()
-            started = start_tel.execution_started_at or completed
-            tool_ms = max((completed - started).total_seconds() * 1000.0, 0.0)
-            end_tel = start_tel.model_copy(
-                update={
-                    "parameters": self._params(start_tel.tool_name, call.args, self._tool_input_keys.get(cid)),
-                    "result_status": "error" if errored else "success",
-                    "result_summary": str(result_text) if result_text is not None else None,
-                    "error_message": (step.error or "tool failed") if errored else None,
-                    "execution_completed_at": completed,
-                    "duration_ms": tool_ms,
-                }
-            )
-            self.commands.append(end_tel)
-            self.emit.on_event(
-                ToolEndEvent(
-                    task_id=self.task_id,
-                    turn_id=self.turn_id,
-                    tool=end_tel,
-                    status=ToolEndStatus.ERROR if errored else ToolEndStatus.OK,
-                )
-            )
-            self._blocks.append(ContentBlock(block_type="tool_use", sequence=0, tool_use_id=cid))
-
-    @staticmethod
-    def _params(tool_name: str, args: dict[str, Any], input_keys: set[str] | None) -> dict[str, Any]:
-        """Model-supplied inputs only, renamed to canonical cross-agent keys.
-
-        A key is a (dropped) result field when it is in the static
-        ``_RESULT_ARG_KEYS`` backstop OR first appeared at DONE, given the
-        input-key snapshot taken at tool start. Survivors are renamed to the
-        canonical vocabulary.
-        """
-        rename = _ANTIGRAVITY_ARG_RENAME.get(tool_name, {})
-        out: dict[str, Any] = {}
-        for k, v in args.items():
-            if k in _RESULT_ARG_KEYS:
-                continue
-            if input_keys is not None and k not in input_keys:
-                continue  # appeared only at DONE → harness result payload
-            out[rename.get(k, k)] = v
-        return out
-
-    def _flush_generation(self, gen: TokenUsage, reasoning_tokens: int) -> None:
-        """Cut accumulated blocks into one AssistantMessage carrying this gen's tokens.
-
-        Keeping the per-message buckets summing to the turn total means the
-        collector's reconciliation books a zero residual.
-        """
-        if not self._blocks and gen.is_empty():
-            return
-        now_wall = self.clock.now()
-        # Do NOT "simplify" this to resetting the mark when a tool ends: this
-        # harness interleaves a tool INTO a window rather than tiling around it,
-        # so the RAW window legitimately contains time that is not model time and
-        # the collector clips the tool union out of it. Resetting instead drops
-        # the model time around a fast tool.
-        # Rationale: .claude/notes/agents.md § Per-harness generation marks
-        _, generation_ms = close_window(mark=self._gen_mark_wall, now=now_wall)
-        for i, block in enumerate(self._blocks):
-            block.sequence = i
-        self.messages.append(
-            AssistantMessage(
-                started_at=self._gen_mark_wall,
-                completed_at=now_wall,
-                generation_duration_ms=generation_ms,
-                content_blocks=list(self._blocks),
-                tool_use_ids=[b.tool_use_id for b in self._blocks if b.block_type == "tool_use" and b.tool_use_id],
-                input_tokens=gen.uncached_input_tokens,
-                output_tokens=gen.output_tokens,
-                cache_creation_tokens=0,
-                cache_read_tokens=gen.cache_read_input_tokens,
-                reasoning_tokens=reasoning_tokens,
-                model=self.model,
-                # The Step stream carries no message id, and the evalboard's
-                # gap fallback cannot split contiguous windows.
-                message_id=f"{self.turn_id}-msg-{self._assistant_turns}",
-            )
-        )
-        self._assistant_turns += 1
-        self._blocks = []
-        # Advance ONLY after a message was appended: a no-op flush leaves the
-        # window open, so a later real generation still measures from its start.
-        self._gen_mark_wall = now_wall
-
-    def _agent_output(self) -> str:
-        if self._output_parts:
-            return "".join(self._output_parts)
-        with contextlib.suppress(Exception):
-            return self._agent._sdk_agent.conversation.last_response  # type: ignore[union-attr]
-        return ""
-
-    def has_orphaned_tool_call(self) -> bool:
-        """True if any NOT-YET-CLOSED tool call's most recently seen status is
-        ACTIVE — the structural signature of a backgrounded task the model went
-        idle on without waiting for. See ``communicate``'s poll loop.
-
-        An ALLOWLIST on ACTIVE, never a denylist on "not yet closed": the SDK also
-        has WAITING_FOR_USER, CANCELED and UNKNOWN, none of which the poll loop
-        should wait out. The `not in _closed_tools` guard is layered on top as a
-        monotonicity backstop, not a substitute.
-
-        Rationale: .claude/notes/agents.md § Antigravity Step interleaving and the background poll
-        """
-        return any(cid not in self._closed_tools and s == _STATUS_ACTIVE for cid, s in self._tool_last_status.items())
-
-    def finalize(self, status: AgentEndStatus, *, crashed: bool = False, crash_reason: str | None = None) -> None:
-        """Close orphaned tools, flush leftover blocks, emit TurnEnd + AgentEnd.
-
-        Idempotent. On a crash, also builds the partial ``pending_turn`` from the
-        collector (the agent base's shared crash kernel).
-        """
-        if self.finalized:
-            return
-        self.finalized = True
-
-        # Force-close any tool that emitted ToolStart but never reached DONE.
-        for cid, tel in self._open_tools.items():
-            if cid in self._closed_tools:
-                continue
-            orphan = tel.model_copy(update={"result_status": "unknown", "execution_completed_at": self.clock.now()})
-            self.emit.on_event(
-                ToolEndEvent(
-                    task_id=self.task_id,
-                    turn_id=self.turn_id,
-                    tool=orphan,
-                    status=ToolEndStatus.UNRESOLVED,
-                )
-            )
-
-        # Flush any trailing blocks not yet attached to a generation (no usage).
-        if self._blocks:
-            self._flush_generation(TokenUsage(), 0)
-
-        # Parallel by value, so an unmapped future member raises loudly instead
-        # of silently bucketing to COMPLETED.
-        turn_status = TurnEndStatus(status.value)
-
-        self.emit.on_event(
-            TurnEndEvent(
-                task_id=self.task_id,
-                turn_id=self.turn_id,
-                status=turn_status,
-                tokens=self.total_usage,
-            )
-        )
-        self.emit.on_event(
-            AgentEndEvent(
-                task_id=self.task_id,
-                status=status,
-                usage=self.total_usage,
-                iteration=self.iteration,
-                user_input=self.user_input,
-                agent_output=self._agent_output(),
-                model_used=self.model,
-                assistant_turn_count=self._assistant_turns,
-                messages=self.messages,
-                num_turns=self._assistant_turns,
-                crashed=crashed,
-                crash_reason=crash_reason,
-                duration_seconds=time.monotonic() - self.turn_start_time,
-                # One basis with the window bounds — see the AgentStartEvent site.
-                timestamp=self.clock.now(),
-            )
-        )
-
-        if crashed:
-            self._agent._capture_partial_turn(self.collector)

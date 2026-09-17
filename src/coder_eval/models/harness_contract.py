@@ -27,6 +27,13 @@ class UsageGranularity(StrEnum):
     TURN = "turn"
 
 
+class TimingBasis(StrEnum):
+    """Where a harness's recorded stamps come from, which decides who stamps a tool and a window."""
+
+    TURN_CLOCK = "turn_clock"
+    CLI_EPOCH_MS = "cli_epoch_ms"
+
+
 class HarnessContract(BaseModel):
     """The per-agent declaration of which uniform fields reach the harness.
 
@@ -56,6 +63,20 @@ class HarnessContract(BaseModel):
             "per communicate() call. A budget can overshoot by one such report."
         )
     )
+    timing_basis: TimingBasis = Field(
+        description=(
+            "Where recorded stamps come from: turn_clock (the TurnEmitter stamps the turn bracket, every tool "
+            "and every window from one TurnClock) or cli_epoch_ms (the adapter passes the CLI's own stamps for "
+            "windows and main-thread tools)."
+        )
+    )
+    reports_cost: bool = Field(
+        default=False,
+        description=(
+            "Whether every finished turn with usage carries a cost the harness computed for any model it can "
+            "run. When False, run_limits.max_usd requires an agent.model that pricing.py prices."
+        ),
+    )
     permission_modes: frozenset[PermissionMode] | None = Field(
         default=None,
         description=(
@@ -63,6 +84,11 @@ class HarnessContract(BaseModel):
             "is unsupported."
         ),
     )
+
+    @property
+    def counts_model_turns(self) -> bool:
+        """Whether the stream opens one inner turn per model response, so run_limits counts model turns."""
+        return self.cooperative_stop and self.usage_granularity is not UsageGranularity.TURN
 
     @model_validator(mode="after")
     def check_semantics_matches_prompt_support(self) -> Self:

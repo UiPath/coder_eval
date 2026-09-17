@@ -101,11 +101,11 @@ jobs:
       - name: Type check with pyright
         run: .venv/bin/pyright
 
-      # The CE036 contract engine lives under tests/, which [tool.pyright] excludes
+      # The CE036 contract engine and the live tests live under tests/, which [tool.pyright] excludes
       # -- and `exclude` beats both a CLI file arg and an `include` entry, so it can
       # only be reached through a config of its own, derived from [tool.pyright] so
       # the two passes cannot drift. Mirrors `make typecheck`.
-      - name: Type check the CE036 contract engine
+      - name: Type check the CE036 contract engine and the live tests
         run: |
           .venv/bin/python -m tests.lint.pyright_config .pyright-tests.json
           .venv/bin/pyright -p .pyright-tests.json
@@ -405,7 +405,7 @@ jobs:
       - name: Type check with pyright
         run: .venv/Scripts/pyright
 
-      - name: Type check the CE036 contract engine
+      - name: Type check the CE036 contract engine and the live tests
         run: |
           .venv/Scripts/python -m tests.lint.pyright_config .pyright-tests.json
           .venv/Scripts/pyright -p .pyright-tests.json

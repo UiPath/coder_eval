@@ -35,7 +35,8 @@ variants:
   - variant_id: with-plugin
     agent:
       plugins:
-        # $PLUGIN_PATH names a plugin root or a bare skills directory. Both are staged;
-        # a path with no skill fails `plan`.
+        # $PLUGIN_PATH names a plugin root or a bare skills directory. A plugin root loads
+        # whole on Claude Code; a bare skills directory loads its skills. A path with no
+        # skill fails `plan`.
         - type: "local"
           path: "$PLUGIN_PATH"

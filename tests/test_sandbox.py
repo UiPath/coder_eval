@@ -157,30 +157,41 @@ def test_sandbox_run_command_task_dir_absent():
         sandbox.cleanup()
 
 
-def test_sandbox_run_command_uses_agent_command_base_path(monkeypatch, tmp_path):
-    """Criteria commands can be pinned to the PATH seen by the agent."""
+@pytest.mark.parametrize("entry", ["setup", "adopt"])
+@pytest.mark.parametrize(("mock_label", "expected"), [("mock", "mock"), (None, "host")], ids=["mock-wins", "host-kept"])
+def test_run_command_resolves_mock_path_dirs_ahead_of_host_path(monkeypatch, tmp_path, entry, mock_label, expected):
+    """A criterion resolves the mock binaries the agent got, and still reaches the host PATH."""
     from tests._path_helpers import write_uip_shim
 
-    stale_bin = tmp_path / "stale"
-    agent_bin = tmp_path / "agent"
-    stale_bin.mkdir()
-    agent_bin.mkdir()
-    write_uip_shim(stale_bin, "stale")
-    write_uip_shim(agent_bin, "agent")
-    monkeypatch.setenv("PATH", str(stale_bin))
+    host_bin = tmp_path / "host"
+    host_bin.mkdir()
+    write_uip_shim(host_bin, "host")
+    monkeypatch.setenv("PATH", str(host_bin))
+    workspace = tmp_path / "ws"
+    (workspace / "mocks").mkdir(parents=True)
+    if mock_label is not None:
+        write_uip_shim(workspace / "mocks", mock_label)
 
-    config = SandboxConfig(driver="tempdir", python=None)
-    sandbox = Sandbox(config, task_id="test_agent_path")
-
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None, mock_path_dirs=["mocks"]), task_id="t")
     try:
-        sandbox.setup()
-        sandbox.set_command_base_path(f"{agent_bin}{os.pathsep}{stale_bin}")
+        if entry == "setup":
+            sandbox.setup(target_dir=workspace)
+        else:
+            sandbox.adopt(workspace)
+        assert sandbox.command_base_path == str((workspace / "mocks").resolve())
 
         exit_code, stdout, _stderr = sandbox.run_command("uip")
         assert exit_code == 0
-        assert stdout.strip() == "agent"
-        # Read-only view exposes the same value `set_…` accepts.
-        assert sandbox.command_base_path == f"{agent_bin}{os.pathsep}{stale_bin}"
+        assert stdout.strip() == expected
+    finally:
+        sandbox.cleanup()
+
+
+def test_command_base_path_is_none_without_mock_path_dirs(tmp_path):
+    sandbox = Sandbox(SandboxConfig(driver="tempdir", python=None), task_id="t")
+    try:
+        sandbox.setup()
+        assert sandbox.command_base_path is None
     finally:
         sandbox.cleanup()
 
@@ -272,31 +283,21 @@ def test_refresh_plugin_tools_dir_none_when_uip_outside_uipath_tree(monkeypatch,
     sys.platform == "win32",
     reason="Fixture uses POSIX symlink + extensionless `uip`; `shutil.which` on Windows needs PATHEXT match.",
 )
-def test_set_command_base_path_refreshes_plugin_tools_dir(monkeypatch, tmp_path):
-    """PATH alignment from the agent should re-derive the canonical tools dir.
-
-    Without this, criterion subprocesses might pin to a tools dir derived from
-    a `uip` that the agent never resolved to.
-    """
+def test_mock_path_dirs_drive_the_plugin_tools_dir_pin(monkeypatch, tmp_path):
+    """A `uip` in a mock dir wins the pin over the host PATH, as it wins the agent's lookup."""
     pre_root = tmp_path / "pre"
     pre_root.mkdir()
-    agent_root = tmp_path / "agent"
-    agent_root.mkdir()
+    workspace = tmp_path / "ws"
+    (workspace / "tools").mkdir(parents=True)
     pre_bin = _install_fake_uip_tree(pre_root)
-    agent_bin = _install_fake_uip_tree(agent_root)
-    # Initial PATH points at the "pre" tools tree; agent PATH override (later)
-    # points at a different "agent" tree. `set_command_base_path` must
-    # re-resolve and update.
+    _install_fake_uip_tree(workspace / "tools")
     monkeypatch.setenv("PATH", str(pre_bin))
-    config = SandboxConfig(driver="tempdir", python=None)
-    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_refresh")
+    config = SandboxConfig(driver="tempdir", python=None, mock_path_dirs=["tools/bin"])
+    sandbox = Sandbox(config, task_id="test_plugin_tools_dir_mock")
     try:
-        sandbox.setup()
-        pre_expected = str((pre_root / "node_modules" / "@uipath").resolve(strict=True))
-        assert sandbox.plugin_tools_dir == pre_expected
-        sandbox.set_command_base_path(str(agent_bin))
-        agent_expected = str((agent_root / "node_modules" / "@uipath").resolve(strict=True))
-        assert sandbox.plugin_tools_dir == agent_expected
+        sandbox.setup(target_dir=workspace)
+        expected = str((workspace / "tools" / "node_modules" / "@uipath").resolve(strict=True))
+        assert sandbox.plugin_tools_dir == expected
     finally:
         sandbox.cleanup()
 

@@ -27,7 +27,7 @@ _BUDGET_OVERSHOOT: Final[str] = (
 class RunLimits(BaseModel):
     """Run-time caps on a task.
 
-    Unifies structural caps (max_tool_calls, task_timeout, turn_timeout) and
+    Unifies structural caps (max_tool_calls, max_turns, task_timeout, turn_timeout) and
     budget caps (tokens, USD). Structural caps and budget caps stop the task at
     the agent's next poll boundary; both are cumulative across every turn of the
     task and apply to the subject agent only.
@@ -41,11 +41,23 @@ class RunLimits(BaseModel):
         default=None,
         gt=0,
         description=(
-            "Hard cap on resolved tool calls across the whole task (every retry attempt and every "
+            "Hard cap on main-thread resolved tool calls across the whole task (every retry attempt and every "
             "dialog turn). Enforced by the TurnMonitor at the agent's next poll boundary on every "
             "harness: the round that reaches the cap is processed whole, so tool calls already in "
             "flight can still land after it. The run finalizes cleanly as tool_calls_exhausted; "
             "criteria are still checked. None = no cap."
+        ),
+    )
+    max_turns: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Hard cap on main-thread model turns (model responses) across the whole task (every retry attempt "
+            "and every dialog turn); a sub-agent's turns do not count. The TurnMonitor stops the agent at its "
+            "next poll once turn N+1 starts, so part of that turn can still land. Only harnesses with a "
+            "per-response turn boundary accept it (usage_granularity generation or step); the others reject it "
+            "at resolution. The run finalizes cleanly as tool_calls_exhausted; criteria are still checked. "
+            "None = no cap."
         ),
     )
     expected_tool_calls: int | None = Field(
@@ -55,6 +67,15 @@ class RunLimits(BaseModel):
             "Soft target for cumulative visible tool calls across a task (each resolved tool call "
             "counts 1, plus 1 for the final reply when present). Exceeding it logs a one-shot warning "
             "and badges the report; the run is NOT aborted (use max_tool_calls for a hard cap)."
+        ),
+    )
+    expected_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Soft target for cumulative main-thread model turns across a task, counted like max_turns. Exceeding "
+            "it logs a one-shot warning and badges the report; the run is NOT aborted (use max_turns for a hard "
+            "cap). Only harnesses with a per-response turn boundary accept it; the others reject it at resolution."
         ),
     )
     task_timeout: int | None = Field(
@@ -88,9 +109,10 @@ class RunLimits(BaseModel):
         description=(
             "Max cumulative cost in USD across the task. Enforced live by the TurnMonitor: priced from the "
             "harness's reported cost when it reports one, else from pricing.py for the reported model or "
-            "agent.model. A run that can do neither finishes ERROR at that turn's end (register_pricing adds a "
-            "plugin rate). Overshoot is soft by one usage report (see usage_granularity in "
-            "docs/agents/HARNESS_PARITY.md) plus any calls in flight."
+            "agent.model. On a harness that does not report its own cost (reports_cost in "
+            "docs/agents/HARNESS_PARITY.md), agent.model must be priced, or the task is rejected at resolution "
+            "(register_pricing adds a plugin rate). A run that still cannot price a turn finishes ERROR. "
+            "Overshoot is soft by one usage report (see usage_granularity) plus any calls in flight."
         ),
     )
     count_cached_input: bool = Field(

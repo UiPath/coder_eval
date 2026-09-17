@@ -47,7 +47,7 @@ Follow these steps:
    - Does this change touch the evaluation flow? (CLI → ExperimentRunner → run_batch → Orchestrator → Sandbox + Agent + SuccessChecker)
    - Does this affect the 5-layer config merge? (default.yaml → experiment defaults → task YAML → variant → CLI flags). Each list/dict field must declare its `MergeField` strategy (lint rule CE014).
    - If adding a new criterion: does it fit `BaseCriterion` / `@register_criterion` / the `SuccessCriterion` discriminated union? Does it need a custom `aggregate()` for suite thresholds?
-   - If adding a new agent: does it follow the plugin SPI (a `BaseAgentConfig` subclass + `Agent` ABC + a `register(registry)` hook exposed via the `coder_eval.plugins` entry-point group)? Does it use the shared turn lifecycle (`_begin_turn`/`_end_turn_ok`/`_mark_stopped`) and emit the standardized event protocol?
+   - If adding a new agent: does it follow the plugin SPI (a `BaseAgentConfig` subclass + `Agent` ABC + a `register(registry)` hook exposed via the `coder_eval.plugins` entry-point group)? Does `communicate(..., iteration=)` write the turn through one `TurnEmitter` (`_open_emitter`) and return a `TurnOutcome`, and does `stop()` call `_mark_stopped`?
    - Does this change the task YAML schema? If so, what happens to existing task files in `tasks/`?
    - Are there edge cases in sandbox isolation, agent lifecycle, retry/crash recovery, or token accounting?
    - Does this introduce new dependencies? Prefer what's already in the project (pydantic, typer, rich, anyio, anthropic).

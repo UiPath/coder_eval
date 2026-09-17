@@ -585,7 +585,7 @@ def resolve_task_for_variant(
 
 def _apply_cli_overrides(
     task: TaskDefinition,
-    config: BatchRunConfig,
+    config: BatchRunConfig | None,
     lineage: dict[str, ConfigLineageEntry] | None = None,
 ) -> None:
     """Apply CLI overrides (layer 5) to a task definition in-place.
@@ -596,7 +596,7 @@ def _apply_cli_overrides(
 
     Args:
         task: The task definition to mutate.
-        config: Batch run configuration containing CLI overrides.
+        config: Batch run configuration containing CLI overrides; ``None`` applies none.
         lineage: Optional lineage dict to update with CLI override entries.
     """
     from .overrides import apply_overrides
@@ -604,7 +604,8 @@ def _apply_cli_overrides(
     # Rationale: .claude/notes/orchestration.md § No-op tasks need no special case anywhere
     assert task.agent is not None, f"Task '{task.task_id}' has no agent config"
 
-    apply_overrides(task, config.overrides, agent_type=config.agent_type, lineage=lineage)
+    if config is not None:
+        apply_overrides(task, config.overrides, agent_type=config.agent_type, lineage=lineage)
 
     # Final guard: agent.type must be set after all 5 layers have merged.
     if task.agent.type is None:
@@ -641,6 +642,53 @@ def resolve_task_files(
         resolve_template_source_paths(task.sandbox.template_sources, exp_dir)
 
 
+def resolve_variant_task(
+    default_experiment: ExperimentDefinition,
+    task: TaskDefinition,
+    experiment: ExperimentDefinition,
+    variant: ExperimentVariant,
+    config: BatchRunConfig | None,
+    *,
+    task_file: Path,
+    experiment_file: Path | None,
+) -> tuple[TaskDefinition, dict[str, ConfigLineageEntry], int]:
+    """One (task x variant) through all five layers, its files inlined, then validated.
+
+    ``run`` and ``plan`` both resolve through here, so ``plan`` rejects what ``run`` rejects.
+
+    Raises:
+        TaskResolutionError: the resolved task fails a resolution check.
+        ValueError: a layer or a file path does not resolve.
+    """
+    from .resolution_checks import validate_resolved_task
+
+    resolved_task, lineage, effective_repeats = resolve_task_for_variant(
+        default_experiment, task, experiment, variant, config
+    )
+    resolve_task_files(resolved_task, task_file, experiment_file)
+    _apply_prompt_overrides(resolved_task, experiment, variant, lineage)
+    _apply_cli_overrides(resolved_task, config, lineage)
+    validate_resolved_task(resolved_task)
+    return resolved_task, lineage, effective_repeats
+
+
+def resolve_variant_prompt_files(experiment: ExperimentDefinition, experiment_file: Path | None) -> None:
+    """Inline every variant's ``initial_prompt_file``, relative to the experiment file.
+
+    Raises:
+        ValueError: a variant uses ``initial_prompt_file`` and ``experiment_file`` is None.
+    """
+    exp_dir = experiment_file.parent if experiment_file is not None else None
+    for variant in experiment.variants:
+        if variant.initial_prompt_file is not None:
+            if exp_dir is None:
+                raise ValueError(
+                    f"variant '{variant.variant_id}' uses initial_prompt_file but no experiment file path "
+                    + "is available for resolving relative paths"
+                )
+            resolve_variant_initial_prompt_file(variant, exp_dir)
+
+
 def resolve_all_tasks(
     task_files: list[Path],
     experiment: ExperimentDefinition,
@@ -674,7 +722,6 @@ def resolve_all_tasks(
         ValueError: If duplicate task IDs are found after resolution.
     """
     from .harness_contract import TaskResolutionError
-    from .resolution_checks import validate_resolved_task
 
     resolved: list[ResolvedTask] = []
     skipped: list[SkippedTask] = []
@@ -683,16 +730,7 @@ def resolve_all_tasks(
     resolution_errors: list[tuple[Path, Exception]] = []
     attempted = 0
 
-    # Resolve variant-level initial_prompt_file paths before the main loop
-    exp_dir = experiment_file.parent if experiment_file is not None else None
-    for variant in experiment.variants:
-        if variant.initial_prompt_file is not None:
-            if exp_dir is None:
-                raise ValueError(
-                    f"variant '{variant.variant_id}' uses initial_prompt_file but no experiment file path "
-                    + "is available for resolving relative paths"
-                )
-            resolve_variant_initial_prompt_file(variant, exp_dir)
+    resolve_variant_prompt_files(experiment, experiment_file)
 
     for task_file in task_files:
         try:
@@ -728,23 +766,15 @@ def resolve_all_tasks(
         try:
             for expanded_task in expanded_tasks:
                 for variant in experiment.variants:
-                    # Apply layers 1-4 (default → experiment-defaults → task → variant) + resolve repeats
-                    resolved_task, lineage, effective_repeats = resolve_task_for_variant(
-                        default_experiment, expanded_task, experiment, variant, config
+                    resolved_task, lineage, effective_repeats = resolve_variant_task(
+                        default_experiment,
+                        expanded_task,
+                        experiment,
+                        variant,
+                        config,
+                        task_file=task_file,
+                        experiment_file=experiment_file,
                     )
-
-                    # Resolve file paths injected by variant overrides
-                    resolve_task_files(resolved_task, task_file, experiment_file)
-
-                    # Apply prompt mutations or overrides (between file resolution and CLI overrides)
-                    _apply_prompt_overrides(resolved_task, experiment, variant, lineage)
-
-                    # Apply layer 5 (CLI overrides)
-                    _apply_cli_overrides(resolved_task, config, lineage)
-
-                    # Once the task is fully resolved, so the -D kill switch is
-                    # already merged. No-op unless armed.
-                    validate_resolved_task(resolved_task)
 
                     # Fan-out: simulation n_trials takes precedence over experiment repeats
                     # when simulation is active; otherwise use experiment-level repeats.

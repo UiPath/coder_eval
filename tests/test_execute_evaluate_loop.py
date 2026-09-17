@@ -473,22 +473,20 @@ def test_execute_records_tool_calls_exhausted_exactly_as_run_does(tmp_path: Path
     assert regraded["tool_calls_exhausted"] is True, "the fact must survive the grade too"
 
 
-def test_a_recorded_run_limits_max_turns_re_grades_from_the_source_yaml_loudly(tmp_path: Path) -> None:
-    """A run recorded before `run_limits.max_turns` became `max_tool_calls` no longer
-    validates. The grade must fall back to the source YAML and say so, not refuse."""
+def test_a_recorded_main_era_max_turns_re_grades_from_the_recorded_config(tmp_path: Path) -> None:
+    """A `main`-era record carries `run_limits.max_turns`; it validates, so the grade uses the recorded config.
+    Detached grading skips the harness gate, so the agentless kind that rejects the field still re-grades."""
     run_dir = tmp_path / "r"
     _invoke(["execute", str(AGENTLESS_TASK), "--run-dir", str(run_dir)])
     task_dir = _task_dir(run_dir)
 
     row = _row(task_dir)
-    run_limits = row["task_config"]["resolved"]["run_limits"]
-    run_limits["max_turns"] = run_limits.pop("max_tool_calls")
+    row["task_config"]["resolved"]["run_limits"]["max_turns"] = 100
     (task_dir / "task.json").write_text(json.dumps(row), encoding="utf-8")
 
     output = _invoke(["evaluate", str(task_dir)]).output
 
-    assert "falling back to" in output
-    assert "NOT reapplied" in output
+    assert "falling back to" not in output
     assert _row(task_dir)["final_status"] == FinalStatus.SUCCESS.value
 
 

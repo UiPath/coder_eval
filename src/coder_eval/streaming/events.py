@@ -82,6 +82,7 @@ class StopReason(StrEnum):
 
     EARLY_CRITERION = "early_criterion"
     TOOL_CALL_CAP = "tool_call_cap"
+    MODEL_TURN_CAP = "model_turn_cap"
     TOKEN_BUDGET = "token_budget"
     USD_BUDGET = "usd_budget"
 
@@ -89,6 +90,7 @@ class StopReason(StrEnum):
 _END_STATUS_FOR_STOP: dict[StopReason, AgentEndStatus] = {
     StopReason.EARLY_CRITERION: AgentEndStatus.STOPPED_EARLY,
     StopReason.TOOL_CALL_CAP: AgentEndStatus.TOOL_CALLS_EXHAUSTED,
+    StopReason.MODEL_TURN_CAP: AgentEndStatus.TOOL_CALLS_EXHAUSTED,
     StopReason.TOKEN_BUDGET: AgentEndStatus.TOKEN_BUDGET_EXCEEDED,
     StopReason.USD_BUDGET: AgentEndStatus.COST_BUDGET_EXCEEDED,
 }

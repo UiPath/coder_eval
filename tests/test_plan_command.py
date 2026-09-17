@@ -363,3 +363,29 @@ class TestPlanCommandHarnessContract:
         assert exit_code == 1
         assert "config error" in printed
         assert "offers no skill" in printed
+
+
+class TestPlanResolvesLikeRun:
+    def test_a_variant_system_prompt_file_on_a_kind_without_system_prompt_fails_plan(self, tmp_path: Path) -> None:
+        (tmp_path / "prompt.txt").write_text("be terse")
+        task_file = tmp_path / "task.yaml"
+        task_file.write_text(
+            "task_id: t\ndescription: d\nagent:\n  type: none\n"
+            + "success_criteria:\n  - type: file_exists\n    path: x\n    description: x\n"
+        )
+        experiment_file = tmp_path / "experiment.yaml"
+        experiment_file.write_text(
+            "experiment_id: e\nvariants:\n  - variant_id: v\n    agent:\n      system_prompt_file: prompt.txt\n"
+        )
+
+        with (
+            patch("coder_eval.cli.plan_command.check_tools"),
+            patch("coder_eval.cli.plan_command.check_api_keys"),
+            patch("coder_eval.cli.plan_command.console") as mock_console,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            run_plan(task_files=[task_file], experiment=experiment_file)
+
+        assert exc_info.value.exit_code == 1
+        printed = " ".join(str(call) for call in mock_console.print.call_args_list)
+        assert "system_prompt" in printed

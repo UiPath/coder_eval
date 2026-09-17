@@ -41,7 +41,7 @@
   "num_turns": 1,
   "result_summary": {
     "is_error": false,
-    "result": null,
+    "result": "All done.",
     "stop_reason": "stop",
     "subtype": "completed"
   },

@@ -21,6 +21,7 @@ Rationale: .claude/notes/timing.md § Where a reducer's window opens
 import math
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from coder_eval.models import AssistantMessage, CommandTelemetry, TranscriptMessage
@@ -127,8 +128,21 @@ def union_ms(spans: list[tuple[datetime, datetime]]) -> float:
     return busy_ms(spans, min(s for s, _ in spans), max(e for _, e in spans))
 
 
-def close_window(*, mark: datetime, now: datetime, item_start: datetime | None = None) -> tuple[datetime, float]:
-    """Open one generation window at ``mark`` and close it at ``now``: its ``(started, span_ms)``.
+@dataclass(frozen=True, slots=True)
+class Window:
+    """One generation window: its two bounds, and nothing a caller could set apart from them."""
+
+    started_at: datetime
+    completed_at: datetime
+
+    @property
+    def duration_ms(self) -> float:
+        """``completed_at - started_at`` in ms, clamped at ``0.0``: an inverted window is a measured zero."""
+        return max(0.0, (self.completed_at - self.started_at).total_seconds() * 1000.0)
+
+
+def close_window(*, mark: datetime, now: datetime, item_start: datetime | None = None) -> Window:
+    """Open one generation window at ``mark`` and close it at ``now``.
 
     The shape all five reducers share, and what it returns is the RAW window —
     tool execution comes back out centrally, in ``subtract_tool_time``.
@@ -141,14 +155,12 @@ def close_window(*, mark: datetime, now: datetime, item_start: datetime | None =
     ``item_start`` is this emission's own first stamp, when the harness has one;
     the ``min()`` against ``mark`` stops a backwards stamp inverting the span.
 
-    The span is clamped at ``0.0``: an inverted window is a measured zero, not a
-    negative generation. ``completed`` is deliberately not returned — it is
-    always ``now``, which the caller already has.
+    An inverted window keeps its bounds and its duration clamps to ``0.0``.
 
     Rationale: .claude/notes/timing.md § close_window
     """
     started = min(mark, item_start) if item_start is not None else mark
-    return started, max(0.0, (now - started).total_seconds() * 1000.0)
+    return Window(started_at=started, completed_at=now)
 
 
 def decompose_turn(
@@ -261,7 +273,7 @@ def subtract_tool_time(
 
     Raises ``ValueError`` if a group's published total does not equal the span
     its bounds describe. That equality is what lets ``generation_duration_ms``
-    stay a PUBLISHED field; CE061 forces the same shape statically. Raising
+    stay a PUBLISHED field; ``TurnEmitter.add_generation`` builds it from one ``Window``. Raising
     kills the turn, which is accepted.
 
     Rationale: .claude/notes/timing.md § subtract_tool_time
@@ -300,8 +312,8 @@ def subtract_tool_time(
                 + "into, sums to it) — tool execution comes back out HERE, once, for every harness. "
                 + "A disagreement means the reducer narrowed or widened a window without moving its "
                 + "bounds, which makes the duration and the bounds two answers to one question and "
-                + "breaks the four-bucket identity. Build the window with `timing.close_window` and "
-                + "write `completed_at=now` (CE061), rather than adjusting the duration in place."
+                + "breaks the four-bucket identity. Pass `TurnEmitter.add_generation` a `Window` from "
+                + "`timing.close_window`, rather than adjusting the duration in place."
             )
         net = max(raw_total - busy_ms(spans, started, completed), 0.0)
         assigned = 0.0

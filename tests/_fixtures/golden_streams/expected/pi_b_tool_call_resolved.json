@@ -3,7 +3,7 @@
   "assistant_turn_count": 3,
   "commands": [
     {
-      "assistant_turn_index": 1,
+      "assistant_turn_index": 0,
       "duration_ms": "<scrubbed>",
       "error_message": null,
       "execution_completed_at": "<scrubbed>",
@@ -17,13 +17,13 @@
       "result_status": "success",
       "result_summary": "Successfully wrote 2 bytes to hello.txt",
       "result_tokens": 10,
-      "sequence_number": 1,
+      "sequence_number": 0,
       "timestamp": "<scrubbed>",
       "tool_id": "write:0",
       "tool_name": "Write"
     },
     {
-      "assistant_turn_index": 2,
+      "assistant_turn_index": 1,
       "duration_ms": "<scrubbed>",
       "error_message": null,
       "execution_completed_at": "<scrubbed>",
@@ -36,7 +36,7 @@
       "result_status": "success",
       "result_summary": "hi",
       "result_tokens": 1,
-      "sequence_number": 2,
+      "sequence_number": 1,
       "timestamp": "<scrubbed>",
       "tool_id": "read:1",
       "tool_name": "Read"
@@ -139,7 +139,7 @@
   "num_turns": 3,
   "result_summary": {
     "is_error": false,
-    "result": null,
+    "result": "Created `hello.txt` and read it back. Contents: **hi**",
     "stop_reason": "stop",
     "subtype": "completed"
   },

@@ -231,8 +231,8 @@ docker` whenever the task prompt or workspace is not fully trusted.
   directory both work. Pi therefore **can run activation suites**:
   `skill_triggered` detects Pi's engagement agent-agnostically (the agent `read`s
   the full `SKILL.md`, a `read`→`Read` call whose `path` matches `skills/<name>/`).
-  Only skills are staged; a plugin's agents, hooks, commands and MCP servers are not
-  wired. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
+  Only skills reach Pi; a plugin's agents, hooks, commands and MCP servers are loaded
+  on Claude Code only. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
 - **`system_prompt_file` is not read by the adapter.** Use `system_prompt` (inline)
   instead — it is enforced via `--append-system-prompt`.
 - **`max_tool_calls` counts resolved tool calls, not Pi turns.** The adapter counts
@@ -242,6 +242,10 @@ docker` whenever the task prompt or workspace is not fully trusted.
 - **No sub-agent attribution.** Pi's CLI stream does not expose nested agent
   generations, so per-sub-agent token grouping (available for Claude and Codex) is
   not derivable.
+- **The CLI never inherits stdin.** `pi -p` reads a non-TTY stdin to EOF before it
+  emits anything, so a CLI that inherited an open stdin (a backgrounded or
+  tool-spawned `coder-eval run`) would stall with zero events until `turn_timeout`.
+  The adapter spawns it with stdin on `/dev/null`.
 - **Cooperative stop is at event granularity.** `should_stop` is polled between
   events and honored by terminating the CLI, so `stop_early` works, but the cut
   lands on an event boundary rather than mid-tool. Pi streams incrementally, so

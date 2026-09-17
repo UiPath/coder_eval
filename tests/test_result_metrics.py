@@ -22,6 +22,7 @@ from coder_eval.models import (
 from coder_eval.result_metrics import (
     TurnTimeBuckets,
     expected_tool_calls_overage,
+    expected_turns_overage,
     has_final_reply,
     turn_time_buckets,
     visible_turn_count,
@@ -135,7 +136,7 @@ def _turn_with_commands(commands: int = 0, reply: str | None = None) -> TurnReco
     )
 
 
-class TestExpectedTurnsOverage:
+class TestExpectedToolCallsOverage:
     def test_strict_greater_than(self):
         # 5 tools + reply = 6 visible turns. Budget 6 → no overage (equal).
         result = _make_result(
@@ -172,7 +173,7 @@ class TestExpectedTurnsOverage:
         result = _make_result(resolved={"run_limits": {"max_turns": 10}}, turns=[_turn_with_commands(commands=20)])
         assert expected_tool_calls_overage(result) is None
 
-    def test_the_historical_expected_turns_key_is_not_read(self):
+    def test_expected_turns_does_not_feed_the_tool_call_overage(self):
         result = _make_result(resolved={"run_limits": {"expected_turns": 5}}, turns=[_turn_with_commands(commands=20)])
         assert expected_tool_calls_overage(result) is None
 
@@ -223,3 +224,27 @@ class TestTurnDefinitionMatchesDoc:
         result = _make_result(turns=[_turn_with_commands(commands=4)])
         stats = calculate_command_statistics(result.iterations)
         assert visible_turn_count(result) == stats.total_commands + (1 if has_final_reply(result) else 0)
+
+
+class TestExpectedTurnsOverage:
+    @staticmethod
+    def _result(expected: object, model_turns: int | None) -> EvaluationResult:
+        run_limits = {} if expected is None else {"expected_turns": expected}
+        result = _make_result(resolved={"run_limits": run_limits})
+        result.model_turns = model_turns
+        return result
+
+    def test_over(self):
+        assert expected_turns_overage(self._result(3, 5)) == (5, 3)
+
+    def test_equal_is_not_over(self):
+        assert expected_turns_overage(self._result(3, 3)) is None
+
+    def test_no_model_turn_count(self):
+        assert expected_turns_overage(self._result(3, None)) is None
+
+    def test_key_absent(self):
+        assert expected_turns_overage(self._result(None, 5)) is None
+
+    def test_invalid_expected_type(self):
+        assert expected_turns_overage(self._result("ten", 5)) is None

@@ -51,10 +51,7 @@
   writes `graded_by_api_routing` / `graded_by_eval_routing` and leaves the run's
   `api_routing` alone — writing in place contradicted the "prior wins" contract and left
   a self-contradictory record (a direct route named beside the run's stale
-  `aws_region`/`bedrock_model`). Two other parity fixes: `command_base_path` is now
-  persisted into `environment_info` by `_sync_sandbox_command_path_with_agent` and
-  restored in the evaluate-only branch (closing the PATH gap that method's docstring
-  already named), and `_join_litellm_actual_cost` **skips** when `prior_result` is set
+  `aws_region`/`bedrock_model`). One other parity fix: `_join_litellm_actual_cost` **skips** when `prior_result` is set
   (its join keys on a per-Orchestrator nonce the prior turns never carried, so it would
   clobber already-correct costs). The verdict is written back into the run's
   `task.json`, with the pre-grade record kept as `task.execute.json` — that in-place
@@ -62,7 +59,7 @@
   with **zero** new code. **`Sandbox.adopt(workspace)`** is the grade-in-place
   primitive: it reuses `setup`'s adoption half but skips every *materializing* step
   (`_setup_template`, `_generate_cli_recorders`, venv/package installs, the destructive
-  `$HOME` remediation), running only non-mutating derivation (mock-dir `+x`, venv
+  `$HOME` remediation), running only non-mutating derivation (mock-dir `+x` and criterion PATH prefix, venv
   *discovery*, plugin-tools pin); `_cleanup_on_exit` stays False so an adopted tree is
   never moved or deleted, and `Sandbox.was_adopted` is set — the Orchestrator reads it
   to SKIP the `pre_run` hook (`run()` calls it unconditionally with `cwd = sandbox_dir`,
@@ -218,9 +215,7 @@
   explicitly (`evaluate <task.yaml> <run_dir>`) also bypasses it, since that config came
   from the operator. The workspace fallback `artifacts / prior.task_id` is
   containment-checked like its `sandbox_path` sibling (`task_id` is an unvalidated
-  string, and `"../../.."` joins to a real directory `is_dir()` confirms),
-  `_sanitize_restored_path` drops relative entries (they resolve against the grader's
-  cwd) and anything inside the run dir rather than only the workspace, and
+  string, and `"../../.."` joins to a real directory `is_dir()` confirms), and
   `write_text_atomic` opens its temp file `O_EXCL|O_NOFOLLOW` — a pre-planted
   `task.json.tmp` symlink otherwise bypassed the write-back's destination symlink guard
   entirely. The record must also describe the task as AUTHORED, not as executed:
@@ -796,14 +791,16 @@ under, and would let an agent shadow binaries by writing `.venv/bin/` into its o
 Each layer is independent — none breaks if another is absent.
 
 1. Inherit the parent environment, so agent tools and credentials remain reachable.
-2. If the orchestrator captured the agent's SDK PATH, **prepend** it ahead of the host PATH
-   rather than replacing it: the agent's PATH only needs to win the lookup race for its
-   bundled toolchain, and system binaries must stay reachable to criteria. Prepending also
-   stays symmetric with the venv and node_bin prepends below.
-3. Activate the sandbox virtualenv, first-hit-wins. If the agent's PATH already contains the
-   venv scripts dir — likely, since it inherits this process's environment — the prepend
-   duplicates the entry, which is harmless everywhere and left explicit so the order does not
-   depend on what the agent SDK injects.
+2. **Prepend** the resolved mock dirs (`record_cli` recorders, then `mock_path_dirs`) ahead
+   of the host PATH rather than replacing it, so system binaries stay reachable to criteria.
+   The sandbox sets this prefix itself, at `setup` and at `adopt`, from the same
+   `resolved_mock_path_dirs` list the orchestrator passes to the agent as `env_path_prepend`.
+   It used to be read back from the agent after each successful turn, through
+   `get_sdk_options()`, which only Claude Code implements: on every other harness, and on
+   Claude Code after a crash, a timeout or in a detached grade, a criterion did not see the
+   mocks the agent saw. The prefix is not persisted in the run record: every entry is inside
+   the workspace, which a restored PATH must never trust.
+3. Activate the sandbox virtualenv, first-hit-wins.
 4. Prepend `<sandbox>/node_modules/.bin`.
 5. Pin `NODE_PATH=""` so Node's fallback search cannot pick up contaminated parent-dir
    installs. This does NOT disable parent-walking from cwd — that is hard-wired in Node — but

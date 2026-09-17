@@ -10,7 +10,7 @@
   on that id (the evalboard's `aggregateSubAgentUsage` does exactly this). Claude
   bubbles its sub-agent's intermediate generations into the parent stream natively, and
   the **terminal** generation (delivered as the Agent tool result, never streamed) is
-  synthesized into one via `_synthesize_subagent_terminal_message` from
+  synthesized into one via `_subagent_terminal_part` from
   `tool_use_result.usage`. Codex reconstructs all child generations from the child
   rollout; both harnesses' turn totals already include sub-agent cost.
   `CommandTelemetry.result_summary` is stored **untruncated** (no 200-char cap) so
@@ -67,15 +67,39 @@ TurnMonitor); CE070 keeps adapters from counting one again.
 
 ## Shared turn lifecycle
 
-Every adapter drives the same skeleton, on the base class: `_begin_turn()` resets the
-pending slot and bumps the iteration counter, `_end_turn_ok()` marks the turn clean, and
-`_mark_stopped()` closes the agent. Before raising on a mid-turn failure an adapter sets
-`pending_turn` to a `crashed=True` `TurnRecord` and raises bare, which is what lets the
-orchestrator drain the partial record and un-bump the iteration.
+`communicate(..., iteration=...)` returns a `TurnOutcome` (Appendix C of the harness
+target design). A crash or a timeout is an outcome with a `crashed=True` record, not an
+exception, and the CALLER owns the iteration: a retry of the same turn passes the same
+number. A side channel on the agent (a parked partial record, plus an iteration counter
+rolled back once per failed turn) is cross-attempt state that every harness would have to
+set correctly on every failure branch.
 
-The record is BUILT before `_end_turn_ok()` on every harness: a failure inside the
-reduction is a failed turn, and `_end_turn_ok` would already have cleared the rollback
-flag `discard_pending_turn` needs.
+The orchestrator maps the status in one place: the clean statuses (an explicit allowlist)
+return the record; `CRASHED` / `TIMEOUT` append the record to the result and then raise
+through `TurnOutcome.record_or_raise`, so the retry categorisation (a crash retries, a
+timeout does not) is unchanged; anything else raises `RuntimeError`.
+
+A crash retries only when the crashed attempt made no tool call. The retry runs in the
+same sandbox, which is not reset, so a crash after the agent wrote files would grade a
+different experiment than the one authored. `record_or_raise` puts the tool-call count on
+`AgentCrashError`; `execute_with_retry` does not retry an `AGENT_CRASH` that carries one.
+A message that categorises as rate limit or API error keeps its own retry policy.
+
+Cancellation cannot return a value. A `CancelledError` from the task watchdog, the
+orchestrator's `wait_for` backstop or the task timeout must keep propagating, or
+`task_timeout` stops working. So an adapter ends the turn FIRST
+(`fail(CRASHED, "turn cancelled")`) and re-raises, and the orchestrator reads the partial
+record from a per-attempt `EventCollector` it attaches to the callback chain itself
+(`_attempt_collector`). The agent-side and orchestrator-side records are the same events
+through the same reducer, so they cannot differ. The attempt clears that collector on
+every exit except a cancel, so a task timeout that fires later (during grading, between
+retries) never appends a finished attempt twice.
+
+A clean turn's `result_summary.result` is the agent's final reply: the text that follows the
+last tool call in the last main-thread message. After, not "a message with no tool call":
+a live Antigravity turn writes its closing text in the same generation as its last tool
+call, and Pi writes text BEFORE a tool call it then makes, which is not a reply. A failed
+turn carries no summary; its failure is `crash_reason`.
 
 Three exit paths converge on `finalize`, and it is idempotent on all of them, because the
 protocol allows EXACTLY ONE `AgentEndEvent` per `communicate()`: the clean return, the
@@ -221,10 +245,18 @@ wiped the span before `step_finish` could subtract it, a 100% overstatement of t
 An exit code of 0 with no telemetry is indistinguishable from a real pass in every
 aggregate, and file-based criteria can still score it SUCCESS. Worse, a turn with no
 tokens is one whose `max_total_tokens` / `max_usd` gates could never have tripped no
-matter how much the run actually billed. So the CLI harnesses crash rather than score:
+matter how much the run actually billed. So the harnesses crash rather than score:
 
-- **Vocabulary drift** — a clean exit that recognized NO event from the harness's known
-  set. This has happened: OpenCode once parsed the `session.next.*` server vocabulary
+- **An empty turn** (every harness) — `TurnEmitter.finalize(COMPLETED)` on a turn that
+  wrote nothing after `begin` (no inner turn, tool, text, generation, usage or
+  `agent_output`) ends `CRASHED`. It lives in the emitter, not in the transport base,
+  so Claude Code, Codex, Antigravity and plugins get it too. A requested stop is exempt,
+  because a cut can land before the first event. `noop` opens an inner turn, so it is
+  never empty.
+
+- **Vocabulary drift** (the JSONL transport) — a clean exit that recognized NO event from
+  the harness's known set. The empty-turn arm also catches it; the transport keeps its
+  own check for the message, which names the unrecognized event types. This has happened: OpenCode once parsed the `session.next.*` server vocabulary
   instead of the CLI's own and scored SUCCESS 1.0 with zero turns and zero tokens.
 - **Finished steps with no tokens** (OpenCode) — the same outcome one layer down. Keying
   on "recognized nothing" alone left it reachable: a `step_finish` carrying no `tokens`
@@ -297,6 +329,10 @@ them a CLI upgrade silently zeroes the run's tokens and cost and blinds the budg
 
 ## Cost: the stream versus the rate card
 
+`pricing.price_turn(usage, models)` is the one rule for a turn's cost. Every adapter and
+`TurnMonitor` call it, and CE071 keeps `calculate_cost` out of both, because five copies
+of the rule once let the `max_usd` stop and the persisted cost disagree on one turn.
+
 A non-zero cost the CLI reported always wins — it is the provider's own accounting, and on
 OpenRouter per-request routing makes it strictly better than a static headline rate. The
 rate card fills two gaps that would otherwise book tokens with no money:
@@ -309,13 +345,34 @@ rate card fills two gaps that would otherwise book tokens with no money:
   and understating cost silently defeats `max_usd`, which is the worse failure. A
   genuinely free model has an all-zero rate entry (or none), so it still resolves to 0.
 
+Empty usage returns the reported cost unchanged, `None` included: `EventCollector`
+publishes `token_usage=None` only for empty usage with no cost, so pricing an empty turn
+at `0.0` would publish a zero-cost usage row for a turn that spent nothing. So an empty
+turn reads `token_usage: null` on every harness (Codex, Antigravity and the LiteLLM route
+used to price it at `0.0` on a priced model). The monitor adds its own "an empty turn
+costs 0" in front, because it sums. A non-finite reported cost counts as unreported.
+
+The ORDER of `models` is the caller's decision. Adapters pass their one model. The monitor
+passes `agent.model`, then the model the agent resolved at start, then the last model a
+message reported: the configured model wins so that a sub-agent's model on the stream
+cannot reprice the run.
+
+`max_usd` is never "accepted and ignored". `HarnessContract.reports_cost` says whether a
+harness prices every finished turn itself (Claude Code; `noop` has no usage). Pi and
+OpenCode do not count: they report $0 for a model their own registry does not price. On a
+harness without `reports_cost`, resolution rejects `max_usd` unless `agent.model` has a
+rate, and the monitor latches `USD_BUDGET` (then raises `BudgetUnenforceableError`) at the
+first in-flight usage it cannot price, instead of counting it as $0 until the turn ends.
+On a harness with `reports_cost`, in-flight usage without a rate still counts $0, because
+the turn's end brings the harness's own cost.
+
 The Claude SDK's own `costUSD` is a client-side estimate assuming Anthropic pricing, so it
 is wrong for an open-weight model behind LiteLLM and is repriced from the token buckets at
-the model's real rate. The buckets are untouched, so the reconciliation invariant holds —
-only the cost scalar changes. An unpriced model sets the cost to `None` (an honest N/A)
-**and warns**. When the task sets `max_usd`, the `TurnMonitor` then raises
-`BudgetUnenforceableError` at the turn end, so the row finishes `ERROR` and is never a
-silent skip.
+the model's real rate (`price_turn` with the report cleared). The buckets are untouched, so
+the reconciliation invariant holds — only the cost scalar changes. An unpriced model sets
+the cost to `None` (an honest N/A) **and warns**. When the task sets `max_usd`, the
+`TurnMonitor` then raises `BudgetUnenforceableError` at the turn end, so the row finishes
+`ERROR` and is never a silent skip.
 
 ## Codex rollout rebuild
 
@@ -356,6 +413,35 @@ is already turn-local and is returned whole rather than clamped to zero.
 On a crash the SDK total never arrives and the per-generation tokens on the flushed
 messages are used instead — but the baseline must still advance past them, or the next
 turn's delta re-books everything the crashed turn already reported.
+
+## One inner turn per generation on Codex and Antigravity
+
+Both streams already carried a per-generation boundary — Codex's
+`thread/tokenUsage/updated`, Antigravity's `usage_metadata` Step — and both adapters cut
+one message there, yet each opened ONE inner turn per `communicate()`, so the
+`TurnMonitor` would have counted calls, and `max_turns` was rejected at resolution. Now
+the cut also closes an inner turn, carrying that generation's delta as
+`TurnEndEvent.tokens`, and the contract declares `usage_granularity=GENERATION`: the
+model-turn limits are accepted, and the token and USD budgets overshoot by one
+generation instead of one whole turn.
+
+The inner turn opens LAZILY, at the first evidence of the generation — an item start, a
+content item, a text delta, or a billed usage report with nothing else — and never
+eagerly after a cut. Eager opening would count a turn that never happens when
+`turn/completed` follows the last cut, and, worse, a tool RESULT landing after its
+generation's cut (Codex patches `is_error` cross-flush; an Antigravity background job
+resolves on a later poll) would open a turn of its own. So a Codex `item/completed` for a
+call already open and an Antigravity DONE Step whose calls are all seen open nothing;
+an unseen call does, because a call the model just made is the model speaking. The cap
+therefore latches exactly where it does on Claude Code: when response N+1 arrives.
+
+The inner turn id is the message id it will cut to (`<turn>-msg-<n>`), so the two line
+up in the record. A billed cut with no content (a placeholder reasoning block that was
+removed) still closes the turn and still advances the counter, or the next turn would
+reuse a closed id and the monitor, which counts each id once per `communicate()`, would
+miss it. The safety flush at the end of the pump (`last=None`, or Antigravity's
+`end()` with trailing blocks) adds the message but leaves the turn for the emitter to
+close with the turn's own end status, so a turn cut short by a stop reads as such.
 
 ## Why the generation is split into sub-messages
 
@@ -446,7 +532,7 @@ instant the sweep runs is not a completion. Stamping it manufactures both an
 a measured span that the central subtraction takes back out of a generation window it
 never occupied. `execution_started_at` IS kept: the harness really did emit that start,
 and one bound alone forms no span. Unknown status and unknown duration are one fact
-(CE058) — claude-code's `_finalize_commands` leaves the same field `None` for the same
+(CE058) — the emitter's sweep leaves the same field `None` on every harness for the same
 reason, rather than coercing it to `0.0`, which put an invented measurement on both sides
 of `avg_command_time_ms`.
 
@@ -581,6 +667,27 @@ profiles and loses the prepend again. Nested zsh keeps it, because `ZDOTDIR` sta
 exported. No-op on Windows, where Codex shells through PowerShell (`-NoProfile`) or
 `cmd /c`, neither of which re-sources a profile chain.
 
+## Why a CLI never inherits stdin
+
+`pi` (`readPipedStdin()`) and `opencode` (`process.stdin.isTTY ? void 0 : await
+Bun.stdin.text()`) both read stdin TO EOF when it is not a TTY, before they emit anything.
+A CLI spawned without `stdin=` inherits the parent's stdin, so when `coder-eval` itself runs
+with stdin on a pipe that stays open (a backgrounded or tool-spawned batch), every CLI
+blocks with zero events until the 300 s `turn_timeout`. Measured on 2026-09-16:
+
+| command | result |
+|---|---|
+| `(sleep 25) \| timeout 15 pi -p --mode json … "Reply PONG"` | 0 lines, killed at 25 s |
+| `pi -p --mode json … "Reply PONG" < /dev/null` | 24 lines, exit 0 in 1 s |
+| `(sleep 25) \| timeout 15 opencode run --format json … "Reply PONG"` | 0 lines, killed at 25 s |
+| `coder-eval run tasks/pi_smoke_test.yaml -D run_limits.turn_timeout=40 < <(sleep 170)` | `ERROR` after 40 s, 0 commands |
+| the same with `< /dev/null` | `SUCCESS` in 10 s |
+
+So every CLI spawn passes `stdin=asyncio.subprocess.DEVNULL`, which gives an immediate EOF.
+The same inheritance reached the task's `pre_run`/`post_run` shell commands (an authored
+`read` hung the task) and the `docker run` CLI, so those pass it too, and CE073 requires
+every asyncio subprocess spawn under `src/` to decide its stdin.
+
 ## Reaping the CLI harnesses
 
 `opencode run` leaves a local server child alive after the CLI exits, and it INHERITS the
@@ -589,7 +696,19 @@ deadline, and signalling only the CLI pid orphans the child. Each invocation the
 in its own session, so its pgid is the CLI's pid and the group holds only what that
 invocation spawned; each read races against process exit, and a bounded drain collects the
 tail. Sessions are persisted on disk, so killing a turn's server does not lose `--session`
-continuity.
+continuity. The group is swept at the end of EVERY turn, a clean one too: a child left
+alive until `stop()` keeps running against the sandbox, and its pgid can be reused by
+another task's CLI by the time `stop()` signals it.
+
+Exit is detected by polling `returncode`, never by `Process.wait()` alone. On CPython 3.13
+`wait()` resolves only once every pipe closes, so a child that holds stdout keeps it
+pending and the bounded drain never starts: a clean exit waited for the child, or became a
+TIMEOUT.
+
+`KILL_GRACE_SECONDS` (SIGTERM to SIGKILL) must stay below the orchestrator's
+`_WAIT_FOR_GRACE_SECONDS`. When it was 5 s against a 2 s backstop, a CLI slow on SIGTERM
+was cancelled by the backstop, and its only end event was `CRASHED "turn cancelled"`, not
+TIMEOUT. `test_a_cli_that_ignores_sigterm_times_out_inside_the_orchestrator_backstop` pins it.
 
 stderr is drained CONCURRENTLY from the moment the CLI starts. Reading it only after exit
 deadlocks the pair: a child that fills the ~64 KiB stderr pipe blocks on write, stops
@@ -615,9 +734,11 @@ orchestrator's mid-turn backstop calls `kill()`, and dropping the dir there woul
 resume across a retried turn. `_cleanup` always calls `stop()` after any `kill()`, so the
 tempdir is still reclaimed.
 
-`_TERM_GRACE_SECONDS` is re-declared at the same value in both nd-JSON harnesses rather
-than shared: the CLI-driver hoist that would unify their teardown constants and reducers is
-a tracked follow-up. `STDOUT_LINE_LIMIT_BYTES`, which IS canonical, is imported.
+Both nd-JSON harnesses run on `agents/_transport/subprocess_jsonl.py::SubprocessJsonlAgent`,
+which owns this whole transport once: the spawn, the stderr drain, the read loop, the settle,
+`kill` / `kill_sync` / the reap, and `KILL_GRACE_SECONDS`, `_EXIT_GRACE_SECONDS`, `_DRAIN_SECONDS`, `_SIGKILL` and
+`_MAX_UNRECOGNIZED_TYPES`. A subclass keeps its argv, environment, session handling and its
+decoder.
 
 ## The system_prompt_semantics marker
 
@@ -641,9 +762,10 @@ cannot disagree with what was sent.
 
 ## Skills, per harness
 
-`orchestration/plugin_staging.py` stages every `plugins:` entry into one canonical root,
-`<run_dir>/plugin_root`, before `Agent.start`. Each harness then receives the SAME layout:
-`.claude-plugin/plugin.json` and `skills/<name>` links. The staging exists because each
+`orchestration/plugin_staging.py` stages every `plugins:` entry into one root,
+`<run_dir>/plugin_root`, before `Agent.start`. Each harness receives the SAME layout:
+`skills/<name>` links (read by every harness) and `plugins/<plugin>` (each entry whole,
+read by Claude Code). The staging exists because each
 adapter used to scan the authored path its own way. claude-code loaded nothing from a bare
 skills directory, with no error, so an activation suite scored recall 0.0 and read exactly
 like a skill that never triggers.
@@ -657,11 +779,29 @@ like a skill that never triggers.
   skill that loads. Confirmed by the plugins reference ("Adds to the default: `skills`")
   and a CLI 2.1.273 spike on 2026-09-16; the moved reader had treated the manifest as a
   REPLACEMENT, which dropped the default `skills/` of any plugin that declared extras.
-- **Only skills are staged.** A plugin's agents, hooks, commands and MCP servers are
-  dropped on every harness, claude-code included. That also removes a confound: a project
-  subagent beside `skills/` can no longer answer the request the skill should answer.
-- **The staged manifest is `{"name": "coder-eval-plugins"}` and nothing else.** A
-  2026-09-17 spike with `claude -p --plugin-dir` showed a staged root whose manifest declared
+- **Claude Code loads each entry as a whole plugin.** On `main` each `plugins:` path went
+  to the SDK as its own plugin, so its agents, commands, hooks, MCP servers and
+  `${CLAUDE_PLUGIN_ROOT}` files loaded under the plugin's own name. Staging once reduced
+  every entry to its skills under one merged manifest name, which dropped
+  all of that and renamed the skills. It was restored on 2026-09-16: the author chooses the
+  scope by choosing the path, so a suite that must not load project agents points `path`
+  at the skills directory. That reverses the earlier "removes a confound" argument.
+  Codex, OpenCode, Pi and Antigravity still receive skills only, as on `main`.
+- **What Claude Code loads from a `--plugin-dir` (CLI 2.1.274 spike, 2026-09-16).** The
+  manifest `name` wins over the directory name; with no manifest the directory name is the
+  plugin name; a symlinked plugin root loads whole; a bare skills directory loads nothing;
+  a manifest plugin whose skills sit only at `<root>/<name>/SKILL.md` loads nothing; a
+  manifest `skills` path outside the root loads nothing. So staging links a plugin root
+  whole under `plugins/<name>`, wraps a root Claude Code would load no skill from (a bare
+  skills directory, or that manifest layout, which then loads skills only) in
+  `plugins/<name>/.claude-plugin/plugin.json` plus a `skills` link, and refuses an
+  out-of-root manifest path and two entries with one plugin name at resolution. Plugin and
+  skill names become directory entries, so both must be one path segment and are compared
+  ignoring case: on a case-folding filesystem a second `Foo` link failed with EEXIST and the
+  copy fallback wrote plugin B into plugin A's source (review, 2026-09-16). The fallback now
+  runs only when symlinks cannot be created at all, and copies symlinks as links.
+- **The wrapper manifest is `{"name": "<plugin>"}` and nothing else.** A 2026-09-17 spike
+  with `claude -p --plugin-dir` showed a staged root whose manifest declared
   `"skills": ["skills"]` load no skill; a 2026-09-16 spike on CLI 2.1.273 loaded a real
   `["./skills"]` fine. The name-only manifest loads the `skills/` default either way.
 - **Refusal is at resolution.** `validate_plugins` runs in `validate_resolved_task`, so a
@@ -677,7 +817,8 @@ like a skill that never triggers.
 
 Delivery, per harness:
 
-- **Claude Code** takes the root as an SDK `{"type": "local", "path": plugin_root}` plugin.
+- **Claude Code** takes one SDK `{"type": "local", "path": ...}` plugin per
+  `staged_plugin_dirs(plugin_root)`, never the staged root itself.
 - **OpenCode** appends `<plugin_root>/skills` to `skills.paths` via
   `OPENCODE_CONFIG_CONTENT`, which the CLI merges as a final local-scope layer. That was
   chosen over writing `<sandbox>/.opencode/skills/` because it writes nothing into the
@@ -710,6 +851,60 @@ lets a plugin register a brand-new kind that is not an enum member. Its imports 
 one-way — the plugin loader and the models layer import the registry, never the reverse.
 `create_agent` deliberately does not import `coder_eval.plugins` itself for the same
 reason; callers reach a config through `parse_agent_config`, which loads them.
+
+## Why plugin loading fails fast, and registration checks the SPI version
+
+A plugin whose `register` hook raises stops the load with `PluginLoadError`. Logging and
+skipping it hides the cause: the run later fails with "No agent registered for type ..."
+or, worse, resolves a task against a different kind than the author meant. A load-error
+record for an unused plugin can come later if the need is proven.
+
+`AgentRegistry.register` requires `spi_version`. An assert inside the plugin's own hook
+was the only check before, and core never read the number. The plugin passes the
+literal version it was written for, not `SPI_VERSION` imported from core, because the
+imported constant always matches. `SPI_VERSION` lives in `agents/registry.py` so the
+check needs no import from `coder_eval.spi`, which imports the built-in agents.
+
+## Transport bases
+
+There is ONE transport base, `SubprocessJsonlAgent`, under Pi and OpenCode: both spawn a
+CLI per turn and read nd-JSON from its stdout, so the spawn, settle, crash, timeout,
+process-group sweep and reap are the same code.
+
+Decided 2026-09-16, after the Antigravity, Codex and Claude Code ports: there is no second
+base (`HostAgent`). The three hold different lifecycles — a harness process spawned in
+`start()` and held across turns (Antigravity), an app-server client held across turns with
+rollout recovery (Codex), and an in-process SDK async iterator whose transport a threaded
+watchdog kills (Claude Code). After the ports, what they still share is the bracket around
+the turn body: open the emitter, run the body under `run_with_watchdog`, map
+`WatchdogFired` and a late `timeout_hit` to `TIMEOUT`, map an SDK-raised `CancelledError`
+(caller `cancelling() == 0`) to `CRASHED`, end an external cancel then re-raise, and pick
+the clean status from the stop reason. That is about 30 lines per adapter (`communicate`
+is 68, 85 and 96 lines), and the lines between the shared ones differ per harness: the
+exception classification (Claude's `ProcessError` and max-turns short circuit, Codex's
+post-stop exception), the values a clean return commits, and the kill target. A base
+would have to take each of those as a hook, which moves the same lines rather than
+removing them. The kernel (`TurnEmitter`, `run_with_watchdog`) already holds what is
+genuinely common.
+
+Revisit when a fourth host-style adapter (Delegate, out of tree) is ported: four copies of
+the same bracket with the same hooks is the point where a base pays for itself.
+
+## Why the watchdog cancels a child task
+
+An adapter that returns a `TIMEOUT` outcome when its OWN watchdog cancels the turn cannot
+cancel the turn's own task. Measured on Python 3.13.11 (2026-09-16): a handler that catches
+that cancel and returns leaves the task's `cancelling()` at 1, so an enclosing
+`asyncio.timeout` later raises `CancelledError` instead of `TimeoutError`, and a cancel
+that lands just after the body finished hits caller code. `uncancel()` would fix the count
+but can also erase a real task-timeout cancel that arrived in the same iteration.
+
+`run_with_watchdog` runs the body as a CHILD task and arms the watchdog on the child. The
+caller's count stays 0, an external cancel of the caller still propagates (and cancels the
+child), and a late cancel lands on a finished child, where it does nothing. The watchdog
+is unchanged. Verified with plain asyncio, and live with the Claude SDK (anyio) and the
+Codex SDK (a threaded iterator). A `ContextVar` set inside the body is not visible to the
+caller afterwards; the only one in `src/` is the logging task id, which the child inherits.
 
 ## The threaded watchdog
 

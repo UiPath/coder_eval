@@ -11,7 +11,6 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
-from inspect import isawaitable
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
@@ -67,6 +66,7 @@ from .models import (
 )
 from .orchestration.early_stop import early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
+from .orchestration.harness_contract import registration_for
 from .orchestration.plugin_staging import stage_plugins
 from .orchestration.resolution_checks import validate_resolved_task
 from .orchestration.run_limits import validate_run_limits
@@ -84,7 +84,8 @@ from .result_metrics import turn_time_buckets, visible_turn_count
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
-from .streaming.events import CriteriaCheckEvent, CriterionSummary
+from .streaming.collector import EventCollector
+from .streaming.events import AgentEndStatus, CriteriaCheckEvent, CriterionSummary
 from .telemetry import Scalar, hash_identifier
 from .utils import get_version_info, looks_like_version, runtime_uip_versions
 
@@ -93,9 +94,21 @@ from .utils import get_version_info, looks_like_version, runtime_uip_versions
 logger = logging.getLogger(__name__)
 
 
-# Grace on outer wait_for so the agent's in-band watchdog (which preserves a partial)
-# wins the race against the asyncio cancel path (which doesn't).
+# Grace on outer wait_for so the agent's in-band watchdog (a TIMEOUT outcome) wins the
+# race against the asyncio cancel path (a CRASHED "turn cancelled" record).
 _WAIT_FOR_GRACE_SECONDS = 2.0
+
+# The clean end statuses a turn's outcome is returned for; CRASHED and TIMEOUT raise.
+# An allowlist, so a new AgentEndStatus member fails loudly until it is placed.
+_RETURNED_END_STATUSES = frozenset(
+    {
+        AgentEndStatus.COMPLETED,
+        AgentEndStatus.STOPPED_EARLY,
+        AgentEndStatus.TOOL_CALLS_EXHAUSTED,
+        AgentEndStatus.TOKEN_BUDGET_EXCEEDED,
+        AgentEndStatus.COST_BUDGET_EXCEEDED,
+    }
+)
 
 
 def _close_subprocess_transport(proc: asyncio.subprocess.Process | None) -> None:
@@ -478,13 +491,20 @@ class Orchestrator:
         # count it answers the should_stop poll from is cumulative per task.
         self._monitor: TurnMonitor | None = None
 
+        # The in-flight communicate attempt's own collector, so a task timeout can
+        # recover the turn the agent ended before the cancel propagated. Cleared on
+        # every other exit, so a finished attempt is never appended twice.
+        self._attempt_collector: EventCollector | None = None
+
         # The skill names the staged plugin root offered; None when the task sets
         # no plugins. Read back from the prior result on an evaluate-only grade.
         self._skills_offered: tuple[str, ...] | None = None
 
-        # One-shot flag: emit the expected_tool_calls rollup warning exactly once per
-        # task run even though _check_expected_tool_calls is called after every turn.
+        # One-shot flags: emit the expected_tool_calls and expected_turns warnings exactly
+        # once per task run even though _check_expected_targets is called after every turn.
         self._expected_tool_calls_warning_emitted: bool = False
+        self._expected_turns_warning_emitted: bool = False
+        self._counts_model_turns: bool = False
 
         # One-shot flag: a resolved task may be inspected more than once during
         # setup, but its ineffective timeout relationship should be logged once.
@@ -648,8 +668,7 @@ class Orchestrator:
                 logger.error(f"Task timed out: {e}")
 
                 # Nothing else on this path recovers the in-flight turn: the
-                # cancel arrives as a BaseException, so it never reaches the retry
-                # executor's per-attempt hook.
+                # cancel arrives as a BaseException, so no outcome ever returns.
                 await self._drain_killed_turn()
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
@@ -763,6 +782,7 @@ class Orchestrator:
 
         # Execution facts that outlive the agent process.
         self.result.tool_calls_exhausted = prior.tool_calls_exhausted
+        self.result.model_turns = prior.model_turns
         self.result.error_message = prior.error_message
         self.result.error_details = prior.error_details
         self.result.error_log_tail = prior.error_log_tail
@@ -931,27 +951,20 @@ class Orchestrator:
         self.result.post_failure_criteria_results = recovered
 
     async def _drain_killed_turn(self) -> None:
-        """Move a hard-killed turn's partial record from the agent onto the result.
+        """Move a hard-killed turn's record from the in-flight attempt's collector onto the result.
 
-        The only reader of ``pending_turn`` on the task-timeout path. Ordering
-        matters both ways: it must run before ``_cleanup`` (whose ``agent.stop()``
-        clears the slot) and before ``_finalize_result``, so the recovered turn
-        feeds token aggregation and command stats like any other.
-
-        Best-effort: a task killed before its first turn has nothing parked, and
-        this runs on the way to a saved row, so it must not raise.
+        Runs before ``_cleanup`` and ``_finalize_result``, so the recovered turn feeds
+        token aggregation and command stats like any other. Best-effort: a task
+        killed before its turn ended has nothing to recover, and this must not raise.
         """
-        if self.agent is None or self.result is None:
+        if self.result is None:
             return
         try:
-            partial = self.agent.pending_turn
-            # `pending_turn` is a slot any agent implementation fills, so a non-record
-            # here would fail validation during teardown and take the row down with it.
-            if not isinstance(partial, TurnRecord):
+            collector = self._attempt_collector
+            partial = self._append_attempt_record(collector) if collector is not None else None
+            if partial is None:
                 logger.debug("[%s] Hard-killed task preserved no partial turn", self.task.task_id)
                 return
-            self.result.iterations.append(partial)
-            await self.agent.discard_pending_turn()
             usage = partial.token_usage
             logger.info(
                 "[%s] Recovered the hard-killed turn: %d tokens, %s",
@@ -963,6 +976,17 @@ class Orchestrator:
             )
         except Exception:
             logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
+
+    def _append_attempt_record(self, collector: EventCollector) -> TurnRecord | None:
+        """Append the attempt's record when its turn ended, once; the collector is then spent."""
+        assert self.result is not None
+        self._attempt_collector = None
+        if not collector.ended:
+            logger.debug("[%s] The killed attempt never ended its turn; nothing appended", self.task.task_id)
+            return None
+        record = collector.build_turn_record()
+        self.result.iterations.append(record)
+        return record
 
     def _finalize_weighted_score(self) -> None:
         """Write ``weighted_score``, or ``None`` when this run was not graded.
@@ -1155,33 +1179,50 @@ class Orchestrator:
 
         write_task_html(self.result, self.html_report_path)
 
-    def _check_expected_tool_calls(self, *, iteration: int) -> None:
-        """Emit a one-shot warning if visible tool calls exceed expected_tool_calls.
+    def _check_expected_targets(self, *, iteration: int) -> None:
+        """One-shot warnings when visible tool calls exceed ``expected_tool_calls`` or model turns exceed
+        ``expected_turns``; never aborts.
 
-        Soft sibling of the hard tool-call cap: never aborts the run. The count is
-        one timeline entry per tool call plus the final reply when present — the
-        same metric evalboard renders. Cumulative across iterations so dialog tasks
-        compare against the budget the user set.
+        Soft siblings of the hard caps. Visible tool calls are one timeline entry per tool
+        call plus the final reply when present — the same metric evalboard renders. Model
+        turns are ``result.model_turns``, the TurnMonitor's count. Both are cumulative across
+        iterations so dialog tasks compare against the target the user set.
         """
         if self.result is None:
             return
         limits = self.task.run_limits
-        if limits is None or limits.expected_tool_calls is None:
-            return
-        if self._expected_tool_calls_warning_emitted:
+        if limits is None:
             return
 
-        total = visible_turn_count(self.result)
-        if total > limits.expected_tool_calls:
+        if limits.expected_tool_calls is not None and not self._expected_tool_calls_warning_emitted:
+            total = visible_turn_count(self.result)
+            if total > limits.expected_tool_calls:
+                logger.warning(
+                    "Visible tool calls (%d) exceeded expected_tool_calls (%d) at iteration %d "
+                    + "for task %s. Run continues — this target never aborts.",
+                    total,
+                    limits.expected_tool_calls,
+                    iteration,
+                    self.task.task_id,
+                )
+                self._expected_tool_calls_warning_emitted = True
+
+        model_turns = self.result.model_turns
+        if (
+            limits.expected_turns is not None
+            and not self._expected_turns_warning_emitted
+            and model_turns is not None
+            and model_turns > limits.expected_turns
+        ):
             logger.warning(
-                "Visible tool calls (%d) exceeded expected_tool_calls (%d) at iteration %d "
-                + "for task %s. Run continues — this target never aborts.",
-                total,
-                limits.expected_tool_calls,
+                "Model turns (%d) exceeded expected_turns (%d) at iteration %d for task %s. "
+                + "Run continues — this target never aborts.",
+                model_turns,
+                limits.expected_turns,
                 iteration,
                 self.task.task_id,
             )
-            self._expected_tool_calls_warning_emitted = True
+            self._expected_turns_warning_emitted = True
 
     def _warn_on_ineffective_task_timeout(self) -> None:
         """Log resolved cross-field run-limit warnings once per task run."""
@@ -1372,21 +1413,6 @@ class Orchestrator:
                 + "the full trajectory is the deliverable."
             )
 
-    def _restore_recorded_command_path(self) -> None:
-        """Re-apply the graded run's own PATH before its criteria run.
-
-        PATH parity with the run being graded. `_sync_sandbox_command_path_with_
-        agent` recorded the agent's effective PATH; no agent runs on the
-        evaluate-only path, so restore it explicitly or `run_command` criteria
-        resolve binaries against ambient PATH and can disagree with the original
-        verdict.
-        """
-        assert self.result is not None
-        assert self.sandbox is not None
-        restored_path = self.result.environment_info.get("command_base_path")
-        if isinstance(restored_path, str) and restored_path:
-            self.sandbox.set_command_base_path(self._sanitize_restored_path(restored_path))
-
     async def _setup(self) -> None:
         """Set up all components for evaluation.
 
@@ -1414,7 +1440,6 @@ class Orchestrator:
             self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
-            self._restore_recorded_command_path()
             recorded_skills = self.prior_result.environment_info.get("skills_offered") if self.prior_result else None
             if isinstance(recorded_skills, list):
                 self._skills_offered = tuple(str(name) for name in recorded_skills)
@@ -1426,6 +1451,9 @@ class Orchestrator:
         # After the evaluate-only return: a re-grade builds no agent, so a recorded
         # config from before the contract existed stays gradable.
         validate_resolved_task(self.task)
+        self._counts_model_turns = registration_for(
+            self.task, requirement="model-turn accounting"
+        ).agent_class.contract.counts_model_turns
 
         # validate_api_keys exempts the no-op agent internally — it makes no API
         # call, so it needs no agent keys.
@@ -1518,6 +1546,12 @@ class Orchestrator:
             context={"task_id": self.task.task_id, "component": "agent", "agent_name": self._agent_name},
         )
 
+        try:
+            self.result.environment_info["harness_version"] = await self.agent.harness_version()
+        except Exception:
+            logger.warning("[%s] agent.harness_version() raised", self.task.task_id, exc_info=True)
+            self.result.environment_info["harness_version"] = None
+
         # Save agent config on result (copy to prevent mutation of shared reference)
         self.result.agent_config = self.task.agent.model_copy(deep=True)
 
@@ -1538,55 +1572,6 @@ class Orchestrator:
         # Add installed tool versions (from npm packages etc.)
         if self.sandbox and self.sandbox.installed_tool_versions:
             self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
-
-    def _sync_sandbox_command_path_with_agent(self) -> None:
-        """Align criteria command PATH with the PATH used for the last agent query.
-
-        Called from the per-turn happy path AFTER a successful
-        ``_communicate_with_retry``, which leaves three gaps: an agent crash or
-        turn timeout, evaluate-only mode, and the window before the first turn. In
-        each, criteria fall back to ambient ``os.environ['PATH']``.
-
-        ``Agent.get_sdk_options()`` is declared synchronous on the ABC, but
-        ``AsyncMock`` fixtures return a coroutine for ANY attribute access, so it
-        is closed rather than awaited — a test-fixture concern, logged at DEBUG. A
-        non-dict, non-None return IS a production contract violation and warns.
-
-        Rationale: .claude/notes/orchestration.md § Restoring a PATH from a run directory
-        """
-        if self.agent is None or self.sandbox is None:
-            return
-        sdk_options = self.agent.get_sdk_options()
-        if sdk_options is None:
-            return
-        if isawaitable(sdk_options):
-            close = getattr(sdk_options, "close", None)
-            if callable(close):
-                # `close()` only documents RuntimeError, which cannot apply here,
-                # so narrow the suppress and let real exceptions propagate.
-                with suppress(RuntimeError):
-                    close()
-            logger.debug(
-                "Agent.get_sdk_options() returned an awaitable; skipping PATH sync."
-                + " (Typical when tests stub the agent with AsyncMock.)"
-            )
-            return
-        if not isinstance(sdk_options, dict):
-            logger.warning(
-                "Agent.get_sdk_options() returned non-dict %r; skipping PATH sync.",
-                type(sdk_options).__name__,
-            )
-            return
-        sdk_env = sdk_options.get("env")
-        if not isinstance(sdk_env, dict):
-            return
-        path = sdk_env.get("PATH")
-        if isinstance(path, str) and path:
-            self.sandbox.set_command_base_path(path)
-            # Persisted so a LATER detached grade can restore the same PATH;
-            # otherwise it resolves run_command criteria against ambient PATH.
-            if self.result is not None:
-                self.result.environment_info["command_base_path"] = path
 
     def _eval_route_overrides(self) -> EvalRouteOverrides:
         """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
@@ -1812,13 +1797,12 @@ class Orchestrator:
     ) -> TurnRecord:
         """Run ``agent.communicate`` with retry, partial-preservation, and a per-attempt timeout.
 
-        Shared by the criteria-feedback and simulation loops. Crashed partials
-        from ``AgentCrashError`` / ``TurnTimeoutError`` are appended to
-        ``self.result.iterations`` via the ``on_attempt_error`` hook (terminal
-        failures included) so observational criteria still see them. Each
-        attempt gets a fresh ``turn_timeout``; ``TurnTimeoutError`` is
-        ``AGENT_TIMEOUT`` (``max_retries=0``) so it still terminates after
-        one attempt.
+        Shared by the criteria-feedback and simulation loops. A ``CRASHED`` or
+        ``TIMEOUT`` outcome's record is appended to ``self.result.iterations``
+        before it is raised as ``AgentCrashError`` / ``TurnTimeoutError`` (terminal
+        failures included), so observational criteria still see it. Each attempt
+        gets a fresh ``turn_timeout``; ``TurnTimeoutError`` is ``AGENT_TIMEOUT``
+        (``max_retries=0``) so it still terminates after one attempt.
         """
         assert self.agent is not None
         assert self.task.agent is not None
@@ -1832,82 +1816,59 @@ class Orchestrator:
         monitor = self._monitor
         assert monitor is not None, "TurnMonitor not built"
 
-        # The sole callback when --stream is off, else alongside the
-        # TaskScopedCallback. The same instance persists across retry attempts and
-        # dialog turns, so its counters and wall-clock origin accumulate.
-        agent_callback: StreamCallback = monitor
-        if self.stream_callback is not None:
-            agent_callback = CompositeStreamCallback(
-                [monitor, TaskScopedCallback(self.stream_callback, self._log_task_id)]
-            )
-
-        def _drain_pending_turn(*, attempt: int) -> None:
-            """Read agent.pending_turn and, if set, append it to result.iterations."""
-            partial = agent.pending_turn
-            if partial is not None:
-                result.iterations.append(partial)
-                logger.debug(
-                    "[%s] Drained partial turn record (attempt %d, iteration %d): %d commands",
-                    self.task.task_id,
-                    attempt + 1,
-                    iteration,
-                    len(partial.commands),
-                )
-            else:
-                logger.debug(
-                    "[%s] No pending_turn to drain on attempt %d (iteration %d)",
-                    self.task.task_id,
-                    attempt + 1,
-                    iteration,
-                )
-
-        async def _on_attempt_failure(
-            err: Exception,
-            attempt: int,
-        ) -> None:
-            if not isinstance(err, (AgentCrashError, TurnTimeoutError)):
-                return
-            _drain_pending_turn(attempt=attempt)
-            try:
-                await agent.discard_pending_turn()
-            except Exception:
-                logger.warning(
-                    "[%s] discard_pending_turn raised on attempt %d",
-                    self.task.task_id,
-                    attempt + 1,
-                    exc_info=True,
-                )
+        unhandled: list[AgentEndStatus] = []
 
         async def _communicate_attempt() -> TurnRecord:
-            coro = agent.communicate(
-                prompt,
-                stream_callback=agent_callback,
-                timeout=turn_timeout,
-                should_stop=monitor.should_stop,
-            )
-            if turn_timeout is None:
-                return await coro
-            # Grace buffer: agent's in-band watchdog (sets pending_turn) must beat
-            # wait_for cancel so the slot is populated before we give up.
-            outer_timeout = turn_timeout + _WAIT_FOR_GRACE_SECONDS
+            # A fresh collector per attempt is how a cancelled turn is recovered:
+            # the agent ends the turn before the cancel propagates, and
+            # `_drain_killed_turn` reads the record from here.
+            attempt_collector = EventCollector()
+            self._attempt_collector = attempt_collector
+            callbacks: list[StreamCallback] = [monitor, attempt_collector]
+            if self.stream_callback is not None:
+                callbacks.append(TaskScopedCallback(self.stream_callback, self._log_task_id))
+            cancelled = False
             try:
-                return await asyncio.wait_for(coro, timeout=outer_timeout)
-            except TimeoutError:
-                # Watchdog wedged or too slow. Kill only — drain + discard happen
-                # in _on_attempt_failure when this TurnTimeoutError propagates up.
-                try:
-                    await agent.kill()
-                except Exception:
-                    logger.warning(
-                        "[%s] agent.kill() raised on wait_for backstop path",
-                        self.task.task_id,
-                        exc_info=True,
-                    )
-                raise TurnTimeoutError(
-                    turn_timeout,
-                    task_id=self.task.task_id,
+                coro = agent.communicate(
+                    prompt,
                     iteration=iteration,
-                ) from None
+                    stream_callback=CompositeStreamCallback(callbacks),
+                    timeout=turn_timeout,
+                    should_stop=monitor.should_stop,
+                )
+                if turn_timeout is None:
+                    outcome = await coro
+                else:
+                    try:
+                        # Grace buffer: the agent's own watchdog must beat this backstop.
+                        outcome = await asyncio.wait_for(coro, timeout=turn_timeout + _WAIT_FOR_GRACE_SECONDS)
+                    except TimeoutError:
+                        try:
+                            await agent.kill()
+                        except Exception:
+                            logger.warning(
+                                "[%s] agent.kill() raised on wait_for backstop path",
+                                self.task.task_id,
+                                exc_info=True,
+                            )
+                        self._append_attempt_record(attempt_collector)
+                        raise TurnTimeoutError(turn_timeout, task_id=self.task.task_id, iteration=iteration) from None
+                if outcome.status in _RETURNED_END_STATUSES:
+                    return outcome.record
+                if outcome.status in (AgentEndStatus.CRASHED, AgentEndStatus.TIMEOUT):
+                    result.iterations.append(outcome.record)
+                    return outcome.record_or_raise(
+                        timeout_seconds=turn_timeout, task_id=self.task.task_id, iteration=iteration
+                    )
+                # Raised after the retry executor, which would retry a RuntimeError.
+                unhandled.append(outcome.status)
+                return outcome.record
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                if not cancelled:
+                    self._attempt_collector = None
 
         # ANTI-CHEAT WINDOW. Both the reference and the task dir sit at mode 000
         # for the whole of every communicate attempt — retries included, since this
@@ -1927,9 +1888,10 @@ class Orchestrator:
                     "component": "agent",
                     "agent_name": self._agent_name,
                 },
-                on_attempt_error=_on_attempt_failure,
             )
         assert turn_record is not None  # execute_with_retry returns the turn or raises
+        if unhandled:
+            raise RuntimeError(f"unhandled end status {unhandled[0]}")
         return turn_record
 
     @staticmethod
@@ -1969,49 +1931,6 @@ class Orchestrator:
                 # No fresh judge tokens this check — carry the running total
                 # forward so it isn't dropped from the latest results list.
                 r.token_usage = prior
-
-    def _sanitize_restored_path(self, recorded: str) -> str:
-        """Filter a PATH restored from a run's own ``task.json`` before prepending it.
-
-        The restored value arrives from inside the directory being graded — a
-        shareable artifact, bind-mounted writable into the agent's container under
-        ``driver: docker`` — so verbatim it lets a run dir decide which binary
-        ``pytest`` resolves to on the grader's host.
-
-        Four filters: absolute paths only, existing directories only, nothing
-        inside the workspace, nothing inside the run directory. What remains is the
-        run's genuine toolchain locations.
-
-        Rationale: .claude/notes/orchestration.md § Restoring a PATH from a run directory
-        """
-        workspace = self.sandbox.sandbox_dir.resolve() if self.sandbox and self.sandbox.sandbox_dir else None
-        run_root = self.run_dir.resolve()
-        blocked = [p for p in (workspace, run_root) if p is not None]
-        kept: list[str] = []
-        for entry in recorded.split(os.pathsep):
-            if not entry:
-                continue
-            candidate = Path(entry)
-            if not candidate.is_absolute():
-                logger.warning(
-                    "Dropping recorded PATH entry %r: it is relative, so it would resolve against "
-                    + "the grader's working directory rather than the run's toolchain.",
-                    entry,
-                )
-                continue
-            if not candidate.is_dir():
-                logger.debug("Dropping recorded PATH entry %s: not a directory here.", entry)
-                continue
-            resolved = candidate.resolve()
-            if any(resolved == root or root in resolved.parents for root in blocked):
-                logger.warning(
-                    "Dropping recorded PATH entry %s: it lies inside the run being graded, "
-                    + "so a binary there could shadow a real tool on the grader's host.",
-                    entry,
-                )
-                continue
-            kept.append(str(resolved))
-        return os.pathsep.join(kept)
 
     def _select_gate(self) -> bool:
         """Apply the verdict gate to the criteria results already on ``self.result``.
@@ -2129,7 +2048,6 @@ class Orchestrator:
             operation_label="Agent communication",
         )
         self.result.iterations.append(turn_record)
-        self._sync_sandbox_command_path_with_agent()
 
         # Record early-stop info (if the monitor tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
@@ -2141,7 +2059,7 @@ class Orchestrator:
 
         # Facts about the RUN, recorded BEFORE the grading switch: `execute`
         # withholds the verdict, never the facts. Recording the fact is not
-        # finalizing on it — the tool-call cap decides the status only when the criteria
+        # finalizing on it — a structural cap decides the status only when the criteria
         # fail, so under grade=False this is carried into task.json for the
         # detached grade rather than turned into a terminal status. Read from the
         # turn's end status, not the monitor's latch: a cap latched after the
@@ -2150,11 +2068,14 @@ class Orchestrator:
         if turn_record.tool_calls_exhausted:
             self.result.tool_calls_exhausted = True
             logger.warning(
-                "Agent reached the tool-call cap (%d resolved tool calls).",
+                "Agent reached a run cap (%s): %d resolved tool calls, %d model turns.",
+                monitor.stop_reason,
                 monitor.tool_calls,
+                monitor.model_turns,
             )
-        # Soft cumulative-turn check (logs once; never aborts).
-        self._check_expected_tool_calls(iteration=iteration)
+        self.result.model_turns = monitor.model_turns if self._counts_model_turns else None
+        # Soft cumulative targets (log once; never abort).
+        self._check_expected_targets(iteration=iteration)
 
         # Grading site 2 of 4. The trajectory is captured and persisted exactly as
         # on a graded run, but nothing is scored; returning False keeps FinalStatus
@@ -2468,9 +2389,8 @@ class Orchestrator:
             # Keyed by (position, criterion_type) — a stable criterion identity.
             judge_usage_accum: dict[tuple[int, str], TokenUsage] = {}
 
-            # In lockstep with the agent's _iteration — one
-            # _communicate_with_retry per sim turn — so a partial turn and its
-            # successful retry share an iteration number.
+            # One _communicate_with_retry per sim turn, passed this turn's number,
+            # so a partial turn and its successful retry share an iteration number.
             while True:
                 turns_completed += 1
                 self.result.iteration_count = turns_completed
@@ -2488,7 +2408,6 @@ class Orchestrator:
                     turn_record.messages.insert(0, pending_user_turn)
                     pending_user_turn = None
                 self.result.iterations.append(turn_record)
-                self._sync_sandbox_command_path_with_agent()
                 dialog_pairs.append((current_prompt, _extract_utterance(turn_record.agent_output or "")))
                 agent_meta_parts = []
                 if turn_record.duration_seconds is not None:
@@ -2524,6 +2443,7 @@ class Orchestrator:
                 # Budget gate: aborts the dialog with a dedicated stop reason and
                 # ensures end-of-dialog criteria still run for partial credit.
                 assert self._monitor is not None
+                self.result.model_turns = self._monitor.model_turns if self._counts_model_turns else None
                 try:
                     self._monitor.raise_if_over_budget(iteration=turns_completed)
                 except BudgetExceededError:
@@ -2536,7 +2456,7 @@ class Orchestrator:
 
                 # Soft check (logs once, never aborts), then the cap fact, both BEFORE
                 # any stop decision, so a turn that also ends the dialog keeps them.
-                self._check_expected_tool_calls(iteration=turns_completed)
+                self._check_expected_targets(iteration=turns_completed)
                 if turn_record.tool_calls_exhausted:
                     self.result.tool_calls_exhausted = True
 
@@ -2549,7 +2469,8 @@ class Orchestrator:
                 if turn_record.tool_calls_exhausted and stop_decision.reason is not DialogStopReason.CRITERIA_PASSED:
                     stop_reason = DialogStopReason.TOOL_CALL_CAP
                     logger.warning(
-                        "Agent reached the tool-call cap during simulation turn %s; ending dialog.",
+                        "Agent reached a run cap (%s) during simulation turn %s; ending dialog.",
+                        self._monitor.stop_reason,
                         turns_completed,
                     )
                     break
@@ -2741,6 +2662,9 @@ class Orchestrator:
                 proc = await asyncio.create_subprocess_shell(
                     cmd.command,
                     cwd=str(sandbox_dir),
+                    # An authored command that reads stdin must not stall the task.
+                    # Rationale: .claude/notes/agents.md § Why a CLI never inherits stdin
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=self._POST_RUN_STREAM_LIMIT,

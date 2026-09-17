@@ -27,25 +27,27 @@ from coder_eval.agents.pi_agent import PiAgent
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import (
     AgentKind,
-    Enforcement,
-    FileExistsCriterion,
     HarnessContract,
     PermissionMode,
-    SandboxConfig,
-    TaskDefinition,
     parse_agent_config,
 )
-from coder_eval.orchestration.harness_contract import HarnessContractError, validate_harness_contract
 from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.plugins import ensure_plugins_loaded
-from coder_eval.streaming.events import AgentEndEvent, StopReason, ToolEndEvent, end_status_for
+from coder_eval.streaming.events import StopReason
+from coder_eval.testing import (
+    FIRST_TOOL_ID,
+    SECOND_TOOL_ID,
+    StopAfterFirstTool,
+    conformance,
+    enforced_cells,
+    rejections,
+    stop_conformance,
+)
 from tests.test_antigravity_agent import _install_fake_sdk
 
 
 MARKER = "CONFORMANCE-MARKER-7f3a"
 USER_TURN = "do the task"
-_FIELDS = ("system_prompt", "plugin_skills", "permission_mode", "allowed_tools", "disallowed_tools")
-_CONFIG_FIELD = {"plugin_skills": "plugins"}
 _KINDS = [kind for kind in AgentKind if kind is not AgentKind.UNKNOWN]
 
 type Probe = Callable[[Path, pytest.MonkeyPatch], Awaitable[None]]
@@ -58,17 +60,6 @@ def _contract(kind: AgentKind) -> HarnessContract:
     return registration.agent_class.contract
 
 
-def _task(kind: AgentKind, **agent: Any) -> TaskDefinition:
-    return TaskDefinition(
-        task_id="t",
-        description="d",
-        initial_prompt=None if kind is AgentKind.NONE else USER_TURN,
-        agent=parse_agent_config(type=kind, **agent),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(description="c", path="out.txt")],
-    )
-
-
 def _plugin_root(tmp_path: Path) -> Path:
     """A root staged by ``stage_plugins`` over one authored ``probe-skill``."""
     skill = tmp_path / "plugin" / "skills" / "probe-skill"
@@ -77,49 +68,26 @@ def _plugin_root(tmp_path: Path) -> Path:
     return stage_plugins([{"type": "local", "path": str(tmp_path / "plugin")}], tmp_path / "plugin_root").root
 
 
-_GATED_VALUES: dict[str, Any] = {
-    "system_prompt": MARKER,
-    "plugins": [{"type": "local", "path": "/plugins/p"}],
-    "permission_mode": "plan",
-    "allowed_tools": ["Bash"],
-    "disallowed_tools": ["Bash"],
-}
-
-
 # --- rejections, derived from the contracts ----------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("kind", "field"),
-    [(k, f) for k in _KINDS for f in _FIELDS if getattr(_contract(k), f) is Enforcement.UNSUPPORTED],
+    ("kind", "check"),
+    [pytest.param(k, check, id=f"{k.value}-{name}") for k in _KINDS for name, check in rejections(k.value)],
 )
-def test_unsupported_field_is_rejected(kind: AgentKind, field: str) -> None:
-    config_field = _CONFIG_FIELD.get(field, field)
-    with pytest.raises(HarnessContractError, match=rf"agent\.{config_field}.*{kind.value!r}"):
-        validate_harness_contract(_task(kind, **{config_field: _GATED_VALUES[config_field]}))
+def test_contract_rejection(kind: AgentKind, check: Callable[[], None]) -> None:
+    check()
 
 
-@pytest.mark.parametrize(
-    ("kind", "mode"),
-    [
-        (k, m)
-        for k in _KINDS
-        if _contract(k).permission_mode is Enforcement.ENFORCED
-        for m in PermissionMode
-        if m not in (_contract(k).permission_modes or frozenset())
-    ],
-)
-def test_undeclared_permission_value_is_rejected(kind: AgentKind, mode: PermissionMode) -> None:
-    with pytest.raises(HarnessContractError, match="has no documented meaning"):
-        validate_harness_contract(_task(kind, permission_mode=mode))
-
-
-@pytest.mark.parametrize(
-    "kind", [k for k in _KINDS if AgentRegistry.get(k) and AgentRegistry.get(k).agent_class.tool_names]
-)
-def test_unknown_tool_name_is_rejected(kind: AgentKind) -> None:
-    with pytest.raises(HarnessContractError, match="did you mean 'Bash'"):
-        validate_harness_contract(_task(kind, allowed_tools=["Bassh"]))
+def test_every_kind_rejects_what_its_contract_does_not_honor() -> None:
+    names = {name for k in _KINDS for name, _ in rejections(k.value)}
+    assert {
+        "unsupported system_prompt",
+        "undeclared permission_mode=default",
+        "misspelled tool name",
+        "unsupported run_limits.max_turns",
+        "unsupported run_limits.expected_turns",
+    } <= names
 
 
 # --- probes: the value reaches the native call --------------------------------------
@@ -139,7 +107,7 @@ async def _claude(tmp_path: Path, plugin_root: Path | None = None, **agent: Any)
     claude = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, **agent))
     await claude.start(str(tmp_path), plugin_root=plugin_root)
     with patch("coder_eval.agents.claude_code_agent.query", fake_query):
-        await claude.communicate(USER_TURN)
+        await claude.communicate(USER_TURN, iteration=1)
     return captured["options"], captured["prompt"]
 
 
@@ -152,7 +120,7 @@ async def _probe_claude_system_prompt(tmp_path: Path, _mp: pytest.MonkeyPatch) -
 async def _probe_claude_plugins(tmp_path: Path, _mp: pytest.MonkeyPatch) -> None:
     root = _plugin_root(tmp_path)
     options, _ = await _claude(tmp_path, plugin_root=root)
-    assert options.plugins == [{"type": "local", "path": str(root)}]
+    assert options.plugins == [{"type": "local", "path": str(root / "plugins" / "plugin")}]
 
 
 async def test_claude_loads_no_plugin_without_a_plugin_root(tmp_path: Path) -> None:
@@ -191,7 +159,7 @@ async def _probe_codex_system_prompt(_tmp: Path, _mp: pytest.MonkeyPatch) -> Non
     codex = _started_agent(parse_agent_config(type=AgentKind.CODEX, system_prompt=MARKER), [_turn_completed()])
     options = codex._build_thread_options()
     codex.thread = _RecordingThread([_turn_completed()])
-    await codex.communicate(USER_TURN)
+    await codex.communicate(USER_TURN, iteration=1)
     assert options["developer_instructions"] == MARKER
     assert turn_inputs == [USER_TURN]
 
@@ -251,7 +219,7 @@ async def _probe_antigravity_system_prompt(tmp_path: Path, monkeypatch: pytest.M
     agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, system_prompt=MARKER))
     agent.working_directory = tmp_path
     agent._sdk_agent = SimpleNamespace(conversation=_RecordingConversation([done]), is_started=True)
-    await agent.communicate(USER_TURN)
+    await agent.communicate(USER_TURN, iteration=1)
     assert sent == [USER_TURN]
 
 
@@ -301,10 +269,10 @@ async def _opencode(
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     opencode = await _cli_agent(OpenCodeAgent, AgentKind.OPENCODE, tmp_path, monkeypatch, plugin_root, **agent)
     try:
-        raw = opencode._build_env().get("OPENCODE_CONFIG_CONTENT")
+        raw = opencode.env().get("OPENCODE_CONFIG_CONTENT")
         config = json.loads(raw) if raw else {}
         config["instructions_text"] = [Path(p).read_text(encoding="utf-8") for p in config.get("instructions", [])]
-        return config, opencode._build_argv(USER_TURN)
+        return config, opencode.argv(USER_TURN)
     finally:
         await opencode.stop()
 
@@ -348,7 +316,7 @@ async def _pi_argv(
 ) -> list[str]:
     pi = await _cli_agent(PiAgent, AgentKind.PI, tmp_path, monkeypatch, plugin_root, **agent)
     try:
-        return pi._build_argv(USER_TURN)
+        return pi.argv(USER_TURN)
     finally:
         await pi.stop()
 
@@ -418,17 +386,7 @@ _PROBES: dict[tuple[str, str], Probe] = {
 
 
 def _enforced_cells() -> set[tuple[str, str]]:
-    cells: set[tuple[str, str]] = set()
-    for kind in _KINDS:
-        contract = _contract(kind)
-        for field in _FIELDS:
-            if getattr(contract, field) is not Enforcement.ENFORCED:
-                continue
-            if field == "permission_mode":
-                cells |= {(kind.value, f"permission_mode={m.value}") for m in contract.permission_modes or ()}
-            else:
-                cells.add((kind.value, field))
-    return cells
+    return {cell for kind in _KINDS for cell in enforced_cells(_contract(kind), kind.value)}
 
 
 def test_every_enforced_cell_has_exactly_one_probe() -> None:
@@ -440,29 +398,22 @@ async def test_probe(cell: tuple[str, str], tmp_path: Path, monkeypatch: pytest.
     await _PROBES[cell](tmp_path, monkeypatch)
 
 
+@pytest.mark.parametrize("kind", _KINDS, ids=lambda k: k.value)
+async def test_conformance_per_kind(kind: AgentKind, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def bound(cell: tuple[str, str], probe: Probe) -> Callable[[], Awaitable[None]]:
+        directory = tmp_path / cell[1].replace("=", "-")
+        directory.mkdir()
+        return lambda: probe(directory, monkeypatch)
+
+    await conformance(
+        kind.value, {cell: bound(cell, probe) for cell, probe in _PROBES.items() if cell[0] == kind.value}
+    )
+
+
 # --- cooperative stop: every StopReason ends the turn at the boundary ---------------
 
 
-class _StopAfterFirstTool:
-    """``should_stop`` stub: ``reason`` once one tool call has resolved; also keeps the end event."""
-
-    def __init__(self, reason: StopReason) -> None:
-        self.reason = reason
-        self.tool_ends = 0
-        self.end: AgentEndEvent | None = None
-
-    def on_event(self, event: object) -> None:
-        if isinstance(event, ToolEndEvent):
-            self.tool_ends += 1
-        elif isinstance(event, AgentEndEvent):
-            self.end = event
-
-    def __call__(self) -> StopReason | None:
-        return self.reason if self.tool_ends else None
-
-
-type StopProbe = Callable[[Path, pytest.MonkeyPatch, _StopAfterFirstTool], Awaitable[list[Any]]]
-_SECOND = "second-call"
+type StopProbe = Callable[[Path, pytest.MonkeyPatch, StopAfterFirstTool], Awaitable[list[Any]]]
 
 
 def _recording(items: list[Any], pulled: list[Any]) -> Iterator[Any]:
@@ -471,7 +422,7 @@ def _recording(items: list[Any], pulled: list[Any]) -> Iterator[Any]:
         yield item
 
 
-async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.claude_fixtures import (
         AssistantMessage,
         ResultMessage,
@@ -481,10 +432,10 @@ async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfter
 
     pulled: list[Any] = []
     events = [
-        AssistantMessage([ToolUseBlock("first", "Bash", {"command": "ls"})], message_id="m1"),
-        UserMessage("first", False, "ok"),
-        AssistantMessage([ToolUseBlock(_SECOND, "Bash", {"command": "ls"})], message_id="m2"),
-        UserMessage(_SECOND, False, "ok"),
+        AssistantMessage([ToolUseBlock(FIRST_TOOL_ID, "Bash", {"command": "ls"})], message_id="m1"),
+        UserMessage(FIRST_TOOL_ID, False, "ok"),
+        AssistantMessage([ToolUseBlock(SECOND_TOOL_ID, "Bash", {"command": "ls"})], message_id="m2"),
+        UserMessage(SECOND_TOOL_ID, False, "ok"),
         ResultMessage(),
     ]
 
@@ -495,11 +446,11 @@ async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfter
     claude = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
     await claude.start(str(tmp_path))
     with patch("coder_eval.agents.claude_code_agent.query", fake_query):
-        await claude.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+        await claude.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     return [getattr(e.content[0], "id", None) for e in pulled if hasattr(e, "content")]
 
 
-async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests.test_codex_agent import _FakeThread, _FakeTurnHandle, _item_notification, _started_agent
 
     pulled: list[Any] = []
@@ -511,7 +462,7 @@ async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirst
 
     notifications = [
         _item_notification(method, command(item_id))
-        for item_id in ("first", _SECOND)
+        for item_id in (FIRST_TOOL_ID, SECOND_TOOL_ID)
         for method in ("item/started", "item/completed")
     ]
 
@@ -526,11 +477,11 @@ async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirst
 
     codex = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
     codex.thread = _RecordingThread(notifications)
-    await codex.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+    await codex.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     return [n.payload.item.root.id for n in pulled]
 
 
-async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.antigravity_fixtures import _FakeConversation, _step, _tc
 
     pulled: list[Any] = []
@@ -547,7 +498,7 @@ async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _Stop
             ),
         ]
 
-    steps = [*call("first"), *call(_SECOND)]
+    steps = [*call(FIRST_TOOL_ID), *call(SECOND_TOOL_ID)]
 
     class _RecordingConversation(_FakeConversation):
         async def receive_steps(self):
@@ -558,7 +509,7 @@ async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _Stop
     agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY))
     agent.working_directory = tmp_path
     agent._sdk_agent = SimpleNamespace(conversation=_RecordingConversation([]), is_started=True)
-    await agent.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+    await agent.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     return [s.tool_calls[0].id for s in pulled]
 
 
@@ -586,23 +537,23 @@ async def _stop_cli(
     monkeypatch.setattr("os.killpg", lambda _pgid, _sig: None, raising=False)
     cli = await _cli_agent(cls, kind, tmp_path, monkeypatch)
     try:
-        await cli.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+        await cli.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     finally:
         await cli.stop()
-    return [tool_id for tool_id in ("first", _SECOND) if any(tool_id in json.dumps(p) for p in pulled)]
+    return [tool_id for tool_id in (FIRST_TOOL_ID, SECOND_TOOL_ID) if any(tool_id in json.dumps(p) for p in pulled)]
 
 
-async def _stop_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.pi_fixtures import _tool_end, _tool_start, _turn_end, _turn_start
 
     lines = [_turn_start()]
-    for tool_id in ("first", _SECOND):
+    for tool_id in (FIRST_TOOL_ID, SECOND_TOOL_ID):
         lines += [_tool_start(tool_id, "bash", {"command": "ls"}), _tool_end(tool_id, "bash", "ok")]
     lines.append(_turn_end(inp=1, out=1))
     return await _stop_cli(PiAgent, AgentKind.PI, lines, tmp_path, monkeypatch, stop)
 
 
-async def _stop_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.opencode_fixtures import _evt
 
     def tool_use(tool_id: str) -> str:
@@ -622,8 +573,8 @@ async def _stop_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: 
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     lines = [
         _evt("step_start", {"id": "prt_0", "messageID": "msg_1", "type": "step-start"}),
-        tool_use("first"),
-        tool_use(_SECOND),
+        tool_use(FIRST_TOOL_ID),
+        tool_use(SECOND_TOOL_ID),
     ]
     return await _stop_cli(OpenCodeAgent, AgentKind.OPENCODE, lines, tmp_path, monkeypatch, stop)
 
@@ -641,17 +592,11 @@ def test_every_cooperative_kind_has_a_stop_probe() -> None:
     assert set(_STOP_PROBES) == {k.value for k in _KINDS if _contract(k).cooperative_stop}
 
 
-@pytest.mark.parametrize("reason", list(StopReason))
 @pytest.mark.parametrize("kind", sorted(_STOP_PROBES))
-async def test_stop_reason_ends_the_turn_before_the_next_call(
-    kind: str, reason: StopReason, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    stop = _StopAfterFirstTool(reason)
+async def test_stop_conformance(kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def probe(stop: StopAfterFirstTool, reason: StopReason) -> list[Any]:
+        directory = tmp_path / reason.value
+        directory.mkdir()
+        return await _STOP_PROBES[kind](directory, monkeypatch, stop)
 
-    pulled = await _STOP_PROBES[kind](tmp_path, monkeypatch, stop)
-
-    assert stop.end is not None
-    assert stop.end.status is end_status_for(reason)
-    assert stop.end.crashed is False
-    assert "first" in pulled
-    assert _SECOND not in pulled
+    await stop_conformance(kind, probe)

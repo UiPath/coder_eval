@@ -15,7 +15,8 @@ skills** — built for benchmark authors, CLI builders, and skill builders — w
 sandboxing, reproducibility, and data-driven analysis. It runs a real agent —
 **Claude Code**, **OpenAI Codex**, **Google Antigravity (Gemini)**, **OpenCode**, or **Pi** —
 against declarative YAML tasks in a sandbox. Changing harness is one field
-(`agent.type`); the tasks, criteria, scoring, telemetry, and reports stay the same.
+(`agent.type`); a field the target harness cannot honor fails at load, and every harness
+records its turn through one kernel, so the telemetry means the same thing on every harness.
 It is **not a fixed leaderboard**: you bring the tasks and you bring the scoring.
 
 If you have ever asked *"how do I benchmark coding agents on my own domain tasks?"*,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Final, TypeVar, cast, get_args
 
 
 # TYPE_CHECKING-only imports, so this module imports nothing from coder_eval at
@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, get_args
 if TYPE_CHECKING:
     from coder_eval.agent import Agent
     from coder_eval.models import AgentKind, ApiRoute, BaseAgentConfig
+
+SPI_VERSION: Final[int] = 1
 
 MethodConfigT = TypeVar("MethodConfigT", bound="BaseAgentConfig")
 AgentClassT = TypeVar("AgentClassT")
@@ -87,12 +89,12 @@ class AgentRegistry:
 
     @classmethod
     def register(
-        cls, agent_kind: str | AgentKind, config_class: type[MethodConfigT]
+        cls, agent_kind: str | AgentKind, config_class: type[MethodConfigT], *, spi_version: int
     ) -> Callable[[type[AgentClassT]], type[AgentClassT]]:
         """Decorator to register an agent class (identity-preserving).
 
         Usage:
-            @AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig)
+            @AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig, spi_version=SPI_VERSION)
             class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 ...
 
@@ -100,10 +102,20 @@ class AgentRegistry:
             agent_kind: The agent kind this agent implements — an ``AgentKind``
                 member (built-ins) or a raw kind string (plugins).
             config_class: The config class this agent expects (e.g., ClaudeCodeAgentConfig)
+            spi_version: The ``SPI_VERSION`` the agent was written against.
 
         Returns:
             A decorator that registers and returns the agent class unchanged (preserves type)
+
+        Raises:
+            TypeError: ``spi_version`` is not this core's ``SPI_VERSION``.
         """
+        if spi_version != SPI_VERSION:
+            raise TypeError(
+                f"Agent kind {str(agent_kind)!r} was written against coder_eval SPI {spi_version!r}, "
+                + f"but this coder_eval provides SPI {SPI_VERSION}. Install a plugin version built for "
+                + f"SPI {SPI_VERSION}, or a coder_eval version that provides SPI {spi_version!r}."
+            )
 
         def decorator(agent_cls: type[AgentClassT]) -> type[AgentClassT]:
             kind = str(agent_kind)

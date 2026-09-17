@@ -86,9 +86,35 @@ class TestRunLimitsResolver:
         assert resolve(exp_default=50, task_value=20, variant_value=10) == (10, "variant")
         assert resolve(exp_default=50, task_value=20, variant_value=10, cli_value=3) == (3, "cli")
 
-    def test_max_turns_under_variant_run_limits_is_rejected(self):
-        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-            ExperimentVariant.model_validate({"variant_id": "v", "run_limits": {"max_turns": 5}})
+    def test_max_turns_merges_through_all_five_layers(self):
+        from coder_eval.orchestration.config import BatchRunConfig
+        from coder_eval.orchestration.experiment import _apply_cli_overrides
+
+        def resolve(*, exp_default=None, task_value=None, variant_value=None, cli_value=None):
+            default_exp = _default_exp(RunLimits(max_turns=100))
+            task = _make_task(run_limits={"max_turns": task_value}) if task_value else _make_task()
+            exp = ExperimentDefinition(
+                experiment_id="e",
+                defaults=ExperimentDefaults(run_limits=RunLimits(max_turns=exp_default)) if exp_default else None,
+                variants=[
+                    ExperimentVariant(
+                        variant_id="v",
+                        run_limits=RunLimits(max_turns=variant_value) if variant_value else None,
+                    )
+                ],
+            )
+            resolved, lineage, _ = resolve_task_for_variant(default_exp, task, exp, exp.variants[0])
+            if cli_value:
+                config = BatchRunConfig(run_dir=Path("runs/test"), overrides={"run_limits.max_turns": cli_value})
+                _apply_cli_overrides(resolved, config, lineage=lineage)
+            assert resolved.run_limits is not None
+            return resolved.run_limits.max_turns, lineage["run_limits.max_turns"].source
+
+        assert resolve() == (100, "default")
+        assert resolve(exp_default=50) == (50, "experiment-defaults")
+        assert resolve(exp_default=50, task_value=20) == (20, "task")
+        assert resolve(exp_default=50, task_value=20, variant_value=10) == (10, "variant")
+        assert resolve(exp_default=50, task_value=20, variant_value=10, cli_value=3) == (3, "cli")
 
     def test_experiment_defaults_overrides_default(self):
         default_exp = _default_exp(RunLimits(max_usd=1.0))

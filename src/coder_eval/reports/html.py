@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ..analysis import calculate_command_statistics
 from ..durations import format_ms
 from ..models import FinalStatus, eval_result_total_cost, sum_costs
-from ..result_metrics import expected_tool_calls_overage, turn_time_buckets
+from ..result_metrics import expected_tool_calls_overage, expected_turns_overage, turn_time_buckets
 from ..stats import stddev, welch_t_test
 from .helpers import (
     collect_variant_series,
@@ -356,6 +356,11 @@ def _render_header(result: EvaluationResult) -> str:
         expected_tool_calls_badge = (
             f'<span class="badge warning">expected_tool_calls exceeded ({actual}/{expected})</span>'
         )
+    expected_turns_badge = ""
+    turns_overage = expected_turns_overage(result)
+    if turns_overage is not None:
+        actual, expected = turns_overage
+        expected_turns_badge = f'<span class="badge warning">expected_turns exceeded ({actual}/{expected})</span>'
     early_stop_badge = ""
     if result.early_stop is not None:
         title = early_stop_gate_note(result.early_stop.reason.value)
@@ -376,6 +381,7 @@ def _render_header(result: EvaluationResult) -> str:
     <span class="badge neutral">{_esc(duration)}</span>
     {cost_badge}
     {expected_tool_calls_badge}
+    {expected_turns_badge}
     {early_stop_badge}
     <span class="nav-toggle" onclick="toggleTheme()">Toggle theme</span>
   </div>

@@ -27,6 +27,7 @@ from coder_eval.models import (
 )
 from coder_eval.orchestrator import Orchestrator
 from coder_eval.simulation.user_simulator import UserSimulator
+from coder_eval.streaming.emitter import TurnOutcome
 from tests.fixtures.harness_stubs import stub_contract
 from tests.fixtures.mock_agent import MockAgent
 from tests.fixtures.text_stub_agent import TextStubAgent
@@ -77,11 +78,11 @@ class _CooperativeToolAgent(MockAgent):
         self._tool_seq = 0
         self.emitted_per_turn: list[int] = []
 
-    async def communicate(self, user_input: str, **kwargs: Any) -> TurnRecord:
+    async def communicate(self, user_input: str, **kwargs: Any) -> TurnOutcome:
         from datetime import datetime
 
         from coder_eval.models import CommandTelemetry
-        from coder_eval.streaming.events import StopReason, ToolEndEvent, ToolStartEvent
+        from coder_eval.streaming.events import AgentEndStatus, StopReason, ToolEndEvent, ToolStartEvent
 
         self._iteration += 1
         stream_callback = kwargs["stream_callback"]
@@ -94,13 +95,14 @@ class _CooperativeToolAgent(MockAgent):
             stream_callback.on_event(ToolEndEvent(task_id=self.task.task_id, tool=tool))
             commands.append(tool)
         self.emitted_per_turn.append(len(commands))
-        return TurnRecord(
+        record = TurnRecord(
             iteration=self._iteration,
             user_input=user_input,
             agent_output="working",
             commands=commands,
             tool_calls_exhausted=should_stop() is StopReason.TOOL_CALL_CAP,
         )
+        return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
 
 def _install_fake_simulator(
@@ -131,15 +133,16 @@ class _TokenizedTextStub(TextStubAgent):
         super().__init__(responses)
         self._tokens = tokens
 
-    async def communicate(self, user_input: str, **kwargs: object) -> TurnRecord:
-        turn = await super().communicate(user_input, **kwargs)
+    async def communicate(self, user_input: str, **kwargs: object) -> TurnOutcome:
+        outcome = await super().communicate(user_input, **kwargs)
         in_tok, out_tok = self._tokens
-        return TurnRecord(
-            iteration=turn.iteration,
-            user_input=turn.user_input,
-            agent_output=turn.agent_output,
+        record = TurnRecord(
+            iteration=outcome.record.iteration,
+            user_input=outcome.record.user_input,
+            agent_output=outcome.record.agent_output,
             token_usage=TokenUsage(uncached_input_tokens=in_tok, output_tokens=out_tok),
         )
+        return TurnOutcome(record=record, status=outcome.status, error=outcome.error)
 
 
 class _ExplodingAgent(Agent):

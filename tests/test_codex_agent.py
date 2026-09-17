@@ -37,7 +37,6 @@ class TestCodexAgentInitialization:
         assert agent.config == config
         assert agent.codex_client is None
         assert agent.get_state() == AgentState.WORKING
-        assert agent.pending_turn is None
 
     def test_codex_agent_with_disallowed_tools(self):
         """Test initialization with disallowed_tools."""
@@ -505,29 +504,6 @@ class TestThreadOptions:
         assert options["approval_mode"] == ApprovalMode.deny_all
 
 
-@pytest.mark.asyncio
-async def test_discard_pending_turn():
-    """Test discard_pending_turn clears pending_turn and decrements iteration."""
-    from coder_eval.models import TurnRecord
-
-    config = parse_agent_config(type=AgentKind.CODEX)
-    agent = CodexAgent(config)
-
-    partial = TurnRecord(
-        iteration=1,
-        user_input="test",
-        agent_output="<partial>",
-        crashed=True,
-    )
-    agent._iteration = 1
-    agent.pending_turn = partial
-
-    await agent.discard_pending_turn()
-
-    assert agent.pending_turn is None
-    assert agent._iteration == 0
-
-
 def test_get_state_returns_current_state():
     """Test get_state returns the agent's current state."""
     config = parse_agent_config(type=AgentKind.CODEX)
@@ -544,6 +520,7 @@ def test_get_state_returns_current_state():
 # without a live SDK. These mirror the notification shapes the real stream emits.
 # ---------------------------------------------------------------------------
 
+import asyncio  # noqa: E402
 import os  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
@@ -556,8 +533,21 @@ from types import SimpleNamespace  # noqa: E402
 
 from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
 
-from coder_eval.errors import AgentCrashError, TurnTimeoutError  # noqa: E402
-from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason  # noqa: E402
+from coder_eval.agents.codex_agent import _CodexDecoder, _ms_to_dt, _ThreadTotals  # noqa: E402
+from coder_eval.models import RunLimits, TimingBasis  # noqa: E402
+from coder_eval.orchestration.turn_monitor import TurnMonitor  # noqa: E402
+from coder_eval.streaming.emitter import TurnEmitter  # noqa: E402
+from coder_eval.streaming.events import (  # noqa: E402
+    AgentEndEvent,
+    AgentEndStatus,
+    StopReason,
+    ToolEndEvent,
+    ToolStartEvent,
+    TurnEndEvent,
+    TurnEndStatus,
+    TurnStartEvent,
+)
+from coder_eval.testing import Replay, ScriptedClock, Tick, assert_stream_balanced, replay  # noqa: E402
 
 
 def _item_notification(
@@ -647,6 +637,43 @@ def _started_agent(config: AgentConfig, notifications) -> CodexAgent:
     return agent
 
 
+class _Recorder:
+    def __init__(self) -> None:
+        self.events: list = []
+
+    def on_event(self, event) -> None:
+        self.events.append(event)
+
+
+def _decoder(model: str = "gpt-5.5") -> _CodexDecoder:
+    """A decoder on a begun ``CLI_EPOCH_MS`` emitter, driven by hand; its clock never moves."""
+    agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model=model))
+    emitter = TurnEmitter(
+        task_id="codex",
+        iteration=1,
+        prompt="go",
+        model=model,
+        basis=TimingBasis.CLI_EPOCH_MS,
+        clock=ScriptedClock(_ms_to_dt(_BOUNDS_EPOCH_MS)),
+        sinks=[],
+    )
+    emitter.begin()
+    return _CodexDecoder(agent, emitter, turn_id="codex-1")
+
+
+def _codex_replay(stream, *, origin_ms: int | None = None, model: str = "gpt-5.5") -> Replay:
+    """Replay notifications through ``_CodexDecoder`` on a real emitter; the turn ends ``COMPLETED``."""
+    agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model=model))
+    return replay(
+        stream,
+        lambda emitter: _CodexDecoder(agent, emitter, turn_id="codex-1"),
+        clock=ScriptedClock(_ms_to_dt(_BOUNDS_EPOCH_MS if origin_ms is None else origin_ms)),
+        basis=TimingBasis.CLI_EPOCH_MS,
+        model=model,
+        end=lambda decoder: decoder.end(AgentEndStatus.COMPLETED),
+    )
+
+
 class TestCommunicateHappyPath:
     """End-to-end communicate() with a fake stream."""
 
@@ -677,7 +704,7 @@ class TestCommunicateHappyPath:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("do it")
+        record = (await agent.communicate("do it", iteration=1)).record
 
         assert record.agent_output == "Hello world"
         # One shell command + one file change both recorded as telemetry.
@@ -685,6 +712,8 @@ class TestCommunicateHappyPath:
         assert tool_names == ["Bash", "Write"]
         # Distinct sequence numbers (no collision / freeze).
         assert sorted(c.sequence_number for c in record.commands) == [0, 1]
+        # No item stamps: the SDK's own duration is the only measurement.
+        assert {c.tool_name: c.duration_ms for c in record.commands} == {"Bash": 12.0, "Write": None}
         assert record.token_usage is not None
         # Cache-bucket convention: the SDK reports a full prompt count of 100 with
         # 8 cached, so the fresh slice (100 - 8 = 92) is plain uncached input;
@@ -695,7 +724,6 @@ class TestCommunicateHappyPath:
         assert record.token_usage.cache_read_input_tokens == 8
         assert record.token_usage.input_tokens == 100
         assert agent.get_state() == AgentState.WORKING
-        assert agent.pending_turn is None
         assert agent._active_turn_handle is None
 
     async def test_state_resets_to_working_after_a_prior_error(self):
@@ -703,7 +731,7 @@ class TestCommunicateHappyPath:
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
         agent._state = AgentState.ERROR
 
-        await agent.communicate("retry")
+        await agent.communicate("retry", iteration=1)
 
         assert agent.get_state() == AgentState.WORKING
 
@@ -797,7 +825,7 @@ class TestCodexCacheWriteBucketing:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant_msgs = [m for m in record.messages if hasattr(m, "cache_creation_tokens")]
         assert assistant_msgs, "expected at least one AssistantMessage"
@@ -834,7 +862,7 @@ class TestCodexCacheWriteBucketing:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         msgs = [m for m in record.messages if hasattr(m, "cache_creation_tokens")]
         # Gen 1 (cold): all 1000 fresh is uncached input, no cache.
@@ -852,23 +880,18 @@ class TestCodexCacheWriteBucketing:
 
 
 class TestCommunicateCrashFunnel:
-    """A turn that never completes funnels through the pending-turn contract."""
+    """A turn that never completes ends with a ``CRASHED`` outcome."""
 
-    async def test_missing_turn_completed_raises_agent_crash_with_pending(self):
+    async def test_missing_turn_completed_ends_crashed(self):
         # No turn/completed notification -> RuntimeError inside, surfaced as crash.
         notifications = [_delta("partial")]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("do it")
+        outcome = await agent.communicate("do it", iteration=1)
 
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.crashed is True
         assert agent.get_state() == AgentState.ERROR
-
-        # discard rolls back the iteration bump (flag-only branch still works).
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
 
     async def test_thread_start_failure_funnels_through_crash(self):
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
@@ -881,12 +904,9 @@ class TestCommunicateCrashFunnel:
 
         agent.codex_client.thread_start = _boom
 
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("do it")
+        outcome = await agent.communicate("do it", iteration=1)
 
-        assert agent.pending_turn is not None
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
+        assert outcome.status is AgentEndStatus.CRASHED
 
 
 class _RaisingStream:
@@ -901,7 +921,7 @@ class _RaisingStream:
 
     def __next__(self):
         nxt = next(self._it)  # raises StopIteration when exhausted
-        if isinstance(nxt, Exception):
+        if isinstance(nxt, BaseException):
             raise nxt
         return nxt
 
@@ -910,8 +930,8 @@ class _RaisingStream:
 
 
 class TestCommunicateCrashTokenFallback:
-    """On a mid-turn crash the SDK never returns its `total` usage, so _finalize
-    falls back to _token_usage_from_messages over the per-generation tokens
+    """On a mid-turn crash the SDK never returns its `total` usage, so the decoder's
+    `end` falls back to _token_usage_from_messages over the per-generation tokens
     already flushed onto the captured AssistantMessages."""
 
     async def test_crash_emits_crashed_end_with_token_fallback(self):
@@ -945,17 +965,17 @@ class TestCommunicateCrashTokenFallback:
         def _cb(event):
             captured.append(event)
 
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("do it", stream_callback=SimpleNamespace(on_event=_cb))
+        outcome = await agent.communicate("do it", iteration=1, stream_callback=SimpleNamespace(on_event=_cb))
+
+        assert outcome.status is AgentEndStatus.CRASHED
 
         # A CRASHED AgentEndEvent closes the event tree.
         end_events = [e for e in captured if isinstance(e, AgentEndEvent)]
         assert end_events and end_events[-1].status == AgentEndStatus.CRASHED
 
-        # The pending turn carries the tokens captured before the crash (fallback).
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
-        tu = agent.pending_turn.token_usage
+        # The turn's record carries the tokens captured before the crash (fallback).
+        assert outcome.record.crashed is True
+        tu = outcome.record.token_usage
         assert tu is not None
         # Fresh slice 100 - 8 = 92 -> uncached_input; cached 8 -> cache_read; out 40; no cache-write.
         assert tu.uncached_input_tokens == 92
@@ -1082,17 +1102,19 @@ class TestMessagesFromItemsHasNoWindow:
     """
 
     def test_rebuilt_messages_report_an_unknown_window(self):
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        decoder = _decoder()
         items = [SimpleNamespace(type="agentMessage", id="m1", text="rebuilt from items")]
 
-        rebuilt = agent._messages_from_items(items, "turn_1")
+        decoder._agent._messages_from_items(items, decoder)
 
-        assert rebuilt, "expected the fallback to rebuild a message"
-        assert all(m.generation_duration_ms is None for m in rebuilt)
+        assert decoder.messages, "expected the fallback to rebuild a message"
+        assert all(m.generation_duration_ms is None for m in decoder.messages)
+        outcome = decoder.end(AgentEndStatus.COMPLETED)
+        assert [m.generation_duration_ms for m in outcome.record.messages if m.role == "assistant"] == [None]
 
 
 class TestFlushMessageReasoningSplit:
-    """_flush_message splits a generation's output across a thinking sub-message
+    """The decoder's flush splits a generation's output across a thinking sub-message
     (reasoning tokens) and an action/text sub-message, and resolves text-less
     reasoning placeholders to the OpenAI-policy string when reasoning was billed."""
 
@@ -1115,7 +1137,7 @@ class TestFlushMessageReasoningSplit:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("think then answer")
+        record = (await agent.communicate("think then answer", iteration=1)).record
 
         assistant = [m for m in record.messages if isinstance(m, AssistantMessage)]
         assert assistant
@@ -1203,7 +1225,7 @@ class TestCodexCollabSubAgent:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         # Both collab calls surface as Agent tool calls in the transcript.
         agent_calls = [c for c in record.commands if c.tool_name == "Agent"]
@@ -1230,7 +1252,7 @@ class TestCodexCollabSubAgent:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("wait")
+        record = (await agent.communicate("wait", iteration=1)).record
 
         # No spawn → no nested sub-agent generations.
         assert not any(getattr(m, "parent_tool_use_id", None) for m in record.messages)
@@ -1251,7 +1273,7 @@ class TestCodexCollabSubAgent:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         # The orphan survives as a named command with 'unknown' status (not dropped,
         # not "unknown" tool name).
@@ -1338,7 +1360,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         # The sub-agent's inner Bash command is recovered as telemetry...
         bash = [c for c in record.commands if c.tool_name == "Bash"]
@@ -1351,6 +1373,39 @@ class TestCodexSubAgentToolRecovery:
         nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
         # Both the returned text ("5050") and the recovered tool-call message nest.
         assert any(sub_tool_id in m.tool_use_ids for m in nested)
+
+    async def test_recovered_events_carry_parent_thread_id_and_reach_the_commands(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        child = "019e0000-aaaa-7000-8000-000000000009"
+        _write_child_rollout(
+            tmp_path,
+            child,
+            [
+                {"type": "function_call", "name": "exec_command", "call_id": "c_exec", "arguments": '{"cmd":"ls"}'},
+                {"type": "function_call_output", "call_id": "c_exec", "output": "a.txt"},
+            ],
+        )
+        spawn = _collab_call("spawnAgent", call_id="call_spawn", model="gpt-5.5", child_thread=child)
+        notifications = [
+            _item_notification("item/started", spawn),
+            _item_notification("item/completed", spawn),
+            _turn_completed(),
+        ]
+        agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
+        recorder = _Recorder()
+
+        record = (await agent.communicate("delegate it", iteration=1, stream_callback=recorder)).record
+
+        sub_id = f"sub:{child}:c_exec"
+        nested = [
+            e for e in recorder.events if isinstance(e, ToolStartEvent | ToolEndEvent) and e.tool.tool_id == sub_id
+        ]
+        assert [type(e) for e in nested] == [ToolStartEvent, ToolEndEvent]
+        assert all(e.parent_thread_id == "call_spawn" for e in nested)
+        main = [e for e in recorder.events if isinstance(e, ToolEndEvent) and e.tool.tool_id == "call_spawn"]
+        assert [e.parent_thread_id for e in main] == [None]
+        assert sub_id in [c.tool_id for c in record.commands]
+        assert_stream_balanced(recorder.events)
 
     async def test_missing_rollout_is_silently_skipped(self, monkeypatch, tmp_path):
         # No rollout written for the child → recovery finds nothing and the turn
@@ -1368,7 +1423,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         assert not [c for c in record.commands if c.tool_name == "Bash"]
         assert any(getattr(m, "parent_tool_use_id", None) == "call_spawn" for m in record.messages)
@@ -1411,7 +1466,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
         assert len(nested) == 2
@@ -1469,7 +1524,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         tu = record.token_usage
         assert tu is not None
@@ -1508,7 +1563,7 @@ class TestCodexGenericToolCapture:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("use tools")
+        record = (await agent.communicate("use tools", iteration=1)).record
 
         names = sorted(c.tool_name for c in record.commands)
         assert names == ["Mcp", "WebSearch"]
@@ -1534,7 +1589,7 @@ class TestCodexGenericToolCapture:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("use tools")
+        record = (await agent.communicate("use tools", iteration=1)).record
 
         tel = next(c for c in record.commands if c.tool_name == "Mcp")
         assert tel.result_status == "error"
@@ -1550,7 +1605,7 @@ class TestCodexGenericToolCapture:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("use tools")
+        record = (await agent.communicate("use tools", iteration=1)).record
 
         assert any(c.tool_name == "someNewTool" for c in record.commands)
 
@@ -1573,7 +1628,7 @@ class TestApplyPatchTelemetryHonesty:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("write out.txt")
+        record = (await agent.communicate("write out.txt", iteration=1)).record
 
         # Turn completes normally (no crash / no retry), but the Write telemetry
         # honestly reflects the failure.
@@ -1599,26 +1654,31 @@ class _BlockingStream:
 
 
 class TestCommunicateTimeoutFunnel:
-    async def test_timeout_raises_turn_timeout_with_pending(self):
+    async def test_a_watchdog_timeout_returns_timeout_and_leaves_the_caller_uncancelled(self):
+        """The real watchdog cancels the turn's child task, never the task awaiting ``communicate``."""
         handle = SimpleNamespace(stream=_BlockingStream, interrupt=lambda: None)
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
         agent.working_directory = __import__("pathlib").Path(".")
         agent.codex_client = SimpleNamespace(close=lambda: None)
         agent.thread = SimpleNamespace(turn=lambda _u: handle)
 
-        with pytest.raises(TurnTimeoutError):
-            await agent.communicate("do it", timeout=0.2)
+        outcome = await agent.communicate("do it", iteration=1, timeout=0.2)
 
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.record.crashed is True
         assert agent.get_state() == AgentState.ERROR
+        caller = asyncio.current_task()
+        assert caller is not None and caller.cancelling() == 0
+        await asyncio.sleep(0)  # a stray cancel would land on this await
 
 
 class _ImmediateTimeoutWatchdog:
     """A watchdog stub that fires on_timeout synchronously on __enter__ (setting
-    state.timeout_hit) but does NOT cancel the task — so the pump runs to
+    decoder.timeout_hit) but does NOT cancel the task — so the pump runs to
     completion and the turn is handled by the POST-watchdog timeout block (the
     'watchdog fired but the pump finished before the cancel landed' race)."""
+
+    fired = True
 
     def __init__(self, *, timeout_seconds=None, on_timeout=None, asyncio_task_to_cancel=None, label=""):
         self._on_timeout = on_timeout
@@ -1635,37 +1695,22 @@ class _ImmediateTimeoutWatchdog:
 class TestCommunicatePostWatchdogTimeoutRace:
     """Regression for the post-watchdog timeout race: when the watchdog fires but
     the pump completes before the cancel lands, the trailing `if timeout_hit`
-    block must set _state=ERROR (consistent with every other timeout/crash path).
-    Previously this path left _state unchanged — a latent inconsistency now fixed
-    by routing it through the shared _finalize_and_raise_timeout kernel."""
+    block must end the turn TIMEOUT with _state=ERROR (consistent with every
+    other timeout/crash path)."""
 
-    async def test_post_watchdog_timeout_sets_error_state_and_partial(self, monkeypatch):
+    async def test_post_watchdog_timeout_sets_error_state_and_ends_timeout(self, monkeypatch):
         notifications = [_delta("done"), _turn_completed()]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
         # Fire the watchdog synchronously without cancelling, so the pump returns
-        # normally and the post-watchdog `if state.timeout_hit:` block fires.
-        monkeypatch.setattr("coder_eval.agents.codex_agent.ThreadedWatchdog", _ImmediateTimeoutWatchdog)
+        # normally and the post-watchdog `if decoder.timeout_hit:` block fires.
+        monkeypatch.setattr("coder_eval.agents.watchdog.ThreadedWatchdog", _ImmediateTimeoutWatchdog)
 
-        with pytest.raises(TurnTimeoutError):
-            await agent.communicate("do it", timeout=30.0)
+        outcome = await agent.communicate("do it", iteration=1, timeout=30.0)
 
+        assert outcome.status is AgentEndStatus.TIMEOUT
         # The fix: this race path now ends in ERROR (would be WORKING before).
         assert agent.get_state() == AgentState.ERROR
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
-
-
-class TestDiscardIdempotency:
-    async def test_double_discard_only_rolls_back_once(self):
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
-        agent._iteration = 3
-        agent._iteration_was_incremented = True
-
-        await agent.discard_pending_turn()
-        assert agent._iteration == 2
-
-        await agent.discard_pending_turn()
-        assert agent._iteration == 2  # idempotent
+        assert outcome.record.crashed is True
 
 
 class TestTeardown:
@@ -2192,9 +2237,11 @@ class TestShouldStopReasons:
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
         capture = _EndCapture()
 
-        record = await agent.communicate(
-            "go", stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOOL_CALL_CAP)
-        )
+        record = (
+            await agent.communicate(
+                "go", iteration=1, stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOOL_CALL_CAP)
+            )
+        ).record
 
         assert capture.end is not None
         assert capture.end.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
@@ -2206,9 +2253,11 @@ class TestShouldStopReasons:
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
         capture = _EndCapture()
 
-        record = await agent.communicate(
-            "go", stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOKEN_BUDGET)
-        )
+        record = (
+            await agent.communicate(
+                "go", iteration=1, stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOKEN_BUDGET)
+            )
+        ).record
 
         assert capture.end is not None
         assert capture.end.status is AgentEndStatus.TOKEN_BUDGET_EXCEEDED
@@ -2219,23 +2268,27 @@ class TestShouldStopReasons:
         """A stop polled after a call's completion keeps that call's result."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(3))
 
-        record = await agent.communicate("go", should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
+        outcome = await agent.communicate("go", iteration=1, should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
+        record = outcome.record
 
         assert len(record.commands) == 1
         assert record.commands[0].result_status == "success"
 
     async def test_stop_interrupts_the_in_flight_turn(self):
-        """Best-effort server-side interrupt, so the stop actually ends spend."""
+        """Best-effort server-side interrupt, so the stop actually ends spend; the turn ends with the stop's status."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
 
-        await agent.communicate("go", should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
+        outcome = await agent.communicate("go", iteration=1, should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
 
         assert agent.thread.last_handle.interrupted is True
+        assert outcome.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
+        assert outcome.error is None
+        assert agent._active_turn_handle is None
 
     async def test_no_reason_consumes_the_whole_stream(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(4))
 
-        record = await agent.communicate("go", should_stop=lambda: None)
+        record = (await agent.communicate("go", iteration=1, should_stop=lambda: None)).record
 
         assert len(record.commands) == 4
         assert record.tool_calls_exhausted is False
@@ -2272,7 +2325,9 @@ class TestShouldStopReasons:
         child = "019e0000-eeee-7000-8000-000000000005"
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._delegation(tmp_path, child))
 
-        record = await agent.communicate("delegate it", should_stop=_stop_on_call(4, StopReason.TOOL_CALL_CAP))
+        record = (
+            await agent.communicate("delegate it", iteration=1, should_stop=_stop_on_call(4, StopReason.TOOL_CALL_CAP))
+        ).record
 
         assert record.tool_calls_exhausted is True
         assert [c for c in record.commands if c.tool_name == "Bash"]
@@ -2288,7 +2343,11 @@ class TestShouldStopReasons:
         child = "019e0000-ffff-7000-8000-000000000006"
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._delegation(tmp_path, child))
 
-        record = await agent.communicate("delegate it", should_stop=_stop_on_call(4, StopReason.EARLY_CRITERION))
+        record = (
+            await agent.communicate(
+                "delegate it", iteration=1, should_stop=_stop_on_call(4, StopReason.EARLY_CRITERION)
+            )
+        ).record
 
         assert record.tool_calls_exhausted is False
         assert not [c for c in record.commands if c.tool_name == "Bash"]
@@ -2312,7 +2371,7 @@ class TestExecutionBoundsWiring:
     """The notification -> builder wiring, end to end through communicate().
 
     The builder arithmetic is covered in test_codex_agent_unit.py by calling
-    `_telemetry_for_item` directly. That leaves the WIRING untested, and the
+    `_tool_end_for_item` directly. That leaves the WIRING untested, and the
     golden snapshots cannot cover it: `_scrub.py` masks every non-null
     timestamp to "<scrubbed>", so they assert presence, not value. Swapping
     `started_ms` and `completed_ms` at the single production call site would
@@ -2328,7 +2387,7 @@ class TestExecutionBoundsWiring:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         cmd = next(c for c in record.commands if c.tool_id == "cmd_1")
         assert cmd.execution_started_at == datetime.fromtimestamp(_BOUNDS_EPOCH_MS / 1000)
@@ -2346,7 +2405,7 @@ class TestExecutionBoundsWiring:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         orphan = next(c for c in record.commands if c.tool_id == "cmd_orphan")
         assert orphan.result_status == "unknown"
@@ -2358,7 +2417,7 @@ class TestExecutionBoundsWiring:
 class TestGenerationWindowExcludesToolExecution:
     """A tool closing inside a generation window is not model time.
 
-    `_flush_message`'s window is extended to the LAST item's completion, so
+    The decoder's flush window is extended to the LAST item's completion, so
     any generation containing a tool call already CONTAINS that tool's
     execution. Publishing the raw span double-counted it against the tool's
     own duration_ms — Generation + Tool exec then exceeded the wall clock they
@@ -2379,7 +2438,7 @@ class TestGenerationWindowExcludesToolExecution:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         cmd = next(c for c in record.commands if c.tool_id == "cmd_1")
@@ -2401,7 +2460,7 @@ class TestGenerationWindowExcludesToolExecution:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         gen_ms = sum(m.generation_duration_ms or 0.0 for m in assistant)
@@ -2440,7 +2499,7 @@ class TestGenerationWindowExcludesToolExecution:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         spans = [
@@ -2485,7 +2544,7 @@ class TestGenerationWindowsTileTheTurn:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         assert len(assistant) == 2
@@ -2509,7 +2568,7 @@ class TestGenerationWindowsTileTheTurn:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         gen_ms = sum(m.generation_duration_ms or 0.0 for m in record.messages if m.role == "assistant")
         tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
@@ -2519,7 +2578,7 @@ class TestGenerationWindowsTileTheTurn:
 
 
 class TestFlushMessageWindowBounds:
-    """Where `_flush_message`'s window OPENS, driven at the reducer.
+    """Where the decoder's flush window OPENS, driven at the decoder.
 
     The end-to-end cases above all describe a stream whose stamps advance, so
     they cannot reach the awkward case the reducer still hands `close_window`:
@@ -2532,38 +2591,17 @@ class TestFlushMessageWindowBounds:
 
     @staticmethod
     def _flush(*, gen_mark_ms, open_start_ms, open_end_ms, open_tool_started_ms=None):
-        from coder_eval.agents.codex_agent import _CodexTurnState, _ms_to_dt
-        from coder_eval.models import CommandTelemetry, ContentBlock
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
-        from coder_eval.streaming.collector import EventCollector
+        from coder_eval.models import ContentBlock
 
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
-        collector = EventCollector()
-        st = _CodexTurnState(
-            agent,
-            emit=CompositeStreamCallback([collector]),
-            task_id="codex",
-            turn_id="codex-1",
-            collector=collector,
-            commands=[],
-            messages=[],
-            user_input="go",
-            iteration=1,
-            turn_start_time=0.0,
-        )
-        st.open_blocks = [ContentBlock(block_type="text", sequence=0, text="answer")]
-        st.gen_mark_ms = gen_mark_ms
-        st.open_start_ms = open_start_ms
-        st.open_end_ms = open_end_ms
+        decoder = _decoder()
+        decoder.open_blocks = [ContentBlock(block_type="text", sequence=0, text="answer")]
+        decoder.gen_mark_ms = gen_mark_ms
+        decoder.open_start_ms = open_start_ms
+        decoder.open_end_ms = open_end_ms
         if open_tool_started_ms is not None:
-            st.open_tools["open-1"] = CommandTelemetry(
-                tool_name="bash",
-                tool_id="open-1",
-                timestamp=_ms_to_dt(open_tool_started_ms),
-                execution_started_at=_ms_to_dt(open_tool_started_ms),
-            )
-        st._flush_message(SimpleNamespace(input_tokens=10, cached_input_tokens=0, output_tokens=5))
-        return st.messages[0]
+            decoder.emitter.open_tool("open-1", "bash", {}, started_at=_ms_to_dt(open_tool_started_ms))
+        decoder.flush(SimpleNamespace(input_tokens=10, cached_input_tokens=0, output_tokens=5))
+        return decoder.messages[0]
 
     def test_a_mark_later_than_the_first_item_does_not_invert_the_window(self):
         # A backwards SDK stamp: the previous flush closed at +2000 while this
@@ -2575,8 +2613,6 @@ class TestFlushMessageWindowBounds:
             open_start_ms=_BOUNDS_EPOCH_MS + 500,
             open_end_ms=_BOUNDS_EPOCH_MS + 1100,
         )
-        from coder_eval.agents.codex_agent import _ms_to_dt
-
         assert message.started_at == _ms_to_dt(_BOUNDS_EPOCH_MS + 500)
         assert message.generation_duration_ms == pytest.approx(600.0)
 
@@ -2608,6 +2644,19 @@ class TestFlushMessageWindowBounds:
         )
         assert message.generation_duration_ms == pytest.approx(1000.0)
 
+    def test_a_mark_without_a_window_end_is_unmeasured_not_host_clocked(self):
+        message = self._flush(gen_mark_ms=_BOUNDS_EPOCH_MS + 2000, open_start_ms=None, open_end_ms=None)
+        assert message.generation_duration_ms is None
+
+    def test_an_idless_tool_keeps_its_cli_start_stamp(self):
+        decoder = _decoder()
+        root = SimpleNamespace(type="commandExecution", id=None, command="ls", exit_code=0, aggregated_output="")
+        decoder(_item_notification("item/started", root, started_at_ms=_BOUNDS_EPOCH_MS + 100))
+        decoder(_item_notification("item/completed", root, completed_at_ms=_BOUNDS_EPOCH_MS + 350))
+        command = decoder.end(AgentEndStatus.COMPLETED).record.commands[0]
+        assert command.execution_started_at == _ms_to_dt(_BOUNDS_EPOCH_MS + 100)
+        assert command.duration_ms == pytest.approx(250.0)
+
 
 class TestFlushMessageGenTimeSplit:
     """`gen_ms` is apportioned across sub-messages by their output share.
@@ -2621,33 +2670,16 @@ class TestFlushMessageGenTimeSplit:
 
     @staticmethod
     def _flush(*, gen_ms: float, think_out: int, action_out: int, thinking: bool = True):
-        """Drive `_flush_message` with a controlled window and output split."""
-        # Build the reducer directly; only the flush path is under test.
-        from coder_eval.agents.codex_agent import _CodexTurnState
+        """Drive the decoder's flush with a controlled window and output split."""
         from coder_eval.models import ContentBlock
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
-        from coder_eval.streaming.collector import EventCollector
 
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
-        collector = EventCollector()
-        st = _CodexTurnState(
-            agent,
-            emit=CompositeStreamCallback([collector]),
-            task_id="codex",
-            turn_id="codex-1",
-            collector=collector,
-            commands=[],
-            messages=[],
-            user_input="go",
-            iteration=1,
-            turn_start_time=0.0,
-        )
-        st.open_blocks = [
+        decoder = _decoder()
+        decoder.open_blocks = [
             *([ContentBlock(block_type="thinking", sequence=0, thinking="plan")] if thinking else []),
             ContentBlock(block_type="text", sequence=0, text="answer"),
         ]
-        st.open_start_ms = _BOUNDS_EPOCH_MS
-        st.open_end_ms = _BOUNDS_EPOCH_MS + int(gen_ms)
+        decoder.open_start_ms = _BOUNDS_EPOCH_MS
+        decoder.open_end_ms = _BOUNDS_EPOCH_MS + int(gen_ms)
         # Non-zero input/cache, so "billing stays on the first spec" is an
         # assertion that can actually fail rather than 0 == 0.
         last = SimpleNamespace(
@@ -2656,8 +2688,8 @@ class TestFlushMessageGenTimeSplit:
             output_tokens=think_out + action_out,
             reasoning_output_tokens=think_out,
         )
-        st._flush_message(last)
-        return st.messages
+        decoder.flush(last)
+        return decoder.messages
 
     def test_time_splits_by_output_share_and_sums_exactly(self):
         msgs = self._flush(gen_ms=1000, think_out=800, action_out=200)
@@ -2721,7 +2753,7 @@ class TestFlushMessageGenTimeSplit:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("think then answer")
+        record = (await agent.communicate("think then answer", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         assert len(assistant) == 2, "expected a thinking and an action sub-message"
@@ -2748,64 +2780,26 @@ class TestTwoSpecGenerationContainingATool:
 
     @staticmethod
     def _published(*, window_ms: int, tool_from_ms: int, tool_to_ms: int, think_out: int, action_out: int):
-        from coder_eval.agents.codex_agent import _CodexTurnState, _ms_to_dt
-        from coder_eval.models import CommandTelemetry, ContentBlock, TokenUsage
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
-        from coder_eval.streaming.collector import EventCollector
-        from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent, ToolEndEvent
-
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
-        collector = EventCollector()
-        state = _CodexTurnState(
-            agent,
-            emit=CompositeStreamCallback([collector]),
-            task_id="codex",
-            turn_id="codex-1",
-            collector=collector,
-            commands=[],
-            messages=[],
-            user_input="go",
-            iteration=1,
-            turn_start_time=0.0,
+        """One window of ``window_ms``: a reasoning item spans it, a command runs inside it."""
+        reasoning = _reasoning_item(text="plan")
+        command = _bounds_command_item("c1")
+        last = SimpleNamespace(
+            input_tokens=100,
+            cached_input_tokens=0,
+            output_tokens=think_out + action_out,
+            reasoning_output_tokens=think_out,
         )
-        command = CommandTelemetry(
-            tool_name="bash",
-            tool_id="c1",
-            timestamp=_ms_to_dt(_BOUNDS_EPOCH_MS + tool_from_ms),
-            execution_started_at=_ms_to_dt(_BOUNDS_EPOCH_MS + tool_from_ms),
-            execution_completed_at=_ms_to_dt(_BOUNDS_EPOCH_MS + tool_to_ms),
-            result_status="success",
-        )
-        state.commands.append(command)
-        state.open_blocks = [
-            ContentBlock(block_type="thinking", sequence=0, thinking="plan"),
-            ContentBlock(block_type="tool_use", sequence=0, tool_use_id="c1"),
-        ]
-        state.open_start_ms = _BOUNDS_EPOCH_MS
-        state.open_end_ms = _BOUNDS_EPOCH_MS + window_ms
-        state._flush_message(
+        stream = [
+            _item_notification("item/started", reasoning, started_at_ms=_BOUNDS_EPOCH_MS),
+            _item_notification("item/started", command, started_at_ms=_BOUNDS_EPOCH_MS + tool_from_ms),
+            _item_notification("item/completed", command, completed_at_ms=_BOUNDS_EPOCH_MS + tool_to_ms),
+            _item_notification("item/completed", reasoning, completed_at_ms=_BOUNDS_EPOCH_MS + window_ms),
             SimpleNamespace(
-                input_tokens=100,
-                cached_input_tokens=0,
-                output_tokens=think_out + action_out,
-                reasoning_output_tokens=think_out,
-            )
-        )
-
-        collector.on_event(
-            AgentStartEvent(task_id="codex", prompt="go", iteration=1, timestamp=_ms_to_dt(_BOUNDS_EPOCH_MS))
-        )
-        collector.on_event(ToolEndEvent(task_id="codex", turn_id="codex-1", tool=command))
-        collector.on_event(
-            AgentEndEvent(
-                task_id="codex",
-                status=AgentEndStatus.COMPLETED,
-                messages=list(state.messages),
-                usage=TokenUsage(),
-                timestamp=_ms_to_dt(_BOUNDS_EPOCH_MS + window_ms),
-            )
-        )
-        record = collector.build_turn_record()
+                method="thread/tokenUsage/updated", payload=SimpleNamespace(token_usage=SimpleNamespace(last=last))
+            ),
+            Tick(window_ms),
+        ]
+        record = _codex_replay(stream).record
         return [m for m in record.messages if m.role == "assistant"]
 
     def test_the_group_is_subtracted_once_and_the_parts_still_sum(self):
@@ -2826,3 +2820,360 @@ class TestTwoSpecGenerationContainingATool:
     def test_a_window_entirely_covered_by_its_tool_splits_zero_two_ways(self):
         published = self._published(window_ms=1000, tool_from_ms=0, tool_to_ms=1000, think_out=800, action_out=200)
         assert [m.generation_duration_ms for m in published] == [0.0, 0.0]
+
+
+class TestCodexDecoder:
+    """``_CodexDecoder`` over a real ``TurnEmitter`` on ``CLI_EPOCH_MS``."""
+
+    @staticmethod
+    def _assistant(result: Replay) -> list:
+        return [m for m in result.record.messages if m.role == "assistant"]
+
+    def test_the_codex_b_window_matches_the_pre_port_reducer(self):
+        """``codex_b_command_execution``: a 400 ms window holding a 250 ms command.
+
+        150.0 is what the pre-port reducer published for this stream.
+        """
+        from tests._fixtures.golden_streams.codex_fixtures import _T0_MS, CODEX_SCENARIOS
+
+        scenario = next(s for s in CODEX_SCENARIOS if s.name == "b_command_execution")
+        result = _codex_replay([*scenario.notifications, Tick(500)], origin_ms=_T0_MS)
+
+        assert [m.generation_duration_ms for m in self._assistant(result)] == [150.0]
+
+    def test_a_two_part_split_of_the_codex_b_stream_matches_the_pre_port_reducer(self):
+        """``codex_b`` with a reasoning item ahead of the command: a thinking and an action part.
+
+        The window is 400 ms, the command 250 ms, and 12 of 30 output tokens are
+        reasoning, so the 150 ms apportions 60/90. Both literals are what the
+        pre-port reducer published for this stream.
+        """
+        from tests._fixtures.golden_streams.codex_fixtures import (
+            _T0_MS,
+            _agent_message,
+            _command,
+            _delta,
+            _item,
+            _reasoning,
+            _token_usage,
+            _turn_completed,
+        )
+
+        command = _command("cmd_b")
+        reasoning = _reasoning("plan")
+        stream = [
+            _item("item/started", reasoning, started_at_ms=_T0_MS),
+            _item("item/completed", reasoning, completed_at_ms=_T0_MS + 50),
+            _item("item/started", command, started_at_ms=_T0_MS + 60),
+            _item("item/completed", command, completed_at_ms=_T0_MS + 310),
+            _delta("done"),
+            _item("item/completed", _agent_message("done"), completed_at_ms=_T0_MS + 400),
+            _token_usage(inp=120, out=30, cached=0, reasoning=12),
+            _turn_completed(),
+            Tick(500),
+        ]
+
+        assistant = self._assistant(_codex_replay(stream, origin_ms=_T0_MS))
+
+        assert [[b.block_type for b in m.content_blocks] for m in assistant] == [["thinking"], ["tool_use", "text"]]
+        assert [m.generation_duration_ms for m in assistant] == [60.0, 90.0]
+        assert [m.output_tokens for m in assistant] == [12, 18]
+        assert [m.input_tokens for m in assistant] == [120, 0]
+
+    def test_a_tool_with_no_item_id_keeps_one_id_from_start_to_completion(self):
+        first = SimpleNamespace(type="webSearch", query="first")
+        second = SimpleNamespace(type="webSearch", query="second")
+        stream = [
+            _item_notification("item/started", first),
+            _item_notification("item/started", second),
+            _item_notification("item/completed", first),
+            _item_notification("item/completed", second),
+        ]
+
+        result = _codex_replay(stream)
+
+        starts = [e.tool.tool_id for e in result.events if isinstance(e, ToolStartEvent)]
+        ends = [e.tool.tool_id for e in result.events if isinstance(e, ToolEndEvent)]
+        assert len(set(starts)) == 2
+        assert ends == starts
+        commands = {c.tool_id: c for c in result.record.commands}
+        assert set(commands) == set(starts)
+        assert [commands[i].parameters["query"] for i in starts] == ["first", "second"]
+        assert all(c.result_status == "success" for c in commands.values())
+        assert [c.sequence_number for c in result.record.commands] == [0, 1]
+        assert_stream_balanced(result.events)
+
+    def test_a_completion_with_no_start_opens_then_closes_the_call(self):
+        result = _codex_replay([_item_notification("item/completed", _bounds_command_item("late"))])
+
+        tool_events = [type(e) for e in result.events if isinstance(e, ToolStartEvent | ToolEndEvent)]
+        assert tool_events == [ToolStartEvent, ToolEndEvent]
+        assert [(c.tool_id, c.tool_name, c.result_status) for c in result.record.commands] == [
+            ("late", "Bash", "success")
+        ]
+        assert_stream_balanced(result.events)
+
+    def test_a_window_with_no_stamp_is_an_unmeasured_generation(self):
+        """Neither bound is known, so the message carries no duration rather than a zero-width window."""
+        stream = [
+            _delta("Hello"),
+            _item_notification("item/completed", SimpleNamespace(type="agentMessage", id="m1", text="Hello")),
+            SimpleNamespace(
+                method="thread/tokenUsage/updated",
+                payload=SimpleNamespace(
+                    token_usage=SimpleNamespace(
+                        last=SimpleNamespace(
+                            input_tokens=10, output_tokens=5, cached_input_tokens=0, reasoning_output_tokens=0
+                        )
+                    )
+                ),
+            ),
+        ]
+
+        assistant = self._assistant(_codex_replay(stream))
+
+        assert len(assistant) == 1
+        assert assistant[0].generation_duration_ms is None
+        assert assistant[0].started_at == assistant[0].completed_at
+        assert assistant[0].output_tokens == 5
+
+
+class _SequencedThread:
+    """A fake thread that serves one notification list per ``turn()`` call, in order."""
+
+    def __init__(self, *turns) -> None:
+        self._turns = list(turns)
+
+    def turn(self, _user_input):
+        stream = _RaisingStream(self._turns.pop(0))
+        return SimpleNamespace(stream=lambda: stream, interrupt=lambda: None)
+
+
+def _usage_notification(*, last: tuple[int, int, int], total: tuple[int, int, int]) -> SimpleNamespace:
+    """A tokenUsage notification; each tuple is ``(input, output, cached)``."""
+    return SimpleNamespace(
+        method="thread/tokenUsage/updated",
+        payload=SimpleNamespace(
+            token_usage=SimpleNamespace(
+                last=SimpleNamespace(
+                    input_tokens=last[0], output_tokens=last[1], cached_input_tokens=last[2], reasoning_output_tokens=0
+                ),
+                total=SimpleNamespace(input_tokens=total[0], output_tokens=total[1], cached_input_tokens=total[2]),
+            )
+        ),
+    )
+
+
+def _reply(item_id: str, text: str) -> SimpleNamespace:
+    return _item_notification("item/completed", SimpleNamespace(type="agentMessage", id=item_id, text=text))
+
+
+class TestThreadUsageBaselinePerTurn:
+    """The thread-cumulative baseline advances exactly once per turn, clean or crashed."""
+
+    @staticmethod
+    def _agent(*turns) -> CodexAgent:
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        agent.working_directory = __import__("pathlib").Path(".")
+        agent.codex_client = SimpleNamespace(close=lambda: None)
+        agent.thread = _SequencedThread(*turns)
+        return agent
+
+    async def test_a_clean_turn_advances_the_baseline_to_the_sdk_total(self):
+        agent = self._agent(
+            [_reply("m1", "one"), _usage_notification(last=(100, 40, 8), total=(100, 40, 8)), _turn_completed()],
+            [_reply("m2", "two"), _usage_notification(last=(150, 20, 12), total=(250, 60, 20)), _turn_completed()],
+        )
+
+        first = await agent.communicate("one", iteration=1)
+        assert agent._thread_usage_baseline == _ThreadTotals(input=100, output=40, cached=8)
+        second = await agent.communicate("two", iteration=2)
+
+        assert first.status is second.status is AgentEndStatus.COMPLETED
+        assert agent._thread_usage_baseline == _ThreadTotals(input=250, output=60, cached=20)
+        usage = second.record.token_usage
+        assert usage is not None
+        assert (usage.uncached_input_tokens, usage.output_tokens, usage.cache_read_input_tokens) == (138, 20, 12)
+
+    async def test_a_crashed_turn_advances_the_baseline_once_past_its_flushed_tokens(self):
+        agent = self._agent(
+            [_reply("m1", "one"), _usage_notification(last=(100, 40, 8), total=(100, 40, 8)), RuntimeError("boom")],
+            [_reply("m2", "two"), _usage_notification(last=(150, 20, 12), total=(250, 60, 20)), _turn_completed()],
+        )
+
+        crashed = await agent.communicate("one", iteration=1)
+        assert crashed.status is AgentEndStatus.CRASHED
+        assert agent._thread_usage_baseline == _ThreadTotals(input=100, output=40, cached=8)
+        second = await agent.communicate("two", iteration=2)
+
+        assert second.status is AgentEndStatus.COMPLETED
+        assert agent._thread_usage_baseline == _ThreadTotals(input=250, output=60, cached=20)
+        usage = second.record.token_usage
+        assert usage is not None
+        assert (usage.uncached_input_tokens, usage.output_tokens, usage.cache_read_input_tokens) == (138, 20, 12)
+
+    async def test_a_timeout_race_keeps_the_committed_sdk_total_and_reply(self, monkeypatch):
+        agent = self._agent(
+            [_delta("one"), _usage_notification(last=(100, 40, 8), total=(100, 40, 8)), _turn_completed()],
+        )
+        monkeypatch.setattr("coder_eval.agents.watchdog.ThreadedWatchdog", _ImmediateTimeoutWatchdog)
+
+        outcome = await agent.communicate("one", iteration=1, timeout=30.0)
+
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.record.agent_output == "one"
+        assert agent._thread_usage_baseline == _ThreadTotals(input=100, output=40, cached=8)
+        usage = outcome.record.token_usage
+        assert usage is not None
+        assert (usage.uncached_input_tokens, usage.output_tokens, usage.cache_read_input_tokens) == (92, 40, 8)
+
+
+class _SlowStream:
+    """Yields its notifications, then blocks the reader thread until ``release`` is set."""
+
+    def __init__(self, notifications) -> None:
+        self._it = iter(notifications)
+        self.release = __import__("threading").Event()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        for nxt in self._it:
+            return nxt
+        self.release.wait(5)
+        raise StopIteration
+
+    def close(self):
+        pass
+
+
+class TestCommunicateCancellation:
+    async def test_an_external_cancel_ends_the_turn_once_then_propagates(self):
+        stream = _SlowStream([_reply("m1", "working")])
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        agent.working_directory = __import__("pathlib").Path(".")
+        agent.codex_client = SimpleNamespace(close=lambda: None)
+        agent.thread = SimpleNamespace(turn=lambda _u: SimpleNamespace(stream=lambda: stream, interrupt=lambda: None))
+        recorder = _Recorder()
+
+        task = asyncio.ensure_future(agent.communicate("go", iteration=1, stream_callback=recorder))
+        for _ in range(200):
+            if any(isinstance(e, ToolStartEvent) or getattr(e, "text", None) for e in recorder.events):
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            stream.release.set()
+
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [(e.status, e.crash_reason) for e in ends] == [(AgentEndStatus.CRASHED, "turn cancelled")]
+        assert agent.get_state() == AgentState.ERROR
+
+    async def test_a_cancel_raised_inside_the_sdk_is_a_crash_outcome(self):
+        agent = TestThreadUsageBaselinePerTurn._agent([_reply("m1", "one"), asyncio.CancelledError()])
+
+        outcome = await agent.communicate("one", iteration=1)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.crashed is True
+        assert agent.get_state() == AgentState.ERROR
+        caller = asyncio.current_task()
+        assert caller is not None and caller.cancelling() == 0
+
+
+class TestInnerTurnsPerGeneration:
+    """One inner turn per model generation, so `max_turns` counts Codex the way it counts Claude Code."""
+
+    @staticmethod
+    def _cmd(item_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            type="commandExecution", id=item_id, command="echo", exit_code=0, aggregated_output="", duration_ms=5
+        )
+
+    def test_each_generation_is_one_inner_turn_carrying_its_own_delta(self):
+        """A tool result landing after its generation's cut opens no turn; the next model output does."""
+        result = _codex_replay(
+            [
+                _reply("m1", "one"),
+                _usage_notification(last=(100, 40, 8), total=(100, 40, 8)),
+                _item_notification("item/started", self._cmd("c1")),
+                _usage_notification(last=(150, 20, 12), total=(250, 60, 20)),
+                _item_notification("item/completed", self._cmd("c1")),
+                _reply("m3", "three"),
+                _usage_notification(last=(50, 10, 0), total=(300, 70, 20)),
+                _turn_completed(),
+            ]
+        )
+
+        starts = [e.turn_id for e in result.events if isinstance(e, TurnStartEvent)]
+        assert starts == ["codex-1-msg-0", "codex-1-msg-1", "codex-1-msg-2"]
+        ends = [e for e in result.events if isinstance(e, TurnEndEvent)]
+        assert [
+            (e.tokens.uncached_input_tokens, e.tokens.output_tokens, e.tokens.cache_read_input_tokens)
+            for e in ends
+            if e.tokens
+        ] == [(92, 40, 8), (138, 20, 12), (50, 10, 0)]
+        assert [m.message_id for m in result.record.messages if m.role == "assistant"] == starts
+        assert result.record.num_turns == result.record.assistant_turn_count == 3
+        assert_stream_balanced(result.events)
+
+    def test_a_billed_cut_with_no_content_counts_and_the_next_turn_gets_a_fresh_id(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        final = _usage_notification(last=(50, 10, 0), total=(150, 15, 0))
+        result = replay(
+            [_usage_notification(last=(100, 5, 0), total=(100, 5, 0)), _reply("m1", "one"), final, _turn_completed()],
+            lambda emitter: _CodexDecoder(agent, emitter, turn_id="codex-1"),
+            clock=ScriptedClock(_ms_to_dt(_BOUNDS_EPOCH_MS)),
+            basis=TimingBasis.CLI_EPOCH_MS,
+            model="gpt-5.5",
+            end=lambda decoder: decoder.end(AgentEndStatus.COMPLETED, sdk_token_usage=final.payload.token_usage),
+        )
+
+        starts = [e.turn_id for e in result.events if isinstance(e, TurnStartEvent)]
+        assert starts == ["codex-1-msg-0", "codex-1-msg-1"]
+        assert [m.message_id for m in result.record.messages if m.role == "assistant"] == ["codex-1-msg-1"]
+        assert result.record.num_turns == 2
+        assert_stream_balanced(result.events)
+
+    def test_a_stop_mid_generation_closes_that_turn_with_the_stop_status(self):
+        result = _codex_replay(
+            [
+                _reply("m1", "one"),
+                _usage_notification(last=(100, 40, 8), total=(100, 40, 8)),
+                _item_notification("item/started", self._cmd("c1")),
+            ]
+        )
+
+        ends = [(e.turn_id, e.status) for e in result.events if isinstance(e, TurnEndEvent)]
+        assert ends == [("codex-1-msg-0", TurnEndStatus.COMPLETED), ("codex-1-msg-1", TurnEndStatus.COMPLETED)]
+        assert_stream_balanced(result.events)
+
+    async def test_max_turns_stops_when_the_turn_past_the_cap_starts(self):
+        """The cap is the monitor's: it latches at the first item of model turn N+1, and the pump pulls no more."""
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"),
+            [
+                _reply("m1", "one"),
+                _usage_notification(last=(100, 40, 8), total=(100, 40, 8)),
+                _item_notification("item/started", self._cmd("c1")),
+                _item_notification("item/completed", self._cmd("c1")),
+                _turn_completed(),
+            ],
+        )
+        monitor = TurnMonitor("t", [], limits=RunLimits(max_turns=1))
+
+        outcome = await agent.communicate("go", iteration=1, stream_callback=monitor, should_stop=monitor.should_stop)
+
+        assert monitor.stop_reason is StopReason.MODEL_TURN_CAP
+        assert monitor.model_turns == 2
+        assert outcome.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
+        assert outcome.record.crashed is False
+        assert outcome.record.tool_calls_exhausted is True
+        assert [(c.tool_id, c.result_status) for c in outcome.record.commands] == [("c1", "unknown")]
+        assert outcome.record.num_turns == 2
+        assert agent.thread.last_handle.interrupted is True

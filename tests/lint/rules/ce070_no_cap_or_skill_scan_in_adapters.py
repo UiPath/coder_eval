@@ -12,8 +12,8 @@ scanner (an adapter only delivers ``plugin_root``).
 
 Fires, in files under ``src/coder_eval/agents/``, on any name, attribute, keyword,
 parameter or ``from``-import alias spelled ``max_turns``, ``max_tool_calls``,
-``max_turns_reached``, ``max_turns_hit``, ``tool_calls_exhausted``, ``RunLimits`` or
-``expand_env_vars``, and on the string literal ``"SKILL.md"``. The identifiers are the
+``max_turns_reached``, ``max_turns_hit``, ``expected_turns``, ``tool_calls_exhausted``,
+``RunLimits`` or ``expand_env_vars``, and on the string literal ``"SKILL.md"``. The identifiers are the
 sensor because the cap has one owner, the flag one writer and staging one scanner: an
 adapter that needs any of them is re-growing a copy. A substring is not a match, so
 ``_is_max_turns_result`` and the SDK's ``"error_max_turns"`` stay legal.
@@ -35,6 +35,7 @@ BANNED_IDENTIFIERS = frozenset(
         "max_tool_calls",
         "max_turns_reached",
         "max_turns_hit",
+        "expected_turns",
         "tool_calls_exhausted",
         "RunLimits",
         "expand_env_vars",

@@ -3,7 +3,9 @@
 One task file, run on any harness, must be the same task. `max_turns` broke that
 promise hardest: Claude Code enforced it, and Codex and Antigravity accepted it and
 never read it, so `max_turns: 6` ran capped on one backend and unbounded on the other
-two. It is now `max_tool_calls`, one counter on every harness.
+two. Now `max_tool_calls` is one counter on every harness, and `max_turns` counts model
+turns on every harness that opens one inner turn per model response: all five built-in
+agents. Only a harness that reports once per `communicate()` rejects it.
 
 This page is the contract for what each run limit means per harness, plus what each
 shared `agent` field means on each harness. Both tables are generated.
@@ -17,14 +19,16 @@ CE069 fails the build on drift.
 <!-- harness-run-limits:start -->
 | limit | claude-code | codex | antigravity | opencode | pi | none |
 | --- | --- | --- | --- | --- | --- | --- |
-| `max_tool_calls` | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | not polled (never fires) |
+| `max_tool_calls` | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | not polled (never fires) |
+| `max_turns` | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | rejected at resolution |
 | `expected_tool_calls` | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only |
+| `expected_turns` | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | rejected at resolution |
 | `task_timeout` | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic |
 | `turn_timeout` | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) |
-| `max_input_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
-| `max_output_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
-| `max_total_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
-| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_input_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_output_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_total_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; priced by the harness | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; priced by the harness |
 | `count_cached_input` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
 | `count_cache_creation` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
 | `stop_early` | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | rejected at resolution |
@@ -39,6 +43,10 @@ A capped run is an ordinary end of run, never `ERROR` and never retried:
 - Calls of the round that reached the cap can still resolve after it. A call in flight
   is recorded with `result_status: unknown`, and a Codex sub-agent's recovered calls still
   reach the record.
+- Only main-thread calls count. A sub-agent's calls (Claude's `Task` sub-agent, Codex's
+  recovered sub-agent calls) are nested under the call that spawned them: they reach
+  `TurnRecord.commands` but never the cap, and a sub-agent's model never becomes
+  `model_used`. `tasks/run_limits/subagent_cap.yaml` is the live check.
 
 ## Agent-field contract
 
@@ -54,7 +62,9 @@ Generated from each agent class's `contract` by `make parity-table`; CE069 fails
 | `allowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `cooperative_stop` | yes | yes | yes | yes | yes | no |
-| `usage_granularity` | generation | turn | turn | step | step | turn |
+| `usage_granularity` | generation | generation | generation | step | step | turn |
+| `timing_basis` | turn_clock | cli_epoch_ms | turn_clock | cli_epoch_ms | turn_clock | turn_clock |
+| `reports_cost` | yes | no | no | no | no | yes |
 | `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
 <!-- harness-contract:end -->
 
@@ -65,6 +75,19 @@ developer instruction channel of the model request, never the user turn.
 `usage_granularity` is how often a harness reports token usage on the stream (per model
 generation, per agent-loop step, or once per `communicate()`); a token or USD budget can
 overshoot by one such report.
+`usage_granularity` also decides the model-turn limits (`max_turns`,
+`expected_turns`): a harness that reports per generation or per step opens one inner turn
+per model response, so the TurnMonitor can count them; a harness that reports once per
+`communicate()` rejects them at resolution. Codex opens a turn at the first item of a
+generation and closes it at that generation's `thread/tokenUsage/updated`; Antigravity
+opens one at the first MODEL Step that carries new content or an unseen tool call and
+closes it at the Step that carries `usage_metadata`. A tool result that lands after the
+cut is not a new turn on either.
+`reports_cost` is whether every finished turn carries a cost the harness computed. On a
+harness that does not, `max_usd` is priced from `coder_eval.pricing`, so a task that sets
+`max_usd` must pin an `agent.model` with a rate, or it is rejected at resolution. Pi and
+OpenCode report a cost for the models they know, but $0 for the others, so they count as
+not reporting.
 
 ### Tool names
 
@@ -99,26 +122,26 @@ wall clock its numbers account for.
 
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
-| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | harness clock: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
+| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | CLI envelope `timestamp`: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
 | tool time subtracted from it | centrally | centrally | centrally | centrally | centrally |
 | what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first MODEL-source `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
 | `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
 | `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
-| tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
-| `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
+| tool `duration_ms` source | measured on the turn clock: `tool_use` arrival → result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | CLI `state.time.end − state.time.start` | measured around the tool event |
+| `execution_started_at` / `execution_completed_at` | measured on the turn clock | SDK stamps (both, or neither) | measured at ACTIVE / DONE | CLI `state.time` stamps (none when absent) | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
-| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn |
-| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | CLI epoch ms (`timing_basis` `cli_epoch_ms`): envelope `timestamp` for window bounds, `state.time` for tool spans; the host clock only for a window bound whose event carries no stamp | one `TurnClock` per turn |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock`, stamped by `TurnEmitter` | the host wall clock, stamped by `TurnEmitter` — consistent with its epoch-ms bounds | the same `TurnClock`, stamped by `TurnEmitter` | the host wall clock, stamped by `TurnEmitter` — consistent with its epoch-ms stamps | the same `TurnClock`, stamped by `TurnEmitter` |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
 something the others cannot.
 
 `tests/test_timing_identity_contract.py` is the committed two-sided one: it
-drives every built-in reducer off a scripted clock, through a real
-`EventCollector`, and asserts the four buckets tile the turn to the
+drives every built-in reducer off a scripted clock, through
+`coder_eval.testing.replay` and a real `TurnEmitter`, and asserts the four buckets tile the turn to the
 MILLISECOND. Magnitudes are only real where a scripted clock makes them real,
 which is why it is not in the golden corpus.
 
@@ -167,10 +190,12 @@ window's own geometry: tile from the mark, keep a stamp that went backwards
 from inverting the span, clamp at zero. It had been copy-pasted four times, and
 Pi shipped a variant that measured from its own turn start — so every
 inter-turn gap fell into no bucket, and nothing failed, because the identity
-above is asserted on one side only. **CE061** requires any module in `agents/`
-publishing a measured `generation_duration_ms` to import the helper, and is now
-**exemption-free**: claude-code was its one permanent `# noqa` and no longer
-needs it.
+above is asserted on one side only. The helper returns a `timing.Window`, a
+frozen pair of bounds whose `duration_ms` clamps at zero, and
+`TurnEmitter.add_generation` takes only a `Window`: an adapter cannot publish a
+measured `generation_duration_ms` any other way. A generation with no window
+goes through `TurnEmitter.add_unmeasured_generation`, which records
+`generation_duration_ms=None`.
 
 **Tool execution comes out of the windows ONCE, at the collector.**
 `timing.py::subtract_tool_time` takes the union of the main-thread
@@ -185,8 +210,9 @@ before the flush could subtract it — a 100% overstatement of that window), whe
 to clear a spent start stamp (a second flush with no intervening start
 republished the previous span — 3000 ms of generation for a 2000 ms turn), when
 to advance the mark. Those three lists, their reset rules, and the bounding of
-still-open calls are all deleted. **CE063** stops a sixth harness rebuilding
-them: no module in `agents/` may import `busy_ms`.
+still-open calls are all deleted. A sixth harness has nowhere to rebuild them:
+an adapter holds no spans, it calls `TurnEmitter.open_tool` / `close_tool`, and
+**CE072** bans it from constructing the events or messages itself.
 
 Two consequences worth stating, because both are behaviour changes:
 
@@ -234,38 +260,27 @@ instant", for a harness whose real tail is ~0.1 ms; the same task now records
 0.035 ms. It surfaced only here because the drift between the two clocks is
 tens of microseconds and antigravity holds its process across turns, so nothing
 happens between its last flush and its end event; every other harness books a
-tail of 7-543 ms, where the drift is invisible rather than absent. **CE064**
-keeps a sixth harness from reintroducing it: a module under `agents/` that
-imports `TurnClock` must pass an explicit `timestamp=` on both brackets. Codex
-and OpenCode have no `TurnClock`, so the rule does not see them and their raw
-`datetime.now()` bracket stays — which is *consistent* with their own CLI-epoch
-bounds rather than a gap.
+tail of 7-543 ms, where the drift is invisible rather than absent. The fix is
+now structural: `TurnEmitter` stamps both brackets, and every other event, from
+the one clock `Agent._open_emitter` gives it — a `TurnClock` under
+`timing_basis` `turn_clock`, the host wall clock under `cli_epoch_ms`. An
+adapter never stamps a bracket. For Codex and OpenCode the wall-clock bracket
+is *consistent* with their own CLI-epoch bounds rather than a gap.
 
-claude-code has exactly one raw `datetime.now()` left, on the synthesized
-sub-agent terminal message. Those bounds are an admitted placeholder for a
-generation that arrives as a tool result and is never streamed
-(`generation_duration_ms is None`, `parent_tool_use_id` set), which is what
-excludes the message from `subtract_tool_time` and from the head/tail bracket.
-A stamp no bucket reads has no basis to share.
+The synthesized claude-code sub-agent terminal message has equal placeholder
+bounds from the emitter's clock, for a generation that arrives as a tool result
+and is never streamed (`generation_duration_ms is None`, `parent_tool_use_id`
+set), which is what excludes the message from `subtract_tool_time` and from the
+head/tail bracket. No bucket reads those stamps.
 
-Codex and OpenCode are **not** converted, and their reasons are DIFFERENT — they
-were stated as one, and that reading described a state OpenCode is already in.
-
-**Codex** is genuinely single-basis: both its window bounds and its tool spans
-come from `_ms_to_dt` over the CLI's own epoch milliseconds, which cannot be
-re-derived host-side. Converting only the window bounds would put two bases
-inside one `busy_ms` subtraction — relocating the defect instead of removing it —
-so it stays whole, and keeps the naive-local exposure.
-
-**OpenCode is already mixed, today.** Its window bounds are host
-`datetime.now()` (`opencode_agent.py:362` at `step_start`, `:696` at
-`step_finish`) while its tool spans are CLI epoch ms (`:406`, assigned to
-`execution_started_at` at `:420`, and `:462`), so the two bases already meet
-inside one subtraction. The argument for leaving it is therefore not the Codex
-one: it is that a monotonic-derived anchor would trade a narrow NTP exposure on
-the window bounds for intra-turn drift against the CLI's own tool stamps, which
-is the larger of the two. The mixed basis is recorded here rather than defended
-as uniform.
+Codex and OpenCode are **not** converted to a `TurnClock`: both are single-basis on the
+CLI's own clock (`timing_basis` `cli_epoch_ms`). Codex takes its window bounds and tool
+spans from `_ms_to_dt` over the SDK's epoch milliseconds; OpenCode takes its window bounds
+from each event's envelope `timestamp` and its tool spans from `state.time`. Neither can be
+re-derived host-side, and converting only the window bounds would put two bases inside one
+`busy_ms` subtraction — relocating the defect instead of removing it. Both keep the
+naive-local exposure. OpenCode falls back to the host clock only for a window bound whose
+event carries no envelope stamp, and warns when it does.
 
 Deadlines on every harness stay on raw `time.monotonic()` and must — a deadline
 may not move when the wall clock steps.
@@ -299,15 +314,12 @@ those WALL bounds. A monotonic-measured duration would have had the two
 disagreeing inside one subtraction, which is the defect that let Antigravity's
 window go negative. Sharing raw `datetime.now()` fixed the disagreement and
 left both sides naive-local; deriving both from the turn's monotonic anchor
-removes that too. The clock is INJECTED into `_ClaudeTurnState` rather than
-read from a module global, because a derived stamp escapes a monkeypatched
-`datetime` — a test that patched one would quietly measure the real clock and
-pass. `_resolve_pending_command` takes the reading as an argument for the same
-reason: it stamps the tool span that is clipped against those bounds, so a
-second basis at that one call site would put two clocks inside one subtraction.
-`turn_start_time` stays raw monotonic and is untouched: `duration_seconds` and
-the turn deadline read it, and a deadline must not move when the wall clock
-steps.
+removes that too. The tool span is now the emitter's own `open_tool` /
+`close_tool` stamps on that same clock, so no duration is measured on a second
+basis at all. The clock is the emitter's, injected per turn, because a derived
+stamp escapes a monkeypatched `datetime` — a test that patched one would quietly
+measure the real clock and pass. The turn deadline stays raw monotonic: it must
+not move when the wall clock steps.
 
 **The head and tail are measured, not normalized.** Generation and tool are
 only two of the four buckets. The turn's **head** (turn start → first
@@ -352,7 +364,7 @@ interval is removed centrally by `subtract_tool_time`, exactly as pi does with
 Why it survived so long is the more useful half. A tool-heavy shape cannot see
 it — three concurrent `sleep 3` calls make the tool union absorb the interval
 and the residual reads 0.05%. Neither can a single-tool-result fixture:
-claude-code reconstructs `execution_started_at` by subtracting the measured
+claude-code then reconstructed `execution_started_at` by subtracting the measured
 duration from the resolve instant, so with one message the discarded interval
 and the tool's own span are the SAME milliseconds and the identity closes
 either way. It takes a FAST tool plus a SECOND user message carrying no tool
@@ -490,8 +502,8 @@ lacks one. Antigravity's `Step` stream carries no message id, so the harness
 synthesizes one — and it must, because this harness's generation windows are
 *contiguous* by construction: each opens exactly where the previous one closed,
 so the gap between two of them is always 0 ms and the fallback would fold a
-whole turn's generations into a single row. CE060 makes the kwarg mandatory in
-`src/coder_eval/agents/` for that reason.
+whole turn's generations into a single row. `TurnEmitter.add_generation` makes
+`message_id` a required keyword-only argument for that reason.
 
 The collapse is a *display* defect, not an accounting one — the consumer SUMS a
 group's token buckets and durations, so every total, percentage and cost is
@@ -513,8 +525,8 @@ Antigravity's are all distinct, because it emits one message per generation
 with every block inside it. Runs recorded before a harness captured the field
 still carry `null` and still depend on the gap fallback, which is why it stays
 — and so does a current OpenCode or Pi message whose payload omitted the id,
-which is the case CE060 cannot see (it requires the kwarg to be present, not
-non-`None` at runtime). OpenCode tiles its windows contiguously too, so it is
+which is the case the required keyword cannot see (it requires the argument to
+be present, not non-`None` at runtime). OpenCode tiles its windows contiguously too, so it is
 the other harness where a missing id can still collapse a turn.
 
 ### Time to first token is not measured
@@ -623,8 +635,8 @@ How each harness enforces `run_limits.turn_timeout` (the meaning is the same eve
 ### What a timeout looks like
 
 On Claude Code and Codex a `turn_timeout` breach is a *failure*: the watchdog fires
-at the deadline, the partial turn is preserved on `pending_turn`, and the turn is
-marked `crashed`.
+at the deadline, the agent returns a `TIMEOUT` outcome, and its partial turn is kept as a
+`crashed` record.
 
 Antigravity stops earlier and more gently, for the reason in the next section.
 
@@ -665,24 +677,31 @@ Each `agent.plugins[].path` names a plugin root or a bare skills directory
 declared path may be one skill), or the root itself when it holds `SKILL.md`. A skill's name
 is its `SKILL.md` frontmatter `name`, else its directory name. Every layout works on every
 harness. Before the
-agent starts, coder-eval stages the skills into one root, `<run_dir>/plugin_root`: a
-`.claude-plugin/plugin.json` that names `coder-eval-plugins`, and one `skills/<name>` symlink
-per skill. Each harness receives that root in its native way. Only skills are staged: a
-plugin's `agents/`, `commands/`, `hooks/` and `.mcp.json` do not reach any harness, Claude Code
-included. Claude Code names staged skills `coder-eval-plugins:<skill>`, not `<plugin>:<skill>`.
-Files beside the skills also stay behind: a skill that reads `${CLAUDE_PLUGIN_ROOT}/scripts/`
-or a shared `references/` directory at the plugin root cannot find it. Keep a skill's files
-inside its own `<name>/` directory.
-A path that offers no skill, two paths that offer the same skill name, or a `skill_triggered`
+agent starts, coder-eval stages every entry into `<run_dir>/plugin_root`: one
+`skills/<name>` symlink per skill, and one `plugins/<plugin>` per entry.
+
+Claude Code loads each entry as a whole plugin under its own name (`<plugin>:<skill>`):
+its agents, commands, hooks, MCP servers and the files beside its skills load too, so
+`${CLAUDE_PLUGIN_ROOT}` works. The plugin name is the manifest `name`, else the directory
+name. A bare skills directory becomes a plugin named after the directory that holds its
+skills only. Codex, OpenCode, Pi and Antigravity receive the skills only.
+
+Pointing `path` at a project `.claude` directory also loads its agents and commands on
+Claude Code. To load the skills alone, point `path` at the skills directory itself. Two
+entries with the same plugin name, or a manifest `skills` path outside its plugin root,
+fail `coder-eval plan`. Under `driver: docker` the authored plugin roots are mounted
+read-only, so a hook or MCP server that writes into its plugin root, or needs a binary the
+image does not have, fails.
+Plugins that offer no skill at all, two paths that offer the same skill name, or a `skill_triggered`
 criterion whose `skill_name` the plugins do not offer fail `coder-eval plan`, before the run is
 paid for. `environment_info.skills_offered` records the staged skill names; re-grading a
 recorded run whose `skill_name` is not in that list finishes `ERROR`, not 0.0.
 
 ## Reproducing
 
-`tasks/run_limits/` holds one fixture per limit: `max_tool_calls_cap.yaml` asks for more
-sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
-outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
+`tasks/run_limits/` holds one fixture per limit: `max_tool_calls_cap.yaml` and
+`max_turns_cap.yaml` ask for more sequential work than their caps allow, and
+`turn_timeout.yaml` runs a command that outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
 `--type antigravity` / `--type opencode` / `--type pi` to check a backend against the
 contract above.
 
