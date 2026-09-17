@@ -47,7 +47,7 @@ class Harness:
 
 
 HARNESSES = [
-    Harness(AgentKind.CLAUDE_CODE, "claude-haiku-4-5-20251001", cli="claude", permission_mode="acceptEdits"),
+    Harness(AgentKind.CLAUDE_CODE, "claude-haiku-4-5-20251001", cli="claude"),
     Harness(
         AgentKind.CODEX,
         os.getenv("CODEX_MODEL"),
