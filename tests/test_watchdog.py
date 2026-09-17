@@ -108,6 +108,16 @@ def test_watchdog_double_fire_protected_by_lock() -> None:
     assert count == 1
 
 
+def test_a_timer_callback_that_starts_after_exit_does_nothing() -> None:
+    """``Timer.cancel`` cannot stop a callback already running: the closed guard does."""
+    calls: list[int] = []
+    wd = ThreadedWatchdog(timeout_seconds=None, on_timeout=lambda: calls.append(1), label="late")
+    with wd:
+        pass
+    wd._fire()
+    assert (wd.fired, calls) == (False, [])
+
+
 def test_watchdog_logger_emits_warning(caplog: pytest.LogCaptureFixture) -> None:
     """Firing emits a WARNING log containing the label."""
     with caplog.at_level(logging.WARNING, logger="coder_eval.agents.watchdog"):

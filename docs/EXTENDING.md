@@ -186,8 +186,11 @@ Write the turn through one `TurnEmitter` (do **not** build events, messages or a
 - [ ] Return `emitter.finalize(status, ...)` for a clean end, or
       `emitter.fail(AgentEndStatus.CRASHED | TIMEOUT, reason)` for a failed one. A crash or
       timeout is an outcome, not an exception; an exception out of `communicate` is a bug.
-- [ ] On `asyncio.CancelledError`, call `emitter.fail(AgentEndStatus.CRASHED, "turn cancelled")`,
-      then re-raise: the orchestrator recovers the record from its own collector.
+- [ ] On an `asyncio.CancelledError` from outside (`asyncio.current_task().cancelling()` is
+      not 0), call `emitter.fail(AgentEndStatus.CRASHED, "turn cancelled")`, then re-raise: the
+      orchestrator recovers the record from its own collector. A `CancelledError` your SDK
+      raised inside the turn (`cancelling()` is 0) is a failure of the turn: return
+      `emitter.fail(AgentEndStatus.CRASHED, reason)` and do not re-raise, or the task row is lost.
 - [ ] Run an SDK turn body under `run_with_watchdog(...)`, and return
       `emitter.fail(AgentEndStatus.TIMEOUT, format_timeout_reason(timeout))` on `WatchdogFired`.
 - [ ] Call `self._mark_stopped()` in `stop()` after your own teardown.

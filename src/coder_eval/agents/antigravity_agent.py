@@ -427,7 +427,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         # Dirs prepended to PATH so sandbox mock CLIs shadow real ones for the
         # harness's run_command tool (see _harness_env).
         self._env_path_prepend: list[str] = []
-        # Turn-lifecycle bookkeeping lives on the Agent base class.
         self._log = PrefixedAdapter(logger, {"prefix": instance_name})
 
     def _effective_model(self) -> str:

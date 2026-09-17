@@ -55,6 +55,7 @@ class ThreadedWatchdog:
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._fired = False
+        self._closed = False
 
     @property
     def fired(self) -> bool:
@@ -65,7 +66,8 @@ class ThreadedWatchdog:
     def _fire(self) -> None:
         """Timer-thread callback. Short, exception-safe."""
         with self._lock:
-            if self._fired:
+            # A callback that starts after __exit__ is a timer the guarded body already outran.
+            if self._fired or self._closed:
                 return
             self._fired = True
         logger.warning("%s fired after %.1fs — hard-killing subprocess", self._label, self._timeout or 0)
@@ -92,6 +94,8 @@ class ThreadedWatchdog:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        with self._lock:
+            self._closed = True
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None

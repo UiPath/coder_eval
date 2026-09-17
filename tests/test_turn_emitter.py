@@ -101,6 +101,27 @@ class TestBracketAndSinks:
         with pytest.raises(RuntimeError, match="twice"):
             emitter.begin()
 
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda e: e.begin_inner_turn("a"),
+            lambda e: e.text("hi"),
+            lambda e: e.open_tool("c1", "Bash", {}),
+            lambda e: e.close_tool("c1", status=ToolEndStatus.OK),
+            lambda e: e.add_unmeasured_generation(message_id="m", part=Generation(blocks=[], tokens=TokenUsage())),
+            lambda e: e.finalize(AgentEndStatus.COMPLETED),
+            lambda e: e.fail(AgentEndStatus.CRASHED, "boom"),
+        ],
+    )
+    def test_every_call_before_begin_is_refused(self, call: Any) -> None:
+        sink = _Sink()
+        emitter = TurnEmitter(
+            task_id="t", iteration=1, prompt="go", model="m", basis=TimingBasis.TURN_CLOCK, clock=_Clock(), sinks=[sink]
+        )
+        with pytest.raises(RuntimeError, match="before begin"):
+            call(emitter)
+        assert sink.events == []
+
     def test_a_raising_sink_does_not_break_the_emitter(self) -> None:
         class _Broken:
             def on_event(self, event: StreamEvent) -> None:

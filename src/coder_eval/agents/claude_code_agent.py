@@ -562,6 +562,16 @@ class _ClaudeDecoder:
                 assistant_turn_count=self.assistant_turn_count,
                 num_turns=self.num_turns,
             )
+        if self.sdk_result_summary is None:
+            # A stop broke the loop before any ResultMessage: the emitter's default summary applies.
+            return self.emitter.finalize(
+                status,
+                usage=usage,
+                agent_output=agent_output,
+                model_used=self.sdk_model_used,
+                assistant_turn_count=self.assistant_turn_count,
+                num_turns=self.num_turns,
+            )
         return self.emitter.finalize(
             status,
             usage=usage,

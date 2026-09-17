@@ -94,8 +94,8 @@ from .utils import get_version_info, looks_like_version, runtime_uip_versions
 logger = logging.getLogger(__name__)
 
 
-# Grace on outer wait_for so the agent's in-band watchdog (which preserves a partial)
-# wins the race against the asyncio cancel path (which doesn't).
+# Grace on outer wait_for so the agent's in-band watchdog (a TIMEOUT outcome) wins the
+# race against the asyncio cancel path (a CRASHED "turn cancelled" record).
 _WAIT_FOR_GRACE_SECONDS = 2.0
 
 # The clean end statuses a turn's outcome is returned for; CRASHED and TIMEOUT raise.

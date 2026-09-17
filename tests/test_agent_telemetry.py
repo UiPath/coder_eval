@@ -1687,3 +1687,24 @@ class TestClaudeSubAgentScope:
         assert cmd.execution_started_at == base + timedelta(milliseconds=1000)
         assert cmd.execution_completed_at == base + timedelta(milliseconds=1750)
         assert cmd.duration_ms == pytest.approx(750.0)
+
+
+def test_a_claude_turn_stopped_before_the_result_message_keeps_the_final_reply():
+    """A stop breaks the loop before any ResultMessage: the summary is the emitter's, as on every harness."""
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeDecoder
+    from coder_eval.models import AgentKind, parse_agent_config
+    from coder_eval.streaming.events import AgentEndStatus
+    from coder_eval.testing import ScriptedClock, replay
+    from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
+    from tests._fixtures.golden_streams.claude_fixtures import TextBlock
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+    result = replay(
+        [SdkAssistantMessage([TextBlock("partial answer")], message_id="m1")],
+        lambda emitter: _ClaudeDecoder(agent, emitter, effective_model=None),
+        clock=ScriptedClock(datetime(2026, 1, 1)),
+        end=lambda decoder: decoder.end(AgentEndStatus.TOOL_CALLS_EXHAUSTED),
+    )
+    summary = result.record.result_summary
+    assert summary is not None
+    assert (summary.is_error, summary.subtype, summary.result) == (False, "tool_calls_exhausted", "partial answer")

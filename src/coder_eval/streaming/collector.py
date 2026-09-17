@@ -4,8 +4,8 @@ The single, agent-agnostic place where the persisted ``TurnRecord`` (and
 therefore ``task.json``) is assembled — so a new agent emits the standard events
 and gets capture for free.
 
-An agent attaches its own collector alongside the caller's ``stream_callback``
-and returns ``build_turn_record()`` from ``communicate()``.
+``TurnEmitter`` feeds one per turn and returns its record in the ``TurnOutcome``;
+the orchestrator attaches a second one per attempt to recover a killed turn.
 
 ``commands`` are derived from the ``ToolEndEvent`` stream (crash-orphaned calls
 included, force-closed as ``unresolved``), ordered by ``sequence_number``. The

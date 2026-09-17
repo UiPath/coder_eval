@@ -11,7 +11,7 @@ from coder_eval.agent import Agent
 from coder_eval.agents._transport import JsonlDecoder, SubprocessJsonlAgent
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import WatchdogFired, run_with_watchdog
-from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError
+from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError, format_timeout_reason
 from coder_eval.models import (
     CANONICAL_TOOL_NAMES,
     READ_ONLY_DENIED_TOOLS,
@@ -19,6 +19,7 @@ from coder_eval.models import (
     ApiRoute,
     BaseAgentConfig,
     CommandTelemetry,
+    ContentBlock,
     Enforcement,
     HarnessContract,
     LocalPluginConfig,
@@ -32,7 +33,7 @@ from coder_eval.models import (
     TurnRecord,
     UsageGranularity,
 )
-from coder_eval.pricing import ModelPricing, register_pricing
+from coder_eval.pricing import ModelPricing, price_turn, register_pricing
 from coder_eval.streaming.callbacks import StreamCallback
 from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import (
@@ -58,6 +59,7 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "BaseAgentConfig",
     "CANONICAL_TOOL_NAMES",
     "CommandTelemetry",
+    "ContentBlock",
     "Enforcement",
     "Generation",
     "HarnessContract",
@@ -88,6 +90,8 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "Window",
     "close_window",
     "end_status_for",
+    "format_timeout_reason",
+    "price_turn",
     "register_pricing",
     "run_with_watchdog",
 ]

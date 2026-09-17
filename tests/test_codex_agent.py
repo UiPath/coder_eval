@@ -2367,7 +2367,7 @@ class TestExecutionBoundsWiring:
     """The notification -> builder wiring, end to end through communicate().
 
     The builder arithmetic is covered in test_codex_agent_unit.py by calling
-    `_telemetry_for_item` directly. That leaves the WIRING untested, and the
+    `_tool_end_for_item` directly. That leaves the WIRING untested, and the
     golden snapshots cannot cover it: `_scrub.py` masks every non-null
     timestamp to "<scrubbed>", so they assert presence, not value. Swapping
     `started_ms` and `completed_ms` at the single production call site would

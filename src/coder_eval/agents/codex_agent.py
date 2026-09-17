@@ -25,7 +25,6 @@ from coder_eval.models import (
     ApiRoute,
     AssistantMessage,
     CodexAgentConfig,
-    CommandTelemetry,
     ContentBlock,
     DirectRoute,
     Enforcement,
@@ -129,12 +128,22 @@ def _ms_to_dt(ms: int | None) -> datetime:
 
 
 class _ItemTiming(NamedTuple):
-    """When a Codex tool item ran, as the four fields CommandTelemetry records."""
+    """When a Codex tool item ran: the CLI bounds, and the duration they or the SDK give."""
 
-    timestamp: datetime
     execution_started_at: datetime | None
     execution_completed_at: datetime | None
     duration_ms: float | None
+
+
+class _ToolEnd(NamedTuple):
+    """What a completed Codex tool item tells ``TurnEmitter.close_tool``."""
+
+    is_error: bool
+    summary: str | None
+    error: str | None
+    result_data: Any
+    parameters: dict[str, Any]
+    timing: _ItemTiming
 
 
 def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_ms: float | None) -> _ItemTiming:
@@ -149,8 +158,6 @@ def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_
     of 211 commands in one nightly reported ``0`` for calls the message gaps show
     took seconds), so it becomes ``None`` (CE058).
 
-    Only the bounds and the duration reach ``close_tool``; the emitter owns ``timestamp``.
-
     ``generation_completed_at`` is deliberately absent for all three: it means
     "when the model finished emitting the ``tool_use`` block", which Codex's
     stream does not carry per tool, and the flush time would be a guess.
@@ -158,7 +165,6 @@ def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_
     if started_ms is not None and completed_ms is not None:
         started = _ms_to_dt(started_ms)
         return _ItemTiming(
-            timestamp=started,
             execution_started_at=started,
             execution_completed_at=_ms_to_dt(completed_ms),
             # Clamped for clock skew; both bounds stay as reported so the
@@ -169,7 +175,6 @@ def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_
     # CE058 coalesce read backwards, and hides the decision being made.
     duration = None if sdk_duration_ms is None or sdk_duration_ms <= 0 else float(sdk_duration_ms)
     return _ItemTiming(
-        timestamp=datetime.now(),
         execution_started_at=None,
         execution_completed_at=None,
         duration_ms=duration,
@@ -394,19 +399,20 @@ class _CodexDecoder:
                     self._agent._tool_parameters(root, root_type),
                     started_at=None,
                 )
-            telemetry, is_error = self._agent._telemetry_for_item(
-                root, root_type, tool_id, started_ms=self.start_ms_by_id.get(tool_id), completed_ms=completed_ms
+            end = self._agent._tool_end_for_item(
+                root, root_type, started_ms=self.start_ms_by_id.get(tool_id), completed_ms=completed_ms
             )
+            is_error = end is not None and end.is_error
             self.emitter.close_tool(
                 tool_id,
                 status=ToolEndStatus.ERROR if is_error else ToolEndStatus.OK,
-                summary=telemetry.result_summary if telemetry else None,
-                error=telemetry.error_message if telemetry else None,
-                result_data=telemetry.result_data if telemetry else None,
-                parameters=telemetry.parameters if telemetry else None,
-                completed_at=telemetry.execution_completed_at if telemetry else None,
-                started_at=telemetry.execution_started_at if telemetry else None,
-                reported_duration_ms=telemetry.duration_ms if telemetry else None,
+                summary=end.summary if end else None,
+                error=end.error if end else None,
+                result_data=end.result_data if end else None,
+                parameters=end.parameters if end else None,
+                completed_at=end.timing.execution_completed_at if end else None,
+                started_at=end.timing.execution_started_at if end else None,
+                reported_duration_ms=end.timing.duration_ms if end else None,
             )
             if tool_id in self.blocks_by_id:
                 self.blocks_by_id[tool_id].is_error = is_error
@@ -1266,72 +1272,50 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return {"prompt": getattr(root, "revised_prompt", None) or ""}
         return {}
 
-    def _telemetry_for_item(
+    def _tool_end_for_item(
         self,
         root: Any,
         root_type: str | None,
-        tool_id: str,
         *,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> tuple[CommandTelemetry | None, bool]:
-        """Build (telemetry, is_error) for a completed tool item; its sequence number is the emitter's.
+    ) -> _ToolEnd | None:
+        """What a completed tool item reports, or None if it cannot be read.
 
         commandExecution/fileChange keep their rich extractors; every other kind
-        routes through the generic builder so it still produces countable
-        telemetry. The SDK's millisecond stamps arrive as ARGUMENTS rather than
-        being read back out of the reducer, so each builder stays pure.
+        routes through the generic one so it still closes a countable call. The
+        SDK's millisecond stamps arrive as ARGUMENTS, so each extractor stays pure.
         """
         if root_type == "commandExecution":
-            exit_code = getattr(root, "exit_code", None)
-            return self._extract_command_telemetry(root, tool_id, started_ms, completed_ms), exit_code != 0
+            return self._command_tool_end(root, started_ms, completed_ms)
         if root_type == "fileChange":
             changes = getattr(root, "changes", []) or []
-            status_str = _status_value(getattr(root, "status", "completed"))
-            failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
-            return (
-                self._extract_file_change_telemetry(tool_id, changes, status_str, started_ms, completed_ms),
-                failed,
-            )
-        return self._extract_generic_telemetry(root, root_type, tool_id, started_ms, completed_ms)
+            return self._file_change_tool_end(changes, getattr(root, "status", "completed"), started_ms, completed_ms)
+        return self._generic_tool_end(root, root_type, started_ms, completed_ms)
 
-    def _extract_generic_telemetry(
+    def _generic_tool_end(
         self,
         root: Any,
         root_type: str | None,
-        tool_id: str,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> tuple[CommandTelemetry | None, bool]:
-        """CommandTelemetry for any tool item without a dedicated extractor.
-
-        Reads status / duration / error generically, so MCP calls, web searches,
-        collab-agent spawns and future kinds all render and count uniformly.
-        """
+    ) -> _ToolEnd | None:
+        """A tool item without a dedicated extractor: status, duration and error read generically."""
         try:
             status_str = _status_value(getattr(root, "status", "") or "")
             err = getattr(root, "error", None)
             success = getattr(root, "success", None)
-            is_error = bool(err) or success is False or status_str in _FILE_CHANGE_FAILURE_STATUSES
-            timing = _item_timing(started_ms, completed_ms, getattr(root, "duration_ms", None))
-            return (
-                CommandTelemetry(
-                    tool_name=self._tool_name(root_type),
-                    tool_id=tool_id,
-                    timestamp=timing.timestamp,
-                    execution_started_at=timing.execution_started_at,
-                    execution_completed_at=timing.execution_completed_at,
-                    duration_ms=timing.duration_ms,
-                    parameters=self._tool_parameters(root, root_type),
-                    result_status="error" if is_error else ("success" if status_str else "unknown"),
-                    result_summary=self._summarize_tool_item(root, root_type),
-                    error_message=str(err) if err else None,
-                ),
-                is_error,
+            return _ToolEnd(
+                is_error=bool(err) or success is False or status_str in _FILE_CHANGE_FAILURE_STATUSES,
+                summary=self._summarize_tool_item(root, root_type),
+                error=str(err) if err else None,
+                result_data=None,
+                parameters=self._tool_parameters(root, root_type),
+                timing=_item_timing(started_ms, completed_ms, getattr(root, "duration_ms", None)),
             )
         except Exception as e:
             self._log.debug(f"Failed to extract generic tool telemetry ({root_type}): {e}")
-            return None, False
+            return None
 
     @staticmethod
     def _summarize_tool_item(root: Any, root_type: str | None) -> str:
@@ -1643,28 +1627,19 @@ class CodexAgent(Agent[CodexAgentConfig]):
         )
         decoder.subagent_index += 1
 
-    def _extract_command_telemetry(
+    def _command_tool_end(
         self,
         command_item: Any,
-        tool_id: str,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> CommandTelemetry | None:
-        """Extract CommandTelemetry from a CommandExecutionThreadItem.
+    ) -> _ToolEnd | None:
+        """What a CommandExecutionThreadItem reports.
 
         Rationale: .claude/notes/agents.md § Tool-name and argument normalization
         """
-
         try:
-            # Extract basic info
-            command = getattr(command_item, "command", "")
-            command_id = getattr(command_item, "id", None) or tool_id
-            duration_ms = getattr(command_item, "duration_ms", None)
             exit_code = getattr(command_item, "exit_code", None)
             output = getattr(command_item, "aggregated_output", None)
-
-            # Determine result status from exit code
-            result_status = "success" if exit_code == 0 else "error" if exit_code is not None else "unknown"
 
             # Store the output WHOLE: result_summary is the untruncated tool-result
             # body and its length drives result_tokens, so trimming here
@@ -1673,70 +1648,51 @@ class CodexAgent(Agent[CodexAgentConfig]):
             summary_parts = [f"Exit code: {exit_code}" if exit_code is not None else "Command executed"]
             if output and len(output.strip()) > 0:
                 summary_parts.append(f"Output: {output}")
-            result_summary = " | ".join(summary_parts)
 
-            # Try to parse output as JSON
             result_data = None
             if output:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     result_data = json.loads(output)
 
-            # Build parameters from command string
-            parameters = {"command": command}
-
-            timing = _item_timing(started_ms, completed_ms, duration_ms)
-            return CommandTelemetry(
-                tool_name="Bash",
-                tool_id=command_id,
-                timestamp=timing.timestamp,
-                execution_started_at=timing.execution_started_at,
-                execution_completed_at=timing.execution_completed_at,
-                duration_ms=timing.duration_ms,
-                parameters=parameters,
-                result_status=result_status,
-                result_summary=result_summary,
-                error_message=None if exit_code == 0 else output or f"Exit code {exit_code}",
+            return _ToolEnd(
+                is_error=exit_code != 0,
+                summary=" | ".join(summary_parts),
+                error=None if exit_code == 0 else output or f"Exit code {exit_code}",
                 result_data=result_data,
+                parameters={"command": getattr(command_item, "command", "")},
+                timing=_item_timing(started_ms, completed_ms, getattr(command_item, "duration_ms", None)),
             )
         except Exception as e:
             self._log.debug(f"Failed to extract command telemetry: {e}")
             return None
 
-    def _extract_file_change_telemetry(
+    def _file_change_tool_end(
         self,
-        change_id: str,
         changes: Any,
         status: Any,
         started_ms: int | None = None,
         completed_ms: int | None = None,
-    ) -> CommandTelemetry | None:
-        """Build CommandTelemetry for a Codex fileChange item.
+    ) -> _ToolEnd | None:
+        """What a Codex fileChange item reports; a failed or declined apply_patch is an error.
 
-        Recorded as a ``Write`` so cross-agent criteria see the same signal they
-        get from Claude's Write/Edit calls. A failed or declined apply_patch is an
-        ``error``, never a successful write.
+        Recorded as a ``Write`` so cross-agent criteria see the same signal they get
+        from Claude's Write/Edit calls.
         """
         try:
             paths = [str(c.path) for c in changes if hasattr(c, "path")] if changes else []
             status_str = _status_value(status)
             failed = status_str in _FILE_CHANGE_FAILURE_STATUSES
-            timing = _item_timing(started_ms, completed_ms, None)
-            return CommandTelemetry(
-                tool_name="Write",
-                tool_id=change_id,
-                timestamp=timing.timestamp,
-                execution_started_at=timing.execution_started_at,
-                execution_completed_at=timing.execution_completed_at,
-                duration_ms=timing.duration_ms,
-                parameters={"paths": paths},
-                result_status="error" if failed else "success",
-                result_summary=(
+            return _ToolEnd(
+                is_error=failed,
+                summary=(
                     f"{len(paths)} file(s) changed"
                     if not failed
                     else f"apply_patch {status_str}: {len(paths)} file(s) not written"
                 ),
-                error_message=f"apply_patch {status_str}" if failed else None,
+                error=f"apply_patch {status_str}" if failed else None,
                 result_data=None,
+                parameters={"paths": paths},
+                timing=_item_timing(started_ms, completed_ms, None),
             )
         except Exception as e:
             self._log.debug(f"Failed to extract file-change telemetry: {e}")

@@ -31,6 +31,7 @@ _FINAL_EXPORTS = [
     "BaseAgentConfig",
     "CANONICAL_TOOL_NAMES",
     "CommandTelemetry",
+    "ContentBlock",
     "Enforcement",
     "Generation",
     "HarnessContract",
@@ -61,6 +62,8 @@ _FINAL_EXPORTS = [
     "Window",
     "close_window",
     "end_status_for",
+    "format_timeout_reason",
+    "price_turn",
     "register_pricing",
     "run_with_watchdog",
 ]

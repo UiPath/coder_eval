@@ -307,7 +307,8 @@ async def conformance(kind: str, probes: Mapping[tuple[str, str], Callable[[], A
     for _name, check in rejections(kind):
         check()
     registration = AgentRegistry.get(kind)
-    assert registration is not None
+    if registration is None:
+        raise AssertionError(f"no agent is registered for {kind!r}")
     expected = enforced_cells(registration.agent_class.contract, kind)
     if set(probes) != expected:
         raise AssertionError(

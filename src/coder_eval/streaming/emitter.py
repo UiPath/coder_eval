@@ -169,7 +169,7 @@ class TurnEmitter:
         return self._clock.now()
 
     def begin(self) -> None:
-        """Emit the ``AgentStartEvent``; once per emitter."""
+        """Emit the ``AgentStartEvent``; once per emitter, before any other call."""
         if self._began:
             raise RuntimeError("TurnEmitter.begin() called twice")
         self._began = True
@@ -182,6 +182,7 @@ class TurnEmitter:
 
     def begin_inner_turn(self, turn_id: str, model: str | None = None, *, parent_tool_id: str | None = None) -> None:
         """Open one inner turn; raises ``RuntimeError`` while another is open."""
+        self._require_begun("begin_inner_turn")
         if self._ended():
             return
         if self._turn_id is not None:
@@ -197,6 +198,7 @@ class TurnEmitter:
         self, status: TurnEndStatus = TurnEndStatus.COMPLETED, *, tokens: TokenUsage | None = None
     ) -> None:
         """Close the open inner turn, adding ``tokens`` (a delta) to the reported usage."""
+        self._require_begun("end_inner_turn")
         if self._ended():
             return
         if self._turn_id is None:
@@ -209,6 +211,7 @@ class TurnEmitter:
 
     def text(self, chunk: str, *, parent_tool_id: str | None = None) -> None:
         """Stream visible assistant text; main-thread chunks form the default ``agent_output``."""
+        self._require_begun("text")
         if self._ended():
             return
         if parent_tool_id is None:
@@ -228,9 +231,10 @@ class TurnEmitter:
         """Record a tool call's start; ``timestamp`` is the execution start, else the clock.
 
         Raises:
-            TypeError: ``started_at`` passed under ``TURN_CLOCK``, or omitted on a
-                main-thread tool under ``CLI_EPOCH_MS``.
+            TypeError: on a main-thread tool, ``started_at`` passed under ``TURN_CLOCK`` or
+                omitted under ``CLI_EPOCH_MS``. A nested tool takes either.
         """
+        self._require_begun("open_tool")
         if self._ended():
             return
         now = self.now()
@@ -274,6 +278,7 @@ class TurnEmitter:
             TypeError: the same basis rule as ``open_tool``, for ``completed_at``; or
                 ``started_at`` / ``reported_duration_ms`` given under ``TURN_CLOCK``.
         """
+        self._require_begun("close_tool")
         if self._ended():
             return
         if self._basis is TimingBasis.TURN_CLOCK and (started_at is not None or reported_duration_ms is not None):
@@ -307,6 +312,7 @@ class TurnEmitter:
         Raises:
             ValueError: ``parts`` is empty.
         """
+        self._require_begun("add_generation")
         if not parts:
             raise ValueError("add_generation() needs at least one part")
         total_ms = window.duration_ms
@@ -335,6 +341,7 @@ class TurnEmitter:
         parent_tool_id: str | None = None,
     ) -> AssistantMessage:
         """Add a generation with no measurable window: equal bounds at ``now()``, no duration."""
+        self._require_begun("add_unmeasured_generation")
         now = self.now()
         message = self._message(part, now, now, None, message_id, model, parent_tool_id)
         if not self._ended():
@@ -363,6 +370,7 @@ class TurnEmitter:
         Raises:
             ValueError: ``status`` is ``CRASHED`` or ``TIMEOUT`` (use ``fail``).
         """
+        self._require_begun("finalize")
         if status in _FAILED:
             raise ValueError(f"finalize({status.value}): a failed turn ends with fail()")
         if self._outcome is not None:
@@ -402,6 +410,7 @@ class TurnEmitter:
         Raises:
             ValueError: ``status`` is not ``CRASHED`` or ``TIMEOUT``.
         """
+        self._require_begun("fail")
         if status not in _FAILED:
             raise ValueError(f"fail({status.value}): a clean turn ends with finalize()")
         if self._outcome is not None:
@@ -418,6 +427,10 @@ class TurnEmitter:
             num_turns=num_turns,
             result_summary=None,
         )
+
+    def _require_begun(self, method: str) -> None:
+        if not self._began:
+            raise RuntimeError(f"TurnEmitter.{method}() before begin(): the turn has no AgentStartEvent")
 
     def _ended(self) -> bool:
         if self._outcome is None and not self._ending:
