@@ -855,6 +855,19 @@ shape this host got is logged rather than left to be inferred.
 `setup` is: discovering a venv a task never asked for grades it under a PATH it never ran
 under, and would let an agent shadow binaries by writing `.venv/bin/` into its own workspace.
 
+Discovery alone was not the whole story: `Sandbox.capture_to` (the docker-WORKDIR-alignment
+path — Harbor's `CoderEvalAgent`, any `--workspace-dir` execute) excludes `.venv` /
+`node_modules` / `.npm-prefix` from the copy-out as noise (`_WORKSPACE_CAPTURE_IGNORE`), so a
+workspace adopted from a captured WORKDIR never has one to discover — even though the execute
+phase installed `env_packages` into it. Confirmed live: a Harbor E2E scenario's `run_command`
+criterion failed `No module named pytest` against a workspace whose agent phase had run
+`pytest` successfully moments earlier. `adopt` now falls back to `_setup_virtualenv` +
+`_install_packages` (or `_install_node_packages`) whenever the expected directory is missing
+AND `env_packages` is non-empty — gated on `env_packages`, not bare `config.python`, so the
+common empty-`env_packages` default still adopts as a pure no-op (matching `setup`'s own
+"asking for packages is what earns a venv" rule). A venv that already exists (the ordinary
+`preserve_to` / non-captured path) is still only discovered, never rebuilt.
+
 The unit test in `tests/test_sandbox.py` reads `pyvenv.cfg`. That proves the flag is set,
 not that the result is correct. Every task image installs packages globally: the
 framework image uses `uv pip install --system`, and skillsbench task images use

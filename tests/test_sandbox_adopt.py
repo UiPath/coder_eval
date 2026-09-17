@@ -88,6 +88,25 @@ def test_adopt_leaves_venv_unset_when_there_is_none(tmp_path: Path) -> None:
     assert sandbox.venv_dir is None
 
 
+def test_adopt_reprovisions_env_packages_missing_from_a_captured_workspace(tmp_path: Path) -> None:
+    """`Sandbox.capture_to` (docker-WORKDIR / Harbor `--workspace-dir` grading)
+    excludes `.venv` as noise (`_WORKSPACE_CAPTURE_IGNORE`), so a workspace
+    adopted from a captured WORKDIR never has one -- even though the execute
+    phase installed `env_packages` into it. Without re-provisioning here, a
+    `run_command` criterion silently grades against a bare interpreter missing
+    everything `env_packages` asked for. This is the regression: no `.venv`
+    directory is planted up front (unlike the discovery test above), only
+    `env_packages` is declared, so adopt must build one from scratch.
+    """
+    ws = _workspace(tmp_path)
+    sandbox = _sandbox(python={"env_packages": ["requests"]})
+    sandbox.adopt(ws)
+    assert sandbox.venv_dir == ws.resolve() / ".venv"
+    exit_code, stdout, stderr = sandbox.run_command('python -c "import requests; print(requests.__version__)"')
+    assert exit_code == 0, f"stderr: {stderr}"
+    assert len(stdout.strip()) > 0
+
+
 def test_adopt_ignores_a_venv_when_python_is_null(tmp_path: Path) -> None:
     """`python: null` opts out of BOTH halves: setup creates no venv, and adopt
     declines to pick up one the agent wrote itself.

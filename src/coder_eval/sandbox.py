@@ -307,21 +307,36 @@ class Sandbox:
         self._cleanup_on_exit = False
         self.was_adopted = True
 
-        # Only NON-materializing steps below. Deliberately skipped:
-        # _setup_template (overwrites the tree being graded),
-        # _generate_cli_recorders (writes shims into it), _setup_virtualenv /
-        # _install_*_packages (the execute phase provisioned these), and
+        # Only NON-materializing steps below, EXCEPT the re-provisioning fallback
+        # just below: _setup_template (overwrites the tree being graded),
+        # _generate_cli_recorders (writes shims into it), and
         # _maybe_remediate_home_plugins_pollution (destructive on $HOME, and
-        # remediation rather than derivation).
+        # remediation rather than derivation) are still deliberately skipped.
         self._prepare_mock_path_dirs()
 
-        # DISCOVER rather than create, so criteria get the same VIRTUAL_ENV/PATH
-        # the agent had. Gated on `config.python` for the same reason `setup` is.
+        # DISCOVER rather than create when the venv survived -- so criteria get
+        # the SAME VIRTUAL_ENV/PATH the agent had, not a freshly reinstalled one.
+        # But a workspace ADOPTED FROM A CAPTURED WORKDIR (Sandbox.capture_to, the
+        # docker-WORKDIR-alignment / Harbor `--workspace-dir` path) never has one:
+        # `.venv` / `node_modules` / `.npm-prefix` are in `_WORKSPACE_CAPTURE_IGNORE`
+        # as noise, so the execute phase's own install is silently gone by the time
+        # grading adopts this workspace -- `run_command` criteria then see a bare
+        # interpreter with none of `env_packages` installed. Re-provision from
+        # scratch whenever the venv is missing AND there is something to install --
+        # never for the common `env_packages: []` case, which has nothing worth a
+        # venv for and must stay a no-op (a bare `sandbox.python` block, the
+        # default, is not itself a request for a venv).
         # Rationale: .claude/notes/isolation.md § Why the venv gets system site packages
         if self.config.python:
             candidate = self.sandbox_dir / VENV_DIRNAME
             if candidate.is_dir():
                 self.venv_dir = candidate
+            elif self.config.python.env_packages:
+                self._setup_virtualenv()
+                self._install_packages()
+
+        if self.config.node and self.config.node.env_packages and not (self.sandbox_dir / "node_modules").is_dir():
+            self._install_node_packages()
 
         self._check_parent_node_modules_contamination()
         self._refresh_plugin_tools_dir()
