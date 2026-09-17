@@ -24,7 +24,6 @@ from typing import Any
 import pytest
 
 from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
-from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig, TokenUsage
 from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.pricing import calculate_cost
@@ -79,9 +78,9 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
-async def _run(agent: PiAgent, tmp_path: Any, prompt: str = "do the thing", **kwargs: Any):
+async def _run(agent: PiAgent, tmp_path: Any, prompt: str = "do the thing", *, iteration: int = 1, **kwargs: Any):
     await agent.start(str(tmp_path))
-    return await agent.communicate(prompt, **kwargs)
+    return await agent.communicate(prompt, iteration=iteration, **kwargs)
 
 
 def _agent(**overrides: Any) -> PiAgent:
@@ -100,7 +99,8 @@ class _EventRecorder:
 class TestHappyPath:
     async def test_builds_turn_record(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
 
         assert record.crashed is False
         # 3 turn_start steps in the fixture (write, read, summarize).
@@ -110,7 +110,8 @@ class TestHappyPath:
 
     async def test_token_buckets_sum_across_turns(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
 
         usage = record.token_usage
         assert usage is not None
@@ -123,7 +124,8 @@ class TestHappyPath:
     async def test_reconciliation_invariant(self, patch_exec, tmp_path):
         """Summing the four buckets across messages must equal token_usage exactly."""
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
 
         usage = record.token_usage
         assert usage is not None
@@ -133,7 +135,8 @@ class TestHappyPath:
 
     async def test_tool_calls_captured(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
 
         # write + read, normalized to the canonical vocabulary.
         assert [c.tool_name for c in record.commands] == ["Write", "Read"]
@@ -146,7 +149,8 @@ class TestHappyPath:
 
     async def test_messages_attributed_to_turns(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
 
         assistants = [m for m in record.messages if isinstance(m, AssistantMessage)]
         assert len(assistants) == 3
@@ -191,7 +195,8 @@ class TestToolNormalization:
             json.dumps({"type": "agent_settled"}),
         ]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         assert record.commands[0].tool_name == "Bash"
         assert record.commands[0].parameters == {"command": "pytest -q"}
 
@@ -207,7 +212,8 @@ class TestToolNormalization:
             json.dumps({"type": "agent_settled"}),
         ]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         assert record.commands[0].tool_name == "Glob"
 
     async def test_unknown_tool_passes_through(self, patch_exec, tmp_path):
@@ -218,7 +224,8 @@ class TestToolNormalization:
             _turn_end(inp=10, out=5),
         ]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         assert record.commands[0].tool_name == "some_new_tool"
         assert record.commands[0].parameters == {"whatever": 1}
 
@@ -230,7 +237,8 @@ class TestToolNormalization:
             _turn_end(inp=10, out=5),
         ]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         assert record.commands[0].parameters == {
             "file_path": "a.py",
             "old_string": "a",
@@ -323,7 +331,7 @@ class TestSessionContinuity:
         sdir1 = argv1[argv1.index("--session-dir") + 1]
 
         captured2 = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await agent.communicate("follow up")
+        await agent.communicate("follow up", iteration=2)
         argv2 = captured2["argv"]
         assert argv2[argv2.index("--session-id") + 1] == sid1
         assert argv2[argv2.index("--session-dir") + 1] == sdir1
@@ -388,7 +396,7 @@ class TestSandboxEnvironment:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()
         await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
-        await agent.communicate("do the thing")
+        await agent.communicate("do the thing", iteration=1)
 
         assert captured["kwargs"]["env"]["PATH"] == os.pathsep.join(["/sandbox/mocks", "/sandbox/bins", "/parent/bin"])
 
@@ -418,7 +426,8 @@ class TestAutoRetry:
         ]
         patch_exec(_FakeProcess(stream))
         recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, stream_callback=recorder)
+        record = outcome.record
 
         assert record.crashed is False
         assert len([e for e in recorder.events if isinstance(e, AgentEndEvent)]) == 1
@@ -449,9 +458,10 @@ class TestCooperativeStop:
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
         recorder = _EventRecorder()
-        record = await _run(
+        outcome = await _run(
             _agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION, stream_callback=recorder
         )
+        record = outcome.record
 
         assert record.crashed is False
         assert proc.terminated is True
@@ -465,7 +475,8 @@ class TestCooperativeStop:
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
         recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP, stream_callback=recorder)
+        record = outcome.record
 
         assert proc.terminated is True
         assert record.crashed is False
@@ -477,7 +488,8 @@ class TestCooperativeStop:
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
         recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET, stream_callback=recorder)
+        record = outcome.record
 
         assert proc.terminated is True
         assert record.crashed is False
@@ -489,9 +501,10 @@ class TestCooperativeStop:
         """A stop that lands on turn 2's `turn_start` keeps turn 1 complete."""
         second_turn_start = [i for i, line in enumerate(HAPPY_STREAM) if json.loads(line)["type"] == "turn_start"][1]
         patch_exec(_RunningProcess(HAPPY_STREAM))
-        record = await _run(
+        outcome = await _run(
             _agent(), tmp_path, should_stop=_stop_after(second_turn_start + 1, StopReason.TOOL_CALL_CAP)
         )
+        record = outcome.record
 
         assert record.tool_calls_exhausted is True
         assert len(record.commands) == 1  # turn 1's write
@@ -503,19 +516,22 @@ class TestCooperativeStop:
     async def test_an_intentional_stop_is_exempt_from_a_non_zero_exit(self, patch_exec, tmp_path):
         """Killing the CLI makes it exit non-zero; that must not crash an intentional stop."""
         patch_exec(_RunningProcess(HAPPY_STREAM, returncode=-15, stderr=b"terminated"))
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP)
+        outcome = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP)
+        record = outcome.record
         assert record.crashed is False
         assert record.tool_calls_exhausted is True
 
     async def test_an_intentional_stop_is_exempt_from_no_recognized_events(self, patch_exec, tmp_path):
         """A stop can land before the first recognized event; that is not vocabulary drift."""
         patch_exec(_RunningProcess([json.dumps({"type": "not_a_pi_event"}), *HAPPY_STREAM]))
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET)
+        outcome = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET)
+        record = outcome.record
         assert record.crashed is False
 
     async def test_no_stop_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, should_stop=lambda: None)
+        outcome = await _run(_agent(), tmp_path, should_stop=lambda: None)
+        record = outcome.record
         assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 3
 
@@ -556,19 +572,16 @@ class TestTimeoutContract:
         agent = _agent()
         recorder = _EventRecorder()
 
-        with pytest.raises(TurnTimeoutError):
-            await _run(agent, tmp_path, timeout=0.2, stream_callback=recorder)
+        outcome = await _run(agent, tmp_path, timeout=0.2, stream_callback=recorder)
 
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
         assert proc.terminated is True
         ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
         assert len(ends) == 1
         assert ends[0].status is AgentEndStatus.TIMEOUT
-
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
 
 
 class _ExplodingProcess(_FakeProcess):
@@ -581,13 +594,15 @@ class _ExplodingProcess(_FakeProcess):
 class TestFailurePaths:
     async def test_nonzero_exit_crashes(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess([], returncode=1, stderr=b"boom: bad model"))
-        with pytest.raises(AgentCrashError, match="boom: bad model"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "boom: bad model" in outcome.error
 
     async def test_empty_clean_exit_crashes_on_no_recognized_events(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess([], returncode=0))
-        with pytest.raises(AgentCrashError, match="no recognized events"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "no recognized events" in outcome.error
 
     async def test_drift_crash_names_the_unrecognized_types(self, patch_exec, tmp_path):
         """A clean exit whose events are all unrecognized (schema drift) crashes and
@@ -597,19 +612,22 @@ class TestFailurePaths:
             json.dumps({"type": "another.unknown", "bar": 2}),
         ]
         patch_exec(_FakeProcess(stream))
-        with pytest.raises(AgentCrashError, match=r"another\.unknown, some\.new\.event") as exc:
-            await _run(_agent(), tmp_path)
-        assert "no recognized events" in str(exc.value)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None
+        assert "another.unknown, some.new.event" in outcome.error
+        assert "no recognized events" in outcome.error
 
     async def test_stream_error_becomes_a_crash_with_partial_parked(self, patch_exec, tmp_path):
         stream = [_turn_start(), _tool_start("w:0", "write", {"path": "a.txt", "content": "x"})]
         patch_exec(_ExplodingProcess(stream))
         agent = _agent()
 
-        with pytest.raises(AgentCrashError, match="Pi turn failed"):
-            await _run(agent, tmp_path)
+        outcome = await _run(agent, tmp_path)
 
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "Pi turn failed" in outcome.error
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
         # The in-flight tool was force-closed rather than dropped.
@@ -622,13 +640,15 @@ class TestFailurePaths:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
         monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/pi")
 
-        with pytest.raises(AgentCrashError, match="no fork for you"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "no fork for you" in outcome.error
 
     async def test_malformed_line_is_skipped(self, patch_exec, tmp_path):
         stream = ["not json at all", *HAPPY_STREAM]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         assert record.crashed is False
         assert record.assistant_turn_count == 3
 
@@ -643,24 +663,13 @@ class TestUnexpectedErrorContract:
         patch_exec(_ExplodingProcess([_turn_start()]))
         recorder = _EventRecorder()
 
-        with pytest.raises(AgentCrashError):
-            await _run(_agent(), tmp_path, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, stream_callback=recorder)
+        assert outcome.status is AgentEndStatus.CRASHED
 
         ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
         assert len(ends) == 1
         assert ends[0].crashed is True
         assert ends[0].status is AgentEndStatus.CRASHED
-
-    async def test_iteration_rolls_back_after_the_crash(self, patch_exec, tmp_path):
-        patch_exec(_ExplodingProcess([]))
-        agent = _agent()
-
-        with pytest.raises(AgentCrashError):
-            await _run(agent, tmp_path)
-        assert agent._iteration == 1
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
-        assert agent.pending_turn is None
 
 
 class TestTurnEventsAreBalanced:
@@ -681,8 +690,8 @@ class TestTurnEventsAreBalanced:
         patch_exec(proc)
         recorder = _EventRecorder()
 
-        with pytest.raises(TurnTimeoutError):
-            await _run(_agent(), tmp_path, timeout=0.2, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, timeout=0.2, stream_callback=recorder)
+        assert outcome.status is AgentEndStatus.TIMEOUT
 
         assert self._pairs(recorder) == (1, 1)
         end = next(e for e in recorder.events if isinstance(e, TurnEndEvent))
@@ -763,7 +772,8 @@ class TestToolFailureCapture:
         ]
         patch_exec(_FakeProcess(stream))
         recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, stream_callback=recorder)
+        record = outcome.record
 
         [cmd] = record.commands
         assert cmd.result_status == "error"
@@ -807,7 +817,8 @@ class TestZeroUsageTurn:
             json.dumps({"type": "agent_settled"}),
         ]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         assert record.crashed is False
 
 
@@ -857,9 +868,10 @@ class TestTurnLifecycleAndTokenTelemetry:
         stream = [_turn_start(), _turn_end_error("404: blocked by guardrail"), json.dumps({"type": "agent_settled"})]
         patch_exec(_FakeProcess(stream))
         agent = _agent()
-        with pytest.raises(AgentCrashError, match="blocked by guardrail"):
-            await _run(agent, tmp_path)
-        partial = agent.pending_turn
+        outcome = await _run(agent, tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "blocked by guardrail" in outcome.error
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
 
@@ -869,7 +881,8 @@ class TestTurnLifecycleAndTokenTelemetry:
         status — NOT crash on the stale error."""
         stream = [_turn_start(), _turn_end_error("transient 429"), _turn_start(), _turn_end(inp=1, out=1)]
         patch_exec(_RunningProcess(stream))
-        record = await _run(_agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP))
+        outcome = await _run(_agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP))
+        record = outcome.record
         assert record.tool_calls_exhausted is True
         assert record.crashed is False
 
@@ -930,7 +943,8 @@ class TestTurnLifecycleAndTokenTelemetry:
         stream = [_turn_start(), zero, json.dumps({"type": "agent_settled"})]
         patch_exec(_FakeProcess(stream))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            outcome = await _run(_agent(), tmp_path)
+            record = outcome.record
         assert record.crashed is False  # score, don't crash (documented Pi policy)
         assert any("all-zero token buckets" in r.getMessage() for r in caplog.records)
 
@@ -953,7 +967,8 @@ class TestTurnLifecycleAndTokenTelemetry:
         stream = [_turn_start(), bad, json.dumps({"type": "agent_settled"})]
         patch_exec(_FakeProcess(stream))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            outcome = await _run(_agent(), tmp_path)
+            record = outcome.record
         assert record.crashed is False
         assert any("does not reconcile" in r.getMessage() for r in caplog.records)
 
@@ -972,7 +987,7 @@ class TestSkillInjection:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()
         await agent.start(str(tmp_path), plugin_root=root)
-        await agent.communicate("do the thing")
+        await agent.communicate("do the thing", iteration=1)
         argv = captured["argv"]
         assert argv[argv.index("--skill") + 1] == str(root / "skills")
         assert "pi_skill_paths" not in agent.get_environment_info()
@@ -984,9 +999,9 @@ class TestSkillInjection:
 
 
 class TestTurnAlwaysReapsTheCli:
-    """No exit from ``communicate()`` may leave the CLI running. ``AgentCrashError``
-    is categorized AGENT_CRASH (max_retries=2) and the orchestrator's attempt-failure
-    hook only drains ``pending_turn`` — it never kills the agent. An abandoned CLI
+    """No exit from ``communicate()`` may leave the CLI running. A crash is
+    categorized AGENT_CRASH (max_retries=2), and the orchestrator only appends the
+    crashed record — it never kills the agent. An abandoned CLI
     therefore means attempt 2 spawns a SECOND ``pi`` editing the very files the
     criteria are about to score. The graceful ``kill()`` covers the intentional cuts
     and the timeout; these pin the two paths that reach ``finally`` with a live child.
@@ -996,8 +1011,9 @@ class TestTurnAlwaysReapsTheCli:
         """``_crash_turn`` is synchronous and raises — nothing below it reaps."""
         proc = _ExplodingRunningProcess([_turn_start()])
         patch_exec(proc)
-        with pytest.raises(AgentCrashError, match="Pi turn failed"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "Pi turn failed" in outcome.error
         assert proc.killed is True
 
     async def test_external_cancel_kills_the_cli(self, patch_exec, tmp_path):
@@ -1007,7 +1023,7 @@ class TestTurnAlwaysReapsTheCli:
         patch_exec(proc)
         agent = _agent()
         await agent.start(str(tmp_path))
-        task = asyncio.ensure_future(agent.communicate("do the thing"))
+        task = asyncio.ensure_future(agent.communicate("do the thing", iteration=1))
         await asyncio.sleep(0.05)  # let it spawn and read the first event
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1033,7 +1049,7 @@ class TestExternalCancel:
         agent = _agent()
         await agent.start(str(tmp_path))
         recorder = _EventRecorder()
-        task = asyncio.ensure_future(agent.communicate("do the thing", stream_callback=recorder))
+        task = asyncio.ensure_future(agent.communicate("do the thing", iteration=1, stream_callback=recorder))
         await asyncio.sleep(0.05)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1071,7 +1087,8 @@ class TestCostFallsBackToTheRateCard:
         """The provider's own accounting beats a static headline rate."""
         stream = [_turn_start(), _turn_end(inp=1000, out=500, cost=0.5), self._SETTLED]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == pytest.approx(0.5)
 
@@ -1079,7 +1096,8 @@ class TestCostFallsBackToTheRateCard:
         """No `cost` key at all — without the fallback the turn books tokens with no money."""
         stream = [_turn_start(), _turn_end_no_cost(inp=1000, out=500), self._SETTLED]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
         expected = calculate_cost("openrouter/moonshotai/kimi-k3", uncached_input_tokens=1000, output_tokens=500)
         assert expected is not None and expected > 0
         assert record.token_usage is not None
@@ -1089,7 +1107,8 @@ class TestCostFallsBackToTheRateCard:
         """`None` (not 0.0) so "unpriceable" stays distinct from "ran for free"."""
         stream = [_turn_start(), _turn_end_no_cost(inp=10, out=5), self._SETTLED]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        outcome = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        record = outcome.record
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd is None
 
@@ -1099,7 +1118,8 @@ class TestCostFallsBackToTheRateCard:
         stream = [_turn_start(), _turn_end(inp=1000, out=500, cost=0.0), self._SETTLED]
         patch_exec(_FakeProcess(stream))
         with caplog.at_level("DEBUG"):
-            record = await _run(_agent(), tmp_path)
+            outcome = await _run(_agent(), tmp_path)
+            record = outcome.record
         expected = calculate_cost("openrouter/moonshotai/kimi-k3", uncached_input_tokens=1000, output_tokens=500)
         assert expected is not None and expected > 0
         assert record.token_usage is not None
@@ -1110,7 +1130,8 @@ class TestCostFallsBackToTheRateCard:
         """With no rate to fall back to, the stream's 0 is the best information we have."""
         stream = [_turn_start(), _turn_end(inp=10, out=5, cost=0.0), self._SETTLED]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        outcome = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        record = outcome.record
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == 0.0
 
@@ -1549,12 +1570,12 @@ class TestClockIsFreshPerTurn:
     async def test_a_turn_after_a_crash_is_anchored_to_a_fresh_clock(self, patch_exec, tmp_path):
         agent = _agent()
         patch_exec(_FakeProcess([], returncode=1, stderr=b"boom: bad model"))
-        with pytest.raises(AgentCrashError):
-            await _run(agent, tmp_path)
+        outcome = await _run(agent, tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
         crashed_clock = agent  # the state is gone; only the agent survives a crash
 
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await crashed_clock.communicate("try again")
+        record = (await crashed_clock.communicate("try again", iteration=2)).record
 
         # The recovered turn measured a real window of its own, rather than one
         # anchored before the crash — which a stale clock would have produced
@@ -1615,6 +1636,7 @@ class TestTheTurnBracketComesFromTheTurnClock:
 
         monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
 
         assert_overhead_is_measured(record)

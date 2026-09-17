@@ -3,7 +3,7 @@
 This is the safety net for decomposing ``ClaudeCodeAgent.communicate`` and
 ``CodexAgent._run_turn_with_streaming``: each scenario replays a recorded SDK
 event stream through ``communicate()`` and asserts the resulting
-``TurnRecord`` / ``pending_turn`` is byte-identical (post-scrub) to a committed
+``TurnRecord`` (crashed or not) is byte-identical (post-scrub) to a committed
 JSON snapshot. The decomposition must not change any snapshot.
 
 Regenerate the snapshots after an INTENTIONAL behavior change with::

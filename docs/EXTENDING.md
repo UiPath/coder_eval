@@ -154,7 +154,7 @@ it on every LiteLLM route.
 Implement these three abstract methods:
 
 - [ ] `async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root: Path | None = None) -> None`
-- [ ] `async def communicate(self, user_input, *, stream_callback=None, timeout=None, should_stop: Callable[[], StopReason | None] | None = None) -> TurnRecord`
+- [ ] `async def communicate(self, user_input, *, iteration: int, stream_callback=None, timeout=None, should_stop: Callable[[], StopReason | None] | None = None) -> TurnOutcome`
 - [ ] `async def stop(self) -> None`
 
 `plugin_root` is the staged plugin root (`<root>/skills/<name>/SKILL.md`), or `None` when
@@ -170,28 +170,41 @@ often you report them as `usage_granularity`. With `cooperative_stop=True`:
 - [ ] Call `should_stop()` at each safe boundary (for example, after each resolved
       tool call, before you pull the next unit of work).
 - [ ] When it returns a `StopReason`, stop pulling work and remember the reason.
-- [ ] Finalize the turn with `AgentEndStatus` `end_status_for(reason)` (both names
-      come from `coder_eval.spi`), with `crashed=False`. Do not raise.
+- [ ] End the turn with `emitter.finalize(end_status_for(reason))` (both names come
+      from `coder_eval.spi`). Do not raise.
 
 Optional overrides (sensible defaults exist): `kill()`, `kill_sync()` (called from a
-non-asyncio watchdog thread — must **not** await), `discard_pending_turn()`.
+non-asyncio watchdog thread — must **not** await).
 
-Follow the shared turn lifecycle (do **not** hand-assemble a `TurnRecord`):
+Write the turn through one `TurnEmitter` (do **not** build events, messages or a
+`TurnRecord` yourself):
 
-- [ ] Call `self._begin_turn()` at the top of `communicate()`.
-- [ ] Call `self._end_turn_ok()` on the success path.
+- [ ] Open it with `emitter = self._open_emitter(prompt=user_input, iteration=iteration,
+      model=..., task_id=..., stream_callback=stream_callback)` and call `emitter.begin()`.
+- [ ] Report what the harness did: `begin_inner_turn` / `end_inner_turn(tokens=delta)`,
+      `text`, `open_tool` / `close_tool`, and `add_generation(message_id=..., window=close_window(...), parts=[Generation(...)])`.
+- [ ] Return `emitter.finalize(status, ...)` for a clean end, or
+      `emitter.fail(AgentEndStatus.CRASHED | TIMEOUT, reason)` for a failed one. A crash or
+      timeout is an outcome, not an exception; an exception out of `communicate` is a bug.
+- [ ] On `asyncio.CancelledError`, call `emitter.fail(AgentEndStatus.CRASHED, "turn cancelled")`,
+      then re-raise: the orchestrator recovers the record from its own collector.
+- [ ] Run an SDK turn body under `run_with_watchdog(...)`, and return
+      `emitter.fail(AgentEndStatus.TIMEOUT, format_timeout_reason(timeout))` on `WatchdogFired`.
 - [ ] Call `self._mark_stopped()` in `stop()` after your own teardown.
-- [ ] Before raising on a mid-turn failure, set `self.pending_turn` to a
-      `crashed=True` `TurnRecord` (built from an `EventCollector`), then raise
-      `AgentCrashError` / `TurnTimeoutError` (bare — no payload). The orchestrator
-      drains it and calls `discard_pending_turn()`.
 
-Emit the standardized event protocol (you are the **sole emitter**): one
-`AgentStartEvent` at the top of `communicate()` and one matching `AgentEndEvent` on
-**every** exit path (emit from `finally`), a `TurnStart`/`TurnEnd` pair per inner
-turn, and `ToolStart`/`ToolEnd` per tool call (close orphaned tools with
-`status=unresolved`). Fan events through an internal `EventCollector` — it builds the
-returned `TurnRecord`, the single agent-agnostic capture path.
+The emitter owns the event protocol: one `AgentStartEvent`, one `AgentEndEvent` on every
+exit, balanced inner turns and tool calls (orphans closed `unresolved`), and the record.
+
+### The sixth-harness checklist
+
+- [ ] A `HarnessContract` (every field, `timing_basis` included).
+- [ ] A config class and its registration.
+- [ ] A translation from config to the harness's native call that delivers the staged
+      `plugin_root`.
+- [ ] A decoder: one object per turn that takes the harness's events and calls the emitter.
+- [ ] The four `coder_eval.testing` sensors in your own tests: `replay` your decoder over a
+      recorded stream, `assert_identity_closes` on the replay, `assert_stream_balanced` on
+      its events, and `conformance(kind, probes)` for the contract.
 
 ### Worked example
 

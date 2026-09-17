@@ -222,9 +222,10 @@ async def test_noop_agent_handles_non_enum_plugin_kind(tmp_path):
     agent = NoOpAgent(_PluginNoneConfig())
     await agent.start(str(tmp_path))
     # Would raise AttributeError if communicate used `.type.value` instead of str(...).
-    record = await agent.communicate("hello")
+    outcome = await agent.communicate("hello", iteration=1)
     await agent.stop()
 
+    record = outcome.record
     assert record.crashed is False
     assert record.iteration == 1
 

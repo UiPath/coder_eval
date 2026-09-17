@@ -37,7 +37,6 @@ class TestCodexAgentInitialization:
         assert agent.config == config
         assert agent.codex_client is None
         assert agent.get_state() == AgentState.WORKING
-        assert agent.pending_turn is None
 
     def test_codex_agent_with_disallowed_tools(self):
         """Test initialization with disallowed_tools."""
@@ -505,29 +504,6 @@ class TestThreadOptions:
         assert options["approval_mode"] == ApprovalMode.deny_all
 
 
-@pytest.mark.asyncio
-async def test_discard_pending_turn():
-    """Test discard_pending_turn clears pending_turn and decrements iteration."""
-    from coder_eval.models import TurnRecord
-
-    config = parse_agent_config(type=AgentKind.CODEX)
-    agent = CodexAgent(config)
-
-    partial = TurnRecord(
-        iteration=1,
-        user_input="test",
-        agent_output="<partial>",
-        crashed=True,
-    )
-    agent._iteration = 1
-    agent.pending_turn = partial
-
-    await agent.discard_pending_turn()
-
-    assert agent.pending_turn is None
-    assert agent._iteration == 0
-
-
 def test_get_state_returns_current_state():
     """Test get_state returns the agent's current state."""
     config = parse_agent_config(type=AgentKind.CODEX)
@@ -556,7 +532,6 @@ from types import SimpleNamespace  # noqa: E402
 
 from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
 
-from coder_eval.errors import AgentCrashError, TurnTimeoutError  # noqa: E402
 from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason  # noqa: E402
 
 
@@ -677,7 +652,7 @@ class TestCommunicateHappyPath:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("do it")
+        record = (await agent.communicate("do it", iteration=1)).record
 
         assert record.agent_output == "Hello world"
         # One shell command + one file change both recorded as telemetry.
@@ -695,7 +670,6 @@ class TestCommunicateHappyPath:
         assert record.token_usage.cache_read_input_tokens == 8
         assert record.token_usage.input_tokens == 100
         assert agent.get_state() == AgentState.WORKING
-        assert agent.pending_turn is None
         assert agent._active_turn_handle is None
 
     async def test_state_resets_to_working_after_a_prior_error(self):
@@ -703,7 +677,7 @@ class TestCommunicateHappyPath:
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
         agent._state = AgentState.ERROR
 
-        await agent.communicate("retry")
+        await agent.communicate("retry", iteration=1)
 
         assert agent.get_state() == AgentState.WORKING
 
@@ -797,7 +771,7 @@ class TestCodexCacheWriteBucketing:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant_msgs = [m for m in record.messages if hasattr(m, "cache_creation_tokens")]
         assert assistant_msgs, "expected at least one AssistantMessage"
@@ -834,7 +808,7 @@ class TestCodexCacheWriteBucketing:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         msgs = [m for m in record.messages if hasattr(m, "cache_creation_tokens")]
         # Gen 1 (cold): all 1000 fresh is uncached input, no cache.
@@ -859,16 +833,11 @@ class TestCommunicateCrashFunnel:
         notifications = [_delta("partial")]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("do it")
+        outcome = await agent.communicate("do it", iteration=1)
 
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.crashed is True
         assert agent.get_state() == AgentState.ERROR
-
-        # discard rolls back the iteration bump (flag-only branch still works).
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
 
     async def test_thread_start_failure_funnels_through_crash(self):
         agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
@@ -881,12 +850,9 @@ class TestCommunicateCrashFunnel:
 
         agent.codex_client.thread_start = _boom
 
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("do it")
+        outcome = await agent.communicate("do it", iteration=1)
 
-        assert agent.pending_turn is not None
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
+        assert outcome.status is AgentEndStatus.CRASHED
 
 
 class _RaisingStream:
@@ -945,17 +911,17 @@ class TestCommunicateCrashTokenFallback:
         def _cb(event):
             captured.append(event)
 
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("do it", stream_callback=SimpleNamespace(on_event=_cb))
+        outcome = await agent.communicate("do it", iteration=1, stream_callback=SimpleNamespace(on_event=_cb))
+
+        assert outcome.status is AgentEndStatus.CRASHED
 
         # A CRASHED AgentEndEvent closes the event tree.
         end_events = [e for e in captured if isinstance(e, AgentEndEvent)]
         assert end_events and end_events[-1].status == AgentEndStatus.CRASHED
 
-        # The pending turn carries the tokens captured before the crash (fallback).
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
-        tu = agent.pending_turn.token_usage
+        # The turn's record carries the tokens captured before the crash (fallback).
+        assert outcome.record.crashed is True
+        tu = outcome.record.token_usage
         assert tu is not None
         # Fresh slice 100 - 8 = 92 -> uncached_input; cached 8 -> cache_read; out 40; no cache-write.
         assert tu.uncached_input_tokens == 92
@@ -1115,7 +1081,7 @@ class TestFlushMessageReasoningSplit:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("think then answer")
+        record = (await agent.communicate("think then answer", iteration=1)).record
 
         assistant = [m for m in record.messages if isinstance(m, AssistantMessage)]
         assert assistant
@@ -1203,7 +1169,7 @@ class TestCodexCollabSubAgent:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         # Both collab calls surface as Agent tool calls in the transcript.
         agent_calls = [c for c in record.commands if c.tool_name == "Agent"]
@@ -1230,7 +1196,7 @@ class TestCodexCollabSubAgent:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("wait")
+        record = (await agent.communicate("wait", iteration=1)).record
 
         # No spawn → no nested sub-agent generations.
         assert not any(getattr(m, "parent_tool_use_id", None) for m in record.messages)
@@ -1251,7 +1217,7 @@ class TestCodexCollabSubAgent:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         # The orphan survives as a named command with 'unknown' status (not dropped,
         # not "unknown" tool name).
@@ -1338,7 +1304,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         # The sub-agent's inner Bash command is recovered as telemetry...
         bash = [c for c in record.commands if c.tool_name == "Bash"]
@@ -1368,7 +1334,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         assert not [c for c in record.commands if c.tool_name == "Bash"]
         assert any(getattr(m, "parent_tool_use_id", None) == "call_spawn" for m in record.messages)
@@ -1411,7 +1377,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         nested = [m for m in record.messages if getattr(m, "parent_tool_use_id", None) == "call_spawn"]
         assert len(nested) == 2
@@ -1469,7 +1435,7 @@ class TestCodexSubAgentToolRecovery:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("delegate it")
+        record = (await agent.communicate("delegate it", iteration=1)).record
 
         tu = record.token_usage
         assert tu is not None
@@ -1508,7 +1474,7 @@ class TestCodexGenericToolCapture:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("use tools")
+        record = (await agent.communicate("use tools", iteration=1)).record
 
         names = sorted(c.tool_name for c in record.commands)
         assert names == ["Mcp", "WebSearch"]
@@ -1534,7 +1500,7 @@ class TestCodexGenericToolCapture:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("use tools")
+        record = (await agent.communicate("use tools", iteration=1)).record
 
         tel = next(c for c in record.commands if c.tool_name == "Mcp")
         assert tel.result_status == "error"
@@ -1550,7 +1516,7 @@ class TestCodexGenericToolCapture:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("use tools")
+        record = (await agent.communicate("use tools", iteration=1)).record
 
         assert any(c.tool_name == "someNewTool" for c in record.commands)
 
@@ -1573,7 +1539,7 @@ class TestApplyPatchTelemetryHonesty:
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
 
-        record = await agent.communicate("write out.txt")
+        record = (await agent.communicate("write out.txt", iteration=1)).record
 
         # Turn completes normally (no crash / no retry), but the Write telemetry
         # honestly reflects the failure.
@@ -1606,11 +1572,10 @@ class TestCommunicateTimeoutFunnel:
         agent.codex_client = SimpleNamespace(close=lambda: None)
         agent.thread = SimpleNamespace(turn=lambda _u: handle)
 
-        with pytest.raises(TurnTimeoutError):
-            await agent.communicate("do it", timeout=0.2)
+        outcome = await agent.communicate("do it", iteration=1, timeout=0.2)
 
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.record.crashed is True
         assert agent.get_state() == AgentState.ERROR
 
 
@@ -1646,26 +1611,12 @@ class TestCommunicatePostWatchdogTimeoutRace:
         # normally and the post-watchdog `if state.timeout_hit:` block fires.
         monkeypatch.setattr("coder_eval.agents.codex_agent.ThreadedWatchdog", _ImmediateTimeoutWatchdog)
 
-        with pytest.raises(TurnTimeoutError):
-            await agent.communicate("do it", timeout=30.0)
+        outcome = await agent.communicate("do it", iteration=1, timeout=30.0)
 
+        assert outcome.status is AgentEndStatus.TIMEOUT
         # The fix: this race path now ends in ERROR (would be WORKING before).
         assert agent.get_state() == AgentState.ERROR
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
-
-
-class TestDiscardIdempotency:
-    async def test_double_discard_only_rolls_back_once(self):
-        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX))
-        agent._iteration = 3
-        agent._iteration_was_incremented = True
-
-        await agent.discard_pending_turn()
-        assert agent._iteration == 2
-
-        await agent.discard_pending_turn()
-        assert agent._iteration == 2  # idempotent
+        assert outcome.record.crashed is True
 
 
 class TestTeardown:
@@ -2192,9 +2143,11 @@ class TestShouldStopReasons:
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
         capture = _EndCapture()
 
-        record = await agent.communicate(
-            "go", stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOOL_CALL_CAP)
-        )
+        record = (
+            await agent.communicate(
+                "go", iteration=1, stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOOL_CALL_CAP)
+            )
+        ).record
 
         assert capture.end is not None
         assert capture.end.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
@@ -2206,9 +2159,11 @@ class TestShouldStopReasons:
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
         capture = _EndCapture()
 
-        record = await agent.communicate(
-            "go", stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOKEN_BUDGET)
-        )
+        record = (
+            await agent.communicate(
+                "go", iteration=1, stream_callback=capture, should_stop=_stop_on_call(1, StopReason.TOKEN_BUDGET)
+            )
+        ).record
 
         assert capture.end is not None
         assert capture.end.status is AgentEndStatus.TOKEN_BUDGET_EXCEEDED
@@ -2219,7 +2174,8 @@ class TestShouldStopReasons:
         """A stop polled after a call's completion keeps that call's result."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(3))
 
-        record = await agent.communicate("go", should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
+        outcome = await agent.communicate("go", iteration=1, should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
+        record = outcome.record
 
         assert len(record.commands) == 1
         assert record.commands[0].result_status == "success"
@@ -2228,14 +2184,14 @@ class TestShouldStopReasons:
         """Best-effort server-side interrupt, so the stop actually ends spend."""
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(5))
 
-        await agent.communicate("go", should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
+        await agent.communicate("go", iteration=1, should_stop=_stop_on_call(2, StopReason.TOOL_CALL_CAP))
 
         assert agent.thread.last_handle.interrupted is True
 
     async def test_no_reason_consumes_the_whole_stream(self):
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._cmd_notifications(4))
 
-        record = await agent.communicate("go", should_stop=lambda: None)
+        record = (await agent.communicate("go", iteration=1, should_stop=lambda: None)).record
 
         assert len(record.commands) == 4
         assert record.tool_calls_exhausted is False
@@ -2272,7 +2228,9 @@ class TestShouldStopReasons:
         child = "019e0000-eeee-7000-8000-000000000005"
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._delegation(tmp_path, child))
 
-        record = await agent.communicate("delegate it", should_stop=_stop_on_call(4, StopReason.TOOL_CALL_CAP))
+        record = (
+            await agent.communicate("delegate it", iteration=1, should_stop=_stop_on_call(4, StopReason.TOOL_CALL_CAP))
+        ).record
 
         assert record.tool_calls_exhausted is True
         assert [c for c in record.commands if c.tool_name == "Bash"]
@@ -2288,7 +2246,11 @@ class TestShouldStopReasons:
         child = "019e0000-ffff-7000-8000-000000000006"
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), self._delegation(tmp_path, child))
 
-        record = await agent.communicate("delegate it", should_stop=_stop_on_call(4, StopReason.EARLY_CRITERION))
+        record = (
+            await agent.communicate(
+                "delegate it", iteration=1, should_stop=_stop_on_call(4, StopReason.EARLY_CRITERION)
+            )
+        ).record
 
         assert record.tool_calls_exhausted is False
         assert not [c for c in record.commands if c.tool_name == "Bash"]
@@ -2328,7 +2290,7 @@ class TestExecutionBoundsWiring:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         cmd = next(c for c in record.commands if c.tool_id == "cmd_1")
         assert cmd.execution_started_at == datetime.fromtimestamp(_BOUNDS_EPOCH_MS / 1000)
@@ -2346,7 +2308,7 @@ class TestExecutionBoundsWiring:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         orphan = next(c for c in record.commands if c.tool_id == "cmd_orphan")
         assert orphan.result_status == "unknown"
@@ -2379,7 +2341,7 @@ class TestGenerationWindowExcludesToolExecution:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         cmd = next(c for c in record.commands if c.tool_id == "cmd_1")
@@ -2401,7 +2363,7 @@ class TestGenerationWindowExcludesToolExecution:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         gen_ms = sum(m.generation_duration_ms or 0.0 for m in assistant)
@@ -2440,7 +2402,7 @@ class TestGenerationWindowExcludesToolExecution:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         spans = [
@@ -2485,7 +2447,7 @@ class TestGenerationWindowsTileTheTurn:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         assert len(assistant) == 2
@@ -2509,7 +2471,7 @@ class TestGenerationWindowsTileTheTurn:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         gen_ms = sum(m.generation_duration_ms or 0.0 for m in record.messages if m.role == "assistant")
         tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
@@ -2721,7 +2683,7 @@ class TestFlushMessageGenTimeSplit:
             _turn_completed(),
         ]
         agent = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
-        record = await agent.communicate("think then answer")
+        record = (await agent.communicate("think then answer", iteration=1)).record
 
         assistant = [m for m in record.messages if m.role == "assistant"]
         assert len(assistant) == 2, "expected a thinking and an action sub-message"

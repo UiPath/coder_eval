@@ -39,77 +39,6 @@ def test_pending_turn_defaults_to_none():
 
 
 @pytest.mark.asyncio
-async def test_discard_pending_turn_clears_slot_and_decrements():
-    """discard_pending_turn clears the slot and rolls back _iteration once."""
-    from coder_eval.models import TurnRecord
-
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
-    agent = ClaudeCodeAgent(config)
-
-    partial = TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True)
-    agent._iteration = 1
-    agent.pending_turn = partial
-
-    await agent.discard_pending_turn()
-
-    assert agent.pending_turn is None
-    assert agent._iteration == 0
-
-
-@pytest.mark.asyncio
-async def test_discard_pending_turn_idempotent():
-    """discard_pending_turn is a no-op when pending_turn is already None."""
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
-    agent = ClaudeCodeAgent(config)
-
-    assert agent.pending_turn is None
-    assert agent._iteration == 0
-
-    # First call: nothing to discard — counter must not go negative.
-    await agent.discard_pending_turn()
-    assert agent.pending_turn is None
-    assert agent._iteration == 0
-
-    # Second call after a real discard: still a no-op.
-    from coder_eval.models import TurnRecord
-
-    partial = TurnRecord(iteration=2, user_input="p", agent_output="<partial>", crashed=True)
-    agent._iteration = 2
-    agent.pending_turn = partial
-    await agent.discard_pending_turn()  # real discard
-    await agent.discard_pending_turn()  # idempotent second call
-    assert agent.pending_turn is None
-    assert agent._iteration == 1  # decremented once, not twice
-
-
-@pytest.mark.asyncio
-async def test_discard_pending_turn_rolls_back_when_partial_build_failed():
-    """If _set_pending swallowed an exception and left pending_turn=None, discard
-    must still roll back the iteration counter.
-
-    Regression: previously the rollback gated on (pending_turn is not None), so
-    a swallowed partial-build exception caused _iteration to drift permanently
-    higher on every double-failure.
-    """
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
-    agent = ClaudeCodeAgent(config)
-
-    # Simulate communicate() incrementing the counter and then crashing before
-    # _set_pending could finish (partial-build exception swallowed → pending_turn None).
-    agent._iteration = 5
-    agent._iteration_was_incremented = True
-    agent.pending_turn = None
-
-    await agent.discard_pending_turn()
-    assert agent._iteration == 4, "rollback must fire even when pending_turn is None"
-    assert agent._iteration_was_incremented is False
-
-    # Second call is idempotent — neither signal fires.
-    await agent.discard_pending_turn()
-    assert agent._iteration == 4
-
-
-@pytest.mark.asyncio
 async def test_stop_clears_pending_turn():
     """stop() clears pending_turn so stale partials don't leak between runs."""
     import tempfile
@@ -210,7 +139,7 @@ async def _capture_sdk_options(
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir, env_path_prepend=env_path_prepend)
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            await agent.communicate("hello")
+            await agent.communicate("hello", iteration=1)
 
     return captured_options
 
@@ -969,7 +898,9 @@ def test_format_messages_system_message_subclasses_are_filtered():
 
 @pytest.mark.asyncio
 async def test_claude_agent_process_error_includes_stderr():
-    """Test that ProcessError is caught and its stderr is included in RuntimeError."""
+    """Test that ProcessError is caught and its stderr is included in the CRASHED outcome's error."""
+    import re
+
     config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
@@ -986,18 +917,20 @@ async def test_claude_agent_process_error_includes_stderr():
             raise ProcessError("process failed", exit_code=1, stderr="Error: invalid config")
             yield  # makes this an async generator
 
-        with (
-            patch("coder_eval.agents.claude_code_agent.query", mock_query),
-            pytest.raises(RuntimeError, match=r"CLI process failed \(exit code 1\): Error: invalid config"),
-        ):
-            await agent.communicate("do something")
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            outcome = await agent.communicate("do something", iteration=1)
 
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None
+        assert re.search(r"CLI process failed \(exit code 1\): Error: invalid config", outcome.error)
         assert agent.get_state() == AgentState.ERROR
 
 
 @pytest.mark.asyncio
 async def test_claude_agent_process_error_no_stderr_at_all():
     """Test that ProcessError with no stderr and no stderr_lines shows sentinel message."""
+    import re
+
     config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
         permission_mode="acceptEdits",
@@ -1013,11 +946,12 @@ async def test_claude_agent_process_error_no_stderr_at_all():
             raise ProcessError("process failed", exit_code=None, stderr=None)
             yield  # makes this an async generator
 
-        with (
-            patch("coder_eval.agents.claude_code_agent.query", mock_query),
-            pytest.raises(RuntimeError, match=r"CLI process failed \(exit code None\): No stderr captured"),
-        ):
-            await agent.communicate("do something")
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            outcome = await agent.communicate("do something", iteration=1)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None
+        assert re.search(r"CLI process failed \(exit code None\): No stderr captured", outcome.error)
 
 
 @pytest.mark.asyncio
@@ -1058,12 +992,12 @@ async def test_claude_agent_session_resumption():
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
             # First call: no session_id yet
-            await agent.communicate("first prompt")
+            await agent.communicate("first prompt", iteration=1)
             assert captured_options[0].resume is None
             assert agent._session_id == "test-session-abc"
 
             # Second call: should pass session_id as resume
-            await agent.communicate("second prompt")
+            await agent.communicate("second prompt", iteration=2)
             assert captured_options[1].resume == "test-session-abc"
 
 
@@ -1102,7 +1036,7 @@ async def test_claude_agent_errored_result_does_not_commit_session_id():
             yield ResultMessage(session_id="good-session", is_error=False)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_ok):
-            await agent.communicate("clean turn")
+            await agent.communicate("clean turn", iteration=1)
             assert agent._session_id == "good-session"
 
         # Second: an errored turn arriving with a NEW session_id must NOT
@@ -1114,7 +1048,7 @@ async def test_claude_agent_errored_result_does_not_commit_session_id():
             yield ResultMessage(session_id="poisoned-session", is_error=True)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_err):
-            await agent.communicate("errored turn")
+            await agent.communicate("errored turn", iteration=2)
             assert agent._session_id == "good-session"
 
 
@@ -1154,11 +1088,11 @@ async def test_claude_agent_session_resumption_none_degrades_gracefully():
             yield ResultMessage(session_id=None)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            await agent.communicate("first prompt")
+            await agent.communicate("first prompt", iteration=1)
             assert agent._session_id is None
 
             # Second call: resume should be None (fresh session)
-            await agent.communicate("second prompt")
+            await agent.communicate("second prompt", iteration=2)
             assert captured_options[1].resume is None
 
 
@@ -1202,15 +1136,15 @@ async def test_claude_agent_session_rotation():
             yield ResultMessage(session_id=f"session-{call_count}")
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            await agent.communicate("first prompt")
+            await agent.communicate("first prompt", iteration=1)
             assert agent._session_id == "session-1"
 
-            await agent.communicate("second prompt")
+            await agent.communicate("second prompt", iteration=2)
             assert captured_options[1].resume == "session-1"
             assert agent._session_id == "session-2"
 
             # Third call should use the rotated session_id
-            await agent.communicate("third prompt")
+            await agent.communicate("third prompt", iteration=3)
             assert captured_options[2].resume == "session-2"
 
 
@@ -1248,7 +1182,7 @@ async def test_claude_agent_session_retained_on_error():
             yield ResultMessage(session_id="good-session")
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query_ok):
-            await agent.communicate("first prompt")
+            await agent.communicate("first prompt", iteration=1)
             assert agent._session_id == "good-session"
 
         # Second call raises an error mid-stream
@@ -1256,11 +1190,12 @@ async def test_claude_agent_session_retained_on_error():
             raise RuntimeError("SDK connection lost")
             yield
 
-        with (
-            patch("coder_eval.agents.claude_code_agent.query", mock_query_error),
-            pytest.raises(RuntimeError, match="SDK connection lost"),
-        ):
-            await agent.communicate("second prompt")
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query_error):
+            outcome = await agent.communicate("second prompt", iteration=2)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None
+        assert "SDK connection lost" in outcome.error
 
         # session_id should still be the value from the successful call
         assert agent._session_id == "good-session"
@@ -1385,8 +1320,10 @@ async def test_communicate_persists_result_summary_on_turn_record():
             )
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            turn = await agent.communicate("hello")
+            outcome = await agent.communicate("hello", iteration=1)
 
+        assert outcome.status is AgentEndStatus.COMPLETED
+        turn = outcome.record
         assert turn.result_summary is not None
         assert turn.result_summary.is_error is False
         assert turn.result_summary.subtype == "success"
@@ -1398,12 +1335,12 @@ async def test_communicate_persists_result_summary_on_turn_record():
 
 @pytest.mark.asyncio
 async def test_claude_agent_crash_preserves_partial_turn_record():
-    """When communicate() fails mid-turn, agent.pending_turn carries a partial
+    """When communicate() fails mid-turn, the CRASHED outcome carries a partial
     TurnRecord populated with tool calls captured before the crash.
 
-    This is the whole point of the pending_turn slot + on_attempt_error
-    plumbing: typed criteria like skill_triggered must still be able to
-    observe a Skill invocation that happened before the crash.
+    This is the whole point of the pending_turn slot + outcome plumbing: typed
+    criteria like skill_triggered must still be able to observe a Skill
+    invocation that happened before the crash.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -1427,14 +1364,11 @@ async def test_claude_agent_crash_preserves_partial_turn_record():
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
 
-        with (
-            patch("coder_eval.agents.claude_code_agent.query", mock_query),
-            pytest.raises(AgentCrashError),
-        ):
-            await agent.communicate("do the thing")
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            outcome = await agent.communicate("do the thing", iteration=1)
 
-        # Slot is populated before the raise; not yet cleared (caller must drain).
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.CRASHED
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
         assert partial.tool_calls_exhausted is False
@@ -1444,14 +1378,11 @@ async def test_claude_agent_crash_preserves_partial_turn_record():
         assert len(partial.commands) == 1
         assert partial.commands[0].tool_name == "Skill"
         assert partial.commands[0].parameters == {"skill": "my_skill"}
-        # Iteration contract: partial carries the bumped iteration number; the
-        # counter is NOT rolled back until discard_pending_turn() is called.
+        # Iteration contract: partial carries the bumped iteration number.
         assert partial.iteration == 1
         assert agent._iteration == 1
-
-        await agent.discard_pending_turn()
+        # The pending_turn side-channel is always cleared once communicate() returns.
         assert agent.pending_turn is None
-        assert agent._iteration == 0
 
 
 @pytest.mark.asyncio
@@ -1473,13 +1404,11 @@ async def test_claude_agent_crash_partial_carries_crash_reason():
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
 
-        with (
-            patch("coder_eval.agents.claude_code_agent.query", mock_query),
-            pytest.raises(AgentCrashError),
-        ):
-            await agent.communicate("go")
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            outcome = await agent.communicate("go", iteration=1)
 
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.CRASHED
+        partial = outcome.record
         assert partial is not None
         assert partial.crash_reason is not None
         # The crash message is truncated at 200 chars, but a short message
@@ -1504,11 +1433,11 @@ async def test_claude_agent_timeout_partial_carries_crash_reason():
         with (
             patch("coder_eval.agents.claude_code_agent.query", mock_query),
             patch.object(ClaudeCodeAgent, "_timed_out", staticmethod(lambda *a, **k: True)),
-            pytest.raises(TurnTimeoutError),
         ):
-            await agent.communicate("go", timeout=42.0)
+            outcome = await agent.communicate("go", iteration=1, timeout=42.0)
 
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        partial = outcome.record
         assert partial is not None
         # Normalised reason: integer-second formatting matches the
         # orchestrator's defensive fallback so report rendering is consistent.
@@ -1517,13 +1446,14 @@ async def test_claude_agent_timeout_partial_carries_crash_reason():
 
 @pytest.mark.asyncio
 async def test_claude_agent_repeated_crashes_keep_iteration_stable():
-    """Consecutive crashes in one orchestrator iteration all carry the same iteration number.
+    """Consecutive crashes for the same caller-supplied iteration all carry that
+    same iteration number.
 
-    discard_pending_turn() rolls back _iteration after each crash (simulating
-    what the orchestrator does), so repeated failures in a single logical
-    orchestrator iteration all stamp the same iteration on their partial records.
-    A subsequent clean call then advances the counter by one. This is what the
-    orchestrator's multiple-partials-per-iteration contract relies on.
+    Retries of one logical turn pass the same ``iteration`` on every attempt;
+    ``_legacy_outcome`` resets ``_iteration`` to ``iteration - 1`` on each call, so
+    repeated failures for that iteration all stamp the same number on their
+    partial records. A subsequent clean call at ``iteration + 1`` then advances
+    the counter by one.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -1556,24 +1486,20 @@ async def test_claude_agent_repeated_crashes_keep_iteration_stable():
 
         partials: list = []
         for _ in range(3):
-            with (
-                patch("coder_eval.agents.claude_code_agent.query", crashing_query),
-                pytest.raises(AgentCrashError),
-            ):
-                await agent.communicate("go")
-            partials.append(agent.pending_turn)
-            # Simulate the orchestrator draining and discarding after a failed attempt.
-            await agent.discard_pending_turn()
-            assert agent._iteration == 0
+            with patch("coder_eval.agents.claude_code_agent.query", crashing_query):
+                outcome = await agent.communicate("go", iteration=1)
+            assert outcome.status is AgentEndStatus.CRASHED
+            partials.append(outcome.record)
 
         assert all(p is not None and p.iteration == 1 and p.crashed for p in partials)
 
-        # The clean retry advances the counter and produces iteration=1 again,
-        # so all four records for this logical orchestrator iteration share 1.
+        # The clean retry passes the SAME iteration number as its failed
+        # predecessors — a retry of one logical turn, not a new one.
         with patch("coder_eval.agents.claude_code_agent.query", clean_query):
-            turn_record = await agent.communicate("go")
+            outcome = await agent.communicate("go", iteration=1)
 
         assert clean_finished
+        turn_record = outcome.record
         assert turn_record.iteration == 1
         assert turn_record.crashed is False
         assert agent._iteration == 1
@@ -1581,8 +1507,7 @@ async def test_claude_agent_repeated_crashes_keep_iteration_stable():
 
 @pytest.mark.asyncio
 async def test_claude_agent_timeout_preserves_partial_turn_record():
-    """agent.pending_turn carries a partial TurnRecord with pre-kill tool calls
-    after a TurnTimeoutError.
+    """A TIMEOUT outcome carries a partial TurnRecord with pre-kill tool calls.
 
     Watchdog-killed turns are exactly where observational telemetry is
     most valuable (an agent that looped on tool calls and ran the wall
@@ -1617,20 +1542,19 @@ async def test_claude_agent_timeout_preserves_partial_turn_record():
         with (
             patch("coder_eval.agents.claude_code_agent.query", mock_query),
             patch.object(ClaudeCodeAgent, "_timed_out", staticmethod(lambda *a, **k: True)),
-            pytest.raises(TurnTimeoutError),
         ):
-            await agent.communicate("start", timeout=0.01)
+            outcome = await agent.communicate("start", iteration=1, timeout=0.01)
 
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
         assert len(partial.commands) == 1
         assert partial.commands[0].tool_name == "Bash"
-        # Slot carries the bumped iteration; counter rolls back after discard.
+        # The outcome carries the bumped iteration.
         assert partial.iteration == 1
         assert agent._iteration == 1
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
+        assert agent.pending_turn is None
 
 
 @pytest.mark.asyncio
@@ -1681,9 +1605,11 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
         await agent.start(tmpdir)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            # Must NOT raise: error_max_turns is a clean completion path.
-            turn_record = await agent.communicate("solve something hard", stream_callback=recorder)
+            # Must NOT crash: error_max_turns is a clean completion path.
+            outcome = await agent.communicate("solve something hard", iteration=1, stream_callback=recorder)
 
+        assert outcome.status is AgentEndStatus.COMPLETED
+        turn_record = outcome.record
         assert turn_record.crashed is False
         assert turn_record.tool_calls_exhausted is False
         assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.COMPLETED]
@@ -1738,8 +1664,10 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
         await agent.start(tmpdir)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            turn_record = await agent.communicate("solve something hard", stream_callback=recorder)
+            outcome = await agent.communicate("solve something hard", iteration=1, stream_callback=recorder)
 
+        assert outcome.status is AgentEndStatus.COMPLETED
+        turn_record = outcome.record
         assert turn_record.crashed is False
         assert turn_record.tool_calls_exhausted is False
         assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.COMPLETED]
@@ -1785,8 +1713,10 @@ async def test_claude_agent_should_stop_ends_turn_with_the_reason_status(reason,
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            turn_record = await agent.communicate("go", stream_callback=recorder, should_stop=lambda: reason)
+            outcome = await agent.communicate("go", iteration=1, stream_callback=recorder, should_stop=lambda: reason)
 
+    assert outcome.status is status
+    turn_record = outcome.record
     assert dispatched == ["first"]
     assert turn_record.crashed is False
     assert turn_record.tool_calls_exhausted is exhausted
@@ -2034,8 +1964,8 @@ async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
             ),
             patch("coder_eval.agents.claude_code_agent.query", mock_query),
         ):
-            await agent.communicate("turn 1", timeout=30.0)
-            await agent.communicate("turn 2", timeout=30.0)
+            await agent.communicate("turn 1", iteration=1, timeout=30.0)
+            await agent.communicate("turn 2", iteration=2, timeout=30.0)
 
     assert len(captured_callbacks) == 2
     # Both turns finished, so self._active_transport is None. Fire turn 1's
@@ -2044,3 +1974,221 @@ async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
     captured_callbacks[0]()
     transport_a._process.kill.assert_called_once()
     transport_b._process.kill.assert_not_called()
+
+
+class TestLegacyOutcome:
+    """Unit tests for ``Agent._legacy_outcome``, the adapter that wraps a
+    not-yet-ported raise-and-park ``communicate`` body onto the ``TurnOutcome``
+    contract. Drives it with a tiny fake body, not a real harness.
+    """
+
+    @staticmethod
+    def _agent():
+        return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+
+    @pytest.mark.asyncio
+    async def test_sets_iteration_so_the_body_sees_the_caller_iteration(self):
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+        agent._iteration = 99
+        seen: list[int] = []
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            agent._begin_turn()
+            seen.append(agent._iteration)
+            return TurnRecord(iteration=agent._iteration, user_input=user_input, agent_output="ok")
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=5, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert seen == [5]
+        assert outcome.record.iteration == 5
+
+    @pytest.mark.asyncio
+    async def test_returned_record_maps_to_the_recorded_end_status(self):
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+        record = TurnRecord(iteration=1, user_input="hi", agent_output="done")
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.STOPPED_EARLY))
+            return record
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
+        assert outcome.record is record
+        assert outcome.error is None
+
+    @pytest.mark.asyncio
+    async def test_returned_record_falls_back_to_completed_with_no_recorded_end_event(self):
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+        record = TurnRecord(iteration=1, user_input="hi", agent_output="done")
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            return record
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.COMPLETED
+        assert outcome.record is record
+        assert outcome.error is None
+
+    @pytest.mark.asyncio
+    async def test_crash_uses_pending_turn_when_present(self):
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+        pending = TurnRecord(iteration=3, user_input="hi", agent_output="", crashed=True, crash_reason="boom")
+        agent.pending_turn = pending
+        agent._iteration_was_incremented = True
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            raise AgentCrashError("boom")
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=3, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record is pending
+        assert outcome.error == "boom"
+        assert agent.pending_turn is None
+        assert agent._iteration_was_incremented is False
+
+    @pytest.mark.asyncio
+    async def test_crash_without_pending_turn_builds_an_empty_crashed_record(self):
+        from coder_eval.errors.agent import truncate_crash_message
+
+        agent = self._agent()
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            raise AgentCrashError("kaboom")
+
+        outcome = await agent._legacy_outcome(
+            body, "hi there", iteration=2, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        record = outcome.record
+        assert record.iteration == 2
+        assert record.user_input == "hi there"
+        assert record.agent_output == ""
+        assert record.crashed is True
+        assert record.crash_reason == truncate_crash_message("kaboom")
+        assert outcome.error == "kaboom"
+        assert agent.pending_turn is None
+
+    @pytest.mark.asyncio
+    async def test_timeout_without_pending_turn_falls_back_to_timeout_status(self):
+        agent = self._agent()
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            raise TurnTimeoutError(30.0)
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=1, stream_callback=None, timeout=30.0, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.record.crashed is True
+        assert outcome.error == "Agent turn timed out after 30s"
+
+    @pytest.mark.asyncio
+    async def test_a_recorded_failed_status_wins_over_the_exception_type_fallback(self):
+        agent = self._agent()
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.TIMEOUT))
+            raise AgentCrashError("late failure")
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.error == "late failure"
+
+    @pytest.mark.asyncio
+    async def test_a_recorded_clean_status_never_labels_a_raised_crash(self):
+        agent = self._agent()
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.COMPLETED))
+            raise AgentCrashError("record build failed after a clean finalize")
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.crashed is True
+
+    @pytest.mark.asyncio
+    async def test_forwards_events_to_the_given_callback(self):
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+        received: list = []
+
+        class _Recorder:
+            def on_event(self, event):
+                received.append(event)
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.COMPLETED))
+            return TurnRecord(iteration=1, user_input=user_input, agent_output="ok")
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=1, stream_callback=_Recorder(), timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.COMPLETED
+        assert len(received) == 1
+        assert received[0].status is AgentEndStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_works_with_stream_callback_none(self):
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            # No external sink was given; the internal status tracker is still fed.
+            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.COMPLETED))
+            return TurnRecord(iteration=1, user_input=user_input, agent_output="ok")
+
+        outcome = await agent._legacy_outcome(
+            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
+        )
+
+        assert outcome.status is AgentEndStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_untouched(self):
+        import asyncio
+
+        from coder_eval.models import TurnRecord
+
+        agent = self._agent()
+        pending = TurnRecord(iteration=1, user_input="hi", agent_output="", crashed=True)
+        agent.pending_turn = pending
+
+        async def body(user_input, *, stream_callback, timeout, should_stop):
+            raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            await agent._legacy_outcome(body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None)
+
+        # The body already finalized the turn on cancellation; _legacy_outcome
+        # does not touch pending_turn on this path.
+        assert agent.pending_turn is pending

@@ -18,7 +18,6 @@ async def execute_with_retry(
     operation_name: str,
     context: dict[str, Any],
     max_attempts: int | None = None,
-    on_attempt_error: Callable[[Exception, int], Awaitable[None]] | None = None,
 ) -> Any:
     """Execute an operation with automatic retry on transient errors.
 
@@ -32,11 +31,6 @@ async def execute_with_retry(
         operation_name: Human-readable name, for logging only.
         context: Requires ``task_id``; ``component`` and ``agent_name`` are optional.
         max_attempts: Overrides the safety limit of 10.
-        on_attempt_error: Async ``(exception, zero_indexed_attempt) -> None`` invoked
-            after every failed attempt, including the final non-retryable one, and
-            before the backoff. Its own exceptions are logged and swallowed so they
-            cannot mask the original. The orchestrator uses it to drain
-            ``agent.pending_turn`` and call ``agent.discard_pending_turn()``.
 
     Returns:
         Whatever ``operation`` returned.
@@ -46,7 +40,7 @@ async def execute_with_retry(
 
     Example:
         >>> async def flaky_api_call():
-        ...     return await agent.communicate(prompt)
+        ...     return (await agent.communicate(prompt, iteration=1)).record_or_raise()
         >>>
         >>> result = await execute_with_retry(
         ...     operation=flaky_api_call,
@@ -72,19 +66,6 @@ async def execute_with_retry(
 
         except Exception as e:
             last_error = e
-
-            # Fire callback before the retry decision so partial telemetry
-            # is captured even on the final non-retryable attempt.
-            if on_attempt_error is not None:
-                try:
-                    await on_attempt_error(e, attempt)
-                except Exception:
-                    logger.exception(
-                        "[%s] on_attempt_error callback raised for %s (attempt %d); ignoring",
-                        task_id,
-                        operation_name,
-                        attempt + 1,
-                    )
 
             # Categorize error
             category = categorize_error(e, context)

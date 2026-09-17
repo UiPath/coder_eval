@@ -8,6 +8,7 @@ import coder_eval.spi as spi
 _ORIGINS = (
     "coder_eval.agent",
     "coder_eval.agents.registry",
+    "coder_eval.agents.watchdog",
     "coder_eval.errors",
     "coder_eval.models",
     "coder_eval.pricing",
@@ -25,6 +26,7 @@ def test_spi_version_is_three() -> None:
 
 def test_the_emitter_surface_is_exported() -> None:
     assert {"TurnEmitter", "TurnOutcome", "Generation", "Window", "TimingBasis"} <= set(spi.__all__)
+    assert {"run_with_watchdog", "WatchdogFired"} <= set(spi.__all__)
 
 
 def test_the_stop_channel_is_exported() -> None:

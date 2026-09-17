@@ -93,7 +93,7 @@ async def _claude(tmp_path: Path, plugin_root: Path | None = None, **agent: Any)
     claude = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, **agent))
     await claude.start(str(tmp_path), plugin_root=plugin_root)
     with patch("coder_eval.agents.claude_code_agent.query", fake_query):
-        await claude.communicate(USER_TURN)
+        await claude.communicate(USER_TURN, iteration=1)
     return captured["options"], captured["prompt"]
 
 
@@ -145,7 +145,7 @@ async def _probe_codex_system_prompt(_tmp: Path, _mp: pytest.MonkeyPatch) -> Non
     codex = _started_agent(parse_agent_config(type=AgentKind.CODEX, system_prompt=MARKER), [_turn_completed()])
     options = codex._build_thread_options()
     codex.thread = _RecordingThread([_turn_completed()])
-    await codex.communicate(USER_TURN)
+    await codex.communicate(USER_TURN, iteration=1)
     assert options["developer_instructions"] == MARKER
     assert turn_inputs == [USER_TURN]
 
@@ -205,7 +205,7 @@ async def _probe_antigravity_system_prompt(tmp_path: Path, monkeypatch: pytest.M
     agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, system_prompt=MARKER))
     agent.working_directory = tmp_path
     agent._sdk_agent = SimpleNamespace(conversation=_RecordingConversation([done]), is_started=True)
-    await agent.communicate(USER_TURN)
+    await agent.communicate(USER_TURN, iteration=1)
     assert sent == [USER_TURN]
 
 
@@ -451,7 +451,7 @@ async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfter
     claude = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
     await claude.start(str(tmp_path))
     with patch("coder_eval.agents.claude_code_agent.query", fake_query):
-        await claude.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+        await claude.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     return [getattr(e.content[0], "id", None) for e in pulled if hasattr(e, "content")]
 
 
@@ -482,7 +482,7 @@ async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirst
 
     codex = _started_agent(parse_agent_config(type=AgentKind.CODEX), notifications)
     codex.thread = _RecordingThread(notifications)
-    await codex.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+    await codex.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     return [n.payload.item.root.id for n in pulled]
 
 
@@ -514,7 +514,7 @@ async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _Stop
     agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY))
     agent.working_directory = tmp_path
     agent._sdk_agent = SimpleNamespace(conversation=_RecordingConversation([]), is_started=True)
-    await agent.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+    await agent.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     return [s.tool_calls[0].id for s in pulled]
 
 
@@ -542,7 +542,7 @@ async def _stop_cli(
     monkeypatch.setattr("os.killpg", lambda _pgid, _sig: None, raising=False)
     cli = await _cli_agent(cls, kind, tmp_path, monkeypatch)
     try:
-        await cli.communicate(USER_TURN, stream_callback=stop, should_stop=stop)
+        await cli.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     finally:
         await cli.stop()
     return [tool_id for tool_id in ("first", _SECOND) if any(tool_id in json.dumps(p) for p in pulled)]

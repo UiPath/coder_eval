@@ -16,6 +16,7 @@ from claude_agent_sdk import ProcessError
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.streaming.events import AgentEndStatus
 
 
 def _make_agent() -> ClaudeCodeAgent:
@@ -91,11 +92,13 @@ async def test_communicate_watchdog_raises_turn_timeout():
         ):
             mock_transport_cls.return_value = MagicMock()
 
-            with pytest.raises(TurnTimeoutError) as exc:
-                # 100ms watchdog — bypasses AgentConfig's ge=10 validator
-                # because we pass it directly as a call arg, not via config.
-                await agent.communicate("prompt", timeout=0.1)
+            # 100ms watchdog — bypasses AgentConfig's ge=10 validator
+            # because we pass it directly as a call arg, not via config.
+            outcome = await agent.communicate("prompt", iteration=1, timeout=0.1)
 
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        with pytest.raises(TurnTimeoutError) as exc:
+            outcome.record_or_raise(timeout_seconds=0.1)
         assert exc.value.timeout_seconds == 0.1
         assert exc.value.layer == "turn"
         mock_kill_transport.assert_called()
@@ -127,8 +130,9 @@ async def test_process_error_after_watchdog_kill_raises_turn_timeout():
         ):
             mock_transport_cls.return_value = MagicMock()
 
-            with pytest.raises(TurnTimeoutError):
-                await agent.communicate("prompt", timeout=0.1)
+            outcome = await agent.communicate("prompt", iteration=1, timeout=0.1)
+
+        assert outcome.status is AgentEndStatus.TIMEOUT
 
 
 @pytest.mark.asyncio
@@ -181,9 +185,10 @@ async def test_watchdog_kills_own_transport_not_current_active():
             patch("coder_eval.agents.claude_code_agent.query", mock_query),
         ):
             swapper = asyncio.create_task(swap_active_transport_before_watchdog())
-            with pytest.raises(TurnTimeoutError):
-                await agent.communicate("A", timeout=0.1)
+            outcome = await agent.communicate("A", iteration=1, timeout=0.1)
             await swapper
+
+        assert outcome.status is AgentEndStatus.TIMEOUT
 
         # The watchdog must have killed transport A (its captured target),
         # not transport B (which happened to be in self._active_transport
@@ -230,10 +235,11 @@ async def test_successful_turn_past_deadline_is_not_misclassified():
             patch("coder_eval.agents.claude_code_agent.time.monotonic", fake_monotonic),
         ):
             mock_transport_cls.return_value = MagicMock()
-            # Must return a TurnRecord, not raise TurnTimeoutError, even
-            # though wall-clock is way past deadline.
-            result = await agent.communicate("prompt", timeout=1.0)
-            assert result is not None
+            # Must complete cleanly, not TIMEOUT, even though wall-clock is
+            # way past deadline.
+            outcome = await agent.communicate("prompt", iteration=1, timeout=1.0)
+            assert outcome.status is AgentEndStatus.COMPLETED
+            assert outcome.record is not None
 
 
 @pytest.mark.asyncio
@@ -256,7 +262,7 @@ async def test_communicate_without_timeout_does_not_construct_transport():
             patch("coder_eval.agents.claude_code_agent.SubprocessCLITransport") as mock_transport_cls,
             patch("coder_eval.agents.claude_code_agent.query", mock_query),
         ):
-            await agent.communicate("prompt")  # no timeout
+            await agent.communicate("prompt", iteration=1)  # no timeout
             mock_transport_cls.assert_not_called()
 
 
@@ -299,7 +305,7 @@ async def test_external_cancel_parks_the_turn_it_interrupted():
             await asyncio.sleep(30)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            turn = asyncio.create_task(agent.communicate("prompt"))
+            turn = asyncio.create_task(agent.communicate("prompt", iteration=1))
             await streaming.wait()
             turn.cancel()
             with pytest.raises(asyncio.CancelledError):

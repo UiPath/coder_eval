@@ -105,7 +105,7 @@ class TestCommandTelemetryStatus:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("List files")
+            turn = (await agent.communicate("List files", iteration=1)).record
 
             # Verify command telemetry
             assert len(turn.commands) == 1
@@ -150,7 +150,7 @@ class TestCommandTelemetryStatus:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Read file")
+            turn = (await agent.communicate("Read file", iteration=1)).record
 
             assert len(turn.commands) == 1
             cmd = turn.commands[0]
@@ -189,7 +189,7 @@ class TestCommandTelemetryStatus:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Write file")
+            turn = (await agent.communicate("Write file", iteration=1)).record
 
             assert len(turn.commands) == 1
             cmd = turn.commands[0]
@@ -239,7 +239,7 @@ class TestCommandTelemetryStatus:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Multiple commands")
+            turn = (await agent.communicate("Multiple commands", iteration=1)).record
 
             assert len(turn.commands) == 3
 
@@ -290,7 +290,7 @@ class TestCommandTelemetryStatus:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Timed command")
+            turn = (await agent.communicate("Timed command", iteration=1)).record
 
             assert len(turn.commands) == 1
             cmd = turn.commands[0]
@@ -328,7 +328,7 @@ class TestCommandTelemetryStatus:
             await agent.start(str(tmp_path))
 
             with caplog.at_level(logging.WARNING):
-                turn = await agent.communicate("Orphaned result")
+                turn = (await agent.communicate("Orphaned result", iteration=1)).record
 
                 assert len(turn.commands) == 0
                 assert any("Unhandled SDK message type" in record.message for record in caplog.records), (
@@ -372,7 +372,7 @@ class TestCommandTelemetryStatus:
             await agent.start(str(tmp_path))
 
             with caplog.at_level(logging.DEBUG):
-                turn = await agent.communicate("Duplicate results")
+                turn = (await agent.communicate("Duplicate results", iteration=1)).record
 
                 assert len(turn.commands) == 1
                 cmd = turn.commands[0]
@@ -416,7 +416,7 @@ class TestCommandTelemetryStatus:
 
             # Capture both INFO and WARNING levels
             with caplog.at_level(logging.INFO):
-                turn = await agent.communicate("Missing result")
+                turn = (await agent.communicate("Missing result", iteration=1)).record
 
                 assert len(turn.commands) == 1
                 assert turn.commands[0].result_status == "unknown"
@@ -465,7 +465,7 @@ class TestCommandTelemetryStatus:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Non-dict input")
+            turn = (await agent.communicate("Non-dict input", iteration=1)).record
 
             # Should capture the command without crashing
             assert len(turn.commands) == 1
@@ -512,7 +512,7 @@ class TestCommandTelemetryStatus:
 
         try:
             await agent.start(str(tmp_path))
-            await agent.communicate("Non-dict stream", stream_callback=CollectingCallback())
+            await agent.communicate("Non-dict stream", iteration=1, stream_callback=CollectingCallback())
 
             from coder_eval.streaming.events import ToolStartEvent
 
@@ -555,7 +555,7 @@ class TestAssistantMessageTelemetry:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Read a file")
+            turn = (await agent.communicate("Read a file", iteration=1)).record
 
             # Verify assistant_turns list is populated
             assert len(turn.messages) == 1
@@ -607,7 +607,7 @@ class TestAssistantMessageTelemetry:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Test ordering")
+            turn = (await agent.communicate("Test ordering", iteration=1)).record
 
             assert len(turn.messages) == 1
             aturn = turn.messages[0]
@@ -654,7 +654,7 @@ class TestAssistantMessageTelemetry:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Test thinking")
+            turn = (await agent.communicate("Test thinking", iteration=1)).record
 
             assert len(turn.messages) == 1
             aturn = turn.messages[0]
@@ -708,7 +708,7 @@ class TestAssistantMessageTelemetry:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Multiple turns")
+            turn = (await agent.communicate("Multiple turns", iteration=1)).record
 
             # Verify both turns captured (a trailing ReconciliationMessage may
             # follow when the authoritative total exceeds the per-message sum).
@@ -762,7 +762,7 @@ class TestAssistantMessageTelemetry:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Test execution timing")
+            turn = (await agent.communicate("Test execution timing", iteration=1)).record
 
             assert len(turn.commands) == 1
             cmd = turn.commands[0]
@@ -812,7 +812,7 @@ class TestAssistantMessageTelemetry:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("Test command indexing")
+            turn = (await agent.communicate("Test command indexing", iteration=1)).record
 
             # Both commands should reference assistant turn index 0
             assert len(turn.commands) == 2
@@ -927,7 +927,7 @@ class TestPerMessageTokenCapture:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("hi")
+            turn = (await agent.communicate("hi", iteration=1)).record
             assert len(turn.messages) == 1
             aturn = turn.messages[0]
             assert isinstance(aturn, AssistantMessage)
@@ -999,7 +999,7 @@ class TestPerMessageTokenCapture:
         agent_module.query = mock_query
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("hi")
+            turn = (await agent.communicate("hi", iteration=1)).record
             assistants = [m for m in turn.messages if isinstance(m, AssistantMessage)]
             assert len(assistants) == 3  # A-text, A-tool, B-text
             a_text, a_tool, b_text = assistants
@@ -1061,7 +1061,7 @@ class TestPerMessageTokenCapture:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("hi")
+            turn = (await agent.communicate("hi", iteration=1)).record
             assert len(turn.messages) == 2
             first, second = turn.messages
             assert isinstance(first, AssistantMessage)
@@ -1123,7 +1123,7 @@ class TestPerMessageTokenCapture:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("hi")
+            turn = (await agent.communicate("hi", iteration=1)).record
             aturn = turn.messages[0]
             assert isinstance(aturn, AssistantMessage)
             # delta wins over partial 0; ResultMessage fallback is suppressed.
@@ -1166,7 +1166,7 @@ class TestPerMessageTokenCapture:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("hi")
+            turn = (await agent.communicate("hi", iteration=1)).record
             aturn = turn.messages[0]
             assert isinstance(aturn, AssistantMessage)
             # Backfilled from ResultMessage.
@@ -1216,7 +1216,7 @@ class TestPerMessageTokenCapture:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("hi")
+            turn = (await agent.communicate("hi", iteration=1)).record
             assert len(turn.messages) == 2
             a1, a2 = turn.messages
             assert isinstance(a1, AssistantMessage)
@@ -1264,7 +1264,7 @@ class TestPerMessageTokenCapture:
 
         try:
             await agent.start(str(tmp_path))
-            turn = await agent.communicate("hi")
+            turn = (await agent.communicate("hi", iteration=1)).record
             # A trailing ReconciliationMessage may follow the two assistant
             # emissions (here the snapshot total differs from the per-message sum).
             assistant_msgs = [m for m in turn.messages if isinstance(m, AssistantMessage)]
@@ -1580,7 +1580,7 @@ class TestTheTurnBracketComesFromTheTurnClock:
         agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
         await agent.start(str(tmp_path))
         seen: list[Any] = []
-        await agent.communicate("go", stream_callback=SimpleNamespace(on_event=seen.append))
+        await agent.communicate("go", iteration=1, stream_callback=SimpleNamespace(on_event=seen.append))
 
         assert_bracket_on_the_clock(seen)
 
@@ -1601,6 +1601,6 @@ class TestTheTurnBracketComesFromTheTurnClock:
 
         agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
         await agent.start(str(tmp_path))
-        record = await agent.communicate("go")
+        record = (await agent.communicate("go", iteration=1)).record
 
         assert_overhead_is_measured(record)

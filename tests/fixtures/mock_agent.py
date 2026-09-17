@@ -9,6 +9,8 @@ from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.models import TaskDefinition, TurnRecord
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus
 from tests.fixtures.harness_stubs import stub_contract
 
 
@@ -70,28 +72,29 @@ class MockAgent(Agent):
         """
         return self.state
 
-    async def communicate(self, user_input: str, **kwargs) -> TurnRecord:
+    async def communicate(self, user_input: str, *, iteration: int, **kwargs) -> TurnOutcome:
         """Simulate agent turn based on configured scenario.
 
         Args:
             user_input: Prompt from orchestrator
 
         Returns:
-            TurnRecord with simulated agent response and file changes
+            A completed outcome carrying the simulated agent response and file changes
 
         Raises:
             ValueError: If scenario is unknown
         """
-        self._iteration += 1  # Increment iteration count
+        self._iteration = iteration
 
         if self.scenario == "success":
-            return self._success_turn(user_input)
+            record = self._success_turn(user_input)
         elif self.scenario == "failure":
-            return self._failure_turn(user_input)
+            record = self._failure_turn(user_input)
         elif self.scenario == "partial":
-            return self._partial_turn(user_input)
+            record = self._partial_turn(user_input)
         else:
             raise ValueError(f"Unknown scenario: {self.scenario}")
+        return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
     def _success_turn(self, user_input: str) -> TurnRecord:
         """Simulate successful task completion.

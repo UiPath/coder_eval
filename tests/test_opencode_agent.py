@@ -85,11 +85,19 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
-async def _run(
+async def _run_outcome(
     agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", *, plugin_root: Path | None = None, **kwargs: Any
 ):
     await agent.start(str(tmp_path), plugin_root=plugin_root)
+    kwargs.setdefault("iteration", 1)
     return await agent.communicate(prompt, **kwargs)
+
+
+async def _run(
+    agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", *, plugin_root: Path | None = None, **kwargs: Any
+):
+    outcome = await _run_outcome(agent, tmp_path, prompt, plugin_root=plugin_root, **kwargs)
+    return outcome.record_or_raise()
 
 
 def _agent(**overrides: Any) -> OpenCodeAgent:
@@ -607,7 +615,7 @@ class TestSandboxEnvironment:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()
         await agent.start(str(tmp_path), env_path_prepend=["/sandbox/mocks", "/sandbox/bins"])
-        await agent.communicate("do the thing")
+        await agent.communicate("do the thing", iteration=1)
 
         expected = os.pathsep.join(["/sandbox/mocks", "/sandbox/bins", "/parent/bin"])
         assert captured["kwargs"]["env"]["PATH"] == expected
@@ -617,7 +625,7 @@ class TestSandboxEnvironment:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()
         await agent.start(str(tmp_path), plugin_tools_dir="/sandbox/tools")
-        await agent.communicate("do the thing")
+        await agent.communicate("do the thing", iteration=1)
 
         assert captured["kwargs"]["env"]["PLUGIN_TOOLS_DIR"] == "/sandbox/tools"
 
@@ -627,7 +635,7 @@ class TestSandboxEnvironment:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()
         await agent.start(str(tmp_path), plugin_tools_dir="/sandbox/tools")
-        await agent.communicate("do the thing")
+        await agent.communicate("do the thing", iteration=1)
 
         assert captured["kwargs"]["env"]["PLUGIN_TOOLS_DIR"] == "/host/tools"
 
@@ -874,7 +882,7 @@ class TestSessionContinuity:
         assert agent._session_id == SESSION
 
         captured2 = patch_exec(_FakeProcess(HAPPY_STREAM))
-        await agent.communicate("follow up")
+        await agent.communicate("follow up", iteration=2)
         argv = captured2["argv"]
         assert argv[argv.index("--session") + 1] == SESSION
 
@@ -1024,11 +1032,11 @@ class TestFailurePaths:
         patch_exec(_FakeProcess(stream))
         agent = _agent()
 
-        with pytest.raises(AgentCrashError, match="provider exploded"):
-            await _run(agent, tmp_path)
+        outcome = await _run_outcome(agent, tmp_path)
 
-        partial = agent.pending_turn
-        assert partial is not None
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "provider exploded" in outcome.error
+        partial = outcome.record
         assert partial.crashed is True
         # The in-flight tool was force-closed rather than dropped.
         assert [c.result_status for c in partial.commands] == ["unknown"]
@@ -1080,12 +1088,14 @@ class TestZeroTelemetryIsLoud:
         patch_exec(_FakeProcess(stream))
         agent = _agent()
 
-        with pytest.raises(AgentCrashError, match="no recognized events") as exc:
-            await _run(agent, tmp_path)
-        # The crash names what it DID see, for diagnosis.
-        assert "session.next.step.ended" in str(exc.value)
+        outcome = await _run_outcome(agent, tmp_path)
 
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "no recognized events" in outcome.error
+        # The crash names what it DID see, for diagnosis.
+        assert "session.next.step.ended" in outcome.error
+
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
 
@@ -1126,10 +1136,13 @@ class TestZeroTelemetryIsLoud:
         patch_exec(_FakeProcess(self._stream_without_tokens()))
         agent = _agent()
 
-        with pytest.raises(AgentCrashError, match="zero token telemetry") as exc:
-            await _run(agent, tmp_path)
-        assert "1 finished step(s)" in str(exc.value)
-        assert agent.pending_turn is not None  # telemetry captured so far still parked
+        outcome = await _run_outcome(agent, tmp_path)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None
+        assert "zero token telemetry" in outcome.error
+        assert "1 finished step(s)" in outcome.error
+        assert outcome.record is not None  # telemetry captured so far still parked
 
     async def test_cost_without_tokens_still_crashes(self, patch_exec, tmp_path):
         """Reported cost does not excuse missing tokens: the USD gate might trip,
@@ -1195,12 +1208,11 @@ class _EventRecorder:
 
 
 class TestUnexpectedErrorContract:
-    """An unanticipated exception must still honor the pending-turn contract.
+    """An unanticipated exception must still end the turn as a crashed outcome.
 
-    Escaping raw would break it three ways: no terminal ``AgentEndEvent`` (an
-    unbalanced event tree for every renderer), captured telemetry dropped instead
-    of parked on ``pending_turn``, and ``_iteration`` left incremented because the
-    orchestrator never reaches ``discard_pending_turn``.
+    Escaping raw would break it two ways: no terminal ``AgentEndEvent`` (an
+    unbalanced event tree for every renderer), and captured telemetry dropped
+    instead of kept on the crashed record.
     """
 
     async def test_stream_error_becomes_a_crash_with_partial_parked(self, patch_exec, tmp_path):
@@ -1221,11 +1233,11 @@ class TestUnexpectedErrorContract:
         patch_exec(_ExplodingProcess(stream))
         agent = _agent()
 
-        with pytest.raises(AgentCrashError, match="OpenCode turn failed"):
-            await _run(agent, tmp_path)
+        outcome = await _run_outcome(agent, tmp_path)
 
-        partial = agent.pending_turn
-        assert partial is not None
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "OpenCode turn failed" in outcome.error
+        partial = outcome.record
         assert partial.crashed is True
         # Telemetry captured before the failure survives, orphan tool force-closed.
         assert [c.result_status for c in partial.commands] == ["unknown"]
@@ -1256,18 +1268,6 @@ class TestUnexpectedErrorContract:
         assert len(ends) == 1
         assert ends[0].crashed is True
         assert ends[0].status is AgentEndStatus.CRASHED
-
-    async def test_iteration_rolls_back_after_the_crash(self, patch_exec, tmp_path):
-        """`discard_pending_turn` must find the bump it needs to undo."""
-        patch_exec(_ExplodingProcess([]))
-        agent = _agent()
-
-        with pytest.raises(AgentCrashError):
-            await _run(agent, tmp_path)
-        assert agent._iteration == 1
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0
-        assert agent.pending_turn is None
 
 
 class _LeakyPipeProcess(_FakeProcess):
@@ -1492,26 +1492,23 @@ class _EofNoExitProcess(_HangingProcess):
 
 class TestTimeoutContract:
     async def test_deadline_raises_turn_timeout_with_partial_parked(self, patch_exec, tmp_path):
-        """A wedged CLI must yield TurnTimeoutError + a crashed partial record,
+        """A wedged CLI must yield a TIMEOUT outcome with a crashed partial record,
         with exactly one terminal AgentEndEvent (status TIMEOUT) emitted."""
         proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
         patch_exec(proc)
         agent = _agent()
         recorder = _EventRecorder()
 
-        with pytest.raises(TurnTimeoutError):
-            await _run(agent, tmp_path, timeout=0.2, stream_callback=recorder)
+        outcome = await _run_outcome(agent, tmp_path, timeout=0.2, stream_callback=recorder)
 
-        partial = agent.pending_turn
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
         assert proc.terminated is True  # the CLI was torn down, not abandoned
         ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
         assert len(ends) == 1
         assert ends[0].status is AgentEndStatus.TIMEOUT
-
-        await agent.discard_pending_turn()
-        assert agent._iteration == 0  # the failed turn's bump was rolled back
 
     async def test_eof_without_exit_hits_the_deadline(self, patch_exec, tmp_path):
         """Stream closed, process wedged: the post-EOF reap must be bounded by the
@@ -1520,11 +1517,11 @@ class TestTimeoutContract:
         patch_exec(proc)
         agent = _agent()
 
-        with pytest.raises(TurnTimeoutError):
-            await asyncio.wait_for(_run(agent, tmp_path, timeout=0.3), timeout=10)
+        outcome = await asyncio.wait_for(_run_outcome(agent, tmp_path, timeout=0.3), timeout=10)
 
+        assert outcome.status is AgentEndStatus.TIMEOUT
         # Everything parsed before the wedge survives on the partial record.
-        partial = agent.pending_turn
+        partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
         assert partial.token_usage is not None
@@ -1552,7 +1549,7 @@ class TestExternalCancel:
         await agent.start(str(tmp_path))
         recorder = _EventRecorder()
 
-        task = asyncio.ensure_future(agent.communicate("do the thing", stream_callback=recorder))
+        task = asyncio.ensure_future(agent.communicate("do the thing", iteration=1, stream_callback=recorder))
         await asyncio.sleep(0.05)  # let it spawn and read the first event
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1609,7 +1606,7 @@ class TestTurnEventsAreBalanced:
         await agent.start(str(tmp_path))
         recorder = _EventRecorder()
 
-        task = asyncio.ensure_future(agent.communicate("do the thing", stream_callback=recorder))
+        task = asyncio.ensure_future(agent.communicate("do the thing", iteration=1, stream_callback=recorder))
         await asyncio.sleep(0.05)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1656,9 +1653,9 @@ class TestTurnEventsAreBalanced:
 class TestTurnAlwaysReapsTheCli:
     """No exit from `communicate()` may leave the CLI running.
 
-    `AgentCrashError` is categorized AGENT_CRASH (max_retries=2) and the
-    orchestrator's attempt-failure hook only drains `pending_turn` — it never
-    kills the agent. An abandoned CLI therefore means attempt 2 spawns a SECOND
+    A crash is categorized AGENT_CRASH (max_retries=2), and the orchestrator
+    only appends the crashed record — it never kills the agent. An abandoned CLI
+    therefore means attempt 2 spawns a SECOND
     `opencode --dir <sandbox> --session <same id>` while attempt 1 is still
     editing the very files the criteria are about to score, and whichever writer
     wins decides the task's result.
@@ -1685,7 +1682,7 @@ class TestTurnAlwaysReapsTheCli:
         agent = _agent()
         await agent.start(str(tmp_path))
 
-        task = asyncio.ensure_future(agent.communicate("do the thing"))
+        task = asyncio.ensure_future(agent.communicate("do the thing", iteration=1))
         await asyncio.sleep(0.05)  # let it spawn and read the first event
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

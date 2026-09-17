@@ -102,7 +102,7 @@ async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict
     agent = ClaudeCodeAgent(config, route=_route_from_env())
     await agent.start(str(sandbox_dir))
     try:
-        turn = await agent.communicate(prompt, timeout=60.0)
+        turn = (await agent.communicate(prompt, iteration=1, timeout=60.0)).record
     finally:
         await agent.stop()
     return agent, turn

@@ -47,6 +47,7 @@ from coder_eval.orchestration.config import BatchRunConfig
 from coder_eval.orchestration.experiment import _apply_cli_overrides, resolve_task_for_variant
 from coder_eval.orchestration.task_loader import resolve_initial_prompt_file
 from coder_eval.orchestrator import Orchestrator
+from coder_eval.streaming.events import AgentEndStatus
 
 
 def _none_task(criteria=None, **overrides) -> TaskDefinition:
@@ -67,11 +68,14 @@ def _none_task(criteria=None, **overrides) -> TaskDefinition:
 @pytest.mark.asyncio
 class TestNoOpAgent:
     async def test_lifecycle_returns_empty_turn(self) -> None:
-        """start/communicate/stop are no-ops; communicate returns an empty TurnRecord."""
+        """start/communicate/stop are no-ops; communicate returns a COMPLETED outcome
+        wrapping an empty TurnRecord."""
         agent = NoOpAgent(NoneAgentConfig(type=AgentKind.NONE))
         await agent.start("/tmp/whatever")
-        turn = await agent.communicate("this prompt is ignored")
+        outcome = await agent.communicate("this prompt is ignored", iteration=1)
 
+        assert outcome.status is AgentEndStatus.COMPLETED
+        turn = outcome.record
         assert turn.agent_output == ""
         assert turn.iteration == 1
         assert turn.commands == []

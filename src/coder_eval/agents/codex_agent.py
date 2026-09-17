@@ -45,6 +45,7 @@ from coder_eval.orchestration.plugin_staging import link_or_copy
 from coder_eval.pricing import price_turn
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.emitter import TurnOutcome
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -846,6 +847,25 @@ class CodexAgent(Agent[CodexAgentConfig]):
             raise RuntimeError(f"Failed to initialize Codex client: {e}") from e
 
     async def communicate(
+        self,
+        user_input: str,
+        *,
+        iteration: int,
+        stream_callback: StreamCallback | None = None,
+        timeout: float | None = None,
+        should_stop: Callable[[], StopReason | None] | None = None,
+    ) -> TurnOutcome:
+        """Run one turn; see ``Agent.communicate``."""
+        return await self._legacy_outcome(
+            self._communicate_legacy,
+            user_input,
+            iteration=iteration,
+            stream_callback=stream_callback,
+            timeout=timeout,
+            should_stop=should_stop,
+        )
+
+    async def _communicate_legacy(
         self,
         user_input: str,
         *,

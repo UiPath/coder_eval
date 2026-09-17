@@ -26,7 +26,8 @@ from coder_eval.models import (
     TurnRecord,
 )
 from coder_eval.orchestrator import Orchestrator
-from coder_eval.streaming.events import AgentEndEvent, AgentStartEvent
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
 
 
 def _make_task(*, run_limits: RunLimits | None = None) -> TaskDefinition:
@@ -90,12 +91,12 @@ def _reporting_agent(*turns: TurnRecord) -> AsyncMock:
     """A fake agent whose each ``communicate`` reports its turn's usage on the stream, as real agents do."""
     remaining = list(turns)
 
-    async def communicate(user_input, *, stream_callback=None, timeout=None, should_stop=None):
+    async def communicate(user_input, *, iteration, stream_callback=None, timeout=None, should_stop=None):
         turn = remaining.pop(0) if len(remaining) > 1 else remaining[0]
         assert stream_callback is not None
         stream_callback.on_event(AgentStartEvent(task_id="budget_test", prompt=user_input))
         stream_callback.on_event(AgentEndEvent(task_id="budget_test", usage=turn.token_usage or TokenUsage()))
-        return turn
+        return TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
 
     agent = AsyncMock()
     agent.communicate = communicate
@@ -470,7 +471,9 @@ class TestExpectedTurnsSingleShot:
 
         orch = _make_orchestrator(task, tmp_path)
         mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
+        mock_agent.communicate = AsyncMock(
+            return_value=TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
+        )
         orch.agent = mock_agent
         mock_checker = MagicMock()
         mock_checker.check_all_async = AsyncMock(
@@ -515,7 +518,9 @@ class TestExpectedTurnsSimulation:
         # Each agent turn = 1 tool call → cumulative still under 3 after one turn.
         turn = _make_turn(commands=1)
         mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
+        mock_agent.communicate = AsyncMock(
+            return_value=TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
+        )
         orch.agent = mock_agent
 
         mock_checker = MagicMock()
@@ -571,7 +576,9 @@ class TestExpectedTurnsSimulation:
         # 4 tools + reply = 5 visible turns, exceeds 2.
         turn = _make_turn(commands=4, reply="done")
         mock_agent = AsyncMock()
-        mock_agent.communicate = AsyncMock(return_value=turn)
+        mock_agent.communicate = AsyncMock(
+            return_value=TurnOutcome(record=turn, status=AgentEndStatus.COMPLETED, error=None)
+        )
         orch.agent = mock_agent
 
         mock_checker = MagicMock()

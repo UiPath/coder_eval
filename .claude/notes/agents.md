@@ -67,15 +67,31 @@ TurnMonitor); CE070 keeps adapters from counting one again.
 
 ## Shared turn lifecycle
 
-Every adapter drives the same skeleton, on the base class: `_begin_turn()` resets the
-pending slot and bumps the iteration counter, `_end_turn_ok()` marks the turn clean, and
-`_mark_stopped()` closes the agent. Before raising on a mid-turn failure an adapter sets
-`pending_turn` to a `crashed=True` `TurnRecord` and raises bare, which is what lets the
-orchestrator drain the partial record and un-bump the iteration.
+`communicate(..., iteration=...)` returns a `TurnOutcome` (Appendix C of the harness
+target design). A crash or a timeout is an outcome with a `crashed=True` record, not an
+exception, and the CALLER owns the iteration: a retry of the same turn passes the same
+number. A side channel on the agent (a parked partial record, plus an iteration counter
+rolled back once per failed turn) is cross-attempt state that every harness would have to
+set correctly on every failure branch.
 
-The record is BUILT before `_end_turn_ok()` on every harness: a failure inside the
-reduction is a failed turn, and `_end_turn_ok` would already have cleared the rollback
-flag `discard_pending_turn` needs.
+The orchestrator maps the status in one place: the clean statuses (an explicit allowlist)
+return the record; `CRASHED` / `TIMEOUT` append the record to the result and then raise
+through `TurnOutcome.record_or_raise`, so the retry categorisation (a crash retries, a
+timeout does not) is unchanged; anything else raises `RuntimeError`.
+
+Cancellation cannot return a value. A `CancelledError` from the task watchdog, the
+orchestrator's `wait_for` backstop or the task timeout must keep propagating, or
+`task_timeout` stops working. So an adapter ends the turn FIRST
+(`fail(CRASHED, "turn cancelled")`) and re-raises, and the orchestrator reads the partial
+record from a per-attempt `EventCollector` it attaches to the callback chain itself
+(`_attempt_collector`). The agent-side and orchestrator-side records are the same events
+through the same reducer, so they cannot differ. The attempt clears that collector on
+every exit except a cancel, so a task timeout that fires later (during grading, between
+retries) never appends a finished attempt twice.
+
+Until an adapter is ported onto `TurnEmitter` it keeps its old body as
+`_communicate_legacy`, and `Agent._legacy_outcome` maps its record or raised exception
+to an outcome.
 
 Three exit paths converge on `finalize`, and it is idempotent on all of them, because the
 protocol allows EXACTLY ONE `AgentEndEvent` per `communicate()`: the clean return, the
@@ -726,6 +742,22 @@ lets a plugin register a brand-new kind that is not an enum member. Its imports 
 one-way — the plugin loader and the models layer import the registry, never the reverse.
 `create_agent` deliberately does not import `coder_eval.plugins` itself for the same
 reason; callers reach a config through `parse_agent_config`, which loads them.
+
+## Why the watchdog cancels a child task
+
+An adapter that returns a `TIMEOUT` outcome when its OWN watchdog cancels the turn cannot
+cancel the turn's own task. Measured on Python 3.13.11 (2026-09-16): a handler that catches
+that cancel and returns leaves the task's `cancelling()` at 1, so an enclosing
+`asyncio.timeout` later raises `CancelledError` instead of `TimeoutError`, and a cancel
+that lands just after the body finished hits caller code. `uncancel()` would fix the count
+but can also erase a real task-timeout cancel that arrived in the same iteration.
+
+`run_with_watchdog` runs the body as a CHILD task and arms the watchdog on the child. The
+caller's count stays 0, an external cancel of the caller still propagates (and cancels the
+child), and a late cancel lands on a finished child, where it does nothing. The watchdog
+is unchanged. Verified with plain asyncio, and live with the Claude SDK (anyio) and the
+Codex SDK (a threaded iterator). A `ContextVar` set inside the body is not visible to the
+caller afterwards; the only one in `src/` is the logging task id, which the child inherits.
 
 ## The threaded watchdog
 

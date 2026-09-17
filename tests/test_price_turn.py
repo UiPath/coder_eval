@@ -116,7 +116,7 @@ async def _run_cli(agent: Any, cli: str, lines: list[str], working_dir: str) -> 
         patch.object(os, "killpg", lambda _pgid, _sig: None, create=True),
     ):
         await agent.start(working_dir)
-        await agent.communicate("do it", stream_callback=recorder)
+        await agent.communicate("do it", iteration=1, stream_callback=recorder)
     return recorder.events
 
 
@@ -171,7 +171,7 @@ class TestAdapterAndMonitorAgree:
         agent.working_directory = tmp_path
         recorder = _Recorder()
         with patch.object(antigravity_agent.asyncio, "sleep", _no_sleep):
-            await agent.communicate("do it", stream_callback=recorder)
+            await agent.communicate("do it", iteration=1, stream_callback=recorder)
         expected = _rate(
             "gemini-3.5-flash", TokenUsage(uncached_input_tokens=800, output_tokens=350, cache_read_input_tokens=200)
         )

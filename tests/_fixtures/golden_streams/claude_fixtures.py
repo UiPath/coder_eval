@@ -20,6 +20,7 @@ from claude_agent_sdk import ProcessError
 import coder_eval.agents.claude_code_agent as claude_module
 from coder_eval.models import AgentKind, parse_agent_config
 from coder_eval.streaming import events as protocol
+from coder_eval.streaming.events import AgentEndStatus
 from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
@@ -180,7 +181,7 @@ class ClaudeScenario:
     name: str
     build_query: Callable[[], Callable[..., Any]]
     timeout: float | None = None
-    expects: type[BaseException] | None = None
+    expects: AgentEndStatus | None = None
     # When set, ``ClaudeCodeAgent._timed_out`` is patched to this constant so the
     # timeout-vs-crash classification is deterministic without real wall-clock.
     timed_out: bool | None = None
@@ -364,7 +365,7 @@ def _scenario_g() -> ClaudeScenario:
     return ClaudeScenario(
         name="g_crash_format_placeholder",
         build_query=lambda: _raising_query(events, RuntimeError("crash after poison")),
-        expects=None,  # set below to AgentCrashError
+        expects=None,  # set below to CRASHED
     )
 
 
@@ -379,7 +380,7 @@ def _scenario_h1() -> ClaudeScenario:
 
 
 def _scenario_h2() -> ClaudeScenario:
-    """Non-timeout ProcessError -> AgentCrashError."""
+    """Non-timeout ProcessError -> a CRASHED outcome."""
     return ClaudeScenario(
         name="h2_process_error_crash",
         build_query=lambda: _raising_query([], ProcessError("boom", exit_code=1, stderr="bad config")),
@@ -387,7 +388,6 @@ def _scenario_h2() -> ClaudeScenario:
 
 
 def _build_catalogue() -> list[ClaudeScenario]:
-    from coder_eval.errors import AgentCrashError, TurnTimeoutError
 
     scenarios = [
         _scenario_a(),
@@ -399,19 +399,19 @@ def _build_catalogue() -> list[ClaudeScenario]:
     ]
 
     g = _scenario_g()
-    g.expects = AgentCrashError
+    g.expects = AgentEndStatus.CRASHED
     scenarios.append(g)
 
     h1 = _scenario_h1()
-    h1.expects = TurnTimeoutError
+    h1.expects = AgentEndStatus.TIMEOUT
     scenarios.append(h1)
 
     h2 = _scenario_h2()
-    h2.expects = AgentCrashError
+    h2.expects = AgentEndStatus.CRASHED
     scenarios.append(h2)
 
     i = _build_deadline_break_scenario()
-    i.expects = TurnTimeoutError
+    i.expects = AgentEndStatus.TIMEOUT
     scenarios.append(i)
 
     return scenarios
@@ -437,14 +437,13 @@ def _patches(scenario: ClaudeScenario) -> Iterator[Any]:
 async def run_claude_scenario(
     scenario: ClaudeScenario, working_dir: str
 ) -> tuple[dict[str, Any], list[protocol.StreamEvent]]:
-    """Run ``scenario`` and return the ``TurnRecord``/``pending_turn`` model_dump.
+    """Run ``scenario`` and return its outcome record's model_dump and the events.
 
     Raises ``AssertionError`` if a crash/timeout scenario fails to raise its
     expected exception (so a refactor that silently swallows the failure is
     caught).
     """
     recorder = EventRecorder()
-    import pytest
 
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -453,12 +452,11 @@ async def run_claude_scenario(
     with contextlib.ExitStack() as stack:
         for ctx in _patches(scenario):
             stack.enter_context(ctx)
-        if scenario.expects is not None:
-            with pytest.raises(scenario.expects):
-                await agent.communicate(scenario.prompt, timeout=scenario.timeout, stream_callback=recorder)
-            record = agent.pending_turn
-            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
-        else:
-            record = await agent.communicate(scenario.prompt, timeout=scenario.timeout, stream_callback=recorder)
+        outcome = await agent.communicate(
+            scenario.prompt, iteration=1, timeout=scenario.timeout, stream_callback=recorder
+        )
+        expected = scenario.expects or AgentEndStatus.COMPLETED
+        assert outcome.status is expected, f"{scenario.name}: ended {outcome.status}, expected {expected}"
+        record = outcome.record
 
     return record.model_dump(mode="json"), recorder.events

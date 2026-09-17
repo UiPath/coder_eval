@@ -186,6 +186,7 @@ class UserSimulator:
         self._route: ApiRoute | None = route
         self._agent_override: Agent[Any] | None = agent_override
         self._agent: Agent[Any] | None = None
+        self._turns = 0
         self._scratch_dir: Path | None = None
 
         # PINNED from config, not inherited from the route: leaving it None let
@@ -332,7 +333,8 @@ class UserSimulator:
 
         assert self._agent is not None, "UserSimulator.start() must be called before next_user_message()"
         prompt = dialog_pairs[-1][1] if dialog_pairs else _OPENER_NUDGE
-        turn = await self._agent.communicate(prompt)
+        self._turns += 1
+        turn = (await self._agent.communicate(prompt, iteration=self._turns)).record_or_raise()
         raw = turn.agent_output or ""
         usage = turn.token_usage
         input_tokens = usage.uncached_input_tokens if usage is not None else None

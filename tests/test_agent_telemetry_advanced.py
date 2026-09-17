@@ -73,7 +73,7 @@ async def test_orphaned_result_message_marks_unknown(tmp_path):
 
     try:
         await agent.start(str(tmp_path))
-        turn_record = await agent.communicate("test prompt")
+        turn_record = (await agent.communicate("test prompt", iteration=1)).record
 
         # Verify command has 'unknown' status
         assert len(turn_record.commands) == 1
@@ -125,7 +125,7 @@ async def test_duplicate_result_message_last_wins(tmp_path, caplog):
         await agent.start(str(tmp_path))
 
         with caplog.at_level(logging.DEBUG):
-            turn_record = await agent.communicate("test prompt")
+            turn_record = (await agent.communicate("test prompt", iteration=1)).record
 
         # Verify last result wins
         assert len(turn_record.commands) == 1
@@ -177,7 +177,7 @@ async def test_pending_command_without_result_finalizes_unknown(tmp_path, caplog
         await agent.start(str(tmp_path))
 
         with caplog.at_level(logging.WARNING):
-            turn_record = await agent.communicate("test prompt")
+            turn_record = (await agent.communicate("test prompt", iteration=1)).record
 
         # Verify all three commands recorded
         assert len(turn_record.commands) == 3
@@ -231,7 +231,7 @@ async def test_orphaned_result_without_tool_use_logs_warning(tmp_path, caplog):
         await agent.start(str(tmp_path))
 
         with caplog.at_level(logging.WARNING):
-            turn_record = await agent.communicate("test prompt")
+            turn_record = (await agent.communicate("test prompt", iteration=1)).record
 
         # The orphaned result is handled gracefully: a single synthesized
         # 'unknown' command captures it (rather than being silently dropped).
@@ -283,7 +283,7 @@ async def test_multiple_tools_with_mixed_results(tmp_path):
 
     try:
         await agent.start(str(tmp_path))
-        turn_record = await agent.communicate("test prompt")
+        turn_record = (await agent.communicate("test prompt", iteration=1)).record
 
         assert len(turn_record.commands) == 3
 

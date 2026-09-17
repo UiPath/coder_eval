@@ -14,8 +14,13 @@ from typing import Any
 
 import pytest
 
-from coder_eval.models import SimulationConfig
+from coder_eval.agent import Agent, AgentState
+from coder_eval.errors import AgentCrashError
+from coder_eval.models import SimulationConfig, TurnRecord
 from coder_eval.simulation.user_simulator import UserSimulator
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus
+from tests.fixtures.harness_stubs import stub_contract
 from tests.fixtures.text_stub_agent import TextStubAgent
 
 
@@ -159,7 +164,74 @@ class TestSdkTurnCap:
             UserSimulator(config=_sim_cfg(), task_description="T", initial_prompt="start", agent_override=stub)
         )
         await sim.next_user_message([_pair("start", "reply")])
-        assert stub.kwargs == [{}]
+        assert stub.kwargs == [{"iteration": 1}]
+        await sim.stop()
+
+
+class _OutcomeStubAgent(Agent):
+    """Minimal Agent fake returning a caller-supplied ``TurnOutcome`` per call.
+
+    Unlike ``TextStubAgent`` (which only ever produces a clean turn), this lets
+    a test drive an arbitrary ``TurnOutcome`` (including CRASHED/TIMEOUT), and
+    records the ``iteration`` each ``communicate`` call was given.
+    """
+
+    contract = stub_contract()
+
+    def __init__(self, outcomes: list[TurnOutcome]) -> None:
+        self._outcomes = list(outcomes)
+        self.iterations_seen: list[int] = []
+        self._state = AgentState.WORKING
+        self.working_directory: Path | None = None
+
+    async def start(
+        self,
+        working_directory: str,
+        *,
+        env_path_prepend: list[str] | None = None,
+        plugin_tools_dir: str | None = None,
+        plugin_root: Path | None = None,
+    ) -> None:
+        self.working_directory = Path(working_directory)
+        self._state = AgentState.WORKING
+
+    async def stop(self) -> None:
+        self._state = AgentState.FINISHED
+
+    def get_state(self) -> AgentState:
+        return self._state
+
+    async def communicate(self, user_input: str, *, iteration: int, **kwargs: object) -> TurnOutcome:
+        self.iterations_seen.append(iteration)
+        return self._outcomes.pop(0) if len(self._outcomes) > 1 else self._outcomes[0]
+
+
+class TestCommunicateOutcome:
+    """``next_user_message`` unwraps the underlying agent's ``TurnOutcome`` via ``record_or_raise()``."""
+
+    async def test_crashed_outcome_raises_agent_crash_error(self):
+        crashed_record = TurnRecord(iteration=1, user_input="start", agent_output="", crashed=True)
+        stub = _OutcomeStubAgent([TurnOutcome(record=crashed_record, status=AgentEndStatus.CRASHED, error="boom")])
+        sim = await _make_started(
+            UserSimulator(config=_sim_cfg(), task_description="T", initial_prompt="start", agent_override=stub)
+        )
+        with pytest.raises(AgentCrashError, match="boom"):
+            await sim.next_user_message([_pair("start", "reply")])
+        await sim.stop()
+
+    async def test_iteration_increments_per_simulator_turn(self):
+        def _completed(n: int) -> TurnOutcome:
+            record = TurnRecord(iteration=n, user_input="x", agent_output=f"reply {n}")
+            return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
+
+        stub = _OutcomeStubAgent([_completed(1), _completed(2), _completed(3)])
+        sim = await _make_started(
+            UserSimulator(config=_sim_cfg(), task_description="T", initial_prompt="start", agent_override=stub)
+        )
+        await sim.next_user_message([])
+        await sim.next_user_message([_pair("start", "reply 1")])
+        await sim.next_user_message([_pair("reply 1", "reply 2")])
+        assert stub.iterations_seen == [1, 2, 3]
         await sim.stop()
 
 

@@ -13,8 +13,8 @@ import asyncio
 import contextlib
 import logging
 import threading
-from collections.abc import Callable
-from typing import Self
+from collections.abc import Callable, Coroutine
+from typing import Any, Self
 
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class ThreadedWatchdog:
         *,
         timeout_seconds: float | None,
         on_timeout: Callable[[], None],
-        asyncio_task_to_cancel: asyncio.Task[object] | None = None,
+        asyncio_task_to_cancel: asyncio.Task[Any] | None = None,
         label: str = "watchdog",
     ) -> None:
         self._timeout = timeout_seconds
@@ -95,3 +95,43 @@ class ThreadedWatchdog:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
+
+
+class WatchdogFired(Exception):  # noqa: N818 - a signal, not an error: the plan-named SPI export
+    """The watchdog cancelled the guarded body at its deadline."""
+
+
+async def run_with_watchdog[T](
+    body: Coroutine[Any, Any, T],
+    *,
+    timeout_seconds: float | None,
+    on_timeout: Callable[[], None],
+    label: str,
+) -> T:
+    """Run ``body`` as a child task that a ``ThreadedWatchdog`` cancels at ``timeout_seconds``.
+
+    Returns the body's value; any exception the body raises propagates unchanged.
+
+    Raises:
+        WatchdogFired: the watchdog fired and cancelled the body while the caller
+            itself was not being cancelled. The caller's cancel count is untouched.
+        asyncio.CancelledError: the caller was cancelled; the body is cancelled too.
+
+    Rationale: .claude/notes/agents.md § Why the watchdog cancels a child task
+    """
+    child = asyncio.create_task(body)
+    watchdog = ThreadedWatchdog(
+        timeout_seconds=timeout_seconds, on_timeout=on_timeout, asyncio_task_to_cancel=child, label=label
+    )
+    try:
+        with watchdog:
+            return await child
+    except asyncio.CancelledError:
+        caller = asyncio.current_task()
+        if watchdog.fired and child.cancelled() and (caller is None or caller.cancelling() == 0):
+            raise WatchdogFired(label) from None
+        child.cancel()
+        raise
+    except BaseException:
+        child.cancel()
+        raise

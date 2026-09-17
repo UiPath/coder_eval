@@ -23,7 +23,7 @@ from openai_codex.generated.v2_all import Turn, TurnCompletedNotification
 
 from coder_eval.agents.codex_agent import CodexAgent
 from coder_eval.models import AgentKind, parse_agent_config
-from coder_eval.streaming.events import StreamEvent
+from coder_eval.streaming.events import AgentEndStatus, StreamEvent
 from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
@@ -172,11 +172,10 @@ def _collab(
 class CodexScenario:
     name: str
     notifications: list[Any]
-    expects: type[BaseException] | None = None
+    expects: AgentEndStatus | None = None
 
 
 def _build_catalogue() -> list[CodexScenario]:
-    from coder_eval.errors import AgentCrashError
 
     scenarios: list[CodexScenario] = []
 
@@ -317,7 +316,7 @@ def _build_catalogue() -> list[CodexScenario]:
                 ),
                 _token_usage(inp=100, out=40, cached=8),
             ],
-            expects=AgentCrashError,
+            expects=AgentEndStatus.CRASHED,
         )
     )
 
@@ -381,9 +380,8 @@ def _rebase_notifications(notifications: list[Any]) -> list[Any]:
 
 
 async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> tuple[dict[str, Any], list[StreamEvent]]:
-    """Run ``scenario`` with fakes and return the TurnRecord/pending_turn dump."""
+    """Run ``scenario`` with fakes and return the outcome record's dump and the events."""
     recorder = EventRecorder()
-    import pytest
 
     config = parse_agent_config(type=AgentKind.CODEX, model=CODEX_MODEL)
     agent = CodexAgent(config)
@@ -394,12 +392,9 @@ async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> tuple
     # Point CODEX_HOME at a sessions-less dir so sub-agent rollout recovery
     # short-circuits instead of polling the real ~/.codex.
     with patch.dict(os.environ, {"CODEX_HOME": working_dir}):
-        if scenario.expects is not None:
-            with pytest.raises(scenario.expects):
-                await agent.communicate("do it", stream_callback=recorder)
-            record = agent.pending_turn
-            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
-        else:
-            record = await agent.communicate("do it", stream_callback=recorder)
+        outcome = await agent.communicate("do it", iteration=1, stream_callback=recorder)
+        expected = scenario.expects or AgentEndStatus.COMPLETED
+        assert outcome.status is expected, f"{scenario.name}: ended {outcome.status}, expected {expected}"
+        record = outcome.record
 
     return record.model_dump(mode="json"), recorder.events

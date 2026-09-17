@@ -30,9 +30,8 @@ from typing import Any
 from unittest.mock import patch
 
 from coder_eval.agents.opencode_agent import OpenCodeAgent
-from coder_eval.errors import AgentCrashError
 from coder_eval.models import OpenCodeAgentConfig
-from coder_eval.streaming.events import StreamEvent
+from coder_eval.streaming.events import AgentEndStatus, StreamEvent
 from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
@@ -204,8 +203,8 @@ def _agent() -> OpenCodeAgent:
 class OpenCodeScenario:
     """One recorded CLI event stream.
 
-    ``expects`` names the exception a scenario is supposed to raise, and the
-    runner then snapshots ``pending_turn`` instead of the returned record —
+    ``expects`` names the failed end status a scenario is supposed to reach, and the
+    runner asserts that end status and snapshots the crashed record —
     the same knob ``ClaudeScenario`` carries, for the same reason: the partial
     a crash preserves is a real capture path, and one nobody was comparing
     against a snapshot on this harness.
@@ -213,7 +212,7 @@ class OpenCodeScenario:
 
     name: str
     lines: list[str]
-    expects: type[BaseException] | None = None
+    expects: AgentEndStatus | None = None
 
 
 async def run_opencode_scenario(
@@ -221,7 +220,6 @@ async def run_opencode_scenario(
 ) -> tuple[dict[str, Any], list[StreamEvent]]:
     """Replay one scenario and return the resulting record as a plain dump."""
     recorder = EventRecorder()
-    import pytest
 
     proc = _FakeProcess(_rebase_lines(scenario.lines))
 
@@ -236,13 +234,10 @@ async def run_opencode_scenario(
         patch.object(os, "killpg", lambda _pgid, _sig: None, create=True),
     ):
         await agent.start(working_dir)
-        if scenario.expects is not None:
-            with pytest.raises(scenario.expects):
-                await agent.communicate("do it", stream_callback=recorder)
-            record = agent.pending_turn
-            assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
-        else:
-            record = await agent.communicate("do it", stream_callback=recorder)
+        outcome = await agent.communicate("do it", iteration=1, stream_callback=recorder)
+        expected = scenario.expects or AgentEndStatus.COMPLETED
+        assert outcome.status is expected, f"{scenario.name}: ended {outcome.status}, expected {expected}"
+        record = outcome.record
     return record.model_dump(mode="json"), recorder.events
 
 
@@ -349,7 +344,7 @@ def _build_catalogue() -> list[OpenCodeScenario]:
     )
 
     # (e) the CLI's own structured error AFTER a complete generation. `_settle_turn`
-    # crashes on it, and the partial `pending_turn` must still carry that
+    # crashes on it, and the crashed record must still carry that
     # generation and its head/tail — a crash does not un-measure what was
     # measured before it.
     scenarios.append(
@@ -370,7 +365,7 @@ def _build_catalogue() -> list[OpenCodeScenario]:
                     }
                 ),
             ],
-            expects=AgentCrashError,
+            expects=AgentEndStatus.CRASHED,
         )
     )
 

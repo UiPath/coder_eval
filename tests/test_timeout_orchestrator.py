@@ -26,6 +26,8 @@ from coder_eval.models import (
 )
 from coder_eval.orchestrator import Orchestrator
 from coder_eval.sandbox import Sandbox
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
 
 
 def _make_task(*, turn_timeout: float | None = None, task_timeout: float | None = None):
@@ -72,6 +74,18 @@ def _make_turn_record(iteration: int = 1) -> TurnRecord:
     )
 
 
+def _completed_outcome(record: TurnRecord) -> TurnOutcome:
+    return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
+
+
+def _crashed_outcome(record: TurnRecord, error: str) -> TurnOutcome:
+    return TurnOutcome(record=record, status=AgentEndStatus.CRASHED, error=error)
+
+
+def _timeout_outcome(record: TurnRecord, error: str) -> TurnOutcome:
+    return TurnOutcome(record=record, status=AgentEndStatus.TIMEOUT, error=error)
+
+
 def _make_initialized_orchestrator(task: TaskDefinition, tmp_path) -> Orchestrator:
     """Build an Orchestrator with a pre-initialized EvaluationResult and mock sandbox/checker."""
     run_dir = tmp_path / "run" / "timeout_test"
@@ -116,7 +130,8 @@ async def test_turn_timeout_propagates_from_agent(tmp_path) -> None:
 
     async def timeout_communicate(_prompt, **kwargs):
         await asyncio.sleep(0.01)
-        raise TurnTimeoutError(turn_timeout, iteration=1)
+        record = TurnRecord(iteration=kwargs["iteration"], user_input=_prompt, agent_output="", crashed=True)
+        return _timeout_outcome(record, "agent turn timed out")
 
     mock_agent.communicate = timeout_communicate
     orchestrator.agent = mock_agent
@@ -196,7 +211,7 @@ async def test_no_timeout_when_none(tmp_path) -> None:
     orchestrator = _make_initialized_orchestrator(task, tmp_path)
 
     mock_agent = AsyncMock()
-    mock_agent.communicate = AsyncMock(return_value=_make_turn_record())
+    mock_agent.communicate = AsyncMock(return_value=_completed_outcome(_make_turn_record()))
     orchestrator.agent = mock_agent
 
     orchestrator.success_checker.check_all_async = AsyncMock(  # type: ignore[union-attr]
@@ -241,10 +256,11 @@ async def test_task_timeout_hard_kills_agent(tmp_path) -> None:
 async def test_task_timeout_recovers_the_killed_turn(tmp_path) -> None:
     """A hard-killed task's spend lands on the result instead of vanishing.
 
-    The agent parks the interrupted turn on ``pending_turn`` when it is cancelled,
-    and the task-timeout handler is the only reader of that slot: the cancel is a
-    BaseException, so it never reaches the retry executor's per-attempt hook that
-    drains it on a turn-level timeout. Without the drain the row reports no turns
+    The in-flight attempt's ``EventCollector`` is parked on
+    ``orchestrator._attempt_collector`` for the duration of the attempt, and
+    ``_drain_killed_turn`` is the only reader of that slot: the cancel is a
+    BaseException, so no outcome ever returns to the retry wrapper that would
+    append it. Without the drain the row reports no turns
     and no cost for a task that spent real money.
     """
     task = _make_task(task_timeout=0.1)
@@ -263,13 +279,16 @@ async def test_task_timeout_recovers_the_killed_turn(tmp_path) -> None:
         token_usage=TokenUsage(uncached_input_tokens=40_000, output_tokens=2_000, total_cost_usd=0.15),
     )
 
+    collector = MagicMock()
+    collector.ended = True
+    collector.build_turn_record.return_value = partial
+
     mock_agent = MagicMock()
-    mock_agent.pending_turn = partial
-    mock_agent.discard_pending_turn = AsyncMock()
     mock_agent.get_sdk_options = MagicMock(return_value=None)
     orchestrator.agent = mock_agent
 
     async def slow_loop():
+        orchestrator._attempt_collector = collector
         await asyncio.sleep(10)
         return False
 
@@ -282,8 +301,6 @@ async def test_task_timeout_recovers_the_killed_turn(tmp_path) -> None:
     assert result.total_token_usage is not None
     assert result.total_token_usage.output_tokens == 2_000
     assert result.total_token_usage.total_cost_usd == pytest.approx(0.15)
-    # Drained through the documented contract, so the slot is left clean.
-    mock_agent.discard_pending_turn.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -302,7 +319,6 @@ async def test_task_timeout_with_nothing_to_recover_still_lands(tmp_path) -> Non
     orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
 
     mock_agent = MagicMock()
-    mock_agent.pending_turn = None
     mock_agent.get_sdk_options = MagicMock(return_value=None)
     orchestrator.agent = mock_agent
 
@@ -331,7 +347,8 @@ async def test_turn_timeout_not_rewrapped_as_task_timeout(tmp_path) -> None:
 
     async def turn_out_communicate(_prompt, **kwargs):
         await asyncio.sleep(0.01)
-        raise TurnTimeoutError(turn_timeout, iteration=1)
+        record = TurnRecord(iteration=kwargs["iteration"], user_input=_prompt, agent_output="", crashed=True)
+        return _timeout_outcome(record, "agent turn timed out")
 
     mock_agent.communicate = turn_out_communicate
     orchestrator.agent = mock_agent
@@ -562,8 +579,6 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
     same ``timeout=turn_timeout`` kwarg. A shared retry-cycle budget would
     decrement (or omit) the second-attempt timeout.
     """
-    from coder_eval.errors import AgentCrashError
-
     task = _make_task(turn_timeout=1.0)
     run_dir = tmp_path / "run" / "per_attempt_budget"
     run_dir.mkdir(parents=True)
@@ -589,9 +604,8 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
     async def flaky_communicate(_prompt, **kwargs):
         timeouts_seen.append(kwargs.get("timeout"))
         if len(timeouts_seen) == 1:
-            mock_agent.pending_turn = partial_record
-            raise AgentCrashError("mid-turn failure")
-        return success_record
+            return _crashed_outcome(partial_record, "mid-turn failure")
+        return _completed_outcome(success_record)
 
     mock_agent = AsyncMock()
     mock_agent.communicate = flaky_communicate
@@ -620,64 +634,108 @@ async def test_turn_timeout_is_per_attempt_not_cycle(tmp_path):
 
     assert success is True
     assert timeouts_seen == [1.0, 1.0], "every attempt must receive turn_timeout fresh"
-    # Result.turns: partial (from on_attempt_error) + success (from main flow).
+    # Result.iterations: the CRASHED outcome's partial (appended by
+    # `_communicate_with_retry`) + the retry's success record (appended by the
+    # main flow).
     assert len(orchestrator.result.iterations) == 2
     assert orchestrator.result.iterations[0].crashed is True
     assert orchestrator.result.iterations[1].crashed is False
 
 
 @pytest.mark.asyncio
-async def test_wait_for_backstop_calls_discard_pending_turn(tmp_path):
-    """When the outer ``asyncio.wait_for`` fires, the orchestrator must call
-    ``agent.discard_pending_turn()`` after ``agent.kill()``.
-
-    The wait_for cancels ``communicate()`` via ``CancelledError``
-    (a ``BaseException``), which bypasses the agent's ``except Exception``
-    handlers — so the per-turn iteration counter that ``communicate()`` bumped
-    at entry never gets rolled back by the agent's normal failure path. The
-    orchestrator must invoke ``discard_pending_turn()`` so any future change
-    to the AGENT_TIMEOUT retry policy doesn't silently break the
-    "partials and the retry share an iteration number" contract.
+async def test_crash_then_success_appends_both_records_same_iteration(tmp_path) -> None:
+    """A crashed attempt's partial and the retry's record both land on
+    ``result.iterations``, in order, sharing the iteration number — a retry
+    resumes the same turn rather than starting a new one.
     """
-    task = _make_task(turn_timeout=0.05)
-    run_dir = tmp_path / "run" / "discard_pending"
-    run_dir.mkdir(parents=True)
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
 
-    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
-    orchestrator._build_monitor()
-    orchestrator.result = EvaluationResult(
-        task_id="discard_pending",
-        task_description="discard_pending",
-        variant_id="v",
-        agent_type=AgentKind.CLAUDE_CODE,
-        started_at=datetime.now(),
-        final_status="FAILURE",
-        iteration_count=0,
-        environment_info={},
+    partial = TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True)
+    success = _make_turn_record(iteration=1)
+    calls: list[int] = []
+
+    async def flaky_communicate(_prompt, **kwargs):
+        calls.append(kwargs["iteration"])
+        if len(calls) == 1:
+            return _crashed_outcome(partial, "mid-turn failure")
+        return _completed_outcome(success)
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = flaky_communicate
+    orchestrator.agent = mock_agent
+    orchestrator.success_checker.check_all_async = AsyncMock(  # type: ignore[union-attr]
+        return_value=[CriterionResult(criterion_type="file_exists", description="test", score=1.0)]
     )
 
-    # An Event().wait() coroutine never completes on its own — wait_for must
-    # cancel it. Plain asyncio.sleep would be vulnerable to a global sleep
-    # patch elsewhere; Event.wait isolates this test from that.
+    async def fast_retry_sleep(delay: float) -> None:
+        return None
+
+    with (
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+        patch("asyncio.sleep", side_effect=fast_retry_sleep),
+    ):
+        success_result = await orchestrator._evaluation_loop()
+
+    assert success_result is True
+    assert calls == [1, 1]
+    assert orchestrator.result.iterations == [partial, success]
+
+
+@pytest.mark.asyncio
+async def test_timeout_outcome_is_not_retried(tmp_path) -> None:
+    """A TIMEOUT outcome is terminal: ``communicate`` is called exactly once,
+    and its record is appended to ``result.iterations`` before the
+    ``TurnTimeoutError`` propagates.
+    """
+    task = _make_task(turn_timeout=5.0)
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+
+    record = TurnRecord(iteration=1, user_input="p", agent_output="", crashed=True)
+    calls = 0
+
+    async def timeout_once(_prompt, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _timeout_outcome(record, "timed out")
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = timeout_once
+    orchestrator.agent = mock_agent
+
+    with pytest.raises(TurnTimeoutError):
+        await orchestrator._evaluation_loop()
+
+    assert calls == 1
+    assert orchestrator.result.iterations == [record]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_backstop_appends_record_when_agent_ended_its_turn(tmp_path, monkeypatch) -> None:
+    """The ``wait_for`` backstop kills a hung agent and, when the attempt's
+    ``EventCollector`` already saw an ``AgentEndEvent`` before the hang, appends
+    that record to ``result.iterations``.
+    """
+    monkeypatch.setattr("coder_eval.orchestrator._WAIT_FOR_GRACE_SECONDS", 0.05)
+    task = _make_task(turn_timeout=0.05)
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+
     never_set = asyncio.Event()
 
-    async def hanging_communicate(_prompt, **kwargs):
+    async def hanging_but_ended(_prompt, *, stream_callback, **kwargs):
+        stream_callback.on_event(AgentStartEvent(task_id=task.task_id, iteration=kwargs["iteration"], prompt=_prompt))
+        stream_callback.on_event(
+            AgentEndEvent(
+                task_id=task.task_id, iteration=kwargs["iteration"], crashed=True, status=AgentEndStatus.CRASHED
+            )
+        )
         await never_set.wait()
         raise AssertionError("unreachable: wait_for should have cancelled this")
 
     mock_agent = AsyncMock()
-    mock_agent.communicate = hanging_communicate
+    mock_agent.communicate = hanging_but_ended
     mock_agent.kill = AsyncMock()
-    mock_agent.discard_pending_turn = AsyncMock()
     orchestrator.agent = mock_agent
-
-    mock_sandbox = MagicMock()
-    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
-    mock_sandbox.sandbox_dir.mkdir()
-    orchestrator.sandbox = mock_sandbox
-
-    mock_checker = MagicMock()
-    orchestrator.success_checker = mock_checker
 
     with (
         patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
@@ -685,32 +743,200 @@ async def test_wait_for_backstop_calls_discard_pending_turn(tmp_path):
     ):
         await orchestrator._evaluation_loop()
 
-    # kill() and discard_pending_turn() must both have run.
     assert mock_agent.kill.await_count == 1
-    assert mock_agent.discard_pending_turn.await_count == 1
+    assert len(orchestrator.result.iterations) == 1
+    assert orchestrator.result.iterations[0].crashed is True
 
 
 @pytest.mark.asyncio
-async def test_claude_agent_discard_pending_turn_rolls_back_iteration():
-    """ClaudeCodeAgent.discard_pending_turn is slot-gated: it decrements _iteration
-    only when pending_turn is set, and is idempotent when the slot is empty.
+async def test_wait_for_backstop_appends_nothing_when_agent_never_ended(tmp_path, monkeypatch) -> None:
+    """When the hung agent never got as far as an ``AgentEndEvent``, the
+    backstop's kill has nothing to recover and appends nothing.
     """
-    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-    from coder_eval.models import AgentKind, TurnRecord, parse_agent_config
+    monkeypatch.setattr("coder_eval.orchestrator._WAIT_FOR_GRACE_SECONDS", 0.05)
+    task = _make_task(turn_timeout=0.05)
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
 
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
-    agent = ClaudeCodeAgent(config)
+    never_set = asyncio.Event()
 
-    # Idle agent (no pending turn): discard is a no-op. Negative values would
-    # break the "partials and retry share an iteration" contract.
-    assert agent._iteration == 0
-    await agent.discard_pending_turn()
-    assert agent._iteration == 0
+    async def hanging_never_started(_prompt, **kwargs):
+        await never_set.wait()
+        raise AssertionError("unreachable: wait_for should have cancelled this")
 
-    # With pending_turn set: discard clears the slot AND decrements _iteration.
-    partial = TurnRecord(iteration=3, user_input="p", agent_output="<partial>", crashed=True)
-    agent._iteration = 3
-    agent.pending_turn = partial
-    await agent.discard_pending_turn()
-    assert agent.pending_turn is None
-    assert agent._iteration == 2
+    mock_agent = AsyncMock()
+    mock_agent.communicate = hanging_never_started
+    mock_agent.kill = AsyncMock()
+    orchestrator.agent = mock_agent
+
+    with (
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+        pytest.raises(TurnTimeoutError),
+    ):
+        await orchestrator._evaluation_loop()
+
+    assert mock_agent.kill.await_count == 1
+    assert orchestrator.result.iterations == []
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_recovers_in_flight_turn_via_attempt_collector(tmp_path) -> None:
+    """A real task-timeout cancellation, hitting the agent mid-``communicate``,
+    is recovered through ``orchestrator._attempt_collector`` (not
+    ``agent.pending_turn``) by ``_drain_killed_turn``.
+    """
+    task = _make_task(task_timeout=0.1)
+    run_dir = tmp_path / "run" / "drain_killed_turn"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._build_monitor()
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+    orchestrator.success_checker = MagicMock()
+
+    async def hang_after_ending(_prompt, *, stream_callback, **kwargs):
+        stream_callback.on_event(AgentStartEvent(task_id=task.task_id, iteration=kwargs["iteration"], prompt=_prompt))
+        stream_callback.on_event(
+            AgentEndEvent(
+                task_id=task.task_id, iteration=kwargs["iteration"], crashed=True, status=AgentEndStatus.CRASHED
+            )
+        )
+        await asyncio.Event().wait()
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = hang_after_ending
+    mock_agent.kill_sync = MagicMock()
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    result = await orchestrator.run()
+
+    assert result.final_status == "TIMEOUT"
+    assert len(result.iterations) == 1
+    assert result.iterations[0].crashed is True
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_after_finished_attempt_appends_nothing_extra(tmp_path) -> None:
+    """A task timeout that fires AFTER the agent's attempt already finished
+    (e.g. during a slow criteria check) finds ``_attempt_collector`` already
+    cleared to ``None`` and drains nothing extra.
+    """
+    task = _make_task(task_timeout=0.15)
+    run_dir = tmp_path / "run" / "drain_after_finished_attempt"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._build_monitor()
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+
+    record = _make_turn_record()
+
+    async def quick_communicate(_prompt, **kwargs):
+        callback = kwargs["stream_callback"]
+        callback.on_event(AgentStartEvent(task_id="t", iteration=kwargs["iteration"]))
+        callback.on_event(AgentEndEvent(task_id="t", iteration=kwargs["iteration"]))
+        return _completed_outcome(record)
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = quick_communicate
+    mock_agent.kill_sync = MagicMock()
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    mock_checker = MagicMock()
+
+    async def slow_check(*_args, **_kwargs):
+        await asyncio.sleep(10)
+        return []
+
+    mock_checker.check_all_async = slow_check
+    orchestrator.success_checker = mock_checker
+
+    result = await orchestrator.run()
+
+    assert orchestrator._attempt_collector is None
+    assert result.final_status == "TIMEOUT"
+    assert result.iterations == [record]
+
+
+@pytest.mark.asyncio
+async def test_unhandled_end_status_raises_runtime_error_and_ends_error(tmp_path, monkeypatch) -> None:
+    """An outcome status outside the returned/crash/timeout allowlist is a
+    harness bug: it raises ``RuntimeError`` and the task ends ``ERROR``.
+    """
+    monkeypatch.setattr("coder_eval.orchestrator._RETURNED_END_STATUSES", frozenset())
+    task = _make_task()
+    run_dir = tmp_path / "run" / "unhandled_status"
+    run_dir.mkdir(parents=True)
+
+    orchestrator = Orchestrator(task=task, run_dir=run_dir, variant_id="test-variant")
+    orchestrator._build_monitor()
+    orchestrator._setup = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._cleanup = AsyncMock()  # type: ignore[method-assign]
+
+    mock_sandbox = MagicMock()
+    mock_sandbox.sandbox_dir = tmp_path / "sandbox"
+    mock_sandbox.sandbox_dir.mkdir()
+    orchestrator.sandbox = mock_sandbox
+    orchestrator.success_checker = MagicMock()
+
+    record = _make_turn_record()
+    calls: list[int] = []
+
+    async def completed_communicate(_prompt, **kwargs):
+        calls.append(kwargs["iteration"])
+        return _completed_outcome(record)
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = completed_communicate
+    mock_agent.get_sdk_options = MagicMock(return_value=None)
+    orchestrator.agent = mock_agent
+
+    result = await orchestrator.run()
+
+    assert result.final_status == "ERROR"
+    assert "unhandled end status" in (result.error_message or "")
+    assert calls == [1], "an unhandled status is a harness bug, never a retried turn"
+
+
+@pytest.mark.asyncio
+async def test_every_attempt_crashing_appends_every_partial_before_the_error(tmp_path) -> None:
+    """CRASHED on the final retry still appends its record before ``AgentCrashError`` escapes."""
+    task = _make_task()
+    orchestrator = _make_initialized_orchestrator(task, tmp_path)
+    partials = [TurnRecord(iteration=1, user_input="p", agent_output=f"<partial {n}>", crashed=True) for n in range(3)]
+    calls: list[int] = []
+
+    async def crashing_communicate(_prompt, **kwargs):
+        calls.append(kwargs["iteration"])
+        return _crashed_outcome(partials[len(calls) - 1], "provider exploded")
+
+    mock_agent = AsyncMock()
+    mock_agent.communicate = crashing_communicate
+    orchestrator.agent = mock_agent
+
+    async def fast_retry_sleep(delay: float) -> None:
+        return None
+
+    with (
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+        patch("asyncio.sleep", side_effect=fast_retry_sleep),
+        pytest.raises(AgentCrashError, match="provider exploded"),
+    ):
+        await orchestrator._evaluation_loop()
+
+    assert calls == [1, 1, 1]
+    assert orchestrator.result.iterations == partials
+    assert orchestrator._attempt_collector is None

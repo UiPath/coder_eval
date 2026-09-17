@@ -1913,15 +1913,15 @@ class _CooperativeToolAgent:
         self._tool_seq = 0
         self.host = AsyncMock()
         self.host.communicate = self.communicate
-        self.host.pending_turn = None
 
-    async def communicate(self, user_input, *, stream_callback=None, timeout=None, should_stop=None):
+    async def communicate(self, user_input, *, iteration=1, stream_callback=None, timeout=None, should_stop=None):
         from datetime import datetime
 
-        from coder_eval.errors import AgentCrashError
         from coder_eval.models import CommandTelemetry, TurnRecord
+        from coder_eval.streaming.emitter import TurnOutcome
         from coder_eval.streaming.events import (
             AgentEndEvent,
+            AgentEndStatus,
             AgentStartEvent,
             StopReason,
             ToolEndEvent,
@@ -1934,7 +1934,7 @@ class _CooperativeToolAgent:
         intended, crash = self._plan[self.attempt]
         self.attempt += 1
         self.should_stop_callables.append(should_stop)
-        stream_callback.on_event(AgentStartEvent(task_id="t", prompt=user_input, iteration=1))
+        stream_callback.on_event(AgentStartEvent(task_id="t", prompt=user_input, iteration=iteration))
 
         commands: list[CommandTelemetry] = []
         reason: StopReason | None = should_stop()
@@ -1948,21 +1948,24 @@ class _CooperativeToolAgent:
         self.emitted_per_attempt.append(len(commands))
 
         if crash:
-            self.host.pending_turn = TurnRecord(
-                iteration=1, user_input=user_input, agent_output="<partial>", commands=commands, crashed=True
+            partial = TurnRecord(
+                iteration=iteration, user_input=user_input, agent_output="<partial>", commands=commands, crashed=True
             )
-            raise AgentCrashError("mid-turn failure")
+            return TurnOutcome(record=partial, status=AgentEndStatus.CRASHED, error="mid-turn failure")
 
         status = end_status_for(reason) if reason is not None else None
         if status is not None:
-            stream_callback.on_event(AgentEndEvent(task_id="t", status=status, iteration=1, user_input=user_input))
-        return TurnRecord(
-            iteration=1,
+            stream_callback.on_event(
+                AgentEndEvent(task_id="t", status=status, iteration=iteration, user_input=user_input)
+            )
+        record = TurnRecord(
+            iteration=iteration,
             user_input=user_input,
             agent_output="stopped",
             commands=commands,
             tool_calls_exhausted=reason is StopReason.TOOL_CALL_CAP,
         )
+        return TurnOutcome(record=record, status=status or AgentEndStatus.COMPLETED, error=None)
 
 
 @pytest.mark.asyncio
@@ -1996,14 +1999,16 @@ async def test_a_latched_cap_the_agent_did_not_stop_on_is_not_labelled_exhausted
     from unittest.mock import AsyncMock, patch
 
     from coder_eval.models import CommandTelemetry, TurnRecord
-    from coder_eval.streaming.events import StopReason, ToolEndEvent
+    from coder_eval.streaming.emitter import TurnOutcome
+    from coder_eval.streaming.events import AgentEndStatus, StopReason, ToolEndEvent
 
     orchestrator = _cap_orchestrator(_cap_task("late_latch_test", max_tool_calls=1), tmp_path)
 
-    async def _communicate(user_input, *, stream_callback=None, timeout=None, should_stop=None):
+    async def _communicate(user_input, *, iteration=1, stream_callback=None, timeout=None, should_stop=None):
         tool = CommandTelemetry(tool_name="Bash", tool_id="late", timestamp=datetime.now())
         stream_callback.on_event(ToolEndEvent(task_id="t", tool=tool))
-        return TurnRecord(iteration=1, user_input=user_input, agent_output="done", commands=[tool])
+        record = TurnRecord(iteration=iteration, user_input=user_input, agent_output="done", commands=[tool])
+        return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
     mock_agent = AsyncMock()
     mock_agent.communicate = _communicate
@@ -2067,17 +2072,16 @@ async def test_tool_call_cap_counts_a_crashed_attempts_calls_toward_the_retry(tm
 
 @pytest.mark.asyncio
 async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
-    """First agent.communicate raises AgentCrashError with a partial; retry succeeds.
+    """First agent.communicate outcome is CRASHED with a partial; retry succeeds.
 
-    Locks the orchestrator wiring between `execute_with_retry` and the
-    `_preserve_partial_on_failure` callback: the partial record reaches
-    `result.iterations` before the successful retry's record, and both share the
-    same iteration number (per the agent-side rollback contract).
+    Locks the orchestrator wiring in `_communicate_with_retry`: a CRASHED
+    outcome's record reaches `result.iterations` before it is raised (and
+    retried), so the partial lands before the successful retry's record, and
+    both share the same iteration number (per the agent-side rollback contract).
     """
     from datetime import datetime
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from coder_eval.errors import AgentCrashError
     from coder_eval.models import (
         CommandTelemetry,
         CriterionResult,
@@ -2085,6 +2089,8 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
         SandboxConfig,
         TurnRecord,
     )
+    from coder_eval.streaming.emitter import TurnOutcome
+    from coder_eval.streaming.events import AgentEndStatus
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
@@ -2151,9 +2157,8 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
     async def crash_then_succeed_impl(_prompt, **kwargs):
         call_index[0] += 1
         if call_index[0] == 1:
-            mock_agent.pending_turn = partial_record
-            raise AgentCrashError("mid-turn failure")
-        return success_record
+            return TurnOutcome(record=partial_record, status=AgentEndStatus.CRASHED, error="mid-turn failure")
+        return TurnOutcome(record=success_record, status=AgentEndStatus.COMPLETED, error=None)
 
     mock_agent.communicate.side_effect = crash_then_succeed_impl
     orchestrator.agent = mock_agent
@@ -2207,6 +2212,8 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
         SandboxConfig,
         TurnRecord,
     )
+    from coder_eval.streaming.emitter import TurnOutcome
+    from coder_eval.streaming.events import AgentEndStatus
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
         type=AgentKind.CLAUDE_CODE,
@@ -2255,8 +2262,9 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     mock_agent = AsyncMock()
 
     async def timeout_impl(_prompt, **kwargs):
-        mock_agent.pending_turn = partial_record
-        raise TurnTimeoutError(600.0, iteration=1)
+        return TurnOutcome(
+            record=partial_record, status=AgentEndStatus.TIMEOUT, error="Agent turn timed out after 600s"
+        )
 
     mock_agent.communicate.side_effect = timeout_impl
     orchestrator.agent = mock_agent
@@ -2275,9 +2283,9 @@ async def test_evaluation_loop_stamps_timeout_reason_on_partial(tmp_path):
     with (
         patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
-        # TurnTimeoutError is non-retryable, so the loop re-raises after the
-        # on_attempt_error callback has already stamped + appended the partial.
-        # We only care about the side-effect, so suppress the re-raise.
+        # TurnTimeoutError is non-retryable, so the loop re-raises after
+        # `_communicate_with_retry` has already appended the TIMEOUT outcome's
+        # partial. We only care about the side-effect, so suppress the re-raise.
         pytest.raises(TurnTimeoutError),
     ):
         await orchestrator._evaluation_loop()
@@ -2691,12 +2699,15 @@ class _PluginRootAgent(MockAgent):
         from datetime import datetime
 
         from coder_eval.models import CommandTelemetry, TurnRecord
+        from coder_eval.streaming.emitter import TurnOutcome
+        from coder_eval.streaming.events import AgentEndStatus
 
         self._iteration += 1
         skill = CommandTelemetry(
             tool_name="Skill", tool_id="s1", timestamp=datetime.now(), parameters={"skill": "probe-skill"}
         )
-        return TurnRecord(iteration=self._iteration, user_input=user_input, agent_output="done", commands=[skill])
+        record = TurnRecord(iteration=self._iteration, user_input=user_input, agent_output="done", commands=[skill])
+        return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
 
 def _patch_routes(monkeypatch) -> None:

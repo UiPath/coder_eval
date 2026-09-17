@@ -11,6 +11,8 @@ from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.models import TurnRecord
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus
 from tests.fixtures.harness_stubs import stub_contract
 
 
@@ -47,12 +49,8 @@ class TextStubAgent(Agent):
     def get_state(self) -> AgentState:
         return self._state
 
-    async def communicate(self, user_input: str, **kwargs: object) -> TurnRecord:
-        self._iteration += 1
+    async def communicate(self, user_input: str, *, iteration: int, **kwargs: object) -> TurnOutcome:
         self.calls.append(user_input)
         text = self._responses.pop(0) if self._responses else ""
-        return TurnRecord(
-            iteration=self._iteration,
-            user_input=user_input,
-            agent_output=text,
-        )
+        record = TurnRecord(iteration=iteration, user_input=user_input, agent_output=text)
+        return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)

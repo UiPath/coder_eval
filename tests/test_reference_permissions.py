@@ -561,6 +561,8 @@ class TestOrchestratorWiring:
 
         from coder_eval.models import EvaluationResult, FinalStatus, TurnRecord
         from coder_eval.orchestrator import Orchestrator
+        from coder_eval.streaming.emitter import TurnOutcome
+        from coder_eval.streaming.events import AgentEndStatus
 
         task_dir = tmp_path / "task"
         reference = task_dir / "reference"
@@ -598,11 +600,11 @@ class TestOrchestratorWiring:
         async def _cheating_communicate(prompt, **kwargs):
             observed["reference"] = _try_read(staged / "solution.py")
             observed["task_dir"] = _try_read(task_file)
-            return TurnRecord(iteration=1, prompt=prompt, user_input=prompt, agent_output="done")
+            record = TurnRecord(iteration=1, prompt=prompt, user_input=prompt, agent_output="done")
+            return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
         agent = MagicMock()
         agent.communicate = _cheating_communicate
-        agent.pending_turn = None
         orchestrator.agent = agent
 
         await orchestrator._communicate_with_retry(prompt="go", iteration=1, operation_label="test")
@@ -633,6 +635,8 @@ class TestOrchestratorWiring:
 
         from coder_eval.models import CriterionResult, EvaluationResult, FinalStatus, TurnRecord
         from coder_eval.orchestrator import Orchestrator
+        from coder_eval.streaming.emitter import TurnOutcome
+        from coder_eval.streaming.events import AgentEndStatus
 
         task_dir = tmp_path / "task"
         reference = task_dir / "reference"
@@ -664,11 +668,11 @@ class TestOrchestratorWiring:
 
         async def _communicate(prompt, **kwargs):
             seen["during_turn"] = _mode(staged)
-            return TurnRecord(iteration=1, prompt=prompt, user_input=prompt, agent_output="done")
+            record = TurnRecord(iteration=1, prompt=prompt, user_input=prompt, agent_output="done")
+            return TurnOutcome(record=record, status=AgentEndStatus.COMPLETED, error=None)
 
         agent = MagicMock()
         agent.communicate = _communicate
-        agent.pending_turn = None
         orchestrator.agent = agent
 
         async def _check_all_async(*args, **kwargs):

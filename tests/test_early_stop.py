@@ -43,7 +43,6 @@ from coder_eval.config import settings
 from coder_eval.criteria import CriterionRegistry, init_criteria
 from coder_eval.criteria.command_executed import CommandExecutedChecker
 from coder_eval.criteria.skill_triggered import SkillTriggeredChecker, _engaged_skill_names
-from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import (
     AgentKind,
     ApiBackend,
@@ -81,6 +80,7 @@ from coder_eval.orchestrator import Orchestrator, build_task_event
 from coder_eval.reports import ReportGenerator
 from coder_eval.reports.html import _render_criteria, _render_header
 from coder_eval.run_record import eval_result_to_task_dict
+from coder_eval.streaming.emitter import TurnOutcome
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -91,6 +91,7 @@ from coder_eval.streaming.events import (
     ToolStartEvent,
     TurnEndStatus,
     TurnStartEvent,
+    end_status_for,
 )
 from tests._fixtures.live_criteria import FROZEN_TS, make_command, make_turn
 from tests.fixtures.harness_stubs import config_for_kind, stub_contract
@@ -1132,14 +1133,14 @@ class _EventSink:
 
 async def _run_claude_communicate(
     *, stop_after: int | None = None, never: bool = False, n_messages: int = 3
-) -> tuple[ClaudeCodeAgent, TurnRecord, _EventSink, int]:
+) -> tuple[ClaudeCodeAgent, TurnOutcome, _EventSink, int]:
     """Drive ``ClaudeCodeAgent.communicate`` over a mocked ``query`` yielding
     ``n_messages`` dummy messages.
 
     ``stop_after``: build a should_stop that returns ``EARLY_CRITERION`` once that
     many messages have been pulled (checked after each dispatch). ``never``: pass
     an explicit always-None should_stop. Neither: pass ``should_stop=None``. Returns
-    ``(agent, record, sink, pulled_count)``.
+    ``(agent, outcome, sink, pulled_count)``.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -1169,8 +1170,8 @@ async def _run_claude_communicate(
 
         sink = _EventSink()
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            record = await agent.communicate("prompt", stream_callback=sink, should_stop=should_stop)
-    return agent, record, sink, pulled["n"]
+            outcome = await agent.communicate("prompt", iteration=1, stream_callback=sink, should_stop=should_stop)
+    return agent, outcome, sink, pulled["n"]
 
 
 def _agent_end_events(sink: _EventSink) -> list[AgentEndEvent]:
@@ -1190,14 +1191,13 @@ class _NoopWatchdog:
         return False
 
 
-async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink, BaseException | None]:
+async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink, TurnOutcome]:
     """Drive ``communicate`` with a slow query (50ms) against a 10ms deadline AND
     a should_stop returning ``EARLY_CRITERION`` — the deadline guard must win. Returns
-    ``(agent, sink, raised_exception)``."""
+    ``(agent, sink, outcome)``."""
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
     sink = _EventSink()
-    raised: BaseException | None = None
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
 
@@ -1209,13 +1209,10 @@ async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink
             patch("coder_eval.agents.claude_code_agent.query", slow_query),
             patch("coder_eval.agents.claude_code_agent.ThreadedWatchdog", _NoopWatchdog),
         ):
-            try:
-                await agent.communicate(
-                    "p", stream_callback=sink, timeout=0.01, should_stop=lambda: StopReason.EARLY_CRITERION
-                )
-            except TurnTimeoutError as exc:
-                raised = exc
-    return agent, sink, raised
+            outcome = await agent.communicate(
+                "p", iteration=1, stream_callback=sink, timeout=0.01, should_stop=lambda: StopReason.EARLY_CRITERION
+            )
+    return agent, sink, outcome
 
 
 class TestNewFixtureTasksResolve:
@@ -1252,31 +1249,31 @@ class TestCooperativeStopSeam:
         assert TurnEndStatus(AgentEndStatus.STOPPED_EARLY.value) == TurnEndStatus.STOPPED_EARLY
 
     async def test_stop_after_first_dispatched_message(self) -> None:
-        _agent, record, sink, pulled = await _run_claude_communicate(stop_after=1, n_messages=3)
+        _agent, outcome, sink, pulled = await _run_claude_communicate(stop_after=1, n_messages=3)
         # The deciding message is kept; the next is never pulled.
         assert pulled == 1
-        assert record.crashed is False
+        assert outcome.record.crashed is False
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.STOPPED_EARLY
         assert ends[0].crashed is False
 
     async def test_early_stop_is_clean_not_crashed(self) -> None:
-        agent, record, _sink, _pulled = await _run_claude_communicate(stop_after=1)
-        # A clean stop: no partial pending_turn, no ERROR state, no raise (we got here).
-        assert agent.pending_turn is None
+        agent, outcome, _sink, _pulled = await _run_claude_communicate(stop_after=1)
+        # A clean stop: no CRASHED/TIMEOUT status, no ERROR state.
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
         assert agent.get_state().value != "error"
-        assert record.crashed is False
+        assert outcome.record.crashed is False
 
     async def test_should_stop_none_consumes_full_stream(self) -> None:
-        _agent, _record, sink, pulled = await _run_claude_communicate(stop_after=None, n_messages=3)
+        _agent, _outcome, sink, pulled = await _run_claude_communicate(stop_after=None, n_messages=3)
         assert pulled == 3
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.COMPLETED
 
     async def test_should_stop_returning_none_consumes_full_stream(self) -> None:
-        _agent, _record, sink, pulled = await _run_claude_communicate(never=True, n_messages=3)
+        _agent, _outcome, sink, pulled = await _run_claude_communicate(never=True, n_messages=3)
         assert pulled == 3
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
 
@@ -1284,14 +1281,14 @@ class TestCooperativeStopSeam:
         # Both signals live in one turn: a deadline breach AND should_stop=True.
         # The top-of-loop deadline guard returns BEFORE dispatch, so the stop
         # check is never reached — TIMEOUT wins over the pending stop.
-        agent, sink, raised = await _run_claude_communicate_timeout()
-        assert isinstance(raised, TurnTimeoutError)
+        _agent, sink, outcome = await _run_claude_communicate_timeout()
+        assert outcome.status is AgentEndStatus.TIMEOUT
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.TIMEOUT
         assert ends[0].crashed is True
         # The crashed partial is preserved for the orchestrator to drain.
-        assert agent.pending_turn is not None and agent.pending_turn.crashed is True
+        assert outcome.record.crashed is True
         # STOPPED_EARLY must NOT appear — the stop lost the race.
         assert AgentEndStatus.STOPPED_EARLY not in {e.status for e in ends}
 
@@ -2276,12 +2273,12 @@ class TestTurnMonitorEarlyStop:
 class _ScriptedAgent:
     """Duck-typed agent: replays scripted events through the callback, polling
     ``should_stop`` after each and breaking on a reason (mirrors the real
-    message-boundary cut). Returns a fixed ``TurnRecord``."""
+    message-boundary cut). Returns a fixed ``TurnRecord`` wrapped in a
+    ``TurnOutcome`` whose status reflects whether ``should_stop`` fired."""
 
     def __init__(self, events: list[Any], turn: TurnRecord) -> None:
         self._events = events
         self._turn = turn
-        self.pending_turn: TurnRecord | None = None
         self.delivered = 0
 
     def get_sdk_options(self) -> dict[str, Any] | None:
@@ -2291,17 +2288,22 @@ class _ScriptedAgent:
         self,
         prompt: str,
         *,
+        iteration: int,
         stream_callback: Any = None,
         timeout: float | None = None,
         should_stop: Callable[[], StopReason | None] | None = None,
-    ) -> TurnRecord:
+    ) -> TurnOutcome:
+        reason: StopReason | None = None
         for event in self._events:
             if stream_callback is not None:
                 stream_callback.on_event(event)
             self.delivered += 1
-            if should_stop is not None and should_stop():
-                break
-        return self._turn
+            if should_stop is not None:
+                reason = should_stop()
+                if reason is not None:
+                    break
+        status = end_status_for(reason) if reason is not None else AgentEndStatus.COMPLETED
+        return TurnOutcome(record=self._turn, status=status, error=None)
 
 
 async def _run_wiring(
@@ -2912,7 +2914,7 @@ async def _run_codex_communicate(
     stop_after: int | None = None,
     never: bool = False,
     timeout: float | None = None,
-) -> tuple[CodexAgent, TurnRecord, _EventSink, _FakeCodexStream, _FakeCodexTurnHandle]:
+) -> tuple[CodexAgent, TurnOutcome, _EventSink, _FakeCodexStream, _FakeCodexTurnHandle]:
     """Drive ``CodexAgent.communicate`` over a fake notification stream.
 
     ``stop_after``: should_stop returns ``EARLY_CRITERION`` once that many
@@ -2934,38 +2936,40 @@ async def _run_codex_communicate(
 
     sink = _EventSink()
     with patch.object(_CodexTurnState, "on_turn_completed", _stub_on_turn_completed):
-        record = await agent.communicate("prompt", stream_callback=sink, timeout=timeout, should_stop=should_stop)
-    return agent, record, sink, stream, handle
+        outcome = await agent.communicate(
+            "prompt", iteration=1, stream_callback=sink, timeout=timeout, should_stop=should_stop
+        )
+    return agent, outcome, sink, stream, handle
 
 
 class TestCodexCooperativeStopSeam:
     async def test_stop_after_first_dispatched_notification(self) -> None:
         notifications = [_codex_delta(0), _codex_delta(1), _codex_delta(2), _codex_completed()]
-        agent, record, sink, stream, handle = await _run_codex_communicate(notifications=notifications, stop_after=1)
+        agent, outcome, sink, stream, handle = await _run_codex_communicate(notifications=notifications, stop_after=1)
         # The deciding notification is kept; the next is never pulled.
         assert stream.iter.pulled == 1
         # The in-flight turn was interrupted exactly once (server-side spend cut).
         assert handle.interrupts == 1
-        assert record.crashed is False
+        assert outcome.record.crashed is False
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.STOPPED_EARLY
         assert ends[0].crashed is False
-        # A clean stop: no partial pending_turn, no ERROR state, no raise.
-        assert agent.pending_turn is None
+        # A clean stop: no CRASHED/TIMEOUT status, no ERROR state.
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
         assert agent.get_state().value != "error"
 
     async def test_should_stop_none_consumes_full_stream(self) -> None:
         notifications = [_codex_delta(0), _codex_delta(1), _codex_completed()]
-        _agent, record, sink, stream, handle = await _run_codex_communicate(notifications=notifications)
+        _agent, outcome, sink, stream, handle = await _run_codex_communicate(notifications=notifications)
         assert stream.iter.pulled == 3
         assert handle.interrupts == 0
-        assert record.crashed is False
+        assert outcome.record.crashed is False
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
 
     async def test_should_stop_returning_none_consumes_full_stream(self) -> None:
         notifications = [_codex_delta(0), _codex_delta(1), _codex_completed()]
-        _agent, _record, sink, stream, _handle = await _run_codex_communicate(notifications=notifications, never=True)
+        _agent, _outcome, sink, stream, _handle = await _run_codex_communicate(notifications=notifications, never=True)
         assert stream.iter.pulled == 3
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
 
@@ -2973,21 +2977,22 @@ class TestCodexCooperativeStopSeam:
         # The stream is cut before any turn/completed: turn_result is None, but the
         # stop makes the "turn never completed" raise conditional — no crash.
         notifications = [_codex_delta(0), _codex_delta(1), _codex_delta(2)]
-        _agent, record, sink, _stream, _handle = await _run_codex_communicate(notifications=notifications, stop_after=1)
-        assert record.crashed is False
+        _agent, outcome, sink, _stream, _handle = await _run_codex_communicate(
+            notifications=notifications, stop_after=1
+        )
+        assert outcome.record.crashed is False
         assert _agent_end_events(sink)[0].status == AgentEndStatus.STOPPED_EARLY
 
-    async def test_stream_dying_without_stop_still_raises(self) -> None:
+    async def test_stream_dying_without_stop_still_crashes(self) -> None:
         # Regression guard: a stream that ends with NO turn/completed and NO stop
         # is still a crash (the RuntimeError survives for genuine stream deaths).
         agent = _codex_agent()
         stream = _FakeCodexStream([_codex_delta(0)])
         agent.thread = SimpleNamespace(turn=lambda _prompt: _FakeCodexTurnHandle(stream))
-        with pytest.raises(AgentCrashError, match="did not complete"):
-            await agent.communicate("prompt", stream_callback=_EventSink(), should_stop=None)
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
-        await agent.discard_pending_turn()
+        outcome = await agent.communicate("prompt", iteration=1, stream_callback=_EventSink(), should_stop=None)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert "did not complete" in (outcome.error or "")
+        assert outcome.record.crashed is True
 
     async def test_timeout_beats_stop_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Both signals in one turn: the watchdog fires (timeout_hit) AND should_stop
@@ -3008,18 +3013,17 @@ class TestCodexCooperativeStopSeam:
         stream = _FakeCodexStream([_codex_delta(0), _codex_delta(1)])
         agent.thread = SimpleNamespace(turn=lambda _prompt: _FakeCodexTurnHandle(stream))
         sink = _EventSink()
-        with pytest.raises(TurnTimeoutError):
-            await agent.communicate(
-                "prompt", stream_callback=sink, timeout=30.0, should_stop=lambda: StopReason.EARLY_CRITERION
-            )
+        outcome = await agent.communicate(
+            "prompt", iteration=1, stream_callback=sink, timeout=30.0, should_stop=lambda: StopReason.EARLY_CRITERION
+        )
+        assert outcome.status is AgentEndStatus.TIMEOUT
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.TIMEOUT
         assert ends[0].crashed is True
-        assert agent.pending_turn is not None and agent.pending_turn.crashed is True
+        assert outcome.record.crashed is True
         # STOPPED_EARLY must NOT appear — the stop lost the race.
         assert AgentEndStatus.STOPPED_EARLY not in {e.status for e in ends}
-        await agent.discard_pending_turn()
 
     async def test_post_stop_exception_stays_clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The retry-poisoning gap: an exception AFTER the cooperative break (here:
@@ -3031,14 +3035,16 @@ class TestCodexCooperativeStopSeam:
 
         monkeypatch.setattr(_CodexTurnState, "close_open_tools", _boom)
         notifications = [_codex_delta(0), _codex_delta(1)]
-        agent, record, sink, _stream, _handle = await _run_codex_communicate(notifications=notifications, stop_after=1)
-        # No AgentCrashError raised (we got a record back), clean STOPPED_EARLY.
-        assert record.crashed is False
+        _agent, outcome, sink, _stream, _handle = await _run_codex_communicate(
+            notifications=notifications, stop_after=1
+        )
+        # No crash outcome (we got a clean record back), clean STOPPED_EARLY.
+        assert outcome.record.crashed is False
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.STOPPED_EARLY
         assert ends[0].crashed is False
-        assert agent.pending_turn is None
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
 
     async def test_post_stop_cleanup_exception_without_stop_still_crashes(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3052,9 +3058,9 @@ class TestCodexCooperativeStopSeam:
         agent = _codex_agent()
         stream = _FakeCodexStream([_codex_delta(0)])
         agent.thread = SimpleNamespace(turn=lambda _prompt: _FakeCodexTurnHandle(stream))
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("prompt", stream_callback=_EventSink(), should_stop=None)
-        await agent.discard_pending_turn()
+        outcome = await agent.communicate("prompt", iteration=1, stream_callback=_EventSink(), should_stop=None)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.crashed is True
 
     async def test_stopped_turn_skips_subagent_recovery(self) -> None:
         # A stopped turn must not attempt rollout recovery: children may have no
@@ -3078,6 +3084,7 @@ class TestCodexCooperativeStopSeam:
         ):
             await agent.communicate(
                 "prompt",
+                iteration=1,
                 stream_callback=_EventSink(),
                 should_stop=lambda: StopReason.EARLY_CRITERION if stream.iter.pulled >= 1 else None,
             )
@@ -3145,7 +3152,7 @@ async def _run_antigravity_communicate(
     stop_after: int | None = None,
     never: bool = False,
     cancel_raises: bool = False,
-) -> tuple[AntigravityAgent, TurnRecord, _EventSink, _CountingConversation]:
+) -> tuple[AntigravityAgent, TurnOutcome, _EventSink, _CountingConversation]:
     """Drive ``AntigravityAgent.communicate`` over a fake step stream (same
     stop_after / never / None semantics as the Claude and Codex drivers)."""
     conversation = _CountingConversation([_ag_step(i) for i in range(n_steps)], cancel_raises=cancel_raises)
@@ -3160,45 +3167,45 @@ async def _run_antigravity_communicate(
         should_stop = None
 
     sink = _EventSink()
-    record = await agent.communicate("prompt", stream_callback=sink, should_stop=should_stop)
-    return agent, record, sink, conversation
+    outcome = await agent.communicate("prompt", iteration=1, stream_callback=sink, should_stop=should_stop)
+    return agent, outcome, sink, conversation
 
 
 class TestAntigravityCooperativeStopSeam:
     async def test_stop_after_first_processed_step(self) -> None:
-        agent, record, sink, conversation = await _run_antigravity_communicate(stop_after=1, n_steps=3)
+        agent, outcome, sink, conversation = await _run_antigravity_communicate(stop_after=1, n_steps=3)
         # The deciding step is kept; the next is never pulled.
         assert conversation.yielded == 1
         # The conversation was cancelled once (best-effort server-side cut).
         assert conversation.cancels == 1
-        assert record.crashed is False
+        assert outcome.record.crashed is False
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.STOPPED_EARLY
         assert ends[0].crashed is False
-        assert agent.pending_turn is None
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
         assert agent.get_state().value != "error"
 
     async def test_should_stop_none_consumes_full_stream(self) -> None:
-        _agent, record, sink, conversation = await _run_antigravity_communicate(n_steps=3)
+        _agent, outcome, sink, conversation = await _run_antigravity_communicate(n_steps=3)
         assert conversation.yielded == 3
         assert conversation.cancels == 0
-        assert record.crashed is False
+        assert outcome.record.crashed is False
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
 
     async def test_should_stop_returning_none_consumes_full_stream(self) -> None:
-        _agent, _record, sink, conversation = await _run_antigravity_communicate(never=True, n_steps=3)
+        _agent, _outcome, sink, conversation = await _run_antigravity_communicate(never=True, n_steps=3)
         assert conversation.yielded == 3
         assert _agent_end_events(sink)[0].status == AgentEndStatus.COMPLETED
 
     async def test_raising_cancel_still_stops_clean(self) -> None:
         # conversation.cancel() is best-effort: a raising cancel must not escalate
         # a stopped turn to a crash.
-        agent, record, sink, conversation = await _run_antigravity_communicate(stop_after=1, cancel_raises=True)
+        _agent, outcome, sink, conversation = await _run_antigravity_communicate(stop_after=1, cancel_raises=True)
         assert conversation.cancels == 1
-        assert record.crashed is False
+        assert outcome.record.crashed is False
         assert _agent_end_events(sink)[0].status == AgentEndStatus.STOPPED_EARLY
-        assert agent.pending_turn is None
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
 
     async def test_timeout_beats_stop_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class _FiringWatchdog:
@@ -3216,17 +3223,16 @@ class TestAntigravityCooperativeStopSeam:
         conversation = _CountingConversation([_ag_step(0), _ag_step(1)])
         agent = _antigravity_agent(conversation)
         sink = _EventSink()
-        with pytest.raises(TurnTimeoutError):
-            await agent.communicate(
-                "prompt", stream_callback=sink, timeout=30.0, should_stop=lambda: StopReason.EARLY_CRITERION
-            )
+        outcome = await agent.communicate(
+            "prompt", iteration=1, stream_callback=sink, timeout=30.0, should_stop=lambda: StopReason.EARLY_CRITERION
+        )
+        assert outcome.status is AgentEndStatus.TIMEOUT
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.TIMEOUT
         assert ends[0].crashed is True
-        assert agent.pending_turn is not None and agent.pending_turn.crashed is True
+        assert outcome.record.crashed is True
         assert AgentEndStatus.STOPPED_EARLY not in {e.status for e in ends}
-        await agent.discard_pending_turn()
 
     async def test_post_stop_exception_stays_clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The retry-poisoning gap, antigravity flavor: an exception raised by
@@ -3246,13 +3252,13 @@ class TestAntigravityCooperativeStopSeam:
                 return False
 
         monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _ExplodingExitWatchdog)
-        agent, record, sink, _conversation = await _run_antigravity_communicate(stop_after=1)
-        assert record.crashed is False
+        _agent, outcome, sink, _conversation = await _run_antigravity_communicate(stop_after=1)
+        assert outcome.record.crashed is False
         ends = _agent_end_events(sink)
         assert len(ends) == 1
         assert ends[0].status == AgentEndStatus.STOPPED_EARLY
         assert ends[0].crashed is False
-        assert agent.pending_turn is None
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
 
     async def test_post_stop_cleanup_exception_without_stop_still_crashes(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3274,9 +3280,9 @@ class TestAntigravityCooperativeStopSeam:
         monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _ExplodingExitWatchdog)
         conversation = _CountingConversation([_ag_step(0)])
         agent = _antigravity_agent(conversation)
-        with pytest.raises(AgentCrashError):
-            await agent.communicate("prompt", stream_callback=_EventSink(), should_stop=None)
-        await agent.discard_pending_turn()
+        outcome = await agent.communicate("prompt", iteration=1, stream_callback=_EventSink(), should_stop=None)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.crashed is True
 
 
 # --------------------------------------------------------------------------- #

@@ -84,7 +84,8 @@ from .result_metrics import turn_time_buckets, visible_turn_count
 from .sandbox import Sandbox
 from .simulation import DialogStopReason, SimulatorResult, UserSimulator, evaluate_stop
 from .streaming.callbacks import CompositeStreamCallback, StreamCallback, TaskScopedCallback, safe_emit
-from .streaming.events import CriteriaCheckEvent, CriterionSummary
+from .streaming.collector import EventCollector
+from .streaming.events import AgentEndStatus, CriteriaCheckEvent, CriterionSummary
 from .telemetry import Scalar, hash_identifier
 from .utils import get_version_info, looks_like_version, runtime_uip_versions
 
@@ -96,6 +97,18 @@ logger = logging.getLogger(__name__)
 # Grace on outer wait_for so the agent's in-band watchdog (which preserves a partial)
 # wins the race against the asyncio cancel path (which doesn't).
 _WAIT_FOR_GRACE_SECONDS = 2.0
+
+# The clean end statuses a turn's outcome is returned for; CRASHED and TIMEOUT raise.
+# An allowlist, so a new AgentEndStatus member fails loudly until it is placed.
+_RETURNED_END_STATUSES = frozenset(
+    {
+        AgentEndStatus.COMPLETED,
+        AgentEndStatus.STOPPED_EARLY,
+        AgentEndStatus.TOOL_CALLS_EXHAUSTED,
+        AgentEndStatus.TOKEN_BUDGET_EXCEEDED,
+        AgentEndStatus.COST_BUDGET_EXCEEDED,
+    }
+)
 
 
 def _close_subprocess_transport(proc: asyncio.subprocess.Process | None) -> None:
@@ -478,6 +491,11 @@ class Orchestrator:
         # count it answers the should_stop poll from is cumulative per task.
         self._monitor: TurnMonitor | None = None
 
+        # The in-flight communicate attempt's own collector, so a task timeout can
+        # recover the turn the agent ended before the cancel propagated. Cleared on
+        # every other exit, so a finished attempt is never appended twice.
+        self._attempt_collector: EventCollector | None = None
+
         # The skill names the staged plugin root offered; None when the task sets
         # no plugins. Read back from the prior result on an evaluate-only grade.
         self._skills_offered: tuple[str, ...] | None = None
@@ -648,8 +666,7 @@ class Orchestrator:
                 logger.error(f"Task timed out: {e}")
 
                 # Nothing else on this path recovers the in-flight turn: the
-                # cancel arrives as a BaseException, so it never reaches the retry
-                # executor's per-attempt hook.
+                # cancel arrives as a BaseException, so no outcome ever returns.
                 await self._drain_killed_turn()
             except BudgetExceededError as e:
                 # Map token-budget breaches and cost-budget breaches to distinct
@@ -931,27 +948,20 @@ class Orchestrator:
         self.result.post_failure_criteria_results = recovered
 
     async def _drain_killed_turn(self) -> None:
-        """Move a hard-killed turn's partial record from the agent onto the result.
+        """Move a hard-killed turn's record from the in-flight attempt's collector onto the result.
 
-        The only reader of ``pending_turn`` on the task-timeout path. Ordering
-        matters both ways: it must run before ``_cleanup`` (whose ``agent.stop()``
-        clears the slot) and before ``_finalize_result``, so the recovered turn
-        feeds token aggregation and command stats like any other.
-
-        Best-effort: a task killed before its first turn has nothing parked, and
-        this runs on the way to a saved row, so it must not raise.
+        Runs before ``_cleanup`` and ``_finalize_result``, so the recovered turn feeds
+        token aggregation and command stats like any other. Best-effort: a task
+        killed before its turn ended has nothing to recover, and this must not raise.
         """
-        if self.agent is None or self.result is None:
+        if self.result is None:
             return
         try:
-            partial = self.agent.pending_turn
-            # `pending_turn` is a slot any agent implementation fills, so a non-record
-            # here would fail validation during teardown and take the row down with it.
-            if not isinstance(partial, TurnRecord):
+            collector = self._attempt_collector
+            partial = self._append_attempt_record(collector) if collector is not None else None
+            if partial is None:
                 logger.debug("[%s] Hard-killed task preserved no partial turn", self.task.task_id)
                 return
-            self.result.iterations.append(partial)
-            await self.agent.discard_pending_turn()
             usage = partial.token_usage
             logger.info(
                 "[%s] Recovered the hard-killed turn: %d tokens, %s",
@@ -963,6 +973,17 @@ class Orchestrator:
             )
         except Exception:
             logger.warning("[%s] Could not recover the hard-killed turn", self.task.task_id, exc_info=True)
+
+    def _append_attempt_record(self, collector: EventCollector) -> TurnRecord | None:
+        """Append the attempt's record when its turn ended, once; the collector is then spent."""
+        assert self.result is not None
+        self._attempt_collector = None
+        if not collector.ended:
+            logger.debug("[%s] The killed attempt never ended its turn; nothing appended", self.task.task_id)
+            return None
+        record = collector.build_turn_record()
+        self.result.iterations.append(record)
+        return record
 
     def _finalize_weighted_score(self) -> None:
         """Write ``weighted_score``, or ``None`` when this run was not graded.
@@ -1812,13 +1833,12 @@ class Orchestrator:
     ) -> TurnRecord:
         """Run ``agent.communicate`` with retry, partial-preservation, and a per-attempt timeout.
 
-        Shared by the criteria-feedback and simulation loops. Crashed partials
-        from ``AgentCrashError`` / ``TurnTimeoutError`` are appended to
-        ``self.result.iterations`` via the ``on_attempt_error`` hook (terminal
-        failures included) so observational criteria still see them. Each
-        attempt gets a fresh ``turn_timeout``; ``TurnTimeoutError`` is
-        ``AGENT_TIMEOUT`` (``max_retries=0``) so it still terminates after
-        one attempt.
+        Shared by the criteria-feedback and simulation loops. A ``CRASHED`` or
+        ``TIMEOUT`` outcome's record is appended to ``self.result.iterations``
+        before it is raised as ``AgentCrashError`` / ``TurnTimeoutError`` (terminal
+        failures included), so observational criteria still see it. Each attempt
+        gets a fresh ``turn_timeout``; ``TurnTimeoutError`` is ``AGENT_TIMEOUT``
+        (``max_retries=0``) so it still terminates after one attempt.
         """
         assert self.agent is not None
         assert self.task.agent is not None
@@ -1832,82 +1852,59 @@ class Orchestrator:
         monitor = self._monitor
         assert monitor is not None, "TurnMonitor not built"
 
-        # The sole callback when --stream is off, else alongside the
-        # TaskScopedCallback. The same instance persists across retry attempts and
-        # dialog turns, so its counters and wall-clock origin accumulate.
-        agent_callback: StreamCallback = monitor
-        if self.stream_callback is not None:
-            agent_callback = CompositeStreamCallback(
-                [monitor, TaskScopedCallback(self.stream_callback, self._log_task_id)]
-            )
-
-        def _drain_pending_turn(*, attempt: int) -> None:
-            """Read agent.pending_turn and, if set, append it to result.iterations."""
-            partial = agent.pending_turn
-            if partial is not None:
-                result.iterations.append(partial)
-                logger.debug(
-                    "[%s] Drained partial turn record (attempt %d, iteration %d): %d commands",
-                    self.task.task_id,
-                    attempt + 1,
-                    iteration,
-                    len(partial.commands),
-                )
-            else:
-                logger.debug(
-                    "[%s] No pending_turn to drain on attempt %d (iteration %d)",
-                    self.task.task_id,
-                    attempt + 1,
-                    iteration,
-                )
-
-        async def _on_attempt_failure(
-            err: Exception,
-            attempt: int,
-        ) -> None:
-            if not isinstance(err, (AgentCrashError, TurnTimeoutError)):
-                return
-            _drain_pending_turn(attempt=attempt)
-            try:
-                await agent.discard_pending_turn()
-            except Exception:
-                logger.warning(
-                    "[%s] discard_pending_turn raised on attempt %d",
-                    self.task.task_id,
-                    attempt + 1,
-                    exc_info=True,
-                )
+        unhandled: list[AgentEndStatus] = []
 
         async def _communicate_attempt() -> TurnRecord:
-            coro = agent.communicate(
-                prompt,
-                stream_callback=agent_callback,
-                timeout=turn_timeout,
-                should_stop=monitor.should_stop,
-            )
-            if turn_timeout is None:
-                return await coro
-            # Grace buffer: agent's in-band watchdog (sets pending_turn) must beat
-            # wait_for cancel so the slot is populated before we give up.
-            outer_timeout = turn_timeout + _WAIT_FOR_GRACE_SECONDS
+            # A fresh collector per attempt is how a cancelled turn is recovered:
+            # the agent ends the turn before the cancel propagates, and
+            # `_drain_killed_turn` reads the record from here.
+            attempt_collector = EventCollector()
+            self._attempt_collector = attempt_collector
+            callbacks: list[StreamCallback] = [monitor, attempt_collector]
+            if self.stream_callback is not None:
+                callbacks.append(TaskScopedCallback(self.stream_callback, self._log_task_id))
+            cancelled = False
             try:
-                return await asyncio.wait_for(coro, timeout=outer_timeout)
-            except TimeoutError:
-                # Watchdog wedged or too slow. Kill only — drain + discard happen
-                # in _on_attempt_failure when this TurnTimeoutError propagates up.
-                try:
-                    await agent.kill()
-                except Exception:
-                    logger.warning(
-                        "[%s] agent.kill() raised on wait_for backstop path",
-                        self.task.task_id,
-                        exc_info=True,
-                    )
-                raise TurnTimeoutError(
-                    turn_timeout,
-                    task_id=self.task.task_id,
+                coro = agent.communicate(
+                    prompt,
                     iteration=iteration,
-                ) from None
+                    stream_callback=CompositeStreamCallback(callbacks),
+                    timeout=turn_timeout,
+                    should_stop=monitor.should_stop,
+                )
+                if turn_timeout is None:
+                    outcome = await coro
+                else:
+                    try:
+                        # Grace buffer: the agent's own watchdog must beat this backstop.
+                        outcome = await asyncio.wait_for(coro, timeout=turn_timeout + _WAIT_FOR_GRACE_SECONDS)
+                    except TimeoutError:
+                        try:
+                            await agent.kill()
+                        except Exception:
+                            logger.warning(
+                                "[%s] agent.kill() raised on wait_for backstop path",
+                                self.task.task_id,
+                                exc_info=True,
+                            )
+                        self._append_attempt_record(attempt_collector)
+                        raise TurnTimeoutError(turn_timeout, task_id=self.task.task_id, iteration=iteration) from None
+                if outcome.status in _RETURNED_END_STATUSES:
+                    return outcome.record
+                if outcome.status in (AgentEndStatus.CRASHED, AgentEndStatus.TIMEOUT):
+                    result.iterations.append(outcome.record)
+                    return outcome.record_or_raise(
+                        timeout_seconds=turn_timeout, task_id=self.task.task_id, iteration=iteration
+                    )
+                # Raised after the retry executor, which would retry a RuntimeError.
+                unhandled.append(outcome.status)
+                return outcome.record
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                if not cancelled:
+                    self._attempt_collector = None
 
         # ANTI-CHEAT WINDOW. Both the reference and the task dir sit at mode 000
         # for the whole of every communicate attempt — retries included, since this
@@ -1927,9 +1924,10 @@ class Orchestrator:
                     "component": "agent",
                     "agent_name": self._agent_name,
                 },
-                on_attempt_error=_on_attempt_failure,
             )
         assert turn_record is not None  # execute_with_retry returns the turn or raises
+        if unhandled:
+            raise RuntimeError(f"unhandled end status {unhandled[0]}")
         return turn_record
 
     @staticmethod
@@ -2468,9 +2466,8 @@ class Orchestrator:
             # Keyed by (position, criterion_type) — a stable criterion identity.
             judge_usage_accum: dict[tuple[int, str], TokenUsage] = {}
 
-            # In lockstep with the agent's _iteration — one
-            # _communicate_with_retry per sim turn — so a partial turn and its
-            # successful retry share an iteration number.
+            # One _communicate_with_retry per sim turn, passed this turn's number,
+            # so a partial turn and its successful retry share an iteration number.
             while True:
                 turns_completed += 1
                 self.result.iteration_count = turns_completed

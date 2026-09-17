@@ -278,7 +278,7 @@ async def test_communicate_maps_steps_to_turn_record():
         ),
     ]
     agent = _agent_with_steps(steps)
-    tr = await agent.communicate("make hello.py")
+    tr = (await agent.communicate("make hello.py", iteration=1)).record
 
     assert tr.crashed is False
     assert tr.agent_output == "All done."
@@ -314,7 +314,6 @@ async def test_communicate_maps_steps_to_turn_record():
     # distinctness (a uuid would pass) does not.
     ids = [m.message_id for m in tr.messages if isinstance(m, AssistantMessage)]
     assert ids == ["antigravity-1-msg-0", "antigravity-1-msg-1", "antigravity-1-msg-2"]
-    assert agent.pending_turn is None  # success path leaves no partial
 
 
 async def test_communicate_normalizes_arg_keys_and_strips_done_only_results():
@@ -344,7 +343,7 @@ async def test_communicate_normalizes_arg_keys_and_strips_done_only_results():
         ),
         _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
-    tr = await _agent_with_steps(steps).communicate("x")
+    tr = (await _agent_with_steps(steps).communicate("x", iteration=1)).record
     ls = next(c for c in tr.commands if c.tool_name == "LS")
     assert ls.parameters == {"path": "/work"}  # renamed, results stripped
     web = next(c for c in tr.commands if c.tool_name == "WebSearch")
@@ -364,14 +363,13 @@ async def test_communicate_records_tool_error_from_nonzero_exit():
         ),
         _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(510, 0, 3, 0)),
     ]
-    tr = await _agent_with_steps(steps).communicate("run it")
+    tr = (await _agent_with_steps(steps).communicate("run it", iteration=1)).record
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
     assert bash.result_status == "error"
 
 
 async def test_communicate_crash_sets_pending_partial_turn():
-    """A mid-stream SDK error raises AgentCrashError and leaves a crashed partial."""
-    from coder_eval.errors import AgentCrashError
+    """A mid-stream SDK error crashes the turn and leaves a crashed partial record."""
 
     class _Boom:
         last_response = ""
@@ -389,17 +387,14 @@ async def test_communicate_crash_sets_pending_partial_turn():
     agent.working_directory = Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=_Boom(), is_started=True)
 
-    with pytest.raises(AgentCrashError):
-        await agent.communicate("x")
-    assert agent.pending_turn is not None
-    assert agent.pending_turn.crashed is True
+    outcome = await agent.communicate("x", iteration=1)
 
-    await agent.discard_pending_turn()
-    assert agent.pending_turn is None
+    assert outcome.status is AgentEndStatus.CRASHED
+    assert outcome.record.crashed is True
 
 
 async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
-    """A turn timeout raises TurnTimeoutError and leaves a crashed partial turn.
+    """A turn timeout ends the turn TIMEOUT and leaves a crashed partial record.
 
     Drives the timeout branch deterministically: a fake watchdog fires its
     ``on_timeout`` callback synchronously on entry (setting ``state.timeout_hit``,
@@ -407,8 +402,6 @@ async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
     the cancel as ``asyncio.CancelledError`` — the :402-404 timeout branch.
     """
     import asyncio
-
-    from coder_eval.errors import TurnTimeoutError
 
     monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _FiringWatchdog)
 
@@ -428,19 +421,16 @@ async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
     agent.working_directory = Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=_Cancelled(), is_started=True)
 
-    with pytest.raises(TurnTimeoutError):
-        await agent.communicate("x", timeout=30.0)
-    assert agent.pending_turn is not None
-    assert agent.pending_turn.crashed is True
+    outcome = await agent.communicate("x", iteration=1, timeout=30.0)
 
-    await agent.discard_pending_turn()
-    assert agent.pending_turn is None
+    assert outcome.status is AgentEndStatus.TIMEOUT
+    assert outcome.record.crashed is True
 
 
 async def test_communicate_requires_started_agent():
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     with pytest.raises(RuntimeError, match="not started"):
-        await agent.communicate("x")
+        await agent.communicate("x", iteration=1)
 
 
 def _install_fake_sdk(monkeypatch, sdk_agent_cls) -> None:
@@ -534,7 +524,7 @@ async def test_communicate_fast_path_when_no_orphaned_tools(monkeypatch):
         _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
     agent = _agent_with_steps(steps)
-    tr = await agent.communicate("run it")
+    tr = (await agent.communicate("run it", iteration=1)).record
 
     conv = agent._sdk_agent.conversation
     assert conv.receive_steps_call_count == 1
@@ -565,7 +555,7 @@ async def test_communicate_does_not_poll_a_tool_stuck_waiting_for_user(monkeypat
         _step("TEXT_RESPONSE", "DONE", content="waiting on you", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
     agent = _agent_with_steps(steps)
-    tr = await agent.communicate("do it")
+    tr = (await agent.communicate("do it", iteration=1)).record
 
     conv = agent._sdk_agent.conversation
     assert conv.receive_steps_call_count == 1  # poll loop never entered
@@ -627,7 +617,7 @@ async def test_communicate_polls_and_resumes_after_orphaned_tool_closes(monkeypa
         ),
     ]
     agent = _agent_with_steps([batch1, batch2])
-    tr = await agent.communicate("do it")
+    tr = (await agent.communicate("do it", iteration=1)).record
 
     assert sleep_calls == [antigravity_agent._BACKGROUND_POLL_INTERVAL_SECONDS]
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
@@ -671,7 +661,7 @@ async def test_communicate_resolves_backgrounded_tool_call_with_no_id(monkeypatc
         _step("TEXT_RESPONSE", "DONE", content="All finished.", complete=True, usage=_usage(5, 0, 1, 0)),
     ]
     agent = _agent_with_steps([batch1, batch2])
-    tr = await agent.communicate("do it")
+    tr = (await agent.communicate("do it", iteration=1)).record
 
     assert agent._sdk_agent.conversation.receive_steps_call_count == 2  # closed on the first poll, not the cap
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
@@ -707,7 +697,7 @@ async def test_id_less_tool_calls_in_different_trajectories_do_not_collide():
         _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
     agent = _agent_with_steps(steps)
-    tr = await agent.communicate("do two things")
+    tr = (await agent.communicate("do two things", iteration=1)).record
 
     bash_calls = [c for c in tr.commands if c.tool_name == "Bash"]
     assert len(bash_calls) == 2  # distinct cids, not collapsed into one
@@ -765,7 +755,7 @@ async def test_communicate_handles_two_sequential_background_jobs(monkeypatch):
         _step("TEXT_RESPONSE", "DONE", content="all done", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
     agent = _agent_with_steps([batch1, batch2, batch3])
-    tr = await agent.communicate("do two things")
+    tr = (await agent.communicate("do two things", iteration=1)).record
 
     assert len(sleep_calls) == 2  # exactly two poll cycles, one per backgrounded job
     bash_calls = [c for c in tr.commands if c.tool_name == "Bash"]
@@ -800,7 +790,7 @@ async def test_communicate_stops_polling_at_max_poll_cap(monkeypatch):
     # empty batch (see _FakeConversation's docstring, matching the real SDK) --
     # the orphan is never closed, simulating a job whose state never changes.
     agent = _agent_with_steps([never_closing])
-    tr = await agent.communicate("do it forever")
+    tr = (await agent.communicate("do it forever", iteration=1)).record
 
     assert len(sleep_calls) == 3  # exactly _MAX_BACKGROUND_POLLS, not infinite
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
@@ -845,7 +835,7 @@ async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(m
     ]
     agent = _agent_with_steps([never_closing])
 
-    tr = await agent.communicate("do it forever", timeout=300.0)  # the real default turn_timeout
+    tr = (await agent.communicate("do it forever", iteration=1, timeout=300.0)).record  # the real default turn_timeout
 
     # Finalized and graded -- no TurnTimeoutError, no crash.
     assert tr is not None
@@ -905,20 +895,18 @@ async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(mon
         ),
         _step("TEXT_RESPONSE", "DONE", content="waiting...", complete=True, usage=_usage(10, 0, 1, 0)),
     ]
-    from coder_eval.errors import TurnTimeoutError
 
     agent = _agent_with_steps([never_closing])
-    with pytest.raises(TurnTimeoutError):
-        await agent.communicate("do it forever", timeout=30.0)
+    outcome = await agent.communicate("do it forever", iteration=1, timeout=30.0)
 
+    assert outcome.status is AgentEndStatus.TIMEOUT
     # Stopped right after the sleep that flipped timeout_hit -- NOT the (patched) cap of 50.
     assert len(sleep_calls) == 2
     # 1 initial drain + 1 poll re-drain (after sleep #1) -- the mid-loop
     # `if state.timeout_hit: break` skips the re-drain that would otherwise
     # follow sleep #2, so no 3rd receive_steps() call happens.
     assert agent._sdk_agent.conversation.receive_steps_call_count == 2
-    assert agent.pending_turn is not None
-    bash = next(c for c in agent.pending_turn.commands if c.tool_name == "Bash")
+    bash = next(c for c in outcome.record.commands if c.tool_name == "Bash")
     assert bash.result_status == "unknown"
 
 
@@ -959,7 +947,7 @@ async def test_communicate_respects_should_stop_during_poll(monkeypatch):
         # None for batch1's 2 steps; a reason on the post-sleep check
         return StopReason.EARLY_CRITERION if call_count > 2 else None
 
-    await agent.communicate("do it", should_stop=should_stop)
+    await agent.communicate("do it", iteration=1, should_stop=should_stop)
 
     assert conv.receive_steps_call_count == 1  # the poll's re-drain never happened
     assert conv.cancel_call_count == 1
@@ -1048,13 +1036,14 @@ async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_
     agent.working_directory = Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
 
-    await agent.communicate("do it", should_stop=lambda: StopReason.EARLY_CRITERION)  # breaks after the first step
+    # breaks after the first step
+    await agent.communicate("do it", iteration=1, should_stop=lambda: StopReason.EARLY_CRITERION)
 
-    # Without the retry, this second call raises AgentCrashError wrapping the
-    # fake's RuntimeError (verified live before the fix landed). With it, the
+    # Without the retry, this second call crashes wrapping the fake's
+    # RuntimeError (verified live before the fix landed). With it, the
     # transient window clears within a couple of asyncio.sleep(0) yields and
     # the second turn's real content is delivered, not silently dropped.
-    tr = await agent.communicate("do it again")
+    tr = (await agent.communicate("do it again", iteration=2)).record
     assert tr.agent_output == "second turn"
 
 
@@ -1090,8 +1079,6 @@ async def test_a_runtime_error_after_a_step_is_not_retried_as_reentrancy(monkeyp
     """Only an error raised before the first step is the re-entrancy window. A
     RuntimeError while processing a pulled step is a real failure: retrying it would
     re-pull the stream and emit the same steps again."""
-    from coder_eval.errors import AgentCrashError
-
     conversation_pulls = 0
 
     class _Conversation:
@@ -1116,8 +1103,10 @@ async def test_a_runtime_error_after_a_step_is_not_retried_as_reentrancy(monkeyp
     agent.working_directory = __import__("pathlib").Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=_Conversation(), is_started=True)
 
-    with pytest.raises(AgentCrashError, match="reducer bug"):
-        await agent.communicate("do it")
+    outcome = await agent.communicate("do it", iteration=1)
+
+    assert outcome.status is AgentEndStatus.CRASHED
+    assert outcome.error is not None and "reducer bug" in outcome.error
     assert conversation_pulls == 1
 
 
@@ -1133,7 +1122,6 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
     callback and the ``CancelledError`` it triggers are the same causal event,
     not two independently-timed ones."""
     from coder_eval.agents import antigravity_agent
-    from coder_eval.errors import TurnTimeoutError
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
@@ -1173,14 +1161,11 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
     conversation = _FiresWatchdogThenCancelsOnSecondDrain()
     agent._sdk_agent = SimpleNamespace(conversation=conversation, is_started=True)
 
-    with pytest.raises(TurnTimeoutError):
-        await agent.communicate("x", timeout=30.0)
-    assert conversation.call_count == 2  # the re-drain genuinely ran, not skipped
-    assert agent.pending_turn is not None
-    assert agent.pending_turn.crashed is True
+    outcome = await agent.communicate("x", iteration=1, timeout=30.0)
 
-    await agent.discard_pending_turn()
-    assert agent.pending_turn is None
+    assert outcome.status is AgentEndStatus.TIMEOUT
+    assert conversation.call_count == 2  # the re-drain genuinely ran, not skipped
+    assert outcome.record.crashed is True
 
 
 # --- env_path_prepend / mock-CLI PATH shadowing -----------------------------------
@@ -1507,7 +1492,7 @@ async def test_should_stop_reason_ends_the_turn_with_its_status(reason, status, 
     agent = _agent_with_steps(_tool_steps(5))
     capture = _EndCapture()
 
-    record = await agent.communicate("go", stream_callback=capture, should_stop=lambda: reason)
+    record = (await agent.communicate("go", iteration=1, stream_callback=capture, should_stop=lambda: reason)).record
 
     assert capture.end is not None
     assert capture.end.status is status
@@ -1527,7 +1512,7 @@ async def test_stop_after_a_done_step_keeps_the_deciding_call_whole():
         polls += 1
         return StopReason.TOOL_CALL_CAP if polls >= 2 else None
 
-    record = await agent.communicate("go", should_stop=should_stop)
+    record = (await agent.communicate("go", iteration=1, should_stop=should_stop)).record
 
     assert len(record.commands) == 1
     assert record.commands[0].result_status == "success"
@@ -1537,7 +1522,7 @@ async def test_stop_after_a_done_step_keeps_the_deciding_call_whole():
 async def test_no_reason_consumes_every_step():
     agent = _agent_with_steps(_tool_steps(4))
 
-    record = await agent.communicate("go", should_stop=lambda: None)
+    record = (await agent.communicate("go", iteration=1, should_stop=lambda: None)).record
 
     assert len(record.commands) == 4
     assert record.tool_calls_exhausted is False
@@ -1582,7 +1567,8 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
     conv = agent._sdk_agent.conversation
     monitor = TurnMonitor("t", [], limits=RunLimits(max_tool_calls=2))
 
-    record = await agent.communicate("go", stream_callback=monitor, should_stop=monitor.should_stop)
+    outcome = await agent.communicate("go", iteration=1, stream_callback=monitor, should_stop=monitor.should_stop)
+    record = outcome.record
 
     assert monitor.stop_reason is StopReason.TOOL_CALL_CAP
     assert record.tool_calls_exhausted is True
@@ -1743,7 +1729,7 @@ async def test_concurrent_tools_do_not_over_subtract(monkeypatch):
         closes,
         _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     second = _assistant(record)[1]
     tools = [c for c in record.commands if c.tool_id.startswith("t")]
@@ -1770,7 +1756,7 @@ async def test_generation_window_is_measured_not_zero():
         _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
         _step("THINKING", "DONE", thinking="second", usage=_usage(120, 0, 6, 4)),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     messages = _assistant(record)
     assert len(messages) == 2
@@ -1787,7 +1773,7 @@ async def test_consecutive_windows_chain_end_to_start():
         _step("THINKING", "DONE", thinking="b", usage=_usage(100, 0, 5, 5)),
         _step("TEXT_RESPONSE", "DONE", content="c", content_delta="c", complete=True, usage=_usage(100, 0, 5, 0)),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     messages = _assistant(record)
     assert len(messages) == 3
@@ -1823,7 +1809,7 @@ async def test_tool_execution_is_subtracted_from_the_window(monkeypatch):
             "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(200, 0, 10, 0)
         ),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     messages = _assistant(record)
     assert len(messages) == 2
@@ -1889,7 +1875,7 @@ async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypa
         ),
         _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     second = _assistant(record)[1]
     slow = next(c for c in record.commands if c.tool_id == "t1")
@@ -1932,7 +1918,7 @@ async def test_a_tool_still_open_at_the_flush_is_not_generation_time(monkeypatch
         ),
         _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     first = _assistant(record)[0]
     slow = next(c for c in record.commands if c.tool_id == "t1")
@@ -1964,10 +1950,10 @@ async def test_a_no_op_flush_does_not_move_the_mark(monkeypatch):
     # clock read, so it must leave the window — and therefore the real
     # generation's recorded bounds — byte-identical.
     _install_clock(monkeypatch, _Clock())
-    without = _assistant(await _agent_with_steps([real]).communicate("go"))
+    without = _assistant((await _agent_with_steps([real]).communicate("go", iteration=1)).record)
 
     _install_clock(monkeypatch, _Clock())
-    with_empty = _assistant(await _agent_with_steps([empty, real]).communicate("go"))
+    with_empty = _assistant((await _agent_with_steps([empty, real]).communicate("go", iteration=1)).record)
 
     assert len(with_empty) == 1, "the empty generation must not produce a message"
     assert with_empty[0].started_at == without[0].started_at
@@ -2005,7 +1991,7 @@ async def test_generation_and_tool_time_account_for_the_turn():
             "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(200, 0, 10, 0)
         ),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     gen_ms = sum(m.generation_duration_ms or 0.0 for m in _assistant(record))
     tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
@@ -2058,7 +2044,7 @@ async def test_timing_change_moves_no_token_bucket():
             "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(1300, 0, 30, 0)
         ),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     assert record.token_usage is not None
     assert record.token_usage.output_tokens == (10 + 20) + (15 + 5) + (30 + 0)
@@ -2098,7 +2084,7 @@ async def test_the_published_window_reconciles_to_its_own_bounds(monkeypatch):
         ),
         _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     second = _assistant(record)[1]
     spans = [
@@ -2138,7 +2124,7 @@ async def test_the_window_is_measured_without_relying_on_the_negative_clamp(monk
         ),
         _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
     ]
-    record = await _agent_with_steps(steps).communicate("go")
+    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
 
     second = _assistant(record)[1]
     assert second.generation_duration_ms > 0.0
@@ -2158,13 +2144,13 @@ async def test_each_turn_gets_a_fresh_clock():
     """
     step = _step("THINKING", "DONE", thinking="a", usage=_usage(100, 0, 5, 5))
     agent = _agent_with_steps([step])
-    first = _assistant(await agent.communicate("go"))
+    first = _assistant((await agent.communicate("go", iteration=1)).record)
     # The fake conversation yields one batch and is then spent, so borrow a
     # fresh one. The agent INSTANCE is deliberately the same: what is under
     # test is that its second turn builds its own clock rather than inheriting
     # the first turn's origin.
     agent._sdk_agent = _agent_with_steps([step])._sdk_agent
-    second = _assistant(await agent.communicate("again"))
+    second = _assistant((await agent.communicate("again", iteration=2)).record)
 
     assert first and second
     # Re-anchored: the later turn's window opens after the earlier one closed.
@@ -2327,7 +2313,9 @@ class TestTheTurnBracketComesFromTheTurnClock:
     async def test_both_brackets_are_stamped_from_the_injected_clock(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
         seen: list[Any] = []
-        await _agent_with_steps(self._steps()).communicate("go", stream_callback=SimpleNamespace(on_event=seen.append))
+        await _agent_with_steps(self._steps()).communicate(
+            "go", iteration=1, stream_callback=SimpleNamespace(on_event=seen.append)
+        )
 
         assert_bracket_on_the_clock(seen)
 
@@ -2341,6 +2329,6 @@ class TestTheTurnBracketComesFromTheTurnClock:
         holds its process across turns and so has the shortest real tail.
         """
         monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
-        record = await _agent_with_steps(self._steps()).communicate("go")
+        record = (await _agent_with_steps(self._steps()).communicate("go", iteration=1)).record
 
         assert_overhead_is_measured(record)

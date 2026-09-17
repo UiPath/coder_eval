@@ -156,7 +156,7 @@ async def test_communicate_emits_tool_start_event():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        await agent.communicate("test prompt", stream_callback=callback)
+        await agent.communicate("test prompt", iteration=1, stream_callback=callback)
 
     _assert_well_formed_tree(callback.events, expected_agent_status=AgentEndStatus.COMPLETED)
 
@@ -191,7 +191,7 @@ async def test_communicate_emits_tool_end_event():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        await agent.communicate("test prompt", stream_callback=callback)
+        await agent.communicate("test prompt", iteration=1, stream_callback=callback)
 
     _assert_well_formed_tree(callback.events, expected_agent_status=AgentEndStatus.COMPLETED)
 
@@ -226,7 +226,7 @@ async def test_communicate_emits_tool_end_error_status():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        await agent.communicate("test prompt", stream_callback=callback)
+        await agent.communicate("test prompt", iteration=1, stream_callback=callback)
 
     end_events = [e for e in callback.events if isinstance(e, ToolEndEvent)]
     assert len(end_events) == 1
@@ -260,7 +260,7 @@ async def test_communicate_emits_text_chunk_event():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        await agent.communicate("test prompt", stream_callback=callback)
+        await agent.communicate("test prompt", iteration=1, stream_callback=callback)
 
     _assert_well_formed_tree(callback.events, expected_agent_status=AgentEndStatus.COMPLETED)
 
@@ -292,7 +292,7 @@ async def test_agent_start_carries_prompt_and_iteration():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        await agent.communicate("hello world", stream_callback=callback)
+        await agent.communicate("hello world", iteration=1, stream_callback=callback)
 
     start = callback.events[0]
     assert isinstance(start, AgentStartEvent)
@@ -323,7 +323,7 @@ async def test_collector_reduces_stream_into_turn_record():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        returned = await agent.communicate("test prompt", stream_callback=callback)
+        outcome = await agent.communicate("test prompt", iteration=1, stream_callback=callback)
 
     # Replay the captured stream through a fresh collector and confirm it
     # reduces to a record consistent with what communicate() returned.
@@ -335,7 +335,7 @@ async def test_collector_reduces_stream_into_turn_record():
     assert rebuilt.user_input == "test prompt"
     assert len(rebuilt.commands) == 1
     assert rebuilt.commands[0].tool_id == "tc"
-    assert len(returned.commands) == len(rebuilt.commands)
+    assert len(outcome.record.commands) == len(rebuilt.commands)
 
 
 @pytest.mark.asyncio
@@ -359,10 +359,10 @@ async def test_communicate_works_without_callback():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        turn = await agent.communicate("test prompt")  # No callback
+        outcome = await agent.communicate("test prompt", iteration=1)  # No callback
 
-    assert turn is not None
-    assert len(turn.commands) == 1
+    assert outcome.record is not None
+    assert len(outcome.record.commands) == 1
 
 
 @pytest.mark.asyncio
@@ -389,7 +389,7 @@ async def test_task_scoped_callback_fixes_agent_task_id():
             yield msg
 
     with patch("coder_eval.agents.claude_code_agent.query", side_effect=fake_query):
-        await agent.communicate("test prompt", stream_callback=scoped_callback)
+        await agent.communicate("test prompt", iteration=1, stream_callback=scoped_callback)
 
     # All events (AgentStart -> ... -> AgentEnd) should now carry the real task ID.
     assert len(inner_callback.events) > 0

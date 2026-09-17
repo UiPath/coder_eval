@@ -624,8 +624,8 @@ How each harness enforces `run_limits.turn_timeout` (the meaning is the same eve
 ### What a timeout looks like
 
 On Claude Code and Codex a `turn_timeout` breach is a *failure*: the watchdog fires
-at the deadline, the partial turn is preserved on `pending_turn`, and the turn is
-marked `crashed`.
+at the deadline, the agent returns a `TIMEOUT` outcome, and its partial turn is kept as a
+`crashed` record.
 
 Antigravity stops earlier and more gently, for the reason in the next section.
 

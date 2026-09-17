@@ -136,9 +136,9 @@ CLI → ExperimentRunner (task × variant, 5-layer merge) → run_batch → Orch
 
 Per-task (single iteration; simulation mode runs a multi-turn dialog):
   1. Orchestrator._communicate_with_retry(prompt, iteration) → TurnRecord
-     (wraps agent.communicate with retry, per-attempt turn_timeout, the task's
-      TurnMonitor as the should_stop poll, and on_attempt_error → preserves
-      crashed=True partial TurnRecords)
+     (wraps agent.communicate(..., iteration=) → TurnOutcome with retry, per-attempt
+      turn_timeout, the task's TurnMonitor as the should_stop poll; a CRASHED/TIMEOUT
+      outcome's crashed=True record is appended before it is raised)
   2. SuccessChecker.check_all_async() → List[CriterionResult]
 
 Cleanup: stop agent, save EvaluationResult, generate reports.

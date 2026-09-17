@@ -149,7 +149,7 @@ async def run_antigravity_scenario(
     # up to 120 cycles, i.e. ten minutes of wall clock in a unit test. The
     # loop's LOGIC is what the scenario records; the waiting is not.
     with patch.object(antigravity_agent.asyncio, "sleep", _no_sleep):
-        record = await agent.communicate("do it", stream_callback=recorder)
+        record = (await agent.communicate("do it", iteration=1, stream_callback=recorder)).record
     return record.model_dump(mode="json"), recorder.events
 
 

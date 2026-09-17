@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from coder_eval.errors.agent import AgentCrashError
 from coder_eval.errors.timeout import TurnTimeoutError
 from coder_eval.evaluation.sub_agent import (
     SubAgentRunner,
@@ -17,6 +18,8 @@ from coder_eval.evaluation.sub_agent import (
 from coder_eval.models import AgentKind, ClaudeCodeAgentConfig, TurnRecord, parse_agent_config
 from coder_eval.models.routing import DirectRoute
 from coder_eval.sandbox import Sandbox
+from coder_eval.streaming.emitter import TurnOutcome
+from coder_eval.streaming.events import AgentEndStatus
 
 
 # Symlink creation on Windows requires either admin privileges or Developer
@@ -56,10 +59,14 @@ def _make_turn() -> TurnRecord:
     return TurnRecord(iteration=1, user_input="x", agent_output='{"score": 1.0, "rationale": "ok"}')
 
 
+def _make_outcome(record: TurnRecord | None = None) -> TurnOutcome:
+    return TurnOutcome(record=record or _make_turn(), status=AgentEndStatus.COMPLETED, error=None)
+
+
 def _make_mock_agent() -> MagicMock:
     agent = MagicMock()
     agent.start = AsyncMock(return_value=None)
-    agent.communicate = AsyncMock(return_value=_make_turn())
+    agent.communicate = AsyncMock(return_value=_make_outcome())
     agent.stop = AsyncMock(return_value=None)
     agent.kill = AsyncMock(return_value=None)
     return agent
@@ -83,7 +90,7 @@ async def test_runner_happy_path(sandbox: Sandbox, tmp_path: Path) -> None:
 
     assert turn.agent_output == '{"score": 1.0, "rationale": "ok"}'
     mock_agent.start.assert_awaited_once()
-    mock_agent.communicate.assert_awaited_once_with("grade this", timeout=30.0)
+    mock_agent.communicate.assert_awaited_once_with("grade this", iteration=1, timeout=30.0)
     mock_agent.stop.assert_awaited()
 
 
@@ -115,13 +122,13 @@ async def test_runner_mounts_reference_dir_at_underscore_reference(sandbox: Sand
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
         # Capture the workdir before it's torn down by the finally block.
-        async def capture_files(_msg: str, **_kw: object) -> TurnRecord:
+        async def capture_files(_msg: str, **_kw: object) -> TurnOutcome:
             workdir = Path(captured["workdir"])
             captured["has_reference_dir"] = str((workdir / "_reference").is_dir())
             captured["has_main"] = str((workdir / "_reference" / "Main.xaml").is_file())
             captured["main_content"] = (workdir / "_reference" / "Main.xaml").read_text()
             captured["has_subdir"] = str((workdir / "_reference" / "subdir" / "Helper.xaml").is_file())
-            return _make_turn()
+            return _make_outcome()
 
         mock_agent.communicate.side_effect = capture_files
         await runner.run_async("grade", turn_timeout=30.0)
@@ -166,12 +173,12 @@ async def test_runner_handles_sandbox_side_reference_collision(sandbox: Sandbox,
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
 
-        async def capture_state(_msg: str, **_kw: object) -> TurnRecord:
+        async def capture_state(_msg: str, **_kw: object) -> TurnOutcome:
             workdir = Path(captured["workdir"])
             ref_main = workdir / "_reference" / "Main.xaml"
             captured["ref_main_content"] = ref_main.read_text()
             captured["agent_planted_present"] = str((workdir / "_reference" / "agent_planted.txt").exists())
-            return _make_turn()
+            return _make_outcome()
 
         mock_agent.communicate.side_effect = capture_state
         # Must not raise — this is the regression assertion.
@@ -202,10 +209,10 @@ async def test_runner_skips_reference_when_not_provided(sandbox: Sandbox, tmp_pa
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
 
-        async def capture_no_ref(_msg: str, **_kw: object) -> TurnRecord:
+        async def capture_no_ref(_msg: str, **_kw: object) -> TurnOutcome:
             workdir = Path(captured["workdir"])
             captured["has_reference_dir"] = str((workdir / "_reference").exists())
-            return _make_turn()
+            return _make_outcome()
 
         mock_agent.communicate.side_effect = capture_no_ref
         await runner.run_async("grade", turn_timeout=30.0)
@@ -274,7 +281,7 @@ async def test_runner_cleans_up_when_cancelled_mid_communicate(sandbox: Sandbox)
     async def capture_start(path: str, **_kwargs: object) -> None:
         captured["path"] = path
 
-    async def hang_forever(*_args: object, **_kwargs: object) -> TurnRecord:
+    async def hang_forever(*_args: object, **_kwargs: object) -> TurnOutcome:
         started.set()
         await asyncio.sleep(3600)
         raise AssertionError("should have been cancelled before waking up")
@@ -399,7 +406,9 @@ async def test_runner_propagates_turn_timeout(sandbox: Sandbox) -> None:
         route=DirectRoute(),
     )
     mock_agent = _make_mock_agent()
-    mock_agent.communicate.side_effect = TurnTimeoutError(30.0, task_id="t", iteration=1)
+    mock_agent.communicate.return_value = TurnOutcome(
+        record=_make_turn(), status=AgentEndStatus.TIMEOUT, error="timed out"
+    )
     captured: dict[str, str] = {}
 
     async def capture_start(path: str, **_kwargs: object) -> None:
@@ -410,6 +419,34 @@ async def test_runner_propagates_turn_timeout(sandbox: Sandbox) -> None:
     with (
         patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
         pytest.raises(TurnTimeoutError),
+    ):
+        await runner.run_async("grade", turn_timeout=30.0)
+
+    assert not Path(captured["path"]).exists()
+
+
+async def test_runner_propagates_agent_crash_error(sandbox: Sandbox) -> None:
+    runner = SubAgentRunner(
+        sandbox=sandbox,
+        agent_config=_make_agent_config(),
+        ignore_patterns=[],
+        route=DirectRoute(),
+    )
+    mock_agent = _make_mock_agent()
+    crashed_record = TurnRecord(iteration=1, user_input="x", agent_output="", crashed=True, crash_reason="boom")
+    mock_agent.communicate.return_value = TurnOutcome(
+        record=crashed_record, status=AgentEndStatus.CRASHED, error="boom"
+    )
+    captured: dict[str, str] = {}
+
+    async def capture_start(path: str, **_kwargs: object) -> None:
+        captured["path"] = path
+
+    mock_agent.start.side_effect = capture_start
+
+    with (
+        patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent),
+        pytest.raises(AgentCrashError, match="boom"),
     ):
         await runner.run_async("grade", turn_timeout=30.0)
 
@@ -648,12 +685,12 @@ async def test_runner_reference_dir_with_nested_underscore_reference_preserved(
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
 
-        async def capture_state(_msg: str, **_kw: object) -> TurnRecord:
+        async def capture_state(_msg: str, **_kw: object) -> TurnOutcome:
             workdir = Path(captured["workdir"])
             inner = workdir / "_reference" / "nested" / "_reference" / "inner.txt"
             captured["inner_present"] = str(inner.exists())
             captured["inner_content"] = inner.read_text(encoding="utf-8") if inner.exists() else ""
-            return _make_turn()
+            return _make_outcome()
 
         mock_agent.communicate.side_effect = capture_state
         await runner.run_async("grade", turn_timeout=30.0)
@@ -688,11 +725,11 @@ async def test_runner_reference_ignore_patterns_explicit(sandbox: Sandbox, tmp_p
     mock_agent.start.side_effect = capture_start
     with patch("coder_eval.evaluation.sub_agent.ClaudeCodeAgent", return_value=mock_agent):
 
-        async def capture_state(_msg: str, **_kw: object) -> TurnRecord:
+        async def capture_state(_msg: str, **_kw: object) -> TurnOutcome:
             workdir = Path(captured["workdir"])
             captured["keep_present"] = str((workdir / "_reference" / "keep.txt").exists())
             captured["log_present"] = str((workdir / "_reference" / "drop.log").exists())
-            return _make_turn()
+            return _make_outcome()
 
         mock_agent.communicate.side_effect = capture_state
         await runner.run_async("grade", turn_timeout=30.0)

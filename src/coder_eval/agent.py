@@ -5,17 +5,20 @@
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, NoReturn, Protocol
 
 from .errors import AgentCrashError, TurnTimeoutError
 from .errors.agent import format_timeout_reason, truncate_crash_message
 from .models import AgentState as AgentState
-from .models import ApiRoute, BaseAgentConfig, HarnessContract, ToolNameMap, TurnRecord
-from .streaming.callbacks import StreamCallback
+from .models import ApiRoute, BaseAgentConfig, HarnessContract, TimingBasis, ToolNameMap, TurnRecord
+from .streaming.callbacks import CompositeStreamCallback, StreamCallback
 from .streaming.collector import EventCollector
-from .streaming.events import AgentEndStatus, StopReason
+from .streaming.emitter import Clock, TurnEmitter, TurnOutcome
+from .streaming.events import AgentEndEvent, AgentEndStatus, StopReason, StreamEvent
+from .timing import TurnClock
 
 
 logger = logging.getLogger(__name__)
@@ -54,19 +57,11 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
     """
 
     pending_turn: TurnRecord | None = None
-    """Side-channel for partial turn records from failed ``communicate()`` calls.
-
-    Implementations must set this to a ``crashed=True`` TurnRecord before
-    raising any mid-turn exception that carries captured telemetry. Callers
-    must read this slot after every failed ``communicate()`` call, then call
-    ``discard_pending_turn()`` to clear it. Outside ``communicate()``, this
-    slot is always None.
+    """A not-yet-ported adapter parks its crashed partial record here before raising;
+    ``_legacy_outcome`` reads and clears it. Always None once ``communicate()`` returns.
     """
 
-    # Class-level defaults so a subclass gets the behaviour without re-declaring it.
-    # `_iteration_was_incremented` is consumed by `discard_pending_turn()`, which
-    # rolls the counter back exactly once per failed turn.
-    # Rationale: .claude/notes/reporting.md § The Agent ABC contract
+    # Class-level defaults for the not-yet-ported adapters' turn bookkeeping.
     _state: AgentState = AgentState.WORKING
     _iteration: int = 0
     _iteration_was_incremented: bool = False
@@ -216,50 +211,100 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         self,
         user_input: str,
         *,
+        iteration: int,
         stream_callback: StreamCallback | None = None,
         timeout: float | None = None,
         should_stop: Callable[[], StopReason | None] | None = None,
-    ) -> TurnRecord:
-        """Send a message to the agent and receive its response.
+    ) -> TurnOutcome:
+        """Run one turn and return its outcome; a crash or timeout is an outcome, not an exception.
 
         Args:
             user_input: The message/prompt to send to the agent
+            iteration: The caller's turn number, stamped on the record; a retry of
+                the same turn passes the same number.
             stream_callback: Optional callback for real-time event streaming
-            timeout: Hard wall-clock deadline in seconds. When exceeded the
-                agent must force-terminate any in-flight subprocess and raise
-                TurnTimeoutError. Do not rely solely on asyncio cancellation --
-                some SDKs swallow it.
+            timeout: Hard wall-clock deadline in seconds. When exceeded the agent
+                force-terminates any in-flight subprocess and returns a ``TIMEOUT``
+                outcome. Do not rely solely on asyncio cancellation -- some SDKs
+                swallow it.
             should_stop: The run's single stop poll. An implementation with
                 ``contract.cooperative_stop`` calls it at each safe boundary; a
-                non-None reason means stop pulling work, remember the reason, and
-                finalize with ``end_status_for(reason)`` (``crashed=False``, no
-                raise). Agents that do not support it accept and ignore it.
+                non-None reason means stop pulling work and finalize with
+                ``end_status_for(reason)``. Agents that do not support it ignore it.
 
         Returns:
-            TurnRecord containing the complete interaction
+            The ``TurnOutcome`` from the turn's ``TurnEmitter``: ``finalize(...)`` for a
+            clean status, ``fail(...)`` for ``CRASHED`` / ``TIMEOUT`` (its record is
+            ``crashed=True``).
 
         Raises:
-            RuntimeError: If agent is not started or communication fails.
-            TurnTimeoutError: Timeout elapsed; implementations must set
-                ``self.pending_turn`` to a ``crashed=True`` partial TurnRecord
-                before raising if telemetry was captured.
-            AgentCrashError: Agent failed mid-turn; same ``pending_turn`` contract.
+            asyncio.CancelledError: the turn was cancelled from outside. The agent
+                ends the turn first with ``fail(CRASHED, "turn cancelled")``, then
+                re-raises. Any other exception is a harness bug.
 
-        On success ``pending_turn`` must be None. On failure it holds the partial
-        record, and only ``discard_pending_turn`` — which the caller invokes after
-        every failed call — rolls back per-turn bookkeeping.
-
-        The agent is the SOLE emitter of the event protocol. Emit exactly one
-        ``AgentStartEvent`` at entry and one matching ``AgentEndEvent`` from
-        ``finally`` on every exit path, one ``TurnStartEvent`` / ``TurnEndEvent``
-        pair per inner turn, and a ``ToolStartEvent`` closed by a ``ToolEndEvent``
-        for every tool call (``status=unresolved`` when a crash orphans one). Fan
-        every event through an internal ``EventCollector``, which builds the
-        returned ``TurnRecord``, and through the caller's ``stream_callback``.
+        Open one ``TurnEmitter`` per turn with ``_open_emitter``; it is the sole writer
+        of the event protocol.
 
         Rationale: .claude/notes/agents.md § Shared turn lifecycle
         """
         pass
+
+    def _open_emitter(
+        self,
+        *,
+        prompt: str,
+        iteration: int,
+        model: str | None,
+        task_id: str,
+        stream_callback: StreamCallback | None,
+    ) -> TurnEmitter:
+        """The turn's emitter, on a fresh ``TurnClock`` or the wall clock per ``contract.timing_basis``."""
+        clock: Clock = TurnClock() if self.contract.timing_basis is TimingBasis.TURN_CLOCK else datetime
+        return TurnEmitter(
+            task_id=task_id,
+            iteration=iteration,
+            prompt=prompt,
+            model=model,
+            basis=self.contract.timing_basis,
+            clock=clock,
+            sinks=[stream_callback] if stream_callback is not None else [],
+        )
+
+    async def _legacy_outcome(
+        self,
+        body: Callable[..., Awaitable[TurnRecord]],
+        user_input: str,
+        *,
+        iteration: int,
+        stream_callback: StreamCallback | None,
+        timeout: float | None,
+        should_stop: Callable[[], StopReason | None] | None,
+    ) -> TurnOutcome:
+        """Adapt a not-yet-ported raise-and-park ``communicate`` body to the outcome contract.
+
+        ``CancelledError`` propagates untouched: the body already finalized the turn.
+        """
+        self._iteration = iteration - 1
+        last = _LastEndStatus()
+        callback = CompositeStreamCallback([last, stream_callback] if stream_callback is not None else [last])
+        try:
+            record = await body(user_input, stream_callback=callback, timeout=timeout, should_stop=should_stop)
+        except (AgentCrashError, TurnTimeoutError) as err:
+            fallback = AgentEndStatus.TIMEOUT if isinstance(err, TurnTimeoutError) else AgentEndStatus.CRASHED
+            partial = self.pending_turn or TurnRecord(
+                iteration=iteration,
+                user_input=user_input,
+                agent_output="",
+                crashed=True,
+                crash_reason=truncate_crash_message(str(err)),
+            )
+            self.pending_turn = None
+            self._iteration_was_incremented = False
+            failed = fallback
+            if last.status is AgentEndStatus.CRASHED or last.status is AgentEndStatus.TIMEOUT:
+                failed = last.status
+            return TurnOutcome(record=partial, status=failed, error=str(err))
+        return TurnOutcome(record=record, status=last.status or AgentEndStatus.COMPLETED, error=None)
 
     @abstractmethod
     async def stop(self) -> None:
@@ -341,3 +386,14 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
             "system_prompt_semantics": self.contract.system_prompt_semantics or "unknown",
             "harness_contract": self.contract.model_dump(mode="json"),
         }
+
+
+class _LastEndStatus:
+    """Remembers the last ``AgentEndEvent.status`` a legacy turn body emitted."""
+
+    def __init__(self) -> None:
+        self.status: AgentEndStatus | None = None
+
+    def on_event(self, event: StreamEvent) -> None:
+        if isinstance(event, AgentEndEvent):
+            self.status = event.status

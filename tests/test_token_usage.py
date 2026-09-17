@@ -12,7 +12,6 @@ from coder_eval.agents.claude_code_agent import (
     _is_sdk_result_message,
     _is_task_notification,
 )
-from coder_eval.errors import AgentCrashError
 from coder_eval.models import (
     AgentKind,
     AssistantMessage,
@@ -26,6 +25,7 @@ from coder_eval.models import (
 )
 from coder_eval.pricing import calculate_cost
 from coder_eval.reports import ReportGenerator
+from coder_eval.streaming.events import AgentEndStatus
 
 
 def _assistant(
@@ -523,7 +523,7 @@ class TestAgentTokenCapture:
             yield sdk_result
 
         with patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query):
-            record = await agent.communicate("test prompt")
+            record = (await agent.communicate("test prompt", iteration=1)).record
 
         assert record.token_usage is not None
         assert record.token_usage.uncached_input_tokens == 1000
@@ -559,7 +559,7 @@ class TestAgentTokenCapture:
             yield assistant_msg
 
         with patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query):
-            record = await agent.communicate("test prompt")
+            record = (await agent.communicate("test prompt", iteration=1)).record
 
         assert record.token_usage is None
 
@@ -568,7 +568,7 @@ class TestAgentTokenCapture:
         """End-to-end wiring (issue #386): on a crash there is no ResultMessage,
         so the SDK supplies no cost. The agent must thread its resolved
         ``effective_model`` through ``communicate() → _finalize →
-        _build_token_usage`` so the partial ``pending_turn`` records a
+        _build_token_usage`` so the crashed partial record carries a
         rate-card cost instead of None. The unit tests for ``_build_token_usage``
         pass an explicit model; this proves the closure is actually wired."""
         config = parse_agent_config(
@@ -602,14 +602,14 @@ class TestAgentTokenCapture:
         with (
             patch("coder_eval.agents.claude_code_agent.SubprocessCLITransport", return_value=MagicMock()),
             patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query),
-            pytest.raises(AgentCrashError),
         ):
-            await agent.communicate("test prompt")
+            outcome = await agent.communicate("test prompt", iteration=1)
 
-        # The crashed partial turn is parked on pending_turn with cost backfilled.
-        assert agent.pending_turn is not None
-        assert agent.pending_turn.crashed is True
-        usage = agent.pending_turn.token_usage
+        # The crashed partial turn is returned on the outcome with cost backfilled.
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record is not None
+        assert outcome.record.crashed is True
+        usage = outcome.record.token_usage
         assert usage is not None
         expected = calculate_cost(
             "claude-opus-4-8",
@@ -653,7 +653,7 @@ class TestAgentTokenCapture:
             yield sdk_result
 
         with patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query):
-            record = await agent.communicate("test prompt")
+            record = (await agent.communicate("test prompt", iteration=1)).record
 
         assert record.token_usage is not None
         assert record.token_usage.cache_creation_input_tokens == 0
@@ -716,7 +716,7 @@ class TestAgentTokenCapture:
             yield result
 
         with patch("coder_eval.agents.claude_code_agent.query", side_effect=mock_query):
-            record = await agent.communicate("delegate it")
+            record = (await agent.communicate("delegate it", iteration=1)).record
 
         # Turn total is the model_usage figure — UNCHANGED by the synthetic message.
         assert record.token_usage is not None
