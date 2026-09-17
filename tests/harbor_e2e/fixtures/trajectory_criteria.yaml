@@ -10,7 +10,13 @@ description: >
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"
-  allowed_tools: ["Read", "Write", "Bash"]
+  # Bash only -- no Read/Write/Edit -- so there is no alternative tool the
+  # agent could use to create done.txt instead of running `touch`. A prior
+  # version of this fixture allowed Write and asked for file *content*, which
+  # gave the agent a reason to prefer Write over the shell command this
+  # scenario exists to exercise; file_exists below never checks content, so
+  # nothing was gained by asking for it.
+  allowed_tools: ["Bash"]
 
 sandbox:
   driver: docker
@@ -19,9 +25,7 @@ sandbox:
 
 initial_prompt: >
   Run the shell command `touch done.txt` to create an empty file named
-  done.txt, then write the single word "done" into it. You must actually run
-  `touch done.txt` as a separate Bash command -- do not create the file only
-  through a file-editing tool.
+  done.txt.
 
 success_criteria:
   - type: "file_exists"
