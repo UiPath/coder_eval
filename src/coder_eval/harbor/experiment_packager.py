@@ -119,8 +119,6 @@ def export_experiment(
     task_files: list[Path],
     experiment_file: Path,
     out_dir: Path,
-    *,
-    allow_credentials: bool = False,
 ) -> ExperimentExportResult:
     """Export every (task x variant x replicate[ x dataset row]) combination to Harbor directories.
 
@@ -183,7 +181,6 @@ def export_experiment(
                 resolved.task,
                 resolved.task_file,
                 dest,
-                allow_credentials=allow_credentials,
             )
         except (TaskNotExportableError, CriteriaNotExportableError) as e:
             skipped.append(

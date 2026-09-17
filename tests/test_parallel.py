@@ -80,6 +80,60 @@ success_criteria:
 
 
 @pytest.mark.asyncio
+async def test_workspace_dir_constructs_orchestrator_with_flat_run_dir(tmp_path):
+    """--workspace-dir mode must pass config.run_dir (flat) to Orchestrator, not the
+    nested <variant>/<task_id>/<NN> path a ResolvedTask normally carries.
+
+    Exercises the effective_run_dir branch in run_batch's run_single -- the exact
+    code path the real Harbor CoderEvalAgent drives via `coder-eval execute
+    --format harbor --workspace-dir "$(pwd)"`. Patches Orchestrator itself (rather
+    than driving a full run) so the assertion is directly on the value this branch
+    computes, independent of what a real run happens to persist to disk.
+    """
+    task = TaskDefinition(
+        task_id="test_workspace_dir",
+        description="Test workspace_dir flat run_dir",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "tempdir"},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / "test_task.yaml"
+    task_file.write_text("task_id: test_workspace_dir\n")
+
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        preservation_mode=PreservationMode.NONE,
+        workspace_dir=workspace_dir,
+    )
+
+    nested_run_dir = run_dir / "default" / "test_workspace_dir" / "default"
+    resolved_task = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=nested_run_dir,
+        variant_id="default",
+        original_task_id="test_workspace_dir",
+    )
+
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.run = AsyncMock(return_value=MagicMock(duration_seconds=0.0))
+    mock_orchestrator_cls = MagicMock(return_value=mock_orchestrator)
+
+    with patch("coder_eval.orchestrator.Orchestrator", mock_orchestrator_cls):
+        await run_batch([resolved_task], config)
+
+    assert mock_orchestrator_cls.call_count == 1
+    assert mock_orchestrator_cls.call_args.kwargs["run_dir"] == run_dir, (
+        "workspace_dir mode must construct Orchestrator with the flat config.run_dir, not the nested per-task run_dir"
+    )
+
+
+@pytest.mark.asyncio
 async def test_semaphore_limits_concurrency(tmp_path):
     """Test that semaphore actually limits concurrent tasks."""
     max_parallel = 2

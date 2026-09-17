@@ -60,15 +60,6 @@ def export_command(
         "--format",
         help=f"Target format. Supported: {', '.join(_SUPPORTED_FORMATS)}.",
     ),
-    allow_credentials: bool = typer.Option(
-        False,
-        "--allow-credentials",
-        help=(
-            "Export criteria that need model credentials/network inside the verifier "
-            "(llm_judge / agent_judge / uipath_eval) anyway. Only pass this if you have "
-            "already provisioned that access yourself — the export does not do it for you."
-        ),
-    ),
 ) -> None:
     """Export a coder-eval task (or task x experiment.yaml variants) to another framework's directory format.
 
@@ -85,7 +76,7 @@ def export_command(
             console.print("[red]✗[/] Without --experiment, pass exactly one task YAML.")
             raise typer.Exit(1)
         try:
-            result = export_task(task_files[0], output_dir, allow_credentials=allow_credentials)
+            result = export_task(task_files[0], output_dir)
         except (TaskNotExportableError, CriteriaNotExportableError) as e:
             console.print(f"[red]✗[/] {e}")
             raise typer.Exit(1) from e
@@ -99,7 +90,6 @@ def export_command(
         all_task_files,
         experiment,
         output_dir,
-        allow_credentials=allow_credentials,
     )
 
     for exported in exp_result.exported:

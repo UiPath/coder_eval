@@ -7,14 +7,15 @@ an unsupported task **at export time**, where the operator sees why.
 Classification, v1:
 
 - ``PORTABLE`` — filesystem/exit-code checks.
-- ``NEEDS_REFERENCE`` — ``reference_comparison``; never actually blocking, since the
-  export always emits ``tests/reference/`` when the task declares one.
+- ``NEEDS_REFERENCE`` — ``reference_comparison``; never blocking, since the export
+  always emits ``tests/reference/`` when the task declares one.
 - ``NEEDS_TRAJECTORY`` — ``command_executed``, ``commands_efficiency``,
-  ``skill_triggered``. Hard-error until ATIF ingestion lands.
+  ``skill_triggered``; never blocking, since the generated ``tests/test.sh`` always
+  grades against ``/logs/agent/trajectory.json`` (ATIF).
 - ``NEEDS_CLI_RECORDER`` — ``cli_called``. Hard-error until the export bakes the
   recorder shim in.
-- ``NEEDS_CREDENTIALS`` — ``llm_judge``, ``agent_judge``, ``uipath_eval``.
-  Hard-error, with an opt-in escape hatch for an operator who has provisioned it.
+- ``NEEDS_CREDENTIALS`` — ``llm_judge``, ``agent_judge``, ``uipath_eval``. Never
+  blocking — assumes the operator provisions credentials themselves.
 
 Rationale: .claude/notes/reporting.md § Not every criterion can grade inside someone else's container
 """
@@ -62,12 +63,13 @@ _KNOWN_CRITERION_TYPES = frozenset(_PORTABILITY_BY_TYPE)
 
 # Which non-PORTABLE classes v1 refuses to export outright (vs. tolerating
 # with a caveat, like NEEDS_REFERENCE — C2 always emits tests/reference/ when
-# task.reference is set, so that class is never actually blocking).
+# task.reference is set — NEEDS_TRAJECTORY, which C2's CoderEvalAgent +
+# generated test.sh always wire up via /logs/agent/trajectory.json, and
+# NEEDS_CREDENTIALS, which the export always assumes the operator has
+# provisioned themselves — none of these three classes is actually blocking).
 _BLOCKING_IN_V1 = frozenset(
     {
-        CriterionPortability.NEEDS_TRAJECTORY,
         CriterionPortability.NEEDS_CLI_RECORDER,
-        CriterionPortability.NEEDS_CREDENTIALS,
     }
 )
 
@@ -97,27 +99,21 @@ def classify(criterion_type: str) -> CriterionPortability:
         ) from None
 
 
-def audit_criteria(
-    criteria: list[SuccessCriterion],
-    *,
-    allow_credentials: bool = False,
-) -> list[PortabilityIssue]:
+def audit_criteria(criteria: list[SuccessCriterion]) -> list[PortabilityIssue]:
     """Return every criterion this v1 export would refuse, or ``[]`` if the task exports cleanly.
 
-    ``allow_credentials`` is the escape hatch for ``NEEDS_CREDENTIALS`` criteria
-    (``llm_judge`` / ``agent_judge`` / ``uipath_eval``) — an operator who has
-    already provisioned model credentials and network access inside the
-    verifier container may pass it to export anyway. It does not affect
-    ``NEEDS_TRAJECTORY`` or ``NEEDS_CLI_RECORDER``, which are missing
-    functionality (C1.3, a recorder-baking step in C2), not a missing
-    permission — no flag can supply what does not exist yet.
+    Only ``NEEDS_CLI_RECORDER`` (``cli_called``) actually blocks — it is missing
+    functionality (a recorder-baking step in C2 that does not exist yet), so no
+    flag can supply it. Every other non-``PORTABLE`` class exports unconditionally:
+    ``NEEDS_REFERENCE``/``NEEDS_TRAJECTORY`` because C2 always wires up the
+    supporting artifact itself, and ``NEEDS_CREDENTIALS`` because the export
+    always assumes the operator provisions model credentials/network access
+    inside the verifier container themselves.
     """
     issues: list[PortabilityIssue] = []
     for c in criteria:
         portability = classify(c.type)
         if portability not in _BLOCKING_IN_V1:
-            continue
-        if portability is CriterionPortability.NEEDS_CREDENTIALS and allow_credentials:
             continue
         issues.append(
             PortabilityIssue(criterion_description=c.description, criterion_type=c.type, portability=portability)

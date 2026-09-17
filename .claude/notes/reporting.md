@@ -422,13 +422,17 @@ where it is an unexplained low reward with no obvious cause.
 Filesystem and exit-code checks are portable — nothing about the verifier container changes
 what they need. `reference_comparison` needs the reference tree, which the export always
 places verifier-side when the task declares one, so that class never actually blocks.
-Trajectory-reading criteria cannot work in the export direction at all: the verifier is a
-separate process from the agent phase, and the agent may not even BE coder-eval, so there is
-no iterations list to read without ATIF ingestion. `cli_called` reads a log written by a
-recorder shim coder-eval's own sandbox installs, which the exported Dockerfile does not
-provision. Credential-needing criteria need a model reachable from inside the verifier
-container and a judge that does not follow the agent's route; they are refused with an
-explicit opt-in escape hatch for an operator who has provisioned that themselves.
+Trajectory-reading criteria once could not work in the export direction at all, but no
+longer block: the packager's `CoderEvalAgent` always runs `coder-eval execute --format
+harbor`, which writes `/logs/agent/trajectory.json` (ATIF) alongside `task.json`, and the
+generated `tests/test.sh` grades `/logs/agent` as a run directory — so the trajectory is
+always there by the time the verifier runs. `cli_called` reads a log written by a recorder
+shim coder-eval's own sandbox installs, which the exported Dockerfile does not provision —
+this is the one class that still hard-blocks. Credential-needing criteria need a model
+reachable from inside the verifier container and a judge that does not follow the agent's
+route; the export no longer gates them behind a flag — it exports them unconditionally on
+the assumption that an operator exporting one has already provisioned that access
+themselves (C2 does not do it for them).
 
 Coverage is registry-derived, so a new criterion type added to the union without a
 classification fails CLOSED rather than silently exporting as if it were portable.
@@ -508,12 +512,18 @@ letting a bare `OSError` escape, because the CLI catches only the export errors 
 unreadable tree would otherwise abort a whole experiment export the docstring promises it
 will not abort.
 
-The generated shell script no longer interpolates a workdir value at all — it resolves its
-own cwd via `$(pwd)` at run time, a fixed literal in `_TEST_SH_TEMPLATE`. `docker exec`
-(with `-w` when the task set an explicit override, or none when it did not — see above)
-always lands the shell there, whether or not the same container's agent phase used an
-explicit override too, so `pwd` is authoritative and there is no longer an injection
-surface to `shlex.quote` against.
+The generated shell script no longer interpolates a workdir value, or guesses a cwd, at
+all — it is a fixed literal in `_TEST_SH_TEMPLATE` that calls `coder-eval evaluate
+/tests/task.yaml /logs/agent --in-place --run-dir /logs/verifier`, passing `/logs/agent`
+as an explicit RUN DIRECTORY rather than a workdir guess. `coder-eval execute --run-dir
+/logs/agent ...` (the agent phase) always finishes with `/logs/agent/task.json` and
+`/logs/agent/artifacts/<task_id>/`, so `coder-eval evaluate` locates the workspace from
+that `task.json`'s own recorded `sandbox_path` instead of a live `$(pwd)`. Passing the
+task file explicitly also keeps this off the untrusted-recorded-config path (which exists
+for a shared run directory whose config is not to be trusted without
+`--allow-recorded-commands`) — an explicit, operator-supplied task file always overrides
+the run's recorded config. Nothing task-controlled is interpolated into the template, so
+there is no injection surface to `shlex.quote` against.
 
 ## The ATIF trajectory bridge
 
