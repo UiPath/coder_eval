@@ -590,6 +590,12 @@ class TestByType:
 _PARITY_FIXTURE_DIRS = ("tasks/run_limits", "tasks/skills")
 
 
+def _contract_of(kind: AgentKind) -> HarnessContract:
+    registration = AgentRegistry.get(kind)
+    assert registration is not None
+    return registration.agent_class.contract
+
+
 def _cooperative_kinds() -> list[AgentKind]:
     ensure_plugins_loaded()
     kinds = [kind for kind in AgentKind if kind is not AgentKind.UNKNOWN]
@@ -606,11 +612,21 @@ def _cooperative_kinds() -> list[AgentKind]:
     ids=lambda p: Path(p).name,
 )
 def test_multi_harness_fixtures_run_on_every_cooperative_harness(fixture: str) -> None:
-    """A fixture documented to run with `--type <kind>` must not carry a field one harness rejects."""
+    """A fixture documented to run with `--type <kind>` must not carry a field one harness rejects.
+
+    A fixture that sets a model-turn limit runs on the harnesses that count model turns, and the rest reject it.
+    """
     from coder_eval.orchestration.task_loader import load_task
 
     task, _source = load_task(Path(fixture))
     authored = task.agent.model_dump(exclude_unset=True, exclude={"type"}) if task.agent is not None else {}
+    counts_turns_only = task.run_limits is not None and any(
+        getattr(task.run_limits, field) is not None for field in MODEL_TURN_LIMITS
+    )
     for kind in _cooperative_kinds():
         retyped = task.model_copy(update={"agent": parse_agent_config(type=kind, **authored)})
-        validate_harness_contract(retyped)
+        if counts_turns_only and not _contract_of(kind).counts_model_turns:
+            with pytest.raises(HarnessContractError, match=r"run_limits\."):
+                validate_harness_contract(retyped)
+        else:
+            validate_harness_contract(retyped)
