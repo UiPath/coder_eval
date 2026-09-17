@@ -35,6 +35,7 @@ from coder_eval.models import (
     DirectRoute,
     Enforcement,
     HarnessContract,
+    TimingBasis,
     TokenUsage,
     TranscriptMessage,
     TurnRecord,
@@ -420,7 +421,7 @@ class _CodexTurnState:
         # the collector takes it back out. That is also what makes the sub-message
         # split safe: the two specs SHARE these bounds, so the overlap is
         # subtracted once rather than once per part.
-        started, gen_ms = close_window(
+        window = close_window(
             mark=mark,
             now=completed,
             item_start=_ms_to_dt(self.open_start_ms) if self.open_start_ms is not None else None,
@@ -451,9 +452,9 @@ class _CodexTurnState:
         assigned = 0.0
         for idx, (_, out_tok, _) in enumerate(specs):
             if idx == len(specs) - 1:
-                gen_parts.append(gen_ms - assigned)
+                gen_parts.append(window.duration_ms - assigned)
             else:
-                share = round(gen_ms * (out_tok / out_total if out_total > 0 else 1 / len(specs)), 6)
+                share = round(window.duration_ms * (out_tok / out_total if out_total > 0 else 1 / len(specs)), 6)
                 gen_parts.append(share)
                 assigned += share
 
@@ -463,8 +464,8 @@ class _CodexTurnState:
             first = idx == 0
             self.messages.append(
                 AssistantMessage(
-                    started_at=started,
-                    completed_at=completed,
+                    started_at=window.started_at,
+                    completed_at=window.completed_at,
                     generation_duration_ms=gen_parts[idx],
                     content_blocks=blocks,
                     tool_use_ids=[b.tool_use_id for b in blocks if b.block_type == "tool_use" and b.tool_use_id],
@@ -752,6 +753,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=True,
         usage_granularity=UsageGranularity.TURN,
+        timing_basis=TimingBasis.CLI_EPOCH_MS,
     )
 
     def __init__(

@@ -18,11 +18,19 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 
-if TYPE_CHECKING:
-    from coder_eval.models import TokenUsage
+class _TurnUsage(Protocol):
+    """The ``TokenUsage`` shape ``price_turn`` reads; a protocol, because models import this module."""
+
+    uncached_input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+    total_cost_usd: float | None
+
+    def is_empty(self) -> bool: ...
 
 
 logger = logging.getLogger(__name__)
@@ -256,7 +264,7 @@ def calculate_cost(
     ) / 1_000_000
 
 
-def price_turn(usage: "TokenUsage", models: Sequence[str | None]) -> float | None:
+def price_turn(usage: _TurnUsage, models: Sequence[str | None]) -> float | None:
     """The cost of one turn: ``usage.total_cost_usd`` is what the harness reported.
 
     In order: a finite, non-zero reported cost wins; empty usage returns the reported

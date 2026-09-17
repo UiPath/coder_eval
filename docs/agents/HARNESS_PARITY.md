@@ -17,7 +17,7 @@ CE069 fails the build on drift.
 <!-- harness-run-limits:start -->
 | limit | claude-code | codex | antigravity | opencode | pi | none |
 | --- | --- | --- | --- | --- | --- | --- |
-| `max_tool_calls` | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | TurnMonitor at the should_stop poll, resolved tool calls | not polled (never fires) |
+| `max_tool_calls` | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | not polled (never fires) |
 | `expected_tool_calls` | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only |
 | `task_timeout` | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic |
 | `turn_timeout` | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) |
@@ -55,6 +55,7 @@ Generated from each agent class's `contract` by `make parity-table`; CE069 fails
 | `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `cooperative_stop` | yes | yes | yes | yes | yes | no |
 | `usage_granularity` | generation | turn | turn | step | step | turn |
+| `timing_basis` | turn_clock | cli_epoch_ms | turn_clock | mixed | turn_clock | turn_clock |
 | `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
 <!-- harness-contract:end -->
 

@@ -189,9 +189,14 @@ class TurnMonitor:
         monitor would reduce a strictly smaller command set than the authoritative
         check. The cap counts distinct resolved tool ids.
 
+        A nested (sub-agent) event is main-thread-scoped out: its tool end is recorded
+        but never counted or evaluated, its turn start sets no model, and only its
+        turn-end tokens count, toward the budgets.
+
         Rationale: .claude/notes/orchestration.md § Verdicts latch, and the decision happens on the CALL
         """
         if event.parent_thread_id is not None:
+            self._on_nested_event(event)
             return
         if isinstance(event, AgentStartEvent):
             if self._started_monotonic is None:
@@ -222,6 +227,13 @@ class TurnMonitor:
             self._evaluate_cap()
             return
         self._collector.on_event(event)
+
+    def _on_nested_event(self, event: StreamEvent) -> None:
+        if isinstance(event, ToolEndEvent):
+            self._collector.on_event(event)
+        elif isinstance(event, TurnEndEvent) and event.tokens is not None:
+            self._in_flight += event.tokens
+            self._evaluate_budgets()
 
     def should_stop(self) -> StopReason | None:
         """The cooperative poll the agent calls at each safe boundary."""

@@ -69,7 +69,7 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     ToolEndStatus,
 )
-from coder_eval.timing import main_thread_tool_spans, union_ms
+from coder_eval.testing import assert_identity_closes
 
 
 # The two CLI harnesses (opencode, codex) report their stamps as epoch
@@ -127,56 +127,8 @@ def _record(turn: Turn) -> TurnRecord:
     return collector.build_turn_record()
 
 
-def assert_identity_closes(turn: Turn) -> None:
-    """head + Σ generation + UNION(tool) + tail == the scripted span, EXACTLY.
-
-    ``pytest.approx`` rather than an order-of-magnitude bound: every input is
-    scripted, so the only slack is float representation. A bound wide enough to
-    absorb a real defect is the sensor this module exists to replace.
-
-    MAIN THREAD ONLY on both sides, and both through production's own helpers:
-    a sub-agent's generations bubble into the same stream, and the spawning
-    Agent call's own interval already spans them and their tools.
-    """
-    record = _record(turn)
-    span_ms = turn.ended_ms - turn.started_ms
-
-    generation_ms = sum(
-        m.generation_duration_ms or 0.0
-        for m in record.messages
-        if isinstance(m, AssistantMessage) and m.parent_tool_use_id is None
-    )
-    # The PRODUCTION selector, not a re-derivation of it. Unioning every command
-    # would assert a different identity than the collector computes: production,
-    # the golden sensor, the live residual gate and the HTML report all exclude
-    # a sub-agent's own tools (the spawning Agent call's interval already spans
-    # them). No case here has a child command yet, so a local copy stayed green
-    # while quietly testing something else — and the first sub-agent case added
-    # would have reported a false regression.
-    tool_ms = union_ms(main_thread_tool_spans(record.messages, record.commands))
-    assert record.harness_startup_ms is not None, "a turn that generated has a measured head"
-    assert record.harness_teardown_ms is not None, "a turn that generated has a measured tail"
-    # The STORED bucket must equal the one just computed independently. Without
-    # this the ms-exact sensor would cover three of the four buckets and read
-    # the fourth from a re-derivation, leaving the published field unchecked on
-    # every harness — which is how a stored value and its consumers drift.
-    # `None` only when no bounded span exists, in which case the union is 0.0.
-    stored_tool_ms = record.tool_union_ms if record.tool_union_ms is not None else 0.0
-    assert stored_tool_ms == pytest.approx(tool_ms), (
-        f"TurnRecord.tool_union_ms is {record.tool_union_ms}, but this turn's main-thread "
-        f"command spans union to {tool_ms:.4f} ms. The collector writes the field from the same "
-        "span set it measures the head and the tail against, so a disagreement means the stored "
-        "value and the selection rule have come apart."
-    )
-    bucket_sum = record.harness_startup_ms + generation_ms + tool_ms + record.harness_teardown_ms
-
-    assert bucket_sum == pytest.approx(span_ms), (
-        f"the four buckets sum to {bucket_sum:.4f} ms against a {span_ms:.4f} ms turn "
-        f"(off by {bucket_sum - span_ms:+.4f} ms): head={record.harness_startup_ms:.4f}, "
-        f"generation={generation_ms:.4f}, tool_union={tool_ms:.4f}, tail={record.harness_teardown_ms:.4f}. "
-        "They tile the turn, so a sum UNDER it means some interval is booked nowhere — the "
-        "defect class the golden corpus cannot see — and a sum OVER it means one is booked twice."
-    )
+def _assert_closes(turn: Turn) -> None:
+    assert_identity_closes(_record(turn), started_at=at(turn.started_ms), ended_at=at(turn.ended_ms))
 
 
 # --------------------------------------------------------------------------
@@ -619,23 +571,23 @@ def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
 
 
 def test_pi_buckets_tile_the_turn():
-    assert_identity_closes(_pi_turn())
+    _assert_closes(_pi_turn())
 
 
 def test_opencode_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
-    assert_identity_closes(_opencode_turn(monkeypatch))
+    _assert_closes(_opencode_turn(monkeypatch))
 
 
 def test_antigravity_buckets_tile_the_turn():
-    assert_identity_closes(_antigravity_turn())
+    _assert_closes(_antigravity_turn())
 
 
 def test_codex_buckets_tile_the_turn():
-    assert_identity_closes(_codex_turn())
+    _assert_closes(_codex_turn())
 
 
 def test_claude_code_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
-    assert_identity_closes(_claude_turn(monkeypatch))
+    _assert_closes(_claude_turn(monkeypatch))
 
 
 def test_a_slow_tool_result_round_trip_is_not_lost(monkeypatch: pytest.MonkeyPatch):
@@ -645,7 +597,7 @@ def test_a_slow_tool_result_round_trip_is_not_lost(monkeypatch: pytest.MonkeyPat
     `on_user_message`) fails THIS and leaves every other case in the file
     green, which is exactly what happened in production.
     """
-    assert_identity_closes(_claude_slow_result_turn(monkeypatch))
+    _assert_closes(_claude_slow_result_turn(monkeypatch))
 
 
 def test_every_built_in_harness_has_a_case():
@@ -689,4 +641,4 @@ def test_the_sensor_sees_a_window_that_stops_tiling():
 
     assert _generation_ms(healthy) - _generation_ms(mutated) == pytest.approx(600.0)
     with pytest.raises(AssertionError, match="booked nowhere"):
-        assert_identity_closes(mutated)
+        _assert_closes(mutated)

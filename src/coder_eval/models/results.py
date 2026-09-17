@@ -281,24 +281,20 @@ CriterionResultUnion = Annotated[
 
 
 class ResultSummary(BaseModel):
-    """Diagnostic fields lifted from the SDK's final ResultMessage.
+    """How a clean turn ended, on every harness.
 
-    Powers the agent's debug log and the error-path formatter that
-    surfaces a useful detail string when the CLI crashes. Persisted on
-    ``TurnRecord`` for clean turns only — on a crash the agent raises
-    before the TurnRecord is constructed, so post-mortem persistence on
-    error turns is out of scope here.
-
-    Mirrors the diagnostic-bearing subset of
-    ``claude_agent_sdk.ResultMessage``; pure accounting fields
-    (``num_turns``, ``duration_ms``) live on ``TurnRecord`` /
-    ``TokenUsage``.
+    Persisted on ``TurnRecord`` for clean turns only; a crashed or timed-out turn
+    carries none, and its failure is in ``crash_reason``. ``result`` is the agent's
+    final reply: the text of the last main-thread assistant message when that
+    message calls no tool. A harness with its own final summary may pass that
+    instead. Accounting fields (``num_turns``, durations) live on
+    ``TurnRecord`` / ``TokenUsage``.
     """
 
-    is_error: bool = Field(description="Whether the SDK reported the turn as errored")
-    subtype: str = Field(description="Coarse classification (e.g. 'success', 'error_during_execution')")
+    is_error: bool = Field(description="Whether the harness reported the finished turn as errored")
+    subtype: str = Field(description="Coarse classification: the end status, or the harness's own subtype")
     stop_reason: str | None = Field(default=None, description="Why the model stopped, if reported")
-    result: str | None = Field(default=None, description="Free-form result/error text from the SDK")
+    result: str | None = Field(default=None, description="The agent's final reply text, or the harness's result text")
 
 
 class TurnRecord(BaseModel):
@@ -404,7 +400,7 @@ class TurnRecord(BaseModel):
     )
     result_summary: ResultSummary | None = Field(
         default=None,
-        description="SDK ResultMessage summary, when one was emitted (clean turns or partials that got one).",
+        description="How a clean turn ended, including the agent's final reply; None on a crashed or timed-out turn.",
     )
     provider_call_costs: list[ProviderCallCost] = Field(
         default_factory=list,

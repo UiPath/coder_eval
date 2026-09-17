@@ -44,5 +44,5 @@ def register(registry: type[AgentRegistry]) -> None:
 
     ``registry`` is the ``AgentRegistry`` class (not an instance).
     """
-    assert SPI_VERSION == 2, f"byoa_demo supports coder_eval SPI 2, not {SPI_VERSION}"
+    assert SPI_VERSION == 3, f"byoa_demo supports coder_eval SPI 3, not {SPI_VERSION}"
     registry.register(DEMO_KIND, DemoAgentConfig)(DemoAgent)

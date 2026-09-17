@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import create_model
 
-from coder_eval.models import BaseAgentConfig, Enforcement, HarnessContract, UsageGranularity
+from coder_eval.models import BaseAgentConfig, Enforcement, HarnessContract, TimingBasis, UsageGranularity
 
 
 def stub_contract(*, cooperative_stop: bool = True) -> HarnessContract:
@@ -20,6 +20,7 @@ def stub_contract(*, cooperative_stop: bool = True) -> HarnessContract:
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=cooperative_stop,
         usage_granularity=UsageGranularity.TURN,
+        timing_basis=TimingBasis.TURN_CLOCK,
     )
 
 

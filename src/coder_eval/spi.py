@@ -23,6 +23,7 @@ from coder_eval.models import (
     PermissionMode,
     ResultSummary,
     SystemPromptMode,
+    TimingBasis,
     TokenUsage,
     ToolNameMap,
     TranscriptMessage,
@@ -32,6 +33,7 @@ from coder_eval.models import (
 from coder_eval.pricing import ModelPricing, register_pricing
 from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
 from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -46,10 +48,10 @@ from coder_eval.streaming.events import (
     TurnStartEvent,
     end_status_for,
 )
-from coder_eval.timing import TurnClock, close_window
+from coder_eval.timing import TurnClock, Window, close_window
 
 
-SPI_VERSION: Final[int] = 2
+SPI_VERSION: Final[int] = 3
 
 __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "Agent",
@@ -67,6 +69,7 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "CompositeStreamCallback",
     "Enforcement",
     "EventCollector",
+    "Generation",
     "HarnessContract",
     "LocalPluginConfig",
     "ModelPricing",
@@ -78,6 +81,7 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "StreamCallback",
     "SystemPromptMode",
     "TextChunkEvent",
+    "TimingBasis",
     "TokenUsage",
     "ToolEndEvent",
     "ToolEndStatus",
@@ -85,12 +89,15 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "ToolStartEvent",
     "TranscriptMessage",
     "TurnClock",
+    "TurnEmitter",
     "TurnEndEvent",
     "TurnEndStatus",
+    "TurnOutcome",
     "TurnRecord",
     "TurnStartEvent",
     "TurnTimeoutError",
     "UsageGranularity",
+    "Window",
     "close_window",
     "end_status_for",
     "register_pricing",

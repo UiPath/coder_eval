@@ -433,3 +433,52 @@ class TestUsdBudget:
         _feed(monitor, [AgentStartEvent(task_id="t"), TurnEndEvent(task_id="t", tokens=TokenUsage(output_tokens=5))])
         assert monitor.cost_usd() == 0.0
         assert monitor.should_stop() is None
+
+
+class TestSubAgentScope:
+    """A nested (sub-agent) event reaches the collector and the budgets, never the cap, criteria or model."""
+
+    @staticmethod
+    def _nested(event: Any) -> Any:
+        return event.model_copy(update={"thread_id": "agent_1", "parent_thread_id": "agent_1"})
+
+    def test_nested_tool_calls_do_not_reach_the_cap_but_reach_the_collector(self) -> None:
+        monitor = TurnMonitor.for_task(_task(max_tool_calls=1), arm=True)
+        _feed(monitor, [AgentStartEvent(task_id="t"), self._nested(_end("child"))])
+        assert monitor.tool_calls == 0
+        assert monitor.should_stop() is None
+        assert [c.tool_id for c in monitor._collector.build_turn_record().commands] == ["child"]
+        monitor.on_event(_end("main"))
+        assert monitor.should_stop() is StopReason.TOOL_CALL_CAP
+
+    def test_nested_tool_calls_do_not_reach_armed_criteria(self) -> None:
+        criteria = [_skill_crit("date-teller", on_pass=True)]
+        monitor = TurnMonitor.for_task(_task(criteria=criteria), arm=True)
+        skill = _end("sk", tool_name="Skill", parameters={"skill": "date-teller"})
+        with patch.object(TurnMonitor, "_evaluate_impl") as evaluate:
+            _feed(monitor, [self._nested(ToolStartEvent(task_id="t", tool=skill.tool)), self._nested(skill)])
+        evaluate.assert_not_called()
+        assert monitor.should_stop() is None
+
+    def test_a_nested_model_never_becomes_the_reported_model(self) -> None:
+        monitor = TurnMonitor.for_task(_task(limits=RunLimits(max_usd=100.0)), arm=True)
+        _feed(
+            monitor,
+            [
+                AgentStartEvent(task_id="t"),
+                self._nested(TurnStartEvent(task_id="t", model="claude-haiku-4-5")),
+                AgentEndEvent(task_id="t", usage=TokenUsage(uncached_input_tokens=1_000_000)),
+            ],
+        )
+        assert monitor.cost_usd() is None
+
+    def test_nested_tokens_count_toward_budgets(self) -> None:
+        monitor = TurnMonitor.for_task(_task(limits=RunLimits(max_output_tokens=10)), arm=True)
+        _feed(
+            monitor,
+            [
+                AgentStartEvent(task_id="t"),
+                self._nested(TurnEndEvent(task_id="t", tokens=TokenUsage(output_tokens=11))),
+            ],
+        )
+        assert monitor.should_stop() is StopReason.TOKEN_BUDGET

@@ -102,47 +102,101 @@ class TestUsageCoalescing:
         assert record.token_usage.total_cost_usd == 0.0
 
 
-class TestSubAgentEventFiltering:
-    """Events with parent_thread_id set are ignored (collector.py ~61)."""
+class TestSubAgentEvents:
+    """A nested event (parent_thread_id set) records its tool call and shapes nothing else."""
 
-    def test_sub_agent_events_do_not_affect_record(self):
+    def test_nested_start_and_end_do_not_affect_record_but_the_nested_tool_is_a_command(self):
         collector = EventCollector()
         _feed(
             collector,
             [
                 AgentStartEvent(task_id=TASK_ID, prompt="main prompt", iteration=2),
-                # A nested sub-agent's events (parent_thread_id set) must be skipped.
                 AgentStartEvent(
                     task_id=TASK_ID,
                     prompt="child prompt",
                     iteration=99,
                     thread_id="tool_x",
-                    parent_thread_id="main",
+                    parent_thread_id="tool_x",
                 ),
                 ToolEndEvent(
                     task_id=TASK_ID,
                     tool=_tool("child_tool", 0),
                     thread_id="tool_x",
-                    parent_thread_id="main",
+                    parent_thread_id="tool_x",
                 ),
+                AgentEndEvent(task_id=TASK_ID, iteration=99, thread_id="tool_x", parent_thread_id="tool_x"),
                 AgentEndEvent(
                     task_id=TASK_ID,
                     iteration=2,
                     user_input="main prompt",
                     agent_output="main out",
                     usage=TokenUsage(output_tokens=10),
-                    parent_thread_id=None,
                 ),
             ],
         )
 
         record = collector.build_turn_record()
-        # The child AgentStart did not overwrite iteration/user_input.
         assert record.iteration == 2
         assert record.user_input == "main prompt"
         assert record.agent_output == "main out"
-        # The child ToolEnd contributed no command.
-        assert record.commands == []
+        assert [c.tool_id for c in record.commands] == ["child_tool"]
+
+    def test_a_nested_turn_start_sets_no_model_and_counts_no_turn(self):
+        collector = EventCollector()
+        _feed(
+            collector,
+            [
+                AgentStartEvent(task_id=TASK_ID, model="main-model"),
+                TurnStartEvent(task_id=TASK_ID, model="sub-model", thread_id="t1", parent_thread_id="t1"),
+            ],
+        )
+        record = collector.build_turn_record()
+        assert record.model_used == "main-model"
+        assert record.assistant_turn_count == 0
+
+    def test_ended_tracks_the_current_attempt(self):
+        collector = EventCollector()
+        assert not collector.ended
+        _feed(collector, [AgentStartEvent(task_id=TASK_ID), AgentEndEvent(task_id=TASK_ID, parent_thread_id="x")])
+        assert not collector.ended
+        collector.on_event(AgentEndEvent(task_id=TASK_ID))
+        assert collector.ended
+        collector.on_event(AgentStartEvent(task_id=TASK_ID))
+        assert not collector.ended
+
+
+class TestAssistantTurnIndexIsDerived:
+    """``assistant_turn_index`` is the owning AssistantMessage's position, computed by the collector."""
+
+    @staticmethod
+    def _message(*tool_ids: str) -> AssistantMessage:
+        now = datetime(2026, 1, 1)
+        return AssistantMessage(started_at=now, completed_at=now, tool_use_ids=list(tool_ids))
+
+    def test_the_index_counts_assistant_messages_only(self):
+        from coder_eval.models import UserMessage
+
+        collector = EventCollector()
+        tool_a, tool_b, orphan = _tool("a", 0), _tool("b", 1), _tool("orphan", 2)
+        tool_a.assistant_turn_index = 7
+        messages = [
+            self._message("a"),
+            UserMessage(text="hi"),
+            ReconciliationMessage(),
+            self._message(),
+            self._message("b"),
+        ]
+        _feed(
+            collector,
+            [
+                AgentStartEvent(task_id=TASK_ID),
+                *(ToolEndEvent(task_id=TASK_ID, tool=t) for t in (tool_a, tool_b, orphan)),
+                AgentEndEvent(task_id=TASK_ID, messages=messages),
+            ],
+        )
+        record = collector.build_turn_record()
+        assert [(c.tool_id, c.assistant_turn_index) for c in record.commands] == [("a", 0), ("b", 2), ("orphan", None)]
+        assert tool_a.assistant_turn_index == 7, "the event's own telemetry is never mutated"
 
 
 class TestToolReduction:

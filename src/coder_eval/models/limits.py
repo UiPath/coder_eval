@@ -41,7 +41,7 @@ class RunLimits(BaseModel):
         default=None,
         gt=0,
         description=(
-            "Hard cap on resolved tool calls across the whole task (every retry attempt and every "
+            "Hard cap on main-thread resolved tool calls across the whole task (every retry attempt and every "
             "dialog turn). Enforced by the TurnMonitor at the agent's next poll boundary on every "
             "harness: the round that reaches the cap is processed whole, so tool calls already in "
             "flight can still land after it. The run finalizes cleanly as tool_calls_exhausted; "

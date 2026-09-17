@@ -23,6 +23,8 @@ from openai_codex.generated.v2_all import Turn, TurnCompletedNotification
 
 from coder_eval.agents.codex_agent import CodexAgent
 from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.streaming.events import StreamEvent
+from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
 CODEX_MODEL = "gpt-5-codex"
@@ -378,8 +380,9 @@ def _rebase_notifications(notifications: list[Any]) -> list[Any]:
     return rebased
 
 
-async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> dict[str, Any]:
+async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> tuple[dict[str, Any], list[StreamEvent]]:
     """Run ``scenario`` with fakes and return the TurnRecord/pending_turn dump."""
+    recorder = EventRecorder()
     import pytest
 
     config = parse_agent_config(type=AgentKind.CODEX, model=CODEX_MODEL)
@@ -393,10 +396,10 @@ async def run_codex_scenario(scenario: CodexScenario, working_dir: str) -> dict[
     with patch.dict(os.environ, {"CODEX_HOME": working_dir}):
         if scenario.expects is not None:
             with pytest.raises(scenario.expects):
-                await agent.communicate("do it")
+                await agent.communicate("do it", stream_callback=recorder)
             record = agent.pending_turn
             assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
         else:
-            record = await agent.communicate("do it")
+            record = await agent.communicate("do it", stream_callback=recorder)
 
-    return record.model_dump(mode="json")
+    return record.model_dump(mode="json"), recorder.events

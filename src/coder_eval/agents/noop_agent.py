@@ -26,6 +26,7 @@ from coder_eval.models import (
     Enforcement,
     HarnessContract,
     NoneAgentConfig,
+    TimingBasis,
     TurnRecord,
     UsageGranularity,
 )
@@ -62,6 +63,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=False,
         usage_granularity=UsageGranularity.TURN,
+        timing_basis=TimingBasis.TURN_CLOCK,
     )
 
     def __init__(

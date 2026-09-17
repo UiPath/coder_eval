@@ -13,13 +13,18 @@ _ORIGINS = (
     "coder_eval.pricing",
     "coder_eval.streaming.callbacks",
     "coder_eval.streaming.collector",
+    "coder_eval.streaming.emitter",
     "coder_eval.streaming.events",
     "coder_eval.timing",
 )
 
 
-def test_spi_version_is_two() -> None:
-    assert spi.SPI_VERSION == 2
+def test_spi_version_is_three() -> None:
+    assert spi.SPI_VERSION == 3
+
+
+def test_the_emitter_surface_is_exported() -> None:
+    assert {"TurnEmitter", "TurnOutcome", "Generation", "Window", "TimingBasis"} <= set(spi.__all__)
 
 
 def test_the_stop_channel_is_exported() -> None:

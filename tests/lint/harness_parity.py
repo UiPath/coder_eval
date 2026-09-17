@@ -87,7 +87,9 @@ def _budget_cell(contract: HarnessContract) -> str:
 
 _RUN_LIMIT_CELLS: dict[str, Callable[[HarnessContract], str]] = {
     "max_tool_calls": lambda c: (
-        "TurnMonitor at the should_stop poll, resolved tool calls" if c.cooperative_stop else "not polled (never fires)"
+        "TurnMonitor at the should_stop poll, main-thread resolved tool calls"
+        if c.cooperative_stop
+        else "not polled (never fires)"
     ),
     "expected_tool_calls": lambda _c: "orchestrator, cumulative visible tool calls, warns only",
     "task_timeout": lambda _c: "orchestrator, agent-agnostic",

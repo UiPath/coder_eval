@@ -55,6 +55,7 @@ from coder_eval.models import (
     PermissionMode,
     PiAgentConfig,
     ResultSummary,
+    TimingBasis,
     TokenUsage,
     ToolNameMap,
     TranscriptMessage,
@@ -527,16 +528,16 @@ class _PiTurnState:
 
         # Tile from the previous turn's end. The RAW window only.
         turn_start = self.turn_started_at if self.turn_started_at is not None else completed
-        started, generation_ms = close_window(
+        window = close_window(
             mark=self.gen_mark if self.gen_mark is not None else turn_start,
             now=completed,
             item_start=turn_start,
         )
         self.messages.append(
             AssistantMessage(
-                started_at=started,
-                completed_at=completed,
-                generation_duration_ms=generation_ms,
+                started_at=window.started_at,
+                completed_at=window.completed_at,
+                generation_duration_ms=window.duration_ms,
                 content_blocks=blocks,
                 tool_use_ids=list(self.turn_tool_ids),
                 input_tokens=step_in,
@@ -652,6 +653,7 @@ class PiAgent(Agent[PiAgentConfig]):
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
         usage_granularity=UsageGranularity.STEP,
+        timing_basis=TimingBasis.TURN_CLOCK,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES

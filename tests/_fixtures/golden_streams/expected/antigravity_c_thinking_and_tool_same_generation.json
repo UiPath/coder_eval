@@ -3,7 +3,7 @@
   "assistant_turn_count": 1,
   "commands": [
     {
-      "assistant_turn_index": null,
+      "assistant_turn_index": 0,
       "duration_ms": "<scrubbed>",
       "error_message": null,
       "execution_completed_at": "<scrubbed>",

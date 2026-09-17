@@ -27,25 +27,19 @@ from coder_eval.agents.pi_agent import PiAgent
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.models import (
     AgentKind,
-    Enforcement,
-    FileExistsCriterion,
     HarnessContract,
     PermissionMode,
-    SandboxConfig,
-    TaskDefinition,
     parse_agent_config,
 )
-from coder_eval.orchestration.harness_contract import HarnessContractError, validate_harness_contract
 from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.streaming.events import AgentEndEvent, StopReason, ToolEndEvent, end_status_for
+from coder_eval.testing import conformance, enforced_cells, rejections
 from tests.test_antigravity_agent import _install_fake_sdk
 
 
 MARKER = "CONFORMANCE-MARKER-7f3a"
 USER_TURN = "do the task"
-_FIELDS = ("system_prompt", "plugin_skills", "permission_mode", "allowed_tools", "disallowed_tools")
-_CONFIG_FIELD = {"plugin_skills": "plugins"}
 _KINDS = [kind for kind in AgentKind if kind is not AgentKind.UNKNOWN]
 
 type Probe = Callable[[Path, pytest.MonkeyPatch], Awaitable[None]]
@@ -58,17 +52,6 @@ def _contract(kind: AgentKind) -> HarnessContract:
     return registration.agent_class.contract
 
 
-def _task(kind: AgentKind, **agent: Any) -> TaskDefinition:
-    return TaskDefinition(
-        task_id="t",
-        description="d",
-        initial_prompt=None if kind is AgentKind.NONE else USER_TURN,
-        agent=parse_agent_config(type=kind, **agent),
-        sandbox=SandboxConfig(driver="tempdir"),
-        success_criteria=[FileExistsCriterion(description="c", path="out.txt")],
-    )
-
-
 def _plugin_root(tmp_path: Path) -> Path:
     """A root staged by ``stage_plugins`` over one authored ``probe-skill``."""
     skill = tmp_path / "plugin" / "skills" / "probe-skill"
@@ -77,49 +60,20 @@ def _plugin_root(tmp_path: Path) -> Path:
     return stage_plugins([{"type": "local", "path": str(tmp_path / "plugin")}], tmp_path / "plugin_root").root
 
 
-_GATED_VALUES: dict[str, Any] = {
-    "system_prompt": MARKER,
-    "plugins": [{"type": "local", "path": "/plugins/p"}],
-    "permission_mode": "plan",
-    "allowed_tools": ["Bash"],
-    "disallowed_tools": ["Bash"],
-}
-
-
 # --- rejections, derived from the contracts ----------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("kind", "field"),
-    [(k, f) for k in _KINDS for f in _FIELDS if getattr(_contract(k), f) is Enforcement.UNSUPPORTED],
+    ("kind", "check"),
+    [pytest.param(k, check, id=f"{k.value}-{name}") for k in _KINDS for name, check in rejections(k.value)],
 )
-def test_unsupported_field_is_rejected(kind: AgentKind, field: str) -> None:
-    config_field = _CONFIG_FIELD.get(field, field)
-    with pytest.raises(HarnessContractError, match=rf"agent\.{config_field}.*{kind.value!r}"):
-        validate_harness_contract(_task(kind, **{config_field: _GATED_VALUES[config_field]}))
+def test_contract_rejection(kind: AgentKind, check: Callable[[], None]) -> None:
+    check()
 
 
-@pytest.mark.parametrize(
-    ("kind", "mode"),
-    [
-        (k, m)
-        for k in _KINDS
-        if _contract(k).permission_mode is Enforcement.ENFORCED
-        for m in PermissionMode
-        if m not in (_contract(k).permission_modes or frozenset())
-    ],
-)
-def test_undeclared_permission_value_is_rejected(kind: AgentKind, mode: PermissionMode) -> None:
-    with pytest.raises(HarnessContractError, match="has no documented meaning"):
-        validate_harness_contract(_task(kind, permission_mode=mode))
-
-
-@pytest.mark.parametrize(
-    "kind", [k for k in _KINDS if AgentRegistry.get(k) and AgentRegistry.get(k).agent_class.tool_names]
-)
-def test_unknown_tool_name_is_rejected(kind: AgentKind) -> None:
-    with pytest.raises(HarnessContractError, match="did you mean 'Bash'"):
-        validate_harness_contract(_task(kind, allowed_tools=["Bassh"]))
+def test_every_kind_rejects_what_its_contract_does_not_honor() -> None:
+    names = {name for k in _KINDS for name, _ in rejections(k.value)}
+    assert {"unsupported system_prompt", "undeclared permission_mode=default", "misspelled tool name"} <= names
 
 
 # --- probes: the value reaches the native call --------------------------------------
@@ -418,17 +372,7 @@ _PROBES: dict[tuple[str, str], Probe] = {
 
 
 def _enforced_cells() -> set[tuple[str, str]]:
-    cells: set[tuple[str, str]] = set()
-    for kind in _KINDS:
-        contract = _contract(kind)
-        for field in _FIELDS:
-            if getattr(contract, field) is not Enforcement.ENFORCED:
-                continue
-            if field == "permission_mode":
-                cells |= {(kind.value, f"permission_mode={m.value}") for m in contract.permission_modes or ()}
-            else:
-                cells.add((kind.value, field))
-    return cells
+    return {cell for kind in _KINDS for cell in enforced_cells(_contract(kind), kind.value)}
 
 
 def test_every_enforced_cell_has_exactly_one_probe() -> None:
@@ -438,6 +382,18 @@ def test_every_enforced_cell_has_exactly_one_probe() -> None:
 @pytest.mark.parametrize("cell", sorted(_PROBES))
 async def test_probe(cell: tuple[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     await _PROBES[cell](tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("kind", _KINDS, ids=lambda k: k.value)
+async def test_conformance_per_kind(kind: AgentKind, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def bound(cell: tuple[str, str], probe: Probe) -> Callable[[], Awaitable[None]]:
+        directory = tmp_path / cell[1].replace("=", "-")
+        directory.mkdir()
+        return lambda: probe(directory, monkeypatch)
+
+    await conformance(
+        kind.value, {cell: bound(cell, probe) for cell, probe in _PROBES.items() if cell[0] == kind.value}
+    )
 
 
 # --- cooperative stop: every StopReason ends the turn at the boundary ---------------

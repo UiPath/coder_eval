@@ -230,7 +230,8 @@ canonical score remains 0.0.
 cache buckets, captured proxy-side on the LiteLLM open-weight backend and rendered
 by the evalboard as a per-call table; empty on every other
 backend), `num_turns`, `tool_calls_exhausted`,
-`result_summary` (`{is_error, subtype, stop_reason, result}`), `crashed`,
+`result_summary` (`{is_error, subtype, stop_reason, result}`: how a clean turn ended, `result` being
+the agent's final reply; `null` on a crashed or timed-out turn), `crashed`,
 `crash_reason`.
 
 > **Token invariant.** Summing the four token buckets across `messages`

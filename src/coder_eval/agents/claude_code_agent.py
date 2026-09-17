@@ -57,6 +57,7 @@ from coder_eval.models import (
     PermissionMode,
     ResultSummary,
     SystemPromptSemantics,
+    TimingBasis,
     TokenUsage,
     ToolNameMap,
     TranscriptMessage,
@@ -451,14 +452,14 @@ class _ClaudeTurnState:
                 out_tok = int(msg_usage.get("output_tokens", 0) or 0)
             self.pending_delta_output_tokens = None
 
-        # The RAW window. `started` is the mark, since this stream carries no
+        # The RAW window, opened at the mark, since this stream carries no
         # per-emission item start to pull the window open to.
         # Rationale: .claude/notes/agents.md § Per-harness generation marks
-        started, raw_generation_ms = close_window(mark=generation_started_wall, now=message_arrival_wall)
+        window = close_window(mark=generation_started_wall, now=message_arrival_wall)
         assistant_telemetry = AssistantMessageTelemetry(
-            started_at=started,
-            completed_at=message_arrival_wall,
-            generation_duration_ms=raw_generation_ms,
+            started_at=window.started_at,
+            completed_at=window.completed_at,
+            generation_duration_ms=window.duration_ms,
             content_blocks=turn_content_blocks,
             tool_use_ids=turn_tool_use_ids,
             input_tokens=in_tok,
@@ -716,6 +717,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
         usage_granularity=UsageGranularity.GENERATION,
+        timing_basis=TimingBasis.TURN_CLOCK,
         permission_modes=frozenset(PermissionMode),
     )
     tool_names = ToolNameMap(names={name: (name,) for name in CANONICAL_TOOL_NAMES}, mcp_names=True)

@@ -19,6 +19,8 @@ from claude_agent_sdk import ProcessError
 
 import coder_eval.agents.claude_code_agent as claude_module
 from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.streaming import events as protocol
+from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
 ClaudeCodeAgent = claude_module.ClaudeCodeAgent
@@ -432,13 +434,16 @@ def _patches(scenario: ClaudeScenario) -> Iterator[Any]:
         yield patch.object(claude_module.time, "monotonic", scenario.monotonic)
 
 
-async def run_claude_scenario(scenario: ClaudeScenario, working_dir: str) -> dict[str, Any]:
+async def run_claude_scenario(
+    scenario: ClaudeScenario, working_dir: str
+) -> tuple[dict[str, Any], list[protocol.StreamEvent]]:
     """Run ``scenario`` and return the ``TurnRecord``/``pending_turn`` model_dump.
 
     Raises ``AssertionError`` if a crash/timeout scenario fails to raise its
     expected exception (so a refactor that silently swallows the failure is
     caught).
     """
+    recorder = EventRecorder()
     import pytest
 
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
@@ -450,10 +455,10 @@ async def run_claude_scenario(scenario: ClaudeScenario, working_dir: str) -> dic
             stack.enter_context(ctx)
         if scenario.expects is not None:
             with pytest.raises(scenario.expects):
-                await agent.communicate(scenario.prompt, timeout=scenario.timeout)
+                await agent.communicate(scenario.prompt, timeout=scenario.timeout, stream_callback=recorder)
             record = agent.pending_turn
             assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
         else:
-            record = await agent.communicate(scenario.prompt, timeout=scenario.timeout)
+            record = await agent.communicate(scenario.prompt, timeout=scenario.timeout, stream_callback=recorder)
 
-    return record.model_dump(mode="json")
+    return record.model_dump(mode="json"), recorder.events

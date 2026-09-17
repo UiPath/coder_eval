@@ -32,6 +32,8 @@ from unittest.mock import patch
 from coder_eval.agents.opencode_agent import OpenCodeAgent
 from coder_eval.errors import AgentCrashError
 from coder_eval.models import OpenCodeAgentConfig
+from coder_eval.streaming.events import StreamEvent
+from tests._fixtures.golden_streams._recorder import EventRecorder
 
 
 SESSION = "ses_test123"
@@ -214,8 +216,11 @@ class OpenCodeScenario:
     expects: type[BaseException] | None = None
 
 
-async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) -> dict[str, Any]:
+async def run_opencode_scenario(
+    scenario: OpenCodeScenario, working_dir: str
+) -> tuple[dict[str, Any], list[StreamEvent]]:
     """Replay one scenario and return the resulting record as a plain dump."""
+    recorder = EventRecorder()
     import pytest
 
     proc = _FakeProcess(_rebase_lines(scenario.lines))
@@ -233,12 +238,12 @@ async def run_opencode_scenario(scenario: OpenCodeScenario, working_dir: str) ->
         await agent.start(working_dir)
         if scenario.expects is not None:
             with pytest.raises(scenario.expects):
-                await agent.communicate("do it")
+                await agent.communicate("do it", stream_callback=recorder)
             record = agent.pending_turn
             assert record is not None, f"{scenario.name}: pending_turn was not set on the failure path"
         else:
-            record = await agent.communicate("do it")
-    return record.model_dump(mode="json")
+            record = await agent.communicate("do it", stream_callback=recorder)
+    return record.model_dump(mode="json"), recorder.events
 
 
 def _build_catalogue() -> list[OpenCodeScenario]:

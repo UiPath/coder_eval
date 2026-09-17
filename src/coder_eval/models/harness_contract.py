@@ -27,6 +27,14 @@ class UsageGranularity(StrEnum):
     TURN = "turn"
 
 
+class TimingBasis(StrEnum):
+    """Where a harness's recorded stamps come from, which decides who stamps a tool and a window."""
+
+    TURN_CLOCK = "turn_clock"
+    CLI_EPOCH_MS = "cli_epoch_ms"
+    MIXED = "mixed"
+
+
 class HarnessContract(BaseModel):
     """The per-agent declaration of which uniform fields reach the harness.
 
@@ -54,6 +62,13 @@ class HarnessContract(BaseModel):
         description=(
             "How often TurnEndEvent.tokens reports usage: per model generation, per agent-loop step, or once "
             "per communicate() call. A budget can overshoot by one such report."
+        )
+    )
+    timing_basis: TimingBasis = Field(
+        description=(
+            "Where recorded stamps come from: turn_clock (the TurnEmitter stamps the turn bracket, every tool "
+            "and every window from one TurnClock) or cli_epoch_ms (the adapter passes the CLI's own stamps for "
+            "windows and main-thread tools). mixed is OpenCode's interim value."
         )
     )
     permission_modes: frozenset[PermissionMode] | None = Field(

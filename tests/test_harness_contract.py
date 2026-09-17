@@ -86,9 +86,19 @@ class TestModel:
         with pytest.raises(ValidationError, match="usage_granularity"):
             HarnessContract(**fields)
 
-    def test_unknown_field_rejected(self) -> None:
+    def test_timing_basis_is_required(self) -> None:
+        fields = stub_contract().model_dump()
+        del fields["timing_basis"]
+        with pytest.raises(ValidationError, match="timing_basis"):
+            HarnessContract(**fields)
+
+    def test_unknown_timing_basis_rejected(self) -> None:
         with pytest.raises(ValidationError, match="timing_basis"):
             HarnessContract(**{**stub_contract().model_dump(), "timing_basis": "wall"})
+
+    def test_unknown_field_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="clock_basis"):
+            HarnessContract(**{**stub_contract().model_dump(), "clock_basis": "wall"})
 
 
 class TestPermissionModes:

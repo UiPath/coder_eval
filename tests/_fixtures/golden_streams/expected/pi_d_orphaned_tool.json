@@ -3,7 +3,7 @@
   "assistant_turn_count": 1,
   "commands": [
     {
-      "assistant_turn_index": 1,
+      "assistant_turn_index": 0,
       "duration_ms": null,
       "error_message": "no result observed",
       "execution_completed_at": null,

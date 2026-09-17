@@ -475,6 +475,18 @@ while the cap and budgets read counters and must keep running on a run that has 
 criteria. `result.tool_calls_exhausted` still comes from the turn's end status, not the
 latch, because a cap latched after the agent's last poll stopped nothing.
 
+### The monitor scopes to the main thread
+
+A sub-agent's events arrive tagged with `parent_thread_id`. The cap and the armed criteria
+count and evaluate MAIN-THREAD resolved tool calls only, and a nested `TurnStartEvent`
+never becomes the reported model. The cap once tripped on a Claude sub-agent's `Bash`
+call before the main thread wrote its answer (decision 2026-09-16): the author capped the
+agent they configured, and a sub-agent's calls are already covered by the spawning `Agent`
+call. A nested `ToolEndEvent` still reaches the monitor's collector, so its command set
+equals the authoritative one, and `TurnRecord.commands` keeps sub-agent calls. Budgets
+still add a nested `TurnEndEvent`'s tokens: money a sub-agent spends is spent.
+`expected_tool_calls` is a post-run warning over `TurnRecord.commands` and is unchanged.
+
 ### Inert triggers are by design, and the watcher fails open
 
 A trigger whose polarity an instance can never decide is INERT, not an error — one

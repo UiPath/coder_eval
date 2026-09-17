@@ -49,6 +49,7 @@ from coder_eval.models import (
     Enforcement,
     HarnessContract,
     PermissionMode,
+    TimingBasis,
     TokenUsage,
     ToolNameMap,
     TranscriptMessage,
@@ -209,6 +210,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
         usage_granularity=UsageGranularity.TURN,
+        timing_basis=TimingBasis.TURN_CLOCK,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES
@@ -879,14 +881,14 @@ class _AntigravityTurnState:
         # the collector clips the tool union out of it. Resetting instead drops
         # the model time around a fast tool.
         # Rationale: .claude/notes/agents.md § Per-harness generation marks
-        _, generation_ms = close_window(mark=self._gen_mark_wall, now=now_wall)
+        window = close_window(mark=self._gen_mark_wall, now=now_wall)
         for i, block in enumerate(self._blocks):
             block.sequence = i
         self.messages.append(
             AssistantMessage(
-                started_at=self._gen_mark_wall,
-                completed_at=now_wall,
-                generation_duration_ms=generation_ms,
+                started_at=window.started_at,
+                completed_at=window.completed_at,
+                generation_duration_ms=window.duration_ms,
                 content_blocks=list(self._blocks),
                 tool_use_ids=[b.tool_use_id for b in self._blocks if b.block_type == "tool_use" and b.tool_use_id],
                 input_tokens=gen.uncached_input_tokens,

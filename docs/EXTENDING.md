@@ -48,7 +48,7 @@ signature.
 from coder_eval.spi import SPI_VERSION, AgentRegistry
 
 def register(registry: type[AgentRegistry]) -> None:
-    assert SPI_VERSION == 2, f"my-agent supports coder_eval SPI 2, not {SPI_VERSION}"
+    assert SPI_VERSION == 3, f"my-agent supports coder_eval SPI 3, not {SPI_VERSION}"
     # Bind type string → config class → agent class.
     registry.register("my-agent", MyAgentConfig)(MyAgent)
     # Optionally contribute pricing here too (see §3):
@@ -99,7 +99,15 @@ at resolution, so `coder-eval plan` fails before any run. This is a JSONL CLI ag
 that appends a system prompt and honors `plan` and tool lists natively:
 
 ```python
-from coder_eval.spi import Agent, Enforcement, HarnessContract, PermissionMode, ToolNameMap, UsageGranularity
+from coder_eval.spi import (
+    Agent,
+    Enforcement,
+    HarnessContract,
+    PermissionMode,
+    TimingBasis,
+    ToolNameMap,
+    UsageGranularity,
+)
 
 # native tool name -> canonical (Claude) name; also used for telemetry
 _TOOL_NAME_MAP = {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "task": "Agent"}
@@ -115,6 +123,7 @@ class MyAgent(Agent[MyAgentConfig]):
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
         usage_granularity=UsageGranularity.STEP,
+        timing_basis=TimingBasis.TURN_CLOCK,
     )
     tool_names = ToolNameMap.from_inverse(
         _TOOL_NAME_MAP,
@@ -129,6 +138,9 @@ class MyAgent(Agent[MyAgentConfig]):
   meaning (`plan` is read-only, `bypassPermissions` runs every permitted tool).
 - `tool_names` is required exactly when a tool-list row is `ENFORCED`. It must map every
   canonical name; list a name your harness has no tool for in `no_equivalent`.
+- `timing_basis` says who stamps the turn. `TURN_CLOCK`: the `TurnEmitter` stamps every
+  tool and the turn bracket from one clock. `CLI_EPOCH_MS`: your harness reports its own
+  stamps, and you pass them for every main-thread tool and window.
 - Set `cooperative_stop=True` only if your `communicate()` honors `should_stop`
   (needed for criterion-level `stop_early:` arming and for `run_limits.max_tool_calls`
   to cut a turn). `False` means early stop is rejected at resolution for your agent.

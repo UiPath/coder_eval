@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from coder_eval.models import AgentKind
+from coder_eval.testing import assert_stream_balanced
 from tests._fixtures.golden_streams import assert_reconciliation, assert_timing_captured, scrub
 from tests._fixtures.golden_streams.antigravity_fixtures import ANTIGRAVITY_SCENARIOS, run_antigravity_scenario
 from tests._fixtures.golden_streams.claude_fixtures import CLAUDE_SCENARIOS, run_claude_scenario
@@ -161,7 +162,7 @@ def _compare_or_regen(name: str, actual_scrubbed: dict[str, Any]) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", CLAUDE_SCENARIOS, ids=lambda s: s.name)
 async def test_claude_golden(scenario, tmp_path):
-    raw = await run_claude_scenario(scenario, str(tmp_path))
+    raw, _ = await run_claude_scenario(scenario, str(tmp_path))
     # Reconciliation is asserted on the UNscrubbed dump (token buckets are never
     # scrubbed, but cost/timestamps are — assert before masking to be explicit).
     assert_reconciliation(raw)
@@ -177,7 +178,7 @@ async def test_claude_golden(scenario, tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", CODEX_SCENARIOS, ids=lambda s: s.name)
 async def test_codex_golden(scenario, tmp_path):
-    raw = await run_codex_scenario(scenario, str(tmp_path))
+    raw, _ = await run_codex_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -191,7 +192,7 @@ async def test_codex_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", CLAUDE_SCENARIOS, ids=lambda s: s.name)
 async def test_claude_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Claude snapshot."""
-    raw = await run_claude_scenario(scenario, str(tmp_path))
+    raw, _ = await run_claude_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
 
 
@@ -200,14 +201,14 @@ async def test_claude_reconciliation_invariant(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", CODEX_SCENARIOS, ids=lambda s: s.name)
 async def test_codex_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Codex snapshot."""
-    raw = await run_codex_scenario(scenario, str(tmp_path))
+    raw, _ = await run_codex_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ANTIGRAVITY_SCENARIOS, ids=lambda s: s.name)
 async def test_antigravity_golden(scenario, tmp_path):
-    raw = await run_antigravity_scenario(scenario, str(tmp_path))
+    raw, _ = await run_antigravity_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -221,13 +222,13 @@ async def test_antigravity_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", ANTIGRAVITY_SCENARIOS, ids=lambda s: s.name)
 async def test_antigravity_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Antigravity snapshot."""
-    assert_reconciliation(await run_antigravity_scenario(scenario, str(tmp_path)))
+    assert_reconciliation((await run_antigravity_scenario(scenario, str(tmp_path)))[0])
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", OPENCODE_SCENARIOS, ids=lambda s: s.name)
 async def test_opencode_golden(scenario, tmp_path):
-    raw = await run_opencode_scenario(scenario, str(tmp_path))
+    raw, _ = await run_opencode_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -241,13 +242,13 @@ async def test_opencode_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", OPENCODE_SCENARIOS, ids=lambda s: s.name)
 async def test_opencode_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every OpenCode snapshot."""
-    assert_reconciliation(await run_opencode_scenario(scenario, str(tmp_path)))
+    assert_reconciliation((await run_opencode_scenario(scenario, str(tmp_path)))[0])
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", PI_SCENARIOS, ids=lambda s: s.name)
 async def test_pi_golden(scenario, tmp_path):
-    raw = await run_pi_scenario(scenario, str(tmp_path))
+    raw, _ = await run_pi_scenario(scenario, str(tmp_path))
     assert_reconciliation(raw)
     assert_timing_captured(
         raw,
@@ -261,7 +262,56 @@ async def test_pi_golden(scenario, tmp_path):
 @pytest.mark.parametrize("scenario", PI_SCENARIOS, ids=lambda s: s.name)
 async def test_pi_reconciliation_invariant(scenario, tmp_path):
     """The per-bucket reconciliation invariant holds for every Pi snapshot."""
-    assert_reconciliation(await run_pi_scenario(scenario, str(tmp_path)))
+    assert_reconciliation((await run_pi_scenario(scenario, str(tmp_path)))[0])
+
+
+def _balance_params(harness: str, scenarios: list[Any]) -> list[Any]:
+    """Every scenario, with the one known-unbalanced stream a strict xfail until its port fixes it."""
+    return [
+        pytest.param(
+            s,
+            id=s.name,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="duplicate turn_end emits a TurnEndEvent with no open turn; fixed by the Pi port",
+            ),
+        )
+        if f"{harness}_{s.name}" == "pi_f_duplicate_turn_end"
+        else pytest.param(s, id=s.name)
+        for s in scenarios
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", _balance_params("claude", CLAUDE_SCENARIOS))
+async def test_claude_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_claude_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.skipif(not _HAS_CODEX, reason="openai_codex extra not installed")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", _balance_params("codex", CODEX_SCENARIOS))
+async def test_codex_stream_balanced(scenario, tmp_path):
+    assert run_codex_scenario is not None
+    assert_stream_balanced((await run_codex_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", _balance_params("antigravity", ANTIGRAVITY_SCENARIOS))
+async def test_antigravity_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_antigravity_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", _balance_params("opencode", OPENCODE_SCENARIOS))
+async def test_opencode_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_opencode_scenario(scenario, str(tmp_path)))[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", _balance_params("pi", PI_SCENARIOS))
+async def test_pi_stream_balanced(scenario, tmp_path):
+    assert_stream_balanced((await run_pi_scenario(scenario, str(tmp_path)))[1])
 
 
 # The ONE place a harness is listed for golden coverage. Derived from AgentKind

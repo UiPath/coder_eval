@@ -47,6 +47,7 @@ from coder_eval.models import (
     OpenCodeAgentConfig,
     PermissionMode,
     ResultSummary,
+    TimingBasis,
     TokenUsage,
     ToolNameMap,
     TranscriptMessage,
@@ -581,16 +582,16 @@ class _OpenCodeTurnState:
             blocks.append(ContentBlock(block_type="tool_use", sequence=i, tool_use_id=tool_id))
 
         # Tile from the previous step's finish. The RAW window only.
-        started, generation_ms = close_window(
+        window = close_window(
             mark=self.gen_mark if self.gen_mark is not None else step_start,
             now=completed,
             item_start=step_start,
         )
         self.messages.append(
             AssistantMessage(
-                started_at=started,
-                completed_at=completed,
-                generation_duration_ms=generation_ms,
+                started_at=window.started_at,
+                completed_at=window.completed_at,
+                generation_duration_ms=window.duration_ms,
                 content_blocks=blocks,
                 tool_use_ids=list(self.step_tool_ids),
                 input_tokens=step_in,
@@ -724,6 +725,7 @@ class OpenCodeAgent(Agent[OpenCodeAgentConfig]):
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
         usage_granularity=UsageGranularity.STEP,
+        timing_basis=TimingBasis.MIXED,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES

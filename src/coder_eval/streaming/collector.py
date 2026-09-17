@@ -42,8 +42,9 @@ class EventCollector:
     Tolerant by construction: ``build_turn_record()`` can be called at any point
     (including mid-stream after a crash) and returns the best record derivable
     from the events seen so far. Sub-agent activity is captured as
-    ``parent_tool_use_id``-tagged messages in the transcript; per-sub-agent
-    attribution is derived by grouping those messages, not from a separate field.
+    ``parent_tool_use_id``-tagged messages in the transcript. A nested event
+    (``parent_thread_id`` set) contributes only its ``ToolEndEvent`` to ``commands``;
+    it sets no model and counts no turn.
     """
 
     def __init__(self) -> None:
@@ -57,10 +58,15 @@ class EventCollector:
         self._commands: dict[str, CommandTelemetry] = {}
         self._agent_end: AgentEndEvent | None = None
 
+    @property
+    def ended(self) -> bool:
+        """True once the current attempt's ``AgentEndEvent`` has been seen."""
+        return self._agent_end is not None
+
     def on_event(self, event: StreamEvent) -> None:
-        # Only the main agent's own events shape its TurnRecord. Forward-looking:
-        # no agent emits nested sub-agent events yet, so this never fires today.
         if event.parent_thread_id is not None:
+            if isinstance(event, ToolEndEvent):
+                self._commands[event.tool.tool_id] = event.tool
             return
 
         if isinstance(event, AgentStartEvent):
@@ -82,8 +88,20 @@ class EventCollector:
         elif isinstance(event, AgentEndEvent):
             self._agent_end = event
 
-    def _ordered_commands(self) -> list[CommandTelemetry]:
-        return sorted(self._commands.values(), key=lambda c: c.sequence_number)
+    def _ordered_commands(self, messages: list[TranscriptMessage]) -> list[CommandTelemetry]:
+        """Commands by ``sequence_number``, each a copy carrying its derived ``assistant_turn_index``.
+
+        The index is the position, among the ``AssistantMessage`` entries, of the first
+        message whose ``tool_use_ids`` names the command; ``None`` when none does.
+        """
+        owner: dict[str, int] = {}
+        for index, message in enumerate(m for m in messages if isinstance(m, AssistantMessage)):
+            for tool_id in message.tool_use_ids:
+                owner.setdefault(tool_id, index)
+        return [
+            command.model_copy(update={"assistant_turn_index": owner.get(command.tool_id)})
+            for command in sorted(self._commands.values(), key=lambda c: c.sequence_number)
+        ]
 
     def _overhead_ms(
         self, messages: list[TranscriptMessage], tool_spans: list[tuple[datetime, datetime]]
@@ -175,7 +193,6 @@ class EventCollector:
     def build_turn_record(self) -> TurnRecord:
         """Assemble the ``TurnRecord`` from the events observed so far."""
         end = self._agent_end
-        commands = self._ordered_commands()
 
         if end is None:
             # No terminal event yet (mid-stream snapshot): minimal record.
@@ -183,7 +200,7 @@ class EventCollector:
                 iteration=self._iteration,
                 user_input=self._user_input,
                 agent_output="",
-                commands=commands,
+                commands=self._ordered_commands([]),
                 token_usage=None,
                 model_used=self._model,
                 assistant_turn_count=self._turn_starts,
@@ -216,7 +233,7 @@ class EventCollector:
             iteration=end.iteration or self._iteration,
             user_input=end.user_input or self._user_input,
             agent_output=end.agent_output,
-            commands=commands,
+            commands=self._ordered_commands(messages),
             duration_seconds=end.duration_seconds,
             token_usage=token_usage,
             model_used=end.model_used or self._model,
