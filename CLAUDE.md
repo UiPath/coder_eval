@@ -91,7 +91,7 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
   Defense-in-depth, not a boundary — the known gaps are documented in the notes.
   Authoring reference: [Reference Solutions](docs/TASK_DEFINITION_GUIDE.md#reference-solutions).
 - **Harness run-limit parity**: every structural cap and budget is one `TurnMonitor`
-  answer on the `should_stop` channel, in tool calls or tokens, on every harness;
+  answer on the `should_stop` channel, in tool calls, model turns or tokens, on every harness;
   `run_limits` and agent-field meanings are both generated tables in
   [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Every agent declares a
   `HarnessContract`; a base field the harness marks unsupported is rejected at

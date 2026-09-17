@@ -84,26 +84,31 @@ including: `task_id`, `replicate_index`, `variant_id`, `status`
 `expected_commands`,
 `actual_commands`, `commands_efficiency`, `agent_config`, `sdk_options`,
 `installed_tools`, turn accounting (`total_turns`, `visible_turns`, `expected_tool_calls`,
-`expected_tool_calls_overage`, `tool_calls_exhausted`, `has_final_reply`), and early-stop fields (`stopped_early`,
+`expected_tool_calls_overage`, `tool_calls_exhausted`, `has_final_reply`, `model_turns`,
+`expected_turns`, `expected_turns_overage`), and early-stop fields (`stopped_early`,
 `early_stop_reason`, `tool_calls_remaining_at_stop`). `iterations` here is a **reduced**
 turn digest (`{iteration, duration_seconds, command_count, assistant_turn_count,
 crashed, crash_reason}`) — the full transcript is in `task.json`.
 
-> **Historical spellings.** Runs written before the tool-call rename carry
-> `max_turns_exhausted`, `expected_turns`, `expected_turns_overage` and the status
-> `MAX_TURNS_EXHAUSTED` instead of `tool_calls_exhausted`, `expected_tool_calls`,
-> `expected_tool_calls_overage` and `TOOL_CALLS_EXHAUSTED`. The evalboard reads both.
-> The Python side does not: there is no alias. A `task.json` with the old flag loads with
-> the fact `false`; one whose `final_status` is `MAX_TURNS_EXHAUSTED`, or whose recorded
-> config sets `run_limits.expected_turns`, does not load. `run --resume` then runs that
-> row again, and `evaluate <run_dir>` cannot re-grade it from its recorded config.
+> **Historical spellings.** Runs from older releases carry `run_limits.max_turns`
+> (Claude Code SDK turns per `communicate()` call) and `run_limits.expected_turns` plus a
+> row `expected_turns` / `expected_turns_overage` that count visible entries (tool calls
+> and the final reply). Current runs use those names for model turns, and use
+> `expected_tool_calls` / `expected_tool_calls_overage` for visible entries. An older row
+> has no `expected_tool_calls` key and no `model_turns`, which is how a reader tells the
+> two apart; the evalboard reads `expected_turns` as the tool-call target only on such a
+> row. Older runs also carry `max_turns_exhausted` and the status `MAX_TURNS_EXHAUSTED`
+> instead of `tool_calls_exhausted` and `TOOL_CALLS_EXHAUSTED`. The Python side has no
+> alias: a `task.json` with the old flag loads with the fact `false`, and one whose
+> `final_status` is `MAX_TURNS_EXHAUSTED` does not load, so `run --resume` runs that row
+> again and `evaluate <run_dir>` cannot re-grade it from its recorded config. A recorded
+> `run_limits.max_turns` or `run_limits.expected_turns` loads, so `evaluate <run_dir>`
+> re-grades from the recorded config; no `expected_turns` overage is computed for a record
+> without `model_turns`.
 >
-> Runs written before the tool-call cap replaced the turn cap carry
-> `turns_remaining_at_stop` instead of `tool_calls_remaining_at_stop`, in both
-> `EarlyStopInfo` and the `run.json` row. No reader maps the old key. Their recorded
-> config also sets `run_limits.max_turns`, which no longer validates, so
-> `evaluate <run_dir>` re-grades such a run from the source task YAML and prints its
-> fallback warning.
+> Older runs also carry `turns_remaining_at_stop` instead of
+> `tool_calls_remaining_at_stop`, in both `EarlyStopInfo` and the `run.json` row. No
+> reader maps the old key.
 
 ### Missing cost is never fatal
 
@@ -144,7 +149,8 @@ The authoritative per-replicate record.
 | --- | --- | --- |
 | `final_status` | [`FinalStatus`](#finalstatus) | Terminal status. |
 | `weighted_score` | `float \| null` | Weighted average of criterion scores, 0.0–1.0. |
-| `tool_calls_exhausted` | `bool` | The tool-call cap ended an iteration before the agent completed on its own. |
+| `tool_calls_exhausted` | `bool` | A structural cap (`max_tool_calls` or `max_turns`) ended an iteration before the agent completed on its own. |
+| `model_turns` | `int \| null` | Main-thread model turns counted by the TurnMonitor; null where the harness does not count them, when no turn finished, or on older runs. |
 | `iteration_count` | `int` | Number of turns. |
 | `success_criteria_results` | `list[CriterionResult]` | Per-criterion results — see [below](#criterionresult). |
 | `post_failure_criteria_results` | `list[CriterionResult]` | Diagnostic artifact evidence collected after a terminal agent failure. It does not affect `final_status`, `weighted_score`, gating, or suite aggregation. |
@@ -251,7 +257,8 @@ Fields: `reason` (`criterion_passed` / `criterion_failed` /
 criterion timed out undecided past its `stop_early.decide_within`; it gates through
 the same weighted armed gate as a native fail),
 `deciding_criterion_type`, `deciding_criterion_description`, `armed_criteria`,
-`sdk_turn_index`, `tool_call_index` (1-based, includes the in-flight call),
+`sdk_turn_index` (main-thread model turns started at the stop, each turn id once per
+`communicate()`), `tool_call_index` (1-based, includes the in-flight call),
 `elapsed_seconds`, `tool_calls_remaining_at_stop` (`max_tool_calls − tool_call_index`,
 floored at `0`; `null` when `run_limits.max_tool_calls` is unset), `gate_threshold` (the
 `run_limits.stop_early_gate_threshold` in effect for this stop; default `1.0`).

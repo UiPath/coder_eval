@@ -462,18 +462,46 @@ nothing to defer for and fail-stops on the first misfire.
 
 `EarlyStopWatcher` answered one question on the `should_stop` channel. Every harness
 also counted its own turn cap in its own unit, and the budgets were checked by the
-orchestrator after a turn had already spent the money. `TurnMonitor` answers all four
-reasons (`EARLY_CRITERION`, `TOOL_CALL_CAP`, `TOKEN_BUDGET`, `USD_BUDGET`) from ONE
-collector, so a cap means the same number of resolved tool calls on every harness and a
-budget stops the agent at its next poll. It is cumulative because one instance serves
+orchestrator after a turn had already spent the money. `TurnMonitor` answers all five
+reasons (`EARLY_CRITERION`, `TOOL_CALL_CAP`, `MODEL_TURN_CAP`, `TOKEN_BUDGET`,
+`USD_BUDGET`) from ONE collector, so a cap means the same count on every harness that
+accepts it and a budget stops the agent at its next poll. It is cumulative because one instance serves
 every retry attempt and every dialog turn of a task: the cap, the budgets and
 `expected_tool_calls` all measure the task, not an attempt. On one round the armed stop
-wins, then the cap, then the token budgets, then USD, and the first latched reason is
+wins, then the tool-call cap, then the token budgets, then USD (the model-turn cap latches
+on a turn start, which carries no tool and no tokens, so it never competes), and the first latched reason is
 final, so the status an adapter finalizes with cannot flip after the fact. Fail-open
 covers only the armed criteria: a raising `live_verdict` is agent-output-dependent code,
 while the cap and budgets read counters and must keep running on a run that has lost its
 criteria. `result.tool_calls_exhausted` still comes from the turn's end status, not the
 latch, because a cap latched after the agent's last poll stopped nothing.
+
+### The model-turn cap counts turn starts
+
+`run_limits.max_turns` and `expected_turns` came back (decisions 2026-09-16) with one unit:
+main-thread model turns across the whole task. `MODEL_TURN_CAP` reuses `AgentEndStatus.TOOL_CALLS_EXHAUSTED` so that no status,
+resume rule or report label forks. The counter is the monitor's existing `_sdk_turn_index`:
+a main-thread `TurnStartEvent` counts once per turn id per `communicate()` (the id set
+clears on each main-thread `AgentStartEvent`), cumulatively across attempts and dialog
+turns, and the cap latches when turn N+1 STARTS, so a run of exactly N turns is not
+capped. It counts starts, not ends: Claude Code closes main turn A when a sub-agent
+message arrives and re-opens A for its next block, so an end-based rule latched with cap 1
+before A's second tool was dispatched. On Claude Code the stop lands when response N+1
+arrives: that message is recorded and its tools stay unresolved. Pi counts its own
+provider-error retry as a turn (it opens a new `turn_{n}` id); Claude Code and OpenCode
+retry below the stream, so their retries count zero.
+
+Which harnesses accept the fields is derived, not declared:
+`HarnessContract.counts_model_turns` is `cooperative_stop` and a `usage_granularity`
+other than `turn`. A harness that reports once per `communicate()` would count calls, a
+different meaning, so it rejects both fields at resolution. The count is persisted as
+`EvaluationResult.model_turns` because reports are rebuilt from `task.json` and a detached
+grade has an inert monitor; re-deriving it from `TurnRecord.messages` over-counts on
+Claude Code (a spike stream showed 5 for 3 main responses). The dialog loop writes it
+before the budget gate, so a budget abort keeps it. `main`-era records used
+`expected_turns` for visible entries, so the row reports `expected_turns` only beside a
+`model_turns` count, and the evalboard reads `expected_turns` as the tool-call target only
+on a row with no `expected_tool_calls` key.
 
 ### The monitor scopes to the main thread
 

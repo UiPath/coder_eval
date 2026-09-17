@@ -116,6 +116,11 @@ agent:
 > trips the turn ends `COMPLETED` with `result_summary.subtype == "error_max_turns"`,
 > while `run_limits.max_tool_calls` is the framework's cap on resolved tool calls
 > (the `TurnMonitor` enforces it, as on every harness); both apply.
+>
+> `run_limits.max_turns` counts main-thread API responses across the whole task, not SDK
+> turns per call. A sub-agent's responses do not count, and a response interrupted by its
+> sub-agent counts once. The stop lands when response N+1 arrives, so that response is
+> recorded in part and its tools do not run. `sdk_options.max_turns` is unrelated.
 
 > **System-prompt reproducibility.** In `append` mode the preset's *dynamic
 > sections* (working directory, git status, auto-memory) are excluded so the system

@@ -83,7 +83,11 @@ Two names *did* change between generations, which is what the `keys` check is fo
 | Current runs | Older runs | Where |
 | --- | --- | --- |
 | `iterations` | `turns` | top-level record key |
-| `task_config.resolved.run_limits.max_tool_calls` | `task_config.resolved.run_limits.max_turns` (a turn cap, not a tool-call cap), and before that `task_config.resolved.max_iterations` | inside the free-form `task_config` dict |
+| `task_config.resolved.run_limits.max_tool_calls` | `task_config.resolved.run_limits.max_turns` (a Claude Code SDK turn cap, not a tool-call cap), and before that `task_config.resolved.max_iterations` | inside the free-form `task_config` dict |
+
+A current run can ALSO set `run_limits.max_turns`: there it is a cap on main-thread model
+turns, beside `max_tool_calls`. Read it as the older turn cap only on a record that has no
+`max_tool_calls` key and no `model_turns`.
 
 Extract whichever the file actually has. The loader still accepts the older top-level
 name when reading, so an old run is not broken — but current runs do not write it, and
@@ -159,7 +163,7 @@ passes:
    variant/run scope.
 4. **Criteria** — sensitivity `weight × (threshold − score)`; fragile passes sitting on
    the threshold; redundant criteria and coverage gaps.
-5. **Configuration** — lineage conflicts (`source != "task"`), tool-call cap (`max_tool_calls`) hit or
+5. **Configuration** — lineage conflicts (`source != "task"`), tool-call cap (`max_tool_calls`) or model-turn cap (`max_turns`) hit or
    wildly excessive, model fit, `allowed_tools` alignment with what the task needs.
 6. **Environment** — infrastructure errors, missing services, expired credentials, CLI
    tool errors. Also **idempotency and cross-run contamination**: a criterion that passed on

@@ -3,7 +3,8 @@
 One task file, run on any harness, must be the same task. `max_turns` broke that
 promise hardest: Claude Code enforced it, and Codex and Antigravity accepted it and
 never read it, so `max_turns: 6` ran capped on one backend and unbounded on the other
-two. It is now `max_tool_calls`, one counter on every harness.
+two. Now `max_tool_calls` is one counter on every harness; `max_turns` counts model turns
+on the harnesses that report one turn per response and is rejected on the others.
 
 This page is the contract for what each run limit means per harness, plus what each
 shared `agent` field means on each harness. Both tables are generated.
@@ -680,8 +681,9 @@ recorded run whose `skill_name` is not in that list finishes `ERROR`, not 0.0.
 
 ## Reproducing
 
-`tasks/run_limits/` holds one fixture per limit: `max_tool_calls_cap.yaml` asks for more
-sequential work than its cap allows, and `turn_timeout.yaml` runs a command that
+`tasks/run_limits/` holds one fixture per limit: `max_tool_calls_cap.yaml` and
+`max_turns_cap.yaml` ask for more sequential work than their caps allow (Codex and
+Antigravity reject the second at resolution), and `turn_timeout.yaml` runs a command that
 outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
 `--type antigravity` / `--type opencode` / `--type pi` to check a backend against the
 contract above.
