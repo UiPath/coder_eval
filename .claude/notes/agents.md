@@ -414,6 +414,35 @@ On a crash the SDK total never arrives and the per-generation tokens on the flus
 messages are used instead — but the baseline must still advance past them, or the next
 turn's delta re-books everything the crashed turn already reported.
 
+## One inner turn per generation on Codex and Antigravity
+
+Both streams already carried a per-generation boundary — Codex's
+`thread/tokenUsage/updated`, Antigravity's `usage_metadata` Step — and both adapters cut
+one message there, yet each opened ONE inner turn per `communicate()`, so the
+`TurnMonitor` would have counted calls, and `max_turns` was rejected at resolution. Now
+the cut also closes an inner turn, carrying that generation's delta as
+`TurnEndEvent.tokens`, and the contract declares `usage_granularity=GENERATION`: the
+model-turn limits are accepted, and the token and USD budgets overshoot by one
+generation instead of one whole turn.
+
+The inner turn opens LAZILY, at the first evidence of the generation — an item start, a
+content item, a text delta, or a billed usage report with nothing else — and never
+eagerly after a cut. Eager opening would count a turn that never happens when
+`turn/completed` follows the last cut, and, worse, a tool RESULT landing after its
+generation's cut (Codex patches `is_error` cross-flush; an Antigravity background job
+resolves on a later poll) would open a turn of its own. So a Codex `item/completed` for a
+call already open and an Antigravity DONE Step whose calls are all seen open nothing;
+an unseen call does, because a call the model just made is the model speaking. The cap
+therefore latches exactly where it does on Claude Code: when response N+1 arrives.
+
+The inner turn id is the message id it will cut to (`<turn>-msg-<n>`), so the two line
+up in the record. A billed cut with no content (a placeholder reasoning block that was
+removed) still closes the turn and still advances the counter, or the next turn would
+reuse a closed id and the monitor, which counts each id once per `communicate()`, would
+miss it. The safety flush at the end of the pump (`last=None`, or Antigravity's
+`end()` with trailing blocks) adds the message but leaves the turn for the emitter to
+close with the turn's own end status, so a turn cut short by a stop reads as such.
+
 ## Why the generation is split into sub-messages
 
 Codex flushes one generation as up to two `AssistantMessage`s — thinking and action —

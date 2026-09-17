@@ -222,6 +222,18 @@ class _ThreadTotals(NamedTuple):
         )
 
 
+def _generation_tokens(last: Any) -> TokenUsage:
+    """One generation's usage from the SDK's ``last`` breakdown; empty when ``last`` is None."""
+    if not last:
+        return TokenUsage()
+    cached = getattr(last, "cached_input_tokens", 0) or 0
+    return TokenUsage(
+        uncached_input_tokens=_fresh_input_tokens(getattr(last, "input_tokens", 0) or 0, cached),
+        output_tokens=getattr(last, "output_tokens", 0) or 0,
+        cache_read_input_tokens=cached,
+    )
+
+
 def _message_uncached_input(m: AssistantMessage) -> int:
     """A captured generation's fresh (uncached) input.
 
@@ -266,6 +278,8 @@ class _CodexDecoder:
     Timing is the SDK's own epoch milliseconds. A generation is cut at each
     ``thread/tokenUsage/updated``; its window runs from the previous cut to the last
     item's completion, and it is split into a thinking and an action sub-message.
+    Each generation is one inner turn: opened at its first item or text, closed at
+    its cut with the SDK's ``last`` delta as the turn's tokens.
     """
 
     def __init__(self, agent: "CodexAgent", emitter: TurnEmitter, *, turn_id: str) -> None:
@@ -331,6 +345,11 @@ class _CodexDecoder:
             return self.on_turn_completed(notification)
         return False
 
+    def _open_generation(self) -> None:
+        """Open the inner turn for the generation now arriving; a no-op while one is open."""
+        if not self.emitter.inner_turn_open:
+            self.emitter.begin_inner_turn(f"{self.turn_id}-msg-{self.gen_index}")
+
     def _record_block(self, block: ContentBlock, item_id: str, completed_ms: int | None) -> None:
         self.open_blocks.append(block)
         start_ms = self.start_ms_by_id.get(item_id)
@@ -362,7 +381,10 @@ class _CodexDecoder:
         if item_id is not None and started_at_ms is not None:
             self.start_ms_by_id[item_id] = started_at_ms
         root_type = getattr(root, "type", None)
-        if root_type is None or root_type in _CONTENT_ITEM_TYPES:
+        if root_type is None:
+            return
+        self._open_generation()
+        if root_type in _CONTENT_ITEM_TYPES:
             return
         tool_id = self._tool_id(root, root_type, starting=True)
         if started_at_ms is not None:
@@ -390,6 +412,8 @@ class _CodexDecoder:
         if root_type is not None and root_type not in _CONTENT_ITEM_TYPES:
             tool_id = self._tool_id(root, root_type, starting=False)
             if tool_id not in self.opened_tools:
+                # A result landing after the cut is not a new model turn; an unseen call is.
+                self._open_generation()
                 self.opened_tools.add(tool_id)
                 self.emitter.open_tool(
                     tool_id,
@@ -425,6 +449,7 @@ class _CodexDecoder:
                     root, tool_id, self.collab_spawn_by_thread, self.spawned_children, self.collab_results
                 )
         elif root_type == "reasoning":
+            self._open_generation()
             # OpenAI never returns raw CoT, so a text-less item becomes a
             # placeholder, resolved with its token count at flush.
             reasoning_id = getattr(root, "id", f"reasoning_{len(self.open_blocks)}")
@@ -435,6 +460,7 @@ class _CodexDecoder:
             if not text:
                 self.reasoning_placeholders.append(block)
         elif root_type == "agentMessage":
+            self._open_generation()
             # Cut at the following tokenUsage event (the generation boundary), not here.
             message_item_id = getattr(root, "id", f"msg_{len(self.open_blocks)}")
             text = getattr(root, "text", "") or ""
@@ -447,14 +473,18 @@ class _CodexDecoder:
         if notification.payload:
             delta = getattr(notification.payload, "delta", None)
             if delta:
+                self._open_generation()
                 self.agent_message_chunks.append(delta)
                 self.emitter.text(delta)
 
     def on_token_usage_updated(self, notification: Any) -> None:
-        """One per generation: cut a message. ``last`` is this generation's delta."""
+        """One per generation: cut a message and close its inner turn. ``last`` is this generation's delta."""
         if notification.payload:
             self.latest_token_usage = getattr(notification.payload, "token_usage", None)
-            self.flush(getattr(self.latest_token_usage, "last", None))
+            last = getattr(self.latest_token_usage, "last", None)
+            if not _generation_tokens(last).is_empty():
+                self._open_generation()
+            self.flush(last)
 
     def on_turn_completed(self, notification: Any) -> bool:
         from openai_codex.generated.v2_all import TurnCompletedNotification
@@ -465,12 +495,24 @@ class _CodexDecoder:
         return False
 
     def flush(self, last: Any) -> None:
-        """Cut the open buffer into one generation: a thinking part and an action part.
+        """Cut the open buffer into one generation and close its inner turn.
 
-        ``last`` is the SDK breakdown for the generation (None for a safety flush).
+        ``last`` is the SDK breakdown for the generation; its delta becomes the inner
+        turn's tokens. ``None`` is a safety flush at the end of the pump: it adds the
+        message but leaves the inner turn open for the turn's own end status.
 
         Rationale: .claude/notes/agents.md § Why the generation is split into sub-messages
         """
+        before = self.gen_index
+        self._cut(last)
+        if last is None or not self.emitter.inner_turn_open:
+            return
+        self.emitter.end_inner_turn(TurnEndStatus.COMPLETED, tokens=_generation_tokens(last))
+        if self.gen_index == before:
+            # A billed cut with no message still spends its id, or the next turn would reuse it.
+            self.gen_index += 1
+
+    def _cut(self, last: Any) -> None:
         if not self.open_blocks:
             self.reasoning_placeholders = []
             return
@@ -563,27 +605,11 @@ class _CodexDecoder:
             agent._advance_usage_baseline(token_usage)
         # AFTER the baseline advance: the SDK total covers the parent thread only.
         token_usage = agent._fold_subagent_tokens(token_usage, self.messages)
-        if self.emitter.inner_turn_open:
-            self.emitter.end_inner_turn(TurnEndStatus(status.value), tokens=token_usage)
         usage = token_usage or TokenUsage()
         agent_output = result_text or (agent._format_turn_result(result_turn) if result_turn is not None else None)
         if status is AgentEndStatus.CRASHED or status is AgentEndStatus.TIMEOUT:
-            return self.emitter.fail(
-                status,
-                reason or status.value,
-                usage=usage,
-                agent_output=agent_output,
-                assistant_turn_count=1,
-                num_turns=1,
-            )
-        return self.emitter.finalize(
-            status,
-            usage=usage,
-            agent_output=agent_output,
-            model_used=agent.config.model,
-            assistant_turn_count=1,
-            num_turns=1,
-        )
+            return self.emitter.fail(status, reason or status.value, usage=usage, agent_output=agent_output)
+        return self.emitter.finalize(status, usage=usage, agent_output=agent_output, model_used=agent.config.model)
 
 
 @AgentRegistry.register(AgentKind.CODEX, CodexAgentConfig, spi_version=SPI_VERSION)
@@ -591,7 +617,8 @@ class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
     # The pump has a between-items guard where `should_stop` runs; `system_prompt`
-    # maps to developer_instructions, ON TOP of the base prompt.
+    # maps to developer_instructions, ON TOP of the base prompt. Usage is one
+    # `thread/tokenUsage/updated` per model generation, each closing one inner turn.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     contract = HarnessContract(
         system_prompt=Enforcement.ENFORCED,
@@ -601,7 +628,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=True,
-        usage_granularity=UsageGranularity.TURN,
+        usage_granularity=UsageGranularity.GENERATION,
         timing_basis=TimingBasis.CLI_EPOCH_MS,
     )
 
@@ -719,9 +746,7 @@ class CodexAgent(Agent[CodexAgentConfig]):
             stream_callback=stream_callback,
         )
         emitter.begin()
-        # Codex has no per-API-call boundary: one thread.turn() == one turn_id.
-        turn_id = f"codex-{iteration}"
-        decoder = _CodexDecoder(self, emitter, turn_id=turn_id)
+        decoder = _CodexDecoder(self, emitter, turn_id=f"codex-{iteration}")
 
         def _on_turn_timeout() -> None:
             decoder.timeout_hit = True
@@ -734,7 +759,6 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 self.thread = await self._run_async(self.codex_client.thread_start, **thread_kwargs)
                 # A fresh thread counts its cumulative total from zero.
                 self._thread_usage_baseline = _ThreadTotals()
-            emitter.begin_inner_turn(turn_id)
             self._log.debug("Starting Codex turn...")
             committed = await run_with_watchdog(
                 self._run_turn_with_streaming(user_input, decoder, should_stop),
@@ -1203,12 +1227,15 @@ class CodexAgent(Agent[CodexAgentConfig]):
                 return
             for i, blk in enumerate(open_blocks):
                 blk.sequence = i
+            message_id = f"{decoder.turn_id}-msg-{rebuilt}"
+            if not decoder.emitter.inner_turn_open:
+                decoder.emitter.begin_inner_turn(message_id)
             decoder.messages.append(
                 decoder.emitter.add_unmeasured_generation(
-                    message_id=f"{decoder.turn_id}-msg-{rebuilt}",
-                    part=Generation(blocks=open_blocks, tokens=TokenUsage()),
+                    message_id=message_id, part=Generation(blocks=open_blocks, tokens=TokenUsage())
                 )
             )
+            decoder.emitter.end_inner_turn(TurnEndStatus.COMPLETED)
             rebuilt += 1
             open_blocks = []
 

@@ -51,6 +51,7 @@ from coder_eval.streaming.events import (
     ToolEndStatus,
     ToolStartEvent,
     TurnEndEvent,
+    TurnStartEvent,
 )
 from coder_eval.testing import (
     Replay,
@@ -1722,14 +1723,13 @@ def _replay(
 ) -> tuple[Replay, _AntigravityDecoder]:
     """Drive an `_AntigravityDecoder` through `coder_eval.testing.replay` from `_CLOCK_BASE`.
 
-    Opens the one inner turn `communicate` opens and ends through `decoder.end`;
-    returns the decoder too, for the tests that pin its bookkeeping.
+    Ends through `decoder.end`; returns the decoder too, for the tests that pin its
+    bookkeeping.
     """
     decoders: list[_AntigravityDecoder] = []
 
     def make(emitter: TurnEmitter) -> _AntigravityDecoder:
         decoder = _AntigravityDecoder(emitter)
-        emitter.begin_inner_turn(decoder.turn_id)
         decoders.append(decoder)
         return decoder
 
@@ -2425,8 +2425,8 @@ class TestAntigravityDecoder:
         assert [e.status for e in ends] == [ToolEndStatus.UNRESOLVED]
         assert_stream_balanced(result.events)
 
-    def test_generation_tokens_sum_to_the_turn_end_tokens(self):
-        """One inner turn; its `TurnEndEvent.tokens` is the sum of the per-generation deltas."""
+    def test_each_generation_is_one_inner_turn_carrying_its_own_delta(self):
+        """One inner turn per generation; its `TurnEndEvent.tokens` is that generation's usage, summing to the turn."""
         result, decoder = _replay(
             [
                 _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 10, 5)),
@@ -2435,19 +2435,55 @@ class TestAntigravityDecoder:
             ]
         )
 
-        [turn_end] = [e for e in result.events if isinstance(e, TurnEndEvent)]
+        starts = [e for e in result.events if isinstance(e, TurnStartEvent)]
+        turn_ends = [e for e in result.events if isinstance(e, TurnEndEvent)]
         [agent_end] = [e for e in result.events if isinstance(e, AgentEndEvent)]
-        tokens = turn_end.tokens
-        assert tokens is not None
         messages = _assistant(result.record)
-        assert len(messages) == decoder.generations == 3
-        assert sum(m.input_tokens for m in messages) == tokens.uncached_input_tokens == 100 + 90 + 120
-        assert sum(m.output_tokens for m in messages) == tokens.output_tokens == 15 + 18 + 14
-        assert sum(m.cache_read_tokens for m in messages) == tokens.cache_read_input_tokens == 20
-        assert sum(m.cache_creation_tokens for m in messages) == tokens.cache_creation_input_tokens == 0
+        assert len(messages) == decoder.generations == len(starts) == len(turn_ends) == 3
+        assert [e.turn_id for e in starts] == [m.message_id for m in messages]
+        assert result.record.num_turns == result.record.assistant_turn_count == 3
+        for message, turn_end in zip(messages, turn_ends, strict=True):
+            assert turn_end.tokens is not None
+            assert turn_end.tokens.uncached_input_tokens == message.input_tokens
+            assert turn_end.tokens.output_tokens == message.output_tokens
+            assert turn_end.tokens.cache_read_input_tokens == message.cache_read_tokens
+        assert [e.tokens.uncached_input_tokens for e in turn_ends if e.tokens] == [100, 90, 120]
+        assert [e.tokens.output_tokens for e in turn_ends if e.tokens] == [15, 18, 14]
         for bucket in ("uncached_input_tokens", "output_tokens", "cache_read_input_tokens"):
-            assert getattr(agent_end.usage, bucket) == getattr(tokens, bucket)
+            assert getattr(agent_end.usage, bucket) == sum(getattr(e.tokens, bucket) for e in turn_ends if e.tokens)
         assert_stream_balanced(result.events)
+
+    def test_a_tool_result_after_the_cut_opens_no_inner_turn(self):
+        """A DONE Step for a call already open is its result landing, not a model turn."""
+        result, _decoder = _replay(
+            [
+                _step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=[_tc("run_command", "t1", {})]),
+                _step("THINKING", "DONE", thinking="waiting", usage=_usage(100, 0, 10, 0)),
+                _step(
+                    "TOOL_CALL",
+                    "DONE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=[_tc("run_command", "t1", {"exit_code": 0, "combined_output": "hi"})],
+                ),
+                _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(120, 0, 5, 0)),
+            ]
+        )
+
+        starts = [e.turn_id for e in result.events if isinstance(e, TurnStartEvent)]
+        assert starts == ["antigravity-1-msg-0", "antigravity-1-msg-1"]
+        assert result.record.num_turns == 2
+        assert_stream_balanced(result.events)
+
+    def test_a_user_step_opens_no_inner_turn(self):
+        result, _decoder = _replay(
+            [
+                _step("TEXT_RESPONSE", "DONE", source="USER", target="UNKNOWN", content="do it"),
+                _step("TEXT_RESPONSE", "DONE", content="DONE.", complete=True, usage=_usage(100, 0, 5, 0)),
+            ]
+        )
+
+        assert [e.turn_id for e in result.events if isinstance(e, TurnStartEvent)] == ["antigravity-1-msg-0"]
+        assert result.record.num_turns == 1
 
     def test_a_user_source_text_step_is_not_assistant_text(self):
         """The prompt echo adds no text block, no text chunk and no `agent_output`; the reply does."""
@@ -2589,3 +2625,32 @@ class TestCancellation:
         assert outcome.status is AgentEndStatus.CRASHED
         assert outcome.record.agent_output == "partial answer"
         assert outcome.record.assistant_turn_count == outcome.record.num_turns == 2
+
+
+async def test_max_turns_stops_when_the_turn_past_the_cap_starts():
+    """The cap is the monitor's: it latches at the first Step of model turn N+1, and no later Step is pulled."""
+    never = _step(
+        "TOOL_CALL",
+        "ACTIVE",
+        target="TARGET_ENVIRONMENT",
+        tool_calls=[_tc("run_command", "t9", {"command_line": "echo never"})],
+    )
+    agent = _agent_with_steps(
+        [
+            _step("THINKING", "DONE", thinking="one", usage=_usage(100, 0, 10, 0)),
+            _step("THINKING", "DONE", thinking="two", usage=_usage(100, 0, 10, 0)),
+            never,
+        ]
+    )
+    monitor = TurnMonitor("t", [], limits=RunLimits(max_turns=1))
+
+    outcome = await agent.communicate("go", iteration=1, stream_callback=monitor, should_stop=monitor.should_stop)
+
+    assert monitor.stop_reason is StopReason.MODEL_TURN_CAP
+    assert monitor.model_turns == 2
+    assert outcome.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
+    assert outcome.record.crashed is False
+    assert outcome.record.tool_calls_exhausted is True
+    assert outcome.record.commands == []
+    assert outcome.record.num_turns == 2
+    assert agent._sdk_agent.conversation.cancel_call_count == 1

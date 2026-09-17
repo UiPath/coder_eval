@@ -534,7 +534,8 @@ from types import SimpleNamespace  # noqa: E402
 from openai_codex.generated.v2_all import Turn, TurnCompletedNotification  # noqa: E402
 
 from coder_eval.agents.codex_agent import _CodexDecoder, _ms_to_dt, _ThreadTotals  # noqa: E402
-from coder_eval.models import TimingBasis  # noqa: E402
+from coder_eval.models import RunLimits, TimingBasis  # noqa: E402
+from coder_eval.orchestration.turn_monitor import TurnMonitor  # noqa: E402
 from coder_eval.streaming.emitter import TurnEmitter  # noqa: E402
 from coder_eval.streaming.events import (  # noqa: E402
     AgentEndEvent,
@@ -542,6 +543,9 @@ from coder_eval.streaming.events import (  # noqa: E402
     StopReason,
     ToolEndEvent,
     ToolStartEvent,
+    TurnEndEvent,
+    TurnEndStatus,
+    TurnStartEvent,
 )
 from coder_eval.testing import Replay, ScriptedClock, Tick, assert_stream_balanced, replay  # noqa: E402
 
@@ -3080,3 +3084,96 @@ class TestCommunicateCancellation:
         assert agent.get_state() == AgentState.ERROR
         caller = asyncio.current_task()
         assert caller is not None and caller.cancelling() == 0
+
+
+class TestInnerTurnsPerGeneration:
+    """One inner turn per model generation, so `max_turns` counts Codex the way it counts Claude Code."""
+
+    @staticmethod
+    def _cmd(item_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            type="commandExecution", id=item_id, command="echo", exit_code=0, aggregated_output="", duration_ms=5
+        )
+
+    def test_each_generation_is_one_inner_turn_carrying_its_own_delta(self):
+        """A tool result landing after its generation's cut opens no turn; the next model output does."""
+        result = _codex_replay(
+            [
+                _reply("m1", "one"),
+                _usage_notification(last=(100, 40, 8), total=(100, 40, 8)),
+                _item_notification("item/started", self._cmd("c1")),
+                _usage_notification(last=(150, 20, 12), total=(250, 60, 20)),
+                _item_notification("item/completed", self._cmd("c1")),
+                _reply("m3", "three"),
+                _usage_notification(last=(50, 10, 0), total=(300, 70, 20)),
+                _turn_completed(),
+            ]
+        )
+
+        starts = [e.turn_id for e in result.events if isinstance(e, TurnStartEvent)]
+        assert starts == ["codex-1-msg-0", "codex-1-msg-1", "codex-1-msg-2"]
+        ends = [e for e in result.events if isinstance(e, TurnEndEvent)]
+        assert [
+            (e.tokens.uncached_input_tokens, e.tokens.output_tokens, e.tokens.cache_read_input_tokens)
+            for e in ends
+            if e.tokens
+        ] == [(92, 40, 8), (138, 20, 12), (50, 10, 0)]
+        assert [m.message_id for m in result.record.messages if m.role == "assistant"] == starts
+        assert result.record.num_turns == result.record.assistant_turn_count == 3
+        assert_stream_balanced(result.events)
+
+    def test_a_billed_cut_with_no_content_counts_and_the_next_turn_gets_a_fresh_id(self):
+        agent = CodexAgent(parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"))
+        final = _usage_notification(last=(50, 10, 0), total=(150, 15, 0))
+        result = replay(
+            [_usage_notification(last=(100, 5, 0), total=(100, 5, 0)), _reply("m1", "one"), final, _turn_completed()],
+            lambda emitter: _CodexDecoder(agent, emitter, turn_id="codex-1"),
+            clock=ScriptedClock(_ms_to_dt(_BOUNDS_EPOCH_MS)),
+            basis=TimingBasis.CLI_EPOCH_MS,
+            model="gpt-5.5",
+            end=lambda decoder: decoder.end(AgentEndStatus.COMPLETED, sdk_token_usage=final.payload.token_usage),
+        )
+
+        starts = [e.turn_id for e in result.events if isinstance(e, TurnStartEvent)]
+        assert starts == ["codex-1-msg-0", "codex-1-msg-1"]
+        assert [m.message_id for m in result.record.messages if m.role == "assistant"] == ["codex-1-msg-1"]
+        assert result.record.num_turns == 2
+        assert_stream_balanced(result.events)
+
+    def test_a_stop_mid_generation_closes_that_turn_with_the_stop_status(self):
+        result = _codex_replay(
+            [
+                _reply("m1", "one"),
+                _usage_notification(last=(100, 40, 8), total=(100, 40, 8)),
+                _item_notification("item/started", self._cmd("c1")),
+            ]
+        )
+
+        ends = [(e.turn_id, e.status) for e in result.events if isinstance(e, TurnEndEvent)]
+        assert ends == [("codex-1-msg-0", TurnEndStatus.COMPLETED), ("codex-1-msg-1", TurnEndStatus.COMPLETED)]
+        assert_stream_balanced(result.events)
+
+    async def test_max_turns_stops_when_the_turn_past_the_cap_starts(self):
+        """The cap is the monitor's: it latches at the first item of model turn N+1, and the pump pulls no more."""
+        agent = _started_agent(
+            parse_agent_config(type=AgentKind.CODEX, model="gpt-5.5"),
+            [
+                _reply("m1", "one"),
+                _usage_notification(last=(100, 40, 8), total=(100, 40, 8)),
+                _item_notification("item/started", self._cmd("c1")),
+                _item_notification("item/completed", self._cmd("c1")),
+                _turn_completed(),
+            ],
+        )
+        monitor = TurnMonitor("t", [], limits=RunLimits(max_turns=1))
+
+        outcome = await agent.communicate("go", iteration=1, stream_callback=monitor, should_stop=monitor.should_stop)
+
+        assert monitor.stop_reason is StopReason.MODEL_TURN_CAP
+        assert monitor.model_turns == 2
+        assert outcome.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
+        assert outcome.record.crashed is False
+        assert outcome.record.tool_calls_exhausted is True
+        assert [(c.tool_id, c.result_status) for c in outcome.record.commands] == [("c1", "unknown")]
+        assert outcome.record.num_turns == 2
+        assert agent.thread.last_handle.interrupted is True

@@ -373,8 +373,8 @@ class TestModelTurnLimits:
             (AgentKind.CLAUDE_CODE, True),
             (AgentKind.OPENCODE, True),
             (AgentKind.PI, True),
-            (AgentKind.CODEX, False),
-            (AgentKind.ANTIGRAVITY, False),
+            (AgentKind.CODEX, True),
+            (AgentKind.ANTIGRAVITY, True),
             (AgentKind.NONE, False),
         ],
     )

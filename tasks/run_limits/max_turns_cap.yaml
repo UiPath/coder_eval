@@ -3,9 +3,9 @@ description: >-
   Parity fixture for run_limits.max_turns. The prompt asks for far more
   sequential model turns than the cap allows, so every harness that counts model
   turns must stop at the cap rather than running the prompt to completion. Run it
-  with --type claude-code / opencode / pi and compare: the cap must produce a
-  CLEAN stop (`tool_calls_exhausted`, criteria still checked), never a crash.
-  Codex and Antigravity reject it at resolution.
+  with --type claude-code / codex / antigravity / opencode / pi and compare: the cap
+  must produce a CLEAN stop (`tool_calls_exhausted`, criteria still checked), never
+  a crash.
 
 tags:
   - run-limits

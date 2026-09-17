@@ -3,8 +3,9 @@
 One task file, run on any harness, must be the same task. `max_turns` broke that
 promise hardest: Claude Code enforced it, and Codex and Antigravity accepted it and
 never read it, so `max_turns: 6` ran capped on one backend and unbounded on the other
-two. Now `max_tool_calls` is one counter on every harness; `max_turns` counts model turns
-on the harnesses that report one turn per response and is rejected on the others.
+two. Now `max_tool_calls` is one counter on every harness, and `max_turns` counts model
+turns on every harness that opens one inner turn per model response: all five built-in
+agents. Only a harness that reports once per `communicate()` rejects it.
 
 This page is the contract for what each run limit means per harness, plus what each
 shared `agent` field means on each harness. Both tables are generated.
@@ -19,15 +20,15 @@ CE069 fails the build on drift.
 | limit | claude-code | codex | antigravity | opencode | pi | none |
 | --- | --- | --- | --- | --- | --- | --- |
 | `max_tool_calls` | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | not polled (never fires) |
-| `max_turns` | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | rejected at resolution | rejected at resolution | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | rejected at resolution |
+| `max_turns` | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | rejected at resolution |
 | `expected_tool_calls` | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only |
-| `expected_turns` | orchestrator, cumulative model turns (TurnMonitor count), warns only | rejected at resolution | rejected at resolution | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | rejected at resolution |
+| `expected_turns` | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | orchestrator, cumulative model turns (TurnMonitor count), warns only | rejected at resolution |
 | `task_timeout` | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic |
 | `turn_timeout` | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) |
-| `max_input_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
-| `max_output_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
-| `max_total_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
-| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; priced by the harness | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; priced by the harness |
+| `max_input_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_output_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_total_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; priced by the harness | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; priced by the harness |
 | `count_cached_input` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
 | `count_cache_creation` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
 | `stop_early` | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | rejected at resolution |
@@ -61,7 +62,7 @@ Generated from each agent class's `contract` by `make parity-table`; CE069 fails
 | `allowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `cooperative_stop` | yes | yes | yes | yes | yes | no |
-| `usage_granularity` | generation | turn | turn | step | step | turn |
+| `usage_granularity` | generation | generation | generation | step | step | turn |
 | `timing_basis` | turn_clock | cli_epoch_ms | turn_clock | cli_epoch_ms | turn_clock | turn_clock |
 | `reports_cost` | yes | no | no | no | no | yes |
 | `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
@@ -77,7 +78,11 @@ overshoot by one such report.
 `usage_granularity` also decides the model-turn limits (`max_turns`,
 `expected_turns`): a harness that reports per generation or per step opens one inner turn
 per model response, so the TurnMonitor can count them; a harness that reports once per
-`communicate()` rejects them at resolution.
+`communicate()` rejects them at resolution. Codex opens a turn at the first item of a
+generation and closes it at that generation's `thread/tokenUsage/updated`; Antigravity
+opens one at the first MODEL Step that carries new content or an unseen tool call and
+closes it at the Step that carries `usage_metadata`. A tool result that lands after the
+cut is not a new turn on either.
 `reports_cost` is whether every finished turn carries a cost the harness computed. On a
 harness that does not, `max_usd` is priced from `coder_eval.pricing`, so a task that sets
 `max_usd` must pin an `agent.model` with a rate, or it is rejected at resolution. Pi and
@@ -695,9 +700,8 @@ recorded run whose `skill_name` is not in that list finishes `ERROR`, not 0.0.
 ## Reproducing
 
 `tasks/run_limits/` holds one fixture per limit: `max_tool_calls_cap.yaml` and
-`max_turns_cap.yaml` ask for more sequential work than their caps allow (Codex and
-Antigravity reject the second at resolution), and `turn_timeout.yaml` runs a command that
-outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
+`max_turns_cap.yaml` ask for more sequential work than their caps allow, and
+`turn_timeout.yaml` runs a command that outlives its watchdog. Run either with `--type claude-code` / `--type codex` /
 `--type antigravity` / `--type opencode` / `--type pi` to check a backend against the
 contract above.
 

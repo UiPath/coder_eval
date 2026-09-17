@@ -494,7 +494,10 @@ retry below the stream, so their retries count zero.
 Which harnesses accept the fields is derived, not declared:
 `HarnessContract.counts_model_turns` is `cooperative_stop` and a `usage_granularity`
 other than `turn`. A harness that reports once per `communicate()` would count calls, a
-different meaning, so it rejects both fields at resolution. The count is persisted as
+different meaning, so it rejects both fields at resolution. Codex and Antigravity were
+that harness until 2026-09-17; each now opens one inner turn per generation
+(agents.md § One inner turn per generation on Codex and Antigravity), so only `none`
+rejects. The count is persisted as
 `EvaluationResult.model_turns` because reports are rebuilt from `task.json` and a detached
 grade has an inert monitor; re-deriving it from `TurnRecord.messages` over-counts on
 Claude Code (a spike stream showed 5 for 3 main responses). The dialog loop writes it

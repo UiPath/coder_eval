@@ -178,7 +178,9 @@ class _AntigravityDecoder:
     Step-stream shape (observed): each ``step_index`` is yielded repeatedly through
     ACTIVE -> DONE transitions; ``usage_metadata`` lands once per generation on a
     DONE/terminal step (summing them == the turn total); a tool call carries a stable
-    ``id`` and its result is folded into expanded ``args`` at DONE.
+    ``id`` and its result is folded into expanded ``args`` at DONE. Each generation
+    is one inner turn: opened at the first MODEL Step that brings new content or an
+    unseen tool call, closed at its ``usage_metadata`` with that usage as its tokens.
     """
 
     def __init__(self, emitter: TurnEmitter, *, turn_id: str = "antigravity-1") -> None:
@@ -228,12 +230,36 @@ class _AntigravityDecoder:
         """The ONE test for "the model talking to the user"; a USER-source prompt echo is not."""
         return stype == _TYPE_TEXT_RESPONSE and ssource == _SOURCE_MODEL and starget == _TARGET_USER
 
+    def _open_generation(self) -> None:
+        """Open the inner turn for the generation now arriving; a no-op while one is open."""
+        if not self.emitter.inner_turn_open:
+            self.emitter.begin_inner_turn(f"{self.turn_id}-msg-{self.generations}")
+
+    def _starts_generation(self, step: Any, ssource: Any) -> bool:
+        """True when ``step`` is the model speaking: new content, new usage, or a tool call not seen before.
+
+        A DONE Step for a call already open is its result landing, not a model turn.
+        """
+        if ssource != _SOURCE_MODEL:
+            return False
+        if step.tool_calls:
+            return any(self._call_id(call, step, i) not in self._seen_tools for i, call in enumerate(step.tool_calls))
+        return bool(
+            step.thinking
+            or step.thinking_delta
+            or step.content
+            or step.content_delta
+            or step.usage_metadata is not None
+        )
+
     def __call__(self, step: Any) -> None:
         """Route one streamed ``Step`` to the emitter."""
         stype = _enum_value(step.type)
         sstatus = _enum_value(step.status)
         ssource = _enum_value(step.source)
         self._seed_first_generation_window(ssource)
+        if self._starts_generation(step, ssource):
+            self._open_generation()
         starget = _enum_value(step.target)
         done = sstatus in (_STATUS_DONE, _STATUS_ERROR)
         reply = self._is_reply(stype, ssource, starget)
@@ -256,15 +282,19 @@ class _AntigravityDecoder:
             self.total_usage = self.total_usage + gen
             self._flush_generation(gen, getattr(step.usage_metadata, "thoughts_token_count", 0) or 0)
 
-    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
-        raw_name = _enum_value(call.name)
+    @staticmethod
+    def _call_id(call: Any, step: Any, call_index: int) -> str:
         # call.id is usually present but the SDK types it optional. The fallback
         # mirrors the SDK's own `trajectory_id:step_index` scheme; call_index
         # further disambiguates multiple id-less calls within one step.
         # Rationale: .claude/notes/agents.md § Why the tool-call id falls back the way it does
         trajectory_id = getattr(step, "trajectory_id", "") or ""
         step_key = f"{trajectory_id}:{step.step_index}" if trajectory_id else str(step.step_index)
-        cid = call.id or f"{raw_name}_{step_key}_{call_index}"
+        return call.id or f"{_enum_value(call.name)}_{step_key}_{call_index}"
+
+    def _handle_tool_call(self, call: Any, step: Any, done: bool, sstatus: Any, call_index: int) -> None:
+        raw_name = _enum_value(call.name)
+        cid = self._call_id(call, step, call_index)
         self._tool_last_status[cid] = sstatus
         if cid not in self._seen_tools:
             self._seen_tools.add(cid)
@@ -315,10 +345,13 @@ class _AntigravityDecoder:
             out[rename.get(k, k)] = v
         return out
 
-    def _flush_generation(self, gen: TokenUsage, reasoning_tokens: int) -> None:
-        """Cut the accumulated blocks into one generation carrying this step's tokens."""
+    def _flush_generation(
+        self, gen: TokenUsage, reasoning_tokens: int, *, status: TurnEndStatus = TurnEndStatus.COMPLETED
+    ) -> None:
+        """Cut the accumulated blocks into one generation carrying this step's tokens, and close its inner turn."""
         if not self._blocks and gen.is_empty():
             return
+        self._open_generation()
         now = self.emitter.now()
         # Do NOT "simplify" this to resetting the mark when a tool ends: this
         # harness interleaves a tool INTO a window rather than tiling around it,
@@ -335,6 +368,7 @@ class _AntigravityDecoder:
         self.generations += 1
         self._blocks = []
         self._gen_mark = now
+        self.emitter.end_inner_turn(status, tokens=gen)
 
     def has_orphaned_tool_call(self) -> bool:
         """True if any NOT-YET-CLOSED tool call's most recently seen status is
@@ -351,31 +385,18 @@ class _AntigravityDecoder:
         return any(cid not in self._closed_tools and s == _STATUS_ACTIVE for cid, s in self._tool_last_status.items())
 
     def end(self, status: AgentEndStatus, *, reason: str | None = None, agent_output: str | None = None) -> TurnOutcome:
-        """Flush trailing blocks, close the one inner turn with the turn's tokens, and end the turn.
+        """Flush trailing blocks as an unbilled generation and end the turn.
 
-        ``agent_output`` is the fallback when the stream carried no reply text.
+        Every billed generation already closed its own inner turn; the emitter closes
+        one still open with ``status``. ``agent_output`` is the fallback when the
+        stream carried no reply text.
         """
         if self._blocks:
-            self._flush_generation(TokenUsage(), 0)
-        if self.emitter.inner_turn_open:
-            self.emitter.end_inner_turn(TurnEndStatus(status.value), tokens=self.total_usage)
+            self._flush_generation(TokenUsage(), 0, status=TurnEndStatus(status.value))
         output = "".join(self.output_parts) if self.output_parts else (agent_output or "")
         if status is AgentEndStatus.CRASHED or status is AgentEndStatus.TIMEOUT:
-            return self.emitter.fail(
-                status,
-                reason or status.value,
-                usage=self.total_usage,
-                agent_output=output,
-                assistant_turn_count=self.generations,
-                num_turns=self.generations,
-            )
-        return self.emitter.finalize(
-            status,
-            usage=self.total_usage,
-            agent_output=output,
-            assistant_turn_count=self.generations,
-            num_turns=self.generations,
-        )
+            return self.emitter.fail(status, reason or status.value, usage=self.total_usage, agent_output=output)
+        return self.emitter.finalize(status, usage=self.total_usage, agent_output=output)
 
 
 @AgentRegistry.register(AgentKind.ANTIGRAVITY, AntigravityAgentConfig, spi_version=SPI_VERSION)
@@ -385,6 +406,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
     # The step loop has a between-steps guard where `should_stop` runs;
     # TemplatedSystemInstructions wraps system_instructions around the harness's
     # own prompt, and always has — so runs ARE comparable across the marker.
+    # Usage is one `usage_metadata` per model generation, each closing one inner turn.
     # Rationale: .claude/notes/agents.md § The system_prompt_semantics marker
     contract = HarnessContract(
         system_prompt=Enforcement.ENFORCED,
@@ -394,7 +416,7 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
-        usage_granularity=UsageGranularity.TURN,
+        usage_granularity=UsageGranularity.GENERATION,
         timing_basis=TimingBasis.TURN_CLOCK,
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
@@ -630,7 +652,6 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
             decoder.timeout_hit = True
 
         try:
-            emitter.begin_inner_turn(turn_id)
             try:
                 await run_with_watchdog(
                     self._run_turn(user_input, decoder, timeout, should_stop),
