@@ -7,18 +7,15 @@ an unsupported task **at export time**, where the operator sees why.
 Classification, v1:
 
 - ``PORTABLE`` — filesystem/exit-code checks.
-- ``NEEDS_REFERENCE`` — ``reference_comparison``; never actually blocking, since the
-  export always emits ``tests/reference/`` when the task declares one.
+- ``NEEDS_REFERENCE`` — ``reference_comparison``; never blocking, since the export
+  always emits ``tests/reference/`` when the task declares one.
 - ``NEEDS_TRAJECTORY`` — ``command_executed``, ``commands_efficiency``,
-  ``skill_triggered``; never actually blocking, since the packager's ``CoderEvalAgent``
-  always runs ``coder-eval execute --format harbor`` and the generated ``tests/test.sh``
-  always grades against the resulting ``/logs/agent/trajectory.json`` (ATIF).
+  ``skill_triggered``; never blocking, since the generated ``tests/test.sh`` always
+  grades against ``/logs/agent/trajectory.json`` (ATIF).
 - ``NEEDS_CLI_RECORDER`` — ``cli_called``. Hard-error until the export bakes the
   recorder shim in.
 - ``NEEDS_CREDENTIALS`` — ``llm_judge``, ``agent_judge``, ``uipath_eval``. Never
-  actually blocking — exporting one of these always assumes the operator will
-  provision model credentials/network access inside the verifier container
-  themselves; C2 does not do it for them.
+  blocking — assumes the operator provisions credentials themselves.
 
 Rationale: .claude/notes/reporting.md § Not every criterion can grade inside someone else's container
 """

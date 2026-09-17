@@ -244,22 +244,12 @@ def _write_environment(
     """Derive ``environment/`` and return ``(workdir, docker_image)``.
 
     ``workdir`` is an EXPLICIT override only — ``sandbox.docker.working_dir`` or a
-    Dockerfile's own ``WORKDIR`` line. ``None`` otherwise, so Harbor's ``docker exec``
-    gets no ``-w`` and lands wherever the image's OWN ``WORKDIR`` already puts it. This
-    still matters for the AGENT phase: ``CoderEvalAgent.run()`` shells out with
-    ``--workspace-dir "$(pwd)"``, so wherever ``docker exec`` actually lands decides
-    what that captures. The VERIFIER phase no longer depends on it at all —
-    ``tests/test.sh`` grades against ``/logs/agent`` as a run directory (its own
-    recorded ``sandbox_path``), not a live cwd.
-
-    ``docker_image`` is set only when no ``environment/Dockerfile`` was written, so
-    ``task.toml``'s ``[environment].docker_image`` points at the pre-built image;
-    ``None`` when a Dockerfile was written and Harbor must build from it.
-
-    A ``dockerfile_path`` is the only shape that writes a Dockerfile, copied in
-    UNCHANGED — no ``WORKDIR`` appended even when it declares none.
-    ``environment/task.yaml`` is bind-mounted at :data:`AGENT_TASK_YAML_PATH`, never
-    ``COPY``'d.
+    Dockerfile's own ``WORKDIR`` line — ``None`` otherwise. ``docker_image`` is set only
+    when no ``environment/Dockerfile`` was written, so ``task.toml``'s
+    ``[environment].docker_image`` points at the pre-built image; ``None`` when a
+    Dockerfile was written and Harbor must build from it. A ``dockerfile_path`` is the
+    only shape that writes a Dockerfile, copied in UNCHANGED. ``environment/task.yaml``
+    is bind-mounted at :data:`AGENT_TASK_YAML_PATH`, never ``COPY``'d.
 
     Rationale: .claude/notes/reporting.md § What the export carries, and what it refuses to carry
     """
