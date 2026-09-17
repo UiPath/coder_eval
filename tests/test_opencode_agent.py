@@ -34,8 +34,20 @@ from coder_eval.agents.opencode_agent import (
     _unwrap,
 )
 from coder_eval.errors.agent import format_timeout_reason
-from coder_eval.models import AssistantMessage, OpenCodeAgentConfig, PermissionMode, TimingBasis, TurnRecord
+from coder_eval.models import (
+    AssistantMessage,
+    FileExistsCriterion,
+    OpenCodeAgentConfig,
+    PermissionMode,
+    RunLimits,
+    SandboxConfig,
+    TaskDefinition,
+    TimingBasis,
+    TurnRecord,
+    parse_agent_config,
+)
 from coder_eval.orchestration.plugin_staging import stage_plugins
+from coder_eval.orchestration.turn_monitor import TurnMonitor
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.emitter import TurnOutcome
 from coder_eval.streaming.events import (
@@ -43,6 +55,7 @@ from coder_eval.streaming.events import (
     AgentEndStatus,
     AgentStartEvent,
     StopReason,
+    StreamEvent,
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
@@ -2326,3 +2339,35 @@ class TestToolSpansSurviveTheStepBoundary:
         assert decoder.gen_mark == _at(1000)
         assert len(_assistants(result)) == 1
         assert result.outcome.status is AgentEndStatus.CRASHED
+
+
+class TestModelTurnCap:
+    def test_the_model_turn_cap_stops_at_the_next_turn_start_with_the_last_turn_resolved(self) -> None:
+        lines = Path("tests/fixtures/opencode_happy_stream.jsonl").read_text(encoding="utf-8").splitlines()
+        result, _ = _replay([json.loads(line) for line in lines if line.strip()])
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="go",
+            agent=parse_agent_config(type="opencode"),
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[FileExistsCriterion(description="c", path="out.txt")],
+            run_limits=RunLimits(max_turns=1),
+        )
+        monitor = TurnMonitor.for_task(task, arm=False)
+        ends: list[ToolEndEvent] = []
+        latch: tuple[StreamEvent, list[ToolEndEvent]] | None = None
+        for event in result.events:
+            monitor.on_event(event)
+            if latch is None and monitor.stop_reason is not None:
+                latch = (event, list(ends))
+            if isinstance(event, ToolEndEvent) and event.parent_thread_id is None:
+                ends.append(event)
+
+        assert monitor.model_turns == 2
+        assert monitor.stop_reason is StopReason.MODEL_TURN_CAP
+        assert latch is not None
+        latched_on, ends_at_latch = latch
+        assert isinstance(latched_on, TurnStartEvent)
+        unresolved = sum(end.status is ToolEndStatus.UNRESOLVED for end in ends_at_latch)
+        assert (len(ends_at_latch) - unresolved, unresolved) == (2, 0)

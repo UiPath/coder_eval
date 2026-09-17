@@ -25,8 +25,18 @@ import pytest
 
 from coder_eval.agents.pi_agent import PiAgent, _PiDecoder, _result_text
 from coder_eval.errors.agent import format_timeout_reason
-from coder_eval.models import AgentKind, AssistantMessage, PiAgentConfig
+from coder_eval.models import (
+    AgentKind,
+    AssistantMessage,
+    FileExistsCriterion,
+    PiAgentConfig,
+    RunLimits,
+    SandboxConfig,
+    TaskDefinition,
+    parse_agent_config,
+)
 from coder_eval.orchestration.plugin_staging import stage_plugins
+from coder_eval.orchestration.turn_monitor import TurnMonitor
 from coder_eval.pricing import calculate_cost
 from coder_eval.streaming.emitter import TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import (
@@ -34,6 +44,7 @@ from coder_eval.streaming.events import (
     AgentEndStatus,
     AgentStartEvent,
     StopReason,
+    StreamEvent,
     ToolEndEvent,
     ToolEndStatus,
     ToolStartEvent,
@@ -1597,3 +1608,35 @@ class TestTheTurnBracketComesFromTheTurnClock:
         record = outcome.record
 
         assert_overhead_is_measured(record)
+
+
+class TestModelTurnCap:
+    def test_the_model_turn_cap_stops_at_the_next_turn_start_with_the_last_turn_resolved(self) -> None:
+        lines = Path("tests/fixtures/pi_happy_stream.jsonl").read_text(encoding="utf-8").splitlines()
+        result, _ = _replay([json.loads(line) for line in lines if line.strip()])
+        task = TaskDefinition(
+            task_id="t",
+            description="d",
+            initial_prompt="go",
+            agent=parse_agent_config(type="pi"),
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[FileExistsCriterion(description="c", path="out.txt")],
+            run_limits=RunLimits(max_turns=1),
+        )
+        monitor = TurnMonitor.for_task(task, arm=False)
+        ends: list[ToolEndEvent] = []
+        latch: tuple[StreamEvent, list[ToolEndEvent]] | None = None
+        for event in result.events:
+            monitor.on_event(event)
+            if latch is None and monitor.stop_reason is not None:
+                latch = (event, list(ends))
+            if isinstance(event, ToolEndEvent) and event.parent_thread_id is None:
+                ends.append(event)
+
+        assert monitor.model_turns == 3
+        assert monitor.stop_reason is StopReason.MODEL_TURN_CAP
+        assert latch is not None
+        latched_on, ends_at_latch = latch
+        assert isinstance(latched_on, TurnStartEvent)
+        unresolved = sum(end.status is ToolEndStatus.UNRESOLVED for end in ends_at_latch)
+        assert (len(ends_at_latch) - unresolved, unresolved) == (1, 0)

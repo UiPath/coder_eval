@@ -2302,6 +2302,7 @@ class TestCE070NoCapOrSkillScanInAdapters:
         [
             "n = self.max_tool_calls",
             "state.max_turns_hit = True",
+            "x = limits.expected_turns",
             "limits: RunLimits | None = None",
             "from coder_eval.utils import expand_env_vars",
             "def communicate(self, max_turns=None): ...",

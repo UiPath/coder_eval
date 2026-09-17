@@ -1839,7 +1839,7 @@ success_criteria:
 # --- Evaluation loop: tool-call cap via the TurnMonitor ---
 
 
-def _cap_task(task_id: str, max_tool_calls: int) -> TaskDefinition:
+def _cap_task(task_id: str, max_tool_calls: int | None = None, *, max_turns: int | None = None) -> TaskDefinition:
     from coder_eval.models import RunLimits
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
@@ -1858,7 +1858,7 @@ def _cap_task(task_id: str, max_tool_calls: int) -> TaskDefinition:
         agent=agent_cfg,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
-        run_limits=RunLimits(max_tool_calls=max_tool_calls),
+        run_limits=RunLimits(max_tool_calls=max_tool_calls, max_turns=max_turns),
         task_timeout=None,
         reference=None,
     )
@@ -1927,6 +1927,8 @@ class _CooperativeToolAgent:
             StopReason,
             ToolEndEvent,
             ToolStartEvent,
+            TurnEndEvent,
+            TurnStartEvent,
             end_status_for,
         )
 
@@ -1941,9 +1943,14 @@ class _CooperativeToolAgent:
         reason: StopReason | None = should_stop()
         while reason is None and len(commands) < intended:
             self._tool_seq += 1
+            stream_callback.on_event(TurnStartEvent(task_id="t", turn_id=f"turn-{self._tool_seq}"))
+            reason = should_stop()
+            if reason is not None:
+                break
             tool = CommandTelemetry(tool_name="Bash", tool_id=f"tool-{self._tool_seq}", timestamp=datetime.now())
             stream_callback.on_event(ToolStartEvent(task_id="t", tool=tool))
             stream_callback.on_event(ToolEndEvent(task_id="t", tool=tool))
+            stream_callback.on_event(TurnEndEvent(task_id="t", turn_id=f"turn-{self._tool_seq}"))
             commands.append(tool)
             reason = should_stop()
         self.emitted_per_attempt.append(len(commands))
@@ -1964,7 +1971,7 @@ class _CooperativeToolAgent:
             user_input=user_input,
             agent_output="stopped",
             commands=commands,
-            tool_calls_exhausted=reason is StopReason.TOOL_CALL_CAP,
+            tool_calls_exhausted=status is AgentEndStatus.TOOL_CALLS_EXHAUSTED,
         )
         return TurnOutcome(record=record, status=status or AgentEndStatus.COMPLETED, error=None)
 
@@ -2843,3 +2850,26 @@ async def test_evaluate_only_reads_skills_offered_from_the_prior_result(tmp_path
     assert seen and all(offered == ("probe-skill",) for offered in seen)
     assert result.final_status == FinalStatus.ERROR
     assert "absent-skill" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_evaluation_loop_breaks_on_model_turn_cap(tmp_path):
+    """Turn N+1 starting latches the model-turn cap; the run records the cap fact like the tool-call cap."""
+    from unittest.mock import patch
+
+    from coder_eval.streaming.events import StopReason
+
+    orchestrator = _cap_orchestrator(_cap_task("model_turn_cap_test", max_turns=3), tmp_path)
+    agent = _CooperativeToolAgent([(10, False)])
+    orchestrator.agent = agent.host
+
+    with patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None):
+        success = await orchestrator._evaluation_loop()
+
+    assert success is False
+    assert agent.emitted_per_attempt == [3]
+    assert orchestrator._monitor is not None
+    assert orchestrator._monitor.stop_reason is StopReason.MODEL_TURN_CAP
+    assert orchestrator._monitor.model_turns == 4
+    assert orchestrator.result is not None
+    assert orchestrator.result.tool_calls_exhausted is True

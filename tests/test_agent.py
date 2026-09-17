@@ -1809,6 +1809,98 @@ async def test_claude_agent_should_stop_ends_turn_with_the_reason_status(reason,
     assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [status]
 
 
+def _cap_monitor(max_turns: int):
+    from coder_eval.models import FileExistsCriterion, RunLimits, SandboxConfig, TaskDefinition
+    from coder_eval.orchestration.turn_monitor import TurnMonitor
+
+    task = TaskDefinition(
+        task_id="t",
+        description="d",
+        initial_prompt="go",
+        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
+        sandbox=SandboxConfig(driver="tempdir"),
+        success_criteria=[FileExistsCriterion(description="c", path="out.txt")],
+        run_limits=RunLimits(max_turns=max_turns),
+    )
+    return TurnMonitor.for_task(task, arm=False)
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_stops_when_the_turn_past_the_model_cap_starts():
+    """Turn N+1 starts when its first message arrives; that message is recorded and the loop breaks."""
+    from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, TextBlock
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+    monitor = _cap_monitor(2)
+    dispatched: list[str] = []
+
+    async def mock_query(prompt, options, transport=None):
+        for i in range(1, 6):
+            dispatched.append(f"msg-{i}")
+            yield AssistantMessage([TextBlock(f"reply {i}")], message_id=f"msg-{i}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            outcome = await agent.communicate(
+                "go", iteration=1, stream_callback=monitor, should_stop=monitor.should_stop
+            )
+
+    assert outcome.status is AgentEndStatus.TOOL_CALLS_EXHAUSTED
+    assert monitor.stop_reason is StopReason.MODEL_TURN_CAP
+    assert dispatched == ["msg-1", "msg-2", "msg-3"]
+    assert outcome.record.tool_calls_exhausted is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cap", "status", "dispatched_count"),
+    [(1, AgentEndStatus.TOOL_CALLS_EXHAUSTED, 7), (2, AgentEndStatus.COMPLETED, 8)],
+)
+async def test_a_sub_agent_does_not_split_the_main_turn_the_model_cap_counts(cap, status, dispatched_count):
+    """A sub-agent message closes and re-opens main turn A under the same id, which counts once."""
+    from tests._fixtures.golden_streams.claude_fixtures import (
+        AssistantMessage,
+        ResultMessage,
+        TextBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
+
+    stream = [
+        AssistantMessage([ToolUseBlock("t1", "Task", {"prompt": "look"})], message_id="A"),
+        AssistantMessage([TextBlock("sub one")], message_id="S1", parent_tool_use_id="t1"),
+        AssistantMessage([ToolUseBlock("t2", "Bash", {"command": "ls"})], message_id="A"),
+        UserMessage("t2", False, "ok"),
+        AssistantMessage([TextBlock("sub two")], message_id="S2", parent_tool_use_id="t1"),
+        UserMessage("t1", False, "sub result"),
+        AssistantMessage([TextBlock("done")], message_id="B"),
+        ResultMessage(),
+    ]
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+    monitor = _cap_monitor(cap)
+    dispatched: list[object] = []
+
+    async def mock_query(prompt, options, transport=None):
+        for message in stream:
+            dispatched.append(message)
+            yield message
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        await agent.start(tmpdir)
+        with patch("coder_eval.agents.claude_code_agent.query", mock_query):
+            outcome = await agent.communicate(
+                "go", iteration=1, stream_callback=monitor, should_stop=monitor.should_stop
+            )
+
+    assert outcome.status is status
+    assert len(dispatched) == dispatched_count
+    assert monitor.model_turns == 2
+    statuses = {command.tool_id: command.result_status for command in outcome.record.commands}
+    assert statuses["t1"] == "success"
+    assert statuses["t2"] == "success"
+
+
 def test_setting_sources_default_is_project():
     """When config.setting_sources is None, it defaults to ['project'] at runtime."""
     config = parse_agent_config(

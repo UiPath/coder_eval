@@ -396,7 +396,8 @@ class TurnRecord(BaseModel):
     )
     tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether the tool-call cap ended this turn before the agent completed on its own",
+        description="Whether a structural cap (max_tool_calls or max_turns) ended this turn before the agent "
+        + "completed on its own",
     )
     result_summary: ResultSummary | None = Field(
         default=None,
@@ -519,7 +520,7 @@ class EarlyStopInfo(BaseModel):
         + "advisory without re-deriving from task_config.",
     )
     sdk_turn_index: int = Field(
-        description="SDK inner-turn count at the stop (the monitor counts TurnStartEvents). NOT the "
+        description="Main-thread model turns started at the stop (each turn id once per communicate()). NOT the "
         + "orchestrator iteration, which is always 1 in single-shot."
     )
     tool_call_index: int = Field(
@@ -595,7 +596,8 @@ class EvaluationResult(BaseModel):
     final_status: FinalStatus = Field(description="Final status of the evaluation")
     tool_calls_exhausted: bool = Field(
         default=False,
-        description="Whether the tool-call cap ended any iteration before the agent completed on its own",
+        description="Whether a structural cap (max_tool_calls or max_turns) ended any iteration before the agent "
+        + "completed on its own",
     )
     weighted_score: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Weighted average of criterion scores (0.0 to 1.0)"

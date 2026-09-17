@@ -1,4 +1,4 @@
-"""The run's single ``should_stop`` answerer: armed early stop, the tool-call cap and the budgets.
+"""The run's single ``should_stop`` answerer: armed early stop, the tool-call and model-turn caps and the budgets.
 
 ``TurnMonitor`` is a ``StreamCallback`` composed into the agent's callback chain
 for the whole task. It owns ONE ``EventCollector`` across every retry attempt and
@@ -6,13 +6,13 @@ every dialog turn, so every count it answers from is cumulative per task. The ag
 polls ``should_stop`` at its safe boundaries; the first non-None ``StopReason`` is
 latched and final.
 
-Precedence on one round: ``EARLY_CRITERION``, ``TOOL_CALL_CAP``, ``TOKEN_BUDGET``,
-``USD_BUDGET``. A budget breach seen mid-turn latches its reason and its figures, so a
+Precedence on one round: ``EARLY_CRITERION``, ``TOOL_CALL_CAP``, ``MODEL_TURN_CAP``,
+``TOKEN_BUDGET``, ``USD_BUDGET``. A budget breach seen mid-turn latches its reason and its figures, so a
 turn that stopped on a budget always finalizes as that budget's status.
 
 FAIL-OPEN covers the armed criteria only: any exception while reducing an event or
-evaluating them disarms them and the run degrades to a full run. The cap reads
-counters and is checked on every resolved call regardless, so it never disarms.
+evaluating them disarms them and the run degrades to a full run. The caps read
+counters, so they never disarm.
 
 Rationale: .claude/notes/orchestration.md § Early stop on criterion
 """
@@ -126,6 +126,7 @@ class TurnMonitor:
         self._collector = EventCollector()
         self._resolved_tool_ids: set[str] = set()
         self._sdk_turn_index = 0
+        self._call_turn_ids: set[str] = set()
         self._tool_call_index = 0
         self._started_monotonic: float | None = None
         self._committed = TokenUsage()
@@ -187,7 +188,8 @@ class TurnMonitor:
         increments on each resolved end. UNRESOLVED tool ends are RECORDED but never
         counted or evaluated on — they must still land in the collector, or the
         monitor would reduce a strictly smaller command set than the authoritative
-        check. The cap counts distinct resolved tool ids.
+        check. The cap counts distinct resolved tool ids. A main-thread turn start counts once
+        per turn id per ``communicate()``; the model-turn cap latches when turn N+1 starts.
 
         A nested (sub-agent) event is main-thread-scoped out: its tool end is recorded
         but never counted or evaluated, its turn start sets no model, and only its
@@ -203,8 +205,12 @@ class TurnMonitor:
                 self._started_monotonic = time.monotonic()
             self._in_flight = TokenUsage()
             self._start_model = event.model or self._start_model
+            self._call_turn_ids = set()
         elif isinstance(event, TurnStartEvent):
-            self._sdk_turn_index += 1
+            if event.turn_id not in self._call_turn_ids:
+                self._call_turn_ids.add(event.turn_id)
+                self._sdk_turn_index += 1
+                self._evaluate_model_turn_cap()
             self._reported_model = event.model or self._reported_model
         elif isinstance(event, TurnEndEvent):
             if event.tokens is not None:
@@ -263,6 +269,11 @@ class TurnMonitor:
     def tool_calls(self) -> int:
         """Distinct resolved tool calls across the whole task."""
         return len(self._resolved_tool_ids)
+
+    @property
+    def model_turns(self) -> int:
+        """Main-thread model turns started across the whole task, each turn id once per communicate()."""
+        return self._sdk_turn_index
 
     @property
     def usage(self) -> TokenUsage:
@@ -365,6 +376,18 @@ class TurnMonitor:
                     "[%s] tool-call cap reached: %d resolved tool calls (cap %d)", self._task_id, self.tool_calls, cap
                 )
             self._latch(StopReason.TOOL_CALL_CAP)
+
+    def _evaluate_model_turn_cap(self) -> None:
+        cap = self._limits.max_turns if self._limits is not None else None
+        if cap is not None and self._sdk_turn_index > cap:
+            if self._stop_reason is None:
+                logger.info(
+                    "[%s] model-turn cap reached: model turn %d started (cap %d)",
+                    self._task_id,
+                    self._sdk_turn_index,
+                    cap,
+                )
+            self._latch(StopReason.MODEL_TURN_CAP)
 
     def _ceiling(self, verdicts: list[LiveVerdict]) -> float:
         """Best-case weighted score over the WHOLE armed set, given current verdicts.

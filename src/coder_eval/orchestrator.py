@@ -2148,8 +2148,10 @@ class Orchestrator:
         if turn_record.tool_calls_exhausted:
             self.result.tool_calls_exhausted = True
             logger.warning(
-                "Agent reached the tool-call cap (%d resolved tool calls).",
+                "Agent reached a run cap (%s): %d resolved tool calls, %d model turns.",
+                monitor.stop_reason,
                 monitor.tool_calls,
+                monitor.model_turns,
             )
         # Soft cumulative-turn check (logs once; never aborts).
         self._check_expected_tool_calls(iteration=iteration)
@@ -2546,7 +2548,8 @@ class Orchestrator:
                 if turn_record.tool_calls_exhausted and stop_decision.reason is not DialogStopReason.CRITERIA_PASSED:
                     stop_reason = DialogStopReason.TOOL_CALL_CAP
                     logger.warning(
-                        "Agent reached the tool-call cap during simulation turn %s; ending dialog.",
+                        "Agent reached a run cap (%s) during simulation turn %s; ending dialog.",
+                        self._monitor.stop_reason,
                         turns_completed,
                     )
                     break

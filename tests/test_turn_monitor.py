@@ -86,6 +86,10 @@ def _feed(monitor: TurnMonitor, events: list[Any]) -> None:
         monitor.on_event(event)
 
 
+def _turn_start(turn_id: str) -> TurnStartEvent:
+    return TurnStartEvent(task_id="t", turn_id=turn_id)
+
+
 class TestToolCallCap:
     def test_the_cap_latches_on_the_resolved_call_that_reaches_it(self) -> None:
         monitor = TurnMonitor.for_task(_task(max_tool_calls=3), arm=True)
@@ -141,6 +145,89 @@ class TestToolCallCap:
         assert monitor.info is None
 
 
+class TestModelTurnCap:
+    @staticmethod
+    def _monitor(max_turns: int | None, *, arm: bool = True, **limits: Any) -> TurnMonitor:
+        return TurnMonitor.for_task(_task(limits=RunLimits(max_turns=max_turns, **limits)), arm=arm)
+
+    def test_the_cap_latches_when_the_turn_past_it_starts(self) -> None:
+        monitor = self._monitor(2)
+        _feed(monitor, [AgentStartEvent(task_id="t"), _turn_start("t1"), _turn_start("t2")])
+        assert monitor.should_stop() is None
+        monitor.on_event(_turn_start("t3"))
+        assert monitor.should_stop() is StopReason.MODEL_TURN_CAP
+        assert monitor.info is None
+        assert monitor.model_turns == 3
+
+    def test_exactly_the_cap_never_latches(self) -> None:
+        monitor = self._monitor(2)
+        _feed(
+            monitor,
+            [
+                AgentStartEvent(task_id="t"),
+                _turn_start("t1"),
+                TurnEndEvent(task_id="t", turn_id="t1"),
+                _turn_start("t2"),
+                TurnEndEvent(task_id="t", turn_id="t2"),
+                AgentEndEvent(task_id="t"),
+            ],
+        )
+        assert monitor.should_stop() is None
+        assert monitor.model_turns == 2
+
+    def test_a_repeated_turn_id_in_one_call_counts_once(self) -> None:
+        monitor = self._monitor(1)
+        _feed(monitor, [AgentStartEvent(task_id="t"), _turn_start("t1"), _turn_start("t1")])
+        assert monitor.should_stop() is None
+        assert monitor.model_turns == 1
+
+    def test_the_same_turn_id_in_a_new_call_counts_again(self) -> None:
+        monitor = self._monitor(1)
+        _feed(monitor, [AgentStartEvent(task_id="t"), _turn_start("turn_1"), AgentEndEvent(task_id="t")])
+        assert monitor.should_stop() is None
+        _feed(monitor, [AgentStartEvent(task_id="t"), _turn_start("turn_1")])
+        assert monitor.should_stop() is StopReason.MODEL_TURN_CAP
+        assert monitor.model_turns == 2
+
+    def test_a_used_up_cap_stops_the_next_attempt_at_its_first_turn(self) -> None:
+        monitor = self._monitor(1)
+        _feed(monitor, [AgentStartEvent(task_id="t"), _turn_start("t1"), AgentEndEvent(task_id="t", crashed=True)])
+        assert monitor.should_stop() is None
+        _feed(monitor, [AgentStartEvent(task_id="t"), _turn_start("t1")])
+        assert monitor.should_stop() is StopReason.MODEL_TURN_CAP
+
+    def test_nested_turn_starts_are_not_counted(self) -> None:
+        monitor = self._monitor(1)
+        _feed(
+            monitor,
+            [
+                AgentStartEvent(task_id="t"),
+                *(
+                    _turn_start(turn_id).model_copy(update={"thread_id": "agent_1", "parent_thread_id": "agent_1"})
+                    for turn_id in ("t1", "t2")
+                ),
+            ],
+        )
+        assert monitor.model_turns == 0
+        assert monitor.should_stop() is None
+
+    def test_no_cap_never_stops(self) -> None:
+        monitor = self._monitor(None)
+        _feed(monitor, [_turn_start(f"t{i}") for i in range(50)])
+        assert monitor.should_stop() is None
+        assert monitor.model_turns == 50
+
+    def test_an_unarmed_monitor_still_caps(self) -> None:
+        monitor = self._monitor(1, arm=False)
+        _feed(monitor, [_turn_start("t1"), _turn_start("t2")])
+        assert monitor.should_stop() is StopReason.MODEL_TURN_CAP
+
+    def test_the_tool_call_cap_latched_first_is_final(self) -> None:
+        monitor = self._monitor(1, max_tool_calls=1)
+        _feed(monitor, [_turn_start("t1"), _end("a"), _turn_start("t2")])
+        assert monitor.should_stop() is StopReason.TOOL_CALL_CAP
+
+
 class TestEarlyCriterionAndPrecedence:
     def test_arm_false_never_fires_the_criterion(self) -> None:
         criteria = [_skill_crit("date-teller", on_pass=True)]
@@ -174,6 +261,21 @@ class TestEarlyCriterionAndPrecedence:
         assert monitor.info is not None
         assert monitor.info.tool_call_index == 3
         assert monitor.info.tool_calls_remaining_at_stop == 7
+
+    def test_the_early_stop_turn_index_counts_a_reopened_turn_once(self) -> None:
+        criteria = [_skill_crit("date-teller", on_pass=True)]
+        monitor = TurnMonitor.for_task(_task(criteria=criteria), arm=True)
+        _feed(
+            monitor,
+            [
+                AgentStartEvent(task_id="t"),
+                _turn_start("t1"),
+                _turn_start("t1"),
+                _end("sk", tool_name="Skill", parameters={"skill": "date-teller"}),
+            ],
+        )
+        assert monitor.info is not None
+        assert monitor.info.sdk_turn_index == 1
 
     def test_tool_calls_remaining_at_stop_is_none_without_a_cap(self) -> None:
         criteria = [_skill_crit("date-teller", on_pass=True)]
