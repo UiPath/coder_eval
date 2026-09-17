@@ -23,11 +23,12 @@ from typing import Any
 
 import pytest
 
-from coder_eval.agents.pi_agent import PiAgent, _PiTurnState, _result_text
-from coder_eval.models import AgentKind, AssistantMessage, CommandTelemetry, PiAgentConfig, TokenUsage
+from coder_eval.agents.pi_agent import PiAgent, _PiDecoder, _result_text
+from coder_eval.errors.agent import format_timeout_reason
+from coder_eval.models import AgentKind, AssistantMessage, PiAgentConfig
 from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.pricing import calculate_cost
-from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.emitter import TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -40,6 +41,7 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.testing import Replay, ScriptedClock, Tick, assert_identity_closes, assert_stream_balanced, replay
 from coder_eval.timing import TurnClock
 from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams.pi_fixtures import (
@@ -94,6 +96,53 @@ class _EventRecorder:
 
     def on_event(self, event: Any) -> None:
         self.events.append(event)
+
+
+_SPAN_BASE = datetime(2026, 3, 1, 9, 0, 0)
+
+
+def _ms(at_ms: float) -> datetime:
+    return _SPAN_BASE + timedelta(milliseconds=at_ms)
+
+
+def _event(line: str) -> dict[str, Any]:
+    return json.loads(line)
+
+
+def _start() -> dict[str, Any]:
+    return {"type": "turn_start"}
+
+
+def _end(*, inp: int = 10, out: int = 5) -> dict[str, Any]:
+    return {
+        "type": "turn_end",
+        "message": {"role": "assistant", "usage": {"input": inp, "output": out}, "stopReason": "stop"},
+    }
+
+
+def _open(call_id: str) -> dict[str, Any]:
+    return {"type": "tool_execution_start", "toolCallId": call_id, "toolName": "bash", "args": {}}
+
+
+def _close(call_id: str) -> dict[str, Any]:
+    return {"type": "tool_execution_end", "toolCallId": call_id, "result": "ok"}
+
+
+def _replay(
+    stream: list[Any], *, status: AgentEndStatus = AgentEndStatus.COMPLETED, reason: str | None = None
+) -> tuple[Replay, _PiDecoder]:
+    """Drive a `_PiDecoder` through `coder_eval.testing.replay` from `_SPAN_BASE`; return the decoder too."""
+    decoders: list[_PiDecoder] = []
+
+    def end(decoder: _PiDecoder) -> TurnOutcome:
+        decoders.append(decoder)
+        return decoder.end(status, reason=reason)
+
+    return replay(stream, _PiDecoder, clock=ScriptedClock(_SPAN_BASE), end=end), decoders[0]
+
+
+def _assistants(result: Replay) -> list[AssistantMessage]:
+    return [m for m in result.record.messages if isinstance(m, AssistantMessage)]
 
 
 class TestHappyPath:
@@ -281,6 +330,12 @@ class TestArgvConstruction:
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(), tmp_path)
         assert captured["kwargs"]["limit"] > 64 * 1024
+
+    async def test_the_cli_never_inherits_stdin(self, patch_exec, tmp_path):
+        """Pi reads a non-TTY stdin to EOF before it emits; an inherited open stdin stalls the turn."""
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+        assert captured["kwargs"]["stdin"] is asyncio.subprocess.DEVNULL
 
 
 class TestToolFlags:
@@ -566,22 +621,65 @@ class _HangingProcess(_FakeProcess):
 
 
 class TestTimeoutContract:
-    async def test_deadline_raises_turn_timeout_with_partial_parked(self, patch_exec, tmp_path):
+    async def test_deadline_returns_a_timeout_outcome_with_the_partial(self, patch_exec, tmp_path):
         proc = _HangingProcess([_turn_start()])
         patch_exec(proc)
         agent = _agent()
         recorder = _EventRecorder()
+        ends_seen_at_kill: list[int] = []
+        real_kill = agent.kill
+
+        async def spy_kill() -> None:
+            ends_seen_at_kill.append(len([e for e in recorder.events if isinstance(e, AgentEndEvent)]))
+            await real_kill()
+
+        agent.kill = spy_kill  # type: ignore[method-assign]
 
         outcome = await _run(agent, tmp_path, timeout=0.2, stream_callback=recorder)
 
         assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.error == format_timeout_reason(0.2)
         partial = outcome.record
         assert partial is not None
         assert partial.crashed is True
         assert proc.terminated is True
+        assert ends_seen_at_kill[:1] == [0], "the CLI is killed BEFORE the turn ends"
         ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
         assert len(ends) == 1
         assert ends[0].status is AgentEndStatus.TIMEOUT
+
+
+class _EofButAliveProcess(_HangingProcess):
+    """Stdout reaches EOF, but the process never exits until it is signalled."""
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        return b""
+
+
+class TestSettleWaitsForTheExit:
+    async def test_no_exit_before_the_deadline_is_a_timeout(self, patch_exec, tmp_path):
+        proc = _EofButAliveProcess([_turn_start()])
+        patch_exec(proc)
+        recorder = _EventRecorder()
+        outcome = await _run(_agent(), tmp_path, timeout=0.3, stream_callback=recorder)
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert proc.terminated is True
+        assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.TIMEOUT]
+
+    async def test_no_exit_without_a_deadline_is_a_crash(self, patch_exec, tmp_path, monkeypatch):
+        from coder_eval.agents import pi_agent
+
+        monkeypatch.setattr(pi_agent, "_TERM_GRACE_SECONDS", 0.1)
+        proc = _EofButAliveProcess([_turn_start()])
+        patch_exec(proc)
+        recorder = _EventRecorder()
+        outcome = await _run(_agent(), tmp_path, stream_callback=recorder)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "did not exit within" in outcome.error
+        assert proc.terminated is True
+        assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.CRASHED]
 
 
 class _ExplodingProcess(_FakeProcess):
@@ -618,7 +716,7 @@ class TestFailurePaths:
         assert "another.unknown, some.new.event" in outcome.error
         assert "no recognized events" in outcome.error
 
-    async def test_stream_error_becomes_a_crash_with_partial_parked(self, patch_exec, tmp_path):
+    async def test_stream_error_becomes_a_crash_with_the_crashed_partial(self, patch_exec, tmp_path):
         stream = [_turn_start(), _tool_start("w:0", "write", {"path": "a.txt", "content": "x"})]
         patch_exec(_ExplodingProcess(stream))
         agent = _agent()
@@ -795,15 +893,12 @@ class TestToolFailureCapture:
         assert end.status is ToolEndStatus.PERMISSION_DENIED
 
     def test_orphan_result_is_never_dropped(self):
-        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model=None)
-        events: list[Any] = []
-        state.bind(events.append)
-        state._close_tool("ghost", status=ToolEndStatus.UNRESOLVED, summary=None, error="no result observed")
+        result, _ = _replay([_close("ghost")])
 
-        [event] = events
-        assert isinstance(event, ToolEndEvent)
+        [event] = [e for e in result.events if isinstance(e, ToolEndEvent)]
+        assert event.tool.tool_id == "ghost"
         assert event.tool.tool_name == "unknown"
-        assert event.tool.result_status == "unknown"
+        assert [c.tool_id for c in result.record.commands] == ["ghost"]
 
 
 class TestZeroUsageTurn:
@@ -888,11 +983,56 @@ class TestTurnLifecycleAndTokenTelemetry:
 
     def test_error_message_resets_on_a_recovered_turn(self):
         """#3: an intermediate error a later cycle recovers from must not leak into the result."""
-        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m")
-        state.on_turn_end(json.loads(_turn_end_error("transient")))
-        assert state.error_message == "transient"
-        state.on_turn_end(json.loads(_turn_end(inp=5, out=2)))  # a later, successful turn
-        assert state.error_message is None
+        _, errored = _replay([_start(), _event(_turn_end_error("transient"))])
+        assert errored.error == "transient"
+        _, recovered = _replay([_start(), _event(_turn_end_error("transient")), _start(), _end()])
+        assert recovered.error is None
+
+    def test_dangling_turn_is_closed_crashed_at_the_next_turn_start(self):
+        result, _ = _replay([_start(), _start(), _end()])
+
+        turn_ends = [e for e in result.events if isinstance(e, TurnEndEvent)]
+        assert [(e.turn_id, e.status) for e in turn_ends] == [
+            ("turn_1", TurnEndStatus.CRASHED),
+            ("turn_2", TurnEndStatus.COMPLETED),
+        ]
+        assert_stream_balanced(result.events)
+
+    def test_a_duplicate_turn_end_publishes_no_second_turn_end_but_books_its_tokens(self):
+        result, _ = _replay([_start(), _end(inp=10, out=5), _end(inp=7, out=3)])
+
+        assert len([e for e in result.events if isinstance(e, TurnEndEvent)]) == 1
+        assert len(_assistants(result)) == 2
+        [agent_end] = [e for e in result.events if isinstance(e, AgentEndEvent)]
+        assert agent_end.usage.uncached_input_tokens == 17
+        assert agent_end.usage.output_tokens == 8
+        assert_stream_balanced(result.events)
+
+    def test_token_shape_warns_once_per_turn(self, caplog):
+        no_usage = {"type": "turn_end", "message": {"role": "assistant", "stopReason": "stop"}}
+        bad_total = {
+            "type": "turn_end",
+            "message": {"role": "assistant", "usage": {"input": 1, "output": 1, "totalTokens": 99}},
+        }
+
+        def warnings() -> int:
+            return len([r for r in caplog.records if "unexpected token accounting" in r.getMessage()])
+
+        with caplog.at_level("WARNING"):
+            _replay([_start(), no_usage, _start(), bad_total])
+            assert warnings() == 1
+            _replay([_start(), bad_total])
+            assert warnings() == 2  # the flag is per turn, not per agent
+
+    def test_total_tokens_mismatch_warns_at_the_decoder(self, caplog):
+        bad_total = {
+            "type": "turn_end",
+            "message": {"role": "assistant", "usage": {"input": 10, "output": 5, "totalTokens": 999}},
+        }
+        with caplog.at_level("WARNING"):
+            _, decoder = _replay([_start(), bad_total])
+        assert decoder.warned_token_shape is True
+        assert any("does not reconcile" in r.getMessage() for r in caplog.records)
 
     async def test_bad_token_bucket_warns_once(self, patch_exec, tmp_path, caplog):
         """#1: a bucket whose type drifted (here a dict) coerces to 0 but warns, once."""
@@ -1008,7 +1148,7 @@ class TestTurnAlwaysReapsTheCli:
     """
 
     async def test_read_loop_crash_kills_the_cli(self, patch_exec, tmp_path):
-        """``_crash_turn`` is synchronous and raises — nothing below it reaps."""
+        """A read-loop crash ends the turn as an outcome, and ``finally`` still reaps the live CLI."""
         proc = _ExplodingRunningProcess([_turn_start()])
         patch_exec(proc)
         outcome = await _run(_agent(), tmp_path)
@@ -1040,9 +1180,9 @@ class TestTurnAlwaysReapsTheCli:
 
 
 class TestExternalCancel:
-    async def test_cancel_parks_partial_and_reraises(self, patch_exec, tmp_path):
+    async def test_cancel_ends_the_turn_and_reraises(self, patch_exec, tmp_path):
         """The watchdog's CancelledError must not swallow captured telemetry: the
-        partial is parked, the terminal event says CRASHED, and the cancellation
+        turn is ended, the terminal event says CRASHED, and the cancellation
         still propagates."""
         proc = _HangingProcess([_turn_start()])
         patch_exec(proc)
@@ -1054,12 +1194,10 @@ class TestExternalCancel:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             _ = await task  # the await re-raises the cancellation; no value ever exists
-        partial = agent.pending_turn
-        assert partial is not None
-        assert partial.crashed is True
         ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
         assert len(ends) == 1
         assert ends[0].status is AgentEndStatus.CRASHED
+        assert ends[0].crashed is True
         assert ends[0].crash_reason == "turn cancelled"
         assert proc.killed is True  # not abandoned mid-stream — see TestTurnAlwaysReapsTheCli
 
@@ -1136,89 +1274,47 @@ class TestCostFallsBackToTheRateCard:
         assert record.token_usage.total_cost_usd == 0.0
 
 
-class _FixedClock:
-    """A `TurnClock` stand-in frozen at one instant, injected into the state."""
-
-    def __init__(self, at: datetime) -> None:
-        self.at = at
-
-    def now(self) -> datetime:
-        return self.at
-
-
 class TestGenerationWindowExcludesToolExecution:
     """A tool running inside a turn is not model time — asserted where it is now DECIDED.
 
-    The reducer no longer subtracts anything. It publishes the RAW window, and
+    The decoder no longer subtracts anything. It publishes the RAW window, and
     `timing.subtract_tool_time` takes the tool union back out of it
-    once, for all five harnesses. So these cases drive the reducer and then a
-    real collector, and assert the PUBLISHED number — the one that reaches
-    `task.json` — rather than an intermediate the reducer used to own.
+    once, for all five harnesses. So these cases replay the decoder through a
+    real emitter and assert the PUBLISHED number — the one that reaches
+    `task.json` — rather than an intermediate the decoder used to own.
 
     They are not duplicates of
     `tests/test_event_collector.py::TestSubtractToolTime`: those pin the
-    arithmetic, these pin that THIS reducer hands the collector a window and a
+    arithmetic, these pin that THIS decoder hands the collector a window and a
     span set the arithmetic can be right about.
     """
 
-    WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
-    WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms turn
-
-    def _finish_turn(self, spans, open_starts=()):
-        """Drive the reducer, then publish through a real collector.
+    def _finish_turn(self, spans: list[tuple[float, float]], open_starts: tuple[float, ...] = ()) -> AssistantMessage:
+        """Replay one 0 -> 1000 ms turn with tool calls at the given ms offsets.
 
         `spans` are RESOLVED calls (both bounds); `open_starts` are calls that
-        never returned. An unresolved call now contributes NO span — it has no
+        never returned. An unresolved call contributes NO span — it has no
         `execution_completed_at`, and inventing one is what `None` exists to
-        prevent — where the reducer used to bound it at the window's end. That
-        is a real change and a better one: the collector sees every span at
-        once, so a call straddling a boundary is clipped to each window it
-        actually overlapped instead of approximated at the boundary.
+        prevent. The collector sees every span at once, so a call straddling a
+        boundary is clipped to each window it actually overlapped.
         """
-        state = _PiTurnState(task_id="t", iteration=1, user_input="x", model="m", clock=_FixedClock(self.WINDOW_END))
-        state.turn_started_at = self.WINDOW_START
-        commands = [
-            CommandTelemetry(
-                tool_name="bash",
-                tool_id=f"closed-{i}",
-                timestamp=started,
-                execution_started_at=started,
-                execution_completed_at=completed,
-                result_status="success",
-            )
-            for i, (started, completed) in enumerate(spans)
-        ]
-        commands += [
-            CommandTelemetry(tool_name="bash", tool_id=f"open-{i}", timestamp=s, execution_started_at=s)
-            for i, s in enumerate(open_starts)
-        ]
-        state.on_turn_end(
-            {"message": {"role": "assistant", "usage": {"input": 100, "output": 20}, "stopReason": "stop"}}
-        )
+        timeline: list[tuple[float, dict[str, Any]]] = [(0.0, _start()), (1000.0, _end(inp=100, out=20))]
+        for i, (started, completed) in enumerate(spans):
+            timeline += [(started, _open(f"closed-{i}")), (completed, _close(f"closed-{i}"))]
+        timeline += [(started, _open(f"open-{i}")) for i, started in enumerate(open_starts)]
+        stream: list[Any] = []
+        for at_ms, event in sorted(timeline, key=lambda item: item[0]):
+            stream += [Tick(at_ms), event]
 
-        collector = EventCollector()
-        collector.on_event(AgentStartEvent(task_id="t", prompt="x", iteration=1, timestamp=self.WINDOW_START))
-        for command in commands:
-            collector.on_event(ToolEndEvent(task_id="t", turn_id="t1", tool=command))
-        collector.on_event(
-            AgentEndEvent(
-                task_id="t",
-                status=AgentEndStatus.COMPLETED,
-                messages=list(state.messages),
-                usage=TokenUsage(),
-                timestamp=self.WINDOW_END,
-            )
-        )
-        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
+        result, _ = _replay(stream)
+        published = _assistants(result)
         assert len(published) == 1
         return published[0]
 
     def test_tool_time_inside_the_turn_is_subtracted(self):
-        message = self._finish_turn(
-            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
-        )
+        message = self._finish_turn([(200, 700)])
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        assert span_ms == pytest.approx(1000.0), "the reducer still publishes the whole window as its bounds"
+        assert span_ms == pytest.approx(1000.0), "the decoder still publishes the whole window as its bounds"
         assert message.generation_duration_ms == pytest.approx(500.0)
 
     def test_a_turn_with_no_tools_keeps_its_whole_window(self):
@@ -1227,36 +1323,24 @@ class TestGenerationWindowExcludesToolExecution:
     def test_concurrent_tools_are_subtracted_once(self):
         # Two overlapping 500ms tools occupy 600ms, not 1000ms. Summing them
         # would leave 0 generation for a turn that generated 400.
-        message = self._finish_turn(
-            [
-                (self.WINDOW_START + timedelta(milliseconds=100), self.WINDOW_START + timedelta(milliseconds=600)),
-                (self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700)),
-            ],
-        )
+        message = self._finish_turn([(100, 600), (200, 700)])
         assert message.generation_duration_ms == pytest.approx(400.0)
 
     def test_the_window_never_goes_negative(self):
-        message = self._finish_turn(
-            [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
-        )
+        message = self._finish_turn([(-30_000, 31_000)])
         assert message.generation_duration_ms == 0.0
 
     def test_a_tool_still_open_at_the_boundary_contributes_no_span(self):
-        """The behaviour that CHANGED with the move, stated rather than implied.
+        """A call with no `execution_completed_at` was never timed.
 
-        The reducer used to bound a still-open call at the window's end and
-        subtract that slice. The collector cannot: a call with no
-        `execution_completed_at` was never timed. Its time is subtracted when it
-        RESOLVES, from whichever windows its real interval overlaps.
+        Its time is subtracted when it RESOLVES, from whichever windows its real
+        interval overlaps — never bounded at the window's end.
         """
-        message = self._finish_turn([], open_starts=[self.WINDOW_START + timedelta(milliseconds=600)])
+        message = self._finish_turn([], open_starts=(600,))
         assert message.generation_duration_ms == pytest.approx(1000.0)
 
     def test_a_resolved_tool_overlapping_an_unresolved_one_counts_only_the_resolved(self):
-        message = self._finish_turn(
-            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
-            open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
-        )
+        message = self._finish_turn([(200, 700)], open_starts=(500,))
         assert message.generation_duration_ms == pytest.approx(500.0)
 
     def test_the_published_window_reconciles_to_its_own_bounds(self):
@@ -1270,44 +1354,18 @@ class TestGenerationWindowExcludesToolExecution:
         """
         from coder_eval.timing import busy_ms
 
-        closed = [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))]
-        message = self._finish_turn(closed)
+        message = self._finish_turn([(200, 700)])
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        expected = span_ms - busy_ms(closed, message.started_at, message.completed_at)
+        expected = span_ms - busy_ms([(_ms(200), _ms(700))], message.started_at, message.completed_at)
         assert message.generation_duration_ms == pytest.approx(expected)
-
-
-_SPAN_BASE = datetime(2026, 3, 1, 9, 0, 0)
-
-
-class _SteppedClock:
-    """A `TurnClock` stand-in the test moves by hand, in ms from `_SPAN_BASE`.
-
-    INJECTED, never monkeypatched onto the module. Pi derives every wall stamp
-    from its turn clock now, so patching `agent_module.datetime` would no
-    longer reach it: the tests would quietly start measuring the real clock and
-    pass by accident instead of failing. Injection also puts the "one clock per
-    turn" lifetime in the constructor signature where it can be read.
-    """
-
-    def __init__(self, at_ms: float = 0.0) -> None:
-        self.at_ms = at_ms
-
-    def now(self) -> datetime:
-        return _SPAN_BASE + timedelta(milliseconds=self.at_ms)
-
-
-def _turn_end_payload():
-    return {"message": {"role": "assistant", "usage": {"input": 10, "output": 5}, "stopReason": "stop"}}
 
 
 class TestGenerationWindowsTileTheTurn:
     """Each window runs from the PREVIOUS `turn_end`, not from its own `turn_start`.
 
-    Pi was the only harness measuring from its own turn start, so the wall
-    clock between one `turn_end` and the next `turn_start` — the model time
-    that PRODUCED the next turn — fell into no bucket at all. The four-bucket
-    identity is asserted only as an upper bound, so nothing failed.
+    Measured from its own turn start, the wall clock between one `turn_end` and
+    the next `turn_start` — the model time that PRODUCED the next turn — fell
+    into no bucket at all.
 
     The gap is small in practice (measured across 25 real window pairs: median
     0.25 ms, max 0.75 ms). The value here is that it closes, and that the tool
@@ -1315,17 +1373,9 @@ class TestGenerationWindowsTileTheTurn:
     which is the half that carries the weight.
     """
 
-    def _two_turns(self):
-        clock = _SteppedClock()
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-        state.on_turn_start()
-        clock.at_ms = 1000
-        state.on_turn_end(_turn_end_payload())
-        clock.at_ms = 1600
-        state.on_turn_start()
-        clock.at_ms = 2000
-        state.on_turn_end(_turn_end_payload())
-        return [m for m in state.messages if m.role == "assistant"]
+    def _two_turns(self) -> list[AssistantMessage]:
+        result, _ = _replay([_start(), Tick(1000), _end(), Tick(1600), _start(), Tick(2000), _end()])
+        return _assistants(result)
 
     def test_the_second_window_abuts_the_first(self):
         messages = self._two_turns()
@@ -1342,64 +1392,38 @@ class TestGenerationWindowsTileTheTurn:
 class TestToolSpansSurviveTheTurnBoundary:
     """A tool that closes BETWEEN two turns still belongs to the next window.
 
-    This used to be a bookkeeping problem: a per-turn span list, cleared at
-    `turn_start` — after the window it feeds had already opened at the mark —
-    so a call closing in the gap had its span wiped before the flush could
-    subtract it. That list is gone. `timing.subtract_tool_time` sees
-    every span at once and clips each to the windows it overlaps, so the
-    property now holds by construction rather than by a reset rule.
-
-    Kept, and re-pointed at the collector, because the property itself is what
-    matters and a future reducer change could still break it — by moving a
-    mark, or by failing to emit the ToolEnd the collector reduces.
+    `timing.subtract_tool_time` sees every span at once and clips each to the
+    windows it overlaps, so the property holds by construction rather than by a
+    reset rule. Kept because the property itself is what matters and a future
+    decoder change could still break it — by moving a mark, or by failing to
+    close the tool the collector reduces.
     """
 
-    def _run(self):
-        clock = _SteppedClock()
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-        # The resolved telemetry leaves the state via ToolEnd; the identity
-        # case below reconciles against what was RECORDED, not against the
-        # clock the test scripted.
-        resolved: list[Any] = []
-        state.bind(lambda e: resolved.append(e.tool) if isinstance(e, ToolEndEvent) else None)
-        state.on_turn_start()
-        clock.at_ms = 100
-        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
-        clock.at_ms = 1000
-        state.on_turn_end(_turn_end_payload())
-        clock.at_ms = 1500
-        state.on_tool_execution_end({"toolCallId": "c1", "result": "ok"})  # closes in the GAP
-        clock.at_ms = 1600
-        state.on_turn_start()
-        clock.at_ms = 2000
-        state.on_turn_end(_turn_end_payload())
-
-        # Published through the real collector: the reducer hands over raw
-        # windows, and the tool subtraction happens once, there.
-        collector = EventCollector()
-        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=_SPAN_BASE))
-        for command in resolved:
-            collector.on_event(ToolEndEvent(task_id="t", turn_id="t1", tool=command))
-        collector.on_event(
-            AgentEndEvent(
-                task_id="t",
-                status=AgentEndStatus.COMPLETED,
-                messages=list(state.messages),
-                usage=TokenUsage(),
-                timestamp=_SPAN_BASE + timedelta(milliseconds=2000),
-            )
-        )
-        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
-        return resolved, published
+    def _run(self) -> Replay:
+        return _replay(
+            [
+                _start(),
+                Tick(100),
+                _open("c1"),
+                Tick(1000),
+                _end(),
+                Tick(1500),
+                _close("c1"),  # closes in the GAP
+                Tick(1600),
+                _start(),
+                Tick(2000),
+                _end(),
+            ]
+        )[0]
 
     def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self):
-        _, messages = self._run()
+        messages = _assistants(self._run())
         # Window 2 tiles 1000 -> 2000. c1 ran for 1000 -> 1500 of it, so 500ms
         # is model time. With the reset left at `turn_start` this reads 1000.0.
         assert messages[1].generation_duration_ms == pytest.approx(500.0)
 
     def test_the_call_is_subtracted_from_exactly_one_window(self):
-        _, messages = self._run()
+        messages = _assistants(self._run())
         # Window 1 bounded c1 at its own close (100 -> 1000); window 2 takes
         # only the remainder.
         assert messages[0].generation_duration_ms == pytest.approx(100.0)
@@ -1411,71 +1435,49 @@ class TestToolSpansSurviveTheTurnBoundary:
         This is the assertion the golden corpus CANNOT make: `_scrub.py` masks
         `generation_duration_ms` and both bounds to a placeholder, so a
         snapshot records that a window was measured and never what it measured.
-        Its identity check (`_scrub.py`) is an upper bound besides, so
-        under-accounting — the defect this phase fixes — passes it silently.
-        `scripts/timing/decompose_run.py --max-residual-pct` is the two-sided
-        check on live runs; this is the committed one.
         """
         from coder_eval.timing import busy_ms
 
-        resolved, messages = self._run()
+        result = self._run()
+        messages = _assistants(result)
         lo, hi = messages[0].started_at, messages[1].completed_at
         generation_ms = sum(m.generation_duration_ms or 0.0 for m in messages)
-        command = next(c for c in resolved if c.tool_id == "c1")
+        command = next(c for c in result.record.commands if c.tool_id == "c1")
+        assert command.execution_started_at is not None and command.execution_completed_at is not None
         tool_ms = busy_ms([(command.execution_started_at, command.execution_completed_at)], lo, hi)
 
         assert generation_ms + tool_ms == pytest.approx((hi - lo).total_seconds() * 1000.0)
+        assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
     def test_a_duplicate_turn_end_does_not_republish_the_previous_window(self):
         """A spent `turn_started_at` must not seed the next window.
 
         `close_window`'s `min(mark, item_start)` pulls the window open to cover
-        the item's own start. That is the backwards-clock defence, but a start
-        stamp left in place after its turn was published is not a backwards
-        clock — it is a stale value BEFORE the mark, so the guard reopens the
-        next window at the previous turn's start and publishes that whole span
-        again. Reproduced before the fix: 3000 ms of generation for a 2000 ms
-        turn. This reducer promises to survive a malformed stream, and Pi's CLI
-        retries internally, so a duplicate or replayed `turn_end` is a transport
-        hiccup rather than a hypothetical.
+        the item's own start. A start stamp left in place after its turn was
+        published is a stale value BEFORE the mark, so the guard would reopen the
+        next window at the previous turn's start and publish that whole span
+        again (3000 ms of generation for a 2000 ms turn). Pi's CLI retries
+        internally, so a duplicate `turn_end` is a transport hiccup rather than a
+        hypothetical.
         """
-        clock = _SteppedClock()
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-        state.on_turn_start()
-        clock.at_ms = 1000
-        state.on_turn_end(_turn_end_payload())
-        clock.at_ms = 2000
-        state.on_turn_end(_turn_end_payload())  # no intervening `turn_start`
+        result, _ = _replay([_start(), Tick(1000), _end(), Tick(2000), _end()])  # no intervening `turn_start`
 
-        messages = [m for m in state.messages if m.role == "assistant"]
+        messages = _assistants(result)
         assert len(messages) == 2
         assert messages[1].started_at == messages[0].completed_at
         assert sum(m.generation_duration_ms or 0.0 for m in messages) == pytest.approx(2000.0)
 
     def test_a_duplicate_turn_end_does_not_republish_the_previous_content(self):
-        """The CONTENT half of the same reset, and the same argument.
+        """The CONTENT half of the same reset.
 
-        `turn_text_parts` / `turn_tool_ids` were cleared in `on_turn_start`
-        only, so the replayed line re-emitted the first turn's text as its own
-        assistant message and re-listed the same `tool_use_ids` — one tool call
-        appearing to belong to two generations, and the text counted twice by
-        anything that reads the transcript. The sibling above pinned the timing
-        half while this one silently stayed broken, which is why it is asserted
-        separately rather than folded in.
+        Without it the replayed line re-emits the first turn's text as its own
+        assistant message and re-lists the same `tool_use_ids` — one tool call
+        appearing to belong to two generations.
         """
-        clock = _SteppedClock()
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-        state.on_turn_start()
-        state.on_message_update(
-            {"assistantMessageEvent": {"type": "text_delta", "delta": "First."}},
-        )
-        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
-        clock.at_ms = 1000
-        state.on_turn_end(_turn_end_payload())
-        clock.at_ms = 2000
-        state.on_turn_end(_turn_end_payload())  # no intervening `turn_start`
+        text = {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "First."}}
+        result, _ = _replay([_start(), text, _open("c1"), Tick(1000), _end(), Tick(2000), _end()])
 
-        messages = [m for m in state.messages if m.role == "assistant"]
+        messages = _assistants(result)
         assert len(messages) == 2
         assert [b.text for b in messages[0].content_blocks if b.block_type == "text"] == ["First."]
         assert messages[0].tool_use_ids == ["c1"]
@@ -1485,75 +1487,30 @@ class TestToolSpansSurviveTheTurnBoundary:
     def test_an_unresolved_orphan_is_not_given_a_completion_or_a_duration(self):
         """Force-closing is not observing a completion.
 
-        The orphan sweep runs at finalization; stamping its instant as
-        `execution_completed_at` manufactures a bound, and the `duration_ms`
-        derived from it is the distance to whenever the sweep happened to run.
-        The pair then reads as a measured span that
-        `timing.subtract_tool_time` takes back out of a generation
-        window the tool never occupied. `execution_started_at` IS kept: the CLI
-        really did emit that start, and one bound alone forms no span. Same
-        rule as claude-code's `_finalize_commands` — unknown status and unknown
-        duration are one fact (CE058).
+        Stamping the sweep's instant as `execution_completed_at` manufactures a
+        bound that `timing.subtract_tool_time` then takes back out of a
+        generation window the tool never occupied. `execution_started_at` IS
+        kept: the CLI really did emit that start, and one bound alone forms no
+        span (CE058).
         """
-        clock = _SteppedClock()
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-        state.on_turn_start()
-        clock.at_ms = 500
-        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
-        clock.at_ms = 4000
-        closed: list[CommandTelemetry] = []
-        state.bind(lambda e: closed.append(e.tool) if isinstance(e, ToolEndEvent) else None)
-        state.close_open_tools()
+        result, _ = _replay([_start(), Tick(500), _open("c1"), Tick(4000)])
 
+        closed = [e.tool for e in result.events if isinstance(e, ToolEndEvent)]
         assert len(closed) == 1
         assert closed[0].result_status == "unknown"
-        assert closed[0].execution_started_at == _SPAN_BASE + timedelta(milliseconds=500)
+        assert closed[0].error_message is None
+        assert closed[0].execution_started_at == _ms(500)
         assert closed[0].execution_completed_at is None
         assert closed[0].duration_ms is None
 
     def test_a_resolved_tool_still_gets_both_bounds_and_a_duration(self):
-        """The guard narrows the UNRESOLVED case only.
+        """The guard narrows the UNRESOLVED case only."""
+        result, _ = _replay([_start(), Tick(500), _open("c1"), Tick(1200), _close("c1")])
 
-        Without this, deleting the whole stamping block would leave the sibling
-        above green while every real tool call lost its timing.
-        """
-        clock = _SteppedClock()
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-        state.on_turn_start()
-        clock.at_ms = 500
-        state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
-        clock.at_ms = 1200
-        closed: list[CommandTelemetry] = []
-        state.bind(lambda e: closed.append(e.tool) if isinstance(e, ToolEndEvent) else None)
-        state.on_tool_execution_end({"toolCallId": "c1", "result": "ok"})
-
+        closed = [e.tool for e in result.events if isinstance(e, ToolEndEvent)]
         assert len(closed) == 1
-        assert closed[0].execution_completed_at == _SPAN_BASE + timedelta(milliseconds=1200)
+        assert closed[0].execution_completed_at == _ms(1200)
         assert closed[0].duration_ms == pytest.approx(700.0)
-
-    def test_a_turn_that_never_finishes_does_not_advance_the_mark(self):
-        """The half of this that is still the reducer's job.
-
-        There is no span list to preserve any more — the collector reduces the
-        ToolEnd stream itself. What the reducer still owns is the MARK: a turn
-        that published nothing must not advance it, or its time is handed to
-        whichever turn finishes next.
-        """
-        clock = _SteppedClock()
-        state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-        state.on_turn_start()
-        clock.at_ms = 1000
-        state.on_turn_end(_turn_end_payload())
-        mark_after_flush = state.gen_mark
-
-        clock.at_ms = 1600
-        state.on_turn_start()
-        clock.at_ms = 1700
-        state.on_tool_execution_start({"toolCallId": "c2", "toolName": "bash", "args": {}})
-        clock.at_ms = 1900
-        state.close_open_tools()  # crash/timeout orphan sweep — no message appended
-
-        assert state.gen_mark == mark_after_flush
 
 
 class TestClockIsFreshPerTurn:
@@ -1562,8 +1519,8 @@ class TestClockIsFreshPerTurn:
     `TurnClock` anchors once and derives every later stamp from that anchor, so
     one surviving a retry would stamp the new turn against the old turn's wall
     origin — and over a long run accumulate drift against real wall time. The
-    lifetime is structural (the clock is built with the turn state, and the
-    state is built per `communicate()`), which is exactly the kind of property
+    lifetime is structural (the clock is built with the turn's emitter, and the
+    emitter is built per `communicate()`), which is exactly the kind of property
     that stays true only while someone is checking.
     """
 
@@ -1572,10 +1529,9 @@ class TestClockIsFreshPerTurn:
         patch_exec(_FakeProcess([], returncode=1, stderr=b"boom: bad model"))
         outcome = await _run(agent, tmp_path)
         assert outcome.status is AgentEndStatus.CRASHED
-        crashed_clock = agent  # the state is gone; only the agent survives a crash
 
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = (await crashed_clock.communicate("try again", iteration=2)).record
+        record = (await agent.communicate("try again", iteration=2)).record
 
         # The recovered turn measured a real window of its own, rather than one
         # anchored before the crash — which a stale clock would have produced
@@ -1589,8 +1545,8 @@ class TestClockIsFreshPerTurn:
     async def test_the_agent_retains_no_clock_between_turns(self, patch_exec, tmp_path):
         """Nothing to reset, because nothing survives — the structural half.
 
-        The clock is reachable only through the turn state, and the turn state
-        is a local of `communicate()`. If either were ever hoisted onto the
+        The clock is reachable only through the turn's emitter and decoder, which
+        are locals of `communicate()`. If either were ever hoisted onto the
         agent (a plausible refactor — several other fields are), the next turn
         would silently inherit the previous turn's anchor and no assertion
         about a single turn's numbers would notice.
@@ -1599,7 +1555,9 @@ class TestClockIsFreshPerTurn:
         patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(agent, tmp_path)
 
-        leaked = [name for name, value in vars(agent).items() if isinstance(value, _PiTurnState | TurnClock)]
+        leaked = [
+            name for name, value in vars(agent).items() if isinstance(value, _PiDecoder | TurnEmitter | TurnClock)
+        ]
         assert not leaked, f"a turn's clock outlived its turn via {leaked}"
 
 
@@ -1615,7 +1573,7 @@ class TestTheTurnBracketComesFromTheTurnClock:
     async def test_both_brackets_are_stamped_from_the_injected_clock(
         self, patch_exec, tmp_path, monkeypatch: pytest.MonkeyPatch
     ):
-        from coder_eval.agents import pi_agent as agent_module
+        import coder_eval.agent as agent_module
 
         monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
         patch_exec(_FakeProcess(HAPPY_STREAM))
@@ -1632,7 +1590,7 @@ class TestTheTurnBracketComesFromTheTurnClock:
         A mixed pair is off by the anchor offset, not by a millisecond, so the
         bound here is what the assertion rests on rather than the sign.
         """
-        from coder_eval.agents import pi_agent as agent_module
+        import coder_eval.agent as agent_module
 
         monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
         patch_exec(_FakeProcess(HAPPY_STREAM))

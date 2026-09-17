@@ -69,7 +69,7 @@ from coder_eval.streaming.events import (
     ToolEndEvent,
     ToolEndStatus,
 )
-from coder_eval.testing import assert_identity_closes
+from coder_eval.testing import Replay, ScriptedClock, Tick, assert_identity_closes, replay
 
 
 # The two CLI harnesses (opencode, codex) report their stamps as epoch
@@ -152,7 +152,7 @@ class _InjectedClock:
         return at(self.at_ms)
 
 
-def _pi_turn(*, untile: bool = False) -> Turn:
+def _pi_replay(*, untile: bool = False) -> Replay:
     """Two tiled windows around a tool, with a real head and a real tail.
 
     The tool closes INSIDE the first window rather than across the boundary —
@@ -165,35 +165,32 @@ def _pi_turn(*, untile: bool = False) -> Turn:
     so that the sensor can be shown to catch it. See
     ``test_the_sensor_sees_a_window_that_stops_tiling``.
     """
-    from coder_eval.agents.pi_agent import _PiTurnState
+    from coder_eval.agents.pi_agent import _PiDecoder
 
-    payload = {"message": {"role": "assistant", "usage": {"input": 10, "output": 5}, "stopReason": "stop"}}
-    clock = _InjectedClock()
-    state = _PiTurnState(task_id="t", iteration=1, user_input="go", model="m", clock=clock)
-    commands: list[CommandTelemetry] = []
-    state.bind(lambda e: commands.append(e.tool) if isinstance(e, ToolEndEvent) else None)
+    payload = {"type": "turn_end", "message": {"role": "assistant", "usage": {"input": 10, "output": 5}}}
 
-    clock.at_ms = 500  # CLI boot: head
-    state.on_turn_start()
-    clock.at_ms = 700
-    state.on_tool_execution_start({"toolCallId": "c1", "toolName": "bash", "args": {}})
-    clock.at_ms = 1200
-    state.on_tool_execution_end({"toolCallId": "c1", "result": "ok"})
-    clock.at_ms = 2000
-    state.on_turn_end(payload)
-    clock.at_ms = 2600  # the inter-turn gap, which window 2 tiles back over
-    state.on_turn_start()
-    if untile:
-        state.gen_mark = None
-    clock.at_ms = 3000
-    state.on_turn_end(payload)
+    class _Untiling(_PiDecoder):
+        def on_turn_start(self) -> None:
+            super().on_turn_start()
+            if untile:
+                self.gen_mark = None
 
-    return Turn(
-        started_ms=0.0,
-        ended_ms=3500.0,  # process teardown after the last turn: tail
-        messages=list(state.messages),
-        commands=commands,
-    )
+    stream = [
+        Tick(500),  # CLI boot: head
+        {"type": "turn_start"},
+        Tick(700),
+        {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "bash", "args": {}},
+        Tick(1200),
+        {"type": "tool_execution_end", "toolCallId": "c1", "result": "ok"},
+        Tick(2000),
+        payload,
+        Tick(2600),  # the inter-turn gap, which window 2 tiles back over
+        {"type": "turn_start"},
+        Tick(3000),
+        payload,
+        Tick(3500),  # process teardown after the last turn: tail
+    ]
+    return replay(stream, _Untiling, clock=ScriptedClock(BASE), end=lambda d: d.end(AgentEndStatus.COMPLETED))
 
 
 # --------------------------------------------------------------------------
@@ -571,7 +568,8 @@ def _claude_slow_result_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
 
 
 def test_pi_buckets_tile_the_turn():
-    _assert_closes(_pi_turn())
+    result = _pi_replay()
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 def test_opencode_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
@@ -633,12 +631,12 @@ def test_the_sensor_sees_a_window_that_stops_tiling():
     600 ms is the scripted gap between one ``turn_end`` and the next
     ``turn_start`` — real model time, which untiling books to nothing.
     """
-    healthy = _pi_turn()
-    mutated = _pi_turn(untile=True)
+    healthy = _pi_replay()
+    mutated = _pi_replay(untile=True)
 
-    def _generation_ms(turn: Turn) -> float:
-        return sum(m.generation_duration_ms or 0.0 for m in turn.messages if isinstance(m, AssistantMessage))
+    def _generation_ms(result: Replay) -> float:
+        return sum(m.generation_duration_ms or 0.0 for m in result.record.messages if isinstance(m, AssistantMessage))
 
     assert _generation_ms(healthy) - _generation_ms(mutated) == pytest.approx(600.0)
     with pytest.raises(AssertionError, match="booked nowhere"):
-        _assert_closes(mutated)
+        assert_identity_closes(mutated.record, started_at=mutated.started_at, ended_at=mutated.ended_at)

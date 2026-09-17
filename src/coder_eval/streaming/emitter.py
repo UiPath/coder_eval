@@ -157,6 +157,10 @@ class TurnEmitter:
         return self._iteration
 
     @property
+    def model(self) -> str | None:
+        return self._model
+
+    @property
     def inner_turn_open(self) -> bool:
         return self._turn_id is not None
 

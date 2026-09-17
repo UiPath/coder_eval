@@ -613,6 +613,24 @@ profiles and loses the prepend again. Nested zsh keeps it, because `ZDOTDIR` sta
 exported. No-op on Windows, where Codex shells through PowerShell (`-NoProfile`) or
 `cmd /c`, neither of which re-sources a profile chain.
 
+## Why a CLI never inherits stdin
+
+`pi` (`readPipedStdin()`) and `opencode` (`process.stdin.isTTY ? void 0 : await
+Bun.stdin.text()`) both read stdin TO EOF when it is not a TTY, before they emit anything.
+A CLI spawned without `stdin=` inherits the parent's stdin, so when `coder-eval` itself runs
+with stdin on a pipe that stays open (a backgrounded or tool-spawned batch), every CLI
+blocks with zero events until the 300 s `turn_timeout`. Measured on 2026-09-16:
+
+| command | result |
+|---|---|
+| `(sleep 25) \| timeout 15 pi -p --mode json … "Reply PONG"` | 0 lines, killed at 25 s |
+| `pi -p --mode json … "Reply PONG" < /dev/null` | 24 lines, exit 0 in 1 s |
+| `(sleep 25) \| timeout 15 opencode run --format json … "Reply PONG"` | 0 lines, killed at 25 s |
+| `coder-eval run tasks/pi_smoke_test.yaml -D run_limits.turn_timeout=40 < <(sleep 170)` | `ERROR` after 40 s, 0 commands |
+| the same with `< /dev/null` | `SUCCESS` in 10 s |
+
+So every CLI spawn passes `stdin=asyncio.subprocess.DEVNULL`, which gives an immediate EOF.
+
 ## Reaping the CLI harnesses
 
 `opencode run` leaves a local server child alive after the CLI exits, and it INHERITS the

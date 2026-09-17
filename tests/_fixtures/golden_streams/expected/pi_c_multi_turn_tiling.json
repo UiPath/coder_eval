@@ -16,7 +16,7 @@
       "result_status": "success",
       "result_summary": "main.py",
       "result_tokens": 2,
-      "sequence_number": 1,
+      "sequence_number": 0,
       "timestamp": "<scrubbed>",
       "tool_id": "call_1",
       "tool_name": "Bash"
@@ -90,7 +90,7 @@
   "num_turns": 2,
   "result_summary": {
     "is_error": false,
-    "result": null,
+    "result": "Listed it.",
     "stop_reason": "stop",
     "subtype": "completed"
   },
