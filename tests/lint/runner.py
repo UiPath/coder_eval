@@ -45,6 +45,7 @@ from tests.lint.rules.ce066_no_report_imports_in_core import NoReportImportsInCo
 from tests.lint.rules.ce068_no_kind_names_in_kernel import NoKindNamesInKernel
 from tests.lint.rules.ce070_no_cap_or_skill_scan_in_adapters import NoCapOrSkillScanInAdapters
 from tests.lint.rules.ce071_price_turn_only import PriceTurnOnly
+from tests.lint.rules.ce073_create_subprocess_explicit_stdin import CreateSubprocessExplicitStdin
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
 from tests.lint.rules.no_cli_imports_in_core import NoCliImportsInCore
@@ -68,7 +69,7 @@ from tests.lint.violation import Violation
 # start meaning something new.
 #
 # Claim 074 next (069 is TestCE069HarnessParityTable, 070 is NoCapOrSkillScanInAdapters, 071 is
-# PriceTurnOnly; 072 and 073 are reserved for the emitter sole-writer and subprocess-stdin rules).
+# PriceTurnOnly, 073 is CreateSubprocessExplicitStdin; 072 is reserved for the emitter sole-writer rule).
 # NOTE 065 IS TAKEN and is not in ALL_RULES: doc-surface and
 # whole-tree rules are `@pytest.mark.lint` classes in tests/test_custom_lint.py
 # rather than BaseRules, so the `_rule_ids` uniqueness assert below cannot see
@@ -129,6 +130,7 @@ ALL_RULES: list[RuleClass] = [
     NoKindNamesInKernel,
     NoCapOrSkillScanInAdapters,
     PriceTurnOnly,
+    CreateSubprocessExplicitStdin,
 ]
 
 # Anti-shadow invariant (mirrors AgentRegistry / register_pricing): every CE rule

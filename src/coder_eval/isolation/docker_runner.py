@@ -660,6 +660,7 @@ class DockerRunner:
             heartbeat_task = asyncio.create_task(_heartbeat_loop(heartbeat_path))
             proc = await asyncio.create_subprocess_exec(
                 *argv,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 limit=STDOUT_LINE_LIMIT_BYTES,

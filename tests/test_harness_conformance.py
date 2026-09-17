@@ -255,10 +255,10 @@ async def _opencode(
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     opencode = await _cli_agent(OpenCodeAgent, AgentKind.OPENCODE, tmp_path, monkeypatch, plugin_root, **agent)
     try:
-        raw = opencode._build_env().get("OPENCODE_CONFIG_CONTENT")
+        raw = opencode.env().get("OPENCODE_CONFIG_CONTENT")
         config = json.loads(raw) if raw else {}
         config["instructions_text"] = [Path(p).read_text(encoding="utf-8") for p in config.get("instructions", [])]
-        return config, opencode._build_argv(USER_TURN)
+        return config, opencode.argv(USER_TURN)
     finally:
         await opencode.stop()
 
@@ -302,7 +302,7 @@ async def _pi_argv(
 ) -> list[str]:
     pi = await _cli_agent(PiAgent, AgentKind.PI, tmp_path, monkeypatch, plugin_root, **agent)
     try:
-        return pi._build_argv(USER_TURN)
+        return pi.argv(USER_TURN)
     finally:
         await pi.stop()
 

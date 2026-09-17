@@ -254,19 +254,27 @@ class TurnEmitter:
         result_data: dict[str, Any] | list[Any] | None = None,
         parameters: dict[str, Any] | None = None,
         completed_at: datetime | None = _UNSET,
+        started_at: datetime | None = None,
     ) -> None:
         """Record a tool call's end; an unknown id synthesizes a ``tool_name="unknown"`` call.
 
         Only a resolved call is timed: ``UNRESOLVED`` keeps ``execution_started_at``
-        and sets no completion stamp and no duration.
+        and sets no completion stamp and no duration. ``started_at`` is a CLI start
+        stamp that arrived only with the result (``CLI_EPOCH_MS``); it fills a call
+        opened without one and never replaces an existing start.
 
         Raises:
-            TypeError: the same basis rule as ``open_tool``, for ``completed_at``.
+            TypeError: the same basis rule as ``open_tool``, for ``completed_at``; or
+                ``started_at`` given under ``TURN_CLOCK``.
         """
         if self._ended():
             return
+        if started_at is not None and self._basis is TimingBasis.TURN_CLOCK:
+            raise TypeError("started_at= is not accepted under TimingBasis.TURN_CLOCK: the emitter stamps the clock")
         opened = self._open_tools.get(tool_id)
         stamp = self._stamp("completed_at", completed_at, self.now(), opened.parent_tool_id if opened else None)
+        if opened is not None and started_at is not None and opened.telemetry.execution_started_at is None:
+            opened.telemetry.execution_started_at = started_at
         self._close(tool_id, status, summary, error, result_data, parameters, stamp)
 
     def add_generation(

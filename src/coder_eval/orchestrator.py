@@ -2738,6 +2738,9 @@ class Orchestrator:
                 proc = await asyncio.create_subprocess_shell(
                     cmd.command,
                     cwd=str(sandbox_dir),
+                    # An authored command that reads stdin must not stall the task.
+                    # Rationale: .claude/notes/agents.md § Why a CLI never inherits stdin
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=self._POST_RUN_STREAM_LIMIT,

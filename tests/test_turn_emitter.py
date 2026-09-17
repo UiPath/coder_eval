@@ -167,6 +167,22 @@ class TestToolBasis:
         assert (command.execution_started_at, command.execution_completed_at, command.duration_ms) == (None, None, None)
         assert command.result_status == "success"
 
+    def test_a_start_that_arrives_with_the_result_fills_a_missing_one(self) -> None:
+        emitter, _, _ = _emitter(TimingBasis.CLI_EPOCH_MS)
+        emitter.open_tool("late", "Bash", {}, started_at=None)
+        emitter.close_tool("late", status=ToolEndStatus.OK, completed_at=at(900), started_at=at(400))
+        emitter.open_tool("kept", "Bash", {}, started_at=at(100))
+        emitter.close_tool("kept", status=ToolEndStatus.OK, completed_at=at(900), started_at=at(400))
+        commands = {c.tool_id: c for c in emitter.finalize(AgentEndStatus.COMPLETED).record.commands}
+        assert commands["late"].duration_ms == pytest.approx(500.0)
+        assert commands["kept"].execution_started_at == at(100)
+
+    def test_a_start_at_the_result_is_refused_under_the_turn_clock(self) -> None:
+        emitter, _, _ = _emitter()
+        emitter.open_tool("c1", "Bash", {})
+        with pytest.raises(TypeError, match="TURN_CLOCK"):
+            emitter.close_tool("c1", status=ToolEndStatus.OK, started_at=at(1))
+
     def test_a_completion_before_the_start_is_a_zero_duration(self) -> None:
         emitter, _, _ = _emitter(TimingBasis.CLI_EPOCH_MS)
         emitter.open_tool("c1", "Bash", {}, started_at=at(5000))

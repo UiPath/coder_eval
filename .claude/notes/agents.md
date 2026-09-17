@@ -630,6 +630,9 @@ blocks with zero events until the 300 s `turn_timeout`. Measured on 2026-09-16:
 | the same with `< /dev/null` | `SUCCESS` in 10 s |
 
 So every CLI spawn passes `stdin=asyncio.subprocess.DEVNULL`, which gives an immediate EOF.
+The same inheritance reached the task's `pre_run`/`post_run` shell commands (an authored
+`read` hung the task) and the `docker run` CLI, so those pass it too, and CE073 requires
+every asyncio subprocess spawn under `src/` to decide its stdin.
 
 ## Reaping the CLI harnesses
 
@@ -665,9 +668,11 @@ orchestrator's mid-turn backstop calls `kill()`, and dropping the dir there woul
 resume across a retried turn. `_cleanup` always calls `stop()` after any `kill()`, so the
 tempdir is still reclaimed.
 
-`_TERM_GRACE_SECONDS` is re-declared at the same value in both nd-JSON harnesses rather
-than shared: the CLI-driver hoist that would unify their teardown constants and reducers is
-a tracked follow-up. `STDOUT_LINE_LIMIT_BYTES`, which IS canonical, is imported.
+Both nd-JSON harnesses run on `agents/_transport/subprocess_jsonl.py::SubprocessJsonlAgent`,
+which owns this whole transport once: the spawn, the stderr drain, the read loop, the settle,
+`kill` / `kill_sync` / the reap, and `_TERM_GRACE_SECONDS`, `_DRAIN_SECONDS`, `_SIGKILL` and
+`_MAX_UNRECOGNIZED_TYPES`. A subclass keeps its argv, environment, session handling and its
+decoder.
 
 ## The system_prompt_semantics marker
 

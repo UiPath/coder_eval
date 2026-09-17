@@ -1565,7 +1565,9 @@ pre_run:
 | `timeout` | 30 | Maximum seconds to wait (1–300) |
 | `fail_on_error` | `true` | When true, failure aborts evaluation with `FinalStatus.ERROR` |
 
-Commands run sequentially with `cwd` set to the sandbox directory. stdout and stderr are
+Commands run sequentially with `cwd` set to the sandbox directory, with stdin on
+`/dev/null`: a command that reads stdin gets end-of-file at once instead of waiting for
+input nobody can type. stdout and stderr are
 captured in `pre_run_results` on the evaluation result (truncated to 100KB each). When a
 command fails with `fail_on_error: true`, remaining commands are skipped.
 

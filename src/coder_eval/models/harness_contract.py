@@ -32,7 +32,6 @@ class TimingBasis(StrEnum):
 
     TURN_CLOCK = "turn_clock"
     CLI_EPOCH_MS = "cli_epoch_ms"
-    MIXED = "mixed"
 
 
 class HarnessContract(BaseModel):
@@ -68,7 +67,7 @@ class HarnessContract(BaseModel):
         description=(
             "Where recorded stamps come from: turn_clock (the TurnEmitter stamps the turn bracket, every tool "
             "and every window from one TurnClock) or cli_epoch_ms (the adapter passes the CLI's own stamps for "
-            "windows and main-thread tools). mixed is OpenCode's interim value."
+            "windows and main-thread tools)."
         )
     )
     permission_modes: frozenset[PermissionMode] | None = Field(

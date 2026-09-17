@@ -3,7 +3,9 @@
 The CLI is never invoked: ``asyncio.create_subprocess_exec`` is patched with a
 fake process that replays a newline-delimited JSON event stream, so the whole
 reduction path (nd-JSON -> standardized events -> ``TurnRecord``) is exercised
-offline and without credentials.
+offline and without credentials. Timing cases drive ``_OpenCodeDecoder``
+directly through ``coder_eval.testing.replay`` under ``cli_epoch_ms``: the
+windows come from the scripted envelope stamps, never from the clock.
 
 The fixtures below mirror event lines CAPTURED FROM A LIVE ``opencode run
 --format json`` — the CLI's own compact vocabulary (``step_start`` /
@@ -28,14 +30,14 @@ import pytest
 from coder_eval.agents import opencode_agent as agent_module
 from coder_eval.agents.opencode_agent import (
     OpenCodeAgent,
-    _OpenCodeTurnState,
+    _OpenCodeDecoder,
     _unwrap,
 )
-from coder_eval.errors import AgentCrashError, TurnTimeoutError
-from coder_eval.models import AssistantMessage, CommandTelemetry, OpenCodeAgentConfig, PermissionMode, TokenUsage
+from coder_eval.errors.agent import format_timeout_reason
+from coder_eval.models import AssistantMessage, OpenCodeAgentConfig, PermissionMode, TimingBasis, TurnRecord
 from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.pricing import calculate_cost
-from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.emitter import TurnOutcome
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -48,7 +50,10 @@ from coder_eval.streaming.events import (
     TurnEndStatus,
     TurnStartEvent,
 )
+from coder_eval.testing import Replay, ScriptedClock, Tick, assert_identity_closes, assert_stream_balanced, replay
 from tests._fixtures.golden_streams.opencode_fixtures import (
+    _T0_MS,
+    CAPTURED_STREAM,
     HAPPY_STREAM,
     SESSION,
     _evt,
@@ -85,19 +90,19 @@ def patch_exec(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
-async def _run_outcome(
+async def _run(
     agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", *, plugin_root: Path | None = None, **kwargs: Any
-):
+) -> TurnOutcome:
     await agent.start(str(tmp_path), plugin_root=plugin_root)
     kwargs.setdefault("iteration", 1)
     return await agent.communicate(prompt, **kwargs)
 
 
-async def _run(
-    agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", *, plugin_root: Path | None = None, **kwargs: Any
-):
-    outcome = await _run_outcome(agent, tmp_path, prompt, plugin_root=plugin_root, **kwargs)
-    return outcome.record_or_raise()
+async def _record(agent: OpenCodeAgent, tmp_path: Any, prompt: str = "do the thing", **kwargs: Any) -> TurnRecord:
+    """The record of a turn that must not end CRASHED or TIMEOUT."""
+    outcome = await _run(agent, tmp_path, prompt, **kwargs)
+    assert outcome.error is None, f"{outcome.status}: {outcome.error}"
+    return outcome.record
 
 
 def _agent(**overrides: Any) -> OpenCodeAgent:
@@ -105,33 +110,107 @@ def _agent(**overrides: Any) -> OpenCodeAgent:
     return OpenCodeAgent(config, task_id="t1")
 
 
+_BASE = datetime.fromtimestamp(_T0_MS / 1000)
+
+
+def _at(ms: float) -> datetime:
+    """The naive-local instant of the CLI stamp ``_T0_MS + ms``, as the decoder converts it."""
+    return datetime.fromtimestamp((_T0_MS + ms) / 1000)
+
+
+def _event(event_type: str, part: dict[str, Any] | None = None, *, at_ms: int | None = 0) -> dict[str, Any]:
+    """One decoded CLI event; ``at_ms=None`` drops the envelope ``timestamp``."""
+    event = json.loads(_evt(event_type, part or {}, at_ms=at_ms or 0))
+    if at_ms is None:
+        del event["timestamp"]
+    return event
+
+
+def _tool(call_id: str, status: str, *, at_ms: int, start: int | None = None, end: int | None = None) -> dict[str, Any]:
+    """A ``bash`` ``tool_use`` event whose ``state.time`` carries the given bounds, in ms after ``_T0_MS``."""
+    times = {key: _T0_MS + ms for key, ms in (("start", start), ("end", end)) if ms is not None}
+    state: dict[str, Any] = {"status": status, "input": {"command": "ls"}}
+    if times:
+        state["time"] = times
+    return _event("tool_use", {"callID": call_id, "tool": "bash", "state": state}, at_ms=at_ms)
+
+
+def _finish(at_ms: int | None) -> dict[str, Any]:
+    return _event("step_finish", {"reason": "stop", "tokens": {"input": 10, "output": 5}}, at_ms=at_ms)
+
+
+def _replay(
+    stream: list[Any], *, status: AgentEndStatus = AgentEndStatus.COMPLETED, reason: str | None = None
+) -> tuple[Replay, _OpenCodeDecoder]:
+    """Drive an `_OpenCodeDecoder` under `cli_epoch_ms` on a clock at `_BASE`; return the decoder too."""
+    decoders: list[_OpenCodeDecoder] = []
+
+    def end(decoder: _OpenCodeDecoder) -> TurnOutcome:
+        decoders.append(decoder)
+        return decoder.end(status, reason=reason)
+
+    result = replay(stream, _OpenCodeDecoder, clock=ScriptedClock(_BASE), basis=TimingBasis.CLI_EPOCH_MS, end=end)
+    return result, decoders[0]
+
+
+def _assistants(result: Replay) -> list[AssistantMessage]:
+    return [m for m in result.record.messages if isinstance(m, AssistantMessage)]
+
+
 class TestEnvelopeNormalization:
     def test_part_envelope(self):
         """Normal events carry their payload under `part`."""
-        t, part = _unwrap({"type": "step_finish", "sessionID": "s", "part": {"reason": "stop"}})
+        t, part, stamp = _unwrap({"type": "step_finish", "sessionID": "s", "part": {"reason": "stop"}})
         assert t == "step_finish"
         assert part["reason"] == "stop"
+        assert stamp is None
 
     def test_flat_envelope(self):
         """The CLI's own error path emits a flat object with no `part`."""
-        t, props = _unwrap({"type": "error", "sessionID": "s", "error": {"name": "UnknownError"}})
+        t, props, _ = _unwrap({"type": "error", "sessionID": "s", "error": {"name": "UnknownError"}})
         assert t == "error"
         assert props["error"]["name"] == "UnknownError"
+
+    def test_the_envelope_stamp_is_returned(self):
+        """The envelope `timestamp` (epoch ms) is the CLI's own stamp for the event."""
+        _, _, stamp = _unwrap({"type": "text", "timestamp": _T0_MS + 250, "part": {"text": "hi"}})
+        assert stamp == _at(250)
 
 
 class TestHappyPath:
     async def test_builds_turn_record(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        record = outcome.record
 
+        assert outcome.status is AgentEndStatus.COMPLETED
         assert record.crashed is False
         assert record.agent_output == "Created the file."
         assert record.assistant_turn_count == 2
         assert record.model_used == "deepseek/deepseek-v4-pro"
 
+    async def test_the_result_summary_carries_the_final_reply(self, patch_exec, tmp_path):
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        record = await _record(_agent(), tmp_path)
+
+        assert record.result_summary is not None
+        assert record.result_summary.is_error is False
+        assert record.result_summary.stop_reason == "stop"
+        assert record.result_summary.result == "Created the file."
+
+    async def test_events_carry_no_session_thread_id(self, patch_exec, tmp_path):
+        """The session id is replayed via `--session`; it is not a sub-agent thread."""
+        patch_exec(_FakeProcess(HAPPY_STREAM))
+        recorder = _EventRecorder()
+        await _run(_agent(), tmp_path, stream_callback=recorder)
+
+        assert recorder.events
+        assert all(e.thread_id is None for e in recorder.events)
+        assert_stream_balanced(recorder.events)
+
     async def test_token_buckets_accumulate_across_steps(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -148,7 +227,7 @@ class TestHappyPath:
     async def test_reconciliation_invariant(self, patch_exec, tmp_path):
         """Summing the four buckets across messages must equal token_usage exactly."""
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -159,13 +238,14 @@ class TestHappyPath:
 
     async def test_tool_call_captured(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
 
         assert len(record.commands) == 1
         cmd = record.commands[0]
         # Normalized to the canonical vocabulary criteria are written against.
         assert cmd.tool_name == "Read"
         assert cmd.tool_id == "call_1"
+        assert cmd.sequence_number == 0
         assert cmd.result_status == "success"
         # ...including the ARGUMENT keys: the fixture's native `filePath` is
         # recorded under Claude's `file_path` (see TestCrossHarnessNormalization).
@@ -176,7 +256,7 @@ class TestHappyPath:
 
     async def test_messages_attributed_to_steps(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
 
         assistants = [m for m in record.messages if isinstance(m, AssistantMessage)]
         assert len(assistants) == 2
@@ -205,7 +285,7 @@ class TestTokenShapeIsObservable:
         )
         patch_exec(_FakeProcess([step]))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -219,7 +299,7 @@ class TestTokenShapeIsObservable:
         fresh slice must come back out or the cached portion is billed twice."""
         patch_exec(_FakeProcess(HAPPY_STREAM))  # _tokens() builds nested totals
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -230,7 +310,7 @@ class TestTokenShapeIsObservable:
         """nested=350, flat=8030, reported 8000 — the schema moved; keep `input`."""
         patch_exec(_FakeProcess([self._step({"total": 8000, "input": 300, "output": 50, "cache": {"read": 7680}})]))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -251,7 +331,7 @@ class TestTokenShapeIsObservable:
         silent — but `input` is still taken verbatim, the live-verified convention."""
         patch_exec(_FakeProcess([self._step({"input": 500, "output": 20, "cache": {"read": 200}})]))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -263,7 +343,7 @@ class TestTokenShapeIsObservable:
         """No arbiter but no cache either ⇒ the conventions agree; nothing to verify."""
         patch_exec(_FakeProcess([self._step({"input": 500, "output": 20})]))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -274,7 +354,7 @@ class TestTokenShapeIsObservable:
         """`total` says nested but input < cache: self-contradictory; keep `input`."""
         patch_exec(_FakeProcess([self._step({"total": 350, "input": 300, "output": 50, "cache": {"read": 7680}})]))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         usage = record.token_usage
         assert usage is not None
@@ -286,7 +366,7 @@ class TestCostFallsBackToTheRateCard:
     async def test_stream_cost_wins_when_reported(self, patch_exec, tmp_path):
         """The provider's own accounting beats a static headline rate."""
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == pytest.approx(0.003)  # 0.001 + 0.002
 
@@ -298,7 +378,7 @@ class TestCostFallsBackToTheRateCard:
             _evt("step_finish", {"id": "prt_2", "messageID": "msg_1", "reason": "stop", "tokens": _tokens(1000, 500)}),
         ]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
 
         assert record.token_usage is not None
         expected = calculate_cost("deepseek/deepseek-v4-pro", uncached_input_tokens=1000, output_tokens=500)
@@ -308,7 +388,7 @@ class TestCostFallsBackToTheRateCard:
     async def test_unpriced_model_reports_no_cost(self, patch_exec, tmp_path):
         """`None` (not 0.0) so "unpriceable" stays distinct from "ran for free"."""
         patch_exec(_FakeProcess([_evt("step_finish", {"id": "p", "reason": "stop", "tokens": _tokens(10, 5)})]))
-        record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        record = await _record(_agent(model="nowhere/not-a-real-model"), tmp_path)
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd is None
 
@@ -325,7 +405,7 @@ class TestCostFallsBackToTheRateCard:
         ]
         patch_exec(_FakeProcess(stream))
         with caplog.at_level("DEBUG", logger="coder_eval.pricing"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         expected = calculate_cost("deepseek/deepseek-v4-pro", uncached_input_tokens=1000, output_tokens=500)
         assert expected is not None and expected > 0
@@ -343,7 +423,7 @@ class TestCostFallsBackToTheRateCard:
             ),
         ]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(model="nowhere/not-a-real-model"), tmp_path)
+        record = await _record(_agent(model="nowhere/not-a-real-model"), tmp_path)
         assert record.token_usage is not None
         assert record.token_usage.total_cost_usd == 0.0
 
@@ -370,7 +450,7 @@ class TestCrossHarnessNormalization:
         `parameters["command"]` only for that name — OpenCode's `bash` would match
         nothing and fall back to raw-JSON matching."""
         patch_exec(_FakeProcess([self._tool_event("bash"), self._tool_event("write")]))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["Bash", "Write"]
 
     async def test_gpt_family_apply_patch_maps_to_write(self, patch_exec, tmp_path):
@@ -385,20 +465,20 @@ class TestCrossHarnessNormalization:
         `_TOOL_ITEM_NAMES["apply_patch"] = "Write"`.
         """
         patch_exec(_FakeProcess([self._tool_with_input("apply_patch", {"patchText": "*** Begin Patch\n"})]))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["Write"]
 
     async def test_unknown_tool_passes_through(self, patch_exec, tmp_path):
         """An unmapped tool still surfaces under its own name rather than vanishing."""
         patch_exec(_FakeProcess([self._tool_event("some_new_tool")]))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["some_new_tool"]
 
     async def test_native_skill_tool_maps_to_canonical_skill(self, patch_exec, tmp_path):
         """`skill_triggered` keys on the canonical `Skill`; OpenCode emits lowercase
         `skill`, so without the mapping a real engagement scores as a miss."""
         patch_exec(_FakeProcess([self._tool_event("skill")]))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert [c.tool_name for c in record.commands] == ["Skill"]
 
     @staticmethod
@@ -441,7 +521,7 @@ class TestCrossHarnessNormalization:
         and scores 0 on OpenCode for identical agent behaviour.
         """
         patch_exec(_FakeProcess([self._tool_with_input(tool, native)]))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert record.commands[0].parameters == expected
 
     @pytest.mark.parametrize(
@@ -457,7 +537,7 @@ class TestCrossHarnessNormalization:
         """The rename is per-tool: `path` means `file_path` on Read/Write/Edit and
         stays `path` on the search tools, which is exactly Claude's split."""
         patch_exec(_FakeProcess([self._tool_with_input(tool, native)]))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert record.commands[0].parameters == native
 
 
@@ -501,14 +581,16 @@ class TestTwoEventToolLifecycle:
                 ]
             )
         )
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
 
         assert len(record.commands) == 1  # one tool, not two
         cmd = record.commands[0]
         assert cmd.tool_name == "Bash"
         assert cmd.parameters == {"command": "pytest -q"}
         assert cmd.result_status == "success"
-        assert cmd.execution_started_at is not None
+        assert cmd.execution_completed_at == datetime.fromtimestamp(1786663018231 / 1000.0)
+        assert cmd.execution_started_at is not None, "a start that arrives only with the result still times the call"
+        assert cmd.duration_ms is not None
 
     async def test_one_tool_start_end_pair_is_emitted(self, patch_exec, tmp_path):
         patch_exec(
@@ -551,10 +633,12 @@ class TestTwoEventToolLifecycle:
                 ]
             )
         )
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
 
         cmd = record.commands[0]
         assert cmd.execution_completed_at == datetime.fromtimestamp(1786663018231 / 1000.0)
+        assert cmd.execution_started_at is not None, "a start that arrives only with the result still times the call"
+        assert cmd.duration_ms is not None
         assert cmd.execution_started_at == datetime.fromtimestamp(1786663018214 / 1000.0)
         assert cmd.duration_ms == pytest.approx(17.0)
 
@@ -569,7 +653,7 @@ class TestTwoEventToolLifecycle:
                 ]
             )
         )
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert record.commands[0].parameters == {"command": "ls"}
 
 
@@ -866,6 +950,12 @@ class TestSystemPromptInstructions:
         await _run(_agent(), tmp_path)
         assert captured["kwargs"]["limit"] > 64 * 1024
 
+    async def test_the_cli_never_inherits_stdin(self, patch_exec, tmp_path):
+        """OpenCode reads a non-TTY stdin to EOF before it emits; an inherited open stdin stalls the turn."""
+        captured = patch_exec(_FakeProcess(HAPPY_STREAM))
+        await _run(_agent(), tmp_path)
+        assert captured["kwargs"]["stdin"] is asyncio.subprocess.DEVNULL
+
 
 class TestSessionContinuity:
     async def test_first_turn_omits_session(self, patch_exec, tmp_path):
@@ -915,10 +1005,6 @@ class TestEnvironmentInfo:
 class TestErrorEventShapes:
     """`error` is the CLI's own flat envelope, and its payload shape varies."""
 
-    @staticmethod
-    def _state() -> _OpenCodeTurnState:
-        return _OpenCodeTurnState(task_id="t1", iteration=1, user_input="p", model="m")
-
     @pytest.mark.parametrize(
         ("payload", "expected"),
         [
@@ -932,9 +1018,8 @@ class TestErrorEventShapes:
         ],
     )
     def test_message_extraction(self, payload, expected):
-        state = self._state()
-        state.on_error(payload)
-        assert state.error_message == expected
+        _, decoder = _replay([{"type": "error", "sessionID": SESSION, **payload}])
+        assert decoder.error == expected
 
 
 class TestTokenCastsNeverRaise:
@@ -966,7 +1051,7 @@ class TestTokenCastsNeverRaise:
     async def test_a_non_numeric_bucket_warns_instead_of_crashing(self, patch_exec, tmp_path, tokens, caplog):
         patch_exec(_FakeProcess(self._stream(tokens)))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         assert record.crashed is False
         assert "unexpected token accounting" in caplog.text
@@ -977,7 +1062,7 @@ class TestTokenCastsNeverRaise:
         """A stringly-typed but numeric count is a serialization detail, not drift."""
         patch_exec(_FakeProcess(self._stream({"input": "100", "output": "20", "total": 120})))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         assert record.token_usage is not None
         assert record.token_usage.uncached_input_tokens == 100
@@ -988,7 +1073,7 @@ class TestTokenCastsNeverRaise:
         """JSON has one number type, so a provider may serialize a count as 100.0."""
         patch_exec(_FakeProcess(self._stream({"input": 100.0, "output": 20.7, "total": 120})))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         assert record.token_usage is not None
         assert record.token_usage.uncached_input_tokens == 100
@@ -999,15 +1084,24 @@ class TestTokenCastsNeverRaise:
         """`int(True) == 1` would book a phantom token."""
         patch_exec(_FakeProcess(self._stream({"input": True, "output": 20})))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(), tmp_path)
+            record = await _record(_agent(), tmp_path)
 
         assert record.token_usage is not None
         assert record.token_usage.uncached_input_tokens == 0
         assert "unexpected token accounting" in caplog.text
 
 
+_ERROR_LINE = json.dumps(
+    {
+        "type": "error",
+        "sessionID": SESSION,
+        "error": {"name": "UnknownError", "data": {"message": "provider exploded"}},
+    }
+)
+
+
 class TestFailurePaths:
-    async def test_error_event_raises_and_parks_partial(self, patch_exec, tmp_path):
+    async def test_error_event_then_clean_exit_crashes_with_the_clis_message(self, patch_exec, tmp_path):
         stream = [
             _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
             _evt(
@@ -1021,36 +1115,40 @@ class TestFailurePaths:
                     "state": {"status": "running", "input": {"command": "ls"}},
                 },
             ),
-            json.dumps(
-                {
-                    "type": "error",
-                    "sessionID": SESSION,
-                    "error": {"name": "UnknownError", "data": {"message": "provider exploded"}},
-                }
-            ),
+            _ERROR_LINE,
         ]
-        patch_exec(_FakeProcess(stream))
+        patch_exec(_FakeProcess(stream, returncode=0))
         agent = _agent()
 
-        outcome = await _run_outcome(agent, tmp_path)
+        outcome = await _run(agent, tmp_path)
 
         assert outcome.status is AgentEndStatus.CRASHED
-        assert outcome.error is not None and "provider exploded" in outcome.error
+        assert outcome.error == "OpenCode error: provider exploded"
         partial = outcome.record
         assert partial.crashed is True
+        assert partial.result_summary is None
         # The in-flight tool was force-closed rather than dropped.
         assert [c.result_status for c in partial.commands] == ["unknown"]
 
+    async def test_a_stream_error_crashes_even_when_a_stop_was_requested(self, patch_exec, tmp_path):
+        """OpenCode's `error` event is final: an error read on the line a stop fires on is still a crash."""
+        patch_exec(_RunningProcess([_ERROR_LINE]))
+        outcome = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and outcome.error.startswith("OpenCode error:")
+
     async def test_nonzero_exit_without_error_event_crashes(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess([], returncode=1, stderr=b"boom: bad model"))
-        with pytest.raises(AgentCrashError, match="boom: bad model"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error == "OpenCode exited non-zero: boom: bad model"
 
     async def test_malformed_line_is_skipped(self, patch_exec, tmp_path):
         """Non-JSON noise on stdout must not kill the turn."""
         stream = ["warn: CPU lacks AVX support", *HAPPY_STREAM]
         patch_exec(_FakeProcess(stream))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert record.crashed is False
         assert record.assistant_turn_count == 2
 
@@ -1088,7 +1186,7 @@ class TestZeroTelemetryIsLoud:
         patch_exec(_FakeProcess(stream))
         agent = _agent()
 
-        outcome = await _run_outcome(agent, tmp_path)
+        outcome = await _run(agent, tmp_path)
 
         assert outcome.status is AgentEndStatus.CRASHED
         assert outcome.error is not None and "no recognized events" in outcome.error
@@ -1102,8 +1200,10 @@ class TestZeroTelemetryIsLoud:
     async def test_empty_stdout_with_clean_exit_crashes(self, patch_exec, tmp_path):
         """Zero events at all is the same zero-telemetry hole as wrong vocabulary."""
         patch_exec(_FakeProcess([], returncode=0))
-        with pytest.raises(AgentCrashError, match="no recognized events"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None
+        assert outcome.error.startswith("OpenCode exited cleanly but the turn captured no recognized events.")
 
     async def test_intentional_cuts_are_exempt(self, patch_exec, tmp_path):
         """A cooperative stop can land before the first recognized event; that is
@@ -1111,7 +1211,7 @@ class TestZeroTelemetryIsLoud:
         stream = [json.dumps({"id": "evt_1", "type": "session.next.idle", "properties": {"sessionID": SESSION}})]
         proc = _RunningProcess(stream)
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
+        record = await _record(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert record.crashed is False
 
     @staticmethod
@@ -1136,27 +1236,29 @@ class TestZeroTelemetryIsLoud:
         patch_exec(_FakeProcess(self._stream_without_tokens()))
         agent = _agent()
 
-        outcome = await _run_outcome(agent, tmp_path)
+        outcome = await _run(agent, tmp_path)
 
         assert outcome.status is AgentEndStatus.CRASHED
         assert outcome.error is not None
         assert "zero token telemetry" in outcome.error
         assert "1 finished step(s)" in outcome.error
-        assert outcome.record is not None  # telemetry captured so far still parked
+        assert outcome.record.crashed is True  # telemetry captured so far is still on the record
+        assert len(outcome.record.messages) >= 1
 
     async def test_cost_without_tokens_still_crashes(self, patch_exec, tmp_path):
         """Reported cost does not excuse missing tokens: the USD gate might trip,
         but every token gate and aggregate is still silently blind."""
         patch_exec(_FakeProcess(self._stream_without_tokens(cost=0.004)))
-        with pytest.raises(AgentCrashError, match="cost reported: yes"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "cost reported: yes" in outcome.error
 
     async def test_require_token_telemetry_false_warns_and_scores(self, patch_exec, tmp_path, caplog):
         """The escape hatch, for a provider that genuinely reports no usage: crashing
         every turn there would make the harness unusable, not merely imprecise."""
         patch_exec(_FakeProcess(self._stream_without_tokens()))
         with caplog.at_level("WARNING"):
-            record = await _run(_agent(require_token_telemetry=False), tmp_path)
+            record = await _record(_agent(require_token_telemetry=False), tmp_path)
 
         assert record.crashed is False
         assert "require_token_telemetry is off" in caplog.text
@@ -1165,21 +1267,22 @@ class TestZeroTelemetryIsLoud:
         """Vocabulary drift has silently zeroed a whole run before, and no provider
         quirk explains it — so this arm stays fatal even with the hatch open."""
         patch_exec(_FakeProcess([json.dumps({"type": "session.next.idle", "properties": {"sessionID": SESSION}})]))
-        with pytest.raises(AgentCrashError, match="no recognized events"):
-            await _run(_agent(require_token_telemetry=False), tmp_path)
+        outcome = await _run(_agent(require_token_telemetry=False), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "no recognized events" in outcome.error
 
     async def test_a_cut_before_any_step_finished_is_exempt(self, patch_exec, tmp_path):
         """The arm keys on a step the CLI reported FINISHED. A stop landing between
         a step's start and its `step_finish` is an intentional cut, not drift."""
         proc = _RunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"})])
         patch_exec(proc)
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
+        record = await _record(_agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION)
         assert record.crashed is False
 
     async def test_real_tokens_are_never_condemned(self, patch_exec, tmp_path):
         """The guard must not fire on the ordinary path it lives beside."""
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path)
+        record = await _record(_agent(), tmp_path)
         assert record.crashed is False
         assert record.token_usage is not None
 
@@ -1215,7 +1318,7 @@ class TestUnexpectedErrorContract:
     instead of kept on the crashed record.
     """
 
-    async def test_stream_error_becomes_a_crash_with_partial_parked(self, patch_exec, tmp_path):
+    async def test_stream_error_becomes_a_crash_with_the_crashed_partial(self, patch_exec, tmp_path):
         stream = [
             _evt("step_start", {"id": "prt_1", "messageID": "msg_1", "type": "step-start"}),
             _evt(
@@ -1233,10 +1336,10 @@ class TestUnexpectedErrorContract:
         patch_exec(_ExplodingProcess(stream))
         agent = _agent()
 
-        outcome = await _run_outcome(agent, tmp_path)
+        outcome = await _run(agent, tmp_path)
 
         assert outcome.status is AgentEndStatus.CRASHED
-        assert outcome.error is not None and "OpenCode turn failed" in outcome.error
+        assert outcome.error is not None and outcome.error.startswith("OpenCode turn failed: ")
         partial = outcome.record
         assert partial.crashed is True
         # Telemetry captured before the failure survives, orphan tool force-closed.
@@ -1251,16 +1354,17 @@ class TestUnexpectedErrorContract:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
         monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/opencode")
 
-        with pytest.raises(AgentCrashError, match="no fork for you"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error == "OpenCode turn failed: no fork for you"
 
     async def test_terminal_event_is_emitted_exactly_once(self, patch_exec, tmp_path):
         """The protocol allows exactly one AgentEnd per communicate(), crash included."""
         patch_exec(_ExplodingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})]))
         recorder = _EventRecorder()
 
-        with pytest.raises(AgentCrashError):
-            await _run(_agent(), tmp_path, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, stream_callback=recorder)
+        assert outcome.status is AgentEndStatus.CRASHED
 
         seen = recorder.events
         assert len([e for e in seen if isinstance(e, AgentStartEvent)]) == 1
@@ -1295,7 +1399,7 @@ class TestLeakedPipeDrain:
     async def test_completes_without_eof(self, patch_exec, tmp_path):
         """A stdout pipe that never closes must not stall the turn."""
         patch_exec(_LeakyPipeProcess(HAPPY_STREAM))
-        record = await asyncio.wait_for(_run(_agent(), tmp_path, timeout=300), timeout=30)
+        record = await asyncio.wait_for(_record(_agent(), tmp_path, timeout=300), timeout=30)
 
         assert record.crashed is False
         assert record.assistant_turn_count == 2
@@ -1327,7 +1431,7 @@ class TestStderrIsDrainedConcurrently:
     async def test_turn_completes_under_stderr_backpressure(self, patch_exec, tmp_path):
         patch_exec(_StderrBackpressureProcess(HAPPY_STREAM, stderr=b"noisy"))
         # Bounded so a regression fails here instead of hanging the suite.
-        record = await asyncio.wait_for(_run(_agent(), tmp_path, timeout=300), timeout=10)
+        record = await asyncio.wait_for(_record(_agent(), tmp_path, timeout=300), timeout=10)
         assert record.assistant_turn_count == 2
         assert record.crashed is False
 
@@ -1353,10 +1457,12 @@ class TestCooperativeStop:
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
         recorder = _EventRecorder()
-        record = await _run(
+        outcome = await _run(
             _agent(), tmp_path, should_stop=lambda: StopReason.EARLY_CRITERION, stream_callback=recorder
         )
+        record = outcome.record
 
+        assert outcome.status is AgentEndStatus.STOPPED_EARLY
         assert record.crashed is False
         assert proc.terminated is True
         # Stopped at the first event boundary rather than draining the stream.
@@ -1368,7 +1474,9 @@ class TestCooperativeStop:
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
         recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP, stream_callback=recorder)
+        record = await _record(
+            _agent(), tmp_path, should_stop=lambda: StopReason.TOOL_CALL_CAP, stream_callback=recorder
+        )
 
         assert proc.terminated is True
         assert record.crashed is False
@@ -1380,7 +1488,9 @@ class TestCooperativeStop:
         proc = _RunningProcess(HAPPY_STREAM)
         patch_exec(proc)
         recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET, stream_callback=recorder)
+        record = await _record(
+            _agent(), tmp_path, should_stop=lambda: StopReason.TOKEN_BUDGET, stream_callback=recorder
+        )
 
         assert proc.terminated is True
         assert record.crashed is False
@@ -1390,7 +1500,7 @@ class TestCooperativeStop:
 
     async def test_no_stop_is_uncapped(self, patch_exec, tmp_path):
         patch_exec(_FakeProcess(HAPPY_STREAM))
-        record = await _run(_agent(), tmp_path, should_stop=lambda: None)
+        record = await _record(_agent(), tmp_path, should_stop=lambda: None)
         assert record.tool_calls_exhausted is False
         assert record.assistant_turn_count == 2
 
@@ -1403,7 +1513,7 @@ class TestCooperativeStop:
         """
         patch_exec(_RunningProcess(HAPPY_STREAM))
         recorder = _EventRecorder()
-        record = await _run(
+        record = await _record(
             _agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP), stream_callback=recorder
         )
 
@@ -1422,7 +1532,7 @@ class TestCooperativeStop:
     async def test_an_intentional_stop_is_exempt_from_a_non_zero_exit(self, patch_exec, tmp_path):
         """Killing the CLI makes it exit non-zero; that must not crash an intentional stop."""
         patch_exec(_RunningProcess(HAPPY_STREAM, returncode=-15, stderr=b"terminated"))
-        record = await _run(_agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP))
+        record = await _record(_agent(), tmp_path, should_stop=_stop_after(3, StopReason.TOOL_CALL_CAP))
         assert record.crashed is False
         assert record.tool_calls_exhausted is True
 
@@ -1480,8 +1590,8 @@ class _EofNoExitProcess(_HangingProcess):
     """Replays its lines, signals EOF — but never exits until killed.
 
     Models a CLI that closed its stream during shutdown and then wedged: the one
-    window where the read loop is already done, so only a bounded reap in
-    ``_settle_turn`` stands between the turn and an unbounded hang.
+    window where the read loop is already done, so only the bounded post-EOF
+    exit wait in the transport's settle stands between the turn and an unbounded hang.
     """
 
     async def readline(self) -> bytes:
@@ -1491,7 +1601,7 @@ class _EofNoExitProcess(_HangingProcess):
 
 
 class TestTimeoutContract:
-    async def test_deadline_raises_turn_timeout_with_partial_parked(self, patch_exec, tmp_path):
+    async def test_deadline_returns_a_timeout_outcome_with_the_partial(self, patch_exec, tmp_path):
         """A wedged CLI must yield a TIMEOUT outcome with a crashed partial record,
         with exactly one terminal AgentEndEvent (status TIMEOUT) emitted."""
         proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
@@ -1499,12 +1609,13 @@ class TestTimeoutContract:
         agent = _agent()
         recorder = _EventRecorder()
 
-        outcome = await _run_outcome(agent, tmp_path, timeout=0.2, stream_callback=recorder)
+        outcome = await _run(agent, tmp_path, timeout=0.2, stream_callback=recorder)
 
         assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.error == format_timeout_reason(0.2)
         partial = outcome.record
-        assert partial is not None
         assert partial.crashed is True
+        assert partial.result_summary is None
         assert proc.terminated is True  # the CLI was torn down, not abandoned
         ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
         assert len(ends) == 1
@@ -1517,12 +1628,11 @@ class TestTimeoutContract:
         patch_exec(proc)
         agent = _agent()
 
-        outcome = await asyncio.wait_for(_run_outcome(agent, tmp_path, timeout=0.3), timeout=10)
+        outcome = await asyncio.wait_for(_run(agent, tmp_path, timeout=0.3), timeout=10)
 
         assert outcome.status is AgentEndStatus.TIMEOUT
         # Everything parsed before the wedge survives on the partial record.
         partial = outcome.record
-        assert partial is not None
         assert partial.crashed is True
         assert partial.token_usage is not None
         assert partial.token_usage.output_tokens > 0
@@ -1530,19 +1640,23 @@ class TestTimeoutContract:
     async def test_eof_without_exit_and_no_deadline_crashes(self, patch_exec, monkeypatch, tmp_path):
         """With no turn deadline configured, the reap still gets a fixed grace —
         a stream-closed-but-wedged CLI is a crash, not an indefinite hang."""
-        monkeypatch.setattr("coder_eval.agents.opencode_agent._TERM_GRACE_SECONDS", 0.1)
+        monkeypatch.setattr("coder_eval.agents._transport.subprocess_jsonl._TERM_GRACE_SECONDS", 0.1)
         proc = _EofNoExitProcess(HAPPY_STREAM)
         patch_exec(proc)
 
-        with pytest.raises(AgentCrashError, match="did not exit"):
-            await asyncio.wait_for(_run(_agent(), tmp_path), timeout=10)
+        outcome = await asyncio.wait_for(_run(_agent(), tmp_path), timeout=10)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None
+        assert outcome.error.startswith("OpenCode closed its event stream but did not exit within")
+        assert proc.terminated is True
 
 
 class TestExternalCancel:
-    async def test_cancel_parks_partial_and_reraises(self, patch_exec, tmp_path):
+    async def test_cancel_ends_the_turn_and_reraises(self, patch_exec, tmp_path):
         """The watchdog's CancelledError must not swallow captured telemetry: the
-        partial record is parked, the terminal event says CRASHED, and the
-        cancellation still propagates."""
+        turn is ended, the terminal event says CRASHED, and the cancellation
+        still propagates."""
         proc = _HangingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
         patch_exec(proc)
         agent = _agent()
@@ -1555,12 +1669,10 @@ class TestExternalCancel:
         with pytest.raises(asyncio.CancelledError):
             _ = await task  # the await re-raises the cancellation; no value ever exists
 
-        partial = agent.pending_turn
-        assert partial is not None
-        assert partial.crashed is True
         ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
         assert len(ends) == 1
         assert ends[0].status is AgentEndStatus.CRASHED
+        assert ends[0].crashed is True
         assert ends[0].crash_reason == "turn cancelled"
         assert proc.killed is True  # not abandoned mid-stream — see TestTurnAlwaysReapsTheCli
 
@@ -1569,9 +1681,9 @@ class TestTurnEventsAreBalanced:
     """`Agent.communicate`'s contract is one TurnStart/TurnEnd pair per inner turn.
 
     `on_step_start` opens one per CLI step and `on_step_finish` closes it, but a
-    turn that dies (or is cut) between the two left the last TurnStartEvent open
-    forever — a task.log with `>>> Turn start` and no matching `--- Turn end`.
-    All three sibling agents close it from `finalize`.
+    turn that dies (or is cut) between the two must still close the last
+    TurnStartEvent — a task.log with `>>> Turn start` and no matching
+    `--- Turn end` is the defect. The emitter closes it at the end of the turn.
     """
 
     @staticmethod
@@ -1591,8 +1703,8 @@ class TestTurnEventsAreBalanced:
         patch_exec(proc)
         recorder = _EventRecorder()
 
-        with pytest.raises(TurnTimeoutError):
-            await _run(_agent(), tmp_path, timeout=0.2, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, timeout=0.2, stream_callback=recorder)
+        assert outcome.status is AgentEndStatus.TIMEOUT
 
         assert self._pairs(recorder) == (1, 1)
         end = next(e for e in recorder.events if isinstance(e, TurnEndEvent))
@@ -1620,8 +1732,8 @@ class TestTurnEventsAreBalanced:
         patch_exec(_ExplodingProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})]))
         recorder = _EventRecorder()
 
-        with pytest.raises(AgentCrashError):
-            await _run(_agent(), tmp_path, stream_callback=recorder)
+        outcome = await _run(_agent(), tmp_path, stream_callback=recorder)
+        assert outcome.status is AgentEndStatus.CRASHED
 
         assert self._pairs(recorder) == (1, 1)
 
@@ -1638,16 +1750,32 @@ class TestTurnEventsAreBalanced:
         assert end.status is TurnEndStatus.STOPPED_EARLY
 
     async def test_a_completed_step_is_never_closed_twice(self, patch_exec, tmp_path):
-        """Unlike the siblings, completed steps close themselves in `on_step_finish`,
-        so `finalize` must fire ONLY for a straggler."""
+        """Completed steps close themselves in `on_step_finish`, so the end of the
+        turn must close ONLY a straggler."""
         patch_exec(_FakeProcess(HAPPY_STREAM))
         recorder = _EventRecorder()
-        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+        record = await _record(_agent(), tmp_path, stream_callback=recorder)
 
         assert record.crashed is False
         starts, ends = self._pairs(recorder)
         assert starts == ends == 2
         assert all(e.status is TurnEndStatus.COMPLETED for e in recorder.events if isinstance(e, TurnEndEvent))
+
+    def test_a_dangling_step_is_closed_crashed_at_the_next_step_start(self):
+        result, _ = _replay(
+            [
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                _event("step_start", {"messageID": "m2"}, at_ms=100),
+                _finish(200),
+            ]
+        )
+
+        turn_ends = [e for e in result.events if isinstance(e, TurnEndEvent)]
+        assert [(e.turn_id, e.status) for e in turn_ends] == [
+            ("m1", TurnEndStatus.CRASHED),
+            ("m2", TurnEndStatus.COMPLETED),
+        ]
+        assert_stream_balanced(result.events)
 
 
 class TestTurnAlwaysReapsTheCli:
@@ -1665,13 +1793,14 @@ class TestTurnAlwaysReapsTheCli:
     """
 
     async def test_read_loop_crash_kills_the_cli(self, patch_exec, tmp_path):
-        """`_crash_turn` is synchronous and raises — nothing below it reaps."""
+        """A read-loop crash ends the turn as an outcome, and `finally` still reaps the live CLI."""
         proc = _ExplodingRunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})])
         patch_exec(proc)
 
-        with pytest.raises(AgentCrashError, match="OpenCode turn failed"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
 
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and outcome.error.startswith("OpenCode turn failed: ")
         assert proc.killed is True
 
     async def test_external_cancel_kills_the_cli(self, patch_exec, tmp_path):
@@ -1709,8 +1838,9 @@ class TestTurnAlwaysReapsTheCli:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
         monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/opencode")
 
-        with pytest.raises(AgentCrashError, match="no fork for you"):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error is not None and "no fork for you" in outcome.error
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group teardown (killpg/SIGKILL) is POSIX-only by design")
@@ -1738,8 +1868,8 @@ class TestProcessGroupTeardown:
         the pipes — across a retried batch, that is the leak that compounds."""
         captured = patch_exec(_ExplodingRunningProcess([_evt("step_start", {"id": "prt_1", "messageID": "msg_1"})]))
 
-        with pytest.raises(AgentCrashError):
-            await _run(_agent(), tmp_path)
+        outcome = await _run(_agent(), tmp_path)
+        assert outcome.status is AgentEndStatus.CRASHED
 
         assert (4242, signal.SIGKILL) in captured["killpg"]
 
@@ -1784,7 +1914,7 @@ class TestToolFailureCapture:
     async def test_tool_error_is_captured_not_dropped(self, patch_exec, tmp_path):
         recorder = _EventRecorder()
         patch_exec(_FakeProcess([self._failing_tool("boom: command exploded")]))
-        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+        record = await _record(_agent(), tmp_path, stream_callback=recorder)
 
         [cmd] = record.commands
         assert cmd.result_status == "error"
@@ -1795,180 +1925,239 @@ class TestToolFailureCapture:
     async def test_permission_denial_gets_its_own_status(self, patch_exec, tmp_path):
         recorder = _EventRecorder()
         patch_exec(_FakeProcess([self._failing_tool("Permission denied by policy")]))
-        record = await _run(_agent(), tmp_path, stream_callback=recorder)
+        record = await _record(_agent(), tmp_path, stream_callback=recorder)
 
         [cmd] = record.commands
         assert cmd.result_status == "error"  # the persisted tri-state folds both
         [end] = [e for e in recorder.events if isinstance(e, ToolEndEvent)]
         assert end.status is ToolEndStatus.PERMISSION_DENIED
 
-    def test_orphan_result_is_never_dropped(self):
-        """A result with no matching call still surfaces as an `unknown` tool."""
-        state = _OpenCodeTurnState(task_id="t", iteration=1, user_input="x", model=None)
-        events: list[Any] = []
-        state.bind(events.append)
+    def test_an_unresolved_call_is_swept_never_dropped(self):
+        """A call the CLI never resolved still surfaces, as an `unknown` tool with no invented error."""
+        result, decoder = _replay([_event("step_start", {"messageID": "m1"}), _tool("ghost", "pending", at_ms=1)])
 
-        state._close_tool("ghost", status=ToolEndStatus.UNRESOLVED, summary=None, error="no result observed")
-
-        [event] = events
-        assert isinstance(event, ToolEndEvent)
-        assert event.tool.tool_name == "unknown"
+        [event] = [e for e in result.events if isinstance(e, ToolEndEvent)]
+        assert event.status is ToolEndStatus.UNRESOLVED
+        assert event.tool.tool_id == "ghost"
+        assert event.tool.tool_name == "Bash"
         assert event.tool.result_status == "unknown"
-        assert event.tool.error_message == "no result observed"
+        assert event.tool.error_message is None
+        assert decoder.open_tools == {"ghost": {"command": "ls"}}
+        assert [c.tool_id for c in result.record.commands] == ["ghost"]
+
+
+class TestTimingIsTheClisOwn:
+    """Under `cli_epoch_ms` every recorded bound is a CLI stamp, never a read of the host clock.
+
+    Each case moves the scripted clock far away from the stamps, so a bound taken
+    from the clock instead of the stream lands seconds off and fails.
+    """
+
+    def test_window_bounds_are_the_envelope_stamps(self):
+        result, _ = _replay(
+            [
+                Tick(7_000),
+                _event("step_start", {"messageID": "m1"}, at_ms=100),
+                Tick(50_000),
+                _finish(900),
+            ]
+        )
+
+        [message] = _assistants(result)
+        assert message.started_at == _at(100)
+        assert message.completed_at == _at(900)
+        assert message.generation_duration_ms == pytest.approx(800.0)
+
+    def test_tool_span_is_state_time(self):
+        result, _ = _replay(
+            [
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                Tick(9_000),
+                _tool("c1", "completed", at_ms=600, start=200, end=450),
+                _finish(1000),
+            ]
+        )
+
+        [command] = result.record.commands
+        assert command.execution_started_at == _at(200)
+        assert command.execution_completed_at == _at(450)
+        assert command.duration_ms == pytest.approx(250.0)
+
+    def test_a_resolved_tool_without_an_end_stamp_gets_no_completion_or_duration(self):
+        result, _ = _replay(
+            [
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                Tick(600),
+                _tool("c1", "completed", at_ms=600, start=200),
+                _finish(1000),
+            ]
+        )
+
+        [command] = result.record.commands
+        assert command.result_status == "success"
+        assert command.execution_started_at == _at(200)
+        assert command.execution_completed_at is None
+        assert command.duration_ms is None
+
+    def test_an_orphan_has_no_completion_stamp(self):
+        """Force-closing is not observing a completion; the CLI's start stamp is kept."""
+        result, _ = _replay(
+            [
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                _tool("c1", "running", at_ms=200, start=200),
+                _finish(1000),
+                Tick(4_000),
+            ]
+        )
+
+        [command] = result.record.commands
+        assert command.result_status == "unknown"
+        assert command.error_message is None
+        assert command.execution_started_at == _at(200)
+        assert command.execution_completed_at is None
+        assert command.duration_ms is None
+
+    def test_a_missing_envelope_stamp_bounds_the_window_on_the_host_clock_and_warns_once(self, caplog):
+        with caplog.at_level("WARNING", logger="coder_eval.agents.opencode_agent"):
+            result, decoder = _replay(
+                [
+                    _event("step_start", {"messageID": "m1"}, at_ms=0),
+                    Tick(700),
+                    _finish(None),
+                    Tick(1_200),
+                    _event("step_start", {"messageID": "m2"}, at_ms=None),
+                    Tick(1_500),
+                    _finish(None),
+                ]
+            )
+
+        first, second = _assistants(result)
+        assert first.started_at == _at(0)
+        assert first.completed_at == _BASE + timedelta(milliseconds=700)
+        assert second.started_at == first.completed_at
+        assert second.completed_at == _BASE + timedelta(milliseconds=1_500)
+        assert decoder.warned_missing_stamp is True
+        warnings = [r for r in caplog.records if "no envelope timestamp" in r.getMessage()]
+        assert len(warnings) == 1
+
+    def test_the_captured_stream_tiles_on_its_own_stamps(self):
+        """A real `opencode run` stream: every window and tool bound is a CLI stamp, and the identity closes."""
+        lines = [json.loads(line) for line in CAPTURED_STREAM]
+        first_ms = lines[0]["timestamp"]
+        last_ms = max(event.get("timestamp", first_ms) for event in lines)
+        origin = datetime.fromtimestamp(first_ms / 1000)
+        stream: list[Any] = [*lines, Tick(last_ms - first_ms)]
+
+        decoders: list[_OpenCodeDecoder] = []
+
+        def end(decoder: _OpenCodeDecoder) -> TurnOutcome:
+            decoders.append(decoder)
+            return decoder.end(AgentEndStatus.COMPLETED)
+
+        result = replay(stream, _OpenCodeDecoder, clock=ScriptedClock(origin), basis=TimingBasis.CLI_EPOCH_MS, end=end)
+
+        assert result.outcome.status is AgentEndStatus.COMPLETED
+        assert decoders[0].warned_missing_stamp is False
+        assert [c.tool_name for c in result.record.commands] == ["Write", "Bash"]
+        assert all(c.duration_ms is not None for c in result.record.commands)
+        assert_stream_balanced(result.events)
+        assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 class TestGenerationWindowExcludesToolExecution:
     """A tool running inside a step is not model time — asserted where it is now DECIDED.
 
-    The reducer no longer subtracts anything. It publishes the RAW window, and
+    The decoder does not subtract anything. It publishes the RAW window, and
     `timing.subtract_tool_time` takes the tool union back out of it
-    once, for all five harnesses. So these cases drive the reducer and then a
-    real collector, and assert the PUBLISHED number — the one that reaches
-    `task.json` — rather than an intermediate the reducer used to own.
+    once, for all five harnesses. So these cases replay the decoder through a
+    real emitter and assert the PUBLISHED number — the one that reaches
+    `task.json` — rather than an intermediate the decoder used to own.
 
     They are not duplicates of
     `tests/test_event_collector.py::TestSubtractToolTime`: those pin the
-    arithmetic, these pin that THIS reducer hands the collector a window and a
+    arithmetic, these pin that THIS decoder hands the collector a window and a
     span set the arithmetic can be right about.
     """
 
-    WINDOW_START = datetime(2026, 1, 1, 12, 0, 0)
-    WINDOW_END = datetime(2026, 1, 1, 12, 0, 1)  # a 1000ms step
-
-    def _finish_step(self, monkeypatch, spans, open_starts=()):
-        """Drive the reducer, then publish through a real collector.
+    def _finish_step(self, spans: list[tuple[int, int]], open_starts: tuple[int, ...] = ()) -> AssistantMessage:
+        """Replay one step stamped 0 -> 1000 ms with tool calls whose `state.time` is at the given offsets.
 
         `spans` are RESOLVED calls (both bounds); `open_starts` are calls that
-        never returned. An unresolved call now contributes NO span — it has no
+        never returned. An unresolved call contributes NO span — it has no
         `execution_completed_at`, and inventing one is what `None` exists to
-        prevent — where the reducer used to bound it at the window's end. That
-        is a real change and a better one: the collector sees every span at
-        once, so a call straddling a boundary is clipped to each window it
-        actually overlapped instead of approximated at the boundary.
+        prevent. The collector sees every span at once, so a call straddling a
+        boundary is clipped to each window it actually overlapped.
         """
-
-        class _Clock(datetime):
-            @staticmethod
-            def now(tz=None):
-                return TestGenerationWindowExcludesToolExecution.WINDOW_END
-
-        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
-        state.step_started_at = self.WINDOW_START
-        commands = [
-            CommandTelemetry(
-                tool_name="bash",
-                tool_id=f"closed-{i}",
-                timestamp=started,
-                execution_started_at=started,
-                execution_completed_at=completed,
-                result_status="success",
-            )
+        stream: list[Any] = [_event("step_start", {"messageID": "m1"}, at_ms=0)]
+        stream += [
+            _tool(f"closed-{i}", "completed", at_ms=completed, start=started, end=completed)
             for i, (started, completed) in enumerate(spans)
         ]
-        commands += [
-            CommandTelemetry(tool_name="bash", tool_id=f"open-{i}", timestamp=st, execution_started_at=st)
-            for i, st in enumerate(open_starts)
-        ]
-        monkeypatch.setattr(agent_module, "datetime", _Clock)
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
+        stream += [_tool(f"open-{i}", "running", at_ms=started, start=started) for i, started in enumerate(open_starts)]
+        stream.append(_finish(1000))
 
-        collector = EventCollector()
-        collector.on_event(AgentStartEvent(task_id="t1", prompt="do it", iteration=1, timestamp=self.WINDOW_START))
-        for command in commands:
-            collector.on_event(ToolEndEvent(task_id="t1", turn_id="s1", tool=command))
-        collector.on_event(
-            AgentEndEvent(
-                task_id="t1",
-                status=AgentEndStatus.COMPLETED,
-                messages=list(state.messages),
-                usage=TokenUsage(),
-                timestamp=self.WINDOW_END,
-            )
-        )
-        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
+        result, _ = _replay(stream)
+        published = _assistants(result)
         assert len(published) == 1
         return published[0]
 
-    def test_tool_time_inside_the_step_is_subtracted(self, monkeypatch):
-        message = self._finish_step(
-            monkeypatch,
-            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
-        )
+    def test_tool_time_inside_the_step_is_subtracted(self):
+        message = self._finish_step([(200, 700)])
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        assert span_ms == pytest.approx(1000.0), "the reducer still publishes the whole window as its bounds"
+        assert span_ms == pytest.approx(1000.0), "the decoder still publishes the whole window as its bounds"
         assert message.generation_duration_ms == pytest.approx(500.0)
 
-    def test_a_step_with_no_tools_keeps_its_whole_window(self, monkeypatch):
-        assert self._finish_step(monkeypatch, []).generation_duration_ms == pytest.approx(1000.0)
+    def test_a_step_with_no_tools_keeps_its_whole_window(self):
+        assert self._finish_step([]).generation_duration_ms == pytest.approx(1000.0)
 
-    def test_concurrent_tools_are_subtracted_once(self, monkeypatch):
+    def test_concurrent_tools_are_subtracted_once(self):
         # Two overlapping 500ms tools occupy 600ms, not 1000ms. Summing them
         # would leave 0 generation for a step that generated 400.
-        message = self._finish_step(
-            monkeypatch,
-            [
-                (self.WINDOW_START + timedelta(milliseconds=100), self.WINDOW_START + timedelta(milliseconds=600)),
-                (self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700)),
-            ],
-        )
+        message = self._finish_step([(100, 600), (200, 700)])
         assert message.generation_duration_ms == pytest.approx(400.0)
 
-    def test_the_window_never_goes_negative(self, monkeypatch):
-        message = self._finish_step(
-            monkeypatch,
-            [(self.WINDOW_START - timedelta(seconds=30), self.WINDOW_END + timedelta(seconds=30))],
-        )
+    def test_the_window_never_goes_negative(self):
+        message = self._finish_step([(-30_000, 31_000)])
         assert message.generation_duration_ms == 0.0
 
-    def test_a_tool_still_open_at_the_boundary_contributes_no_span(self, monkeypatch):
-        """The behaviour that CHANGED with the move, stated rather than implied.
+    def test_a_tool_still_open_at_the_boundary_contributes_no_span(self):
+        """A call with no `execution_completed_at` was never timed.
 
-        The reducer used to bound a still-open call at the window's end and
-        subtract that slice. The collector cannot: a call with no
-        `execution_completed_at` was never timed. Its time is subtracted when it
-        RESOLVES, from whichever windows its real interval overlaps.
+        Its time is subtracted when it RESOLVES, from whichever windows its real
+        interval overlaps — never bounded at the window's end.
         """
-        message = self._finish_step(monkeypatch, [], open_starts=[self.WINDOW_START + timedelta(milliseconds=600)])
+        message = self._finish_step([], open_starts=(600,))
         assert message.generation_duration_ms == pytest.approx(1000.0)
 
-    def test_a_resolved_tool_overlapping_an_unresolved_one_counts_only_the_resolved(self, monkeypatch):
-        message = self._finish_step(
-            monkeypatch,
-            [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))],
-            open_starts=[self.WINDOW_START + timedelta(milliseconds=500)],
-        )
+    def test_a_resolved_tool_overlapping_an_unresolved_one_counts_only_the_resolved(self):
+        message = self._finish_step([(200, 700)], open_starts=(500,))
         assert message.generation_duration_ms == pytest.approx(500.0)
 
-    def test_a_mark_later_than_the_step_start_does_not_invert_the_window(self, monkeypatch):
-        """The backwards-clock defence, pinned at the reducer, not in isolation.
+    def test_a_mark_later_than_the_step_start_does_not_invert_the_window(self):
+        """The backwards-stamp defence, pinned at the decoder, not in isolation.
 
-        `close_window`'s `min()` only fires if the reducer actually passes the
+        `close_window`'s `min()` only fires if the decoder actually passes the
         step's own start as `item_start`. Drop that argument and the window
         opens at the (later) mark instead, so the span shrinks — or inverts and
-        clamps to 0.0, publishing a fabricated instant generation. Nothing else
-        in this file fails when it is dropped, which is the whole reason it is
-        here: the mark is what the reducer still owns after the tool
-        subtraction moved to the collector.
+        clamps to 0.0, publishing a fabricated instant generation. The CLI's
+        stamps are not monotonic by contract: here the first step's
+        `step_finish` is stamped 400 ms AFTER the second step's `step_start`.
         """
-        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="m")
-        state.step_started_at = self.WINDOW_START
-        # A mark 400ms AFTER this step began: the CLI's step_finish for the
-        # previous step landed late, or the clock stepped.
-        state.gen_mark = self.WINDOW_START + timedelta(milliseconds=400)
+        result, decoder = _replay(
+            [
+                _event("step_start", {"messageID": "m0"}, at_ms=-500),
+                _finish(400),
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                _finish(1000),
+            ]
+        )
 
-        class _Clock(datetime):
-            @staticmethod
-            def now(tz=None):
-                return TestGenerationWindowExcludesToolExecution.WINDOW_END
-
-        monkeypatch.setattr(agent_module, "datetime", _Clock)
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
-
-        message = next(m for m in state.messages if m.role == "assistant")
-        assert message.started_at == self.WINDOW_START
+        _, message = _assistants(result)
+        assert decoder.gen_mark == _at(1000)
+        assert message.started_at == _at(0)
         assert message.generation_duration_ms == pytest.approx(1000.0)
 
-    def test_the_published_window_reconciles_to_its_own_bounds(self, monkeypatch):
+    def test_the_published_window_reconciles_to_its_own_bounds(self):
         """The collector subtracted exactly the spans the record carries.
 
         `scripts/timing/decompose_run.py` and the evalboard's Unaccounted cell
@@ -1979,10 +2168,9 @@ class TestGenerationWindowExcludesToolExecution:
         """
         from coder_eval.timing import busy_ms
 
-        closed = [(self.WINDOW_START + timedelta(milliseconds=200), self.WINDOW_START + timedelta(milliseconds=700))]
-        message = self._finish_step(monkeypatch, closed)
+        message = self._finish_step([(200, 700)])
         span_ms = (message.completed_at - message.started_at).total_seconds() * 1000.0
-        expected = span_ms - busy_ms(closed, message.started_at, message.completed_at)
+        expected = span_ms - busy_ms([(_at(200), _at(700))], message.started_at, message.completed_at)
         assert message.generation_duration_ms == pytest.approx(expected)
 
 
@@ -1995,235 +2183,146 @@ class TestGenerationWindowsTileTheTurn:
     carrying no tool at all (the Write inside them took 7 ms), attributed to
     nothing — 24% of the turn, on its own enough to hold OpenCode above the
     evalboard's 25% "Unaccounted" red threshold.
-
-    Driven at the reducer for the same reason as the sibling class above: the
-    window is two `datetime.now()` reads, so only setting them explicitly
-    makes the arithmetic deterministic.
     """
 
-    T0 = datetime(2026, 1, 1, 12, 0, 0)
-
-    @staticmethod
-    def _finish_at(monkeypatch, state, *, step_start, now):
-        class _Clock(datetime):
-            @staticmethod
-            def now(tz=None):
-                return now
-
-        state.step_started_at = step_start
-        monkeypatch.setattr(agent_module, "datetime", _Clock)
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 100, "output": 20}})
-
-    def _two_steps(self, monkeypatch):
-        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="do it", model="deepseek/deepseek-v4-pro")
-        # Step 1 runs T0 -> T0+1000.
-        self._finish_at(monkeypatch, state, step_start=self.T0, now=self.T0 + timedelta(milliseconds=1000))
-        # 800ms of model time, then a step the CLI only announces at T0+1800.
-        self._finish_at(
-            monkeypatch,
-            state,
-            step_start=self.T0 + timedelta(milliseconds=1800),
-            now=self.T0 + timedelta(milliseconds=2000),
+    def _two_steps(self) -> list[AssistantMessage]:
+        # Step 1 runs 0 -> 1000; then 800ms of model time, then a step the CLI only announces at 1800.
+        result, _ = _replay(
+            [
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                _finish(1000),
+                _event("step_start", {"messageID": "m2"}, at_ms=1800),
+                _finish(2000),
+            ]
         )
-        return [m for m in state.messages if m.role == "assistant"]
+        return _assistants(result)
 
-    def test_the_gap_before_a_step_is_its_generation_time(self, monkeypatch):
-        first, second = self._two_steps(monkeypatch)
+    def test_the_gap_before_a_step_is_its_generation_time(self):
+        first, second = self._two_steps()
         # Bounded by its own step_start, this window was 200ms and the 800ms
         # that produced it was attributed to nothing.
         assert second.generation_duration_ms == pytest.approx(1000.0)
         assert second.started_at == first.completed_at
 
-    def test_the_first_step_keeps_its_own_start(self, monkeypatch):
+    def test_the_first_step_keeps_its_own_start(self):
         """Everything before the first `step_start` is CLI spawn, not model time.
 
         Tiling the first window back to the turn's start would report Node's
         boot — 3.1 s of OpenCode's measured head — as generation.
         """
-        first, _ = self._two_steps(monkeypatch)
-        assert first.started_at == self.T0
+        first, _ = self._two_steps()
+        assert first.started_at == _at(0)
         assert first.generation_duration_ms == pytest.approx(1000.0)
 
-    def test_the_steps_leave_no_gap_between_them(self, monkeypatch):
-        first, second = self._two_steps(monkeypatch)
+    def test_the_steps_leave_no_gap_between_them(self):
+        first, second = self._two_steps()
         covered = (second.completed_at - first.started_at).total_seconds() * 1000.0
         gen = sum(m.generation_duration_ms or 0.0 for m in (first, second))
         assert gen == pytest.approx(covered)
 
 
-_SPAN_EPOCH_MS = 1_800_000_000_000
-_SPAN_BASE = datetime.fromtimestamp(_SPAN_EPOCH_MS / 1000)
-
-
-class _SteppedClock(datetime):
-    """A clock the test moves by hand, in ms from `_SPAN_BASE`.
-
-    Subclasses `datetime` rather than stubbing it, because `_epoch_ms_to_dt`
-    calls `datetime.fromtimestamp` through the same module global and must keep
-    resolving to the real implementation — the CLI's epoch stamps and the
-    reducer's own `now()` reads have to land on ONE timeline for the span
-    arithmetic under test to mean anything.
-    """
-
-    at_ms = 0.0
-
-    @staticmethod
-    def now(tz=None):
-        return _SPAN_BASE + timedelta(milliseconds=_SteppedClock.at_ms)
-
-
 class TestToolSpansSurviveTheStepBoundary:
     """A tool that closes BETWEEN two steps still belongs to the next window.
 
-    This used to be a bookkeeping problem: a per-step span list, cleared at
-    `step_start` — after the window it feeds had already opened at `gen_mark` —
-    so a call closing in the gap had its span wiped before the next
-    `step_finish` could subtract it. That list is gone.
-    `timing.subtract_tool_time` sees every span at once and clips each
-    to the windows it overlaps, so the property now holds by construction
-    rather than by a reset rule. Kept, and re-pointed at the collector, because
-    the property is what matters: a future reducer change could still break it
-    by moving a mark or failing to emit the ToolEnd the collector reduces.
+    `timing.subtract_tool_time` sees every span at once and clips each to the
+    windows it overlaps, so the property holds by construction rather than by a
+    reset rule. Kept because the property is what matters: a future decoder
+    change could still break it by moving a mark or failing to close the tool
+    the collector reduces.
 
     It needs the NON-TERMINAL tool path to reach: the CLI normally emits one
     already-`completed` event per call, which closes inside the step that
     opened it. That is why the measured corpus reads 0.00% and a reproduction
-    has to drive the state object.
+    has to script the stream.
     """
 
-    def _run(self, monkeypatch):
-        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
-        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")
-        # The resolved telemetry leaves the state via ToolEnd; the identity
-        # case below reconciles against what was RECORDED, not against the
-        # clock the test scripted.
-        resolved: list[Any] = []
-        state.bind(lambda e: resolved.append(e.tool) if isinstance(e, ToolEndEvent) else None)
+    def _run(self) -> Replay:
+        return _replay(
+            [
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                _tool("c1", "running", at_ms=100, start=100),  # non-terminal: stays open across the boundary
+                _finish(1000),
+                _tool("c1", "completed", at_ms=1500, start=100, end=1500),  # closes in the GAP between the steps
+                _event("step_start", {"messageID": "m2"}, at_ms=1600),
+                _finish(2000),
+                Tick(2000),
+            ]
+        )[0]
 
-        def tool(status, *, end_ms=None):
-            times = {"start": _SPAN_EPOCH_MS + 100}
-            if end_ms is not None:
-                times["end"] = _SPAN_EPOCH_MS + end_ms
-            state.on_tool_use({"callID": "c1", "tool": "bash", "state": {"status": status, "time": times}})
-
-        _SteppedClock.at_ms = 0
-        state.on_step_start({"messageID": "m1"})
-        _SteppedClock.at_ms = 100
-        tool("running")  # non-terminal: stays open across the boundary
-        _SteppedClock.at_ms = 1000
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
-        _SteppedClock.at_ms = 1500
-        tool("completed", end_ms=1500)  # closes in the GAP between the steps
-        _SteppedClock.at_ms = 1600
-        state.on_step_start({"messageID": "m2"})
-        _SteppedClock.at_ms = 2000
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
-
-        # Published through the real collector: the reducer hands over raw
-        # windows, and the tool subtraction happens once, there.
-        collector = EventCollector()
-        collector.on_event(AgentStartEvent(task_id="t1", prompt="go", iteration=1, timestamp=_SPAN_BASE))
-        for command in resolved:
-            collector.on_event(ToolEndEvent(task_id="t1", turn_id="s1", tool=command))
-        collector.on_event(
-            AgentEndEvent(
-                task_id="t1",
-                status=AgentEndStatus.COMPLETED,
-                messages=list(state.messages),
-                usage=TokenUsage(),
-                timestamp=_SPAN_BASE + timedelta(milliseconds=2000),
-            )
-        )
-        published = [m for m in collector.build_turn_record().messages if m.role == "assistant"]
-        return resolved, published
-
-    def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self, monkeypatch):
-        _, messages = self._run(monkeypatch)
+    def test_the_gap_slice_of_a_straddling_call_is_not_published_as_generation(self):
+        messages = _assistants(self._run())
         assert len(messages) == 2
         # Window 2 tiles 1000 -> 2000. c1 ran for 1000 -> 1500 of it, so 500ms
         # is model time. Before the reset moved, this published 1000.0 — a 100%
         # overstatement, with c1's own duration_ms counting the same 500ms.
         assert messages[1].generation_duration_ms == pytest.approx(500.0)
 
-    def test_the_call_is_subtracted_from_exactly_one_window(self, monkeypatch):
-        # Window 1 owns c1's 100 -> 1000 slice (it was open at that boundary
-        # and bounded there); window 2 owns 1000 -> 1500. Neither owns both.
-        _, messages = self._run(monkeypatch)
+    def test_the_call_is_subtracted_from_exactly_one_window(self):
+        # Window 1 owns c1's 100 -> 1000 slice; window 2 owns 1000 -> 1500. Neither owns both.
+        messages = _assistants(self._run())
         assert messages[0].generation_duration_ms == pytest.approx(100.0)
         assert messages[1].generation_duration_ms == pytest.approx(500.0)
 
-    def test_the_four_bucket_identity_closes_exactly_across_the_boundary(self, monkeypatch):
+    def test_the_four_bucket_identity_closes_exactly_across_the_boundary(self):
         """generation + UNION(tool) accounts for the whole span, to the ms.
 
         The assertion the golden corpus CANNOT make: `_scrub.py` masks
         `generation_duration_ms` and both bounds to a placeholder, so a
         snapshot records that a window was measured and never what it
-        measured, and its identity check is an upper bound besides — so
-        under-accounting, the defect this phase fixes, passes it silently.
+        measured.
         """
         from coder_eval.timing import busy_ms
 
-        resolved, messages = self._run(monkeypatch)
+        result = self._run()
+        messages = _assistants(result)
         lo, hi = messages[0].started_at, messages[1].completed_at
         generation_ms = sum(m.generation_duration_ms or 0.0 for m in messages)
-        command = next(c for c in resolved if c.tool_id == "c1")
+        command = next(c for c in result.record.commands if c.tool_id == "c1")
+        assert command.execution_started_at is not None and command.execution_completed_at is not None
         tool_ms = busy_ms([(command.execution_started_at, command.execution_completed_at)], lo, hi)
 
         assert generation_ms + tool_ms == pytest.approx((hi - lo).total_seconds() * 1000.0)
+        assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
-    def test_a_duplicate_step_finish_does_not_republish_the_previous_window(self, monkeypatch):
+    def test_a_duplicate_step_finish_does_not_republish_the_previous_window(self):
         """A spent `step_started_at` must not seed the next window.
 
         `close_window`'s `min(mark, item_start)` pulls the window open to cover
-        the item's own start. That is the backwards-clock defence — which this
-        reducer genuinely needs, since its stamps are raw `datetime.now()` and
-        not on a `TurnClock`. But a start stamp left in place after its step was
-        published is not a backwards clock: it is a stale value BEFORE the mark,
-        so the guard reopens the next window at the previous step's start and
-        publishes that whole span again. Reproduced on Pi's identical twin
-        before the fix: 3000 ms of generation for a 2000 ms turn.
+        the item's own start. A start stamp left in place after its step was
+        published is a stale value BEFORE the mark, so the guard would reopen the
+        next window at the previous step's start and publish that whole span
+        again. Reproduced on Pi's identical twin before the fix: 3000 ms of
+        generation for a 2000 ms turn.
         """
-        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
-        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")
-        _SteppedClock.at_ms = 0
-        state.on_step_start({"messageID": "m1"})
-        _SteppedClock.at_ms = 1000
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
-        _SteppedClock.at_ms = 2000
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
+        result, _ = _replay(
+            [_event("step_start", {"messageID": "m1"}, at_ms=0), _finish(1000), _finish(2000)]
+        )  # no intervening `step_start`
 
-        messages = [m for m in state.messages if m.role == "assistant"]
+        messages = _assistants(result)
         assert len(messages) == 2
         assert messages[1].started_at == messages[0].completed_at
         assert sum(m.generation_duration_ms or 0.0 for m in messages) == pytest.approx(2000.0)
 
-    def test_a_step_that_never_finishes_does_not_advance_the_mark(self, monkeypatch):
-        """The half of this that is still the reducer's job.
+    def test_a_step_that_never_finishes_does_not_advance_the_mark(self):
+        """The half of this that is still the decoder's job.
 
-        There is no span list to preserve any more — the collector reduces the
-        ToolEnd stream itself. What the reducer still owns is the MARK: a step
-        that published nothing must not advance it, or its time is handed to
+        There is no span list to preserve — the collector reduces the ToolEnd
+        stream itself. What the decoder still owns is the MARK: a step that
+        published nothing must not advance it, or its time is handed to
         whichever step finishes next.
         """
-        monkeypatch.setattr(agent_module, "datetime", _SteppedClock)
-        state = _OpenCodeTurnState(task_id="t1", iteration=1, user_input="go", model="m")
-        _SteppedClock.at_ms = 0
-        state.on_step_start({"messageID": "m1"})
-        _SteppedClock.at_ms = 1000
-        state.on_step_finish({"reason": "stop", "tokens": {"input": 10, "output": 5}})
-        mark_after_flush = state.gen_mark
-
-        _SteppedClock.at_ms = 1600
-        state.on_step_start({"messageID": "m2"})
-        _SteppedClock.at_ms = 1700
-        state.on_tool_use(
-            {
-                "callID": "c2",
-                "tool": "bash",
-                "state": {"status": "running", "time": {"start": _SPAN_EPOCH_MS + 1700}},
-            }
+        result, decoder = _replay(
+            [
+                _event("step_start", {"messageID": "m1"}, at_ms=0),
+                _finish(1000),
+                _event("step_start", {"messageID": "m2"}, at_ms=1600),
+                _tool("c2", "running", at_ms=1700, start=1700),
+                Tick(1900),
+            ],
+            status=AgentEndStatus.CRASHED,
+            reason="turn cancelled",
         )
-        _SteppedClock.at_ms = 1900
-        state.close_open_tools()  # crash/timeout orphan sweep — no message appended
 
-        assert state.gen_mark == mark_after_flush
+        assert decoder.gen_mark == _at(1000)
+        assert len(_assistants(result)) == 1
+        assert result.outcome.status is AgentEndStatus.CRASHED

@@ -4099,6 +4099,47 @@ class TestCE071PriceTurnOnly:
         assert not self._violations(source, "/repo/src/coder_eval/agents/x_agent.py")
 
 
+class TestCE073CreateSubprocessExplicitStdin:
+    """CE073 — every asyncio subprocess spawn under src/coder_eval decides its stdin."""
+
+    SRC = "/repo/src/coder_eval/agents/x_agent.py"
+
+    @staticmethod
+    def _violations(source: str, filepath: str) -> list:
+        import ast
+
+        from tests.lint.rules.ce073_create_subprocess_explicit_stdin import CreateSubprocessExplicitStdin
+
+        return list(CreateSubprocessExplicitStdin(filepath).check(ast.parse(source)))
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "p = await asyncio.create_subprocess_exec('pi', stdout=PIPE, limit=1)",
+            "p = await asyncio.create_subprocess_shell('ls', limit=1)",
+            "p = await create_subprocess_exec('pi', limit=1)",
+            "p = await create_subprocess_shell('ls', limit=1)",
+        ],
+    )
+    def test_a_spawn_without_stdin_violates(self, source: str):
+        found = self._violations(source, self.SRC)
+        assert found
+        assert "stdin=" in found[0].message
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "p = await asyncio.create_subprocess_exec('pi', stdin=asyncio.subprocess.DEVNULL, limit=1)",
+            "p = await asyncio.create_subprocess_shell('ls', stdin=asyncio.subprocess.PIPE, limit=1)",
+        ],
+    )
+    def test_an_explicit_stdin_passes(self, source: str):
+        assert not self._violations(source, self.SRC)
+
+    def test_outside_src_is_out_of_scope(self):
+        assert not self._violations("p = await asyncio.create_subprocess_exec('x')", "/repo/tests/test_x.py")
+
+
 class TestCE054EnvInfoKeyRoundTrip:
     """CE054 fires when an environment_info key is read with no writer anywhere.
 

@@ -201,7 +201,14 @@ Mapping from the CLI's event vocabulary onto `TurnRecord`:
 | `text` | `TextChunkEvent` + `agent_output` |
 | `tool_use` | `ToolStartEvent` + `ToolEndEvent` (one terminal event carries both) |
 | `step_finish` | `TurnEndEvent` + per-step tokens/cost, one `AssistantMessage` |
-| `error` | `AgentCrashError` with the partial turn preserved |
+| `error` | a `CRASHED` turn, its partial record kept |
+
+Timing uses the CLI's own clock (`timing_basis` `cli_epoch_ms`): every event's envelope
+`timestamp` (epoch ms) bounds the generation windows, and a tool's `state.time.start` /
+`.end` is its execution span. A tool with no `state.time.end` gets no completion stamp and
+no duration. An event with no envelope `timestamp` bounds its window on the host clock,
+with one warning per turn. The CLI runs with stdin on `/dev/null`: it reads a non-TTY
+stdin to EOF before it emits anything, so an inherited open stdin would stall the turn.
 
 Token buckets come from `step_finish.tokens`. Two conventions for `tokens.input`
 exist in the wild, and the stream's own `total` arbitrates **per step**:
@@ -226,13 +233,13 @@ reconciliation invariant exact: summing the four buckets across
 Real per-call cost rides on `step_finish.cost` and lands on
 `token_usage.total_cost_usd`, so runs are costed from the provider's own
 accounting rather than the static rate card. The rate card
-(`calculate_cost` over the captured buckets) fills two gaps so the run total
+(`pricing.price_turn` over the captured buckets) fills two gaps so the run total
 never books tokens with no money: a stream that reports **no** cost at all (a
 provider or auth mode that omits it, or a turn that died before its first
 `step_finish`), and a stream that reports **`cost: 0`** for tokens the rate
 card prices above zero — OpenCode reports 0 when its own model registry has no
 price for the model, or under subscription-style auth, and neither means the
-tokens were free (the fallback logs a warning naming the substituted amount). A
+tokens were free. A
 *non-zero* cost the CLI reported always wins, and a genuinely free model still
 resolves to $0 because its rate entry is absent or all-zero.
 

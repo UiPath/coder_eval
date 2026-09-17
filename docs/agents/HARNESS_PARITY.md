@@ -55,7 +55,7 @@ Generated from each agent class's `contract` by `make parity-table`; CE069 fails
 | `disallowed_tools` | enforced | unsupported | enforced | enforced | enforced | unsupported |
 | `cooperative_stop` | yes | yes | yes | yes | yes | no |
 | `usage_granularity` | generation | turn | turn | step | step | turn |
-| `timing_basis` | turn_clock | cli_epoch_ms | turn_clock | mixed | turn_clock | turn_clock |
+| `timing_basis` | turn_clock | cli_epoch_ms | turn_clock | cli_epoch_ms | turn_clock | turn_clock |
 | `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
 <!-- harness-contract:end -->
 
@@ -100,18 +100,18 @@ wall clock its numbers account for.
 
 | Field | claude-code | codex | antigravity | opencode | pi |
 |---|---|---|---|---|---|
-| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | harness clock: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
+| `generation_duration_ms` RAW window (the reducer's part) | harness clock: previous SDK event → this message | SDK item stamps | harness clock: previous flush → this flush | CLI envelope `timestamp`: previous `step_finish` → this one | harness clock: previous `turn_end` → this one |
 | tool time subtracted from it | centrally | centrally | centrally | centrally | centrally |
 | what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first MODEL-source `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
 | `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
 | `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
-| tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | measured around the tool event | measured around the tool event |
-| `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | measured | measured |
+| tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | CLI `state.time.end − state.time.start` | measured around the tool event |
+| `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | CLI `state.time` stamps (none when absent) | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
-| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | **MIXED**: window bounds on the host `datetime.now()` (`:362`, `:696`); tool spans on CLI epoch ms (`_epoch_ms_to_dt`, `:406`/`:462`) | one `TurnClock` per turn |
-| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms tool spans | the same `TurnClock` (**CE064**) |
+| clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | CLI epoch ms (`timing_basis` `cli_epoch_ms`): envelope `timestamp` for window bounds, `state.time` for tool spans; the host clock only for a window bound whose event carries no stamp | one `TurnClock` per turn |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms stamps | the same `TurnClock` (**CE064**) |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
@@ -249,24 +249,14 @@ generation that arrives as a tool result and is never streamed
 excludes the message from `subtract_tool_time` and from the head/tail bracket.
 A stamp no bucket reads has no basis to share.
 
-Codex and OpenCode are **not** converted, and their reasons are DIFFERENT — they
-were stated as one, and that reading described a state OpenCode is already in.
-
-**Codex** is genuinely single-basis: both its window bounds and its tool spans
-come from `_ms_to_dt` over the CLI's own epoch milliseconds, which cannot be
-re-derived host-side. Converting only the window bounds would put two bases
-inside one `busy_ms` subtraction — relocating the defect instead of removing it —
-so it stays whole, and keeps the naive-local exposure.
-
-**OpenCode is already mixed, today.** Its window bounds are host
-`datetime.now()` (`opencode_agent.py:362` at `step_start`, `:696` at
-`step_finish`) while its tool spans are CLI epoch ms (`:406`, assigned to
-`execution_started_at` at `:420`, and `:462`), so the two bases already meet
-inside one subtraction. The argument for leaving it is therefore not the Codex
-one: it is that a monotonic-derived anchor would trade a narrow NTP exposure on
-the window bounds for intra-turn drift against the CLI's own tool stamps, which
-is the larger of the two. The mixed basis is recorded here rather than defended
-as uniform.
+Codex and OpenCode are **not** converted to a `TurnClock`: both are single-basis on the
+CLI's own clock (`timing_basis` `cli_epoch_ms`). Codex takes its window bounds and tool
+spans from `_ms_to_dt` over the SDK's epoch milliseconds; OpenCode takes its window bounds
+from each event's envelope `timestamp` and its tool spans from `state.time`. Neither can be
+re-derived host-side, and converting only the window bounds would put two bases inside one
+`busy_ms` subtraction — relocating the defect instead of removing it. Both keep the
+naive-local exposure. OpenCode falls back to the host clock only for a window bound whose
+event carries no envelope stamp, and warns when it does.
 
 Deadlines on every harness stay on raw `time.monotonic()` and must — a deadline
 may not move when the wall clock steps.

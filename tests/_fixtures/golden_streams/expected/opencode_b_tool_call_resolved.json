@@ -16,7 +16,7 @@
       "result_status": "success",
       "result_summary": "print('hi')",
       "result_tokens": 3,
-      "sequence_number": 1,
+      "sequence_number": 0,
       "timestamp": "<scrubbed>",
       "tool_id": "call_1",
       "tool_name": "Read"
@@ -90,7 +90,7 @@
   "num_turns": 2,
   "result_summary": {
     "is_error": false,
-    "result": null,
+    "result": "Created the file.",
     "stop_reason": "stop",
     "subtype": "completed"
   },

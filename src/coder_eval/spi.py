@@ -8,6 +8,7 @@ A plugin imports only from this module and checks ``SPI_VERSION`` in its
 from typing import Final
 
 from coder_eval.agent import Agent
+from coder_eval.agents._transport import JsonlDecoder, SubprocessJsonlAgent
 from coder_eval.agents.registry import AgentRegistry
 from coder_eval.agents.watchdog import WatchdogFired, run_with_watchdog
 from coder_eval.errors import AgentConfigError, AgentCrashError, TurnTimeoutError
@@ -72,6 +73,7 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "EventCollector",
     "Generation",
     "HarnessContract",
+    "JsonlDecoder",
     "LocalPluginConfig",
     "ModelPricing",
     "PermissionMode",
@@ -80,6 +82,7 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "SPI_VERSION",
     "StopReason",
     "StreamCallback",
+    "SubprocessJsonlAgent",
     "SystemPromptMode",
     "TextChunkEvent",
     "TimingBasis",

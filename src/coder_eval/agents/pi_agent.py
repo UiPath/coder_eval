@@ -20,26 +20,17 @@ Rationale: .claude/notes/agents.md § Pi
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import json
 import logging
 import os
 import re
 import shutil
-import signal
 import tempfile
-import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from coder_eval.agent import Agent
-from coder_eval.errors.agent import format_timeout_reason
-from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
+from coder_eval.agents._transport import JsonlDecoder, SubprocessJsonlAgent
 from coder_eval.models import (
     READ_ONLY_DENIED_TOOLS,
     AgentKind,
@@ -56,35 +47,14 @@ from coder_eval.models import (
     UsageGranularity,
 )
 from coder_eval.pricing import price_turn
-from coder_eval.streaming.callbacks import StreamCallback
 from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
-from coder_eval.streaming.events import AgentEndStatus, StopReason, ToolEndStatus, TurnEndStatus, end_status_for
+from coder_eval.streaming.events import AgentEndStatus, ToolEndStatus, TurnEndStatus
 from coder_eval.timing import close_window
 
 from .registry import AgentRegistry
 
 
 logger = logging.getLogger(__name__)
-
-# Grace period between SIGTERM and SIGKILL when tearing down the CLI subprocess.
-# Doubles as the post-EOF exit grace in _settle_turn when no turn deadline is set.
-# Re-declared at OpenCode's value rather than shared — see the notes.
-# Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
-_TERM_GRACE_SECONDS = 5.0
-
-# SIGKILL does not exist on Windows (where the process-group sweep is a no-op
-# anyway); resolve it dynamically so the module imports and typechecks on every
-# platform, falling back to SIGTERM for the direct-pid kill_sync path.
-_SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
-
-# How long to keep draining stdout/stderr after the CLI has been reaped: a
-# print-mode CLI may leave an inherited pipe open, so every post-exit read is
-# bounded.
-_DRAIN_SECONDS = 2.0
-
-# How many distinct unrecognized event-type strings to retain for the crash
-# message when the vocabulary check fails (diagnosis, not an exhaustive list).
-_MAX_UNRECOGNIZED_TYPES = 8
 
 # pi's native tool names -> the canonical (Claude) vocabulary every criterion is
 # written against. Unknown tools pass through unchanged.
@@ -176,7 +146,7 @@ def _result_text(result: Any) -> str | None:
     return str(result)
 
 
-class _PiDecoder:
+class _PiDecoder(JsonlDecoder):
     """One turn's reducer: Pi's nd-JSON events in, ``TurnEmitter`` calls out.
 
     Holds only what the emitter cannot know: where the next generation window
@@ -185,12 +155,11 @@ class _PiDecoder:
     """
 
     def __init__(self, emitter: TurnEmitter) -> None:
-        self.emitter = emitter
+        super().__init__(emitter)
         self.usage = TokenUsage()
         self.cost_usd: float = 0.0
         self.saw_cost = False
         self.stop_reason: str | None = None
-        self.error: str | None = None
         self.turn_count = 0
         self.tool_count = 0
         self.open_tool_ids: set[str] = set()
@@ -403,7 +372,7 @@ class _PiDecoder:
 
 
 @AgentRegistry.register(AgentKind.PI, PiAgentConfig)
-class PiAgent(Agent[PiAgentConfig]):
+class PiAgent(SubprocessJsonlAgent[PiAgentConfig]):
     """Runs the ``pi`` CLI as a subprocess, one invocation per turn."""
 
     # `should_stop` is polled at every event boundary (tool-call granularity);
@@ -422,6 +391,10 @@ class PiAgent(Agent[PiAgentConfig]):
         permission_modes=frozenset({PermissionMode.PLAN, PermissionMode.BYPASS_PERMISSIONS}),
     )
     tool_names = _TOOL_NAMES
+    cli_name = "Pi"
+    docs_page = "docs/agents/PI.md"
+    recognized_events = _RECOGNIZED_EVENTS
+    decoder = _PiDecoder
 
     def __init__(
         self,
@@ -439,9 +412,7 @@ class PiAgent(Agent[PiAgentConfig]):
 
         Rationale: .claude/notes/agents.md § Why the constructors declare every kwarg
         """
-        super().__init__(config, route, cost_log_tags=cost_log_tags)
-        self.task_id = task_id
-        self.working_directory: str | None = None
+        super().__init__(config, route, task_id=task_id, cost_log_tags=cost_log_tags)
         self._env_path_prepend: list[str] = []
         self._plugin_tools_dir: str | None = None
         # The staged root's skills dir, passed to `pi --skill`. Assigned in start().
@@ -451,11 +422,6 @@ class PiAgent(Agent[PiAgentConfig]):
         # Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
         self._session_id: str | None = None
         self._session_dir: str | None = None
-        self._process: asyncio.subprocess.Process | None = None
-        # Process-group ids of every invocation this agent spawned, swept on
-        # kill()/kill_sync()/stop().
-        self._spawned_pgids: list[int] = []
-        self._state = AgentState.WORKING
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -499,39 +465,6 @@ class PiAgent(Agent[PiAgentConfig]):
             shutil.rmtree(self._session_dir, ignore_errors=True)
             self._session_dir = None
 
-    async def kill(self) -> None:
-        proc = self._process
-        if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
-                await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-        self._sweep_process_groups()
-
-    def kill_sync(self) -> None:
-        """SIGKILL the in-flight CLI and its process group (watchdog thread; must not await)."""
-        proc = self._process
-        if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(proc.pid, _SIGKILL)
-        self._sweep_process_groups()
-
-    def _sweep_process_groups(self) -> None:
-        """SIGKILL every process group this agent spawned (POSIX only).
-
-        Each invocation runs in its own session, so its pgid is the CLI's pid and
-        the group holds ONLY what that invocation spawned.
-        """
-        if os.name != "posix":
-            return
-        for pgid in self._spawned_pgids:
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                os.killpg(pgid, _SIGKILL)
-        self._spawned_pgids.clear()
-
     def get_environment_info(self) -> dict[str, Any]:
         # Spread the base first so the `system_prompt_semantics` run marker is
         # always present (CE046).
@@ -546,7 +479,7 @@ class PiAgent(Agent[PiAgentConfig]):
 
     # --- command construction ---------------------------------------------
 
-    def _build_argv(self, user_input: str) -> list[str]:
+    def argv(self, prompt: str) -> list[str]:
         # -p exits after the run; --no-context-files + --no-approve isolate the
         # sandbox from host AGENTS.md/CLAUDE.md and project-local trust.
         # --session-dir + --session-id give cross-communicate() continuity — NOT
@@ -575,8 +508,8 @@ class PiAgent(Agent[PiAgentConfig]):
         argv += self._tool_flags()
         if self.config.system_prompt:
             argv += ["--append-system-prompt", self.config.system_prompt]
-        # user_input is a distinct argv element after `--` (never shell-interpolated).
-        argv += ["--", user_input]
+        # The prompt is a distinct argv element after `--` (never shell-interpolated).
+        argv += ["--", prompt]
         return argv
 
     def _tool_flags(self) -> list[str]:
@@ -594,7 +527,7 @@ class PiAgent(Agent[PiAgentConfig]):
             return ["--tools", ",".join(sorted(allow))] if allow else ["--no-tools"]
         return ["--exclude-tools", ",".join(sorted(deny))] if deny else []
 
-    def _build_env(self) -> dict[str, str]:
+    def env(self) -> dict[str, str]:
         """The CLI's full environment: the host's, plus the sandbox's contributions.
 
         The PATH prepend is the mock-shadowing contract (``Agent.start``): the
@@ -609,241 +542,3 @@ class PiAgent(Agent[PiAgentConfig]):
         if self._plugin_tools_dir and "PLUGIN_TOOLS_DIR" not in env:
             env["PLUGIN_TOOLS_DIR"] = self._plugin_tools_dir
         return env
-
-    # --- the turn ----------------------------------------------------------
-
-    async def communicate(
-        self,
-        user_input: str,
-        *,
-        iteration: int,
-        stream_callback: StreamCallback | None = None,
-        timeout: float | None = None,
-        should_stop: Callable[[], StopReason | None] | None = None,
-    ) -> TurnOutcome:
-        """Run one ``pi -p`` invocation as one turn; see ``Agent.communicate``."""
-        if self.working_directory is None:
-            raise RuntimeError("PiAgent.start() must be called before communicate()")
-
-        emitter = self._open_emitter(
-            prompt=user_input,
-            iteration=iteration,
-            model=self.config.model,
-            task_id=self.task_id,
-            stream_callback=stream_callback,
-        )
-        emitter.begin()
-        decoder = _PiDecoder(emitter)
-        vocabulary = _Vocabulary()
-
-        # Deadlines stay on `time.monotonic()`, deliberately NOT the turn clock:
-        # a deadline must not move when the wall clock steps.
-        deadline = None if timeout is None else time.monotonic() + timeout
-        requested_stop: StopReason | None = None
-        stderr_drain: asyncio.Future[bytes] | None = None
-        # Bound OUTSIDE the try so `finally` can tell "never spawned" from
-        # "spawned and possibly still running".
-        proc: asyncio.subprocess.Process | None = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *self._build_argv(user_input),
-                # Pi reads a non-TTY stdin to EOF before it emits anything; an
-                # inherited, still-open stdin stalls the turn to its deadline.
-                # Rationale: .claude/notes/agents.md § Why a CLI never inherits stdin
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.working_directory,
-                env=self._build_env(),
-                # One nd-JSON event can carry a whole tool result, past
-                # StreamReader's default 64 KiB cap.
-                limit=STDOUT_LINE_LIMIT_BYTES,
-                # Own session/process group, so teardown can killpg a lingering
-                # child without touching anything this invocation didn't spawn.
-                start_new_session=os.name == "posix",
-            )
-            self._process = proc
-            if os.name == "posix":
-                self._spawned_pgids.append(proc.pid)
-            assert proc.stdout is not None
-
-            # Drain stderr CONCURRENTLY, or a child that fills the pipe blocks on
-            # write and hangs the turn to its deadline.
-            # Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
-            if proc.stderr is not None:
-                stderr_drain = asyncio.ensure_future(proc.stderr.read())
-
-            # An inherited pipe may never reach EOF, so race each read against
-            # process exit; a bounded drain then collects the tail.
-            exit_waiter = asyncio.ensure_future(proc.wait())
-            read_task: asyncio.Future[bytes] | None = None
-            try:
-                while True:
-                    remaining = None if deadline is None else deadline - time.monotonic()
-                    if remaining is not None and remaining <= 0:
-                        return await self._time_out(decoder, timeout or 0.0)
-
-                    if read_task is None:
-                        read_task = asyncio.ensure_future(proc.stdout.readline())
-                    done, _pending = await asyncio.wait(
-                        {read_task, exit_waiter},
-                        timeout=remaining,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if not done:
-                        return await self._time_out(decoder, timeout or 0.0)
-                    if not read_task.done():
-                        try:
-                            await asyncio.wait_for(asyncio.shield(read_task), _DRAIN_SECONDS)
-                        except TimeoutError:
-                            break
-                    line = read_task.result()
-                    read_task = None
-                    if not line:
-                        break
-
-                    self._handle_line(line, decoder, vocabulary)
-
-                    requested_stop = should_stop() if should_stop is not None else None
-                    if requested_stop is not None:
-                        await self.kill()
-                        break
-            finally:
-                if read_task is not None:
-                    read_task.cancel()
-                exit_waiter.cancel()
-
-            return await self._settle_turn(
-                proc,
-                decoder,
-                vocabulary,
-                stderr_drain,
-                requested_stop=requested_stop,
-                deadline=deadline,
-                timeout=timeout,
-            )
-
-        except asyncio.CancelledError:
-            self._state = AgentState.ERROR
-            decoder.end(AgentEndStatus.CRASHED, reason="turn cancelled")
-            raise
-        except Exception as e:
-            # A spawn failure, a StreamReader ValueError past `limit`, a malformed payload.
-            logger.warning("pi: turn failed", exc_info=True)
-            return self._crash(decoder, f"Pi turn failed: {e!s}")
-        finally:
-            if stderr_drain is not None:
-                stderr_drain.cancel()
-            self._reap_orphaned_cli(proc)
-            self._process = None
-
-    def _reap_orphaned_cli(self, proc: asyncio.subprocess.Process | None) -> None:
-        """Kill a CLI still running as the turn unwinds. No-op otherwise.
-
-        Synchronous (no await) so it survives a ``CancelledError`` in flight.
-        ``proc`` is ``None`` when the spawn failed.
-
-        Rationale: .claude/notes/agents.md § Reaping the CLI harnesses
-        """
-        if proc is None or proc.returncode is not None:
-            return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            proc.kill()
-        self._sweep_process_groups()
-
-    async def _settle_turn(
-        self,
-        proc: asyncio.subprocess.Process,
-        decoder: _PiDecoder,
-        vocabulary: _Vocabulary,
-        stderr_drain: asyncio.Future[bytes] | None,
-        *,
-        requested_stop: StopReason | None,
-        deadline: float | None,
-        timeout: float | None,
-    ) -> TurnOutcome:
-        """Reap the CLI once the read loop is done and end the turn.
-
-        CRASHED when the process died with neither an intentional stop nor a
-        recognized event stream, TIMEOUT when the deadline elapses while waiting
-        for the exit.
-        """
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS if remaining is None else remaining)
-        except TimeoutError:
-            if remaining is not None:
-                return await self._time_out(decoder, timeout or 0.0)
-            await self.kill()
-            return self._crash(
-                decoder, f"Pi closed its event stream but did not exit within {_TERM_GRACE_SECONDS:.0f}s"
-            )
-        stderr_bytes = b""
-        if stderr_drain is not None:
-            with contextlib.suppress(TimeoutError):
-                stderr_bytes = await asyncio.wait_for(asyncio.shield(stderr_drain), timeout=_DRAIN_SECONDS)
-
-        # A terminal provider error is infrastructure failure, not an agent
-        # failure, and `pi -p` exits 0 after exhausting retries. GATED on
-        # intentional cuts: a cut can fire before the clearing `turn_end` arrives.
-        # Rationale: .claude/notes/agents.md § Why a clean exit can still be a crash
-        if decoder.error is not None and requested_stop is None:
-            return self._crash(decoder, f"Pi error: {decoder.error}")
-
-        if proc.returncode not in (0, None) and requested_stop is None:
-            detail = stderr_bytes.decode("utf-8", "replace").strip() or f"exit code {proc.returncode}"
-            return self._crash(decoder, f"Pi exited non-zero: {detail}")
-
-        # A clean exit that recognized NO events is vocabulary drift. Intentional
-        # cuts are exempt: a stop can land before the first event.
-        if requested_stop is None and vocabulary.recognized == 0:
-            seen = ", ".join(sorted(vocabulary.unrecognized)) or "none (stdout carried no JSON events)"
-            return self._crash(
-                decoder,
-                "Pi exited cleanly but the turn captured no recognized events. Unrecognized event types seen: "
-                + f"{seen}. The CLI's event schema may have changed — see docs/agents/PI.md before trusting any "
-                + "run from this CLI version.",
-            )
-
-        return decoder.end(end_status_for(requested_stop) if requested_stop is not None else AgentEndStatus.COMPLETED)
-
-    def _crash(self, decoder: _PiDecoder, message: str) -> TurnOutcome:
-        self._state = AgentState.ERROR
-        return decoder.end(AgentEndStatus.CRASHED, reason=message)
-
-    async def _time_out(self, decoder: _PiDecoder, timeout: float) -> TurnOutcome:
-        """Kill the CLI and end the turn as a timeout."""
-        await self.kill()
-        self._state = AgentState.ERROR
-        return decoder.end(AgentEndStatus.TIMEOUT, reason=format_timeout_reason(timeout))
-
-    def _handle_line(self, line: bytes, decoder: _PiDecoder, vocabulary: _Vocabulary) -> None:
-        """Parse one nd-JSON line and hand it to the decoder. Never raises on bad input.
-
-        ``agent_end`` is NOT terminal — only ``agent_settled`` / stdout EOF is — so
-        it is recognized, ignored, and the read loop keeps going.
-        """
-        raw = line.decode("utf-8", "replace").strip()
-        if not raw:
-            return
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.debug("pi: skipping non-JSON stdout line: %s", raw[:200])
-            return
-        if not isinstance(obj, dict):
-            return
-        event_type = str(obj.get("type") or "")
-        if event_type in _RECOGNIZED_EVENTS:
-            vocabulary.recognized += 1
-        elif len(vocabulary.unrecognized) < _MAX_UNRECOGNIZED_TYPES:
-            vocabulary.unrecognized.add(event_type or "<missing type>")
-        decoder(obj)
-
-
-@dataclass
-class _Vocabulary:
-    """The drift check's evidence: how many events matched Pi's vocabulary, and a sample of what did not."""
-
-    recognized: int = 0
-    unrecognized: set[str] = field(default_factory=set)

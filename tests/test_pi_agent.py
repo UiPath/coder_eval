@@ -669,9 +669,9 @@ class TestSettleWaitsForTheExit:
         assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.TIMEOUT]
 
     async def test_no_exit_without_a_deadline_is_a_crash(self, patch_exec, tmp_path, monkeypatch):
-        from coder_eval.agents import pi_agent
+        from coder_eval.agents._transport import subprocess_jsonl
 
-        monkeypatch.setattr(pi_agent, "_TERM_GRACE_SECONDS", 0.1)
+        monkeypatch.setattr(subprocess_jsonl, "_TERM_GRACE_SECONDS", 0.1)
         proc = _EofButAliveProcess([_turn_start()])
         patch_exec(proc)
         recorder = _EventRecorder()

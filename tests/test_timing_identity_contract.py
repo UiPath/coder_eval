@@ -24,19 +24,12 @@ messages and commands it produced through a real ``EventCollector`` — the same
 seam production uses to compute the head and the tail. Every number asserted is
 therefore one the harness computed, against a span the test declared.
 
-Three clock-injection styles are needed, and all three already exist in the
-per-harness suites (this module reuses their idiom rather than inventing a
-fourth):
-
-* an injected ``TurnClock`` — pi, antigravity and claude-code take ``clock=``
-  / build one through a patched ``TurnClock`` factory;
-* a ``datetime`` SUBCLASS monkeypatched onto the module — opencode, which also
-  calls ``datetime.fromtimestamp`` through the same global (see
-  ``tests/test_opencode_agent.py``'s ``_SteppedClock`` for why a stub breaks);
-* ``time.monotonic`` patched ON TOP of an injected clock — claude-code, whose
-  ``turn_start_time``, turn deadline and measured tool durations still read
-  ``time.monotonic()``, so scripting only the clock leaves the reducer
-  straddling a real clock and a scripted one.
+A ported harness is driven through ``coder_eval.testing.replay``: its decoder runs
+on a real ``TurnEmitter`` whose ``ScriptedClock`` moves on each ``Tick`` (pi), or on
+scripted CLI epoch stamps under ``cli_epoch_ms`` (opencode). The harnesses not yet
+ported keep their older idioms: an injected ``TurnClock`` (antigravity, claude-code),
+with ``time.monotonic`` patched on top for claude-code, whose deadline and measured
+tool durations still read it.
 
 Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
 from any host clock, so its case scripts those stamps directly.
@@ -198,52 +191,45 @@ def _pi_replay(*, untile: bool = False) -> Replay:
 # --------------------------------------------------------------------------
 
 
-class _SteppedDatetime(datetime):
-    """A clock the test moves by hand, in ms from ``BASE``.
+def _opencode_replay() -> Replay:
+    """The same two-window shape, driven through OpenCode's step stream on the CLI's own stamps.
 
-    Subclasses ``datetime`` rather than stubbing it, because the reducer also
-    calls ``datetime.fromtimestamp`` through the same module global to convert
-    the CLI's epoch stamps, and that must keep resolving to the real
-    implementation — the CLI's stamps and the reducer's own ``now()`` reads
-    have to land on ONE timeline for the arithmetic to mean anything.
+    Under ``cli_epoch_ms`` the windows are bounded by each event's envelope
+    ``timestamp`` and the tool by ``state.time``; only the bracket reads the clock.
     """
+    from coder_eval.agents.opencode_agent import _OpenCodeDecoder
+    from coder_eval.models import TimingBasis
 
-    at_ms = 0.0
+    def event(event_type: str, at_ms: int, **part: Any) -> dict[str, Any]:
+        return {"type": event_type, "timestamp": EPOCH_MS + at_ms, "part": part}
 
-    @staticmethod
-    def now(tz: Any = None) -> datetime:  # type: ignore[override]
-        return at(_SteppedDatetime.at_ms)
-
-
-def _opencode_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
-    """The same two-window shape, driven through OpenCode's step stream."""
-    from coder_eval.agents import opencode_agent as opencode_module
-    from coder_eval.agents.opencode_agent import _OpenCodeTurnState
-
-    monkeypatch.setattr(opencode_module, "datetime", _SteppedDatetime)
-    state = _OpenCodeTurnState(task_id="t", iteration=1, user_input="go", model="m")
-    commands: list[CommandTelemetry] = []
-    state.bind(lambda e: commands.append(e.tool) if isinstance(e, ToolEndEvent) else None)
     finish = {"reason": "stop", "tokens": {"input": 10, "output": 5}}
-
-    _SteppedDatetime.at_ms = 500  # Node boot: head
-    state.on_step_start({"messageID": "m1"})
-    _SteppedDatetime.at_ms = 1200
-    state.on_tool_use(
-        {
-            "callID": "c1",
-            "tool": "bash",
-            "state": {"status": "completed", "time": {"start": EPOCH_MS + 700, "end": EPOCH_MS + 1200}},
-        }
+    stream = [
+        Tick(500),
+        event("step_start", 500, messageID="m1"),  # Node boot before it: head
+        Tick(1200),
+        event(
+            "tool_use",
+            1200,
+            callID="c1",
+            tool="bash",
+            state={"status": "completed", "time": {"start": EPOCH_MS + 700, "end": EPOCH_MS + 1200}},
+        ),
+        Tick(2000),
+        event("step_finish", 2000, **finish),
+        Tick(2600),
+        event("step_start", 2600, messageID="m2"),
+        Tick(3000),
+        event("step_finish", 3000, **finish),
+        Tick(3500),
+    ]
+    return replay(
+        stream,
+        _OpenCodeDecoder,
+        clock=ScriptedClock(BASE),
+        basis=TimingBasis.CLI_EPOCH_MS,
+        end=lambda d: d.end(AgentEndStatus.COMPLETED),
     )
-    _SteppedDatetime.at_ms = 2000
-    state.on_step_finish(finish)
-    _SteppedDatetime.at_ms = 2600
-    state.on_step_start({"messageID": "m2"})
-    _SteppedDatetime.at_ms = 3000
-    state.on_step_finish(finish)
-
-    return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=commands)
 
 
 # --------------------------------------------------------------------------
@@ -572,8 +558,9 @@ def test_pi_buckets_tile_the_turn():
     assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
-def test_opencode_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
-    _assert_closes(_opencode_turn(monkeypatch))
+def test_opencode_buckets_tile_the_turn():
+    result = _opencode_replay()
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 def test_antigravity_buckets_tile_the_turn():

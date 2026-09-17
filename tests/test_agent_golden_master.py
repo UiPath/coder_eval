@@ -63,26 +63,6 @@ NO_GENERATION_WINDOW: frozenset[str] = frozenset(
         # subtraction in codex_agent._flush_message.
         "codex_d_cross_flush_is_error",  # flush lands before the tool completes: zero-width window
         "codex_e_orphan_tool",  # the tool never completes, so the window never opens
-        # Same shape, reached from the opposite direction. This scenario injects
-        # a 5 ms CLI tool interval into a replay whose whole turn is well under
-        # one millisecond, so the tool spans BOTH windows entirely and the
-        # central subtraction takes each down to a measured 0.0. It is the tool
-        # interval that is fictional, not the subtraction — which is why the
-        # scenario is in FICTIONAL_DURATIONS too.
-        #
-        # BE HONEST ABOUT WHAT IS LEFT. With both exemptions on, this snapshot
-        # asserts neither the identity nor a positive window, and it does NOT
-        # record the tiling the scenario is named for — `SCRUB_KEYS` masks
-        # `started_at`, `completed_at` and `generation_duration_ms`, so nothing
-        # about where a window opened survives into the JSON. What it still
-        # pins is the STRUCTURE: two assistant messages, their content blocks,
-        # their token buckets, and one resolved command. OpenCode's tiling is
-        # asserted where it can be — `tests/test_timing_identity_contract.py`
-        # (scripted clock, ms-exact) and
-        # `tests/test_opencode_agent.py::TestGenerationWindowsTileTheTurn`.
-        # `pi_c_multi_turn_tiling` is the same scenario shape on a harness whose
-        # stamps come from its own clock, and it needs neither exemption.
-        "opencode_c_multi_step_tiling",
     }
 )
 
@@ -118,6 +98,13 @@ FICTIONAL_DURATIONS: frozenset[str] = frozenset(
         "codex_f_collab_fallback",  # 900 ms collab wait
         "codex_h_no_turn_completed_crash",  # 200 ms of item time — see below
         "opencode_b_tool_call_resolved",  # 17 ms tool interval
+        # OpenCode bounds every window and tool on the CLI's own envelope and
+        # `state.time` epoch stamps (timing_basis cli_epoch_ms), scripted in whole
+        # milliseconds, while the host bracket spans a sub-millisecond replay.
+        "opencode_a_single_text_turn",
+        "opencode_d_orphaned_tool",
+        "opencode_e_error_after_generation",
+        "opencode_f_captured_stream",  # a real 2.3 s CLI timeline
         # 5 ms tool interval, injected as CLI epoch stamps. OpenCode takes its
         # tool bounds from the CLI payload rather than from its own clock, so
         # every scenario of this harness that resolves a tool injects them —
