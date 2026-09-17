@@ -314,18 +314,10 @@ class Sandbox:
         # remediation rather than derivation) are still deliberately skipped.
         self._prepare_mock_path_dirs()
 
-        # DISCOVER rather than create when the venv survived -- so criteria get
-        # the SAME VIRTUAL_ENV/PATH the agent had, not a freshly reinstalled one.
-        # But a workspace ADOPTED FROM A CAPTURED WORKDIR (Sandbox.capture_to, the
-        # docker-WORKDIR-alignment / Harbor `--workspace-dir` path) never has one:
-        # `.venv` / `node_modules` / `.npm-prefix` are in `_WORKSPACE_CAPTURE_IGNORE`
-        # as noise, so the execute phase's own install is silently gone by the time
-        # grading adopts this workspace -- `run_command` criteria then see a bare
-        # interpreter with none of `env_packages` installed. Re-provision from
-        # scratch whenever the venv is missing AND there is something to install --
-        # never for the common `env_packages: []` case, which has nothing worth a
-        # venv for and must stay a no-op (a bare `sandbox.python` block, the
-        # default, is not itself a request for a venv).
+        # DISCOVER rather than create when the venv survived; re-provision only if
+        # it is missing AND env_packages is non-empty, so a captured/stripped
+        # workspace (Sandbox.capture_to drops .venv/node_modules as noise) still
+        # gets its packages, while the default `env_packages: []` case stays a no-op.
         # Rationale: .claude/notes/isolation.md § Why the venv gets system site packages
         if self.config.python:
             candidate = self.sandbox_dir / VENV_DIRNAME
