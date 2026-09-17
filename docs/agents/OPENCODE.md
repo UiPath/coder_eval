@@ -183,8 +183,8 @@ keys are coarser than its tools: `edit` governs `write`, `edit`, `patch`,
 no OpenCode equivalent restricts nothing; an allowlist of only such names denies
 every tool. An empty `allowed_tools: []` restricts nothing, as on Claude Code. Our
 rules are placed after every inherited rule, because OpenCode applies the last
-matching rule. A host rule for `external_directory` or `doom_loop` is kept, so a tool
-allowlist never loosens it. A string rule such as `read: "allow"` replaces the CLI's default
+matching rule. A host rule for `external_directory` or `doom_loop` is kept and placed
+after `"*": "deny"`, so a tool allowlist neither loosens nor hides it. A string rule such as `read: "allow"` replaces the CLI's default
 `.env` read deny, which is acceptable inside a sandbox.
 
 `system_prompt` is written to a temporary file outside the sandbox and listed in

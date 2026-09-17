@@ -141,7 +141,7 @@ class TestTheTurn:
         assert "docs/agents/SCRIPT.md" in outcome.error
 
     async def test_the_deadline_is_a_timeout_and_the_process_group_is_gone(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(subprocess_jsonl, "_TERM_GRACE_SECONDS", 0.5)
+        monkeypatch.setattr(subprocess_jsonl, "KILL_GRACE_SECONDS", 0.5)
         script = f"import subprocess, time\nsubprocess.Popen(['sleep', '60'])\n{_say('started')}\ntime.sleep(60)"
         agent = _ScriptAgent(script)
         await agent.start(str(tmp_path))
@@ -164,6 +164,55 @@ class TestTheTurn:
                 break
             await asyncio.sleep(0.05)
         assert _group_is_gone(spawned[0]), "the grandchild survived: the process group was not swept"
+
+    async def test_a_child_holding_stdout_does_not_hold_the_turn_past_the_drain(self, tmp_path):
+        script = f"import subprocess\nsubprocess.Popen(['sleep', '30'])\n{_say('done')}"
+        agent = _ScriptAgent(script)
+        await agent.start(str(tmp_path))
+        started = asyncio.get_running_loop().time()
+        outcome = await agent.communicate("go", iteration=1, timeout=20)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert outcome.status is AgentEndStatus.COMPLETED
+        assert outcome.record.agent_output == "done"
+        assert elapsed < subprocess_jsonl._DRAIN_SECONDS + 3.0
+
+    async def test_a_finished_turn_sweeps_the_children_it_left_behind(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(subprocess_jsonl, "_DRAIN_SECONDS", 0.2)
+        script = f"import subprocess\nsubprocess.Popen(['sleep', '30'], stdout=subprocess.DEVNULL)\n{_say('done')}"
+        agent = _ScriptAgent(script)
+        await agent.start(str(tmp_path))
+        spawned: list[int] = []
+        original = asyncio.create_subprocess_exec
+
+        async def recording_exec(*args: Any, **kwargs: Any) -> Any:
+            proc = await original(*args, **kwargs)
+            spawned.append(proc.pid)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_exec)
+        outcome = await agent.communicate("go", iteration=1, timeout=20)
+        assert outcome.status is AgentEndStatus.COMPLETED
+        assert agent._spawned_pgids == []
+        for _ in range(100):
+            if _group_is_gone(spawned[0]):
+                break
+            await asyncio.sleep(0.05)
+        assert _group_is_gone(spawned[0]), "the child of a finished turn survived the turn"
+
+    async def test_a_cli_that_ignores_sigterm_times_out_inside_the_orchestrator_backstop(self, tmp_path):
+        from coder_eval.orchestrator import _WAIT_FOR_GRACE_SECONDS
+
+        script = f"import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n{_say('x')}\ntime.sleep(60)"
+        agent = _ScriptAgent(script)
+        await agent.start(str(tmp_path))
+        recorder = _Recorder()
+        timeout = 1.0
+        outcome = await asyncio.wait_for(
+            agent.communicate("go", iteration=1, stream_callback=recorder, timeout=timeout),
+            timeout=timeout + _WAIT_FOR_GRACE_SECONDS,
+        )
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert [e.status for e in recorder.ends()] == [AgentEndStatus.TIMEOUT]
 
     async def test_a_stop_after_the_first_line_kills_and_ends_cleanly(self, tmp_path):
         script = f"import time\n{_say('one')}\n{_say('two')}\ntime.sleep(60)"

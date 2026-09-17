@@ -72,9 +72,13 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
     check_api_keys()
 
     # Lazy import to avoid circular dependency at module level
-    from ..orchestration.experiment import DEFAULT_EXPERIMENT_PATH, load_experiment, resolve_task_for_variant
+    from ..orchestration.experiment import (
+        DEFAULT_EXPERIMENT_PATH,
+        load_experiment,
+        resolve_variant_prompt_files,
+        resolve_variant_task,
+    )
     from ..orchestration.harness_contract import TaskResolutionError
-    from ..orchestration.resolution_checks import validate_resolved_task
     from ..orchestration.run_limits import validate_run_limits
 
     # Always load experiment (defaults to experiments/default.yaml)
@@ -87,6 +91,7 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
             default_exp = load_experiment(DEFAULT_EXPERIMENT_PATH)
         else:
             default_exp = exp_def  # fall back to custom as its own baseline
+        resolve_variant_prompt_files(exp_def, exp_path)
     except Exception as e:
         console.print(f"[red]Failed to load experiment ({exp_path}): {e}[/red]")
         raise typer.Exit(1) from e
@@ -141,8 +146,9 @@ def run_plan(*, task_files: list[Path] | None = None, experiment: Path | None = 
             # Show resolved agent per variant
             for variant in exp_def.variants:
                 try:
-                    resolved, _lineage, _ = resolve_task_for_variant(default_exp, task, exp_def, variant)
-                    validate_resolved_task(resolved)
+                    resolved, _lineage, _ = resolve_variant_task(
+                        default_exp, task, exp_def, variant, None, task_file=task_file, experiment_file=exp_path
+                    )
                     for message in validate_run_limits(resolved):
                         console.print(
                             f"    [yellow]⚠[/yellow] [yellow]Variant '{variant.variant_id}': {message}[/yellow]"

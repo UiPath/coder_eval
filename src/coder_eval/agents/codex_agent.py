@@ -120,10 +120,8 @@ _ROLLOUT_TOOL_OUTPUT_TYPES = frozenset({"function_call_output", "custom_tool_cal
 _STREAM_DONE = object()
 
 
-def _ms_to_dt(ms: int | None) -> datetime:
-    """Convert a Codex Unix-millisecond timestamp to a datetime (now() if absent)."""
-    if ms is None:
-        return datetime.now()
+def _ms_to_dt(ms: int) -> datetime:
+    """Convert a Codex Unix-millisecond timestamp to a datetime."""
     return datetime.fromtimestamp(ms / 1000)
 
 
@@ -149,9 +147,7 @@ class _ToolEnd(NamedTuple):
 def _item_timing(started_ms: int | None, completed_ms: int | None, sdk_duration_ms: float | None) -> _ItemTiming:
     """Resolve a tool item's timing from the SDK's millisecond stamps.
 
-    BOTH stamps or neither: pairing a real stamp with ``_ms_to_dt(None)`` — which
-    is ``datetime.now()`` — fabricates an interval out of one reading and the
-    current time, so the raw values are checked BEFORE conversion.
+    BOTH stamps or neither: one stamp is no interval.
 
     Without them, the SDK item's own ``duration_ms`` is used only when it reports
     something. A ``0`` there is an UNREPORTED duration, not an instant command (70
@@ -369,6 +365,8 @@ class _CodexDecoder:
         if root_type is None or root_type in _CONTENT_ITEM_TYPES:
             return
         tool_id = self._tool_id(root, root_type, starting=True)
+        if started_at_ms is not None:
+            self.start_ms_by_id[tool_id] = started_at_ms
         self.opened_tools.add(tool_id)
         self.emitter.open_tool(
             tool_id,
@@ -526,7 +524,7 @@ class _CodexDecoder:
         # LAST item's completion, so its tool execution comes back out centrally.
         mark_ms = self.gen_mark_ms if self.gen_mark_ms is not None else self.open_start_ms
         window_end_ms = self.open_end_ms if self.open_end_ms is not None else self.open_start_ms
-        if mark_ms is None and window_end_ms is None:
+        if mark_ms is None or window_end_ms is None:
             for part in parts:
                 self.messages.append(self.emitter.add_unmeasured_generation(message_id=message_id, part=part))
         else:

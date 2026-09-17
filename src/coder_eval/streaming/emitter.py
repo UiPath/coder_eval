@@ -145,6 +145,7 @@ class TurnEmitter:
         self._ending = False
         self._dropped_logged = False
         self._open_tools: dict[str, _OpenTool] = {}
+        self._closed_tool_ids: set[str] = set()
         self._sequence = 0
         self._messages: list[AssistantMessage] = []
         self._text: list[str] = []
@@ -230,12 +231,14 @@ class TurnEmitter:
     ) -> None:
         """Record a tool call's start; ``timestamp`` is the execution start, else the clock.
 
+        An id already closed in this turn is ignored: a call is opened and closed once.
+
         Raises:
             TypeError: on a main-thread tool, ``started_at`` passed under ``TURN_CLOCK`` or
                 omitted under ``CLI_EPOCH_MS``. A nested tool takes either.
         """
         self._require_begun("open_tool")
-        if self._ended():
+        if self._ended() or self._already_closed(tool_id):
             return
         now = self.now()
         execution_started_at = self._stamp("started_at", started_at, now, parent_tool_id)
@@ -265,7 +268,9 @@ class TurnEmitter:
         started_at: datetime | None = None,
         reported_duration_ms: float | None = None,
     ) -> None:
-        """Record a tool call's end; an unknown id synthesizes a ``tool_name="unknown"`` call.
+        """Record a tool call's end; a never-opened id synthesizes a ``tool_name="unknown"`` call.
+
+        An id already closed in this turn is ignored, so a repeated close cannot replace the record.
 
         Only a resolved call is timed: ``UNRESOLVED`` keeps ``execution_started_at``
         and sets no completion stamp and no duration. ``started_at`` is a CLI start
@@ -286,6 +291,8 @@ class TurnEmitter:
                 "started_at= and reported_duration_ms= are not accepted under TimingBasis.TURN_CLOCK: "
                 + "the emitter stamps the clock"
             )
+        if self._already_closed(tool_id):
+            return
         opened = self._open_tools.get(tool_id)
         stamp = self._stamp("completed_at", completed_at, self.now(), opened.parent_tool_id if opened else None)
         if opened is not None and started_at is not None and opened.telemetry.execution_started_at is None:
@@ -469,6 +476,12 @@ class TurnEmitter:
             raise TypeError(f"{keyword}= is required under TimingBasis.{self._basis.name} (None means no CLI stamp)")
         return value
 
+    def _already_closed(self, tool_id: str) -> bool:
+        if tool_id not in self._closed_tool_ids:
+            return False
+        logger.debug("ignoring a repeated open or close for tool id %s, already closed in this turn", tool_id)
+        return True
+
     def _close(
         self,
         tool_id: str,
@@ -481,6 +494,7 @@ class TurnEmitter:
         reported_duration_ms: float | None = None,
     ) -> None:
         now = self.now()
+        self._closed_tool_ids.add(tool_id)
         opened = self._open_tools.pop(tool_id, None)
         if opened is None:
             opened = _OpenTool(

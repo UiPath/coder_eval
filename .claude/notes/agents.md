@@ -644,7 +644,19 @@ deadline, and signalling only the CLI pid orphans the child. Each invocation the
 in its own session, so its pgid is the CLI's pid and the group holds only what that
 invocation spawned; each read races against process exit, and a bounded drain collects the
 tail. Sessions are persisted on disk, so killing a turn's server does not lose `--session`
-continuity.
+continuity. The group is swept at the end of EVERY turn, a clean one too: a child left
+alive until `stop()` keeps running against the sandbox, and its pgid can be reused by
+another task's CLI by the time `stop()` signals it.
+
+Exit is detected by polling `returncode`, never by `Process.wait()` alone. On CPython 3.13
+`wait()` resolves only once every pipe closes, so a child that holds stdout keeps it
+pending and the bounded drain never starts: a clean exit waited for the child, or became a
+TIMEOUT.
+
+`KILL_GRACE_SECONDS` (SIGTERM to SIGKILL) must stay below the orchestrator's
+`_WAIT_FOR_GRACE_SECONDS`. When it was 5 s against a 2 s backstop, a CLI slow on SIGTERM
+was cancelled by the backstop, and its only end event was `CRASHED "turn cancelled"`, not
+TIMEOUT. `test_a_cli_that_ignores_sigterm_times_out_inside_the_orchestrator_backstop` pins it.
 
 stderr is drained CONCURRENTLY from the moment the CLI starts. Reading it only after exit
 deadlocks the pair: a child that fills the ~64 KiB stderr pipe blocks on write, stops
@@ -672,7 +684,7 @@ tempdir is still reclaimed.
 
 Both nd-JSON harnesses run on `agents/_transport/subprocess_jsonl.py::SubprocessJsonlAgent`,
 which owns this whole transport once: the spawn, the stderr drain, the read loop, the settle,
-`kill` / `kill_sync` / the reap, and `_TERM_GRACE_SECONDS`, `_DRAIN_SECONDS`, `_SIGKILL` and
+`kill` / `kill_sync` / the reap, and `KILL_GRACE_SECONDS`, `_EXIT_GRACE_SECONDS`, `_DRAIN_SECONDS`, `_SIGKILL` and
 `_MAX_UNRECOGNIZED_TYPES`. A subclass keeps its argv, environment, session handling and its
 decoder.
 

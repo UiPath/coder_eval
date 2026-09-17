@@ -465,6 +465,12 @@ class TestUsdBudget:
         assert monitor.cost_usd() == pytest.approx(0.01)
         monitor.raise_if_over_budget(iteration=1)
 
+    def test_an_empty_turn_with_a_nan_reported_cost_costs_nothing(self) -> None:
+        monitor = TurnMonitor.for_task(_task(limits=RunLimits(max_usd=0.10)), arm=True)
+        _feed(monitor, _turn(TokenUsage(total_cost_usd=float("nan"))))
+        assert monitor.cost_usd() == 0.0
+        monitor.raise_if_over_budget(iteration=1)
+
     def test_the_model_the_harness_reports_prices_a_turn_when_agent_model_is_unset(self) -> None:
         monitor = TurnMonitor.for_task(_task(limits=RunLimits(max_usd=0.50)), arm=True)
         _feed(

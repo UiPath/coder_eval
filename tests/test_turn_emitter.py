@@ -292,6 +292,18 @@ class TestTools:
         assert commands["ghost"].sequence_number == 1
         assert commands["ghost"].result_status == "error"
 
+    def test_a_second_close_on_the_same_id_keeps_the_first_record(self) -> None:
+        emitter, clock, sink = _emitter()
+        emitter.open_tool("c1", "Bash", {})
+        clock.ms = 10
+        emitter.close_tool("c1", status=ToolEndStatus.OK)
+        clock.ms = 20
+        emitter.close_tool("c1", status=ToolEndStatus.ERROR, error="late")
+        emitter.open_tool("c1", "Bash", {})
+        command = emitter.finalize(AgentEndStatus.COMPLETED).record.commands
+        assert [(c.tool_name, c.duration_ms, c.result_status) for c in command] == [("Bash", 10.0, "success")]
+        assert (len(sink.of(ToolStartEvent)), len(sink.of(ToolEndEvent))) == (1, 1)
+
     def test_close_refreshes_parameters_and_result_data(self) -> None:
         emitter, _, _ = _emitter()
         emitter.open_tool("c1", "Bash", {"a": 1})

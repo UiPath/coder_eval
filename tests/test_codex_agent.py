@@ -2640,6 +2640,19 @@ class TestFlushMessageWindowBounds:
         )
         assert message.generation_duration_ms == pytest.approx(1000.0)
 
+    def test_a_mark_without_a_window_end_is_unmeasured_not_host_clocked(self):
+        message = self._flush(gen_mark_ms=_BOUNDS_EPOCH_MS + 2000, open_start_ms=None, open_end_ms=None)
+        assert message.generation_duration_ms is None
+
+    def test_an_idless_tool_keeps_its_cli_start_stamp(self):
+        decoder = _decoder()
+        root = SimpleNamespace(type="commandExecution", id=None, command="ls", exit_code=0, aggregated_output="")
+        decoder(_item_notification("item/started", root, started_at_ms=_BOUNDS_EPOCH_MS + 100))
+        decoder(_item_notification("item/completed", root, completed_at_ms=_BOUNDS_EPOCH_MS + 350))
+        command = decoder.end(AgentEndStatus.COMPLETED).record.commands[0]
+        assert command.execution_started_at == _ms_to_dt(_BOUNDS_EPOCH_MS + 100)
+        assert command.duration_ms == pytest.approx(250.0)
+
 
 class TestFlushMessageGenTimeSplit:
     """`gen_ms` is apportioned across sub-messages by their output share.

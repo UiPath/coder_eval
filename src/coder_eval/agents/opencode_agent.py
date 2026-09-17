@@ -708,11 +708,13 @@ class OpenCodeAgent(SubprocessJsonlAgent[OpenCodeAgentConfig]):
             ]
         if permission:
             # OpenCode applies the LAST matching rule, so ours go after every inherited one.
-            # A host rule for a non-tool key is kept: a tool allowlist must not loosen it.
+            # A host rule for a non-tool key is kept, and placed after ours so `"*"` does not hide it.
             inherited_rules = config.get("permission")
             inherited = inherited_rules if isinstance(inherited_rules, dict) else {}
-            ours = {k: v for k, v in permission.items() if not (k in _NON_TOOL_PERMISSIONS and k in inherited)}
-            config["permission"] = {**{k: v for k, v in inherited.items() if k not in ours}, **ours}
+            kept = {k: v for k, v in inherited.items() if k in _NON_TOOL_PERMISSIONS}
+            ours = {k: v for k, v in permission.items() if k not in kept}
+            earlier = {k: v for k, v in inherited.items() if k not in ours and k not in kept}
+            config["permission"] = {**earlier, **ours, **kept}
         env[_CONFIG_CONTENT_ENV] = json.dumps(config)
 
     # --- the turn ----------------------------------------------------------

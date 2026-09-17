@@ -33,8 +33,15 @@ from coder_eval.streaming.events import AgentEndStatus, StopReason, end_status_f
 
 logger = logging.getLogger(__name__)
 
-# Grace between SIGTERM and SIGKILL, and the post-EOF exit grace when no deadline is set.
-_TERM_GRACE_SECONDS = 5.0
+# Grace between SIGTERM and SIGKILL. It must stay below the orchestrator's backstop grace,
+# or a slow SIGTERM turns a TIMEOUT into a cancelled crash.
+KILL_GRACE_SECONDS = 1.0
+
+# How long a CLI that closed its event stream may take to exit when no deadline is set.
+_EXIT_GRACE_SECONDS = 5.0
+
+# How often exit is polled: `Process.wait()` resolves only once every pipe closes.
+_EXIT_POLL_SECONDS = 0.05
 
 # SIGKILL does not exist on Windows (where the process-group sweep is a no-op).
 _SIGKILL: signal.Signals = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -162,7 +169,7 @@ class SubprocessJsonlAgent[ConfigT: BaseAgentConfig](Agent[ConfigT]):
             if proc.stderr is not None:
                 stderr_drain = asyncio.ensure_future(proc.stderr.read())
 
-            exit_waiter = asyncio.ensure_future(proc.wait())
+            exit_waiter = asyncio.ensure_future(_exited(proc))
             read_task: asyncio.Future[bytes] | None = None
             try:
                 while True:
@@ -178,8 +185,9 @@ class SubprocessJsonlAgent[ConfigT: BaseAgentConfig](Agent[ConfigT]):
                         return await self._time_out(decoder, timeout or 0.0)
                     if not read_task.done():
                         # Exited with the read pending: bound the tail, a child may hold the pipe.
+                        drain = _DRAIN_SECONDS if deadline is None else min(_DRAIN_SECONDS, deadline - time.monotonic())
                         try:
-                            await asyncio.wait_for(asyncio.shield(read_task), _DRAIN_SECONDS)
+                            await asyncio.wait_for(asyncio.shield(read_task), max(0.0, drain))
                         except TimeoutError:
                             break
                     line = read_task.result()
@@ -242,13 +250,14 @@ class SubprocessJsonlAgent[ConfigT: BaseAgentConfig](Agent[ConfigT]):
         """
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
         try:
-            await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS if remaining is None else remaining)
+            if proc.returncode is None:
+                await asyncio.wait_for(_exited(proc), timeout=_EXIT_GRACE_SECONDS if remaining is None else remaining)
         except TimeoutError:
             if remaining is not None:
                 return await self._time_out(decoder, timeout or 0.0)
             await self.kill()
             return self._crash(
-                decoder, f"{self.cli_name} closed its event stream but did not exit within {_TERM_GRACE_SECONDS:.0f}s"
+                decoder, f"{self.cli_name} closed its event stream but did not exit within {_EXIT_GRACE_SECONDS:.0f}s"
             )
         stderr_bytes = b""
         if stderr_drain is not None:
@@ -311,7 +320,7 @@ class SubprocessJsonlAgent[ConfigT: BaseAgentConfig](Agent[ConfigT]):
             with contextlib.suppress(ProcessLookupError):
                 proc.terminate()
             with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
-                await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SECONDS)
+                await asyncio.wait_for(_exited(proc), timeout=KILL_GRACE_SECONDS)
             if proc.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
@@ -335,12 +344,26 @@ class SubprocessJsonlAgent[ConfigT: BaseAgentConfig](Agent[ConfigT]):
         self._spawned_pgids.clear()
 
     def _reap(self, proc: asyncio.subprocess.Process | None) -> None:
-        """Kill a CLI still running as the turn unwinds; synchronous, so it survives a cancel."""
-        if proc is None or proc.returncode is not None:
-            return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            proc.kill()
+        """Kill a CLI still running as the turn unwinds, then sweep the turn's process groups.
+
+        Synchronous, so it survives a cancel. The sweep runs after a clean exit too: a child
+        the turn left behind must not outlive it.
+        """
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                proc.kill()
         self._sweep_process_groups()
+
+
+async def _exited(proc: asyncio.subprocess.Process) -> int | None:
+    """Resolve when the process exits, even while a child still holds its pipes."""
+    waiter = asyncio.ensure_future(proc.wait())
+    try:
+        while not waiter.done() and proc.returncode is None:
+            await asyncio.wait({waiter}, timeout=_EXIT_POLL_SECONDS)
+        return proc.returncode
+    finally:
+        waiter.cancel()
 
 
 class _Vocabulary:

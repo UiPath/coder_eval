@@ -322,8 +322,8 @@ class TurnMonitor:
         self._in_flight = TokenUsage()
 
     def _price(self, usage: TokenUsage) -> float | None:
-        if usage.is_empty() and usage.total_cost_usd is None:
-            return 0.0
+        if usage.is_empty():
+            return price_turn(usage, ()) or 0.0
         return price_turn(usage, (self._model, self._start_model, self._reported_model))
 
     def _breach(self) -> tuple[str, float, float] | None:

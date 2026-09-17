@@ -910,14 +910,17 @@ class TestSystemPromptInstructions:
         assert rules[0] == ("webfetch", "allow")
         assert rules[1] == ("*", "deny")
 
-    async def test_an_allowlist_keeps_a_host_rule_for_a_non_tool_permission(self, patch_exec, tmp_path, monkeypatch):
-        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"permission": {"external_directory": "deny"}}))
+    @pytest.mark.parametrize("host_rule", ["allow", "deny"])
+    async def test_an_allowlist_keeps_a_host_rule_for_a_non_tool_permission(
+        self, patch_exec, tmp_path, monkeypatch, host_rule
+    ):
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"permission": {"external_directory": host_rule}}))
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         await _run(_agent(allowed_tools=["Read"]), tmp_path)
-        rules = json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])["permission"]
-        assert rules["external_directory"] == "deny"
-        assert rules["doom_loop"] == "allow"
-        assert next(iter(rules)) == "external_directory"
+        rules = list(json.loads(captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"])["permission"].items())
+        assert rules[0] == ("*", "deny")
+        assert rules[-1] == ("external_directory", host_rule)
+        assert ("doom_loop", "allow") in rules
 
     async def test_no_prompt_writes_no_file(self, patch_exec, tmp_path):
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
@@ -1653,7 +1656,7 @@ class TestTimeoutContract:
     async def test_eof_without_exit_and_no_deadline_crashes(self, patch_exec, monkeypatch, tmp_path):
         """With no turn deadline configured, the reap still gets a fixed grace —
         a stream-closed-but-wedged CLI is a crash, not an indefinite hang."""
-        monkeypatch.setattr("coder_eval.agents._transport.subprocess_jsonl._TERM_GRACE_SECONDS", 0.1)
+        monkeypatch.setattr("coder_eval.agents._transport.subprocess_jsonl._EXIT_GRACE_SECONDS", 0.1)
         proc = _EofNoExitProcess(HAPPY_STREAM)
         patch_exec(proc)
 
@@ -1832,15 +1835,14 @@ class TestTurnAlwaysReapsTheCli:
 
         assert proc.killed is True
 
-    async def test_a_clean_turn_kills_nothing(self, patch_exec, tmp_path):
-        """The happy path is unchanged: the CLI exited, so the guard is a no-op
-        and the server child survives for the next turn's `--session` resume."""
+    async def test_a_clean_turn_sweeps_only_the_group(self, patch_exec, tmp_path):
+        """The CLI exited, so it is not killed; the server child it left is swept with the turn."""
         proc = _FakeProcess(HAPPY_STREAM)
         captured = patch_exec(proc)
         await _run(_agent(), tmp_path)
 
         assert proc.killed is False
-        assert captured["killpg"] == []
+        assert captured["killpg"] == [(4242, signal.SIGKILL)]
 
     async def test_a_spawn_failure_has_no_process_to_reap(self, monkeypatch, tmp_path):
         """`proc` is unbound on this path; the guard must not raise NameError over it."""
@@ -1865,16 +1867,16 @@ class TestProcessGroupTeardown:
         await _run(_agent(), tmp_path)
         assert captured["kwargs"]["start_new_session"] is (os.name == "posix")
 
-    async def test_stop_sweeps_the_spawned_group(self, patch_exec, tmp_path):
-        """`opencode run` leaves a server child holding the pipes; stop() must
-        SIGKILL the whole group or every task in a batch leaks one."""
+    async def test_a_clean_turn_sweeps_the_spawned_group_once(self, patch_exec, tmp_path):
+        """`opencode run` leaves a server child holding the pipes; the turn must
+        SIGKILL the whole group, and stop() must not signal a pgid that may be reused."""
         captured = patch_exec(_FakeProcess(HAPPY_STREAM))
         agent = _agent()
         await _run(agent, tmp_path)
-        assert captured["killpg"] == []  # a clean turn does not kill mid-run state
+        assert captured["killpg"] == [(4242, signal.SIGKILL)]
 
         await agent.stop()
-        assert (4242, signal.SIGKILL) in captured["killpg"]
+        assert captured["killpg"] == [(4242, signal.SIGKILL)]
 
     async def test_a_crashed_turn_sweeps_the_group_too(self, patch_exec, tmp_path):
         """Killing the CLI pid alone would orphan the server child it left holding

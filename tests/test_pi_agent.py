@@ -682,7 +682,7 @@ class TestSettleWaitsForTheExit:
     async def test_no_exit_without_a_deadline_is_a_crash(self, patch_exec, tmp_path, monkeypatch):
         from coder_eval.agents._transport import subprocess_jsonl
 
-        monkeypatch.setattr(subprocess_jsonl, "_TERM_GRACE_SECONDS", 0.1)
+        monkeypatch.setattr(subprocess_jsonl, "_EXIT_GRACE_SECONDS", 0.1)
         proc = _EofButAliveProcess([_turn_start()])
         patch_exec(proc)
         recorder = _EventRecorder()
@@ -1181,13 +1181,13 @@ class TestTurnAlwaysReapsTheCli:
             _ = await task  # the await re-raises the cancellation; no value ever exists
         assert proc.killed is True
 
-    async def test_a_clean_turn_kills_nothing(self, patch_exec, tmp_path):
-        """The happy path is unchanged: the CLI exited, so the reaper is a no-op."""
+    async def test_a_clean_turn_sweeps_only_the_group(self, patch_exec, tmp_path):
+        """The CLI exited, so it is not killed; any child it left is swept with the turn."""
         proc = _FakeProcess(HAPPY_STREAM)
         captured = patch_exec(proc)
         await _run(_agent(), tmp_path)
         assert proc.killed is False
-        assert captured["killpg"] == []
+        assert captured["killpg"] == [(4242, signal.SIGKILL)]
 
 
 class TestExternalCancel:
