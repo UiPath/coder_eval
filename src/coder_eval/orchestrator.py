@@ -11,7 +11,6 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
-from inspect import isawaitable
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
@@ -1414,21 +1413,6 @@ class Orchestrator:
                 + "the full trajectory is the deliverable."
             )
 
-    def _restore_recorded_command_path(self) -> None:
-        """Re-apply the graded run's own PATH before its criteria run.
-
-        PATH parity with the run being graded. `_sync_sandbox_command_path_with_
-        agent` recorded the agent's effective PATH; no agent runs on the
-        evaluate-only path, so restore it explicitly or `run_command` criteria
-        resolve binaries against ambient PATH and can disagree with the original
-        verdict.
-        """
-        assert self.result is not None
-        assert self.sandbox is not None
-        restored_path = self.result.environment_info.get("command_base_path")
-        if isinstance(restored_path, str) and restored_path:
-            self.sandbox.set_command_base_path(self._sanitize_restored_path(restored_path))
-
     async def _setup(self) -> None:
         """Set up all components for evaluation.
 
@@ -1456,7 +1440,6 @@ class Orchestrator:
             self.sandbox.reference_dir = self._reference_dir
             self.result.sandbox_path = str(self.sandbox.sandbox_dir)
 
-            self._restore_recorded_command_path()
             recorded_skills = self.prior_result.environment_info.get("skills_offered") if self.prior_result else None
             if isinstance(recorded_skills, list):
                 self._skills_offered = tuple(str(name) for name in recorded_skills)
@@ -1583,55 +1566,6 @@ class Orchestrator:
         # Add installed tool versions (from npm packages etc.)
         if self.sandbox and self.sandbox.installed_tool_versions:
             self.result.environment_info["installed_tools"] = self.sandbox.installed_tool_versions
-
-    def _sync_sandbox_command_path_with_agent(self) -> None:
-        """Align criteria command PATH with the PATH used for the last agent query.
-
-        Called from the per-turn happy path AFTER a successful
-        ``_communicate_with_retry``, which leaves three gaps: an agent crash or
-        turn timeout, evaluate-only mode, and the window before the first turn. In
-        each, criteria fall back to ambient ``os.environ['PATH']``.
-
-        ``Agent.get_sdk_options()`` is declared synchronous on the ABC, but
-        ``AsyncMock`` fixtures return a coroutine for ANY attribute access, so it
-        is closed rather than awaited — a test-fixture concern, logged at DEBUG. A
-        non-dict, non-None return IS a production contract violation and warns.
-
-        Rationale: .claude/notes/orchestration.md § Restoring a PATH from a run directory
-        """
-        if self.agent is None or self.sandbox is None:
-            return
-        sdk_options = self.agent.get_sdk_options()
-        if sdk_options is None:
-            return
-        if isawaitable(sdk_options):
-            close = getattr(sdk_options, "close", None)
-            if callable(close):
-                # `close()` only documents RuntimeError, which cannot apply here,
-                # so narrow the suppress and let real exceptions propagate.
-                with suppress(RuntimeError):
-                    close()
-            logger.debug(
-                "Agent.get_sdk_options() returned an awaitable; skipping PATH sync."
-                + " (Typical when tests stub the agent with AsyncMock.)"
-            )
-            return
-        if not isinstance(sdk_options, dict):
-            logger.warning(
-                "Agent.get_sdk_options() returned non-dict %r; skipping PATH sync.",
-                type(sdk_options).__name__,
-            )
-            return
-        sdk_env = sdk_options.get("env")
-        if not isinstance(sdk_env, dict):
-            return
-        path = sdk_env.get("PATH")
-        if isinstance(path, str) and path:
-            self.sandbox.set_command_base_path(path)
-            # Persisted so a LATER detached grade can restore the same PATH;
-            # otherwise it resolves run_command criteria against ambient PATH.
-            if self.result is not None:
-                self.result.environment_info["command_base_path"] = path
 
     def _eval_route_overrides(self) -> EvalRouteOverrides:
         """The ``(backend, model)`` pair from ``task.checker_context.api_route``, if any.
@@ -1992,49 +1926,6 @@ class Orchestrator:
                 # forward so it isn't dropped from the latest results list.
                 r.token_usage = prior
 
-    def _sanitize_restored_path(self, recorded: str) -> str:
-        """Filter a PATH restored from a run's own ``task.json`` before prepending it.
-
-        The restored value arrives from inside the directory being graded — a
-        shareable artifact, bind-mounted writable into the agent's container under
-        ``driver: docker`` — so verbatim it lets a run dir decide which binary
-        ``pytest`` resolves to on the grader's host.
-
-        Four filters: absolute paths only, existing directories only, nothing
-        inside the workspace, nothing inside the run directory. What remains is the
-        run's genuine toolchain locations.
-
-        Rationale: .claude/notes/orchestration.md § Restoring a PATH from a run directory
-        """
-        workspace = self.sandbox.sandbox_dir.resolve() if self.sandbox and self.sandbox.sandbox_dir else None
-        run_root = self.run_dir.resolve()
-        blocked = [p for p in (workspace, run_root) if p is not None]
-        kept: list[str] = []
-        for entry in recorded.split(os.pathsep):
-            if not entry:
-                continue
-            candidate = Path(entry)
-            if not candidate.is_absolute():
-                logger.warning(
-                    "Dropping recorded PATH entry %r: it is relative, so it would resolve against "
-                    + "the grader's working directory rather than the run's toolchain.",
-                    entry,
-                )
-                continue
-            if not candidate.is_dir():
-                logger.debug("Dropping recorded PATH entry %s: not a directory here.", entry)
-                continue
-            resolved = candidate.resolve()
-            if any(resolved == root or root in resolved.parents for root in blocked):
-                logger.warning(
-                    "Dropping recorded PATH entry %s: it lies inside the run being graded, "
-                    + "so a binary there could shadow a real tool on the grader's host.",
-                    entry,
-                )
-                continue
-            kept.append(str(resolved))
-        return os.pathsep.join(kept)
-
     def _select_gate(self) -> bool:
         """Apply the verdict gate to the criteria results already on ``self.result``.
 
@@ -2151,7 +2042,6 @@ class Orchestrator:
             operation_label="Agent communication",
         )
         self.result.iterations.append(turn_record)
-        self._sync_sandbox_command_path_with_agent()
 
         # Record early-stop info (if the monitor tripped) BEFORE check_all_async, so it
         # survives even if a checker raises. None on a full run or when unarmed.
@@ -2512,7 +2402,6 @@ class Orchestrator:
                     turn_record.messages.insert(0, pending_user_turn)
                     pending_user_turn = None
                 self.result.iterations.append(turn_record)
-                self._sync_sandbox_command_path_with_agent()
                 dialog_pairs.append((current_prompt, _extract_utterance(turn_record.agent_output or "")))
                 agent_meta_parts = []
                 if turn_record.duration_seconds is not None:

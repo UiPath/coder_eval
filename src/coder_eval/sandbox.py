@@ -560,21 +560,22 @@ class Sandbox:
                 logger.debug(f"Overwrote {len(overwrites)} files from {source.path}")
 
     def _prepare_mock_path_dirs(self) -> None:
-        """Apply +x to plain files in each ``mock_path_dirs`` entry.
+        """Make each mock dir executable and put the dirs in front of the criterion PATH.
 
-        Resolves each configured directory against the sandbox root and, for every
-        plain file directly under it, ORs in the user/group/other execute bits.
-        Required on NTFS and after copies that drop the +x bit; a no-op when the
-        bit is already set. Missing entries and non-files (e.g. fixture
-        subdirectories) are skipped silently. PATH wiring happens in the agent --
-        this method only owns the filesystem side.
+        For every plain file directly under a resolved mock dir, ORs in the
+        user/group/other execute bits (required on NTFS and after copies that drop
+        the +x bit). Then sets :attr:`command_base_path` from the same list the
+        orchestrator passes to the agent as ``env_path_prepend``, so a
+        ``run_command`` criterion resolves the binaries the agent saw.
         """
         assert self.sandbox_dir is not None, "Sandbox directory not initialized"
 
-        for dir_path in self.resolved_mock_path_dirs:
+        mock_dirs = self.resolved_mock_path_dirs
+        for dir_path in mock_dirs:
             for entry in dir_path.iterdir():
                 if entry.is_file():
                     entry.chmod(entry.stat().st_mode | 0o111)
+        self._command_base_path = os.pathsep.join(str(d) for d in mock_dirs) or None
 
     @property
     def resolved_mock_path_dirs(self) -> list[Path]:
@@ -903,44 +904,17 @@ class Sandbox:
                         exc,
                     )
 
-    def set_command_base_path(self, path: str | None) -> None:
-        """Set the parent PATH used by sandbox command checks.
-
-        The orchestrator uses this to align success-criteria commands with the
-        PATH passed to the agent SDK. Sandbox-local venv and node bin entries
-        are still prepended by ``run_command``.
-
-        Also re-derives the canonical ``PLUGIN_TOOLS_DIR`` (MST-9795): the
-        resolved ``uip`` binary depends on PATH, and the path-aligned criterion
-        is the canonical lookup. Failures are swallowed — the env var simply
-        stays unset and the CLI falls back to its walk-based discovery.
-
-        Passing ``None`` clears the agent-aligned PATH prefix and re-derives
-        ``PLUGIN_TOOLS_DIR`` from ``os.environ['PATH']`` alone. The new pin
-        may differ from the previous one if the parent PATH resolves ``uip``
-        to a different install — by design, since dropping the agent
-        alignment means the criterion subprocess should now match the parent
-        environment.
-        """
-        self._command_base_path = path or None
-        self._refresh_plugin_tools_dir()
-
     @property
     def command_base_path(self) -> str | None:
-        """Read-only view of the configured base PATH (or ``None`` when unset).
-
-        Tests can observe orchestrator-set overrides without touching the
-        underlying private slot. Mutate via :meth:`set_command_base_path`.
-        """
+        """The resolved mock dirs joined as a PATH prefix, or ``None`` when there are none."""
         return self._command_base_path
 
     @property
     def plugin_tools_dir(self) -> str | None:
         """Canonical ``node_modules/@uipath`` derived from the resolved ``uip``.
 
-        Populated by :meth:`_refresh_plugin_tools_dir` after the agent's PATH
-        is captured. When non-None, ``_build_run_command_env`` exports it as
-        ``PLUGIN_TOOLS_DIR`` so the UiPath CLI pins plugin discovery instead
+        Populated by :meth:`_refresh_plugin_tools_dir` at setup. When non-None,
+        ``_build_run_command_env`` exports it as ``PLUGIN_TOOLS_DIR`` so the UiPath CLI pins plugin discovery instead
         of walking up from CWD — eliminating MST-9795's host-pollution
         asymmetry between authoring-time and criterion-time validation.
 
@@ -952,7 +926,7 @@ class Sandbox:
 
     @property
     def uip_search_path(self) -> str:
-        """The PATH used to resolve ``uip`` — agent-aligned prefix + process PATH.
+        """The PATH used to resolve ``uip`` — mock-dir prefix + process PATH.
 
         The same PATH ``run_command`` subprocesses and the agent SDK env see,
         so a binary resolved against it is the one task commands actually
@@ -979,9 +953,7 @@ class Sandbox:
         ``uip_search_path`` (``command_base_path + os.environ['PATH']`` — the
         same PATH ``run_command`` and the agent SDK will see), then stores the
         result as a string on ``self._plugin_tools_dir`` (or ``None`` if no
-        usable ``uip`` is on PATH). Idempotent across calls; safe to call from
-        both ``setup`` (initial value when no command_base_path yet) and
-        ``set_command_base_path`` (re-derive after PATH alignment).
+        usable ``uip`` is on PATH). Idempotent across calls.
         """
         from .utils import resolve_uipath_plugin_dir
 
@@ -1081,7 +1053,7 @@ class Sandbox:
         """Build the environment for ``run_command``.
 
         Each layer is independent -- none breaks if another is absent: the parent
-        env, the agent's captured SDK PATH (PREPENDED, so system binaries stay
+        env, the mock dirs the agent also got (PREPENDED, so system binaries stay
         reachable), the sandbox venv, ``<sandbox>/node_modules/.bin``,
         ``NODE_PATH=""``, a sandbox-scoped ``NPM_CONFIG_PREFIX``, ``TASK_DIR``,
         ``REFERENCE_DIR``, and ``PLUGIN_TOOLS_DIR`` (which defers to an inherited

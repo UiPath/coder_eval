@@ -634,37 +634,6 @@ silently drops out of the run). The interrupt is caught, the full teardown runs,
 re-raised at the end so callers observe the same exception. The watchdog cancels exactly
 once, so the awaits after the catch run normally.
 
-## Restoring a PATH from a run directory
-
-A run dir is a shareable artifact — that is the whole point of detached grading — and
-under `driver: docker` it is bind-mounted writable into the container the agent runs in.
-The PATH recorded in its own `task.json` is PREPENDED ahead of the host PATH, so taken
-verbatim it lets a run dir decide which binary `pytest` resolves to on the grader's host.
-
-Four filters, all about what PATH parity actually needs:
-
-- **Absolute only.** A relative entry resolves against the grader's current working
-  directory, which has nothing to do with the run, so `evilbin` becomes `$PWD/evilbin` at
-  the front of every criterion subprocess's PATH. It also cannot be the toolchain location
-  it claims to be, since the run resolved it somewhere else.
-- Drop anything that is not an existing directory — a dead entry buys no parity.
-- Drop any entry inside the WORKSPACE being graded: that tree is agent-writable, so a shim
-  dropped there would shadow a real tool.
-- Drop any entry inside the RUN DIRECTORY as a whole. The workspace is only part of it;
-  `artifacts/`, a sibling replicate's tree and the run root all travel in the same shared
-  artifact and are equally attacker-chosen.
-
-The PATH is captured only on the per-turn happy path, after a successful turn, which
-leaves three gaps: an agent crash or turn timeout (the sync never runs, and a crashed
-agent's SDK PATH may itself be unreliable), evaluate-only mode, and the window before the
-first turn. Persisting it is what closes the evaluate-only gap for a LATER detached grade,
-which would otherwise resolve `run_command` criteria against ambient PATH and could reach
-a different verdict than the run it claims to be grading.
-
-A sandbox-setup-time sync was considered and rejected: the agent SDK's effective PATH is
-only knowable after the SDK initializes, so it would capture the configured prepends
-rather than the full agent environment.
-
 ## The dialog loop
 
 (The per-site mechanics stay as comments in `_simulation_dialog_loop`; this is only the

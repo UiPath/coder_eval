@@ -7,7 +7,6 @@ that is wrong. They were all shipped with coverage on the happy path only.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -206,90 +205,6 @@ def test_run_evaluation_has_real_defaults_not_typer_sentinels(tmp_path: Path) ->
     for name in ("work_dir", "workspace", "in_place", "run_dir"):
         assert sig.parameters[name].default is None, f"{name} must default to a real None"
     assert sig.parameters["preserve"].default is True
-
-
-# --------------------------------------------------------------------------
-# The PATH round trip
-# --------------------------------------------------------------------------
-
-
-def test_the_agents_path_is_persisted_so_a_later_grade_can_restore_it(tmp_path: Path) -> None:
-    """Without the persisted value a detached grade resolves `run_command`
-    binaries against ambient PATH and can disagree with the run it grades."""
-    task = TaskDefinition(
-        task_id="t",
-        description="d",
-        initial_prompt="p",
-        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
-        success_criteria=[FileExistsCriterion(path="x.txt", description="x")],
-    )
-    orch = Orchestrator(task=task, run_dir=tmp_path, variant_id="v")
-    orch.result = EvaluationResult(
-        task_id="t",
-        task_description="d",
-        variant_id="v",
-        agent_type=AgentKind.CLAUDE_CODE,
-        started_at=datetime(2026, 1, 1),
-        final_status=FinalStatus.FAILURE,
-        iteration_count=0,
-    )
-    orch.sandbox = MagicMock()
-    orch.agent = MagicMock()
-    orch.agent.get_sdk_options.return_value = {"env": {"PATH": f"{tmp_path}:/usr/bin"}}
-
-    orch._sync_sandbox_command_path_with_agent()
-
-    assert "command_base_path" in orch.result.environment_info
-
-
-def test_a_restored_path_drops_entries_inside_the_graded_run(tmp_path: Path) -> None:
-    """The restored value is PREPENDED ahead of the host PATH and comes out of the
-    run's own task.json — a shareable artifact. Every entry an attacker could
-    have placed there must be dropped; only the run's real toolchain survives.
-
-    The run-directory SIBLING case is the one this test used to pin the wrong way
-    round: it asserted such an entry was kept. The workspace is only part of the
-    run dir, and ``artifacts/`` and the run root travel in the same archive.
-    """
-    run_dir = tmp_path / "run"
-    workspace = run_dir / "ws"
-    (workspace / "bin").mkdir(parents=True)
-    sibling = run_dir / "artifacts-shim"  # inside the run dir, outside the workspace
-    sibling.mkdir()
-    toolchain = tmp_path / "toolchain"  # a genuine location outside the run entirely
-    toolchain.mkdir()
-    relative = Path("evilbin")
-
-    task = TaskDefinition(
-        task_id="t",
-        description="d",
-        initial_prompt="p",
-        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
-        success_criteria=[FileExistsCriterion(path="x.txt", description="x")],
-    )
-    orch = Orchestrator(task=task, run_dir=run_dir, variant_id="v")
-    orch.sandbox = MagicMock()
-    orch.sandbox.sandbox_dir = workspace
-
-    # os.pathsep, not a hardcoded ":" — the separator is ";" on Windows, where a
-    # colon-joined value parses as one (non-existent) entry and every assertion
-    # below passes vacuously against an empty result.
-    recorded = os.pathsep.join(
-        [
-            str(workspace / "bin"),
-            str(sibling),
-            str(relative),
-            str(toolchain),
-            str(tmp_path / "gone"),
-        ]
-    )
-    kept = orch._sanitize_restored_path(recorded)
-
-    assert str(toolchain.resolve()) in kept, "a real out-of-run toolchain entry is the point of the restore"
-    assert str(workspace) not in kept, "an entry inside the graded workspace must be dropped"
-    assert str(sibling) not in kept, "an entry elsewhere in the run directory must be dropped too"
-    assert "evilbin" not in kept, "a relative entry would resolve against the grader's cwd"
-    assert "gone" not in kept, "a non-existent entry buys no parity"
 
 
 # --------------------------------------------------------------------------

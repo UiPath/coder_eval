@@ -31,3 +31,7 @@ success_criteria:
     path: "out.txt"
     includes: ["MOCK_PATH_OK from say_hello"]
     description: "out.txt must contain the mock binary's signature line."
+  - type: "run_command"
+    command: "say_hello criterion"
+    timeout: 10
+    description: "A criterion command resolves the mock binary from PATH, as the agent did."

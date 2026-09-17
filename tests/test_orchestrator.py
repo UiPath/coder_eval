@@ -329,142 +329,6 @@ def test_finalize_result_score_mismatch_marks_error_and_writes_task_json(tmp_pat
     assert orchestrator.report_path.exists()
 
 
-class _SdkOptionsAgent(MockAgent):
-    """``MockAgent`` subclass that returns a configurable ``get_sdk_options``.
-
-    Used by the PATH-sync tests so the dummy agent satisfies the full
-    ``Agent`` ABC (``start`` / ``communicate`` / ``stop`` / ``get_state``)
-    rather than only the one method ``_sync_…`` happens to call today —
-    keeps the test surface aligned with the production contract.
-    """
-
-    def __init__(self, task, sdk_options):
-        super().__init__(task)
-        self._sdk_options = sdk_options
-
-    def get_sdk_options(self):
-        return self._sdk_options
-
-
-class _AsyncSdkOptionsAgent(MockAgent):
-    """Returns a fresh coroutine every call — mimics ``AsyncMock`` leakage."""
-
-    def get_sdk_options(self):
-        async def _coro():
-            return {"env": {"PATH": "/agent/bin"}}
-
-        return _coro()
-
-
-@pytest.fixture
-def path_sync_orchestrator(tmp_path):
-    """Yield ``(orchestrator, task)`` ready for PATH-sync helper tests.
-
-    Removes the boilerplate (load task, build orchestrator, setup sandbox,
-    cleanup in finally) that the per-test body would otherwise repeat.
-    """
-    task_file = Path("tasks/hello_date.yaml")
-    task, _ = load_task(task_file)
-    task.sandbox = SandboxConfig(driver="tempdir", python=None)
-    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="t")
-    orchestrator.sandbox = Sandbox(task.sandbox, task_id=task.task_id)
-    orchestrator.sandbox.setup()
-    try:
-        yield orchestrator, task
-    finally:
-        orchestrator.sandbox.cleanup()
-
-
-def test_sync_sandbox_command_path_from_agent_sdk_options(path_sync_orchestrator, monkeypatch, tmp_path):
-    """Happy path: agent SDK PATH wins for criteria ``run_command`` resolution."""
-    from tests._path_helpers import write_uip_shim
-
-    orchestrator, task = path_sync_orchestrator
-    stale_bin = tmp_path / "stale"
-    agent_bin = tmp_path / "agent"
-    stale_bin.mkdir()
-    agent_bin.mkdir()
-    write_uip_shim(stale_bin, "stale")
-    write_uip_shim(agent_bin, "agent")
-    monkeypatch.setenv("PATH", str(stale_bin))
-
-    orchestrator.agent = _SdkOptionsAgent(task, {"env": {"PATH": f"{agent_bin}{os.pathsep}{stale_bin}"}})
-    orchestrator._sync_sandbox_command_path_with_agent()
-
-    exit_code, stdout, _stderr = orchestrator.sandbox.run_command("uip")
-    assert exit_code == 0
-    assert stdout.strip() == "agent"
-
-
-def test_sync_sandbox_command_path_preserves_host_path_for_system_bins(path_sync_orchestrator, monkeypatch, tmp_path):
-    """The agent's narrow PATH must not clobber the host PATH for system bins.
-
-    Locks in the prepend (not replace) semantics flagged HIGH in the
-    multi-model review (PR #249 thread). If a future refactor accidentally
-    re-introduces ``env['PATH'] = base_path`` (replace), this fails because
-    the host's ``/usr/bin``-style binary becomes unreachable.
-    """
-    from tests._path_helpers import write_uip_shim
-
-    orchestrator, task = path_sync_orchestrator
-    # Host PATH carries a `uip` named "host". Agent PATH carries no `uip`.
-    host_bin = tmp_path / "host"
-    agent_bin = tmp_path / "agent"  # intentionally empty
-    host_bin.mkdir()
-    agent_bin.mkdir()
-    write_uip_shim(host_bin, "host")
-    monkeypatch.setenv("PATH", str(host_bin))
-
-    orchestrator.agent = _SdkOptionsAgent(task, {"env": {"PATH": str(agent_bin)}})
-    orchestrator._sync_sandbox_command_path_with_agent()
-
-    # Agent PATH wins for binaries it provides; falls through to host PATH
-    # for binaries it does not. A replace-style implementation would return
-    # exit_code == 1 with the "not found" message.
-    exit_code, stdout, _stderr = orchestrator.sandbox.run_command("uip")
-    assert exit_code == 0
-    assert stdout.strip() == "host"
-
-
-def test_sync_sandbox_command_path_awaitable_sdk_options_is_closed_and_noops(path_sync_orchestrator, caplog):
-    """AsyncMock-style coroutine returns: close, do not leak warnings."""
-    orchestrator, task = path_sync_orchestrator
-    orchestrator.agent = _AsyncSdkOptionsAgent(task)
-    with caplog.at_level("DEBUG", logger="coder_eval.orchestrator"):
-        orchestrator._sync_sandbox_command_path_with_agent()
-    assert orchestrator.sandbox.command_base_path is None
-    # Logged at DEBUG (test-fixture concern), not WARNING.
-    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
-    assert any("awaitable" in r.message for r in debug_records)
-    assert not any(r.levelname == "WARNING" for r in caplog.records)
-
-
-@pytest.mark.parametrize(
-    "sdk_options, warn_substring",
-    [
-        pytest.param(None, None, id="none-sdk-options"),
-        pytest.param(["unexpected"], "non-dict", id="non-dict-sdk-options"),
-        pytest.param({"env": {"HOME": "/tmp"}}, None, id="missing-path-key"),
-        pytest.param({"env": "not-a-dict"}, None, id="env-not-a-dict"),
-    ],
-)
-def test_sync_sandbox_command_path_contract_edge_cases_are_noops(
-    path_sync_orchestrator, caplog, sdk_options, warn_substring
-):
-    """Edge inputs leave ``command_base_path`` unset, with the right log level."""
-    orchestrator, task = path_sync_orchestrator
-    orchestrator.agent = _SdkOptionsAgent(task, sdk_options)
-    with caplog.at_level("WARNING", logger="coder_eval.orchestrator"):
-        orchestrator._sync_sandbox_command_path_with_agent()
-    assert orchestrator.sandbox.command_base_path is None
-    if warn_substring is None:
-        # Silent no-op — these are valid pre-communicate / sparse-env states.
-        assert not any(r.levelname == "WARNING" for r in caplog.records)
-    else:
-        # Contract violation — must be visible at WARNING.
-        assert any(r.levelname == "WARNING" and warn_substring in r.message for r in caplog.records)
-
-
 def test_orchestrator_load_task():
     """Test loading a task from YAML."""
     task_file = Path("tasks/hello_date.yaml")
@@ -952,6 +816,60 @@ async def test_workspace_dir_staleness_warning_keys_on_in_container_not_field(
     assert warned is expect_warning
 
     await orchestrator._cleanup()
+
+
+@pytest.mark.asyncio
+async def test_criterion_path_gets_the_mock_dirs_the_agent_gets(tmp_path, monkeypatch):
+    """The agent's ``env_path_prepend`` and the criterion PATH come from one list, before any turn.
+
+    Harness-independent on purpose: each harness's own tests prove it puts
+    ``env_path_prepend`` first on its PATH, so this is the one remaining link.
+    """
+    from datetime import datetime
+
+    from coder_eval.models import ApiBackend, DirectRoute, EvaluationResult
+
+    captured: dict[str, list[str] | None] = {}
+
+    class DummyAgent:
+        async def start(self, working_directory, *, env_path_prepend=None, plugin_tools_dir=None, plugin_root=None):
+            captured["env_path_prepend"] = env_path_prepend
+
+        def get_environment_info(self):
+            return {}
+
+    async def create_dummy_agent(_self):
+        return DummyAgent()
+
+    task, _ = load_task(Path("tasks/mock_path_dirs_smoke.yaml"))
+    orchestrator = Orchestrator(task=task, run_dir=tmp_path / "run", variant_id="v")
+    orchestrator.result = EvaluationResult(
+        task_id=task.task_id,
+        task_description=task.description,
+        variant_id="v",
+        agent_type=AgentKind.CLAUDE_CODE,
+        started_at=datetime.now(),
+        final_status="FAILURE",
+        iteration_count=0,
+        environment_info={},
+    )
+    monkeypatch.setattr(orchestrator_module.settings, "api_backend", ApiBackend.DIRECT)
+    monkeypatch.setattr(type(orchestrator_module.settings), "validate_api_keys", lambda _self, _agent_type: None)
+    monkeypatch.setattr(orchestrator_module, "resolve_route", lambda _settings: DirectRoute(judge_transport=None))
+    monkeypatch.setattr(Orchestrator, "_create_agent", create_dummy_agent)
+
+    await orchestrator._setup()
+    try:
+        assert orchestrator.sandbox is not None
+        assert orchestrator.sandbox.sandbox_dir is not None
+        mocks = str((orchestrator.sandbox.sandbox_dir / "mocks").resolve())
+        assert captured["env_path_prepend"] == [mocks]
+        assert orchestrator.sandbox.command_base_path == mocks
+        exit_code, stdout, _stderr = orchestrator.sandbox.run_command("say_hello criterion")
+        assert exit_code == 0
+        assert "MOCK_PATH_OK" in stdout
+    finally:
+        orchestrator.sandbox.cleanup()
 
 
 @pytest.mark.asyncio
