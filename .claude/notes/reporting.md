@@ -15,7 +15,8 @@
 
 - **Run-time caps (non-criterion enforcement)**: `TaskDefinition.run_limits`
   (`RunLimits` model) is the single namespace for all *task-level* run-time caps —
-  `max_tool_calls` / `task_timeout` / `turn_timeout` (structural) and `max_input_tokens` /
+  `max_tool_calls` / `max_turns` / `task_timeout` / `turn_timeout` (structural, with the
+  soft targets `expected_tool_calls` / `expected_turns`) and `max_input_tokens` /
   `max_output_tokens` / `max_total_tokens` / `max_usd` (cumulative budget). Token/USD
   breaches abort with `FinalStatus.TOKEN_BUDGET_EXCEEDED` or `COST_BUDGET_EXCEEDED`
   (both `category == "failed"`). Structural caps are set from the CLI via `-D

@@ -96,7 +96,8 @@ Each entry is a pointer. Full rationale: `.claude/notes/` (index: `.claude/notes
   [Run-Limit Parity](docs/agents/HARNESS_PARITY.md). Every agent declares a
   `HarnessContract`; a base field the harness marks unsupported is rejected at
   resolution. Caps are authored under [Run Limits](docs/TASK_DEFINITION_GUIDE.md#run-limits).
-- **Plugin staging**: `stage_plugins` hands every harness one canonical plugin root;
+- **Plugin staging**: `stage_plugins` hands every harness one staged plugin root (a skills
+  index, plus each plugin whole for Claude Code);
   `skills_offered` is the positive control `skill_triggered` checks.
 - **Execute vs. run**: `execute` is `run` with grading off — rows finalize as
   `NOT_GRADED` and leave both sides of every rate. Per-command behaviour:

@@ -23,7 +23,7 @@ initial_prompt: |
   multiple tool calls together. Work strictly in order, starting at step-01.txt.
 
 run_limits:
-  # No batching reaches step 12 inside 4 model turns, so the cap always decides the ending.
+  # Far below the 12 the prompt asks for, so an agent that follows the prompt always meets the cap.
   max_turns: 4
   # Generous: this fixture must fail on the cap, never on the clock.
   turn_timeout: 300

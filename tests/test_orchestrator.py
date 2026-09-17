@@ -2762,7 +2762,7 @@ def _spy_check_all_async(monkeypatch) -> list[object]:
 
 @pytest.mark.asyncio
 async def test_setup_stages_plugins_and_records_skills_offered(tmp_path, monkeypatch):
-    """Staging writes the canonical root, records the offer, and hands the root to the agent and the checker."""
+    """Staging writes the plugin root, records the offer, and hands the root to the agent and the checker."""
     from coder_eval.models import FinalStatus
     from coder_eval.path_utils import PLUGIN_ROOT_DIRNAME
 

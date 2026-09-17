@@ -681,7 +681,7 @@ entries with the same plugin name, or a manifest `skills` path outside its plugi
 fail `coder-eval plan`. Under `driver: docker` the authored plugin roots are mounted
 read-only, so a hook or MCP server that writes into its plugin root, or needs a binary the
 image does not have, fails.
-A path that offers no skill, two paths that offer the same skill name, or a `skill_triggered`
+Plugins that offer no skill at all, two paths that offer the same skill name, or a `skill_triggered`
 criterion whose `skill_name` the plugins do not offer fail `coder-eval plan`, before the run is
 paid for. `environment_info.skills_offered` records the staged skill names; re-grading a
 recorded run whose `skill_name` is not in that list finishes `ERROR`, not 0.0.

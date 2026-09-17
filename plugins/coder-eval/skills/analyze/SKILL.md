@@ -55,6 +55,8 @@ summary per task with `jq` (or `python3` if `jq` is missing):
   total_tokens:    (.total_token_usage.input_tokens + .total_token_usage.output_tokens),
   assistant_turns: .total_assistant_turns,
   max_tool_calls:  .task_config.resolved.run_limits.max_tool_calls,
+  max_turns:       .task_config.resolved.run_limits.max_turns,
+  model_turns,
   criteria_count:  (.success_criteria_results | length),
   all_criteria_perfect:
     (.success_criteria_results | length > 0 and all(.[]; .score == 1.0)),

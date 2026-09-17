@@ -224,8 +224,8 @@ def link_or_copy(source: Path, target: Path) -> None:
     """Symlink ``target`` to ``source``, or copy the tree where symlinks are unavailable.
 
     Only a failure to create symlinks at all falls back: an existing or unreachable ``target`` raises. The copy
-    keeps symlinks as links and skips ``target`` and its ancestors, so a source that contains the target is not
-    copied into itself.
+    follows symlinks, since the host cannot make them, but skips a link to one of its own ancestors and skips
+    ``target`` and its ancestors, so neither a link loop nor a source that contains the target recurses.
     """
     try:
         target.symlink_to(source, target_is_directory=True)
@@ -233,13 +233,17 @@ def link_or_copy(source: Path, target: Path) -> None:
         raise
     except (OSError, NotImplementedError):
         resolved = target.resolve()
-        shutil.copytree(
-            source,
-            target,
-            symlinks=True,
-            dirs_exist_ok=True,
-            ignore=lambda directory, names: [name for name in names if resolved.is_relative_to(Path(directory) / name)],
-        )
+
+        def _skipped(directory: str, names: list[str]) -> list[str]:
+            entries = [Path(directory) / name for name in names]
+            return [
+                entry.name
+                for entry in entries
+                if resolved.is_relative_to(entry)
+                or (entry.is_symlink() and entry.resolve() in entry.absolute().parents)
+            ]
+
+        shutil.copytree(source, target, dirs_exist_ok=True, ignore_dangling_symlinks=True, ignore=_skipped)
 
 
 def stage_plugins(plugins: Sequence[LocalPluginConfig], staging_dir: Path) -> StagedPlugins:

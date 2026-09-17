@@ -196,7 +196,7 @@ simulator force `[]` for the same reason.)
   (`<path>/<name>/SKILL.md`). coder-eval stages both into `<run_dir>/plugin_root` and
   hands the SDK one local plugin per entry. A plugin root loads whole under its own name
   (`<plugin>:<skill>`), with its agents, commands, hooks and MCP servers; a bare skills
-  directory loads its skills only. A path with no skill fails `plan`. To measure a skill
+  directory loads its skills only. Plugins that offer no skill at all fail `plan`. To measure a skill
   alone, point `path` at the skills directory. See
   [Plugin staging](HARNESS_PARITY.md#plugin-staging).
 - **`PLUGIN_TOOLS_DIR`** pins the canonical `node_modules/@uipath` directory for

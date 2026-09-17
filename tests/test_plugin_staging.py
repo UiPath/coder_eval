@@ -358,13 +358,21 @@ class TestStaging:
         assert (copied / "skills" / "alpha" / "SKILL.md").is_file()
         assert not (copied / "run").exists()
 
-    def test_the_copy_fallback_keeps_a_symlink_loop_as_a_link(self, tmp_path: Path, monkeypatch) -> None:
+    def test_the_copy_fallback_follows_links_and_skips_a_link_loop(self, tmp_path: Path, monkeypatch) -> None:
+        """The fallback runs where no symlink can be made, so the copy must not make one either."""
+        import os
+
         root = tmp_path / "plugin"
         _skill(root / "skills", "alpha")
+        _skill(tmp_path / "outside", "shared")
         (root / "loop").symlink_to(root, target_is_directory=True)
+        (root / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
         monkeypatch.setattr(Path, "symlink_to", _refuse_symlinks)
+        monkeypatch.setattr(os, "symlink", _refuse_symlinks)
         copied = _stage(tmp_path, root) / "plugins" / "plugin"
-        assert (copied / "loop").is_symlink()
+        assert not (copied / "loop").exists()
+        assert not (copied / "linked").is_symlink()
+        assert (copied / "linked" / "shared" / "SKILL.md").is_file()
         assert (copied / "skills" / "alpha" / "SKILL.md").is_file()
 
     def test_the_copy_fallback_wraps_a_bare_skills_directory(self, tmp_path: Path, monkeypatch) -> None:
