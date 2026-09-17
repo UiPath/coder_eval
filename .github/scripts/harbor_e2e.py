@@ -120,8 +120,25 @@ def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
     if not reward_path.is_file():
         raise RuntimeError(f"[{scenario.name}] missing {reward_path}")
     reward = json.loads(reward_path.read_text(encoding="utf-8"))
+
+    # Read the per-criterion breakdown BEFORE the reward gate below, so a
+    # failing reward's own root cause (which criterion, and why) is always in
+    # the failure message -- not only when an unrelated criterion happens to
+    # carry the aggregate to 1.0 "by luck" while this one silently failed.
+    verifier_task_json = trial_dir / "verifier" / "task.json"
+    criteria_detail = None
+    if verifier_task_json.is_file():
+        verifier_result = json.loads(verifier_task_json.read_text(encoding="utf-8"))
+        criteria_detail = [
+            {"type": r.get("criterion_type"), "score": r.get("score"), "details": r.get("details")}
+            for r in verifier_result.get("success_criteria_results", [])
+        ]
+
     if reward.get("reward") != 1.0:
-        raise RuntimeError(f"[{scenario.name}] expected reward 1.0, got {reward!r} ({reward_path})")
+        raise RuntimeError(
+            f"[{scenario.name}] expected reward 1.0, got {reward!r} ({reward_path}); "
+            + f"criteria: {criteria_detail!r}"
+        )
 
     trajectory_path = trial_dir / "agent" / "trajectory.json"
     if not trajectory_path.is_file():

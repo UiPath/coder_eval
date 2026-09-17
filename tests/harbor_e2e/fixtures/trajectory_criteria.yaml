@@ -18,8 +18,10 @@ sandbox:
     image: coder-eval-agent:latest
 
 initial_prompt: >
-  Create a file named done.txt containing the single word "done", then run
-  `touch done.txt` again to confirm it exists.
+  Run the shell command `touch done.txt` to create an empty file named
+  done.txt, then write the single word "done" into it. You must actually run
+  `touch done.txt` as a separate Bash command -- do not create the file only
+  through a file-editing tool.
 
 success_criteria:
   - type: "file_exists"

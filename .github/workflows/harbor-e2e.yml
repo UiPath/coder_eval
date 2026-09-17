@@ -1,17 +1,19 @@
 name: Harbor E2E
 
-# Deliberately NOT triggered on pull_request: this exercises real Docker
-# builds, a real `harbor` install, and (for the llm_judge scenario) a real
-# model call, so it is informational rather than a required PR check for now
-# (see .github/scripts/harbor_e2e.py's module docstring). workflow_dispatch
-# lets a maintainer run it on demand; the nightly schedule catches drift
-# between coder-eval's own release and Harbor's own upstream releases without
-# blocking anyone's PR.
+# Required on every PR: exercises real Docker builds, a real `harbor` install,
+# and (for the llm_judge scenario) a real model call, so it is the one gate
+# that actually round-trips a task through Harbor's own export/agent/verifier
+# contract rather than coder-eval's in-process tests. workflow_dispatch lets a
+# maintainer run it on demand; the nightly schedule catches drift between
+# coder-eval's own release and Harbor's own upstream releases even when no PR
+# touched anything.
 on:
   workflow_dispatch:
   schedule:
     - cron: "17 5 * * *" # nightly, off the hour to avoid GitHub's peak-load pile-up
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
 
 concurrency:
