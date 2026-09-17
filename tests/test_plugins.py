@@ -96,11 +96,11 @@ def test_a_plugin_built_for_another_spi_version_stops_the_load(monkeypatch):
         contract = stub_contract()
 
     def register(reg):
-        reg.register("old-spi-kind", config_for_kind("old-spi-kind"), spi_version=SPI_VERSION - 1)(_Agent)
+        reg.register("old-spi-kind", config_for_kind("old-spi-kind"), spi_version=SPI_VERSION + 1)(_Agent)
 
     _patch_entry_points(monkeypatch, [_FakeEntryPoint("old", register)])
 
-    with pytest.raises(plugins.PluginLoadError, match=f"SPI {SPI_VERSION - 1}.*provides SPI {SPI_VERSION}"):
+    with pytest.raises(plugins.PluginLoadError, match=f"SPI {SPI_VERSION + 1}.*provides SPI {SPI_VERSION}"):
         load_plugins()
     assert AgentRegistry.get("old-spi-kind") is None
 

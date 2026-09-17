@@ -43,4 +43,4 @@ def register(registry: type[AgentRegistry]) -> None:
 
     ``registry`` is the ``AgentRegistry`` class (not an instance).
     """
-    registry.register(DEMO_KIND, DemoAgentConfig, spi_version=3)(DemoAgent)
+    registry.register(DEMO_KIND, DemoAgentConfig, spi_version=1)(DemoAgent)

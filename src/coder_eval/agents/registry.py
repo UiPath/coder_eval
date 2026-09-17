@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from coder_eval.agent import Agent
     from coder_eval.models import AgentKind, ApiRoute, BaseAgentConfig
 
-SPI_VERSION: Final[int] = 3
+SPI_VERSION: Final[int] = 1
 
 MethodConfigT = TypeVar("MethodConfigT", bound="BaseAgentConfig")
 AgentClassT = TypeVar("AgentClassT")

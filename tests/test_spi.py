@@ -74,8 +74,8 @@ def test_the_export_list_is_pinned() -> None:
     assert spi.__all__ == _FINAL_EXPORTS
 
 
-def test_spi_version_is_three() -> None:
-    assert spi.SPI_VERSION == 3
+def test_spi_version_is_one() -> None:
+    assert spi.SPI_VERSION == 1
 
 
 def test_the_emitter_surface_is_exported() -> None:

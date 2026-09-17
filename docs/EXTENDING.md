@@ -50,8 +50,8 @@ raises `TypeError` when it is not the version this coder_eval provides.
 from coder_eval.spi import AgentRegistry
 
 def register(registry: type[AgentRegistry]) -> None:
-    # Bind type string → config class → agent class, for SPI 3.
-    registry.register("my-agent", MyAgentConfig, spi_version=3)(MyAgent)
+    # Bind type string → config class → agent class, for SPI 1.
+    registry.register("my-agent", MyAgentConfig, spi_version=1)(MyAgent)
     # Optionally contribute pricing here too (see §3):
     # register_pricing(MY_RATES)
 ```
@@ -60,7 +60,7 @@ def register(registry: type[AgentRegistry]) -> None:
 so the decorator form works too:
 
 ```python
-@AgentRegistry.register("my-agent", MyAgentConfig, spi_version=3)
+@AgentRegistry.register("my-agent", MyAgentConfig, spi_version=1)
 class MyAgent(Agent[MyAgentConfig]):
     ...
 ```
@@ -499,7 +499,7 @@ MY_RATES = {
 }
 
 def register(registry):
-    registry.register("my-agent", MyAgentConfig, spi_version=3)(MyAgent)
+    registry.register("my-agent", MyAgentConfig, spi_version=1)(MyAgent)
     register_pricing(MY_RATES)
 ```
 
