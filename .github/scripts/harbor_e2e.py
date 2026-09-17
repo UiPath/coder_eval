@@ -135,9 +135,24 @@ def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
         ]
 
     if reward.get("reward") != 1.0:
+        # Read the AGENT phase's own task.json directly -- its `iterations[].commands`
+        # is the raw telemetry the verifier's `command_executed` etc. are supposed to
+        # hydrate from. Dumped unconditionally on failure so a criterion that scored
+        # 0.0 because NO commands were ever recorded (a hydration/telemetry bug) is
+        # distinguishable at a glance from one that scored 0.0 because the recorded
+        # commands just didn't match the pattern (an agent/fixture-wording issue).
+        agent_task_jsons = sorted((trial_dir / "agent").glob("**/task.json"))
+        agent_commands: list[dict[str, object]] | str = "no agent/task.json found"
+        if agent_task_jsons:
+            agent_result = json.loads(agent_task_jsons[0].read_text(encoding="utf-8"))
+            agent_commands = [
+                {"tool_name": c.get("tool_name"), "parameters": c.get("parameters")}
+                for it in agent_result.get("iterations", [])
+                for c in it.get("commands", [])
+            ]
         raise RuntimeError(
             f"[{scenario.name}] expected reward 1.0, got {reward!r} ({reward_path}); "
-            + f"criteria: {criteria_detail!r}"
+            + f"criteria: {criteria_detail!r}; agent-phase recorded commands: {agent_commands!r}"
         )
 
     trajectory_path = trial_dir / "agent" / "trajectory.json"
