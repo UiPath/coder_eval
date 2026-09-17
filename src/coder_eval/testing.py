@@ -19,11 +19,13 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     StreamEvent,
     ToolEndEvent,
     ToolStartEvent,
     TurnEndEvent,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.timing import main_thread_tool_spans, union_ms
 
@@ -291,6 +293,18 @@ def rejections(kind: str) -> list[tuple[str, Callable[[], None]]]:
                 lambda: _expect_rejected(lambda: _task(kind, allowed_tools=["Bassh"]), "did you mean 'Bash'"),
             )
         )
+    if not contract.reports_cost:
+        from coder_eval.models import RunLimits
+
+        checks.append(
+            (
+                "max_usd without a priced agent.model",
+                lambda: _expect_rejected(
+                    lambda: _task(kind, run_limits=RunLimits(max_usd=1.0), model="conformance/not-on-the-rate-card"),
+                    r"run_limits\.max_usd is set",
+                ),
+            )
+        )
     if not contract.counts_model_turns:
         from coder_eval.models import RunLimits
         from coder_eval.orchestration.harness_contract import MODEL_TURN_LIMITS
@@ -331,3 +345,72 @@ async def conformance(kind: str, probes: Mapping[tuple[str, str], Callable[[], A
         )
     for cell in sorted(probes):
         await probes[cell]()
+
+
+FIRST_TOOL_ID = "first"
+SECOND_TOOL_ID = "second-call"
+
+
+class StopAfterFirstTool:
+    """A ``should_stop`` poll and stream callback in one: ``reason`` once one tool call has resolved.
+
+    ``end`` holds the turn's ``AgentEndEvent`` once it arrives.
+    """
+
+    def __init__(self, reason: StopReason) -> None:
+        self.reason = reason
+        self.tool_ends = 0
+        self.end: AgentEndEvent | None = None
+
+    def on_event(self, event: StreamEvent) -> None:
+        if isinstance(event, ToolEndEvent):
+            self.tool_ends += 1
+        elif isinstance(event, AgentEndEvent):
+            self.end = event
+
+    def __call__(self) -> StopReason | None:
+        return self.reason if self.tool_ends else None
+
+
+type StopProbe = Callable[[StopAfterFirstTool, StopReason], Awaitable[Sequence[str]]]
+
+
+async def stop_conformance(kind: str, probe: StopProbe) -> None:
+    """Assert ``kind`` ends the turn at the first boundary for every ``StopReason``.
+
+    For each reason, ``probe(stop, reason)`` runs one ``communicate()`` whose scripted
+    harness makes the tool calls ``FIRST_TOOL_ID`` then ``SECOND_TOOL_ID``, passing
+    ``stop`` as both ``stream_callback`` and ``should_stop``. It returns the tool ids the
+    adapter pulled from the harness. The turn must end with ``end_status_for(reason)``,
+    not crashed, after pulling the first call and before pulling the second.
+
+    Raises:
+        AssertionError: ``kind`` does not declare ``cooperative_stop``, or a reason is not honored.
+    """
+    from coder_eval.agents.registry import AgentRegistry
+    from coder_eval.plugins import ensure_plugins_loaded
+
+    ensure_plugins_loaded()
+    registration = AgentRegistry.get(kind)
+    if registration is None:
+        raise AssertionError(f"agent kind {kind!r} is not registered")
+    if not registration.agent_class.contract.cooperative_stop:
+        raise AssertionError(f"agent kind {kind!r} does not declare cooperative_stop, so it has no stop to check")
+    for reason in StopReason:
+        stop = StopAfterFirstTool(reason)
+        pulled = await probe(stop, reason)
+        problems: list[str] = []
+        expected = end_status_for(reason)
+        if stop.end is None:
+            problems.append("no AgentEndEvent")
+        else:
+            if stop.end.status is not expected:
+                problems.append(f"ended {stop.end.status.value}, not {expected.value}")
+            if stop.end.crashed:
+                problems.append(f"crashed: {stop.end.crash_reason}")
+        if FIRST_TOOL_ID not in pulled:
+            problems.append(f"never pulled {FIRST_TOOL_ID!r}")
+        if SECOND_TOOL_ID in pulled:
+            problems.append(f"pulled {SECOND_TOOL_ID!r} after the stop")
+        if problems:
+            raise AssertionError(f"{kind!r} did not honor StopReason.{reason.name}: " + "; ".join(problems))

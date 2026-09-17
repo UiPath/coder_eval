@@ -62,6 +62,17 @@ logger = logging.getLogger(__name__)
 _DISARMED = "armed criteria disarmed, run degrades to a full run"
 
 
+def _reports_cost(task: TaskDefinition) -> bool:
+    from coder_eval.agents.registry import AgentRegistry
+    from coder_eval.plugins import ensure_plugins_loaded
+
+    if task.agent is None or task.agent.type is None:
+        return False
+    ensure_plugins_loaded()
+    registration = AgentRegistry.get(str(task.agent.type))
+    return registration is not None and registration.agent_class.contract.reports_cost
+
+
 class TurnMonitor:
     """Observes the agent event stream and answers the cooperative ``should_stop`` poll.
 
@@ -79,6 +90,7 @@ class TurnMonitor:
         *,
         limits: RunLimits | None,
         model: str | None = None,
+        reports_cost: bool = False,
         gate_threshold: float = DEFAULT_STOP_EARLY_GATE_THRESHOLD,
     ) -> None:
         self._task_id = task_id
@@ -132,6 +144,8 @@ class TurnMonitor:
         self._committed = TokenUsage()
         self._committed_cost = 0.0
         self._unpriced_turn = False
+        self._reports_cost = reports_cost
+        self._unpriced_in_flight = False
         self._in_flight = TokenUsage()
         self._budget_breach: tuple[str, float, float] | None = None
         # Once an entry leaves "undecided" on a RESOLVED round its checker is
@@ -170,7 +184,14 @@ class TurnMonitor:
         limits = task.run_limits
         gate_threshold = limits.stop_early_gate_threshold if limits is not None else DEFAULT_STOP_EARLY_GATE_THRESHOLD
         model = task.agent.model if task.agent is not None else None
-        return cls(task.task_id, armed, limits=limits, model=model, gate_threshold=gate_threshold)
+        return cls(
+            task.task_id,
+            armed,
+            limits=limits,
+            model=model,
+            reports_cost=_reports_cost(task),
+            gate_threshold=gate_threshold,
+        )
 
     def on_event(self, event: StreamEvent) -> None:
         """Reduce one event; an unexpected exception disarms the criteria and never stops the counters."""
@@ -298,13 +319,18 @@ class TurnMonitor:
         Raises:
             BudgetExceededError: a budget reason latched mid-turn (with the figures
                 from that moment), or the finished turns' totals breach a budget.
-            BudgetUnenforceableError: ``max_usd`` is set and a finished turn was unpriceable.
+            BudgetUnenforceableError: ``max_usd`` is set and a finished turn was unpriceable,
+                or in-flight usage was unpriceable on a harness that does not report cost.
         """
         breach = self._budget_breach if self._budget_breach is not None else self._breach()
         if breach is not None:
             name, actual, limit = breach
             raise BudgetExceededError(name, actual=actual, limit=limit, task_id=self._task_id, iteration=iteration)
-        if self._limits is not None and self._limits.max_usd is not None and self._unpriced_turn:
+        if (
+            self._limits is not None
+            and self._limits.max_usd is not None
+            and (self._unpriced_turn or self._unpriced_in_flight)
+        ):
             raise BudgetUnenforceableError(
                 "run_limits.max_usd could not be enforced: the harness reported no cost and "
                 + f"agent.model {self._model!r} (reported {self._reported_model!r}) has no rate in "
@@ -349,11 +375,25 @@ class TurnMonitor:
             return
         breach = self._breach()
         if breach is None:
+            self._evaluate_in_flight_priceable()
             return
         self._budget_breach = breach
         name, actual, limit = breach
         logger.info("[%s] %s budget reached: %g > %g", self._task_id, name, actual, limit)
         self._latch(StopReason.USD_BUDGET if name == "usd" else StopReason.TOKEN_BUDGET)
+
+    def _evaluate_in_flight_priceable(self) -> None:
+        """Latch ``USD_BUDGET`` when ``max_usd`` is set and in-flight usage has no price.
+
+        A harness that reports cost prices the turn at its end, so its in-flight usage is exempt.
+        """
+        if self._limits is None or self._limits.max_usd is None or self._reports_cost:
+            return
+        if self._in_flight.is_empty() or self._price(self._in_flight) is not None:
+            return
+        self._unpriced_in_flight = True
+        logger.error("[%s] usd budget cannot be enforced: the in-flight usage has no price", self._task_id)
+        self._latch(StopReason.USD_BUDGET)
 
     def _latch(self, reason: StopReason) -> None:
         if self._stop_reason is None:

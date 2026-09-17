@@ -109,9 +109,10 @@ class RunLimits(BaseModel):
         description=(
             "Max cumulative cost in USD across the task. Enforced live by the TurnMonitor: priced from the "
             "harness's reported cost when it reports one, else from pricing.py for the reported model or "
-            "agent.model. A run that can do neither finishes ERROR at that turn's end (register_pricing adds a "
-            "plugin rate). Overshoot is soft by one usage report (see usage_granularity in "
-            "docs/agents/HARNESS_PARITY.md) plus any calls in flight."
+            "agent.model. On a harness that does not report its own cost (reports_cost in "
+            "docs/agents/HARNESS_PARITY.md), agent.model must be priced, or the task is rejected at resolution "
+            "(register_pricing adds a plugin rate). A run that still cannot price a turn finishes ERROR. "
+            "Overshoot is soft by one usage report (see usage_granularity) plus any calls in flight."
         ),
     )
     count_cached_input: bool = Field(

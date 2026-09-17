@@ -51,7 +51,7 @@ from coder_eval.streaming.events import (
 )
 from coder_eval.timing import close_window
 
-from .registry import AgentRegistry
+from .registry import SPI_VERSION, AgentRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -498,7 +498,7 @@ class _OpenCodeDecoder(JsonlDecoder):
             self.error = str(error or "unknown error")
 
 
-@AgentRegistry.register(AgentKind.OPENCODE, OpenCodeAgentConfig)
+@AgentRegistry.register(AgentKind.OPENCODE, OpenCodeAgentConfig, spi_version=SPI_VERSION)
 class OpenCodeAgent(SubprocessJsonlAgent[OpenCodeAgentConfig]):
     """Runs the ``opencode`` CLI as a subprocess, one invocation per turn."""
 
@@ -519,6 +519,7 @@ class OpenCodeAgent(SubprocessJsonlAgent[OpenCodeAgentConfig]):
     )
     tool_names = _TOOL_NAMES
     cli_name = "OpenCode"
+    executable = "opencode"
     docs_page = "docs/agents/OPENCODE.md"
     recognized_events = _RECOGNIZED_EVENTS
     decoder = _OpenCodeDecoder
@@ -559,7 +560,7 @@ class OpenCodeAgent(SubprocessJsonlAgent[OpenCodeAgentConfig]):
         plugin_tools_dir: str | None = None,
         plugin_root: Path | None = None,
     ) -> None:
-        if shutil.which("opencode") is None:
+        if shutil.which(self.executable) is None:
             raise RuntimeError(
                 "The 'opencode' CLI was not found on PATH."
                 + " Install it with `npm install -g opencode-ai` (or see https://opencode.ai/docs/)."
@@ -605,7 +606,7 @@ class OpenCodeAgent(SubprocessJsonlAgent[OpenCodeAgentConfig]):
     # --- command construction ---------------------------------------------
 
     def argv(self, prompt: str) -> list[str]:
-        argv = ["opencode", "run", "--format", "json"]
+        argv = [self.executable, "run", "--format", "json"]
         if self.config.model:
             argv += ["-m", self.config.model]
         if self.working_directory:

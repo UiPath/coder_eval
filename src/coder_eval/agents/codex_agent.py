@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.agents.watchdog import WatchdogFired, run_with_watchdog
 from coder_eval.config import settings
 from coder_eval.errors.agent import format_timeout_reason
@@ -586,7 +586,7 @@ class _CodexDecoder:
         )
 
 
-@AgentRegistry.register(AgentKind.CODEX, CodexAgentConfig)
+@AgentRegistry.register(AgentKind.CODEX, CodexAgentConfig, spi_version=SPI_VERSION)
 class CodexAgent(Agent[CodexAgentConfig]):
     """Implementation of the Agent interface for OpenAI Codex using the Codex SDK."""
 
@@ -827,6 +827,17 @@ class CodexAgent(Agent[CodexAgentConfig]):
             return
         with contextlib.suppress(Exception):
             client.close()
+
+    async def harness_version(self) -> str | None:
+        """The ``openai-codex`` SDK version, and the app-server version from its initialize handshake."""
+        from importlib.metadata import version
+
+        server = None
+        if self.codex_client is not None:
+            with contextlib.suppress(Exception):
+                info = self.codex_client.metadata.serverInfo
+                server = info.version if info is not None else None
+        return f"openai-codex {version('openai-codex')}; codex app-server {server or 'unknown'}"
 
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Codex routing so runs are auditable/comparable.

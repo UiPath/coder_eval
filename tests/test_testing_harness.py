@@ -15,20 +15,26 @@ from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
     AgentStartEvent,
+    StopReason,
     StreamEvent,
     ToolEndEvent,
     ToolStartEvent,
     TurnEndEvent,
     TurnStartEvent,
+    end_status_for,
 )
 from coder_eval.testing import (
+    FIRST_TOOL_ID,
+    SECOND_TOOL_ID,
     ScriptedClock,
+    StopAfterFirstTool,
     Tick,
     assert_identity_closes,
     assert_stream_balanced,
     conformance,
     enforced_cells,
     replay,
+    stop_conformance,
 )
 from coder_eval.timing import close_window
 
@@ -225,3 +231,32 @@ class TestConformance:
     async def test_an_unregistered_kind_fails(self) -> None:
         with pytest.raises(AssertionError, match="not registered"):
             await conformance("no-such-harness", {})
+
+
+def _scripted_probe(*, honor: bool) -> Callable[[StopAfterFirstTool, StopReason], Awaitable[list[str]]]:
+    """A fake adapter: pulls the first call, then the second only when it ignores the poll."""
+
+    async def probe(stop: StopAfterFirstTool, reason: StopReason) -> list[str]:
+        pulled = [FIRST_TOOL_ID]
+        tool = CommandTelemetry(tool_name="Bash", tool_id=FIRST_TOOL_ID, timestamp=ORIGIN)
+        stop.on_event(ToolEndEvent(task_id="t", tool=tool))
+        status = end_status_for(reason) if honor and stop() is not None else AgentEndStatus.COMPLETED
+        if status is AgentEndStatus.COMPLETED:
+            pulled.append(SECOND_TOOL_ID)
+        stop.on_event(AgentEndEvent(task_id="t", status=status))
+        return pulled
+
+    return probe
+
+
+class TestStopConformance:
+    async def test_an_adapter_that_honors_the_poll_passes(self) -> None:
+        await stop_conformance(AgentKind.CLAUDE_CODE.value, _scripted_probe(honor=True))
+
+    async def test_an_adapter_that_ignores_the_poll_fails(self) -> None:
+        with pytest.raises(AssertionError, match=f"pulled {SECOND_TOOL_ID!r} after the stop"):
+            await stop_conformance(AgentKind.CLAUDE_CODE.value, _scripted_probe(honor=False))
+
+    async def test_a_kind_without_cooperative_stop_is_rejected(self) -> None:
+        with pytest.raises(AssertionError, match="does not declare cooperative_stop"):
+            await stop_conformance(AgentKind.NONE.value, _scripted_probe(honor=True))

@@ -3,6 +3,8 @@
 # by-design model-hub ↔ registry type-level cycle; runtime imports are lazy per CE017
 # pyright: reportImportCycles=false
 
+import asyncio
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import datetime
@@ -193,6 +195,14 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
         """
         return None
 
+    async def harness_version(self) -> str | None:
+        """The version of the CLI or SDK this agent drives, read after ``start``; ``None`` when unknown.
+
+        The orchestrator records it as ``environment_info.harness_version``. It runs where
+        the agent runs, so under ``driver: docker`` it reads the container's harness.
+        """
+        return None
+
     def get_environment_info(self) -> dict[str, Any]:
         """Agent-specific routing/environment details to persist into the run's
         ``EvaluationResult.environment_info``.
@@ -215,3 +225,31 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
             "system_prompt_semantics": self.contract.system_prompt_semantics or "unknown",
             "harness_contract": self.contract.model_dump(mode="json"),
         }
+
+
+_VERSION_PROBE_SECONDS = 10.0
+_VERSION_PROBE_LIMIT_BYTES = 1024 * 1024
+
+
+async def command_version(argv: list[str], env: dict[str, str] | None = None) -> str | None:
+    """The first non-empty stdout line of ``argv`` (a ``--version`` call), or ``None`` on any failure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            limit=_VERSION_PROBE_LIMIT_BYTES,
+        )
+    except OSError:
+        return None
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_VERSION_PROBE_SECONDS)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        return None
+    if proc.returncode != 0:
+        return None
+    return next((line.strip() for line in stdout.decode("utf-8", "replace").splitlines() if line.strip()), None)

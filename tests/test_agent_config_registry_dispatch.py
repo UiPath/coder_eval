@@ -8,6 +8,7 @@ base-typed agent field with SerializeAsAny round-trip, and the registry-driven
 import pytest
 from pydantic import ValidationError
 
+from coder_eval.agents.registry import SPI_VERSION
 from coder_eval.models import (
     AgentKind,
     BaseAgentConfig,
@@ -152,7 +153,7 @@ def _registered_plugin_kind():
         def __init__(self, config, route=None, **kwargs):
             self.config = config
 
-    AgentRegistry.register("plugin-kind", _PluginAgentConfig)(_PluginAgent)
+    AgentRegistry.register("plugin-kind", _PluginAgentConfig, spi_version=SPI_VERSION)(_PluginAgent)
     try:
         yield
     finally:

@@ -32,9 +32,9 @@ from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITra
 # is the only import route (same treatment as evaluation/verdict_tool.py).
 from claude_agent_sdk.types import SdkPluginConfig, SystemPromptPreset
 
-from coder_eval.agent import Agent, AgentState
+from coder_eval.agent import Agent, AgentState, command_version
 from coder_eval.agents._logging import PrefixedAdapter, log_raw_sdk_event
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.agents.watchdog import WatchdogFired, run_with_watchdog
 from coder_eval.config import settings
 from coder_eval.errors import format_timeout_reason
@@ -584,7 +584,7 @@ class _ClaudeDecoder:
         )
 
 
-@AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig)
+@AgentRegistry.register(AgentKind.CLAUDE_CODE, ClaudeCodeAgentConfig, spi_version=SPI_VERSION)
 class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
     """Implementation of the Agent interface for Claude Code using the SDK."""
 
@@ -597,6 +597,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         allowed_tools=Enforcement.ENFORCED,
         disallowed_tools=Enforcement.ENFORCED,
         cooperative_stop=True,
+        reports_cost=True,
         usage_granularity=UsageGranularity.GENERATION,
         timing_basis=TimingBasis.TURN_CLOCK,
         permission_modes=frozenset(PermissionMode),
@@ -1072,6 +1073,15 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         if self.config.system_prompt is not None:
             preset["append"] = self.config.system_prompt
         return preset
+
+    async def harness_version(self) -> str | None:
+        """The SDK version, and the version of the CLI it spawns: the bundled one, else ``claude`` on PATH."""
+        import claude_agent_sdk
+        from claude_agent_sdk._cli_version import __cli_version__
+
+        bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
+        cli = __cli_version__ if bundled.is_file() else await command_version(["claude", "--version"])
+        return f"claude-agent-sdk {claude_agent_sdk.__version__}; Claude Code {cli or 'unknown'}"
 
     def get_environment_info(self) -> dict[str, Any]:
         """Record which system-prompt regime built this run's prompts.

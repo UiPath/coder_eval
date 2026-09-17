@@ -79,6 +79,12 @@ return the record; `CRASHED` / `TIMEOUT` append the record to the result and the
 through `TurnOutcome.record_or_raise`, so the retry categorisation (a crash retries, a
 timeout does not) is unchanged; anything else raises `RuntimeError`.
 
+A crash retries only when the crashed attempt made no tool call. The retry runs in the
+same sandbox, which is not reset, so a crash after the agent wrote files would grade a
+different experiment than the one authored. `record_or_raise` puts the tool-call count on
+`AgentCrashError`; `execute_with_retry` does not retry an `AGENT_CRASH` that carries one.
+A message that categorises as rate limit or API error keeps its own retry policy.
+
 Cancellation cannot return a value. A `CancelledError` from the task watchdog, the
 orchestrator's `wait_for` backstop or the task timeout must keep propagating, or
 `task_timeout` stops working. So an adapter ends the turn FIRST
@@ -239,10 +245,18 @@ wiped the span before `step_finish` could subtract it, a 100% overstatement of t
 An exit code of 0 with no telemetry is indistinguishable from a real pass in every
 aggregate, and file-based criteria can still score it SUCCESS. Worse, a turn with no
 tokens is one whose `max_total_tokens` / `max_usd` gates could never have tripped no
-matter how much the run actually billed. So the CLI harnesses crash rather than score:
+matter how much the run actually billed. So the harnesses crash rather than score:
 
-- **Vocabulary drift** — a clean exit that recognized NO event from the harness's known
-  set. This has happened: OpenCode once parsed the `session.next.*` server vocabulary
+- **An empty turn** (every harness) — `TurnEmitter.finalize(COMPLETED)` on a turn that
+  wrote nothing after `begin` (no inner turn, tool, text, generation, usage or
+  `agent_output`) ends `CRASHED`. It lives in the emitter, not in the transport base,
+  so Claude Code, Codex, Antigravity and plugins get it too. A requested stop is exempt,
+  because a cut can land before the first event. `noop` opens an inner turn, so it is
+  never empty.
+
+- **Vocabulary drift** (the JSONL transport) — a clean exit that recognized NO event from
+  the harness's known set. The empty-turn arm also catches it; the transport keeps its
+  own check for the message, which names the unrecognized event types. This has happened: OpenCode once parsed the `session.next.*` server vocabulary
   instead of the CLI's own and scored SUCCESS 1.0 with zero turns and zero tokens.
 - **Finished steps with no tokens** (OpenCode) — the same outcome one layer down. Keying
   on "recognized nothing" alone left it reachable: a `step_finish` carrying no `tokens`
@@ -342,6 +356,15 @@ The ORDER of `models` is the caller's decision. Adapters pass their one model. T
 passes `agent.model`, then the model the agent resolved at start, then the last model a
 message reported: the configured model wins so that a sub-agent's model on the stream
 cannot reprice the run.
+
+`max_usd` is never "accepted and ignored". `HarnessContract.reports_cost` says whether a
+harness prices every finished turn itself (Claude Code; `noop` has no usage). Pi and
+OpenCode do not count: they report $0 for a model their own registry does not price. On a
+harness without `reports_cost`, resolution rejects `max_usd` unless `agent.model` has a
+rate, and the monitor latches `USD_BUDGET` (then raises `BudgetUnenforceableError`) at the
+first in-flight usage it cannot price, instead of counting it as $0 until the turn ends.
+On a harness with `reports_cost`, in-flight usage without a rate still counts $0, because
+the turn's end brings the harness's own cost.
 
 The Claude SDK's own `costUSD` is a client-side estimate assuming Anthropic pricing, so it
 is wrong for an open-weight model behind LiteLLM and is repriced from the token buckets at
@@ -799,6 +822,19 @@ lets a plugin register a brand-new kind that is not an enum member. Its imports 
 one-way — the plugin loader and the models layer import the registry, never the reverse.
 `create_agent` deliberately does not import `coder_eval.plugins` itself for the same
 reason; callers reach a config through `parse_agent_config`, which loads them.
+
+## Why plugin loading fails fast, and registration checks the SPI version
+
+A plugin whose `register` hook raises stops the load with `PluginLoadError`. Logging and
+skipping it hides the cause: the run later fails with "No agent registered for type ..."
+or, worse, resolves a task against a different kind than the author meant. A load-error
+record for an unused plugin can come later if the need is proven.
+
+`AgentRegistry.register` requires `spi_version`. An assert inside the plugin's own hook
+was the only check before, and core never read the number. The plugin passes the
+literal version it was written for, not `SPI_VERSION` imported from core, because the
+imported constant always matches. `SPI_VERSION` lives in `agents/registry.py` so the
+check needs no import from `coder_eval.spi`, which imports the built-in agents.
 
 ## Transport bases
 

@@ -14,7 +14,15 @@ def truncate_crash_message(message: str, *, limit: int = CRASH_REASON_MAX_CHARS)
 
 
 class AgentCrashError(RuntimeError):
-    """Mid-turn agent failure; routed to AGENT_CRASH by isinstance."""
+    """Mid-turn agent failure; routed to AGENT_CRASH by isinstance.
+
+    ``tool_calls`` counts the tool calls the crashed attempt made. An ``AGENT_CRASH``
+    with one or more is not retried, because a retry would run on a changed sandbox.
+    """
+
+    def __init__(self, message: str = "", tool_calls: int = 0) -> None:
+        super().__init__(message)
+        self.tool_calls = tool_calls
 
 
 class AgentConfigError(RuntimeError):

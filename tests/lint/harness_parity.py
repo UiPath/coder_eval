@@ -107,7 +107,10 @@ _RUN_LIMIT_CELLS: dict[str, Callable[[HarnessContract], str]] = {
     "max_input_tokens": _budget_cell,
     "max_output_tokens": _budget_cell,
     "max_total_tokens": _budget_cell,
-    "max_usd": _budget_cell,
+    "max_usd": lambda c: (
+        _budget_cell(c)
+        + ("; priced by the harness" if c.reports_cost else "; needs a priced agent.model (checked at resolution)")
+    ),
     "count_cached_input": lambda _c: "TurnMonitor bucket rule",
     "count_cache_creation": lambda _c: "TurnMonitor bucket rule",
     "stop_early": lambda c: "cooperative should_stop" if c.cooperative_stop else "rejected at resolution",

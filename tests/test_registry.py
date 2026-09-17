@@ -2,7 +2,7 @@
 
 import pytest
 
-from coder_eval.agents.registry import AgentRegistry, create_agent
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry, create_agent
 from coder_eval.models import AgentKind, ClaudeCodeAgentConfig, parse_agent_config
 from tests.fixtures.harness_stubs import config_for_kind, stub_contract
 
@@ -23,7 +23,9 @@ def test_register_decorator_preserves_class_type():
     # guard, then roll it back so the process-global registry doesn't leak.
     try:
         registration = AgentRegistry.register(
-            "fake-identity-kind", config_for_kind("fake-identity-kind", ClaudeCodeAgentConfig)
+            "fake-identity-kind",
+            config_for_kind("fake-identity-kind", ClaudeCodeAgentConfig),
+            spi_version=SPI_VERSION,
         )(FakeAgent)
         assert registration is FakeAgent
     finally:

@@ -265,3 +265,40 @@ def test_get_retry_delay_exponential_backoff():
     assert abs(delay_0 - 5.0) < 0.01  # 5.0 * 2^0 = 5.0
     assert abs(delay_1 - 10.0) < 0.01  # 5.0 * 2^1 = 10.0
     assert abs(delay_2 - 20.0) < 0.01  # 5.0 * 2^2 = 20.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_calls", "expected_attempts"), [(0, 3), (1, 1)])
+async def test_agent_crash_retries_only_without_tool_calls(tool_calls: int, expected_attempts: int):
+    """A crashed attempt that made a tool call changed the sandbox, so it is not retried."""
+    from coder_eval.errors import AgentCrashError
+
+    attempts = 0
+
+    async def crashes():
+        nonlocal attempts
+        attempts += 1
+        raise AgentCrashError("mid-turn failure", tool_calls)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock), pytest.raises(AgentCrashError):
+        await execute_with_retry(crashes, "test_op", {"task_id": "t", "component": "agent"})
+
+    assert attempts == expected_attempts
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_crash_after_tool_calls_keeps_its_retry_policy():
+    from coder_eval.errors import AgentCrashError
+
+    attempts = 0
+
+    async def rate_limited():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise AgentCrashError("429 too many requests", 3)
+        return "ok"
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        assert await execute_with_retry(rate_limited, "test_op", {"task_id": "t", "component": "agent"}) == "ok"
+    assert attempts == 2

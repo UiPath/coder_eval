@@ -5,7 +5,7 @@ import importlib.metadata
 import pytest
 
 import coder_eval.plugins as plugins
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.models import AgentKind, ClaudeCodeAgentConfig
 from tests.fixtures.harness_stubs import config_for_kind, stub_contract
 
@@ -69,39 +69,40 @@ def test_load_plugins_idempotent(monkeypatch):
     assert len(calls) == 2
 
 
-def test_load_plugins_skips_failing_plugin(monkeypatch):
-    succeeded = []
+@pytest.mark.parametrize("name", ["coder_eval", "third-party"])
+def test_a_failing_plugin_stops_the_load_with_a_named_error(monkeypatch, name):
+    """A broken plugin, built-in or third-party, is a named error, never skipped."""
+    later = []
 
     def boom(reg):
         raise RuntimeError("plugin exploded")
 
     _patch_entry_points(
         monkeypatch,
-        [_FakeEntryPoint("bad", boom), _FakeEntryPoint("good", lambda reg: succeeded.append(reg))],
+        [_FakeEntryPoint(name, boom), _FakeEntryPoint("later", lambda reg: later.append(reg))],
     )
 
-    # Must not propagate: a broken plugin never aborts startup.
-    load_plugins()
-
-    assert succeeded == [AgentRegistry]
-
-
-def test_load_plugins_reraises_builtin_failure(monkeypatch):
-    """A failure registering the built-in 'coder_eval' entry point is FATAL — not
-    swallowed — so a broken built-in import fails loudly instead of as a later
-    misleading 'No agent registered for claude-code'."""
-
-    def boom(reg):
-        raise RuntimeError("builtin broke")
-
-    _patch_entry_points(monkeypatch, [_FakeEntryPoint("coder_eval", boom)])
-
-    with pytest.raises(RuntimeError, match="builtin broke"):
+    with pytest.raises(plugins.PluginLoadError, match=f"{name!r}.*plugin exploded") as exc:
         load_plugins()
 
-    # Flag is cleared so a caller that catches and retries re-runs the scan
-    # instead of getting a no-op against an empty registry.
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert later == []
+    # Cleared, so a caller that catches and retries re-runs the scan.
     assert plugins._loaded is False
+
+
+def test_a_plugin_built_for_another_spi_version_stops_the_load(monkeypatch):
+    class _Agent:
+        contract = stub_contract()
+
+    def register(reg):
+        reg.register("old-spi-kind", config_for_kind("old-spi-kind"), spi_version=SPI_VERSION - 1)(_Agent)
+
+    _patch_entry_points(monkeypatch, [_FakeEntryPoint("old", register)])
+
+    with pytest.raises(plugins.PluginLoadError, match=f"SPI {SPI_VERSION - 1}.*provides SPI {SPI_VERSION}"):
+        load_plugins()
+    assert AgentRegistry.get("old-spi-kind") is None
 
 
 def test_register_builtins_raises_if_a_builtin_missing():
@@ -146,7 +147,7 @@ def test_register_accepts_raw_string_kind():
             self.config = config
 
     try:
-        AgentRegistry.register("totally-custom-kind", cfg)(_Agent)
+        AgentRegistry.register("totally-custom-kind", cfg, spi_version=SPI_VERSION)(_Agent)
         reg = AgentRegistry.get("totally-custom-kind")
         assert reg is not None
         assert reg.agent_class is _Agent
@@ -176,9 +177,9 @@ def test_register_rejects_conflicting_kind_collision():
             self.config = config
 
     try:
-        AgentRegistry.register("collide-kind", cfg_a)(_AgentA)
+        AgentRegistry.register("collide-kind", cfg_a, spi_version=SPI_VERSION)(_AgentA)
         with pytest.raises(ValueError, match="already registered"):
-            AgentRegistry.register("collide-kind", cfg_b)(_AgentB)
+            AgentRegistry.register("collide-kind", cfg_b, spi_version=SPI_VERSION)(_AgentB)
         # The incumbent is untouched — the conflict did not overwrite it.
         reg = AgentRegistry.get("collide-kind")
         assert reg is not None and reg.agent_class is _AgentA
@@ -199,8 +200,8 @@ def test_register_same_kind_same_classes_is_idempotent():
             self.config = config
 
     try:
-        AgentRegistry.register("idem-kind", cfg)(_Agent)
-        AgentRegistry.register("idem-kind", cfg)(_Agent)  # no raise
+        AgentRegistry.register("idem-kind", cfg, spi_version=SPI_VERSION)(_Agent)
+        AgentRegistry.register("idem-kind", cfg, spi_version=SPI_VERSION)(_Agent)  # no raise
         reg = AgentRegistry.get("idem-kind")
         assert reg is not None and reg.agent_class is _Agent
     finally:

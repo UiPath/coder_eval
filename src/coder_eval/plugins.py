@@ -15,22 +15,19 @@ by core itself and cannot silently rot.
 
 Discovery is idempotent and re-entrancy-safe (the ``_loaded`` flag is set before
 the scan, so a plugin that imports back into coder-eval during its own
-registration does not recurse). A plugin whose ``register`` raises is logged and
-skipped — one broken plugin never aborts startup.
+registration does not recurse). A plugin whose ``register`` raises stops the load
+with a ``PluginLoadError`` that names it: a broken plugin is never skipped.
 """
 
 from __future__ import annotations
 
-import logging
-
-
-logger = logging.getLogger(__name__)
 
 PLUGIN_ENTRY_POINT_GROUP = "coder_eval.plugins"
 
-# The built-in agents register through this same entry point, so a failure here is
-# a real breakage (empty registry), not a skippable third-party plugin error.
-BUILTIN_PLUGIN_NAME = "coder_eval"
+
+class PluginLoadError(RuntimeError):
+    """A ``coder_eval.plugins`` entry point failed to import or register."""
+
 
 _loaded = False
 
@@ -41,6 +38,10 @@ def load_plugins(*, force: bool = False) -> None:
     Idempotent: a second call is a no-op unless ``force=True``. The ``_loaded``
     flag is set *before* iterating so a plugin re-entering via
     :func:`ensure_plugins_loaded` during its own import does not recurse.
+
+    Raises:
+        PluginLoadError: an entry point failed to load or its ``register`` raised.
+            The flag is cleared, so a retry re-runs the scan.
     """
     global _loaded
     if _loaded and not force:
@@ -55,15 +56,12 @@ def load_plugins(*, force: bool = False) -> None:
         try:
             register = ep.load()
             register(AgentRegistry)
-        except Exception:
-            # Fatal: otherwise it surfaces later as a misleading "No agent
-            # registered for 'claude-code'" instead of the real cause.
-            if ep.name == BUILTIN_PLUGIN_NAME:
-                # Clear the flag so a caller that catches and retries re-runs the
-                # scan instead of getting a no-op against an empty registry.
-                _loaded = False
-                raise
-            logger.exception("Failed to load coder_eval plugin %r (%s); skipping", ep.name, ep.value)
+        except Exception as e:
+            _loaded = False
+            raise PluginLoadError(
+                f"coder_eval plugin {ep.name!r} ({ep.value}) failed to load: {e}. "
+                + "Fix or uninstall the package that provides it."
+            ) from e
 
 
 def ensure_plugins_loaded() -> None:

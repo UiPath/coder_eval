@@ -51,7 +51,7 @@ from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import AgentEndStatus, ToolEndStatus, TurnEndStatus
 from coder_eval.timing import close_window
 
-from .registry import AgentRegistry
+from .registry import SPI_VERSION, AgentRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -371,7 +371,7 @@ class _PiDecoder(JsonlDecoder):
             self.emitter.end_inner_turn(TurnEndStatus.COMPLETED, tokens=tokens)
 
 
-@AgentRegistry.register(AgentKind.PI, PiAgentConfig)
+@AgentRegistry.register(AgentKind.PI, PiAgentConfig, spi_version=SPI_VERSION)
 class PiAgent(SubprocessJsonlAgent[PiAgentConfig]):
     """Runs the ``pi`` CLI as a subprocess, one invocation per turn."""
 
@@ -392,6 +392,7 @@ class PiAgent(SubprocessJsonlAgent[PiAgentConfig]):
     )
     tool_names = _TOOL_NAMES
     cli_name = "Pi"
+    executable = "pi"
     docs_page = "docs/agents/PI.md"
     recognized_events = _RECOGNIZED_EVENTS
     decoder = _PiDecoder
@@ -433,7 +434,7 @@ class PiAgent(SubprocessJsonlAgent[PiAgentConfig]):
         plugin_tools_dir: str | None = None,
         plugin_root: Path | None = None,
     ) -> None:
-        if shutil.which("pi") is None:
+        if shutil.which(self.executable) is None:
             raise RuntimeError(
                 "The 'pi' CLI was not found on PATH."
                 + " Install it with `npm install -g @earendil-works/pi-coding-agent` (see https://pi.dev/)."
@@ -486,7 +487,7 @@ class PiAgent(SubprocessJsonlAgent[PiAgentConfig]):
         # --no-session, which would defeat it. No --dir: the working dir is `cwd`.
         assert self._session_dir is not None and self._session_id is not None
         argv = [
-            "pi",
+            self.executable,
             "-p",
             "--mode",
             "json",

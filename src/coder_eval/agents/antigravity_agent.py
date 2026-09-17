@@ -29,7 +29,7 @@ from typing import Any
 
 from coder_eval.agent import Agent, AgentState
 from coder_eval.agents._logging import PrefixedAdapter
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.agents.watchdog import WatchdogFired, run_with_watchdog
 from coder_eval.config import settings
 from coder_eval.errors.agent import format_timeout_reason
@@ -378,7 +378,7 @@ class _AntigravityDecoder:
         )
 
 
-@AgentRegistry.register(AgentKind.ANTIGRAVITY, AntigravityAgentConfig)
+@AgentRegistry.register(AgentKind.ANTIGRAVITY, AntigravityAgentConfig, spi_version=SPI_VERSION)
 class AntigravityAgent(Agent[AntigravityAgentConfig]):
     """Implementation of the Agent interface for Google Antigravity (Gemini)."""
 
@@ -760,6 +760,15 @@ class AntigravityAgent(Agent[AntigravityAgentConfig]):
         ``stop()`` exit-stack close. This hook only records intent.
         """
         self._state = AgentState.ERROR
+
+    async def harness_version(self) -> str | None:
+        """The ``google-antigravity`` SDK version; its localharness ships inside the package."""
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return f"google-antigravity {version('google-antigravity')}"
+        except PackageNotFoundError:
+            return None
 
     def get_environment_info(self) -> dict[str, Any]:
         """Record the resolved Gemini model + thinking level for auditability."""

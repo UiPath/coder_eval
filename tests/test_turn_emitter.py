@@ -11,7 +11,7 @@ import pytest
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.errors.agent import CRASH_REASON_MAX_CHARS
 from coder_eval.models import ContentBlock, ResultSummary, TimingBasis, TokenUsage, TurnRecord
-from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
+from coder_eval.streaming.emitter import EMPTY_TURN_REASON, Generation, TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import (
     AgentEndEvent,
     AgentEndStatus,
@@ -136,7 +136,55 @@ class TestBracketAndSinks:
 
     def test_no_sinks_is_valid(self) -> None:
         emitter, _, _ = _emitter(sinks=[])
+        emitter.text("hi")
         assert emitter.finalize(AgentEndStatus.COMPLETED).status is AgentEndStatus.COMPLETED
+
+
+class TestEmptyTurn:
+    def test_a_completed_turn_that_wrote_nothing_is_a_crash(self) -> None:
+        emitter, _, sink = _emitter()
+        outcome = emitter.finalize(AgentEndStatus.COMPLETED)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error == EMPTY_TURN_REASON
+        assert outcome.record.crashed is True
+        assert outcome.record.result_summary is None
+        [end] = sink.of(AgentEndEvent)
+        assert end.status is AgentEndStatus.CRASHED
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda e: e.text("hi"),
+            lambda e: (e.begin_inner_turn("a"), e.end_inner_turn()),
+            lambda e: e.open_tool("t1", "Bash", {}),
+            lambda e: e.add_unmeasured_generation(message_id=None, part=Generation(blocks=[], tokens=TokenUsage())),
+        ],
+    )
+    def test_any_write_is_not_empty(self, write: Any) -> None:
+        emitter, _, _ = _emitter()
+        write(emitter)
+        assert emitter.finalize(AgentEndStatus.COMPLETED).status is AgentEndStatus.COMPLETED
+
+    def test_reported_usage_or_output_is_not_empty(self) -> None:
+        with_usage, _, _ = _emitter()
+        assert (
+            with_usage.finalize(AgentEndStatus.COMPLETED, usage=TokenUsage(output_tokens=1)).status
+            is AgentEndStatus.COMPLETED
+        )
+        with_output, _, _ = _emitter()
+        assert with_output.finalize(AgentEndStatus.COMPLETED, agent_output="done").status is AgentEndStatus.COMPLETED
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            s
+            for s in AgentEndStatus
+            if s not in (AgentEndStatus.COMPLETED, AgentEndStatus.CRASHED, AgentEndStatus.TIMEOUT)
+        ],
+    )
+    def test_a_requested_stop_is_exempt(self, status: AgentEndStatus) -> None:
+        emitter, _, _ = _emitter()
+        assert emitter.finalize(status).status is status
 
 
 class TestToolBasis:
@@ -614,6 +662,7 @@ class TestTheEnd:
 
 def _outcome(status: AgentEndStatus, error: str | None = None) -> TurnOutcome:
     emitter, _, _ = _emitter()
+    emitter.text("hi")
     return emitter.fail(status, error or "") if error is not None else emitter.finalize(status)  # type: ignore[arg-type]
 
 

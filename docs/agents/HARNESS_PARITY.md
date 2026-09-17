@@ -27,7 +27,7 @@ CE069 fails the build on drift.
 | `max_input_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
 | `max_output_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
 | `max_total_tokens` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
-| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight |
+| `max_usd` | TurnMonitor; usage reported per model generation; overshoot ≤ one model generation + calls in flight; priced by the harness | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per agent-loop step; overshoot ≤ one agent-loop step + calls in flight; needs a priced agent.model (checked at resolution) | TurnMonitor; usage reported per communicate() call; overshoot ≤ one communicate() call + calls in flight; priced by the harness |
 | `count_cached_input` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
 | `count_cache_creation` | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule | TurnMonitor bucket rule |
 | `stop_early` | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | cooperative should_stop | rejected at resolution |
@@ -63,6 +63,7 @@ Generated from each agent class's `contract` by `make parity-table`; CE069 fails
 | `cooperative_stop` | yes | yes | yes | yes | yes | no |
 | `usage_granularity` | generation | turn | turn | step | step | turn |
 | `timing_basis` | turn_clock | cli_epoch_ms | turn_clock | cli_epoch_ms | turn_clock | turn_clock |
+| `reports_cost` | yes | no | no | no | no | yes |
 | `permission_modes` | acceptEdits, bypassPermissions, default, plan | — | bypassPermissions, plan | bypassPermissions, plan | bypassPermissions, plan | — |
 <!-- harness-contract:end -->
 
@@ -77,6 +78,11 @@ overshoot by one such report.
 `expected_turns`): a harness that reports per generation or per step opens one inner turn
 per model response, so the TurnMonitor can count them; a harness that reports once per
 `communicate()` rejects them at resolution.
+`reports_cost` is whether every finished turn carries a cost the harness computed. On a
+harness that does not, `max_usd` is priced from `coder_eval.pricing`, so a task that sets
+`max_usd` must pin an `agent.model` with a rate, or it is rejected at resolution. Pi and
+OpenCode report a cost for the models they know, but $0 for the others, so they count as
+not reporting.
 
 ### Tool names
 

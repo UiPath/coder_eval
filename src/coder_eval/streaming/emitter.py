@@ -48,6 +48,7 @@ from coder_eval.timing import Window
 
 logger = logging.getLogger(__name__)
 
+EMPTY_TURN_REASON = "the harness ended the turn cleanly but reported no model turn, tool call, text or usage"
 _UNSET: Any = object()
 _FAILED = (AgentEndStatus.CRASHED, AgentEndStatus.TIMEOUT)
 _BUCKETS = ("uncached_input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
@@ -96,7 +97,7 @@ class TurnOutcome:
             TurnTimeoutError: the status is ``TIMEOUT``.
         """
         if self.status is AgentEndStatus.CRASHED:
-            raise AgentCrashError(self.error or "agent turn crashed")
+            raise AgentCrashError(self.error or "agent turn crashed", len(self.record.commands))
         if self.status is AgentEndStatus.TIMEOUT:
             raise TurnTimeoutError(timeout_seconds or 0.0, task_id=task_id, iteration=iteration)
         return self.record
@@ -144,6 +145,7 @@ class TurnEmitter:
         self._outcome: TurnOutcome | None = None
         self._ending = False
         self._dropped_logged = False
+        self._events = 0
         self._open_tools: dict[str, _OpenTool] = {}
         self._closed_tool_ids: set[str] = set()
         self._sequence = 0
@@ -369,6 +371,10 @@ class TurnEmitter:
     ) -> TurnOutcome:
         """End a clean turn; a second call returns the first outcome and emits nothing.
 
+        A ``COMPLETED`` turn that wrote nothing after ``begin`` (no inner turn, tool, text,
+        generation, usage or ``agent_output``) ends ``CRASHED`` instead: an empty turn is
+        never graded as agent behavior. A requested stop is exempt.
+
         ``usage`` defaults to the sum of ``end_inner_turn`` tokens. ``result_summary``
         defaults to the final reply: the text that follows the last tool call in the
         last main-thread message. ``num_turns`` defaults to the main-thread inner turns;
@@ -384,6 +390,17 @@ class TurnEmitter:
             return self._outcome
         if self._ending:
             raise RuntimeError("the turn already ended, but its record could not be built")
+        if status is AgentEndStatus.COMPLETED and self._wrote_nothing(usage, agent_output):
+            return self._end(
+                AgentEndStatus.CRASHED,
+                reason=EMPTY_TURN_REASON,
+                usage=usage,
+                agent_output=agent_output,
+                model_used=model_used,
+                assistant_turn_count=assistant_turn_count,
+                num_turns=num_turns,
+                result_summary=None,
+            )
         if result_summary is _UNSET:
             result_summary = ResultSummary(
                 is_error=False, subtype=status.value, stop_reason=stop_reason, result=self._final_reply()
@@ -439,6 +456,15 @@ class TurnEmitter:
         if not self._began:
             raise RuntimeError(f"TurnEmitter.{method}() before begin(): the turn has no AgentStartEvent")
 
+    def _wrote_nothing(self, usage: TokenUsage | None, agent_output: str | None) -> bool:
+        return (
+            self._events <= 1
+            and not self._messages
+            and self._reported.is_empty()
+            and (usage is None or usage.is_empty())
+            and not agent_output
+        )
+
     def _ended(self) -> bool:
         if self._outcome is None and not self._ending:
             return False
@@ -450,6 +476,7 @@ class TurnEmitter:
     def _emit(self, event: StreamEvent, parent_tool_id: str | None = None, *, stamp: datetime | None = None) -> None:
         event.timestamp = stamp if stamp is not None else self.now()
         event.thread_id = event.parent_thread_id = parent_tool_id
+        self._events += 1
         self._collector.on_event(event)
         for sink in self._sinks:
             safe_emit(sink, event)

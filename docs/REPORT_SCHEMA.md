@@ -180,6 +180,11 @@ each of `system_prompt`, `plugin_skills`, `permission_mode`, `allowed_tools` and
 `disallowed_tools`, `"enforced"` or `"unsupported"`, plus
 `system_prompt_semantics` (the class default), `cooperative_stop`, and
 `permission_modes` (the sorted `permission_mode` values the harness honors, or `null`).
+`environment_info.harness_version` is the version of the CLI or SDK the agent drove, read
+where the agent ran (inside the container under `driver: docker`), for example
+`"pi 0.84.4"` or `"claude-agent-sdk 0.2.124; Claude Code 2.1.216"`. It is `null` when the
+agent cannot report one (the `none` agent, or a plugin agent that does not implement
+`Agent.harness_version`), and absent on runs recorded before the field.
 `environment_info.skills_offered` is the list of skill names the staged plugin root
 offered to the agent. It is absent when the task sets no `agent.plugins`.
 `sdk_options.system_prompt` is a `SystemPromptPreset` dict

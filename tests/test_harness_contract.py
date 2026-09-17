@@ -11,7 +11,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from coder_eval.agents.pi_agent import PiAgent
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.models import (
     CANONICAL_TOOL_NAMES,
     READ_ONLY_DENIED_TOOLS,
@@ -197,7 +197,7 @@ class TestRegistryValidation:
             pass
 
         with pytest.raises(TypeError, match=rf"{KIND}.*NoContractAgent.*HarnessContract"):
-            AgentRegistry.register(KIND, config_for_kind(KIND))(NoContractAgent)
+            AgentRegistry.register(KIND, config_for_kind(KIND), spi_version=SPI_VERSION)(NoContractAgent)
         assert AgentRegistry.get(KIND) is None
 
     def test_dict_contract_rejected(self, restored_registry: None) -> None:
@@ -205,7 +205,7 @@ class TestRegistryValidation:
             contract = stub_contract().model_dump()
 
         with pytest.raises(TypeError, match=rf"{KIND}.*DictContractAgent"):
-            AgentRegistry.register(KIND, config_for_kind(KIND))(DictContractAgent)
+            AgentRegistry.register(KIND, config_for_kind(KIND), spi_version=SPI_VERSION)(DictContractAgent)
 
     def test_config_not_a_base_agent_config_rejected(self, restored_registry: None) -> None:
         class ForeignConfig(BaseModel):
@@ -213,7 +213,7 @@ class TestRegistryValidation:
             type: Literal["contract-test-kind"]
 
         with pytest.raises(TypeError, match=rf"{KIND}.*ForeignConfig.*BaseAgentConfig"):
-            AgentRegistry.register(KIND, ForeignConfig)(_ContractAgent)  # type: ignore[type-var]
+            AgentRegistry.register(KIND, ForeignConfig, spi_version=SPI_VERSION)(_ContractAgent)  # type: ignore[type-var]
 
     def test_config_without_extra_forbid_rejected(self, restored_registry: None) -> None:
         class LaxConfig(BaseAgentConfig):
@@ -221,18 +221,18 @@ class TestRegistryValidation:
             type: Literal["contract-test-kind"]  # type: ignore[assignment]
 
         with pytest.raises(TypeError, match=rf"{KIND}.*LaxConfig.*extra='forbid'"):
-            AgentRegistry.register(KIND, LaxConfig)(_ContractAgent)
+            AgentRegistry.register(KIND, LaxConfig, spi_version=SPI_VERSION)(_ContractAgent)
 
     def test_type_literal_not_naming_the_kind_rejected(self, restored_registry: None) -> None:
         with pytest.raises(TypeError, match=rf"{KIND}.*ClaudeCodeAgentConfig.*Literal"):
-            AgentRegistry.register(KIND, ClaudeCodeAgentConfig)(_ContractAgent)
+            AgentRegistry.register(KIND, ClaudeCodeAgentConfig, spi_version=SPI_VERSION)(_ContractAgent)
 
     def test_type_literal_covering_several_kinds_accepted(self, restored_registry: None) -> None:
         class TwoKindConfig(BaseAgentConfig):
             type: Literal["contract-test-kind", "other-kind"]  # type: ignore[assignment]
 
-        AgentRegistry.register(KIND, TwoKindConfig)(_ContractAgent)
-        AgentRegistry.register("other-kind", TwoKindConfig)(_ContractAgent)
+        AgentRegistry.register(KIND, TwoKindConfig, spi_version=SPI_VERSION)(_ContractAgent)
+        AgentRegistry.register("other-kind", TwoKindConfig, spi_version=SPI_VERSION)(_ContractAgent)
         assert AgentRegistry.get("other-kind") is not None
 
     def test_enforced_tool_lists_require_tool_names(self, restored_registry: None) -> None:
@@ -240,7 +240,7 @@ class TestRegistryValidation:
             contract = HarnessContract(**{**stub_contract().model_dump(), "allowed_tools": "enforced"})
 
         with pytest.raises(TypeError, match=rf"{KIND}.*NoMapAgent.*tool_names"):
-            AgentRegistry.register(KIND, config_for_kind(KIND))(NoMapAgent)
+            AgentRegistry.register(KIND, config_for_kind(KIND), spi_version=SPI_VERSION)(NoMapAgent)
 
     def test_unsupported_tool_lists_reject_tool_names(self, restored_registry: None) -> None:
         class StrayMapAgent:
@@ -248,12 +248,12 @@ class TestRegistryValidation:
             tool_names = ToolNameMap(names=_identity_names())
 
         with pytest.raises(TypeError, match=rf"{KIND}.*StrayMapAgent.*tool_names"):
-            AgentRegistry.register(KIND, config_for_kind(KIND))(StrayMapAgent)
+            AgentRegistry.register(KIND, config_for_kind(KIND), spi_version=SPI_VERSION)(StrayMapAgent)
 
     def test_valid_pair_registers_idempotently(self, restored_registry: None) -> None:
         config = config_for_kind(KIND)
-        AgentRegistry.register(KIND, config)(_ContractAgent)
-        AgentRegistry.register(KIND, config)(_ContractAgent)
+        AgentRegistry.register(KIND, config, spi_version=SPI_VERSION)(_ContractAgent)
+        AgentRegistry.register(KIND, config, spi_version=SPI_VERSION)(_ContractAgent)
         registration = AgentRegistry.get(KIND)
         assert registration is not None and registration.agent_class is _ContractAgent
 
@@ -343,7 +343,7 @@ class TestValidateHarnessContract:
         validate_harness_contract(_task(AgentKind.CODEX).model_copy(update={"agent": None}))
 
     def test_unregistered_kind_is_rejected(self, restored_registry: None) -> None:
-        AgentRegistry.register(KIND, config_for_kind(KIND))(_ContractAgent)
+        AgentRegistry.register(KIND, config_for_kind(KIND), spi_version=SPI_VERSION)(_ContractAgent)
         task = TaskDefinition(
             task_id="t",
             description="d",
@@ -394,6 +394,44 @@ class TestModelTurnLimits:
 
     def test_unset_model_turn_limits_pass_everywhere(self) -> None:
         validate_harness_contract(_task(AgentKind.CODEX, run_limits=RunLimits()))
+
+
+class TestMaxUsdPriceable:
+    @pytest.mark.parametrize(
+        ("kind", "reports_cost"),
+        [
+            (AgentKind.CLAUDE_CODE, True),
+            (AgentKind.NONE, True),
+            (AgentKind.CODEX, False),
+            (AgentKind.PI, False),
+            (AgentKind.OPENCODE, False),
+            (AgentKind.ANTIGRAVITY, False),
+        ],
+    )
+    def test_reports_cost_per_builtin(self, kind: AgentKind, reports_cost: bool) -> None:
+        registration = AgentRegistry.get(kind.value)
+        assert registration is not None
+        assert registration.agent_class.contract.reports_cost is reports_cost
+
+    @pytest.mark.parametrize("model", [None, "provider/not-on-the-card"])
+    @pytest.mark.parametrize("kind", [AgentKind.CODEX, AgentKind.PI, AgentKind.OPENCODE, AgentKind.ANTIGRAVITY])
+    def test_an_unpriced_model_is_rejected_where_the_harness_reports_no_cost(
+        self, kind: AgentKind, model: str | None
+    ) -> None:
+        task = _task(kind, run_limits=RunLimits(max_usd=1.0), model=model)
+        with pytest.raises(HarnessContractError, match=r"run_limits\.max_usd is set") as exc:
+            validate_harness_contract(task)
+        assert "claude-code" in str(exc.value)
+
+    def test_a_priced_model_is_accepted_where_the_harness_reports_no_cost(self) -> None:
+        validate_harness_contract(_task(AgentKind.CODEX, run_limits=RunLimits(max_usd=1.0), model="gpt-5-codex"))
+
+    @pytest.mark.parametrize("model", [None, "provider/not-on-the-card"])
+    def test_a_harness_that_reports_cost_needs_no_rate(self, model: str | None) -> None:
+        validate_harness_contract(_task(AgentKind.CLAUDE_CODE, run_limits=RunLimits(max_usd=1.0), model=model))
+
+    def test_no_max_usd_needs_no_rate(self) -> None:
+        validate_harness_contract(_task(AgentKind.CODEX, run_limits=RunLimits(max_output_tokens=10)))
 
 
 _NON_CLAUDE_ENFORCING = [AgentKind.PI, AgentKind.OPENCODE, AgentKind.ANTIGRAVITY]

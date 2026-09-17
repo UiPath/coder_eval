@@ -37,7 +37,7 @@ import typer
 from coder_eval.agents.antigravity_agent import AntigravityAgent
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.agents.codex_agent import CodexAgent, _CodexDecoder
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.cli.plan_command import run_plan
 from coder_eval.config import settings
 from coder_eval.criteria import CriterionRegistry, init_criteria
@@ -162,7 +162,7 @@ class _DummyNoStopAgent:
 def dummy_no_stop_kind() -> Iterator[str]:
     """Register a non-supporting agent kind for guardrail-1 tests, then clean up."""
     kind = "dummy-no-stop"
-    AgentRegistry.register(kind, config_for_kind(kind))(_DummyNoStopAgent)
+    AgentRegistry.register(kind, config_for_kind(kind), spi_version=SPI_VERSION)(_DummyNoStopAgent)
     try:
         yield kind
     finally:
@@ -811,7 +811,7 @@ class TestValidateEarlyStop:
         # An armed task whose agent type vanished from the registry (plugin not
         # installed/loaded) must fail with the plugin-pointing diagnosis.
         kind = "vanishing-agent"
-        AgentRegistry.register(kind, config_for_kind(kind))(_DummyNoStopAgent)
+        AgentRegistry.register(kind, config_for_kind(kind), spi_version=SPI_VERSION)(_DummyNoStopAgent)
         try:
             task = _task(criteria=[_skill_crit("s", "s", stop_on_pass=True)], agent_type=kind)
         finally:

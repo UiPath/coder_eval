@@ -41,12 +41,13 @@ def _task(
     max_tool_calls: int | None = None,
     limits: RunLimits | None = None,
     model: str | None = None,
+    kind: AgentKind = AgentKind.CLAUDE_CODE,
 ) -> TaskDefinition:
     return TaskDefinition(
         task_id="monitor-test",
         description="monitor test task",
         initial_prompt="do the thing",
-        agent=parse_agent_config(type=AgentKind.CLAUDE_CODE, model=model),
+        agent=parse_agent_config(type=kind, model=model),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=criteria or [FileExistsCriterion(path="x", description="x exists")],
         run_limits=limits if limits is not None else RunLimits(max_tool_calls=max_tool_calls),
@@ -536,10 +537,32 @@ class TestUsdBudget:
         _feed(monitor, _turn(TokenUsage(output_tokens=100)))
         monitor.raise_if_over_budget(iteration=1)
 
-    def test_an_unpriced_in_flight_delta_contributes_nothing(self) -> None:
+    def test_an_unpriced_in_flight_delta_contributes_nothing_where_the_harness_reports_cost(self) -> None:
         monitor = TurnMonitor.for_task(_task(limits=RunLimits(max_usd=0.10)), arm=True)
         _feed(monitor, [AgentStartEvent(task_id="t"), TurnEndEvent(task_id="t", tokens=TokenUsage(output_tokens=5))])
         assert monitor.cost_usd() == 0.0
+        assert monitor.should_stop() is None
+        monitor.raise_if_over_budget(iteration=1)
+
+    def test_an_unpriced_in_flight_delta_latches_unenforceable_where_the_harness_reports_no_cost(self) -> None:
+        task = _task(limits=RunLimits(max_usd=0.10), model="not-on-the-card", kind=AgentKind.CODEX)
+        monitor = TurnMonitor.for_task(task, arm=True)
+        _feed(monitor, [AgentStartEvent(task_id="t"), TurnEndEvent(task_id="t", tokens=TokenUsage(output_tokens=5))])
+        assert monitor.should_stop() is StopReason.USD_BUDGET
+        with pytest.raises(BudgetUnenforceableError, match=r"run_limits\.max_usd could not be enforced"):
+            monitor.raise_if_over_budget(iteration=1)
+
+    def test_a_priced_in_flight_delta_does_not_latch_where_the_harness_reports_no_cost(self) -> None:
+        task = _task(limits=RunLimits(max_usd=10.0), model="gpt-5-codex", kind=AgentKind.CODEX)
+        monitor = TurnMonitor.for_task(task, arm=True)
+        _feed(monitor, [AgentStartEvent(task_id="t"), TurnEndEvent(task_id="t", tokens=TokenUsage(output_tokens=5))])
+        assert monitor.should_stop() is None
+        monitor.raise_if_over_budget(iteration=1)
+
+    def test_an_unpriced_in_flight_delta_without_max_usd_does_not_latch(self) -> None:
+        task = _task(limits=RunLimits(max_output_tokens=1000), model="not-on-the-card", kind=AgentKind.CODEX)
+        monitor = TurnMonitor.for_task(task, arm=True)
+        _feed(monitor, [AgentStartEvent(task_id="t"), TurnEndEvent(task_id="t", tokens=TokenUsage(output_tokens=5))])
         assert monitor.should_stop() is None
 
 

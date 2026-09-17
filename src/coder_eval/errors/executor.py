@@ -5,7 +5,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .categories import RETRY_CONFIG, RetryConfig
+from .agent import AgentCrashError
+from .categories import RETRY_CONFIG, ErrorCategory, RetryConfig
 from .categorization import categorize_error
 from .retry import get_error_tip, get_retry_delay, should_retry
 
@@ -22,7 +23,8 @@ async def execute_with_retry(
     """Execute an operation with automatic retry on transient errors.
 
     Retries only what ``errors/categorization.py`` classifies as retryable;
-    everything else raises on the first attempt.
+    everything else raises on the first attempt. An ``AGENT_CRASH`` from an
+    ``AgentCrashError`` with ``tool_calls`` is never retried.
 
     Rationale: .claude/notes/agents.md § Shared turn lifecycle
 
@@ -70,6 +72,13 @@ async def execute_with_retry(
             # Categorize error
             category = categorize_error(e, context)
             config = RETRY_CONFIG.get(category, RetryConfig())
+
+            if category is ErrorCategory.AGENT_CRASH and isinstance(e, AgentCrashError) and e.tool_calls:
+                logger.error(
+                    f"[{task_id}] {operation_name} failed (not retried, the attempt made {e.tool_calls} tool calls): "
+                    + f"{category.value} - {e}"
+                )
+                raise
 
             # Check if we should retry (handles both non-retryable categories and exhausted attempts)
             if not should_retry(category, attempt):

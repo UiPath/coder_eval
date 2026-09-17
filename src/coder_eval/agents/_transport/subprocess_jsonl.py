@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any, ClassVar
 
-from coder_eval.agent import Agent
+from coder_eval.agent import Agent, command_version
 from coder_eval.errors.agent import format_timeout_reason
 from coder_eval.isolation.docker_runner import STDOUT_LINE_LIMIT_BYTES
 from coder_eval.models import AgentState, ApiRoute, BaseAgentConfig
@@ -80,6 +80,7 @@ class SubprocessJsonlAgent[ConfigT: BaseAgentConfig](Agent[ConfigT]):
     """An adapter whose turn is one CLI process streaming nd-JSON on stdout."""
 
     cli_name: ClassVar[str]
+    executable: ClassVar[str]
     docs_page: ClassVar[str]
     recognized_events: ClassVar[frozenset[str]]
     decoder: ClassVar[type[JsonlDecoder]]
@@ -108,6 +109,10 @@ class SubprocessJsonlAgent[ConfigT: BaseAgentConfig](Agent[ConfigT]):
     @abstractmethod
     def env(self) -> dict[str, str]:
         """The CLI's whole environment."""
+
+    async def harness_version(self) -> str | None:
+        """``<executable> --version`` under the turn's environment."""
+        return await command_version([self.executable, "--version"], env=self.env())
 
     def observe(self, event: dict[str, Any]) -> None:
         """See every decoded event before the decoder does (session ids, for example)."""

@@ -19,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from coder_eval.agent import Agent, AgentState
-from coder_eval.agents.registry import AgentRegistry
+from coder_eval.agents.registry import SPI_VERSION, AgentRegistry
 from coder_eval.models import (
     AgentKind,
     ApiRoute,
@@ -34,7 +34,7 @@ from coder_eval.streaming.emitter import TurnOutcome
 from coder_eval.streaming.events import AgentEndStatus, StopReason
 
 
-@AgentRegistry.register(AgentKind.NONE, NoneAgentConfig)
+@AgentRegistry.register(AgentKind.NONE, NoneAgentConfig, spi_version=SPI_VERSION)
 class NoOpAgent(Agent[NoneAgentConfig]):
     """Agent that does nothing — every lifecycle method is a no-op.
 
@@ -52,6 +52,7 @@ class NoOpAgent(Agent[NoneAgentConfig]):
         allowed_tools=Enforcement.UNSUPPORTED,
         disallowed_tools=Enforcement.UNSUPPORTED,
         cooperative_stop=False,
+        reports_cost=True,
         usage_granularity=UsageGranularity.TURN,
         timing_basis=TimingBasis.TURN_CLOCK,
     )

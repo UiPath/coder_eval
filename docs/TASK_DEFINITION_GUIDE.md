@@ -284,7 +284,7 @@ run_limits:
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |
 | `max_output_tokens` | *unset* | `>= 1` | Max cumulative output (completion) tokens. |
 | `max_total_tokens` | *unset* | `>= 1` | Max cumulative input + output tokens. Distinct from [`simulation.max_total_tokens`](#simulation-multi-turn-user-dialog) — see the note below. |
-| `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. Requires per-turn SDK cost reporting. |
+| `max_usd` | *unset* | `> 0.0` | Max cumulative cost in USD. On a harness that does not report its own cost, `agent.model` must have a rate (checked at resolution). |
 | `count_cached_input` | `false` | — | Count `cache_read_input_tokens` toward the input/total budgets. Off by default — cached reads are typically free. |
 | `count_cache_creation` | `false` | — | Count `cache_creation_input_tokens` toward the input/total budgets. Off by default. |
 | `stop_early` | *unset* | `false` or unset | Run-level early-stop **kill switch** — there is no master arm. Unset: the criteria's own `stop_early:` blocks decide. `false`: force-disarm every block for this run. `true` (the removed master arm) is rejected at resolution. See [`stop_early`](#stop_early-opt-in-early-stop). |
@@ -312,11 +312,17 @@ model.
   `FinalStatus.COST_BUDGET_EXCEEDED` (`max_usd`). Both categorize as `failed` — see
   [Report Schema](REPORT_SCHEMA.md).
 - **`max_usd` is priced from the harness's reported cost**, else from the rate card in
-  `coder_eval.pricing` for the model the harness reports (then `agent.model`). A turn with no usage
-  costs nothing. A run that can price a turn neither way finishes **`ERROR`** at that turn's end with
-  the message "run_limits.max_usd could not be enforced". It is never skipped. Add a rate with
-  `register_pricing`, pin a priced model, or remove `max_usd`. Mid-turn usage reports rarely carry a
-  cost, so when the model has no rate the USD cap is checked once the turn's reported cost arrives.
+  `coder_eval.pricing` for `agent.model` (then the model the harness reports). A turn with no usage
+  costs nothing. It is never skipped:
+  - On a harness whose contract does not set `reports_cost` (see
+    [Run-Limit Parity](agents/HARNESS_PARITY.md)), a task with `max_usd` and no priced
+    `agent.model` is **rejected at resolution**, so `coder-eval plan` fails.
+  - A run that still cannot price a turn finishes **`ERROR`** with the message
+    "run_limits.max_usd could not be enforced". On a harness that does not report cost, this
+    happens at the first unpriced usage report, mid-turn.
+  - Add a rate with `register_pricing`, pin a priced model, or remove `max_usd`. On a harness
+    that reports cost, mid-turn usage reports rarely carry a cost, so when the model has no rate
+    the USD cap is checked once the turn's reported cost arrives.
 - **Cached-read and cache-creation tokens are excluded by default.** `count_cache_creation: true` is
   what makes an input-token budget meaningful for **Codex**, which buckets its fresh (full-price)
   prompt slice into `cache_creation`; with the default `false`, a Codex token budget effectively

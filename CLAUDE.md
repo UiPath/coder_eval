@@ -54,7 +54,7 @@ data-driven analysis.
 - **`streaming/`** is the event protocol and `EventCollector`; **`streaming/emitter.py`**
   is `TurnEmitter`, the per-turn kernel every agent writes its turn through.
 - **`testing.py`** is `coder_eval.testing`, the adapter test sensors (`replay`,
-  `assert_identity_closes`, `assert_stream_balanced`, `conformance`). In-tree suites and
+  `assert_identity_closes`, `assert_stream_balanced`, `conformance`, `stop_conformance`). In-tree suites and
   plugins use the same module.
 
 Outside the package: `tasks/`, `experiments/`, `templates/`, `tests/`, `docs/`,

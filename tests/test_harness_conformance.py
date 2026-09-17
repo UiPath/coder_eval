@@ -33,8 +33,16 @@ from coder_eval.models import (
 )
 from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.plugins import ensure_plugins_loaded
-from coder_eval.streaming.events import AgentEndEvent, StopReason, ToolEndEvent, end_status_for
-from coder_eval.testing import conformance, enforced_cells, rejections
+from coder_eval.streaming.events import StopReason
+from coder_eval.testing import (
+    FIRST_TOOL_ID,
+    SECOND_TOOL_ID,
+    StopAfterFirstTool,
+    conformance,
+    enforced_cells,
+    rejections,
+    stop_conformance,
+)
 from tests.test_antigravity_agent import _install_fake_sdk
 
 
@@ -405,26 +413,7 @@ async def test_conformance_per_kind(kind: AgentKind, tmp_path: Path, monkeypatch
 # --- cooperative stop: every StopReason ends the turn at the boundary ---------------
 
 
-class _StopAfterFirstTool:
-    """``should_stop`` stub: ``reason`` once one tool call has resolved; also keeps the end event."""
-
-    def __init__(self, reason: StopReason) -> None:
-        self.reason = reason
-        self.tool_ends = 0
-        self.end: AgentEndEvent | None = None
-
-    def on_event(self, event: object) -> None:
-        if isinstance(event, ToolEndEvent):
-            self.tool_ends += 1
-        elif isinstance(event, AgentEndEvent):
-            self.end = event
-
-    def __call__(self) -> StopReason | None:
-        return self.reason if self.tool_ends else None
-
-
-type StopProbe = Callable[[Path, pytest.MonkeyPatch, _StopAfterFirstTool], Awaitable[list[Any]]]
-_SECOND = "second-call"
+type StopProbe = Callable[[Path, pytest.MonkeyPatch, StopAfterFirstTool], Awaitable[list[Any]]]
 
 
 def _recording(items: list[Any], pulled: list[Any]) -> Iterator[Any]:
@@ -433,7 +422,7 @@ def _recording(items: list[Any], pulled: list[Any]) -> Iterator[Any]:
         yield item
 
 
-async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.claude_fixtures import (
         AssistantMessage,
         ResultMessage,
@@ -443,10 +432,10 @@ async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfter
 
     pulled: list[Any] = []
     events = [
-        AssistantMessage([ToolUseBlock("first", "Bash", {"command": "ls"})], message_id="m1"),
-        UserMessage("first", False, "ok"),
-        AssistantMessage([ToolUseBlock(_SECOND, "Bash", {"command": "ls"})], message_id="m2"),
-        UserMessage(_SECOND, False, "ok"),
+        AssistantMessage([ToolUseBlock(FIRST_TOOL_ID, "Bash", {"command": "ls"})], message_id="m1"),
+        UserMessage(FIRST_TOOL_ID, False, "ok"),
+        AssistantMessage([ToolUseBlock(SECOND_TOOL_ID, "Bash", {"command": "ls"})], message_id="m2"),
+        UserMessage(SECOND_TOOL_ID, False, "ok"),
         ResultMessage(),
     ]
 
@@ -461,7 +450,7 @@ async def _stop_claude(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfter
     return [getattr(e.content[0], "id", None) for e in pulled if hasattr(e, "content")]
 
 
-async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests.test_codex_agent import _FakeThread, _FakeTurnHandle, _item_notification, _started_agent
 
     pulled: list[Any] = []
@@ -473,7 +462,7 @@ async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirst
 
     notifications = [
         _item_notification(method, command(item_id))
-        for item_id in ("first", _SECOND)
+        for item_id in (FIRST_TOOL_ID, SECOND_TOOL_ID)
         for method in ("item/started", "item/completed")
     ]
 
@@ -492,7 +481,7 @@ async def _stop_codex(_tmp: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirst
     return [n.payload.item.root.id for n in pulled]
 
 
-async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.antigravity_fixtures import _FakeConversation, _step, _tc
 
     pulled: list[Any] = []
@@ -509,7 +498,7 @@ async def _stop_antigravity(tmp_path: Path, _mp: pytest.MonkeyPatch, stop: _Stop
             ),
         ]
 
-    steps = [*call("first"), *call(_SECOND)]
+    steps = [*call(FIRST_TOOL_ID), *call(SECOND_TOOL_ID)]
 
     class _RecordingConversation(_FakeConversation):
         async def receive_steps(self):
@@ -551,20 +540,20 @@ async def _stop_cli(
         await cli.communicate(USER_TURN, iteration=1, stream_callback=stop, should_stop=stop)
     finally:
         await cli.stop()
-    return [tool_id for tool_id in ("first", _SECOND) if any(tool_id in json.dumps(p) for p in pulled)]
+    return [tool_id for tool_id in (FIRST_TOOL_ID, SECOND_TOOL_ID) if any(tool_id in json.dumps(p) for p in pulled)]
 
 
-async def _stop_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.pi_fixtures import _tool_end, _tool_start, _turn_end, _turn_start
 
     lines = [_turn_start()]
-    for tool_id in ("first", _SECOND):
+    for tool_id in (FIRST_TOOL_ID, SECOND_TOOL_ID):
         lines += [_tool_start(tool_id, "bash", {"command": "ls"}), _tool_end(tool_id, "bash", "ok")]
     lines.append(_turn_end(inp=1, out=1))
     return await _stop_cli(PiAgent, AgentKind.PI, lines, tmp_path, monkeypatch, stop)
 
 
-async def _stop_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: _StopAfterFirstTool) -> list[Any]:
+async def _stop_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: StopAfterFirstTool) -> list[Any]:
     from tests._fixtures.golden_streams.opencode_fixtures import _evt
 
     def tool_use(tool_id: str) -> str:
@@ -584,8 +573,8 @@ async def _stop_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: 
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     lines = [
         _evt("step_start", {"id": "prt_0", "messageID": "msg_1", "type": "step-start"}),
-        tool_use("first"),
-        tool_use(_SECOND),
+        tool_use(FIRST_TOOL_ID),
+        tool_use(SECOND_TOOL_ID),
     ]
     return await _stop_cli(OpenCodeAgent, AgentKind.OPENCODE, lines, tmp_path, monkeypatch, stop)
 
@@ -603,17 +592,11 @@ def test_every_cooperative_kind_has_a_stop_probe() -> None:
     assert set(_STOP_PROBES) == {k.value for k in _KINDS if _contract(k).cooperative_stop}
 
 
-@pytest.mark.parametrize("reason", list(StopReason))
 @pytest.mark.parametrize("kind", sorted(_STOP_PROBES))
-async def test_stop_reason_ends_the_turn_before_the_next_call(
-    kind: str, reason: StopReason, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    stop = _StopAfterFirstTool(reason)
+async def test_stop_conformance(kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def probe(stop: StopAfterFirstTool, reason: StopReason) -> list[Any]:
+        directory = tmp_path / reason.value
+        directory.mkdir()
+        return await _STOP_PROBES[kind](directory, monkeypatch, stop)
 
-    pulled = await _STOP_PROBES[kind](tmp_path, monkeypatch, stop)
-
-    assert stop.end is not None
-    assert stop.end.status is end_status_for(reason)
-    assert stop.end.crashed is False
-    assert "first" in pulled
-    assert _SECOND not in pulled
+    await stop_conformance(kind, probe)

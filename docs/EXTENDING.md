@@ -35,31 +35,32 @@ my_plugin = "my_plugin:register"
 ```
 
 At CLI init, `load_plugins()` imports each entry point and calls it with the
-`AgentRegistry` **class** (not an instance). A third-party hook that raises is logged
-and skipped; only a failing *built-in* registration is fatal.
+`AgentRegistry` **class** (not an instance). A hook that raises stops the load with a
+`PluginLoadError` that names the entry point, so every command fails until the plugin is
+fixed or uninstalled. A broken plugin is never skipped.
 
 ### The `register` hook
 
-Import everything from `coder_eval.spi`, the stable plugin surface, and check its
-version in the hook. `SPI_VERSION` changes whenever an exported name changes its
-signature.
+Import everything from `coder_eval.spi`, the stable plugin surface. `SPI_VERSION`
+changes whenever an exported name changes its signature. Every `register` call must
+pass the SPI version the agent was written against, as the literal number: registration
+raises `TypeError` when it is not the version this coder_eval provides.
 
 ```python
-from coder_eval.spi import SPI_VERSION, AgentRegistry
+from coder_eval.spi import AgentRegistry
 
 def register(registry: type[AgentRegistry]) -> None:
-    assert SPI_VERSION == 3, f"my-agent supports coder_eval SPI 3, not {SPI_VERSION}"
-    # Bind type string → config class → agent class.
-    registry.register("my-agent", MyAgentConfig)(MyAgent)
+    # Bind type string → config class → agent class, for SPI 3.
+    registry.register("my-agent", MyAgentConfig, spi_version=3)(MyAgent)
     # Optionally contribute pricing here too (see §3):
     # register_pricing(MY_RATES)
 ```
 
-`AgentRegistry.register(agent_kind, config_class)` returns a decorator, so the
-decorator form works too:
+`AgentRegistry.register(agent_kind, config_class, *, spi_version)` returns a decorator,
+so the decorator form works too:
 
 ```python
-@AgentRegistry.register("my-agent", MyAgentConfig)
+@AgentRegistry.register("my-agent", MyAgentConfig, spi_version=3)
 class MyAgent(Agent[MyAgentConfig]):
     ...
 ```
@@ -311,9 +312,13 @@ format drift. The in-tree example is `src/coder_eval/agents/pi_agent.py`.
 - [ ] A translation from config to the harness's native call that delivers the staged
       `plugin_root`.
 - [ ] A decoder: one object per turn that takes the harness's events and calls the emitter.
-- [ ] The four `coder_eval.testing` sensors in your own tests: `replay` your decoder over a
+- [ ] `async def harness_version(self)`: the CLI or SDK version the agent drives, recorded as
+      `environment_info.harness_version`. A `SubprocessJsonlAgent` gets `<executable> --version`
+      from its `executable` class attribute.
+- [ ] The `coder_eval.testing` sensors in your own tests: `replay` your decoder over a
       recorded stream, `assert_identity_closes` on the replay, `assert_stream_balanced` on
-      its events, and `conformance(kind, probes)` for the contract.
+      its events, `conformance(kind, probes)` for the contract, and
+      `stop_conformance(kind, probe)` when the contract declares `cooperative_stop`.
 
 ### Test your adapter: `coder_eval.testing`
 
@@ -326,6 +331,7 @@ The in-tree suites and a plugin's tests call the same module. It does not import
 | `assert_identity_closes(record, started_at=..., ended_at=...)` | Head + generation + tool union + tail equals the turn's span. |
 | `assert_stream_balanced(events)` | Every opened inner turn and tool call closes, and one turn has one start and one end. |
 | `await conformance(kind, probes)` | Your agent rejects every field its contract marks unsupported, and `probes` has one check for each enforced cell. |
+| `await stop_conformance(kind, probe)` | For every `StopReason`, your agent ends the turn with that reason's status at the first boundary. `probe(stop, reason)` runs one `communicate()` over a scripted harness that calls `FIRST_TOOL_ID` then `SECOND_TOOL_ID`, passes `stop` (a `StopAfterFirstTool`) as both `stream_callback` and `should_stop`, and returns the tool ids your agent pulled. |
 
 ```python
 from datetime import datetime
@@ -493,7 +499,7 @@ MY_RATES = {
 }
 
 def register(registry):
-    registry.register("my-agent", MyAgentConfig)(MyAgent)
+    registry.register("my-agent", MyAgentConfig, spi_version=3)(MyAgent)
     register_pricing(MY_RATES)
 ```
 

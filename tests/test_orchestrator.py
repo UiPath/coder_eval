@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from coder_eval import orchestrator as orchestrator_module
+from coder_eval.errors import AgentCrashError
 from coder_eval.models import (
     AgentKind,
     BedrockRoute,
@@ -632,6 +633,9 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
             # carries agent markers like system_prompt_semantics into run.json.
             return {"system_prompt_semantics": "append"}
 
+        async def harness_version(self):
+            return "dummy 1.2.3"
+
     async def create_dummy_agent(_self):
         return DummyAgent()
 
@@ -667,6 +671,7 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
     # An agent-supplied environment_info key survives the merge into the
     # run record (the cross-repo contract seam external consumers read).
     assert orchestrator.result.environment_info["system_prompt_semantics"] == "append"
+    assert orchestrator.result.environment_info["harness_version"] == "dummy 1.2.3"
 
     assert isinstance(orchestrator.sandbox, Sandbox)
     assert orchestrator.sandbox.sandbox_dir is not None
@@ -1826,7 +1831,8 @@ class _CooperativeToolAgent:
     """Fake agent that emits resolved tool calls and polls ``should_stop`` at each boundary.
 
     ``plan`` holds one entry per ``communicate`` attempt: the number of tool calls the
-    attempt intends to make, and whether it then crashes with a partial turn. ``host``
+    attempt intends to make, and whether it then crashes with a partial turn. The crash
+    is a rate limit, which retries after tool calls. ``host``
     is the ``AsyncMock`` the orchestrator talks to; its ``communicate`` is this fake's.
     """
 
@@ -1885,7 +1891,7 @@ class _CooperativeToolAgent:
             partial = TurnRecord(
                 iteration=iteration, user_input=user_input, agent_output="<partial>", commands=commands, crashed=True
             )
-            return TurnOutcome(record=partial, status=AgentEndStatus.CRASHED, error="mid-turn failure")
+            return TurnOutcome(record=partial, status=AgentEndStatus.CRASHED, error="429 rate limit")
 
         status = end_status_for(reason) if reason is not None else None
         if status is not None:
@@ -2005,13 +2011,15 @@ async def test_tool_call_cap_counts_a_crashed_attempts_calls_toward_the_retry(tm
 
 
 @pytest.mark.asyncio
-async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
-    """First agent.communicate outcome is CRASHED with a partial; retry succeeds.
+@pytest.mark.parametrize("tool_calls", [0, 1])
+async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path, tool_calls):
+    """First agent.communicate outcome is CRASHED with a partial.
 
     Locks the orchestrator wiring in `_communicate_with_retry`: a CRASHED
-    outcome's record reaches `result.iterations` before it is raised (and
-    retried), so the partial lands before the successful retry's record, and
-    both share the same iteration number (per the agent-side rollback contract).
+    outcome's record reaches `result.iterations` before it is raised. With no
+    tool call it is retried, the partial lands before the successful retry's
+    record, and both share the same iteration number. With a tool call it is
+    not retried.
     """
     from datetime import datetime
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -2072,7 +2080,7 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
         iteration=1,
         user_input="p",
         agent_output="<partial>",
-        commands=[partial_cmd],
+        commands=[partial_cmd] * tool_calls,
         duration_seconds=0.1,
         crashed=True,
         crash_reason="mid-turn failure",
@@ -2112,16 +2120,24 @@ async def test_evaluation_loop_preserves_partial_on_crash_retry(tmp_path):
         patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        success = await orchestrator._evaluation_loop()
+        if tool_calls:
+            with pytest.raises(AgentCrashError):
+                await orchestrator._evaluation_loop()
+        else:
+            assert await orchestrator._evaluation_loop() is True
 
-    assert success is True
+    if tool_calls:
+        assert mock_agent.communicate.call_count == 1
+        [preserved] = orchestrator.result.iterations
+        assert preserved.crashed is True
+        assert preserved.commands[0].tool_name == "Skill"
+        return
     # communicate called twice: once crashing, once clean.
     assert mock_agent.communicate.call_count == 2
     # Both records reach result.iterations: partial first (via callback), then successful (via main flow).
     assert len(orchestrator.result.iterations) == 2
     preserved, clean = orchestrator.result.iterations
     assert preserved.crashed is True
-    assert preserved.commands[0].tool_name == "Skill"
     assert clean.crashed is False
     # Orchestrator-visible iteration number matches across both records.
     assert preserved.iteration == clean.iteration == 1

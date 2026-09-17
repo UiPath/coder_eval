@@ -70,6 +70,13 @@ class HarnessContract(BaseModel):
             "windows and main-thread tools)."
         )
     )
+    reports_cost: bool = Field(
+        default=False,
+        description=(
+            "Whether every finished turn with usage carries a cost the harness computed for any model it can "
+            "run. When False, run_limits.max_usd requires an agent.model that pricing.py prices."
+        ),
+    )
     permission_modes: frozenset[PermissionMode] | None = Field(
         default=None,
         description=(

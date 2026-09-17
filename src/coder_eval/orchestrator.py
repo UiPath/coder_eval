@@ -1546,6 +1546,12 @@ class Orchestrator:
             context={"task_id": self.task.task_id, "component": "agent", "agent_name": self._agent_name},
         )
 
+        try:
+            self.result.environment_info["harness_version"] = await self.agent.harness_version()
+        except Exception:
+            logger.warning("[%s] agent.harness_version() raised", self.task.task_id, exc_info=True)
+            self.result.environment_info["harness_version"] = None
+
         # Save agent config on result (copy to prevent mutation of shared reference)
         self.result.agent_config = self.task.agent.model_copy(deep=True)
 
