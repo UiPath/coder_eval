@@ -27,7 +27,7 @@ _BUDGET_OVERSHOOT: Final[str] = (
 class RunLimits(BaseModel):
     """Run-time caps on a task.
 
-    Unifies structural caps (max_tool_calls, task_timeout, turn_timeout) and
+    Unifies structural caps (max_tool_calls, max_turns, task_timeout, turn_timeout) and
     budget caps (tokens, USD). Structural caps and budget caps stop the task at
     the agent's next poll boundary; both are cumulative across every turn of the
     task and apply to the subject agent only.
@@ -46,6 +46,18 @@ class RunLimits(BaseModel):
             "harness: the round that reaches the cap is processed whole, so tool calls already in "
             "flight can still land after it. The run finalizes cleanly as tool_calls_exhausted; "
             "criteria are still checked. None = no cap."
+        ),
+    )
+    max_turns: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Hard cap on main-thread model turns (model responses) across the whole task (every retry attempt "
+            "and every dialog turn); a sub-agent's turns do not count. The TurnMonitor stops the agent at its "
+            "next poll once turn N+1 starts, so part of that turn can still land. Only harnesses with a "
+            "per-response turn boundary accept it (usage_granularity generation or step); the others reject it "
+            "at resolution. The run finalizes cleanly as tool_calls_exhausted; criteria are still checked. "
+            "None = no cap."
         ),
     )
     expected_tool_calls: int | None = Field(

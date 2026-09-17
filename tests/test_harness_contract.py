@@ -25,9 +25,11 @@ from coder_eval.models import (
     FileExistsCriterion,
     HarnessContract,
     PermissionMode,
+    RunLimits,
     SandboxConfig,
     TaskDefinition,
     ToolNameMap,
+    UsageGranularity,
     parse_agent_config,
 )
 from coder_eval.orchestration.config import BatchRunConfig
@@ -273,7 +275,7 @@ def test_every_builtin_accepts_cost_log_tags(kind: AgentKind) -> None:
     assert agent.cost_log_tags == tags
 
 
-def _task(kind: str, **agent_fields: Any) -> TaskDefinition:
+def _task(kind: str, *, run_limits: RunLimits | None = None, **agent_fields: Any) -> TaskDefinition:
     prompt = None if kind == AgentKind.NONE else "do it"
     return TaskDefinition(
         task_id="t",
@@ -282,6 +284,7 @@ def _task(kind: str, **agent_fields: Any) -> TaskDefinition:
         agent=parse_agent_config(type=kind, **agent_fields),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(description="c", path="out.txt")],
+        run_limits=run_limits,
     )
 
 
@@ -350,6 +353,45 @@ class TestValidateHarnessContract:
         AgentRegistry._registry.pop(KIND)
         with pytest.raises(HarnessContractError, match="not registered"):
             validate_harness_contract(task)
+
+
+class TestModelTurnLimits:
+    @pytest.mark.parametrize("cooperative_stop", [True, False])
+    @pytest.mark.parametrize("granularity", list(UsageGranularity))
+    def test_counts_model_turns_follows_usage_granularity_and_cooperative_stop(
+        self, cooperative_stop: bool, granularity: UsageGranularity
+    ) -> None:
+        contract = stub_contract(cooperative_stop=cooperative_stop).model_copy(
+            update={"usage_granularity": granularity}
+        )
+        assert contract.counts_model_turns is (cooperative_stop and granularity is not UsageGranularity.TURN)
+
+    @pytest.mark.parametrize(
+        ("kind", "accepted"),
+        [
+            (AgentKind.CLAUDE_CODE, True),
+            (AgentKind.OPENCODE, True),
+            (AgentKind.PI, True),
+            (AgentKind.CODEX, False),
+            (AgentKind.ANTIGRAVITY, False),
+            (AgentKind.NONE, False),
+        ],
+    )
+    def test_model_turn_limit_gate(self, kind: AgentKind, accepted: bool) -> None:
+        task = _task(kind, run_limits=RunLimits(max_turns=3))
+        if accepted:
+            validate_harness_contract(task)
+            return
+        with pytest.raises(HarnessContractError) as exc:
+            validate_harness_contract(task)
+        message = str(exc.value)
+        assert "run_limits.max_turns" in message
+        assert f"{kind.value!r}" in message
+        assert "docs/agents/HARNESS_PARITY.md" in message
+        assert "claude-code" in message.split("counts model turns", 1)[1]
+
+    def test_unset_model_turn_limits_pass_everywhere(self) -> None:
+        validate_harness_contract(_task(AgentKind.CODEX, run_limits=RunLimits()))
 
 
 _NON_CLAUDE_ENFORCING = [AgentKind.PI, AgentKind.OPENCODE, AgentKind.ANTIGRAVITY]

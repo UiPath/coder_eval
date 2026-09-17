@@ -179,9 +179,14 @@ class TestResolutionLevel:
         assert task.run_limits.max_tool_calls == 5
         assert task.run_limits.task_timeout == 600
 
-    def test_dash_d_run_limits_max_turns_is_rejected(self):
-        with pytest.raises(typer.BadParameter, match=r"unknown field 'max_turns' under 'run_limits'"):
-            _overrides(set_overrides=["run_limits.max_turns=5"])
+    def test_dash_d_run_limits_max_turns_is_accepted(self):
+        from coder_eval.orchestration.overrides import apply_overrides
+
+        task = self._task(run_limits={"task_timeout": 600})
+        apply_overrides(task, _overrides(set_overrides=["run_limits.max_turns=5"]))
+        assert task.run_limits is not None
+        assert task.run_limits.max_turns == 5
+        assert task.run_limits.task_timeout == 600
 
     def test_docker_working_dir_override(self):
         from coder_eval.orchestration.overrides import apply_overrides

@@ -1776,13 +1776,14 @@ async def test_overrides_apply_max_tool_calls_field_merge(tmp_path):
     assert task.run_limits.expected_tool_calls == baseline_expected_tool_calls
 
 
-def test_overrides_reject_removed_run_limits_max_turns():
-    """run_limits.max_turns no longer exists; the schema-validated override rejects it."""
-    from coder_eval.orchestration.overrides import OverrideError, apply_overrides
+def test_overrides_set_run_limits_max_turns():
+    from coder_eval.orchestration.overrides import apply_overrides
 
     task, _ = load_task(Path("tasks/hello_date.yaml"))
-    with pytest.raises(OverrideError, match="max_turns"):
-        apply_overrides(task, {"run_limits.max_turns": 42})
+    apply_overrides(task, {"run_limits.max_turns": 42})
+
+    assert task.run_limits is not None
+    assert task.run_limits.max_turns == 42
 
 
 # ==================== Duplicate Task ID Validation Tests ====================

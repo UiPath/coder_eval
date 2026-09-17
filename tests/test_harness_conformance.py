@@ -73,7 +73,12 @@ def test_contract_rejection(kind: AgentKind, check: Callable[[], None]) -> None:
 
 def test_every_kind_rejects_what_its_contract_does_not_honor() -> None:
     names = {name for k in _KINDS for name, _ in rejections(k.value)}
-    assert {"unsupported system_prompt", "undeclared permission_mode=default", "misspelled tool name"} <= names
+    assert {
+        "unsupported system_prompt",
+        "undeclared permission_mode=default",
+        "misspelled tool name",
+        "unsupported run_limits.max_turns",
+    } <= names
 
 
 # --- probes: the value reaches the native call --------------------------------------

@@ -44,6 +44,8 @@ _GATED: dict[str, str] = {
     "disallowed_tools": "disallowed_tools",
 }
 
+MODEL_TURN_LIMITS: tuple[str, ...] = ("max_turns",)
+
 
 def registration_for(task: TaskDefinition, *, requirement: str, hint: str = "") -> AgentRegistration[Any]:
     """The registry entry for the task's resolved agent kind.
@@ -78,13 +80,14 @@ def registration_for(task: TaskDefinition, *, requirement: str, hint: str = "") 
 def validate_harness_contract(task: TaskDefinition) -> None:
     """Reject agent config the task's harness cannot honor with its documented meaning.
 
-    Three checks, in order: a gated field set on a harness whose contract marks it
+    Four checks, in order: a gated field set on a harness whose contract marks it
     unsupported; a ``permission_mode`` value outside the contract's
     ``permission_modes``; a tool-list name outside ``CANONICAL_TOOL_NAMES`` (or an
-    ``mcp__`` name the harness cannot address). A field is set when a config layer
-    wrote it with a value other than None or an empty tool list (which restricts
-    nothing). A task without an agent type returns
-    silently; the layer-5 type guard reports that.
+    ``mcp__`` name the harness cannot address); a non-None model-turn run limit
+    (``MODEL_TURN_LIMITS``) on a harness whose contract does not count model turns.
+    An agent field is set when a config layer wrote it with a value other than None
+    or an empty tool list (which restricts nothing). A task without an agent type
+    returns silently; the layer-5 type guard reports that.
 
     Raises:
         HarnessContractError: on the first violation, or an unregistered kind.
@@ -110,6 +113,21 @@ def validate_harness_contract(task: TaskDefinition) -> None:
     for field in ("allowed_tools", "disallowed_tools"):
         if field in set_fields and tool_names is not None:
             _check_tool_names(field, getattr(task.agent, field), tool_names, kind)
+    _check_model_turn_limits(task, contract, kind)
+
+
+def _check_model_turn_limits(task: TaskDefinition, contract: HarnessContract, kind: str) -> None:
+    limits = task.run_limits
+    if limits is None or contract.counts_model_turns:
+        return
+    for field in MODEL_TURN_LIMITS:
+        if getattr(limits, field) is not None:
+            raise HarnessContractError(
+                f"run_limits.{field} is set but the {kind!r} harness reports no per-response turn boundary "
+                + f"(usage_granularity={contract.usage_granularity.value}; see docs/agents/HARNESS_PARITY.md). "
+                + "Remove the field, or set it only in a variant for a harness that counts model turns "
+                + f"({_honoring_kinds(lambda c: c.counts_model_turns)})."
+            )
 
 
 def _is_set(agent: BaseAgentConfig, field: str) -> bool:

@@ -18,6 +18,7 @@ CE069 fails the build on drift.
 | limit | claude-code | codex | antigravity | opencode | pi | none |
 | --- | --- | --- | --- | --- | --- | --- |
 | `max_tool_calls` | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | TurnMonitor at the should_stop poll, main-thread resolved tool calls | not polled (never fires) |
+| `max_turns` | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | rejected at resolution | rejected at resolution | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts | rejected at resolution |
 | `expected_tool_calls` | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only | orchestrator, cumulative visible tool calls, warns only |
 | `task_timeout` | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic | orchestrator, agent-agnostic |
 | `turn_timeout` | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) | agent watchdog (see Timeouts) |
@@ -70,6 +71,10 @@ developer instruction channel of the model request, never the user turn.
 `usage_granularity` is how often a harness reports token usage on the stream (per model
 generation, per agent-loop step, or once per `communicate()`); a token or USD budget can
 overshoot by one such report.
+`usage_granularity` also decides the model-turn limits (`max_turns`,
+`expected_turns`): a harness that reports per generation or per step opens one inner turn
+per model response, so the TurnMonitor can count them; a harness that reports once per
+`communicate()` rejects them at resolution.
 
 ### Tool names
 

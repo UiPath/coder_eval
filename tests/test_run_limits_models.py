@@ -65,13 +65,18 @@ class TestRunLimitsValidation:
             RunLimits(max_tool_calls=0)
         RunLimits(max_tool_calls=1)
 
-    def test_max_turns_under_run_limits_is_rejected(self):
-        with pytest.raises(ValidationError, match=r"max_turns\n\s+Extra inputs are not permitted"):
-            RunLimits.model_validate({"max_turns": 5})
+    def test_max_turns_defaults_to_none(self):
+        assert RunLimits().max_turns is None
 
-    def test_max_turns_under_task_run_limits_is_rejected(self):
-        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-            _minimal_task(run_limits={"max_turns": 5})
+    def test_max_turns_validation(self):
+        with pytest.raises(ValidationError, match="greater than 0"):
+            RunLimits(max_turns=0)
+        assert RunLimits(max_turns=1).max_turns == 1
+
+    def test_max_turns_under_task_run_limits_loads(self):
+        task = _minimal_task(run_limits={"max_turns": 5})
+        assert task.run_limits is not None
+        assert task.run_limits.max_turns == 5
 
     def test_task_timeout_validation(self):
         with pytest.raises(ValidationError, match="greater than or equal to 30"):

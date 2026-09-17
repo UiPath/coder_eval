@@ -78,6 +78,11 @@ class HarnessContract(BaseModel):
         ),
     )
 
+    @property
+    def counts_model_turns(self) -> bool:
+        """Whether the stream opens one inner turn per model response, so run_limits counts model turns."""
+        return self.cooperative_stop and self.usage_granularity is not UsageGranularity.TURN
+
     @model_validator(mode="after")
     def check_semantics_matches_prompt_support(self) -> Self:
         """Require a semantics value exactly when the system prompt is enforced."""

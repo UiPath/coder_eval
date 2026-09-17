@@ -91,6 +91,11 @@ _RUN_LIMIT_CELLS: dict[str, Callable[[HarnessContract], str]] = {
         if c.cooperative_stop
         else "not polled (never fires)"
     ),
+    "max_turns": lambda c: (
+        "TurnMonitor at the should_stop poll, when main-thread model turn N+1 starts"
+        if c.counts_model_turns
+        else "rejected at resolution"
+    ),
     "expected_tool_calls": lambda _c: "orchestrator, cumulative visible tool calls, warns only",
     "task_timeout": lambda _c: "orchestrator, agent-agnostic",
     "turn_timeout": lambda _c: "agent watchdog (see Timeouts)",

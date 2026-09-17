@@ -29,7 +29,7 @@ from coder_eval.timing import main_thread_tool_spans, union_ms
 
 
 if TYPE_CHECKING:
-    from coder_eval.models import TaskDefinition
+    from coder_eval.models import RunLimits, TaskDefinition
 
 
 @dataclass(frozen=True)
@@ -222,7 +222,7 @@ def enforced_cells(contract: HarnessContract, kind: str) -> set[tuple[str, str]]
     return cells
 
 
-def _task(kind: str, **agent: Any) -> TaskDefinition:
+def _task(kind: str, *, run_limits: RunLimits | None = None, **agent: Any) -> TaskDefinition:
     from coder_eval.models import AgentKind, FileExistsCriterion, SandboxConfig, TaskDefinition, parse_agent_config
 
     return TaskDefinition(
@@ -232,6 +232,7 @@ def _task(kind: str, **agent: Any) -> TaskDefinition:
         agent=parse_agent_config(type=kind, **agent),
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(description="c", path="out.txt")],
+        run_limits=run_limits,
     )
 
 
@@ -290,6 +291,19 @@ def rejections(kind: str) -> list[tuple[str, Callable[[], None]]]:
                 lambda: _expect_rejected(lambda: _task(kind, allowed_tools=["Bassh"]), "did you mean 'Bash'"),
             )
         )
+    if not contract.counts_model_turns:
+        from coder_eval.models import RunLimits
+        from coder_eval.orchestration.harness_contract import MODEL_TURN_LIMITS
+
+        for field in MODEL_TURN_LIMITS:
+            checks.append(
+                (
+                    f"unsupported run_limits.{field}",
+                    lambda f=field: _expect_rejected(
+                        lambda: _task(kind, run_limits=RunLimits.model_validate({f: 1})), rf"run_limits\.{f}"
+                    ),
+                )
+            )
     return checks
 
 
