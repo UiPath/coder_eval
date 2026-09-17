@@ -265,17 +265,14 @@ class Sandbox:
         raise ValueError(f"Unsupported sandbox driver: {self.config.driver}")
 
     def adopt(self, workspace: Path) -> Path:
-        """Use ``workspace`` **as** the sandbox, materializing nothing into it.
+        """Use ``workspace`` **as** the sandbox, deriving its environment in place.
 
         The grade-in-place counterpart to :meth:`setup`: it takes a workspace that
         already exists -- an ``execute`` run's artifacts, or a verifier's ``/app``
-        -- and derives only the *environment* the criteria need (mock-dir ``+x``,
-        venv discovery, the plugin-tools pin). In-place is more CORRECT here, not
-        merely faster.
-
-        "Materializing nothing" means it writes no FILES; it does still chmod
-        ``+x`` over the task's declared mock-PATH directories, a mode change the
-        criteria need to resolve the same shimmed binaries the agent did.
+        -- and derives the *environment* the criteria need (mock-dir ``+x``, venv
+        discovery, the plugin-tools pin, and a re-provisioning fallback when
+        ``env_packages`` is missing). In-place is more CORRECT here, not merely
+        faster.
 
         The caller keeps ownership: ``_cleanup_on_exit`` stays False, so
         ``cleanup()`` never deletes an adopted directory. Criteria CAN still
@@ -318,17 +315,30 @@ class Sandbox:
         # it is missing AND env_packages is non-empty, so a captured/stripped
         # workspace (Sandbox.capture_to drops .venv/node_modules as noise) still
         # gets its packages, while the default `env_packages: []` case stays a no-op.
+        # A failed re-provision must not latch a half-built venv/node_modules into
+        # this caller-owned workspace: the next adopt would silently DISCOVER it
+        # and grade against a tree missing some or all of env_packages.
         # Rationale: .claude/notes/isolation.md § Why the venv gets system site packages
         if self.config.python:
             candidate = self.sandbox_dir / VENV_DIRNAME
             if candidate.is_dir():
                 self.venv_dir = candidate
             elif self.config.python.env_packages:
-                self._setup_virtualenv()
-                self._install_packages()
+                try:
+                    self._setup_virtualenv()
+                    self._install_packages()
+                except Exception:
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    self.venv_dir = None
+                    raise
 
-        if self.config.node and self.config.node.env_packages and not (self.sandbox_dir / "node_modules").is_dir():
-            self._install_node_packages()
+        node_modules = self.sandbox_dir / "node_modules"
+        if self.config.node and self.config.node.env_packages and not node_modules.is_dir():
+            try:
+                self._install_node_packages()
+            except Exception:
+                shutil.rmtree(node_modules, ignore_errors=True)
+                raise
 
         self._check_parent_node_modules_contamination()
         self._refresh_plugin_tools_dir()
@@ -802,13 +812,16 @@ class Sandbox:
             # Use uv to create venv
             cmd = ["uv", "venv", "--system-site-packages", str(self.venv_dir)]
             subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=60)
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.SubprocessError, FileNotFoundError):
             # The two paths do not produce the same artifact -- this one seeds pip,
             # `uv venv` does not -- so say which shape this host got.
             import venv
 
             logger.warning("uv unavailable; created %s with stdlib venv (pip seeded)", self.venv_dir)
-            venv.create(self.venv_dir, with_pip=True, system_site_packages=True)
+            try:
+                venv.create(self.venv_dir, with_pip=True, system_site_packages=True)
+            except subprocess.SubprocessError as e:
+                raise RuntimeError(f"Could not create a virtualenv at {self.venv_dir} (ensurepip): {e}") from e
 
     def _install_packages(self) -> None:
         """Install required Python packages in the virtual environment."""
@@ -828,15 +841,15 @@ class Sandbox:
             env = os.environ.copy()
             env["VIRTUAL_ENV"] = str(self.venv_dir)
             env["PATH"] = f"{scripts_dir}{os.pathsep}{env['PATH']}"
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.SubprocessError, FileNotFoundError):
             # Fallback to regular pip
             cmd = [str(pip_path), "install", *self.config.python.env_packages]
             env = None
 
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", timeout=300, env=env)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to install packages: {e.stderr}") from e
+        except subprocess.SubprocessError as e:
+            raise RuntimeError(f"Failed to install packages: {getattr(e, 'stderr', None) or e}") from e
 
     def _install_node_packages(self) -> None:
         """Install npm packages locally in the sandbox directory."""
@@ -849,7 +862,7 @@ class Sandbox:
         try:
             subprocess.run(["bun", "--version"], check=True, capture_output=True, timeout=5)
             cmd = ["bun", "add", *packages]
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.SubprocessError, FileNotFoundError):
             cmd = ["npm", "install", *packages]
 
         try:
@@ -862,8 +875,8 @@ class Sandbox:
                 timeout=300,
                 cwd=self.sandbox_dir,
             )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to install node packages: {e.stderr}") from e
+        except subprocess.SubprocessError as e:
+            raise RuntimeError(f"Failed to install node packages: {getattr(e, 'stderr', None) or e}") from e
 
         # Capture installed versions
         self._capture_node_tool_versions()

@@ -29,13 +29,16 @@ env:
   # Anthropic-credit spend off this path; DirectRoute is exercised elsewhere.
   API_BACKEND: "bedrock"
   CLAUDE_CODE_USE_BEDROCK: "1"
-  AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
 
 jobs:
   harbor-e2e:
     name: Harbor export + CoderEvalAgent round trip
+    # A fork PR's own workflow, scripts, uv.lock and Dockerfiles all run for a
+    # `pull_request` event -- and this job does two `docker build`s plus a real
+    # Bedrock model call. Fork PRs get no secrets (below) so the job cannot pass
+    # for one anyway; skip rather than run untrusted code on the shared pool and
+    # leave a required check permanently red for every external contributor.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: uipath-ubuntu-latest
     timeout-minutes: 20
 
@@ -90,6 +93,13 @@ jobs:
         run: docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/
 
       - name: Run Harbor E2E scenarios
+        # Bedrock credentials are scoped to this one step, not the workflow-level
+        # env: above (where earlier revisions left them) -- so npm/pip/docker build
+        # steps that fetch third-party code never see them in their environment.
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
         run: python .github/scripts/harbor_e2e.py
 
       - name: Upload failing scenario artifacts

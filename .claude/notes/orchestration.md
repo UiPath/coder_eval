@@ -670,8 +670,20 @@ and it prints as the command is already being prepared.
 ### What the gate covers, and why each part is in scope
 
 `include_setup_phase` covers the two capability families that exist only on the `--copy`
-path: `pre_run`, and the sandbox's own provisioning. Both are SKIPPED when grading in
-place, so on that path they are not a capability the run dir has.
+path: `pre_run` and a `template_sources` repo's `git clone`. Both are SKIPPED when
+grading in place — the orchestrator never runs `pre_run` there, and `Sandbox.adopt` never
+stages a template — so on that path neither is a capability the run dir has.
+
+**`env_packages` installs are NOT part of `include_setup_phase`, and used to be.** The
+premise was "`adopt` runs no installer", true when `adopt` only ever DISCOVERED an
+existing `.venv`/`node_modules`. It no longer holds: `adopt` now re-provisions
+`env_packages` whenever a captured workspace is missing them (see
+`.claude/notes/isolation.md` § Why the venv gets system site packages), so `uv pip
+install`/`npm install` are a capability of the IN-PLACE path too — exactly like `post_run`
+below. Gating them on `include_setup_phase` would let a shared run directory install
+attacker-chosen packages on the grader's host with no consent prompt, simply by omitting
+`.venv` from what it shares (which `capture_to` already strips as noise). They are
+disclosed unconditionally instead, regardless of `grade_in_place`.
 
 **`post_run` is deliberately NOT behind that flag**, and this is the one place the
 distinction bites. It used to be, back when the hooks were skipped as a pair — but

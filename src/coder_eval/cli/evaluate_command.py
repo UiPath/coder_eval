@@ -488,9 +488,11 @@ def run_evaluation(
 
     try:
         result = asyncio.run(_setup_and_run())
-    except RegradeError as e:
+    except (RegradeError, RuntimeError) as e:
         # Rendered like the three sibling handlers above: unwrapped, these
-        # operator-facing messages arrived as the tail of a stack trace.
+        # operator-facing messages arrived as the tail of a stack trace. RuntimeError
+        # is also caught here: both `Sandbox.setup` and `Sandbox.adopt` can raise one
+        # from a failed `env_packages` install (network, bad package name, timeout).
         console.print(f"[red]✗ {escape(str(e))}[/red]")
         raise typer.Exit(1) from e
     _report_and_exit(result, task=task, prior=prior, target=target, prepared_run_dir=prepared_run_dir)

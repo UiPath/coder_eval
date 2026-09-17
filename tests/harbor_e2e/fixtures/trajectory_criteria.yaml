@@ -33,10 +33,11 @@ success_criteria:
     description: "The file done.txt must be created."
   - type: "command_executed"
     tool_name: "Bash"
-    # `\S*` (not a bare literal) because the agent legitimately runs `touch
-    # /work/done.txt` -- its own absolute cwd, not the bare relative name --
-    # and real CI reproduced exactly that both times this fixture ran. Matches
-    # any path ending in done.txt, absolute or relative.
-    command_pattern: "touch\\s+\\S*done\\.txt"
+    # An optional path prefix (not a bare literal) because the agent legitimately
+    # runs `touch /work/done.txt` -- its own absolute cwd, not the bare relative
+    # name -- and real CI reproduced exactly that both times this fixture ran.
+    # The prefix must end in `/`, so `touch notdone.txt`/`touch xdone.txt` do
+    # not also match -- only a path ending in exactly `done.txt`.
+    command_pattern: "touch\\s+(\\S*/)?done\\.txt"
     min_count: 1
     description: "The agent must have run touch done.txt (requires trajectory hydration to grade)."

@@ -121,44 +121,81 @@ def run_harbor(scenario: Scenario, export_dir: Path, jobs_dir: Path) -> Path:
     return trial_dirs[0]
 
 
+def _read_json_best_effort(path: Path) -> object | str | None:
+    """Read and parse ``path`` as JSON, or a string describing why not.
+
+    Only used to build FAILURE diagnostics: a truncated/missing file must
+    degrade to a note rather than raise and replace the real reward/criteria
+    failure this exists to explain -- the same rule ``_zip_scenario_dir``
+    already states for itself.
+    """
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"unreadable ({exc})"
+
+
+def _criteria_detail(verifier_result: object) -> list[dict[str, object]] | None:
+    """Per-criterion score/detail from a parsed verifier ``task.json``."""
+    if not isinstance(verifier_result, dict):
+        return None
+    return [
+        {
+            "type": r.get("criterion_type"),
+            "score": r.get("score"),
+            "details": r.get("details"),
+            "error": r.get("error"),
+            "evaluation_status": r.get("evaluation_status"),
+            "result_kind": r.get("result_kind"),
+        }
+        for r in verifier_result.get("success_criteria_results", [])
+    ]
+
+
+def _agent_commands(agent_task_jsons: list[Path]) -> list[dict[str, object]] | str:
+    """The AGENT phase's own recorded tool calls, for a failure message.
+
+    Read directly rather than trusting the verifier's hydration of it: its
+    `iterations[].commands` is the raw telemetry criteria like
+    `command_executed` are supposed to hydrate from, so dumping it distinguishes
+    "no commands were ever recorded" (a hydration/telemetry bug) from "the
+    recorded commands just didn't match the pattern" (an agent/fixture issue).
+    """
+    if not agent_task_jsons:
+        return "no agent/task.json found"
+    agent_result = _read_json_best_effort(agent_task_jsons[0])
+    if not isinstance(agent_result, dict):
+        return f"unreadable: {agent_result!r}"
+    return [
+        {"tool_name": c.get("tool_name"), "parameters": c.get("parameters")}
+        for it in agent_result.get("iterations", [])
+        for c in it.get("commands", [])
+    ]
+
+
 def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
     reward_path = trial_dir / "verifier" / "reward.json"
     if not reward_path.is_file():
         raise RuntimeError(f"[{scenario.name}] missing {reward_path}")
     reward = json.loads(reward_path.read_text(encoding="utf-8"))
 
-    # Read the per-criterion breakdown BEFORE the reward gate below, so a
+    # Read the per-criterion breakdown ONCE, before the reward gate below, so a
     # failing reward's own root cause (which criterion, and why) is always in
     # the failure message -- not only when an unrelated criterion happens to
     # carry the aggregate to 1.0 "by luck" while this one silently failed.
     verifier_task_json = trial_dir / "verifier" / "task.json"
-    criteria_detail = None
-    if verifier_task_json.is_file():
-        verifier_result = json.loads(verifier_task_json.read_text(encoding="utf-8"))
-        criteria_detail = [
-            {"type": r.get("criterion_type"), "score": r.get("score"), "details": r.get("details")}
-            for r in verifier_result.get("success_criteria_results", [])
-        ]
+    if not verifier_task_json.is_file():
+        raise RuntimeError(f"[{scenario.name}] missing {verifier_task_json}")
+    verifier_result = _read_json_best_effort(verifier_task_json)
+    criteria_detail = _criteria_detail(verifier_result)
+    agent_task_jsons = sorted((trial_dir / "agent").glob("**/task.json"))
 
     if reward.get("reward") != 1.0:
-        # Read the AGENT phase's own task.json directly -- its `iterations[].commands`
-        # is the raw telemetry the verifier's `command_executed` etc. are supposed to
-        # hydrate from. Dumped unconditionally on failure so a criterion that scored
-        # 0.0 because NO commands were ever recorded (a hydration/telemetry bug) is
-        # distinguishable at a glance from one that scored 0.0 because the recorded
-        # commands just didn't match the pattern (an agent/fixture-wording issue).
-        agent_task_jsons = sorted((trial_dir / "agent").glob("**/task.json"))
-        agent_commands: list[dict[str, object]] | str = "no agent/task.json found"
-        if agent_task_jsons:
-            agent_result = json.loads(agent_task_jsons[0].read_text(encoding="utf-8"))
-            agent_commands = [
-                {"tool_name": c.get("tool_name"), "parameters": c.get("parameters")}
-                for it in agent_result.get("iterations", [])
-                for c in it.get("commands", [])
-            ]
         raise RuntimeError(
             f"[{scenario.name}] expected reward 1.0, got {reward!r} ({reward_path}); "
-            + f"criteria: {criteria_detail!r}; agent-phase recorded commands: {agent_commands!r}"
+            + f"criteria: {criteria_detail!r}; agent-phase recorded commands: {_agent_commands(agent_task_jsons)!r}"
         )
 
     trajectory_path = trial_dir / "agent" / "trajectory.json"
@@ -168,18 +205,15 @@ def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
     if "schema_version" not in trajectory:
         raise RuntimeError(f"[{scenario.name}] {trajectory_path} is missing 'schema_version'")
 
-    agent_task_jsons = list((trial_dir / "agent").glob("**/task.json"))
     if not agent_task_jsons:
         raise RuntimeError(f"[{scenario.name}] no task.json found under {trial_dir / 'agent'}")
-    verifier_task_json = trial_dir / "verifier" / "task.json"
-    if not verifier_task_json.is_file():
-        raise RuntimeError(f"[{scenario.name}] missing {verifier_task_json}")
+    if not isinstance(verifier_result, dict):
+        raise RuntimeError(f"[{scenario.name}] {verifier_task_json} did not parse as JSON: {verifier_result!r}")
 
     # An overall reward of 1.0 does not prove a trajectory criterion was
     # actually graded -- it could pass "by luck" from unrelated criteria while
     # this one silently scored 0.0 against an ungraded/empty trajectory. Check
     # each trajectory-dependent criterion's OWN score directly.
-    verifier_result = json.loads(verifier_task_json.read_text(encoding="utf-8"))
     trajectory_results = [
         r
         for r in verifier_result.get("success_criteria_results", [])
@@ -208,10 +242,14 @@ def _zip_scenario_dir(scenario: Scenario) -> Path | None:
     scenario_dir = WORK_DIR / scenario.name
     if not scenario_dir.is_dir():
         return None
-    FAILURE_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     try:
+        FAILURE_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
         archive = shutil.make_archive(str(FAILURE_ARTIFACTS_DIR / scenario.name), "zip", root_dir=str(scenario_dir))
-    except OSError as exc:
+    # Broad by intent: e.g. a pre-1980 mtime from a container image layer raises
+    # ValueError, not OSError, and an undecodable filename raises UnicodeEncodeError.
+    # Either would otherwise escape from inside main()'s own `except Exception`,
+    # killing the scenario loop and hiding every scenario after this one.
+    except Exception as exc:
         print(f"[{scenario.name}] could not zip {scenario_dir} for upload: {exc}", file=sys.stderr)
         return None
     return Path(archive)
