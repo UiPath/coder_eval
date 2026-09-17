@@ -6,7 +6,7 @@
       "assistant_turn_index": null,
       "duration_ms": null,
       "error_message": null,
-      "execution_completed_at": "<scrubbed>",
+      "execution_completed_at": null,
       "execution_started_at": "<scrubbed>",
       "generation_completed_at": null,
       "parameters": {
@@ -59,7 +59,12 @@
   ],
   "model_used": "gemini-3.5-flash",
   "num_turns": 1,
-  "result_summary": null,
+  "result_summary": {
+    "is_error": false,
+    "result": "backgrounded",
+    "stop_reason": null,
+    "subtype": "completed"
+  },
   "timestamp": "<scrubbed>",
   "token_usage": {
     "cache_creation_input_tokens": 0,
@@ -70,6 +75,6 @@
     "uncached_input_tokens": 90
   },
   "tool_calls_exhausted": false,
-  "tool_union_ms": "<scrubbed>",
+  "tool_union_ms": null,
   "user_input": "do it"
 }

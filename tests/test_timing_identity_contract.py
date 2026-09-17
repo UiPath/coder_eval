@@ -25,11 +25,11 @@ seam production uses to compute the head and the tail. Every number asserted is
 therefore one the harness computed, against a span the test declared.
 
 A ported harness is driven through ``coder_eval.testing.replay``: its decoder runs
-on a real ``TurnEmitter`` whose ``ScriptedClock`` moves on each ``Tick`` (pi), or on
-scripted CLI epoch stamps under ``cli_epoch_ms`` (opencode). The harnesses not yet
-ported keep their older idioms: an injected ``TurnClock`` (antigravity, claude-code),
-with ``time.monotonic`` patched on top for claude-code, whose deadline and measured
-tool durations still read it.
+on a real ``TurnEmitter`` whose ``ScriptedClock`` moves on each ``Tick`` (pi,
+antigravity), or on scripted CLI epoch stamps under ``cli_epoch_ms`` (opencode). The
+harnesses not yet ported keep their older idioms: an injected ``TurnClock`` with
+``time.monotonic`` patched on top for claude-code, whose deadline and measured tool
+durations still read it.
 
 Codex is the fifth and takes its stamps from SDK epoch milliseconds rather than
 from any host clock, so its case scripts those stamps directly.
@@ -237,59 +237,44 @@ def _opencode_replay() -> Replay:
 # --------------------------------------------------------------------------
 
 
-def _antigravity_turn() -> Turn:
+def _antigravity_replay() -> Replay:
     """One interleaved window per generation, with a tool inside the first.
 
-    Driven at ``_AntigravityTurnState`` rather than through ``communicate()``:
-    the fake conversation yields with no delay, so an end-to-end run cannot
-    distinguish a window that opened at the turn's start from one that opened
-    later. The state's own ``_gen_mark_wall`` is stamped at construction, so
-    constructing it AFTER the scripted agent start is what gives this harness a
-    measurable head at all.
+    Driven at the decoder: the fake conversation yields with no delay, so an
+    end-to-end run cannot distinguish a window that opened at the turn's start
+    from one that opened later. The first MODEL Step seeds the first window.
     """
-    from coder_eval.agents.antigravity_agent import AntigravityAgent, _AntigravityTurnState
+    from coder_eval.agents.antigravity_agent import _AntigravityDecoder
     from tests._fixtures.golden_streams.antigravity_fixtures import _step, _tc, _usage
 
-    agent = AntigravityAgent(parse_agent_config(type=AgentKind.ANTIGRAVITY, model="gemini-3.5-flash"))
-    collector = EventCollector()
-    clock = _InjectedClock(at_ms=500)  # dispatch before the first Step: head
-    state = _AntigravityTurnState(
-        agent=agent,
-        emit=CompositeStreamCallback([collector]),
-        task_id="t",
-        turn_id="turn",
-        collector=collector,
-        user_input="go",
-        iteration=1,
-        model="gemini-3.5-flash",
-        turn_start_time=0.0,
-        clock=clock,
-    )
-
-    clock.at_ms = 700
-    state.process_step(
+    stream = [
+        Tick(700),  # dispatch before the first Step: head
         _step(
             "TOOL_CALL",
             "ACTIVE",
             target="TARGET_ENVIRONMENT",
             tool_calls=[_tc("run_command", "c1", {"command_line": "ls"})],
-        )
-    )
-    clock.at_ms = 1200
-    state.process_step(
+        ),
+        Tick(1200),
         _step(
             "TOOL_CALL",
             "DONE",
             target="TARGET_ENVIRONMENT",
             tool_calls=[_tc("run_command", "c1", {"command_line": "ls", "exit_code": 0})],
-        )
+        ),
+        Tick(2000),
+        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
+        Tick(3000),
+        _step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)),
+        Tick(3500),
+    ]
+    return replay(
+        stream,
+        _AntigravityDecoder,
+        clock=ScriptedClock(BASE),
+        model="gemini-3.5-flash",
+        end=lambda d: d.end(AgentEndStatus.COMPLETED),
     )
-    clock.at_ms = 2000
-    state.process_step(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)))
-    clock.at_ms = 3000
-    state.process_step(_step("TEXT_RESPONSE", "DONE", content="done", complete=True, usage=_usage(200, 0, 10, 0)))
-
-    return Turn(started_ms=0.0, ended_ms=3500.0, messages=list(state.messages), commands=list(state.commands))
 
 
 # --------------------------------------------------------------------------
@@ -564,7 +549,8 @@ def test_opencode_buckets_tile_the_turn():
 
 
 def test_antigravity_buckets_tile_the_turn():
-    _assert_closes(_antigravity_turn())
+    result = _antigravity_replay()
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
 
 
 def test_codex_buckets_tile_the_turn():

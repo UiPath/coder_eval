@@ -3219,7 +3219,7 @@ class TestAntigravityCooperativeStopSeam:
             def __exit__(self, *_exc: Any) -> bool:
                 return False
 
-        monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _FiringWatchdog)
+        monkeypatch.setattr("coder_eval.agents.watchdog.ThreadedWatchdog", _FiringWatchdog)
         conversation = _CountingConversation([_ag_step(0), _ag_step(1)])
         agent = _antigravity_agent(conversation)
         sink = _EventSink()
@@ -3251,7 +3251,7 @@ class TestAntigravityCooperativeStopSeam:
                     raise RuntimeError("post-stop cleanup boom")
                 return False
 
-        monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _ExplodingExitWatchdog)
+        monkeypatch.setattr("coder_eval.agents.watchdog.ThreadedWatchdog", _ExplodingExitWatchdog)
         _agent, outcome, sink, _conversation = await _run_antigravity_communicate(stop_after=1)
         assert outcome.record.crashed is False
         ends = _agent_end_events(sink)
@@ -3277,7 +3277,7 @@ class TestAntigravityCooperativeStopSeam:
                     raise RuntimeError("cleanup boom")
                 return False
 
-        monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _ExplodingExitWatchdog)
+        monkeypatch.setattr("coder_eval.agents.watchdog.ThreadedWatchdog", _ExplodingExitWatchdog)
         conversation = _CountingConversation([_ag_step(0)])
         agent = _antigravity_agent(conversation)
         outcome = await agent.communicate("prompt", iteration=1, stream_callback=_EventSink(), should_stop=None)

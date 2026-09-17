@@ -93,7 +93,12 @@
   ],
   "model_used": "gemini-3.5-flash",
   "num_turns": 3,
-  "result_summary": null,
+  "result_summary": {
+    "is_error": false,
+    "result": "third",
+    "stop_reason": null,
+    "subtype": "completed"
+  },
   "timestamp": "<scrubbed>",
   "token_usage": {
     "cache_creation_input_tokens": 0,

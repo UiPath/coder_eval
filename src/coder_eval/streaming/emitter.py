@@ -139,7 +139,8 @@ class TurnEmitter:
         self._sinks = list(sinks)
         self._collector = EventCollector()
         self._began = False
-        self._began_monotonic: float | None = None
+        self._began_at: datetime | None = None
+        self._began_monotonic = 0.0
         self._outcome: TurnOutcome | None = None
         self._ending = False
         self._dropped_logged = False
@@ -172,9 +173,11 @@ class TurnEmitter:
         if self._began:
             raise RuntimeError("TurnEmitter.begin() called twice")
         self._began = True
+        self._began_at = self.now()
         self._began_monotonic = time.monotonic()
         self._emit(
-            AgentStartEvent(task_id=self._task_id, prompt=self._prompt, iteration=self._iteration, model=self._model)
+            AgentStartEvent(task_id=self._task_id, prompt=self._prompt, iteration=self._iteration, model=self._model),
+            stamp=self._began_at,
         )
 
     def begin_inner_turn(self, turn_id: str, model: str | None = None, *, parent_tool_id: str | None = None) -> None:
@@ -345,8 +348,8 @@ class TurnEmitter:
         """End a clean turn; a second call returns the first outcome and emits nothing.
 
         ``usage`` defaults to the sum of ``end_inner_turn`` tokens. ``result_summary``
-        defaults to the final reply: the text of the last main-thread message when it
-        calls no tool.
+        defaults to the final reply: the text that follows the last tool call in the
+        last main-thread message.
 
         Raises:
             ValueError: ``status`` is ``CRASHED`` or ``TIMEOUT`` (use ``fail``).
@@ -378,8 +381,13 @@ class TurnEmitter:
         reason: str,
         *,
         usage: TokenUsage | None = None,
+        agent_output: str | None = None,
+        assistant_turn_count: int | None = None,
+        num_turns: int | None = None,
     ) -> TurnOutcome:
         """End a failed turn with the full ``reason``; a second call returns the first outcome.
+
+        The payload keywords default as in ``finalize``.
 
         Raises:
             ValueError: ``status`` is not ``CRASHED`` or ``TIMEOUT``.
@@ -394,10 +402,10 @@ class TurnEmitter:
             status,
             reason=reason,
             usage=usage,
-            agent_output=None,
+            agent_output=agent_output,
             model_used=None,
-            assistant_turn_count=None,
-            num_turns=None,
+            assistant_turn_count=assistant_turn_count,
+            num_turns=num_turns,
             result_summary=None,
         )
 
@@ -409,8 +417,8 @@ class TurnEmitter:
             logger.debug("[%s] a write after the turn ended was dropped", self._task_id)
         return True
 
-    def _emit(self, event: StreamEvent, parent_tool_id: str | None = None) -> None:
-        event.timestamp = self.now()
+    def _emit(self, event: StreamEvent, parent_tool_id: str | None = None, *, stamp: datetime | None = None) -> None:
+        event.timestamp = stamp if stamp is not None else self.now()
         event.thread_id = event.parent_thread_id = parent_tool_id
         self._collector.on_event(event)
         for sink in self._sinks:
@@ -504,9 +512,11 @@ class TurnEmitter:
 
     def _final_reply(self) -> str | None:
         main = [m for m in self._messages if m.parent_tool_use_id is None]
-        if not main or any(b.block_type == "tool_use" for b in main[-1].content_blocks):
+        if not main:
             return None
-        return "".join(b.text or "" for b in main[-1].content_blocks if b.block_type == "text") or None
+        blocks = main[-1].content_blocks
+        last_tool = max((i for i, b in enumerate(blocks) if b.block_type == "tool_use"), default=-1)
+        return "".join(b.text or "" for b in blocks[last_tool + 1 :] if b.block_type == "text") or None
 
     def _end(
         self,
@@ -527,6 +537,7 @@ class TurnEmitter:
         published = usage if usage is not None else self._reported
         self._warn_on_delta_overshoot(published)
         crashed = status in _FAILED
+        ended_at = self.now()
         self._emit(
             AgentEndEvent(
                 task_id=self._task_id,
@@ -542,12 +553,21 @@ class TurnEmitter:
                 result_summary=result_summary,
                 crashed=crashed,
                 crash_reason=truncate_crash_message(reason) if reason is not None else None,
-                duration_seconds=time.monotonic() - self._began_monotonic if self._began_monotonic is not None else 0.0,
-            )
+                duration_seconds=self._duration_seconds(ended_at),
+            ),
+            stamp=ended_at,
         )
         self._ending = True
         self._outcome = TurnOutcome(record=self._collector.build_turn_record(), status=status, error=reason)
         return self._outcome
+
+    def _duration_seconds(self, ended_at: datetime) -> float:
+        """The bracket's own span; monotonic when the clock is the wall clock, which can step."""
+        if self._began_at is None:
+            return 0.0
+        if self._basis is TimingBasis.TURN_CLOCK:
+            return (ended_at - self._began_at).total_seconds()
+        return time.monotonic() - self._began_monotonic
 
     def _warn_on_delta_overshoot(self, published: TokenUsage) -> None:
         over = [

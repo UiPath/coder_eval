@@ -278,6 +278,26 @@ def _build_catalogue() -> list[AntigravityScenario]:
         )
     )
 
+    # (f) the user's prompt arrives as a TEXT_RESPONSE Step with source USER (captured
+    # live, 2026-09-16). It is not the model talking to the user, so it must never
+    # become assistant text or `agent_output`; the model's reply after it must.
+    scenarios.append(
+        AntigravityScenario(
+            name="f_user_prompt_step",
+            steps=[
+                _step("TEXT_RESPONSE", "DONE", source="USER", target="UNKNOWN", content="do it"),
+                _step(
+                    "TEXT_RESPONSE",
+                    "DONE",
+                    content="DONE.",
+                    content_delta="DONE.",
+                    complete=True,
+                    usage=_usage(100, 0, 5, 0),
+                ),
+            ],
+        )
+    )
+
     return scenarios
 
 

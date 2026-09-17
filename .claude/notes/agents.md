@@ -89,6 +89,12 @@ through the same reducer, so they cannot differ. The attempt clears that collect
 every exit except a cancel, so a task timeout that fires later (during grading, between
 retries) never appends a finished attempt twice.
 
+A clean turn's `result_summary.result` is the agent's final reply: the text that follows the
+last tool call in the last main-thread message. After, not "a message with no tool call":
+a live Antigravity turn writes its closing text in the same generation as its last tool
+call, and Pi writes text BEFORE a tool call it then makes, which is not a reply. A failed
+turn carries no summary; its failure is `crash_reason`.
+
 Until an adapter is ported onto `TurnEmitter` it keeps its old body as
 `_communicate_legacy`, and `Agent._legacy_outcome` maps its record or raised exception
 to an outcome.

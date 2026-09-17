@@ -466,6 +466,14 @@ class TestTheEnd:
         summary = emitter.finalize(AgentEndStatus.TOOL_CALLS_EXHAUSTED).record.result_summary
         assert summary is not None and summary.result is None and summary.subtype == "tool_calls_exhausted"
 
+    def test_text_after_the_last_tool_call_in_the_same_generation_is_the_final_reply(self) -> None:
+        emitter, _, _ = _emitter()
+        emitter.add_generation(
+            message_id=None, window=Window(at(0), at(1)), parts=[_part(_tool_use("c1"), _text("All set."))]
+        )
+        summary = emitter.finalize(AgentEndStatus.COMPLETED).record.result_summary
+        assert summary is not None and summary.result == "All set."
+
     @pytest.mark.parametrize("given", [None, ResultSummary(is_error=True, subtype="sdk", result="detail")])
     def test_an_explicit_result_summary_wins(self, given: ResultSummary | None) -> None:
         emitter, _, _ = _emitter()
@@ -557,13 +565,21 @@ class TestRecordOrRaise:
 
 
 class TestEndRobustness:
-    def test_duration_seconds_is_measured_from_begin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_duration_seconds_is_exactly_the_bracket(self) -> None:
+        emitter, clock, sink = _emitter()
+        clock.ms = 2500
+        record = emitter.finalize(AgentEndStatus.COMPLETED).record
+        start, end = sink.of(AgentStartEvent)[0].timestamp, sink.of(AgentEndEvent)[0].timestamp
+        assert record.duration_seconds == (end - start).total_seconds() == 2.5
+
+    def test_under_the_wall_clock_the_duration_is_monotonic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from coder_eval.streaming import emitter as emitter_module
 
-        ticks = iter([100.0, 102.5])
+        ticks = iter([100.0, 101.5])
         monkeypatch.setattr(emitter_module.time, "monotonic", lambda: next(ticks))
-        emitter, _, _ = _emitter()
-        assert emitter.finalize(AgentEndStatus.COMPLETED).record.duration_seconds == pytest.approx(2.5)
+        emitter, clock, _ = _emitter(TimingBasis.CLI_EPOCH_MS)
+        clock.ms = 3_600_000  # a wall-clock step of an hour
+        assert emitter.finalize(AgentEndStatus.COMPLETED).record.duration_seconds == pytest.approx(1.5)
 
     def test_a_record_that_cannot_be_built_ends_the_turn_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from coder_eval.streaming.collector import EventCollector

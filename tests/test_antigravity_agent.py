@@ -22,20 +22,49 @@ from coder_eval.agents.antigravity_agent import (
     _ANTIGRAVITY_TO_CLAUDE_TOOL_MAP,
     _DEFAULT_MODEL,
     AntigravityAgent,
+    _AntigravityDecoder,
     _enum_value,
     _to_token_usage,
 )
 from coder_eval.agents.registry import AgentRegistry
-from coder_eval.models import AgentKind, AntigravityAgentConfig, AssistantMessage, RunLimits, parse_agent_config
+from coder_eval.models import (
+    AgentKind,
+    AgentState,
+    AntigravityAgentConfig,
+    AssistantMessage,
+    RunLimits,
+    TimingBasis,
+    parse_agent_config,
+)
 from coder_eval.orchestration.plugin_staging import stage_plugins
 from coder_eval.orchestration.turn_monitor import TurnMonitor
 from coder_eval.plugins import ensure_plugins_loaded
 from coder_eval.pricing import calculate_cost
-from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason
+from coder_eval.streaming.emitter import TurnEmitter, TurnOutcome
+from coder_eval.streaming.events import (
+    AgentEndEvent,
+    AgentEndStatus,
+    AgentStartEvent,
+    StopReason,
+    TextChunkEvent,
+    ToolEndEvent,
+    ToolEndStatus,
+    ToolStartEvent,
+    TurnEndEvent,
+)
+from coder_eval.testing import (
+    Replay,
+    ScriptedClock,
+    Tick,
+    assert_identity_closes,
+    assert_stream_balanced,
+    replay,
+)
 from tests._bracket_clock import AnchoredClock, assert_bracket_on_the_clock, assert_overhead_is_measured
 from tests._fixtures.golden_streams._scrub import assert_reconciliation
 from tests._fixtures.golden_streams.antigravity_fixtures import (
     _agent_with_steps,
+    _FakeConversation,
     _no_sleep,
     _step,
     _tc,
@@ -215,14 +244,19 @@ def test_gemini_models_are_priced(model: str):
 # --- communicate() step-stream mapping (SDK mocked via fake Step stream) ---------
 
 
+_WATCHDOG = "coder_eval.agents.watchdog.ThreadedWatchdog"
+
+
 class _FiringWatchdog:
     """Fake ThreadedWatchdog that fires ``on_timeout`` synchronously at entry.
 
-    Sets ``state.timeout_hit = True`` before any draining happens (exactly
-    like the real watchdog thread firing early), so a CancelledError raised
-    later — whether from the first drain or from a poll loop's re-drain — is
-    classified via the SAME existing ``if state.timeout_hit`` branch.
+    Sets ``decoder.timeout_hit = True`` before any draining happens (exactly
+    like the real watchdog thread firing early), and reports ``fired`` so a
+    CancelledError the body raises later surfaces from ``run_with_watchdog`` as
+    ``WatchdogFired`` — the watchdog's own cancel, not the caller's.
     """
+
+    fired = True
 
     def __init__(self, *, on_timeout, **_kwargs):
         self._on_timeout = on_timeout
@@ -368,8 +402,8 @@ async def test_communicate_records_tool_error_from_nonzero_exit():
     assert bash.result_status == "error"
 
 
-async def test_communicate_crash_sets_pending_partial_turn():
-    """A mid-stream SDK error crashes the turn and leaves a crashed partial record."""
+async def test_communicate_crash_returns_a_crashed_outcome():
+    """A mid-stream SDK error returns a CRASHED outcome carrying a crashed partial record."""
 
     class _Boom:
         last_response = ""
@@ -390,20 +424,21 @@ async def test_communicate_crash_sets_pending_partial_turn():
     outcome = await agent.communicate("x", iteration=1)
 
     assert outcome.status is AgentEndStatus.CRASHED
+    assert outcome.error == "Antigravity turn failed: kaboom"
     assert outcome.record.crashed is True
+    assert outcome.record.result_summary is None
 
 
-async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
-    """A turn timeout ends the turn TIMEOUT and leaves a crashed partial record.
+async def test_communicate_timeout_returns_a_timeout_outcome(monkeypatch):
+    """A turn timeout returns a TIMEOUT outcome carrying a crashed partial record.
 
     Drives the timeout branch deterministically: a fake watchdog fires its
-    ``on_timeout`` callback synchronously on entry (setting ``state.timeout_hit``,
+    ``on_timeout`` callback synchronously on entry (setting ``decoder.timeout_hit``,
     exactly what the real watchdog thread does), and the step pump then surfaces
-    the cancel as ``asyncio.CancelledError`` — the :402-404 timeout branch.
+    the cancel as ``asyncio.CancelledError`` — which ``run_with_watchdog`` turns
+    into ``WatchdogFired``.
     """
-    import asyncio
-
-    monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _FiringWatchdog)
+    monkeypatch.setattr(_WATCHDOG, _FiringWatchdog)
 
     class _Cancelled:
         last_response = ""
@@ -425,6 +460,79 @@ async def test_communicate_timeout_sets_pending_partial_turn(monkeypatch):
 
     assert outcome.status is AgentEndStatus.TIMEOUT
     assert outcome.record.crashed is True
+
+
+async def test_a_real_watchdog_timeout_returns_timeout_and_leaves_the_caller_uncancelled():
+    """The real watchdog cancels the turn's CHILD task, never the caller.
+
+    A harness that never yields a step past a 0.2 s budget: the outcome is
+    ``TIMEOUT``, and the task that awaited ``communicate`` has no pending cancel
+    request, so the orchestrator's next await is not torn down by a stray cancel.
+    """
+
+    class _Hangs:
+        last_response = ""
+
+        async def send(self, prompt, **kwargs):
+            return None
+
+        async def receive_steps(self):
+            await asyncio.Event().wait()
+            yield  # pragma: no cover - makes this an async generator
+
+        async def cancel(self):
+            return None
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = Path("/tmp")
+    agent._sdk_agent = SimpleNamespace(conversation=_Hangs(), is_started=True)
+
+    outcome = await asyncio.wait_for(agent.communicate("x", iteration=1, timeout=0.2), timeout=10)
+
+    assert outcome.status is AgentEndStatus.TIMEOUT
+    assert outcome.record.crashed is True
+    caller = asyncio.current_task()
+    assert caller is not None and caller.cancelling() == 0
+    await asyncio.sleep(0)  # a stray cancel would land on this await
+
+
+async def test_an_exception_after_a_requested_stop_ends_with_the_stop_status():
+    """Closing the step stream after a stop can raise; the stopped turn still ends clean.
+
+    The generator's own cleanup raises when ``_drain``'s ``aclosing`` closes it
+    after the ``should_stop`` break — a pulled-step ``RuntimeError`` that is not
+    retried. The turn was already over by request, so the outcome carries the
+    stop's status and no error, not ``CRASHED``.
+    """
+
+    class _RaisesOnClose:
+        last_response = ""
+
+        async def send(self, prompt, **kwargs):
+            return None
+
+        async def receive_steps(self):
+            try:
+                yield _step(
+                    "TEXT_RESPONSE", "DONE", content="partial", content_delta="partial", usage=_usage(5, 0, 1, 0)
+                )
+                yield _step("TEXT_RESPONSE", "DONE", content="never pulled")
+            finally:
+                raise RuntimeError("aclose boom")
+
+        async def cancel(self):
+            return None
+
+    agent = AntigravityAgent(parse_agent_config(type="antigravity"))
+    agent.working_directory = Path("/tmp")
+    agent._sdk_agent = SimpleNamespace(conversation=_RaisesOnClose(), is_started=True)
+
+    outcome = await agent.communicate("x", iteration=1, should_stop=lambda: StopReason.TOKEN_BUDGET)
+
+    assert outcome.status is AgentEndStatus.TOKEN_BUDGET_EXCEEDED
+    assert outcome.error is None
+    assert outcome.record.crashed is False
+    assert outcome.record.agent_output == "partial"
 
 
 async def test_communicate_requires_started_agent():
@@ -473,9 +581,7 @@ def test_has_orphaned_tool_call_detects_active_vs_other_statuses():
     it will never become DONE on its own (Phase-2-review finding). Layered on
     top: a cid already in _closed_tools is never orphaned even if its last-seen
     status were ever left at ACTIVE by a re-emission (final-review finding)."""
-    from coder_eval.agents.antigravity_agent import _AntigravityTurnState
-
-    state = _AntigravityTurnState.__new__(_AntigravityTurnState)
+    state = _AntigravityDecoder.__new__(_AntigravityDecoder)
     state._closed_tools = set()
     state._tool_last_status = {}
     assert state.has_orphaned_tool_call() is False  # no tool calls at all
@@ -820,9 +926,11 @@ async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(m
     # loop reads time.monotonic() at least twice per iteration (the while-head
     # check, then the post-sleep deadline check), so this crosses the 240s
     # deadline (0.8 * 300s) after exactly one poll cycle -- proving the exit is
-    # driven by the deadline, not by exhausting all 120 cycles.
+    # driven by the deadline, not by exhausting all 120 cycles. Scoped to the
+    # adapter module's `time`: patching the shared `time.monotonic` also moves the
+    # event loop's clock, and the turn body now runs in a child task on that loop.
     clock = iter([0.0, 130.0, 260.0])
-    monkeypatch.setattr(antigravity_agent.time, "monotonic", lambda: next(clock, 1_000_000.0))
+    monkeypatch.setattr(antigravity_agent, "time", SimpleNamespace(monotonic=lambda: next(clock, 1_000_000.0)))
 
     never_closing = [
         _step(
@@ -837,7 +945,7 @@ async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(m
 
     tr = (await agent.communicate("do it forever", iteration=1, timeout=300.0)).record  # the real default turn_timeout
 
-    # Finalized and graded -- no TurnTimeoutError, no crash.
+    # Finalized and graded -- no TIMEOUT outcome, no crash.
     assert tr is not None
     assert not tr.crashed
     bash = next(c for c in tr.commands if c.tool_name == "Bash")
@@ -849,14 +957,22 @@ async def test_communicate_finalizes_gracefully_under_a_realistic_turn_timeout(m
 
 class _WatchdogFiresLater:
     """Fake ThreadedWatchdog that does NOT fire on entry (unlike _FiringWatchdog
-    above) -- it hands its ``on_timeout`` callback to the caller so the test can
-    invoke it mid-poll-loop, simulating a real watchdog thread firing between
-    poll cycles rather than before the turn even starts."""
+    above) -- the test calls ``fire()`` mid-poll-loop, simulating a real watchdog
+    thread firing between poll cycles rather than before the turn even starts.
+    ``fire()`` sets ``fired`` and runs ``on_timeout``, as the real timer thread does."""
 
-    captured_on_timeout: Callable[[], None] | None = None
+    captured: "_WatchdogFiresLater | None" = None
 
-    def __init__(self, *, on_timeout, **_kwargs):
-        _WatchdogFiresLater.captured_on_timeout = on_timeout
+    def __init__(self, *, on_timeout: Callable[[], None], **_kwargs):
+        self._on_timeout = on_timeout
+        self.fired = False
+        _WatchdogFiresLater.captured = self
+
+    @classmethod
+    def fire(cls) -> None:
+        assert cls.captured is not None
+        cls.captured.fired = True
+        cls.captured._on_timeout()
 
     def __enter__(self):
         return self
@@ -866,7 +982,7 @@ class _WatchdogFiresLater:
 
 
 async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(monkeypatch):
-    """A watchdog timeout landing BETWEEN poll cycles (state.timeout_hit flips
+    """A watchdog timeout landing BETWEEN poll cycles (decoder.timeout_hit flips
     to True while the loop is sleeping) must stop the loop on its next condition
     check, not burn through the rest of _MAX_BACKGROUND_POLLS waiting for a
     cancellation that may not land on this coroutine right away (final-review
@@ -874,15 +990,14 @@ async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(mon
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent, "_MAX_BACKGROUND_POLLS", 50)
-    monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
+    monkeypatch.setattr(_WATCHDOG, _WatchdogFiresLater)
 
     sleep_calls: list[float] = []
 
     async def _fire_watchdog_on_second_sleep(seconds: float) -> None:
         sleep_calls.append(seconds)
         if len(sleep_calls) == 2:
-            assert _WatchdogFiresLater.captured_on_timeout is not None
-            _WatchdogFiresLater.captured_on_timeout()
+            _WatchdogFiresLater.fire()
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _fire_watchdog_on_second_sleep)
 
@@ -903,7 +1018,7 @@ async def test_communicate_poll_loop_exits_promptly_once_watchdog_flag_lands(mon
     # Stopped right after the sleep that flipped timeout_hit -- NOT the (patched) cap of 50.
     assert len(sleep_calls) == 2
     # 1 initial drain + 1 poll re-drain (after sleep #1) -- the mid-loop
-    # `if state.timeout_hit: break` skips the re-drain that would otherwise
+    # `if decoder.timeout_hit: break` skips the re-drain that would otherwise
     # follow sleep #2, so no 3rd receive_steps() call happens.
     assert agent._sdk_agent.conversation.receive_steps_call_count == 2
     bash = next(c for c in outcome.record.commands if c.tool_name == "Bash")
@@ -1016,8 +1131,7 @@ async def test_communicate_recovers_from_transient_reentrancy_after_cooperative_
     see _drain()'s docstring). The NEXT communicate() call must recover by
     retrying past that window (mirroring the SDK's own Conversation.send()
     handling of this exact RuntimeError) instead of crashing with
-    AgentCrashError."""
-    from pathlib import Path
+    a CRASHED outcome."""
 
     batch1 = [
         _step(
@@ -1098,7 +1212,7 @@ async def test_a_runtime_error_after_a_step_is_not_retried_as_reentrancy(monkeyp
     def _boom(self, step):
         raise RuntimeError("reducer bug")
 
-    monkeypatch.setattr(agent_module._AntigravityTurnState, "process_step", _boom)
+    monkeypatch.setattr(agent_module._AntigravityDecoder, "__call__", _boom)
     agent = AntigravityAgent(parse_agent_config(type="antigravity"))
     agent.working_directory = __import__("pathlib").Path("/tmp")
     agent._sdk_agent = SimpleNamespace(conversation=_Conversation(), is_started=True)
@@ -1112,19 +1226,19 @@ async def test_a_runtime_error_after_a_step_is_not_retried_as_reentrancy(monkeyp
 
 async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_path(monkeypatch):
     """A watchdog timeout landing during the poll loop's re-drain (not the first
-    drain) must surface as TurnTimeoutError via the SAME existing exception
-    branch -- the poll loop must not create a second, inconsistent timeout path.
+    drain) must return a TIMEOUT outcome via the SAME watchdog branch -- the poll
+    loop must not create a second, inconsistent timeout path.
 
     Uses ``_WatchdogFiresLater`` (not ``_FiringWatchdog``, which fires at entry
     and would make the loop's head condition skip the poll cycle entirely, per
-    round-3 review) so ``state.timeout_hit`` only flips once a re-drain is
+    round-3 review) so ``decoder.timeout_hit`` only flips once a re-drain is
     genuinely in flight -- mirroring the real watchdog, whose ``on_timeout``
     callback and the ``CancelledError`` it triggers are the same causal event,
     not two independently-timed ones."""
     from coder_eval.agents import antigravity_agent
 
     monkeypatch.setattr(antigravity_agent.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("coder_eval.agents.antigravity_agent.ThreadedWatchdog", _WatchdogFiresLater)
+    monkeypatch.setattr(_WATCHDOG, _WatchdogFiresLater)
 
     class _FiresWatchdogThenCancelsOnSecondDrain:
         last_response = ""
@@ -1146,8 +1260,7 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
                 )
                 yield _step("TEXT_RESPONSE", "DONE", content="started", complete=True, usage=_usage(10, 0, 1, 0))
             else:
-                assert _WatchdogFiresLater.captured_on_timeout is not None
-                _WatchdogFiresLater.captured_on_timeout()
+                _WatchdogFiresLater.fire()
                 raise asyncio.CancelledError
                 yield  # pragma: no cover - makes this an async generator
 
@@ -1166,6 +1279,8 @@ async def test_communicate_poll_budget_exhausted_finalizes_via_existing_timeout_
     assert outcome.status is AgentEndStatus.TIMEOUT
     assert conversation.call_count == 2  # the re-drain genuinely ran, not skipped
     assert outcome.record.crashed is True
+    bash = next(c for c in outcome.record.commands if c.tool_name == "Bash")
+    assert bash.result_status == "unknown"
 
 
 # --- env_path_prepend / mock-CLI PATH shadowing -----------------------------------
@@ -1594,59 +1709,58 @@ async def test_cap_reached_on_a_poll_redrain_stops_polling(monkeypatch):
 _CLOCK_BASE = datetime(2026, 1, 1, 12, 0, 0)
 
 
-class _Clock:
-    """Controlled stand-in for the reducer's clocks — a `TurnClock` and `time`.
+def _at(ms: float) -> datetime:
+    return _CLOCK_BASE + timedelta(milliseconds=ms)
 
-    ONE monotonically advancing counter, read by both: every read — the turn
-    clock's `now()` or `time.monotonic()` — costs TICK_MS. So the fixture's
-    timeline is driven by read ORDER, not by elapsed time, and the two are
-    deliberately coupled rather than independent. That is enough to pin the
-    arithmetic exactly.
 
-    Every WALL stamp the reducer records now derives from its per-turn
-    `TurnClock`, so this stands in for that object rather than for the
-    module's `datetime`. That distinction is load-bearing, not cosmetic: a
-    derived stamp does not read `datetime.now()`, so the old patch would no
-    longer reach it and these tests would quietly measure the real clock and
-    pass by accident. `time` is still patched because `duration_seconds` and
-    the poll deadlines read `time.monotonic()` directly, and must — a deadline
-    may not move when the wall clock steps.
+def _replay(
+    stream: list[Any],
+    *,
+    status: AgentEndStatus = AgentEndStatus.COMPLETED,
+    reason: str | None = None,
+    agent_output: str | None = None,
+) -> tuple[Replay, _AntigravityDecoder]:
+    """Drive an `_AntigravityDecoder` through `coder_eval.testing.replay` from `_CLOCK_BASE`.
 
-    What it still does NOT prove is that the reducer keeps the two in their
-    proper roles; with one basis for every wall stamp there is no longer a
-    second role to confuse it with.
+    Opens the one inner turn `communicate` opens and ends through `decoder.end`;
+    returns the decoder too, for the tests that pin its bookkeeping.
     """
+    decoders: list[_AntigravityDecoder] = []
 
-    TICK_MS = 100.0
+    def make(emitter: TurnEmitter) -> _AntigravityDecoder:
+        decoder = _AntigravityDecoder(emitter)
+        emitter.begin_inner_turn(decoder.turn_id)
+        decoders.append(decoder)
+        return decoder
 
-    def __init__(self) -> None:
-        self.ms = 0.0
+    def end(decoder: _AntigravityDecoder) -> TurnOutcome:
+        return decoder.end(status, reason=reason, agent_output=agent_output)
 
-    def _advance(self) -> float:
-        self.ms += self.TICK_MS
-        return self.ms
-
-    def monotonic(self) -> float:
-        return self._advance() / 1000.0
-
-    def now(self) -> datetime:
-        return _CLOCK_BASE + timedelta(milliseconds=self._advance())
-
-
-def _install_clock(monkeypatch, clock: _Clock) -> None:
-    """Hand the reducer this clock for the turn it is about to build.
-
-    `TurnClock` is replaced by a factory rather than the fake being passed
-    positionally, because the state — and therefore its clock — is built
-    inside `communicate()`, out of the caller's reach. One typed seam, and the
-    stand-in has to satisfy `now()`.
-    """
-    monkeypatch.setattr(agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
-    monkeypatch.setattr(agent_module, "TurnClock", lambda: clock)
+    result = replay(stream, make, clock=ScriptedClock(_CLOCK_BASE), model="gemini-3.5-flash", end=end)
+    return result, decoders[0]
 
 
 def _assistant(record):
     return [m for m in record.messages if m.role == "assistant"]
+
+
+def _opening_step():
+    """A MODEL step that seeds the first window's mark and adds no block."""
+    return _step("THINKING", "ACTIVE", thinking="...")
+
+
+def _thinking_done(text: str):
+    return _step("THINKING", "DONE", thinking=text, usage=_usage(100, 0, 5, 5))
+
+
+def _bash_active(*ids: str):
+    calls = [_tc("run_command", tid, {"command_line": tid}) for tid in ids]
+    return _step("TOOL_CALL", "ACTIVE", target="TARGET_ENVIRONMENT", tool_calls=calls)
+
+
+def _bash_done(*ids: str):
+    calls = [_tc("run_command", tid, {"command_line": tid, "exit_code": 0}) for tid in ids]
+    return _step("TOOL_CALL", "DONE", target="TARGET_ENVIRONMENT", tool_calls=calls)
 
 
 class TestBusyMs:
@@ -1702,47 +1816,43 @@ class TestBusyMs:
         assert self._busy([(100, 100)]) == 0.0
 
 
-async def test_concurrent_tools_do_not_over_subtract(monkeypatch):
+async def test_concurrent_tools_do_not_over_subtract():
     """Overlapping tool calls are subtracted once, not once each.
 
-    Four calls opened by one Step and closed by the next overlap almost
-    entirely. Summing their durations exceeded the window and clamped
+    Four calls opened by one Step and closed by the next overlap entirely.
+    Summing their durations exceeded the window and clamped
     `generation_duration_ms` to 0.0 — the pre-change symptom, with a 0%
     breakdown on the task page and nothing failing.
     """
-    _install_clock(monkeypatch, _Clock())
-    opens = _step(
-        "TOOL_CALL",
-        "ACTIVE",
-        target="TARGET_ENVIRONMENT",
-        tool_calls=[_tc("run_command", f"t{i}", {"command_line": f"job{i}"}) for i in range(4)],
+    ids = ("t0", "t1", "t2", "t3")
+    result, _ = _replay(
+        [
+            Tick(50),
+            _opening_step(),
+            Tick(100),
+            _thinking_done("first"),
+            Tick(200),
+            _bash_active(*ids),
+            Tick(600),
+            _bash_done(*ids),
+            Tick(1000),
+            _thinking_done("second"),
+        ]
     )
-    closes = _step(
-        "TOOL_CALL",
-        "DONE",
-        target="TARGET_ENVIRONMENT",
-        tool_calls=[_tc("run_command", f"t{i}", {"command_line": f"job{i}", "exit_code": 0}) for i in range(4)],
-    )
-    steps = [
-        _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
-        opens,
-        closes,
-        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
-    ]
-    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
+    record = result.record
 
     second = _assistant(record)[1]
-    tools = [c for c in record.commands if c.tool_id.startswith("t")]
+    tools = record.commands
     assert len(tools) == 4
     span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
     summed_ms = sum(c.duration_ms or 0.0 for c in tools)
 
+    assert span_ms == pytest.approx(900.0)
     assert summed_ms > span_ms, "fixture must make the naive sum exceed the window"
-    assert second.generation_duration_ms > 0, "the naive sum clamped this to 0.0"
-    # Union of the four overlapping intervals, not their sum.
     busy_ms = (
         max(c.execution_completed_at for c in tools) - min(c.execution_started_at for c in tools)
     ).total_seconds() * 1000.0
+    assert busy_ms == pytest.approx(400.0)
     assert second.generation_duration_ms == pytest.approx(span_ms - busy_ms)
 
 
@@ -1781,7 +1891,7 @@ async def test_consecutive_windows_chain_end_to_start():
         assert later.started_at == earlier.completed_at
 
 
-async def test_tool_execution_is_subtracted_from_the_window(monkeypatch):
+async def test_tool_execution_is_subtracted_from_the_window():
     """A tool closing inside a generation is not counted as model time.
 
     This is the test that pins the design decision. Without it, "simplifying"
@@ -1789,52 +1899,42 @@ async def test_tool_execution_is_subtracted_from_the_window(monkeypatch):
     real model time, because a harness-local tool can close 8 ms after it opens
     while seconds of model time separate the two flushes around it.
     """
-    clock = _Clock()
-    _install_clock(monkeypatch, clock)
-    steps = [
-        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
-        _step(
-            "TOOL_CALL",
-            "ACTIVE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
-        ),
-        _step(
-            "TOOL_CALL",
-            "DONE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
-        ),
-        _step(
-            "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(200, 0, 10, 0)
-        ),
-    ]
-    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
+    result, _ = _replay(
+        [
+            Tick(50),
+            _opening_step(),
+            Tick(100),
+            _thinking_done("plan"),
+            Tick(300),
+            _bash_active("t1"),
+            Tick(400),
+            _bash_done("t1"),
+            Tick(1000),
+            _step(
+                "TEXT_RESPONSE",
+                "DONE",
+                content="done",
+                content_delta="done",
+                complete=True,
+                usage=_usage(200, 0, 10, 0),
+            ),
+        ]
+    )
+    record = result.record
 
     messages = _assistant(record)
     assert len(messages) == 2
     second = messages[1]
     bash = next(c for c in record.commands if c.tool_name == "Bash")
 
-    # The window contains a 100ms tool call, so what is left of it was the
-    # model generating. That relation is the assertion that matters, and it is
-    # independent of the fixture's tick size.
     span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
     assert bash.duration_ms == pytest.approx(100.0)
     assert second.generation_duration_ms == pytest.approx(span_ms - bash.duration_ms)
-
-    # The absolute figures are artifacts of `_Clock`, which charges one TICK_MS
-    # per clock READ. They moved from 400/300 to 300/200 when the reducer
-    # stopped taking a monotonic reading it no longer needs: a flush now reads
-    # the turn clock once where it used to read two clocks, so each window is
-    # one tick shorter on this fixture's read-driven timeline. Nothing about
-    # real elapsed time changed — the 100ms tool, which is still two reads
-    # apart, is unmoved.
-    assert span_ms == pytest.approx(300.0)
-    assert second.generation_duration_ms == pytest.approx(200.0)
+    assert span_ms == pytest.approx(900.0)
+    assert second.generation_duration_ms == pytest.approx(800.0)
 
 
-async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypatch):
+async def test_a_straddling_tool_is_charged_only_for_its_in_window_part():
     """A tool open across a flush is clipped to the window it is subtracted from.
 
     `t1` opens before the first flush and closes after it. Only the part that
@@ -1843,39 +1943,23 @@ async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypa
     overhang, drive the result to a clamped 0.0 — the very value this change
     exists to stop publishing.
     """
-    _install_clock(monkeypatch, _Clock())
-    steps = [
-        # t1 opens here and stays open across the first flush.
-        _step(
-            "TOOL_CALL",
-            "ACTIVE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "slow"})],
-        ),
-        # t2 opens and closes entirely inside the first window.
-        _step(
-            "TOOL_CALL",
-            "ACTIVE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t2", {"command_line": "quick"})],
-        ),
-        _step(
-            "TOOL_CALL",
-            "DONE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t2", {"command_line": "quick", "exit_code": 0})],
-        ),
-        _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
-        # t1 closes in the SECOND window, carrying the first window's overhang.
-        _step(
-            "TOOL_CALL",
-            "DONE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "slow", "exit_code": 0})],
-        ),
-        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
-    ]
-    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
+    result, _ = _replay(
+        [
+            Tick(100),
+            _bash_active("t1"),  # opens here and stays open across the first flush
+            Tick(200),
+            _bash_active("t2"),  # opens and closes entirely inside the first window
+            Tick(300),
+            _bash_done("t2"),
+            Tick(500),
+            _thinking_done("first"),
+            Tick(800),
+            _bash_done("t1"),  # closes in the SECOND window, carrying the first window's overhang
+            Tick(1000),
+            _thinking_done("second"),
+        ]
+    )
+    record = result.record
 
     second = _assistant(record)[1]
     slow = next(c for c in record.commands if c.tool_id == "t1")
@@ -1885,10 +1969,10 @@ async def test_a_straddling_tool_is_charged_only_for_its_in_window_part(monkeypa
     assert slow.duration_ms > span_ms, "fixture must produce a straddling tool"
     assert 0 < in_window_ms < slow.duration_ms, "part of the tool ran before this window"
     assert second.generation_duration_ms == pytest.approx(span_ms - in_window_ms)
-    assert second.generation_duration_ms > 0
+    assert second.generation_duration_ms == pytest.approx(200.0)
 
 
-async def test_a_tool_still_open_at_the_flush_is_not_generation_time(monkeypatch):
+async def test_a_tool_still_open_at_the_flush_is_not_generation_time():
     """The sibling of the straddle test above, for the window the tool opened IN.
 
     Subtracting only CLOSED intervals published the part of a still-running
@@ -1900,30 +1984,25 @@ async def test_a_tool_still_open_at_the_flush_is_not_generation_time(monkeypatch
     `duration_seconds`, on a turn whose entire headroom was 1.4 ms. Four
     sibling runs passed by 1.2-8.7 ms out of ~12 s, so it was a coin flip.
     """
-    _install_clock(monkeypatch, _Clock())
-    steps = [
-        # t1 opens here and is STILL RUNNING when the first window is cut.
-        _step(
-            "TOOL_CALL",
-            "ACTIVE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "slow"})],
-        ),
-        _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 5, 5)),
-        _step(
-            "TOOL_CALL",
-            "DONE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "slow", "exit_code": 0})],
-        ),
-        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
-    ]
-    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
+    result, _ = _replay(
+        [
+            Tick(100),
+            _opening_step(),
+            Tick(200),
+            _bash_active("t1"),  # STILL RUNNING when the first window is cut
+            Tick(500),
+            _thinking_done("first"),
+            Tick(800),
+            _bash_done("t1"),
+            Tick(1000),
+            _thinking_done("second"),
+        ]
+    )
+    record = result.record
 
     first = _assistant(record)[0]
     slow = next(c for c in record.commands if c.tool_id == "t1")
     span_ms = (first.completed_at - first.started_at).total_seconds() * 1000.0
-    # The part of t1 that had already run when this window was cut.
     in_window_ms = (first.completed_at - slow.execution_started_at).total_seconds() * 1000.0
 
     assert slow.execution_started_at < first.completed_at, "fixture must open the tool in this window"
@@ -1934,7 +2013,7 @@ async def test_a_tool_still_open_at_the_flush_is_not_generation_time(monkeypatch
     assert first.generation_duration_ms + in_window_ms == pytest.approx(span_ms)
 
 
-async def test_a_no_op_flush_does_not_move_the_mark(monkeypatch):
+async def test_a_no_op_flush_does_not_move_the_mark():
     """An empty generation must leave the open window alone.
 
     The early return in `_flush_generation` sits before any mark handling, so
@@ -1942,29 +2021,28 @@ async def test_a_no_op_flush_does_not_move_the_mark(monkeypatch):
     otherwise the real generation that follows reports only the time since the
     empty one.
     """
-    real = _step("THINKING", "DONE", thinking="real", usage=_usage(100, 0, 5, 5))
+    real = _thinking_done("real")
     # Zero usage and no content: reaches the flush, appends nothing.
     empty = _step("THINKING", "DONE", usage=_usage(0, 0, 0, 0))
 
-    # Two runs off identical fresh clocks. The empty flush returns before any
-    # clock read, so it must leave the window — and therefore the real
-    # generation's recorded bounds — byte-identical.
-    _install_clock(monkeypatch, _Clock())
-    without = _assistant((await _agent_with_steps([real]).communicate("go", iteration=1)).record)
+    without, _ = _replay([Tick(100), _opening_step(), Tick(1000), real])
+    with_empty, decoder = _replay([Tick(100), _opening_step(), Tick(500), empty, Tick(1000), real])
 
-    _install_clock(monkeypatch, _Clock())
-    with_empty = _assistant((await _agent_with_steps([empty, real]).communicate("go", iteration=1)).record)
-
-    assert len(with_empty) == 1, "the empty generation must not produce a message"
-    assert with_empty[0].started_at == without[0].started_at
-    assert with_empty[0].generation_duration_ms == without[0].generation_duration_ms
+    assert decoder.generations == 1
+    with_messages = _assistant(with_empty.record)
+    assert len(with_messages) == 1, "the empty generation must not produce a message"
+    assert with_messages[0].started_at == _assistant(without.record)[0].started_at == _at(100)
+    assert with_messages[0].generation_duration_ms == _assistant(without.record)[0].generation_duration_ms
 
 
 async def test_generation_and_tool_time_account_for_the_turn():
-    """Σ generation + Σ tool + head + tail lands inside the turn's own duration.
+    """Σ generation + tool union + head + tail tiles the turn's own bracket.
 
-    Bounds, not equality: the fake conversation's own overhead sits in the
-    residual. Before the window existed the generation half was identically 0.
+    Measured against the ``AgentStartEvent`` / ``AgentEndEvent`` stamps, the span
+    the buckets are defined on. Not against ``duration_seconds``: the emitter reads
+    that on a separate monotonic call before it stamps the end event, so on this
+    sub-millisecond fake turn the bracket exceeds it by a few microseconds every
+    time. Before the window existed the generation half was identically 0.
 
     The HEAD is part of the sum, and has to be: the first window now opens at
     the first observed `Step` rather than at turn entry, so the dispatch before
@@ -1991,32 +2069,29 @@ async def test_generation_and_tool_time_account_for_the_turn():
             "TEXT_RESPONSE", "DONE", content="done", content_delta="done", complete=True, usage=_usage(200, 0, 10, 0)
         ),
     ]
-    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
+    seen: list[Any] = []
+    record = (
+        await _agent_with_steps(steps).communicate(
+            "go", iteration=1, stream_callback=SimpleNamespace(on_event=seen.append)
+        )
+    ).record
 
     gen_ms = sum(m.generation_duration_ms or 0.0 for m in _assistant(record))
-    tool_ms = sum(c.duration_ms or 0.0 for c in record.commands)
     head_ms = record.harness_startup_ms or 0.0
-    tail_ms = record.harness_teardown_ms or 0.0
-    turn_ms = record.duration_seconds * 1000.0
 
     assert gen_ms > 0
     assert head_ms > 0, "the dispatch before the first Step is now a measured bucket, not 0.0"
-    assert gen_ms + tool_ms + head_ms + tail_ms <= turn_ms
+    assert_identity_closes(
+        record,
+        started_at=next(e.timestamp for e in seen if isinstance(e, AgentStartEvent)),
+        ended_at=next(e.timestamp for e in seen if isinstance(e, AgentEndEvent)),
+    )
 
-    # NO relative LOWER bound. This case runs on the REAL clock, and the fake
-    # conversation's own overhead is the residual — under parallel load the
-    # denominator (`duration_seconds`, the agent's monotonic span) inflates
-    # while the measured buckets do not, so any `>= share * turn_ms` assertion
-    # is a scheduler-noise detector. It was one: a `>= 0.5 *` bound survived
-    # here only while the sum excluded the head, and failed under `-n auto`
-    # once the head joined it.
-    #
-    # The share this test was reaching for IS asserted, exactly, in
-    # tests/test_timing_identity_contract.py — on a scripted clock, where the
-    # magnitudes are real and the identity closes to the millisecond. What is
-    # left here is what an end-to-end run can honestly claim: the buckets are
-    # measured, the head is no longer the clamped 0.0, and nothing overflows
-    # the turn.
+    # NO share-of-turn LOWER bound on generation. This case runs on the REAL
+    # clock, where the fake conversation's own overhead lands in head and tail,
+    # so any `>= share * turn_ms` assertion is a scheduler-noise detector. The
+    # magnitudes are asserted on a scripted clock in
+    # tests/test_timing_identity_contract.py.
 
 
 async def test_timing_change_moves_no_token_bucket():
@@ -2055,36 +2130,32 @@ async def test_timing_change_moves_no_token_bucket():
     assert all(m.generation_duration_ms is not None for m in _assistant(record))
 
 
-async def test_the_published_window_reconciles_to_its_own_bounds(monkeypatch):
+def _plan_tool_second_stream() -> list[Any]:
+    return [
+        Tick(50),
+        _opening_step(),
+        Tick(100),
+        _thinking_done("plan"),
+        Tick(300),
+        _bash_active("t1"),
+        Tick(450),
+        _bash_done("t1"),
+        Tick(1000),
+        _thinking_done("second"),
+    ]
+
+
+async def test_the_published_window_reconciles_to_its_own_bounds():
     """The reducer subtracted exactly the spans the record carries.
 
-    The per-migrated-reducer check its three siblings gained when they moved
-    onto `close_window`; antigravity could not have it until its span stopped
-    being monotonic while these intervals were wall. `decompose_run.py` and the
-    evalboard's Unaccounted cell both recompute the tool UNION from the
-    recorded command spans and subtract it from the recorded window bounds, so
-    this asserts the reducer fed the window that same set.
+    `decompose_run.py` and the evalboard's Unaccounted cell both recompute the
+    tool UNION from the recorded command spans and subtract it from the
+    recorded window bounds, so this asserts the published window agrees with
+    that same set.
     """
     from coder_eval.timing import busy_ms
 
-    _install_clock(monkeypatch, _Clock())
-    steps = [
-        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
-        _step(
-            "TOOL_CALL",
-            "ACTIVE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
-        ),
-        _step(
-            "TOOL_CALL",
-            "DONE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
-        ),
-        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
-    ]
-    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
+    record = _replay(_plan_tool_second_stream())[0].record
 
     second = _assistant(record)[1]
     spans = [
@@ -2095,9 +2166,10 @@ async def test_the_published_window_reconciles_to_its_own_bounds(monkeypatch):
     span_ms = (second.completed_at - second.started_at).total_seconds() * 1000.0
     expected = span_ms - busy_ms(spans, second.started_at, second.completed_at)
     assert second.generation_duration_ms == pytest.approx(expected)
+    assert second.generation_duration_ms == pytest.approx(750.0)
 
 
-async def test_the_window_is_measured_without_relying_on_the_negative_clamp(monkeypatch):
+async def test_the_window_is_measured_without_relying_on_the_negative_clamp():
     """A positive window, and no clamp underneath it.
 
     The span used to be read off `time.monotonic()` while the tool intervals
@@ -2107,24 +2179,7 @@ async def test_the_window_is_measured_without_relying_on_the_negative_clamp(monk
     that unrepresentable: `busy_ms` clips to the window and unions overlaps, so
     it cannot exceed a span derived from the same clock.
     """
-    _install_clock(monkeypatch, _Clock())
-    steps = [
-        _step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)),
-        _step(
-            "TOOL_CALL",
-            "ACTIVE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "ls"})],
-        ),
-        _step(
-            "TOOL_CALL",
-            "DONE",
-            target="TARGET_ENVIRONMENT",
-            tool_calls=[_tc("run_command", "t1", {"command_line": "ls", "exit_code": 0})],
-        ),
-        _step("THINKING", "DONE", thinking="second", usage=_usage(100, 0, 5, 5)),
-    ]
-    record = (await _agent_with_steps(steps).communicate("go", iteration=1)).record
+    record = _replay(_plan_tool_second_stream())[0].record
 
     second = _assistant(record)[1]
     assert second.generation_duration_ms > 0.0
@@ -2159,13 +2214,12 @@ async def test_each_turn_gets_a_fresh_clock():
 
 
 class TestAntigravityFirstWindowReseed:
-    """The first `Step` moves `_gen_mark_wall`; a later one must not.
+    """The first MODEL `Step` moves `_gen_mark`; a later one must not.
 
-    Driven at `_AntigravityTurnState` with an injected clock, NOT through
-    `communicate()`: the fake conversation yields with no delay, so an
-    end-to-end run cannot pin the MAGNITUDE — the two stamps land within
-    microseconds of each other, so no assertion there could say the mark moved
-    by the right amount.
+    Replayed on a scripted clock, NOT through `communicate()`: the fake
+    conversation yields with no delay, so an end-to-end run cannot pin the
+    MAGNITUDE — the two stamps land within microseconds of each other, so no
+    assertion there could say the mark moved by the right amount.
 
     It can detect the mark moving at all, and does:
     `test_generation_and_tool_time_account_for_the_turn` asserts `head_ms > 0`
@@ -2173,34 +2227,12 @@ class TestAntigravityFirstWindowReseed:
     WHERE it moved to and that it moves only once.
     """
 
-    BASE = datetime(2026, 9, 11, 9, 0, 0)
-
     class _Clock:
-        def __init__(self, at_ms: float = 0.0) -> None:
-            self.at_ms = at_ms
+        def __init__(self) -> None:
+            self.at_ms = 0.0
 
         def now(self) -> datetime:
-            return TestAntigravityFirstWindowReseed.BASE + timedelta(milliseconds=self.at_ms)
-
-    def _state(self, clock):
-        from coder_eval.agents.antigravity_agent import _AntigravityTurnState
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
-        from coder_eval.streaming.collector import EventCollector
-
-        agent = AntigravityAgent(parse_agent_config(type="antigravity", model="gemini-3.5-flash"))
-        collector = EventCollector()
-        return _AntigravityTurnState(
-            agent=agent,
-            emit=CompositeStreamCallback([collector]),
-            task_id="t",
-            turn_id="turn",
-            collector=collector,
-            user_input="go",
-            iteration=1,
-            model="gemini-3.5-flash",
-            turn_start_time=0.0,
-            clock=clock,
-        )
+            return _at(self.at_ms)
 
     def test_the_first_step_moves_the_mark_off_the_turn_entry_stamp(self):
         """Dispatch before the first Step is head, not the first generation.
@@ -2209,54 +2241,55 @@ class TestAntigravityFirstWindowReseed:
         so this interval was published as generation — ~4.7 s per turn against
         a later-window median of 3.3 s.
         """
-        clock = self._Clock()
-        state = self._state(clock)
-        assert state._gen_mark_wall == self.BASE
+        _, decoder = _replay([Tick(900), _opening_step()])  # dispatch + TTFT
 
-        clock.at_ms = 900  # dispatch + TTFT
-        state.process_step(_step("THINKING", "ACTIVE", thinking="..."))
-
-        assert state._gen_mark_wall == self.BASE + timedelta(milliseconds=900)
+        assert decoder._first_output_seen is True
+        assert decoder._gen_mark == _at(900)
 
     def test_a_later_step_does_not_move_it(self):
         """Re-seeding more than once per turn is the defect, not the feature."""
-        clock = self._Clock()
-        state = self._state(clock)
-        clock.at_ms = 900
-        state.process_step(_step("THINKING", "ACTIVE", thinking="..."))
-        seeded = state._gen_mark_wall
+        _, decoder = _replay([Tick(900), _opening_step(), Tick(5000), _step("THINKING", "ACTIVE", thinking="more")])
 
-        clock.at_ms = 5000
-        state.process_step(_step("THINKING", "ACTIVE", thinking="more"))
-
-        assert state._gen_mark_wall == seeded
+        assert decoder._gen_mark == _at(900)
 
     def test_seeding_twice_by_hand_is_a_no_op_the_second_time(self):
         """The once-per-turn guard, stated outright rather than inferred."""
         clock = self._Clock()
-        state = self._state(clock)
+        emitter = TurnEmitter(
+            task_id="t",
+            iteration=1,
+            prompt="go",
+            model="gemini-3.5-flash",
+            basis=TimingBasis.TURN_CLOCK,
+            clock=clock,
+            sinks=[],
+        )
+        emitter.begin()
+        decoder = _AntigravityDecoder(emitter)
+        assert decoder._gen_mark == _CLOCK_BASE
+
         clock.at_ms = 900
-        state._seed_first_generation_window("MODEL")
-        seeded = state._gen_mark_wall
-
+        decoder._seed_first_generation_window("MODEL")
         clock.at_ms = 5000
-        state._seed_first_generation_window("MODEL")
+        decoder._seed_first_generation_window("MODEL")
 
-        assert state._gen_mark_wall == seeded
+        assert decoder._gen_mark == _at(900)
 
     def test_a_flush_still_advances_the_mark_and_opens_at_the_reseeded_one(self):
         """The re-seed must not break the tiling it sits in front of."""
-        clock = self._Clock()
-        state = self._state(clock)
-        clock.at_ms = 900
-        state.process_step(_step("THINKING", "ACTIVE", thinking="plan"))
-        clock.at_ms = 2000
-        state.process_step(_step("THINKING", "DONE", thinking="plan", usage=_usage(100, 0, 5, 5)))
+        result, decoder = _replay(
+            [
+                Tick(900),
+                _step("THINKING", "ACTIVE", thinking="plan"),
+                Tick(2000),
+                _thinking_done("plan"),
+            ]
+        )
 
-        message = _assistant(state)[0]
-        assert message.started_at == self.BASE + timedelta(milliseconds=900), "opens at the RE-SEEDED mark"
+        message = _assistant(result.record)[0]
+        assert message.started_at == _at(900), "opens at the RE-SEEDED mark"
         assert message.generation_duration_ms == pytest.approx(1100.0)
-        assert state._gen_mark_wall == self.BASE + timedelta(milliseconds=2000), "and the flush advances it"
+        assert decoder._gen_mark == _at(2000), "and the flush advances it"
 
     def test_a_non_model_step_does_not_seed_the_window(self):
         """The field is MODEL output, and the SDK streams Steps that are not.
@@ -2266,23 +2299,187 @@ class TestAntigravityFirstWindowReseed:
         one. Seeding on it would put the mark before the model spoke and hand
         the remainder back to msg0's generation — the defect being fixed.
         """
-        clock = self._Clock()
-        state = self._state(clock)
+        system = _step("SYSTEM_MESSAGE", "DONE", source="SYSTEM", content="compacting")
 
-        clock.at_ms = 400
-        state.process_step(_step("SYSTEM_MESSAGE", "DONE", source="SYSTEM", content="compacting"))
-        assert state._first_output_seen is False
-        assert state._gen_mark_wall == self.BASE, "a system Step must not open the generation window"
+        _, before = _replay([Tick(400), system])
+        assert before._first_output_seen is False
+        assert before._gen_mark == _CLOCK_BASE, "a system Step must not open the generation window"
 
-        clock.at_ms = 900
-        state.process_step(_step("THINKING", "ACTIVE", thinking="..."))
-        assert state._gen_mark_wall == self.BASE + timedelta(milliseconds=900), "the first MODEL Step does"
+        _, after = _replay([Tick(400), system, Tick(900), _opening_step()])
+        assert after._gen_mark == _at(900), "the first MODEL Step does"
 
     def test_a_turn_that_streams_no_step_keeps_the_turn_entry_mark(self):
-        clock = self._Clock()
-        state = self._state(clock)
-        assert state._first_output_seen is False
-        assert state._gen_mark_wall == self.BASE
+        _, decoder = _replay([])
+        assert decoder._first_output_seen is False
+        assert decoder._gen_mark == _CLOCK_BASE
+
+
+class TestAntigravityDecoder:
+    """`_AntigravityDecoder` over a real emitter: ids, parameters, orphans, tokens and replies."""
+
+    def test_an_id_less_call_falls_back_to_a_trajectory_scoped_id(self):
+        """`{name}_{trajectory}:{step_index}_{call_index}`, stable across ACTIVE -> DONE."""
+
+        def calls(done: bool) -> list[Any]:
+            extra = {"exit_code": 0} if done else {}
+            return [
+                _tc("run_command", None, {"command_line": "a", **extra}),
+                _tc("view_file", None, {"file_path": "x.py"}),
+            ]
+
+        result, _ = _replay(
+            [
+                _step(
+                    "TOOL_CALL",
+                    "ACTIVE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=calls(False),
+                    step_index=3,
+                    trajectory_id="traj",
+                ),
+                _step(
+                    "TOOL_CALL",
+                    "DONE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=calls(True),
+                    step_index=3,
+                    trajectory_id="traj",
+                ),
+                _step(
+                    "TOOL_CALL",
+                    "DONE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=[_tc("run_command", None, {"command_line": "b", "exit_code": 0})],
+                    step_index=4,
+                ),
+            ]
+        )
+
+        commands = {c.tool_id: c for c in result.record.commands}
+        assert set(commands) == {"run_command_traj:3_0", "view_file_traj:3_1", "run_command_4_0"}
+        assert all(c.result_status == "success" for c in commands.values())
+        assert_stream_balanced(result.events)
+
+    def test_parameters_keep_only_the_input_keys_seen_at_start(self):
+        """A key first seen at DONE is the harness's result payload, whatever its name."""
+        result, _ = _replay(
+            [
+                _step(
+                    "TOOL_CALL",
+                    "ACTIVE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=[_tc("run_command", "t1", {"command_line": "make", "cwd": "/w"})],
+                ),
+                _step(
+                    "TOOL_CALL",
+                    "DONE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=[
+                        _tc(
+                            "run_command",
+                            "t1",
+                            {"command_line": "make", "cwd": "/w", "exit_code": 0, "elapsed": "3s"},
+                        )
+                    ],
+                ),
+                # First seen at DONE: only the static backstop can drop `summary`.
+                _step(
+                    "TOOL_CALL",
+                    "DONE",
+                    target="TARGET_ENVIRONMENT",
+                    tool_calls=[_tc("search_web", "t2", {"query": "q", "summary": "leaked"})],
+                ),
+            ]
+        )
+
+        starts = {e.tool.tool_id: e.tool.parameters for e in result.events if isinstance(e, ToolStartEvent)}
+        assert starts["t1"] == {"command": "make", "cwd": "/w"}
+        commands = {c.tool_id: c.parameters for c in result.record.commands}
+        assert commands == {"t1": {"command": "make", "cwd": "/w"}, "t2": {"query": "q"}}
+
+    def test_an_orphan_is_swept_unresolved_with_no_completion(self):
+        """A call still ACTIVE at the end keeps its start and gains no end, duration or error."""
+        result, _ = _replay(
+            [
+                Tick(100),
+                _bash_active("bg1"),
+                Tick(500),
+                _step(
+                    "TEXT_RESPONSE",
+                    "DONE",
+                    content="backgrounded",
+                    content_delta="backgrounded",
+                    complete=True,
+                    usage=_usage(90, 0, 10, 0),
+                ),
+            ]
+        )
+
+        [orphan] = result.record.commands
+        assert orphan.result_status == "unknown"
+        assert orphan.execution_started_at == _at(100)
+        assert orphan.execution_completed_at is None
+        assert orphan.duration_ms is None
+        assert orphan.error_message is None
+        ends = [e for e in result.events if isinstance(e, ToolEndEvent)]
+        assert [e.status for e in ends] == [ToolEndStatus.UNRESOLVED]
+        assert_stream_balanced(result.events)
+
+    def test_generation_tokens_sum_to_the_turn_end_tokens(self):
+        """One inner turn; its `TurnEndEvent.tokens` is the sum of the per-generation deltas."""
+        result, decoder = _replay(
+            [
+                _step("THINKING", "DONE", thinking="first", usage=_usage(100, 0, 10, 5)),
+                _step("THINKING", "DONE", thinking="second", usage=_usage(110, 20, 12, 6)),
+                _step("TEXT_RESPONSE", "DONE", content="third", complete=True, usage=_usage(120, 0, 14, 0)),
+            ]
+        )
+
+        [turn_end] = [e for e in result.events if isinstance(e, TurnEndEvent)]
+        [agent_end] = [e for e in result.events if isinstance(e, AgentEndEvent)]
+        tokens = turn_end.tokens
+        assert tokens is not None
+        messages = _assistant(result.record)
+        assert len(messages) == decoder.generations == 3
+        assert sum(m.input_tokens for m in messages) == tokens.uncached_input_tokens == 100 + 90 + 120
+        assert sum(m.output_tokens for m in messages) == tokens.output_tokens == 15 + 18 + 14
+        assert sum(m.cache_read_tokens for m in messages) == tokens.cache_read_input_tokens == 20
+        assert sum(m.cache_creation_tokens for m in messages) == tokens.cache_creation_input_tokens == 0
+        for bucket in ("uncached_input_tokens", "output_tokens", "cache_read_input_tokens"):
+            assert getattr(agent_end.usage, bucket) == getattr(tokens, bucket)
+        assert_stream_balanced(result.events)
+
+    def test_a_user_source_text_step_is_not_assistant_text(self):
+        """The prompt echo adds no text block, no text chunk and no `agent_output`; the reply does."""
+        from tests._fixtures.golden_streams.antigravity_fixtures import ANTIGRAVITY_SCENARIOS
+
+        steps = next(s for s in ANTIGRAVITY_SCENARIOS if s.name == "f_user_prompt_step").steps
+        result, decoder = _replay(steps)
+
+        texts = [b.text for m in _assistant(result.record) for b in m.content_blocks if b.block_type == "text"]
+        assert texts == ["DONE."]
+        assert decoder.output_parts == ["DONE."]
+        assert [e.text for e in result.events if isinstance(e, TextChunkEvent)] == ["DONE."]
+        assert result.record.agent_output == "DONE."
+        assert result.record.result_summary is not None
+        assert result.record.result_summary.result == "DONE."
+
+    def test_a_user_source_delta_stays_out_of_a_failed_turns_output(self):
+        """A failed turn keeps only completed reply text, so neither the prompt echo nor a partial delta lands."""
+        result, _ = _replay(
+            [
+                _step("TEXT_RESPONSE", "DONE", source="USER", target="UNKNOWN", content="do it", content_delta="do it"),
+                _step("TEXT_RESPONSE", "ACTIVE", content_delta="DO"),
+            ],
+            status=AgentEndStatus.CRASHED,
+            reason="boom",
+        )
+
+        assert result.outcome.status is AgentEndStatus.CRASHED
+        assert result.outcome.error == "boom"
+        assert result.record.agent_output == ""
+        assert [e.text for e in result.events if isinstance(e, TextChunkEvent)] == ["DO"]
+        assert result.record.result_summary is None
 
 
 class TestTheTurnBracketComesFromTheTurnClock:
@@ -2311,7 +2508,7 @@ class TestTheTurnBracketComesFromTheTurnClock:
         ]
 
     async def test_both_brackets_are_stamped_from_the_injected_clock(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr("coder_eval.agent.TurnClock", AnchoredClock)
         seen: list[Any] = []
         await _agent_with_steps(self._steps()).communicate(
             "go", iteration=1, stream_callback=SimpleNamespace(on_event=seen.append)
@@ -2328,7 +2525,67 @@ class TestTheTurnBracketComesFromTheTurnClock:
         shares — this harness is simply where the margin is thinnest, since it
         holds its process across turns and so has the shortest real tail.
         """
-        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr("coder_eval.agent.TurnClock", AnchoredClock)
         record = (await _agent_with_steps(self._steps()).communicate("go", iteration=1)).record
 
         assert_overhead_is_measured(record)
+
+
+class TestCancellation:
+    """A cancel from outside ends the turn first and propagates; a cancel the SDK raised itself is a crash."""
+
+    async def test_an_external_cancel_ends_the_turn_once_and_propagates(self, tmp_path):
+        started = asyncio.Event()
+
+        class _HangingConversation(_FakeConversation):
+            async def receive_steps(self):
+                started.set()
+                await asyncio.sleep(60)
+                yield  # pragma: no cover - never reached
+
+        agent = _agent_with_steps([])
+        agent.working_directory = tmp_path
+        agent._sdk_agent = SimpleNamespace(conversation=_HangingConversation([]), is_started=True)
+        events: list[Any] = []
+        callback = SimpleNamespace(on_event=events.append)
+        task = asyncio.ensure_future(agent.communicate("go", iteration=1, stream_callback=callback, timeout=30))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        ends = [e for e in events if isinstance(e, AgentEndEvent)]
+        assert [(e.status, e.crash_reason) for e in ends] == [(AgentEndStatus.CRASHED, "turn cancelled")]
+        assert agent.get_state() is AgentState.ERROR
+
+    async def test_a_cancel_the_sdk_raised_itself_is_a_crashed_outcome(self, tmp_path):
+        class _CancellingConversation(_FakeConversation):
+            async def receive_steps(self):
+                raise asyncio.CancelledError
+                yield  # pragma: no cover - never reached
+
+        agent = _agent_with_steps([])
+        agent.working_directory = tmp_path
+        agent._sdk_agent = SimpleNamespace(conversation=_CancellingConversation([]), is_started=True)
+        outcome = await agent.communicate("go", iteration=1, timeout=30)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error == "Antigravity turn failed: the SDK was cancelled"
+
+    async def test_a_failed_turn_keeps_its_generation_count_and_completed_reply(self, tmp_path):
+        steps = [
+            _step("THINKING", "DONE", thinking="plan", usage=_usage(10, 0, 1, 1)),
+            _step("TEXT_RESPONSE", "DONE", content="partial answer", usage=_usage(10, 0, 2, 0)),
+        ]
+
+        class _ThenBoom(_FakeConversation):
+            async def receive_steps(self):
+                for step in steps:
+                    yield step
+                raise ValueError("stream died")
+
+        agent = _agent_with_steps([])
+        agent.working_directory = tmp_path
+        agent._sdk_agent = SimpleNamespace(conversation=_ThenBoom([]), is_started=True)
+        outcome = await agent.communicate("go", iteration=1, timeout=30)
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.agent_output == "partial answer"
+        assert outcome.record.assistant_turn_count == outcome.record.num_turns == 2
