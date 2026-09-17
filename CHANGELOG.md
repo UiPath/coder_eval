@@ -2,6 +2,200 @@
 
 <!-- version list -->
 
+## v0.12.3 (2026-09-17)
+
+### Bug Fixes
+
+- Code review fixes for container-contract-and-command-surface
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- Code review fixes for tests-slim-prose ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **docs**: Wrap an over-long line in the CE063 docstring
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **harbor**: Allow touch's absolute-path form in trajectory_criteria
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+- **harbor**: Reject --resume with --workspace-dir, sync design notes
+  ([#186](https://github.com/UiPath/coder_eval/pull/186),
+  [`c9b96a8`](https://github.com/UiPath/coder_eval/commit/c9b96a80086b16fbec816b9dc01117d1d9cab4a6))
+
+- **harbor**: Remove the Write/content ambiguity from trajectory_criteria
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+- **harbor**: Require Harbor E2E on PRs, de-flake trajectory_criteria fixture
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+- **harbor**: Resolve workdir dynamically at run time instead of guessing at export
+  ([#182](https://github.com/UiPath/coder_eval/pull/182),
+  [`7af839b`](https://github.com/UiPath/coder_eval/commit/7af839b376332c9fee38716a7582248fa59f5ea4))
+
+- **harbor**: Trim packager docstrings under the prose budget
+  ([#182](https://github.com/UiPath/coder_eval/pull/182),
+  [`7af839b`](https://github.com/UiPath/coder_eval/commit/7af839b376332c9fee38716a7582248fa59f5ea4))
+
+- **lint**: Fail the prose gate cleanly on a missing root, and name the blank-line blind spot
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: Include untracked files in the prose-only proof
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: Make the prose-only proof see added directives and reject typos
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: Point main's exempt-pair test at the repo root
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **sandbox**: Close the adopt() installer-disclosure gap and fix the review's other findings
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+- **sandbox**: Reprovision env_packages that a workspace capture stripped
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+- **sandbox**: Trim adopt()'s re-provisioning comment under the prose budget cap
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+### Continuous Integration
+
+- **harbor**: Zip and upload a failing scenario's full export/+jobs/ tree
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+### Documentation
+
+- Apply main's prose rules to the container-contract branch
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- Record two prose-budget guard gaps the final review found
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **harbor**: Trim two docstrings over the prose budget
+  ([#186](https://github.com/UiPath/coder_eval/pull/186),
+  [`c9b96a8`](https://github.com/UiPath/coder_eval/commit/c9b96a80086b16fbec816b9dc01117d1d9cab4a6))
+
+- **lint**: Answer review — cut runs off the cap, drop lint-rules.md overlap
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: Slim the five essays main's reports split brought in
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **tests**: 2/8 — move the CE catalogue from notes/README.md to lint-rules.md
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **tests**: 3/8 — move lint-rule defect stories into notes/lint-rules.md
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **tests**: 4/8 — move doc-surface rule rationale into notes/lint-rules.md
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **tests**: 5/8 — move golden-sensor and bracket-clock rationale into notes
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **tests**: 6/8 — move plain test-module rationale into the subsystem notes
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **tests**: 7/8 — delete HISTORY prose from tests, fix dangling docstring citations
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+### Features
+
+- Give the host→container boundary a contract and fold aggregate into report --rebuild
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **cli**: 4/6 — replace `aggregate` with `report --rebuild`
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **evaluate**: 5/6 — refresh the run-level run.json after a detached grade
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **harbor**: Unblock trajectory-dependent criteria and always allow credentials at export
+  ([#186](https://github.com/UiPath/coder_eval/pull/186),
+  [`c9b96a8`](https://github.com/UiPath/coder_eval/commit/c9b96a80086b16fbec816b9dc01117d1d9cab4a6))
+
+- **harbor**: Unblock trajectory-dependent criteria, always allow credentials at export
+  ([#186](https://github.com/UiPath/coder_eval/pull/186),
+  [`c9b96a8`](https://github.com/UiPath/coder_eval/commit/c9b96a80086b16fbec816b9dc01117d1d9cab4a6))
+
+- **isolation**: 1/6 — parse context.json as a ContainerContext contract
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **isolation**: 2/6 — refuse image skew and assert the container echoed its contract
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **lint**: 1/8 — scan a _ROOTS tuple in the prose budget
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: 8/8 — turn the prose budget gate on for tests/
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: Cap the comment RUN, replacing the per-file comment budget
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: Gate tests/ on the prose rules, and cap the comment run as well as the file total
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+- **lint**: Keep the file-total comment budget as a backstop under the run cap
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+### Refactoring
+
+- **isolation**: 3/6 — move the docker→tempdir driver rewrite host-side
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **lint**: Delete CE023, which guards a package that no longer exists
+  ([#180](https://github.com/UiPath/coder_eval/pull/180),
+  [`a249877`](https://github.com/UiPath/coder_eval/commit/a24987701e40b04126902c53015925bd145285aa))
+
+### Testing
+
+- Guard the contract echo over a maximal sandbox and the Typer-command exemption list
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **cli**: 6/6 — pin every shared run/execute flag as declared identically
+  ([#178](https://github.com/UiPath/coder_eval/pull/178),
+  [`2f01c9d`](https://github.com/UiPath/coder_eval/commit/2f01c9d415e332bc856ba1cd5529c9d453c1a1db))
+
+- **harbor**: Dump agent-phase recorded commands on scenario failure
+  ([#187](https://github.com/UiPath/coder_eval/pull/187),
+  [`3addf46`](https://github.com/UiPath/coder_eval/commit/3addf4660fd3318e2fb6167c851116c57639b559))
+
+
 ## v0.12.2 (2026-09-16)
 
 ### Bug Fixes
