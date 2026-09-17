@@ -41,6 +41,7 @@ from coder_eval.orchestration.experiment import (
     resolve_task_for_variant,
 )
 from coder_eval.orchestration.harness_contract import (
+    MODEL_TURN_LIMITS,
     HarnessContractError,
     TaskResolutionError,
     validate_harness_contract,
@@ -377,15 +378,16 @@ class TestModelTurnLimits:
             (AgentKind.NONE, False),
         ],
     )
-    def test_model_turn_limit_gate(self, kind: AgentKind, accepted: bool) -> None:
-        task = _task(kind, run_limits=RunLimits(max_turns=3))
+    @pytest.mark.parametrize("field", MODEL_TURN_LIMITS)
+    def test_model_turn_limit_gate(self, kind: AgentKind, accepted: bool, field: str) -> None:
+        task = _task(kind, run_limits=RunLimits.model_validate({field: 3}))
         if accepted:
             validate_harness_contract(task)
             return
         with pytest.raises(HarnessContractError) as exc:
             validate_harness_contract(task)
         message = str(exc.value)
-        assert "run_limits.max_turns" in message
+        assert f"run_limits.{field}" in message
         assert f"{kind.value!r}" in message
         assert "docs/agents/HARNESS_PARITY.md" in message
         assert "claude-code" in message.split("counts model turns", 1)[1]

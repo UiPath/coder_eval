@@ -130,6 +130,14 @@ class TestRunLimitsValidation:
             RunLimits(expected_tool_calls=0)
         assert RunLimits(expected_tool_calls=1).expected_tool_calls == 1
 
+    def test_expected_turns_default_none(self):
+        assert RunLimits().expected_turns is None
+
+    def test_expected_turns_lower_bound(self):
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            RunLimits(expected_turns=0)
+        assert RunLimits(expected_turns=1).expected_turns == 1
+
     def test_expected_tool_calls_yaml_coercion(self):
         assert RunLimits.model_validate({"expected_tool_calls": "10"}).expected_tool_calls == 10
 

@@ -515,8 +515,8 @@ class ReportGenerator:
 
     @staticmethod
     def _runtime_notes_lines(summary: RunSummary) -> list[str]:
-        """The ``## Run-time Notes`` blockquotes (tool-call cap + expected_tool_calls
-        overage). Returns ``[]`` when there are no notes so the caller adds nothing —
+        """The ``## Run-time Notes`` blockquotes (tool-call cap, expected_tool_calls and
+        expected_turns overage). Returns ``[]`` when there are no notes so the caller adds nothing —
         preserving the "only render the section when notes exist" behavior.
         """
         # Surface per-task signals as plain blockquote one-liners. Same surface for
@@ -526,17 +526,18 @@ class ReportGenerator:
             task_id = t.get("task_id", "?")
             if t.get("tool_calls_exhausted"):
                 notes.append(f"> **WARNING:** [{task_id}] tool-call cap reached")
-            overage_field = t.get("expected_tool_calls_overage")
-            if (
-                isinstance(overage_field, (list, tuple))
-                and len(overage_field) == 2
-                and all(isinstance(x, int) for x in overage_field)
+            for key, unit in (
+                ("expected_tool_calls", "cumulative visible tool calls"),
+                ("expected_turns", "cumulative model turns"),
             ):
-                actual, expected = overage_field
-                notes.append(
-                    f"> **WARNING:** [{task_id}] expected_tool_calls exceeded: {actual}/{expected}"
-                    + " (cumulative visible tool calls)"
-                )
+                overage_field = t.get(f"{key}_overage")
+                if (
+                    isinstance(overage_field, (list, tuple))
+                    and len(overage_field) == 2
+                    and all(isinstance(x, int) for x in overage_field)
+                ):
+                    actual, expected = overage_field
+                    notes.append(f"> **WARNING:** [{task_id}] {key} exceeded: {actual}/{expected} ({unit})")
             if t.get("stopped_early"):
                 reason = t.get("early_stop_reason") or "unknown"
                 # No "N turn(s) avoided" claim: on harnesses where one

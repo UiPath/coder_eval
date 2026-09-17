@@ -2201,10 +2201,12 @@ class TestCE069HarnessParityTable:
     def test_run_limits_render_pins_the_model_turn_cells(self):
         from tests.lint.harness_parity import render_run_limits_table
 
-        (row,) = render_run_limits_table(["max_turns"]).splitlines()[2:]
-        cells = [cell.strip() for cell in row.strip("|").split("|")]
-        assert "TurnMonitor" in cells[1]
-        assert cells[-1] == "rejected at resolution"
+        rows = render_run_limits_table(["max_turns", "expected_turns"]).splitlines()[2:]
+        assert len(rows) == 2
+        for row in rows:
+            cells = [cell.strip() for cell in row.strip("|").split("|")]
+            assert "TurnMonitor" in cells[1]
+            assert cells[-1] == "rejected at resolution"
 
     def test_a_run_limits_field_without_a_cell_rule_fails_the_render(self):
         from tests.lint.harness_parity import render_run_limits_table

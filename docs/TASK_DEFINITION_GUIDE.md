@@ -261,6 +261,7 @@ run_limits:
   max_tool_calls: 20                  # hard cap on resolved tool calls across the whole task
   max_turns: 15                       # hard cap on model turns (Claude Code, OpenCode, Pi)
   expected_tool_calls: 8              # SOFT efficiency budget (visible tool calls) — never aborts
+  expected_turns: 8                   # SOFT target on model turns — never aborts
   task_timeout: 300                   # wall-clock cap for the full run envelope, seconds
   turn_timeout: 300                   # per-communicate() timeout, seconds
 
@@ -277,6 +278,7 @@ run_limits:
 | `max_tool_calls` | *unset* | `> 0` | Hard cap on resolved tool calls across the whole task: every retry attempt and every dialog turn count. The TurnMonitor enforces it at the agent's next poll boundary, on every harness. The round that reaches the cap is processed whole, so tool calls already in flight can still land after it. The run finalizes cleanly as `tool_calls_exhausted`, and the criteria are still checked. Unset means no cap. |
 | `max_turns` | *unset* | `> 0` | Hard cap on model turns (main-thread model responses) across the whole task: every retry attempt and every dialog turn count; a sub-agent's turns do not. The TurnMonitor stops the agent at its next poll once turn N+1 starts, so part of that turn can still land; a run that ends at exactly N turns is not capped. Claude Code, OpenCode and Pi accept it; Codex and Antigravity reject it at resolution, because they report one turn per `communicate()` call (see [Run-Limit Parity](agents/HARNESS_PARITY.md)). The run finalizes as `tool_calls_exhausted`, like `max_tool_calls`. Unset means no cap. |
 | `expected_tool_calls` | *unset* | `>= 1` | **Soft** target for cumulative visible tool calls. Exceeding it warns and badges the report; it never aborts. See [`expected_tool_calls`](#expected_tool_calls-soft-efficiency-budget). |
+| `expected_turns` | *unset* | `>= 1` | **Soft** target for cumulative model turns, counted like `max_turns`. Exceeding it warns and badges the report; it never aborts. Claude Code, OpenCode and Pi accept it; Codex and Antigravity reject it at resolution. For a target on visible tool calls, use `expected_tool_calls`. |
 | `task_timeout` | *unset* | `>= 30` | Max seconds for the full run envelope, including agent work, grading, and post-run work. |
 | `turn_timeout` | *unset* | `>= 10` | Max seconds for the agent's single `communicate()` iteration. |
 | `max_input_tokens` | *unset* | `>= 1` | Max cumulative input (prompt) tokens. |

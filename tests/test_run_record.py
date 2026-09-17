@@ -44,6 +44,8 @@ EXPECTED_ROW = {
     "expected_commands": None,
     "expected_tool_calls": None,
     "expected_tool_calls_overage": None,
+    "expected_turns": None,
+    "expected_turns_overage": None,
     "gate_threshold": None,
     "generation_ms": None,
     "has_final_reply": False,
@@ -62,6 +64,7 @@ EXPECTED_ROW = {
     ],
     "judge_cost_usd": None,
     "tool_calls_exhausted": False,
+    "model_turns": None,
     "model_used": "claude-haiku-4-5",
     "output_tokens": 200,
     "reference_similarity": None,
@@ -250,7 +253,7 @@ class TestExpectedTurnsKey:
         d = eval_result_to_task_dict(result)
         assert d["expected_tool_calls"] is None
 
-    def test_row_carries_the_tool_call_keys_and_none_of_the_historical_ones(self):
+    def test_row_carries_the_tool_call_and_model_turn_keys_and_none_of_the_historical_ones(self):
         result = _make_result(resolved={"run_limits": {"expected_turns": 12}}, turns=[_turn_with_expected(5)])
         d = eval_result_to_task_dict(result)
         assert {
@@ -258,17 +261,27 @@ class TestExpectedTurnsKey:
             "tool_calls_remaining_at_stop",
             "expected_tool_calls",
             "expected_tool_calls_overage",
+            "model_turns",
+            "expected_turns",
+            "expected_turns_overage",
         } <= d.keys()
-        assert (
-            not {
-                "max_turns_exhausted",
-                "turns_remaining_at_stop",
-                "expected_turns",
-                "expected_turns_overage",
-            }
-            & d.keys()
-        )
+        assert not {"max_turns_exhausted", "turns_remaining_at_stop"} & d.keys()
         assert d["expected_tool_calls"] is None
+
+    def test_row_carries_the_model_turn_target_and_its_overage(self):
+        result = _make_result(resolved={"run_limits": {"expected_turns": 3}})
+        result.model_turns = 5
+        d = eval_result_to_task_dict(result)
+        assert d["model_turns"] == 5
+        assert d["expected_turns"] == 3
+        assert d["expected_turns_overage"] == [5, 3]
+
+    def test_a_record_without_a_model_turn_count_carries_no_expected_turns(self):
+        result = _make_result(resolved={"run_limits": {"expected_turns": 3}})
+        d = eval_result_to_task_dict(result)
+        assert d["model_turns"] is None
+        assert d["expected_turns"] is None
+        assert d["expected_turns_overage"] is None
 
     def test_row_carries_tool_calls_remaining_at_stop_from_early_stop(self):
         result = _make_result()

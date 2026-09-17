@@ -798,6 +798,8 @@ async def test_orchestrator_setup_move_on_write_uses_ephemeral_runtime_dir(tmp_p
 
     await orchestrator._setup()
 
+    assert orchestrator._counts_model_turns is True
+
     # An agent-supplied environment_info key survives the merge into the
     # run record (the cross-repo contract seam external consumers read).
     assert orchestrator.result.environment_info["system_prompt_semantics"] == "append"
@@ -1839,7 +1841,13 @@ success_criteria:
 # --- Evaluation loop: tool-call cap via the TurnMonitor ---
 
 
-def _cap_task(task_id: str, max_tool_calls: int | None = None, *, max_turns: int | None = None) -> TaskDefinition:
+def _cap_task(
+    task_id: str,
+    max_tool_calls: int | None = None,
+    *,
+    max_turns: int | None = None,
+    expected_turns: int | None = None,
+) -> TaskDefinition:
     from coder_eval.models import RunLimits
 
     agent_cfg = ClaudeCodeAgentConfig.model_construct(
@@ -1858,7 +1866,7 @@ def _cap_task(task_id: str, max_tool_calls: int | None = None, *, max_turns: int
         agent=agent_cfg,
         sandbox=SandboxConfig(driver="tempdir"),
         success_criteria=[FileExistsCriterion(type="file_exists", path="test.py", description="test.py must exist")],
-        run_limits=RunLimits(max_tool_calls=max_tool_calls, max_turns=max_turns),
+        run_limits=RunLimits(max_tool_calls=max_tool_calls, max_turns=max_turns, expected_turns=expected_turns),
         task_timeout=None,
         reference=None,
     )
@@ -2873,3 +2881,44 @@ async def test_evaluation_loop_breaks_on_model_turn_cap(tmp_path):
     assert orchestrator._monitor.model_turns == 4
     assert orchestrator.result is not None
     assert orchestrator.result.tool_calls_exhausted is True
+
+
+@pytest.mark.asyncio
+async def test_model_turns_is_recorded_and_expected_turns_warns(tmp_path, caplog):
+    import logging
+    from unittest.mock import patch
+
+    orchestrator = _cap_orchestrator(_cap_task("expected_turns_test", expected_turns=2), tmp_path)
+    orchestrator._counts_model_turns = True
+    orchestrator.agent = _CooperativeToolAgent([(3, False)]).host
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+    ):
+        await orchestrator._evaluation_loop()
+
+    assert orchestrator.result is not None
+    assert orchestrator.result.model_turns == 3
+    assert caplog.text.count("exceeded expected_turns") == 1
+    assert orchestrator.result.tool_calls_exhausted is False
+
+
+@pytest.mark.asyncio
+async def test_model_turns_is_none_where_the_harness_does_not_count_them(tmp_path, caplog):
+    import logging
+    from unittest.mock import patch
+
+    orchestrator = _cap_orchestrator(_cap_task("expected_turns_uncounted", expected_turns=2), tmp_path)
+    orchestrator._counts_model_turns = False
+    orchestrator.agent = _CooperativeToolAgent([(3, False)]).host
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("coder_eval.orchestrator.resolve_reference_dir", return_value=None),
+    ):
+        await orchestrator._evaluation_loop()
+
+    assert orchestrator.result is not None
+    assert orchestrator.result.model_turns is None
+    assert "exceeded expected_turns" not in caplog.text

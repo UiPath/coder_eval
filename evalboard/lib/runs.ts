@@ -514,7 +514,8 @@ export interface RawTaskResult {
     // null-fallback through the cell helpers in lib/turns.ts.
     total_turns?: number;
     expected_tool_calls?: number | null;
-    // Historical spelling of expected_tool_calls, on runs written before the rename.
+    // Model-turn target on current rows; the historical spelling of expected_tool_calls
+    // on rows without an expected_tool_calls key (see expectedToolCallsFromRaw).
     expected_turns?: number | null;
     // Derived expected wall clock for this task, stamped by the eval runner
     // (see eval_runner/skills/timing.py). Absent on unscored tasks and on every
@@ -896,7 +897,7 @@ export function toTaskRow(t: RawTaskResult): TaskResultSummary {
         totalCostUsd: t.total_cost_usd ?? null,
         actualCommands: t.actual_commands ?? null,
         totalTurns: t.total_turns ?? null,
-        expectedTurns: t.expected_tool_calls ?? t.expected_turns ?? null,
+        expectedTurns: expectedToolCallsFromRaw(t),
         expectedSeconds: t.expected_seconds ?? null,
         hasFinalReply: t.has_final_reply ?? false,
         inputTokens: t.input_tokens ?? null,
@@ -1190,6 +1191,14 @@ export interface RunOverview {
     timePerPassedTask?: number | null;
 }
 
+// expected_turns is the historical spelling only on rows that predate expected_tool_calls;
+// newer rows always carry expected_tool_calls, and their expected_turns counts model turns.
+export function expectedToolCallsFromRaw(
+    t: Pick<RawTaskResult, "expected_tool_calls" | "expected_turns">,
+): number | null {
+    return t.expected_tool_calls !== undefined ? t.expected_tool_calls : (t.expected_turns ?? null);
+}
+
 // Visible-turn count for a task row: the persisted `visible_turns` field when
 // present, else reconstructed as actual_commands + (1 if final reply). That
 // reconstruction is the documented turn rule (tool calls + final reply) and is
@@ -1280,7 +1289,7 @@ export async function readRunOverview(
                 weightedScore: t.weighted_score ?? null,
                 actualCommands: t.actual_commands ?? null,
                 totalTurns: t.total_turns ?? null,
-                expectedTurns: t.expected_tool_calls ?? t.expected_turns ?? null,
+                expectedTurns: expectedToolCallsFromRaw(t),
                 expectedSeconds: t.expected_seconds ?? null,
                 visibleTurns: visibleTurnsFromRaw(t),
                 hasFinalReply: t.has_final_reply ?? false,

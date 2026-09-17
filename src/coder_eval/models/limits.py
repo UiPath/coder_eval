@@ -69,6 +69,15 @@ class RunLimits(BaseModel):
             "and badges the report; the run is NOT aborted (use max_tool_calls for a hard cap)."
         ),
     )
+    expected_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Soft target for cumulative main-thread model turns across a task, counted like max_turns. Exceeding "
+            "it logs a one-shot warning and badges the report; the run is NOT aborted (use max_turns for a hard "
+            "cap). Only harnesses with a per-response turn boundary accept it; the others reject it at resolution."
+        ),
+    )
     task_timeout: int | None = Field(
         default=None,
         ge=30,

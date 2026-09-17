@@ -67,6 +67,7 @@ from .models import (
 )
 from .orchestration.early_stop import early_stop_active, validate_early_stop
 from .orchestration.evaluation import resolve_reference_dir, stage_reference_dir
+from .orchestration.harness_contract import registration_for
 from .orchestration.plugin_staging import stage_plugins
 from .orchestration.resolution_checks import validate_resolved_task
 from .orchestration.run_limits import validate_run_limits
@@ -500,9 +501,11 @@ class Orchestrator:
         # no plugins. Read back from the prior result on an evaluate-only grade.
         self._skills_offered: tuple[str, ...] | None = None
 
-        # One-shot flag: emit the expected_tool_calls rollup warning exactly once per
-        # task run even though _check_expected_tool_calls is called after every turn.
+        # One-shot flags: emit the expected_tool_calls and expected_turns warnings exactly
+        # once per task run even though _check_expected_targets is called after every turn.
         self._expected_tool_calls_warning_emitted: bool = False
+        self._expected_turns_warning_emitted: bool = False
+        self._counts_model_turns: bool = False
 
         # One-shot flag: a resolved task may be inspected more than once during
         # setup, but its ineffective timeout relationship should be logged once.
@@ -780,6 +783,7 @@ class Orchestrator:
 
         # Execution facts that outlive the agent process.
         self.result.tool_calls_exhausted = prior.tool_calls_exhausted
+        self.result.model_turns = prior.model_turns
         self.result.error_message = prior.error_message
         self.result.error_details = prior.error_details
         self.result.error_log_tail = prior.error_log_tail
@@ -1176,33 +1180,50 @@ class Orchestrator:
 
         write_task_html(self.result, self.html_report_path)
 
-    def _check_expected_tool_calls(self, *, iteration: int) -> None:
-        """Emit a one-shot warning if visible tool calls exceed expected_tool_calls.
+    def _check_expected_targets(self, *, iteration: int) -> None:
+        """One-shot warnings when visible tool calls exceed ``expected_tool_calls`` or model turns exceed
+        ``expected_turns``; never aborts.
 
-        Soft sibling of the hard tool-call cap: never aborts the run. The count is
-        one timeline entry per tool call plus the final reply when present — the
-        same metric evalboard renders. Cumulative across iterations so dialog tasks
-        compare against the budget the user set.
+        Soft siblings of the hard caps. Visible tool calls are one timeline entry per tool
+        call plus the final reply when present — the same metric evalboard renders. Model
+        turns are ``result.model_turns``, the TurnMonitor's count. Both are cumulative across
+        iterations so dialog tasks compare against the target the user set.
         """
         if self.result is None:
             return
         limits = self.task.run_limits
-        if limits is None or limits.expected_tool_calls is None:
-            return
-        if self._expected_tool_calls_warning_emitted:
+        if limits is None:
             return
 
-        total = visible_turn_count(self.result)
-        if total > limits.expected_tool_calls:
+        if limits.expected_tool_calls is not None and not self._expected_tool_calls_warning_emitted:
+            total = visible_turn_count(self.result)
+            if total > limits.expected_tool_calls:
+                logger.warning(
+                    "Visible tool calls (%d) exceeded expected_tool_calls (%d) at iteration %d "
+                    + "for task %s. Run continues — this target never aborts.",
+                    total,
+                    limits.expected_tool_calls,
+                    iteration,
+                    self.task.task_id,
+                )
+                self._expected_tool_calls_warning_emitted = True
+
+        model_turns = self.result.model_turns
+        if (
+            limits.expected_turns is not None
+            and not self._expected_turns_warning_emitted
+            and model_turns is not None
+            and model_turns > limits.expected_turns
+        ):
             logger.warning(
-                "Visible tool calls (%d) exceeded expected_tool_calls (%d) at iteration %d "
-                + "for task %s. Run continues — this target never aborts.",
-                total,
-                limits.expected_tool_calls,
+                "Model turns (%d) exceeded expected_turns (%d) at iteration %d for task %s. "
+                + "Run continues — this target never aborts.",
+                model_turns,
+                limits.expected_turns,
                 iteration,
                 self.task.task_id,
             )
-            self._expected_tool_calls_warning_emitted = True
+            self._expected_turns_warning_emitted = True
 
     def _warn_on_ineffective_task_timeout(self) -> None:
         """Log resolved cross-field run-limit warnings once per task run."""
@@ -1447,6 +1468,9 @@ class Orchestrator:
         # After the evaluate-only return: a re-grade builds no agent, so a recorded
         # config from before the contract existed stays gradable.
         validate_resolved_task(self.task)
+        self._counts_model_turns = registration_for(
+            self.task, requirement="model-turn accounting"
+        ).agent_class.contract.counts_model_turns
 
         # validate_api_keys exempts the no-op agent internally — it makes no API
         # call, so it needs no agent keys.
@@ -2139,7 +2163,7 @@ class Orchestrator:
 
         # Facts about the RUN, recorded BEFORE the grading switch: `execute`
         # withholds the verdict, never the facts. Recording the fact is not
-        # finalizing on it — the tool-call cap decides the status only when the criteria
+        # finalizing on it — a structural cap decides the status only when the criteria
         # fail, so under grade=False this is carried into task.json for the
         # detached grade rather than turned into a terminal status. Read from the
         # turn's end status, not the monitor's latch: a cap latched after the
@@ -2153,8 +2177,9 @@ class Orchestrator:
                 monitor.tool_calls,
                 monitor.model_turns,
             )
-        # Soft cumulative-turn check (logs once; never aborts).
-        self._check_expected_tool_calls(iteration=iteration)
+        self.result.model_turns = monitor.model_turns if self._counts_model_turns else None
+        # Soft cumulative targets (log once; never abort).
+        self._check_expected_targets(iteration=iteration)
 
         # Grading site 2 of 4. The trajectory is captured and persisted exactly as
         # on a graded run, but nothing is scored; returning False keeps FinalStatus
@@ -2523,6 +2548,7 @@ class Orchestrator:
                 # Budget gate: aborts the dialog with a dedicated stop reason and
                 # ensures end-of-dialog criteria still run for partial credit.
                 assert self._monitor is not None
+                self.result.model_turns = self._monitor.model_turns if self._counts_model_turns else None
                 try:
                     self._monitor.raise_if_over_budget(iteration=turns_completed)
                 except BudgetExceededError:
@@ -2535,7 +2561,7 @@ class Orchestrator:
 
                 # Soft check (logs once, never aborts), then the cap fact, both BEFORE
                 # any stop decision, so a turn that also ends the dialog keeps them.
-                self._check_expected_tool_calls(iteration=turns_completed)
+                self._check_expected_targets(iteration=turns_completed)
                 if turn_record.tool_calls_exhausted:
                     self.result.tool_calls_exhausted = True
 

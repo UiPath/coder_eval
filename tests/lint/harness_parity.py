@@ -97,6 +97,11 @@ _RUN_LIMIT_CELLS: dict[str, Callable[[HarnessContract], str]] = {
         else "rejected at resolution"
     ),
     "expected_tool_calls": lambda _c: "orchestrator, cumulative visible tool calls, warns only",
+    "expected_turns": lambda c: (
+        "orchestrator, cumulative model turns (TurnMonitor count), warns only"
+        if c.counts_model_turns
+        else "rejected at resolution"
+    ),
     "task_timeout": lambda _c: "orchestrator, agent-agnostic",
     "turn_timeout": lambda _c: "agent watchdog (see Timeouts)",
     "max_input_tokens": _budget_cell,

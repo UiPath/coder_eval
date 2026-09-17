@@ -681,6 +681,14 @@ class EvaluationResult(BaseModel):
         default=None,
         description="Total assistant turns across all orchestrator iterations",
     )
+    model_turns: int | None = Field(
+        default=None,
+        description=(
+            "Main-thread model turns across the task, counted by the TurnMonitor (each turn id once per "
+            "communicate()). None when the harness does not count model turns, when no turn finished, or on a "
+            "run recorded before the field."
+        ),
+    )
 
     # Commands efficiency (orchestrator-level tracking)
     expected_commands: int | None = Field(default=None, description="Expected commands from task definition")

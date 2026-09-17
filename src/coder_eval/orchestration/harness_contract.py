@@ -44,7 +44,7 @@ _GATED: dict[str, str] = {
     "disallowed_tools": "disallowed_tools",
 }
 
-MODEL_TURN_LIMITS: tuple[str, ...] = ("max_turns",)
+MODEL_TURN_LIMITS: tuple[str, ...] = ("max_turns", "expected_turns")
 
 
 def registration_for(task: TaskDefinition, *, requirement: str, hint: str = "") -> AgentRegistration[Any]:

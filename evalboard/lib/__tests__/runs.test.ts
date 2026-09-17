@@ -79,6 +79,16 @@ describe("toTaskRow", () => {
         expect(row.expectedTurns).toBe(4);
     });
 
+    test("a model-turn expected_turns never becomes the tool-call target", () => {
+        const row = toTaskRow({ task_id: "x", expected_tool_calls: null, expected_turns: 7 });
+        expect(row.expectedTurns).toBeNull();
+    });
+
+    test("expected_tool_calls wins over expected_turns when both are set", () => {
+        const row = toTaskRow({ task_id: "x", expected_tool_calls: 5, expected_turns: 7 });
+        expect(row.expectedTurns).toBe(5);
+    });
+
     test("legacy raw shape (no new fields) yields null", () => {
         const row = toTaskRow({ task_id: "x" });
         expect(row.totalTurns).toBeNull();

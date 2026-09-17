@@ -78,6 +78,7 @@ def test_every_kind_rejects_what_its_contract_does_not_honor() -> None:
         "undeclared permission_mode=default",
         "misspelled tool name",
         "unsupported run_limits.max_turns",
+        "unsupported run_limits.expected_turns",
     } <= names
 
 

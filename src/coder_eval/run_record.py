@@ -17,7 +17,13 @@ from typing import Any
 
 from coder_eval.errors import truncate_crash_message
 from coder_eval.models import EvaluationResult, FinalStatus, judge_cost_usd, simulator_cost_usd, sum_costs
-from coder_eval.result_metrics import expected_tool_calls_overage, turn_time_buckets, visible_turn_count
+from coder_eval.result_metrics import (
+    expected_tool_calls_overage,
+    expected_turns_overage,
+    recorded_run_limit,
+    turn_time_buckets,
+    visible_turn_count,
+)
 from coder_eval.result_metrics import has_final_reply as _has_final_reply
 
 
@@ -85,6 +91,7 @@ def eval_result_to_task_dict(
             break
 
     overage = expected_tool_calls_overage(result)
+    turns_overage = expected_turns_overage(result)
 
     total_turns = sum((t.num_turns or 0) for t in result.iterations)
 
@@ -96,14 +103,6 @@ def eval_result_to_task_dict(
     judge_cost = judge_cost_usd(result)
     simulator_cost = simulator_cost_usd(result)
     row_total_cost = sum_costs(agent_cost, judge_cost, simulator_cost)
-
-    expected_tool_calls_value: int | None = None
-    if result.task_config is not None:
-        rl = (result.task_config.resolved or {}).get("run_limits") or {}
-        if isinstance(rl, dict):
-            raw = rl.get("expected_tool_calls")
-            if isinstance(raw, int) and raw >= 1:
-                expected_tool_calls_value = raw
 
     _buckets = turn_time_buckets(result)
 
@@ -181,7 +180,11 @@ def eval_result_to_task_dict(
         # "Visible turns" (tool calls + final reply) -- what the "within expected
         # tool calls" metric compares against. Distinct from total_turns (SDK num_turns).
         "visible_turns": visible_turn_count(result),
-        "expected_tool_calls": expected_tool_calls_value,
+        "expected_tool_calls": recorded_run_limit(result, "expected_tool_calls"),
+        "model_turns": result.model_turns,
+        # expected_turns is reported only beside the model-turn count it targets.
+        "expected_turns": recorded_run_limit(result, "expected_turns") if result.model_turns is not None else None,
+        "expected_turns_overage": list(turns_overage) if turns_overage is not None else None,
         "has_final_reply": has_reply,
         # None/False on the default path, so downstream analysis never confuses a
         # truncated run with a full one.
