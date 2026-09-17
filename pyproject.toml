@@ -294,17 +294,13 @@ external = [
     "CE056",
     "CE057",
     "CE058",
-    "CE059",
-    "CE060",
-    "CE061",
-    "CE063",
-    "CE064",
     "CE065",
     "CE066",
     "CE068",
     "CE069",
     "CE070",
     "CE071",
+    "CE072",
     "CE073",
 ]  # custom architectural lint rules (tests/lint/)
 

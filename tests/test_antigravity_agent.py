@@ -2483,7 +2483,7 @@ class TestAntigravityDecoder:
 
 
 class TestTheTurnBracketComesFromTheTurnClock:
-    """CE064's behavioural half: the SOURCE of the two bracket stamps.
+    """The SOURCE of the two bracket stamps: the turn clock.
 
     This is the harness the defect was measured on. It holds its process across
     turns, so nothing happens between its last flush and its `AgentEndEvent`

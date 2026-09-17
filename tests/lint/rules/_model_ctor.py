@@ -1,35 +1,21 @@
-"""Resolve `coder_eval.models` constructor calls inside one module's AST.
+"""Resolve constructor calls to a known class inside one module's AST.
 
-CE060 and CE061 ask the same first question — *is this call building an
-`AssistantMessage`?* — and answering it takes more than matching a name: a
-module may bind the class under any alias, reach it through a relative import,
-or never bind it at all and spell it `models.AssistantMessage(...)`. CE060
-worked that out once; duplicating it into CE061 would mean a model rename or a
-new import spelling needs two fixes in two rules, and the second one is the one
-that gets missed. So it lives here and both rules consume it.
+Answering *is this call building a ``coder_eval.models.AssistantMessage``?* takes more
+than matching a name: a module may bind the class under any alias, reach it through a
+relative import, or spell it ``models.AssistantMessage(...)``. CE072 asks that question
+for every class it bans, so the resolution lives here once.
 
-The class name is taken from the model itself rather than written as a string,
-the way CE056 imports `IN_CONTAINER_ENV` and CE057 derives its target set from
-`SIDECAR_MODULES`: renaming the model moves both rules with it.
-
-BLIND SPOT, inherited by every consumer: a re-export through an intermediate
-module (`from .sibling import AssistantMessage`) is invisible, because
-resolving it means following imports across files and no rule in this package
-does that.
+BLIND SPOT, inherited by every consumer: a re-export through an intermediate module
+(``from .sibling import AssistantMessage``) is invisible, because resolving it means
+following imports across files and no rule in this package does that.
 """
 
 import ast
 import re
 
-from coder_eval.models import AssistantMessage
 
-
-# Reducers live here; nothing outside it builds a generation window.
+# The adapters: every file under src/coder_eval/agents/.
 AGENTS_ROOT = re.compile(r"(?:^|[/\\])src[/\\]coder_eval[/\\]agents[/\\]")
-
-_MODELS_MODULE = "coder_eval.models"
-# Taken from the model, never spelled here: a rename then moves the rules too.
-ASSISTANT_MESSAGE = AssistantMessage.__name__
 
 
 def reaches_module(node: ast.ImportFrom, module_path: str) -> bool:
@@ -58,34 +44,17 @@ def reaches_module(node: ast.ImportFrom, module_path: str) -> bool:
     return any(spelled[: len(segments) - i] == segments[i:] for i in range(1, len(segments)))
 
 
-def reaches_models_module(node: ast.ImportFrom) -> bool:
-    """`reaches_module` pinned to `coder_eval.models` — CE060/CE061's question."""
-    return reaches_module(node, _MODELS_MODULE)
-
-
 def bindings_from(tree: ast.AST, class_name: str, module_path: str) -> set[str]:
     """Every local name this module binds `<module_path>.<class_name>` to.
 
     Built per file: caching it across files would leak one module's alias into
     another's matching.
-
-    Parameterized on the module because CE064 asks the identical question about
-    `coder_eval.streaming.events` and `coder_eval.timing` rather than about
-    `coder_eval.models`. Copying the resolver into it would mean a new import
-    spelling needs three fixes in three rules, and the third is the one that
-    gets missed — which is the argument this file already makes for CE060 and
-    CE061 sharing it.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and reaches_module(node, module_path):
             names.update(a.asname or a.name for a in node.names if a.name == class_name)
     return names
-
-
-def local_bindings(tree: ast.AST, class_name: str) -> set[str]:
-    """`bindings_from` pinned to `coder_eval.models` — CE060/CE061's question."""
-    return bindings_from(tree, class_name, _MODELS_MODULE)
 
 
 def constructor_name(func: ast.expr, names: set[str], class_name: str) -> str | None:
@@ -101,16 +70,3 @@ def constructor_name(func: ast.expr, names: set[str], class_name: str) -> str | 
     if isinstance(func, ast.Attribute) and func.attr == class_name:
         return func.attr
     return None
-
-
-def keywords_of(node: ast.Call) -> dict[str, ast.expr]:
-    """The call's named arguments. A `**`-expansion contributes nothing.
-
-    That is deliberate rather than an oversight: such a call has not declared
-    the field AT THE SITE, which is what these rules are about.
-    """
-    return {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
-
-
-def is_none(node: ast.expr | None) -> bool:
-    return isinstance(node, ast.Constant) and node.value is None

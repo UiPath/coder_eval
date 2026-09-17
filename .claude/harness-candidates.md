@@ -647,6 +647,8 @@ divergences, so the deferred-work record is one place. Measurements in
   kwarg rule ever lands, extract `tests/lint/rules/_message_calls.py` at that
   point rather than sooner.
   Caught in: the CE060 / antigravity `message_id` run.
+  UPDATE: CE059 and CE060 are retired. CE072 bans an `AssistantMessage` call in
+  `agents/`, alias included, so only CE058's name list is still open.
 
 - [ ] **Nothing pins that `message_id` is only ever a WITHIN-TURN identity.** Ids
   repeat across retry attempts of one turn on every synthetic-id harness —
@@ -808,8 +810,8 @@ re-derive from scratch.
   PRESENT at the call site (`ce059_generation_window_is_two_reads.py:68`), so
   removing the kwarg makes `claims_a_window` true at the three legitimate
   placeholder sites and forces a rule REWRITE rather than a retirement. Net
-  cost: five reducers, a regeneration of every golden, and a CE059 rework; net
-  benefit: SSOT alone. **Deferring it is safe because the seam assertion in
+  cost: five reducers, a regeneration of every golden, and a CE059 rework (CE059
+  is now retired, so that part of the cost is gone); net benefit: SSOT alone. **Deferring it is safe because the seam assertion in
   `timing.subtract_tool_time` now checks the property at runtime** — a group's
   raw total must equal the span its own bounds describe — which also covers a
   third-party agent registered through the `coder_eval.plugins` SPI, where no
@@ -826,7 +828,8 @@ re-derive from scratch.
   case was never about the clamp but about the head being measured against the
   wrong instant. REVISIT IF: an inversion is observed on a live run after
   CE064, which would mean a basis is still mixed somewhere the rule cannot see
-  (the plugin SPI, or a harness whose spans come from a CLI).
+  (the plugin SPI, or a harness whose spans come from a CLI). CE064 is now
+  retired: `TurnEmitter` stamps the bracket from the turn's one clock.
 
 - [ ] **`test_codex_golden[a_agent_message_only]` is FLAKY, ~5% — measured, and
   pre-existing.** Forty consecutive runs on an unmodified tree (`-n 0`): 2
@@ -967,6 +970,6 @@ re-derive from scratch.
 - [ ] OpenCode: warn when an inherited `OPENCODE_CONFIG_CONTENT` `permission` / `instructions` value is not a dict / list and is replaced — today it is dropped silently; small, but needs a decision on warn vs. keep — caught in the harness-contract Phase 3 review.
 - [ ] CE070 blind spot: an adapter that counts `ToolEndEvent`s (or tokens) under a new name to cap or stop a run itself — the rule matches identifiers only; needs a data-flow check that a counter in `agents/` feeds a break or an end status — caught in the central-enforcement plan (Phase 5).
 - [ ] CE070 blind spot: an adapter that re-grows a skill scanner through `glob("*.md")`, `rglob`, or a file name built from parts — the rule matches the literal `"SKILL.md"` only; needs a filesystem-walk classifier scoped to `agents/` — caught in the central-enforcement plan (Phase 5).
-- [ ] Every harness's `TurnEndEvent.tokens` must be a per-report DELTA: over a turn, their sum per bucket must not exceed `AgentEndEvent.usage` (the TurnMonitor latches budgets on the sum) — nothing checks it; the golden-stream runners return only the TurnRecord, so each of the five `run_*_scenario` helpers needs an event sink first — caught in the central-enforcement final review (Claude re-reported an interleaved message id's tokens).
-- [ ] Live tests (`-m live`) are neither run nor type-checked in `make verify`, so an SPI signature change (`communicate(max_turns=)`, bool `should_stop`) leaves them broken until someone runs them with credentials — needs pyright over `tests/*_live.py` or an import-time signature smoke test — caught in the central-enforcement live verification (Phase 6).
+- [x] ~~Every harness's `TurnEndEvent.tokens` must be a per-report DELTA: over a turn, their sum per bucket must not exceed `AgentEndEvent.usage` (the TurnMonitor latches budgets on the sum) — nothing checks it; the golden-stream runners return only the TurnRecord, so each of the five `run_*_scenario` helpers needs an event sink first — caught in the central-enforcement final review (Claude re-reported an interleaved message id's tokens).~~ **DONE.** Closed by the emitter plus `assert_stream_balanced`: `TurnEmitter` is the one per-turn accumulator on every harness and logs a WARNING when a bucket of the summed `TurnEndEvent.tokens` exceeds the published usage, and `coder_eval.testing.assert_stream_balanced` fails on the same condition over a replayed or live event stream.
+- [x] ~~Live tests (`-m live`) are neither run nor type-checked in `make verify`, so an SPI signature change (`communicate(max_turns=)`, bool `should_stop`) leaves them broken until someone runs them with credentials — needs pyright over `tests/*_live.py` or an import-time signature smoke test — caught in the central-enforcement live verification (Phase 6).~~ **DONE.** Closed by pyright over live tests in `make verify` (a second pass whose generated config includes `tests/*_live.py` and the byoa demo fixture) plus `tests/test_harness_live.py`, which runs one tiny turn per installed harness through `communicate` and checks it with `assert_stream_balanced` and the bucket sums.
 

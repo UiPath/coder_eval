@@ -112,7 +112,7 @@ class EventCollector:
         ``generation_duration_ms`` is ``None`` — that field is the codebase's
         marker for "no window was measurable here", and its producers stamp a
         placeholder ``started_at == completed_at`` that would otherwise read as a
-        measurement (the same exemption CE059 makes).
+        measurement (``TurnEmitter.add_unmeasured_generation`` writes exactly that shape).
 
         ``min``/``max``, not the first and last entries: the list is not ordered
         by time. MAIN THREAD ONLY, so all four buckets measure one thread.

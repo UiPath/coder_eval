@@ -30,6 +30,7 @@ from coder_eval.criteria import init_criteria
 from coder_eval.evaluation.checker import SuccessChecker
 from coder_eval.models import (
     AgentJudgeCriterion,
+    ClaudeCodeAgentConfig,
     LLMJudgeCriterion,
     SandboxConfig,
     parse_agent_config,
@@ -123,16 +124,18 @@ def test_agent_judge_sdk_tool_channel(hello_sandbox: Sandbox) -> None:
     if not api_key or api_key.startswith("sk-ant-test-"):
         pytest.skip("ANTHROPIC_API_KEY not set (or placeholder)")
 
+    agent = parse_agent_config(
+        type="claude-code",
+        model="claude-haiku-4-5-20251001",
+        allowed_tools=["Read", "Bash"],
+    )
+    assert isinstance(agent, ClaudeCodeAgentConfig)
     criterion = AgentJudgeCriterion(
         description="burn-in / SDK",
         prompt=_JUDGE_PROMPT,
         max_turns=6,
         turn_timeout=120,
-        agent=parse_agent_config(
-            type="claude-code",
-            model="claude-haiku-4-5-20251001",
-            allowed_tools=["Read", "Bash"],
-        ),
+        agent=agent,
     )
     result = SuccessChecker(hello_sandbox, init_registry=False, route=DirectRoute()).check(criterion)
 

@@ -18,13 +18,21 @@ Three behaviors are validated:
 """
 
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
 from coder_eval.config import Settings
-from coder_eval.models import AgentKind, ApiBackend, parse_agent_config
+from coder_eval.models import (
+    AgentKind,
+    ApiBackend,
+    ClaudeCodeAgentConfig,
+    CommandTelemetry,
+    TurnRecord,
+    parse_agent_config,
+)
 from coder_eval.models.routing import ApiRoute, DirectRoute, resolve_route
 
 
@@ -57,12 +65,12 @@ def _model_for_env() -> str | None:
 SECRET_CONTENTS = "TOP_SECRET_MARKER_42"
 
 
-def _read_calls(turn) -> list:
+def _read_calls(turn: TurnRecord) -> list[CommandTelemetry]:
     """Return Read tool-call telemetry entries from a TurnRecord."""
     return [c for c in turn.commands if c.tool_name == "Read"]
 
 
-def _attempted_or_skip(read_calls: list, target: Path, turn) -> list:
+def _attempted_or_skip(read_calls: list[CommandTelemetry], target: Path, turn: TurnRecord) -> list[CommandTelemetry]:
     """The Reads in ``read_calls`` that touched ``target`` — or skip the test.
 
     These tests can only observe the CLI's deny engine if the agent actually
@@ -82,13 +90,15 @@ def _attempted_or_skip(read_calls: list, target: Path, turn) -> list:
     if not attempted:
         pytest.skip(
             f"Agent declined to attempt a Read of {target}, so the deny rule was never "
-            f"exercised. Read calls: {[(c.tool_name, c.parameters) for c in read_calls]}. "
-            f"Reply: {(turn.agent_output or '')[:200]!r}"
+            + f"exercised. Read calls: {[(c.tool_name, c.parameters) for c in read_calls]}. "
+            + f"Reply: {(turn.agent_output or '')[:200]!r}"
         )
     return attempted
 
 
-async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict) -> tuple[ClaudeCodeAgent, object]:
+async def _run_single_turn(
+    sandbox_dir: Path, prompt: str, claude_settings: Mapping[str, object]
+) -> tuple[ClaudeCodeAgent, TurnRecord]:
     """Start an agent in sandbox_dir, run one turn with the given settings."""
     config = parse_agent_config(
         type=AgentKind.CLAUDE_CODE,
@@ -99,6 +109,7 @@ async def _run_single_turn(sandbox_dir: Path, prompt: str, claude_settings: dict
         claude_settings=claude_settings,
         sdk_options={"max_turns": 3},
     )
+    assert isinstance(config, ClaudeCodeAgentConfig)
     agent = ClaudeCodeAgent(config, route=_route_from_env())
     await agent.start(str(sandbox_dir))
     try:

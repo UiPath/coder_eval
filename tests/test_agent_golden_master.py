@@ -425,9 +425,8 @@ class TestAssertTimingCaptured:
     def test_collapsed_bounds_raise_even_with_a_healthy_duration(self):
         # Two harnesses take the duration from a MONOTONIC clock and the
         # bounds from the wall clock, so a reducer can report a real duration
-        # beside two stamps that collapsed to one instant. CE059 sees that
-        # statically only when both bounds are the same ast.Name; this is the
-        # check for when they are two different names holding one value.
+        # beside two stamps that collapsed to one instant; this is the check
+        # for that.
         with pytest.raises(AssertionError, match="bounds that span it"):
             assert_timing_captured(self._record(windows=[500.0], bounds_collapse=True), expect_generation_window=True)
 

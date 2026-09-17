@@ -194,6 +194,111 @@ Write the turn through one `TurnEmitter` (do **not** build events, messages or a
 
 The emitter owns the event protocol: one `AgentStartEvent`, one `AgentEndEvent` on every
 exit, balanced inner turns and tool calls (orphans closed `unresolved`), and the record.
+That is why `coder_eval.spi` exports no event class and no `EventCollector`. What a turn
+needs from it:
+
+```python
+from coder_eval.spi import (
+    AgentEndStatus,        # the status you pass to finalize / fail
+    Generation,            # one part of a model generation: blocks + its own token delta
+    JsonlDecoder,          # the per-turn reducer of a SubprocessJsonlAgent
+    StopReason,
+    SubprocessJsonlAgent,  # the base for a CLI that streams nd-JSON on stdout
+    TokenUsage,
+    ToolEndStatus,
+    TurnClock,
+    TurnEmitter,
+    TurnEndStatus,
+    TurnOutcome,
+    WatchdogFired,
+    Window,                # the bounds of one generation window; close_window returns it
+    close_window,
+    end_status_for,
+    run_with_watchdog,
+)
+```
+
+### A JSONL CLI agent: `SubprocessJsonlAgent`
+
+If your harness is a CLI that runs one process per turn and prints nd-JSON events on
+stdout, subclass `SubprocessJsonlAgent`. The base owns the transport: the spawn (with
+`stdin` on `/dev/null`), the stderr drain, the read loop against the turn deadline, the
+cooperative stop, the crash and timeout outcomes, and the reap. You supply the argv, the
+environment, and a `JsonlDecoder` that turns one event into emitter calls:
+
+```python
+import os
+from typing import Any
+
+from coder_eval.spi import (
+    AgentEndStatus,
+    Generation,
+    JsonlDecoder,
+    SubprocessJsonlAgent,
+    TimingBasis,
+    TokenUsage,
+    ToolEndStatus,
+    TurnEmitter,
+    TurnOutcome,
+    close_window,
+)
+
+
+class MyDecoder(JsonlDecoder):
+    def __init__(self, emitter: TurnEmitter) -> None:
+        super().__init__(emitter)
+        self.mark = emitter.now()  # where the next generation window opens
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "message":
+            now = self.emitter.now()
+            tokens = TokenUsage(output_tokens=int(event.get("output_tokens", 0)))
+            self.emitter.add_generation(
+                message_id=event.get("id"),
+                window=close_window(mark=self.mark, now=now),
+                parts=[Generation(blocks=[], tokens=tokens)],
+            )
+            self.mark = now
+        elif kind == "text":
+            self.emitter.text(str(event.get("text", "")))
+        elif kind == "tool_start":
+            self.emitter.open_tool(str(event["id"]), str(event["name"]), event.get("args") or {})
+        elif kind == "tool_end":
+            status = ToolEndStatus.ERROR if event.get("is_error") else ToolEndStatus.OK
+            self.emitter.close_tool(str(event["id"]), status=status, summary=event.get("output"))
+        elif kind == "error":
+            self.error = str(event.get("message"))  # the base crashes the turn on it
+
+    def end(self, status: AgentEndStatus, *, reason: str | None = None) -> TurnOutcome:
+        if status is AgentEndStatus.CRASHED or status is AgentEndStatus.TIMEOUT:
+            return self.emitter.fail(status, reason or status.value)
+        return self.emitter.finalize(status)
+
+
+class MyAgent(SubprocessJsonlAgent[MyAgentConfig]):
+    contract = HarnessContract(..., timing_basis=TimingBasis.TURN_CLOCK)  # the emitter stamps the tools
+    cli_name = "MyCli"
+    docs_page = "docs/agents/MY_CLI.md"
+    recognized_events = frozenset({"message", "text", "tool_start", "tool_end", "error"})
+    decoder = MyDecoder
+
+    def argv(self, prompt: str) -> list[str]:
+        return ["my-cli", "--json", "--model", self.config.model or "default", prompt]
+
+    def env(self) -> dict[str, str]:
+        return dict(os.environ)
+
+    async def start(self, working_directory: str, **_: Any) -> None:
+        self.working_directory = working_directory
+
+    async def stop(self) -> None:
+        await self.kill()
+        self._mark_stopped()
+```
+
+A clean exit that produced no event named in `recognized_events` crashes the turn as
+format drift. The in-tree example is `src/coder_eval/agents/pi_agent.py`.
 
 ### The sixth-harness checklist
 
@@ -205,6 +310,38 @@ exit, balanced inner turns and tool calls (orphans closed `unresolved`), and the
 - [ ] The four `coder_eval.testing` sensors in your own tests: `replay` your decoder over a
       recorded stream, `assert_identity_closes` on the replay, `assert_stream_balanced` on
       its events, and `conformance(kind, probes)` for the contract.
+
+### Test your adapter: `coder_eval.testing`
+
+The in-tree suites and a plugin's tests call the same module. It does not import
+`pytest`: each check raises `AssertionError`.
+
+| Sensor | What it checks |
+|---|---|
+| `replay(stream, make_decoder, clock=ScriptedClock(origin), end=...)` | Drives your decoder over a recorded stream through a real `TurnEmitter`. A `Tick(at_ms)` element moves the clock. Returns the record, the events and the bracket stamps. |
+| `assert_identity_closes(record, started_at=..., ended_at=...)` | Head + generation + tool union + tail equals the turn's span. |
+| `assert_stream_balanced(events)` | Every opened inner turn and tool call closes, and one turn has one start and one end. |
+| `await conformance(kind, probes)` | Your agent rejects every field its contract marks unsupported, and `probes` has one check for each enforced cell. |
+
+```python
+from datetime import datetime
+
+from coder_eval.spi import AgentEndStatus
+from coder_eval.testing import ScriptedClock, Tick, assert_identity_closes, assert_stream_balanced, replay
+
+
+def test_a_recorded_turn_balances_and_closes():
+    stream = [
+        Tick(10), {"type": "tool_start", "id": "t1", "name": "Bash"},
+        Tick(50), {"type": "tool_end", "id": "t1"},
+        Tick(80), {"type": "message", "id": "m1", "output_tokens": 12},
+        Tick(90),
+    ]
+    result = replay(stream, MyDecoder, clock=ScriptedClock(datetime(2026, 1, 1)),
+                    end=lambda d: d.end(AgentEndStatus.COMPLETED))
+    assert_stream_balanced(result.events)
+    assert_identity_closes(result.record, started_at=result.started_at, ended_at=result.ended_at)
+```
 
 ### Worked example
 

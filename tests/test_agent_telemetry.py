@@ -1512,10 +1512,8 @@ class TestClaudeFirstWindowReseed:
 
 
 class TestTheTurnBracketComesFromTheTurnClock:
-    """CE064's behavioural half for claude-code: the SOURCE of the two stamps.
+    """The SOURCE of claude-code's two bracket stamps: the turn clock.
 
-    The rule can only see that `timestamp=` is present — it cannot tell
-    `state.clock.now()` from a `datetime.now()` spelled out at the call site.
     Anchoring the stand-in a year from real time is what makes a reverted
     argument fail by a year instead of by the microseconds that separate the
     two clocks in practice.

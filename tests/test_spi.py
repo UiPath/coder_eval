@@ -14,11 +14,61 @@ _ORIGINS = (
     "coder_eval.models",
     "coder_eval.pricing",
     "coder_eval.streaming.callbacks",
-    "coder_eval.streaming.collector",
     "coder_eval.streaming.emitter",
     "coder_eval.streaming.events",
     "coder_eval.timing",
 )
+
+
+_FINAL_EXPORTS = [
+    "Agent",
+    "AgentConfigError",
+    "AgentCrashError",
+    "AgentEndStatus",
+    "AgentRegistry",
+    "AgentState",
+    "ApiRoute",
+    "BaseAgentConfig",
+    "CANONICAL_TOOL_NAMES",
+    "CommandTelemetry",
+    "Enforcement",
+    "Generation",
+    "HarnessContract",
+    "JsonlDecoder",
+    "LocalPluginConfig",
+    "ModelPricing",
+    "PermissionMode",
+    "READ_ONLY_DENIED_TOOLS",
+    "ResultSummary",
+    "SPI_VERSION",
+    "StopReason",
+    "StreamCallback",
+    "SubprocessJsonlAgent",
+    "SystemPromptMode",
+    "TimingBasis",
+    "TokenUsage",
+    "ToolEndStatus",
+    "ToolNameMap",
+    "TranscriptMessage",
+    "TurnClock",
+    "TurnEmitter",
+    "TurnEndStatus",
+    "TurnOutcome",
+    "TurnRecord",
+    "TurnTimeoutError",
+    "UsageGranularity",
+    "WatchdogFired",
+    "Window",
+    "close_window",
+    "end_status_for",
+    "register_pricing",
+    "run_with_watchdog",
+]
+
+
+def test_the_export_list_is_pinned() -> None:
+    """A plugin writes the event protocol through ``TurnEmitter``: no event class, collector or composite callback."""
+    assert spi.__all__ == _FINAL_EXPORTS
 
 
 def test_spi_version_is_three() -> None:

@@ -22,7 +22,7 @@ import pytest
 pytest.importorskip("openai_codex")
 
 from coder_eval.agents.codex_agent import CodexAgent
-from coder_eval.models import AgentKind, parse_agent_config
+from coder_eval.models import AgentKind, CodexAgentConfig, parse_agent_config
 
 
 _live = pytest.mark.live
@@ -42,6 +42,7 @@ def _make_agent() -> CodexAgent:
         permission_mode="bypassPermissions",  # full access so it can run shell + write files
         model=os.getenv("CODEX_MODEL"),
     )
+    assert isinstance(config, CodexAgentConfig)
     return CodexAgent(config, instance_name="codex-live")
 
 
@@ -139,7 +140,7 @@ async def test_codex_live_cooperative_stop_ends_turn_promptly(tmp_path):
         record = (
             await agent.communicate(
                 "Run `echo one`, then `echo two`, then `echo three`, each as a separate shell command, "
-                "then create three files a.txt, b.txt and c.txt.",
+                + "then create three files a.txt, b.txt and c.txt.",
                 iteration=1,
                 timeout=180,
                 stream_callback=sink,

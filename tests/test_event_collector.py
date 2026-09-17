@@ -954,10 +954,9 @@ class TestAPublishedWindowMustMatchItsOwnBounds:
     That equality is what lets `generation_duration_ms` stay a PUBLISHED field
     instead of one the collector derives from the bounds — the migration that
     was considered and cut, on the grounds that this check makes deferring it
-    safe. It is largely true by construction (CE061 forces every reducer
-    through `timing.close_window`); what it catches is a reducer that bypasses
-    the helper, and a third-party agent registered through the
-    `coder_eval.plugins` SPI, which no lint rule scoped to `agents/` can see.
+    safe. It is largely true by construction (`TurnEmitter.add_generation` takes a
+    `Window`); what it catches is an in-tree writer that bypasses the emitter, and
+    a third-party agent registered through the `coder_eval.plugins` SPI, which no lint rule scoped to `agents/` can see.
     """
 
     BASE: ClassVar[datetime] = datetime(2026, 9, 11, 9, 0, 0)

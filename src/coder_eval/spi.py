@@ -33,21 +33,13 @@ from coder_eval.models import (
     UsageGranularity,
 )
 from coder_eval.pricing import ModelPricing, register_pricing
-from coder_eval.streaming.callbacks import CompositeStreamCallback, StreamCallback
-from coder_eval.streaming.collector import EventCollector
+from coder_eval.streaming.callbacks import StreamCallback
 from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import (
-    AgentEndEvent,
     AgentEndStatus,
-    AgentStartEvent,
     StopReason,
-    TextChunkEvent,
-    ToolEndEvent,
     ToolEndStatus,
-    ToolStartEvent,
-    TurnEndEvent,
     TurnEndStatus,
-    TurnStartEvent,
     end_status_for,
 )
 from coder_eval.timing import TurnClock, Window, close_window
@@ -59,18 +51,14 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "Agent",
     "AgentConfigError",
     "AgentCrashError",
-    "AgentEndEvent",
     "AgentEndStatus",
     "AgentRegistry",
-    "AgentStartEvent",
     "AgentState",
     "ApiRoute",
     "BaseAgentConfig",
     "CANONICAL_TOOL_NAMES",
     "CommandTelemetry",
-    "CompositeStreamCallback",
     "Enforcement",
-    "EventCollector",
     "Generation",
     "HarnessContract",
     "JsonlDecoder",
@@ -84,21 +72,16 @@ __all__ = [  # noqa: RUF022 - plain sort, pinned by tests/test_spi.py
     "StreamCallback",
     "SubprocessJsonlAgent",
     "SystemPromptMode",
-    "TextChunkEvent",
     "TimingBasis",
     "TokenUsage",
-    "ToolEndEvent",
     "ToolEndStatus",
     "ToolNameMap",
-    "ToolStartEvent",
     "TranscriptMessage",
     "TurnClock",
     "TurnEmitter",
-    "TurnEndEvent",
     "TurnEndStatus",
     "TurnOutcome",
     "TurnRecord",
-    "TurnStartEvent",
     "TurnTimeoutError",
     "UsageGranularity",
     "WatchdogFired",

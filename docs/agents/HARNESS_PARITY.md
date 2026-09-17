@@ -115,15 +115,15 @@ wall clock its numbers account for.
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
 | clock basis for recorded stamps | one `TurnClock` per turn | SDK epoch ms (`_ms_to_dt`) — the subprocess's own clock, unreachable from the host, for BOTH window bounds and tool spans | one `TurnClock` per turn | CLI epoch ms (`timing_basis` `cli_epoch_ms`): envelope `timestamp` for window bounds, `state.time` for tool spans; the host clock only for a window bound whose event carries no stamp | one `TurnClock` per turn |
-| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms bounds | the same `TurnClock` (**CE064**) | raw `datetime.now()` — consistent with its epoch-ms stamps | the same `TurnClock` (**CE064**) |
+| turn bracket (`AgentStartEvent` / `AgentEndEvent`) stamp | the same `TurnClock`, stamped by `TurnEmitter` | the host wall clock, stamped by `TurnEmitter` — consistent with its epoch-ms bounds | the same `TurnClock`, stamped by `TurnEmitter` | the host wall clock, stamped by `TurnEmitter` — consistent with its epoch-ms stamps | the same `TurnClock`, stamped by `TurnEmitter` |
 | window built by `timing.py::close_window` | yes | yes | yes | yes | yes |
 
 [^identity]: "yes" is load-bearing, and THREE sensors check it, each seeing
 something the others cannot.
 
 `tests/test_timing_identity_contract.py` is the committed two-sided one: it
-drives every built-in reducer off a scripted clock, through a real
-`EventCollector`, and asserts the four buckets tile the turn to the
+drives every built-in reducer off a scripted clock, through
+`coder_eval.testing.replay` and a real `TurnEmitter`, and asserts the four buckets tile the turn to the
 MILLISECOND. Magnitudes are only real where a scripted clock makes them real,
 which is why it is not in the golden corpus.
 
@@ -172,10 +172,12 @@ window's own geometry: tile from the mark, keep a stamp that went backwards
 from inverting the span, clamp at zero. It had been copy-pasted four times, and
 Pi shipped a variant that measured from its own turn start — so every
 inter-turn gap fell into no bucket, and nothing failed, because the identity
-above is asserted on one side only. **CE061** requires any module in `agents/`
-publishing a measured `generation_duration_ms` to import the helper, and is now
-**exemption-free**: claude-code was its one permanent `# noqa` and no longer
-needs it.
+above is asserted on one side only. The helper returns a `timing.Window`, a
+frozen pair of bounds whose `duration_ms` clamps at zero, and
+`TurnEmitter.add_generation` takes only a `Window`: an adapter cannot publish a
+measured `generation_duration_ms` any other way. A generation with no window
+goes through `TurnEmitter.add_unmeasured_generation`, which records
+`generation_duration_ms=None`.
 
 **Tool execution comes out of the windows ONCE, at the collector.**
 `timing.py::subtract_tool_time` takes the union of the main-thread
@@ -190,8 +192,9 @@ before the flush could subtract it — a 100% overstatement of that window), whe
 to clear a spent start stamp (a second flush with no intervening start
 republished the previous span — 3000 ms of generation for a 2000 ms turn), when
 to advance the mark. Those three lists, their reset rules, and the bounding of
-still-open calls are all deleted. **CE063** stops a sixth harness rebuilding
-them: no module in `agents/` may import `busy_ms`.
+still-open calls are all deleted. A sixth harness has nowhere to rebuild them:
+an adapter holds no spans, it calls `TurnEmitter.open_tool` / `close_tool`, and
+**CE072** bans it from constructing the events or messages itself.
 
 Two consequences worth stating, because both are behaviour changes:
 
@@ -239,12 +242,12 @@ instant", for a harness whose real tail is ~0.1 ms; the same task now records
 0.035 ms. It surfaced only here because the drift between the two clocks is
 tens of microseconds and antigravity holds its process across turns, so nothing
 happens between its last flush and its end event; every other harness books a
-tail of 7-543 ms, where the drift is invisible rather than absent. **CE064**
-keeps a sixth harness from reintroducing it: a module under `agents/` that
-imports `TurnClock` must pass an explicit `timestamp=` on both brackets. Codex
-and OpenCode have no `TurnClock`, so the rule does not see them and their raw
-`datetime.now()` bracket stays — which is *consistent* with their own CLI-epoch
-bounds rather than a gap.
+tail of 7-543 ms, where the drift is invisible rather than absent. The fix is
+now structural: `TurnEmitter` stamps both brackets, and every other event, from
+the one clock `Agent._open_emitter` gives it — a `TurnClock` under
+`timing_basis` `turn_clock`, the host wall clock under `cli_epoch_ms`. An
+adapter never stamps a bracket. For Codex and OpenCode the wall-clock bracket
+is *consistent* with their own CLI-epoch bounds rather than a gap.
 
 The synthesized claude-code sub-agent terminal message has equal placeholder
 bounds from the emitter's clock, for a generation that arrives as a tool result
@@ -481,8 +484,8 @@ lacks one. Antigravity's `Step` stream carries no message id, so the harness
 synthesizes one — and it must, because this harness's generation windows are
 *contiguous* by construction: each opens exactly where the previous one closed,
 so the gap between two of them is always 0 ms and the fallback would fold a
-whole turn's generations into a single row. CE060 makes the kwarg mandatory in
-`src/coder_eval/agents/` for that reason.
+whole turn's generations into a single row. `TurnEmitter.add_generation` makes
+`message_id` a required keyword-only argument for that reason.
 
 The collapse is a *display* defect, not an accounting one — the consumer SUMS a
 group's token buckets and durations, so every total, percentage and cost is
@@ -504,8 +507,8 @@ Antigravity's are all distinct, because it emits one message per generation
 with every block inside it. Runs recorded before a harness captured the field
 still carry `null` and still depend on the gap fallback, which is why it stays
 — and so does a current OpenCode or Pi message whose payload omitted the id,
-which is the case CE060 cannot see (it requires the kwarg to be present, not
-non-`None` at runtime). OpenCode tiles its windows contiguously too, so it is
+which is the case the required keyword cannot see (it requires the argument to
+be present, not non-`None` at runtime). OpenCode tiles its windows contiguously too, so it is
 the other harness where a missing id can still collapse a turn.
 
 ### Time to first token is not measured

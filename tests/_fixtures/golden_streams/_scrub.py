@@ -133,7 +133,7 @@ def _tool_union_ms(record: dict[str, Any]) -> float:
     What is shared with production is the SELECTION and ``union_ms``. What is
     NOT shared is the bookkeeping around them — this still builds its own span
     set and computes its own union, which is where every timing defect on this
-    branch actually lived (see CE063's docstring). Do not "simplify" it into
+    branch actually lived. Do not "simplify" it into
     reading ``tool_union_ms``: that would make the sensor a restatement of the
     producer's answer, and the cross-check below is what verifies that field.
     """
@@ -175,9 +175,7 @@ def assert_timing_captured(
     The bounds half is not redundant. Two harnesses derive the duration from a
     MONOTONIC clock and the bounds from the wall clock, so the two can
     disagree: a reducer could report a healthy duration beside two stamps that
-    collapsed to one instant. CE059 catches that statically only when both
-    bounds are the same ``ast.Name``; when they are two different names
-    holding the same value it cannot, and this is the check that does.
+    collapsed to one instant, and this is the check that catches it.
 
     **Unconditional, and keyed on the messages rather than on the flag.** A
     turn's head and tail (``harness_startup_ms`` / ``harness_teardown_ms``) are

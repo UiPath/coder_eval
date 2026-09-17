@@ -273,7 +273,7 @@ def subtract_tool_time(
 
     Raises ``ValueError`` if a group's published total does not equal the span
     its bounds describe. That equality is what lets ``generation_duration_ms``
-    stay a PUBLISHED field; CE061 forces the same shape statically. Raising
+    stay a PUBLISHED field; ``TurnEmitter.add_generation`` builds it from one ``Window``. Raising
     kills the turn, which is accepted.
 
     Rationale: .claude/notes/timing.md § subtract_tool_time
@@ -312,8 +312,8 @@ def subtract_tool_time(
                 + "into, sums to it) — tool execution comes back out HERE, once, for every harness. "
                 + "A disagreement means the reducer narrowed or widened a window without moving its "
                 + "bounds, which makes the duration and the bounds two answers to one question and "
-                + "breaks the four-bucket identity. Build the window with `timing.close_window` and "
-                + "write `completed_at=now` (CE061), rather than adjusting the duration in place."
+                + "breaks the four-bucket identity. Pass `TurnEmitter.add_generation` a `Window` from "
+                + "`timing.close_window`, rather than adjusting the duration in place."
             )
         net = max(raw_total - busy_ms(spans, started, completed), 0.0)
         assigned = 0.0

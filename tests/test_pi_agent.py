@@ -1562,10 +1562,9 @@ class TestClockIsFreshPerTurn:
 
 
 class TestTheTurnBracketComesFromTheTurnClock:
-    """CE064's behavioural half: the SOURCE of the two bracket stamps.
+    """The SOURCE of the two bracket stamps: the turn clock.
 
-    The rule can only see that `timestamp=` is present. Reverting it to
-    `StreamEvent.timestamp`'s `default_factory=datetime.now` would leave the
+    A bracket stamped from `StreamEvent.timestamp`'s `default_factory=datetime.now` would leave the
     stamp within microseconds of the clock-derived one, which is precisely why
     the stand-in is anchored a year out — the revert then fails by a year.
     """

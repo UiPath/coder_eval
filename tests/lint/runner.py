@@ -36,15 +36,11 @@ from tests.lint.rules.ce054_env_info_key_round_trip import EnvInfoKeyRoundTrip
 from tests.lint.rules.ce056_no_container_env_literal import NoContainerEnvLiteral
 from tests.lint.rules.ce057_sidecar_shim_stdlib_only import SidecarShimStdlibOnly
 from tests.lint.rules.ce058_no_timing_literal import NoTimingLiteral
-from tests.lint.rules.ce059_generation_window_is_two_reads import GenerationWindowIsTwoReads
-from tests.lint.rules.ce060_message_id_declared import MessageIdDeclared
-from tests.lint.rules.ce061_window_via_close_window import WindowViaCloseWindow
-from tests.lint.rules.ce063_no_busy_ms_in_agents import NoBusyMsInAgents
-from tests.lint.rules.ce064_turn_bracket_on_the_clock import TurnBracketOnTheClock
 from tests.lint.rules.ce066_no_report_imports_in_core import NoReportImportsInCore
 from tests.lint.rules.ce068_no_kind_names_in_kernel import NoKindNamesInKernel
 from tests.lint.rules.ce070_no_cap_or_skill_scan_in_adapters import NoCapOrSkillScanInAdapters
 from tests.lint.rules.ce071_price_turn_only import PriceTurnOnly
+from tests.lint.rules.ce072_emitter_sole_writer import EmitterSoleWriter
 from tests.lint.rules.ce073_create_subprocess_explicit_stdin import CreateSubprocessExplicitStdin
 from tests.lint.rules.no_agent_timing_access import NoAgentTimingAccess
 from tests.lint.rules.no_blocking_io_in_async import NoBlockingIoInAsync
@@ -62,14 +58,15 @@ from tests.lint.rules.yaml_models_forbid_extras import YamlModelsForbidExtras
 from tests.lint.violation import Violation
 
 
-# CE062 IS DELIBERATELY UNUSED and must stay that way — the ids above jump 061
-# to 063. It was claimed during the turn-timing work and then folded into CE063
-# rather than shipped. An id is a permanent documentation anchor: a suppression
-# comment carrying 062 in an older branch, review or commit message must never
-# start meaning something new.
+# CE059, CE060, CE061, CE062, CE063 AND CE064 ARE RETIRED and must never be reused.
+# CE062 was claimed during the turn-timing work and folded into CE063 rather than
+# shipped; the other five guarded the per-adapter turn accumulators that TurnEmitter
+# replaced, and CE072 (EmitterSoleWriter) keeps adapters from growing one back. An id
+# is a permanent documentation anchor: a suppression comment carrying one of these in
+# an older branch, review or commit message must never start meaning something new.
 #
 # Claim 074 next (069 is TestCE069HarnessParityTable, 070 is NoCapOrSkillScanInAdapters, 071 is
-# PriceTurnOnly, 073 is CreateSubprocessExplicitStdin; 072 is reserved for the emitter sole-writer rule).
+# PriceTurnOnly, 072 is EmitterSoleWriter, 073 is CreateSubprocessExplicitStdin).
 # NOTE 065 IS TAKEN and is not in ALL_RULES: doc-surface and
 # whole-tree rules are `@pytest.mark.lint` classes in tests/test_custom_lint.py
 # rather than BaseRules, so the `_rule_ids` uniqueness assert below cannot see
@@ -121,15 +118,11 @@ ALL_RULES: list[RuleClass] = [
     NoRunRecordFilenameLiteral,
     SidecarShimStdlibOnly,
     NoTimingLiteral,
-    GenerationWindowIsTwoReads,
-    MessageIdDeclared,
-    WindowViaCloseWindow,
-    NoBusyMsInAgents,
-    TurnBracketOnTheClock,
     NoReportImportsInCore,
     NoKindNamesInKernel,
     NoCapOrSkillScanInAdapters,
     PriceTurnOnly,
+    EmitterSoleWriter,
     CreateSubprocessExplicitStdin,
 ]
 
