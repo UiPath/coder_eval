@@ -1181,6 +1181,8 @@ def _agent_end_events(sink: _EventSink) -> list[AgentEndEvent]:
 class _NoopWatchdog:
     """No-op stand-in for ThreadedWatchdog so only the in-loop deadline guard fires."""
 
+    fired = False
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         pass
 
@@ -1207,7 +1209,7 @@ async def _run_claude_communicate_timeout() -> tuple[ClaudeCodeAgent, _EventSink
 
         with (
             patch("coder_eval.agents.claude_code_agent.query", slow_query),
-            patch("coder_eval.agents.claude_code_agent.ThreadedWatchdog", _NoopWatchdog),
+            patch("coder_eval.agents.watchdog.ThreadedWatchdog", _NoopWatchdog),
         ):
             outcome = await agent.communicate(
                 "p", iteration=1, stream_callback=sink, timeout=0.01, should_stop=lambda: StopReason.EARLY_CRITERION

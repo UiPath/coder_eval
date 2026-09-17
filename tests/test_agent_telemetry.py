@@ -340,7 +340,7 @@ class TestCommandTelemetryStatus:
 
     @pytest.mark.asyncio
     async def test_command_telemetry_duplicate_result_logged(self, tmp_path, caplog):
-        """Verify multiple results handled gracefully (last wins) and logged."""
+        """A second result for the same tool id is ignored (the first stands) and logged."""
         tool_use_block_cls, assistant_message_cls, user_message_cls, _, _, result_message_cls = (
             create_mock_sdk_messages()
         )
@@ -377,8 +377,9 @@ class TestCommandTelemetryStatus:
                 assert len(turn.commands) == 1
                 cmd = turn.commands[0]
 
-                assert cmd.result_status == "error"  # From result2
-                assert cmd.error_message == "second result (error)"
+                assert cmd.result_status == "success"
+                assert cmd.result_summary == "first result"
+                assert cmd.error_message is None
 
                 # Should log debug message
                 assert any("Multiple results" in record.message for record in caplog.records)
@@ -421,12 +422,11 @@ class TestCommandTelemetryStatus:
                 assert len(turn.commands) == 1
                 assert turn.commands[0].result_status == "unknown"
 
-                # Should have warning about missing result
-                warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-                assert any("completed without tool result" in r.message for r in warnings)
-
-                # Should have warning summary about unknown statuses with message types
-                assert any("'unknown' status" in r.message for r in warnings)
+                warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+                unresolved = [m for m in warnings if "without a result" in m]
+                assert len(unresolved) == 1
+                assert "toolu_unknown" in unresolved[0]
+                assert "AssistantMessage=1" in unresolved[0]
 
         finally:
             agent_module.query = original_query
@@ -1286,19 +1286,17 @@ class TestPerMessageTokenCapture:
 class TestClaudeHeadIsMeasuredAtFirstOutput:
     """claude-code's head is the wall clock up to the first observed model output.
 
-    `_ClaudeTurnState.__init__` stamps `last_event_wall`, and
+    `_ClaudeDecoder.__init__` stamps `last_event_wall`, and
     `_seed_first_generation_window` re-stamps it at the first `message_start`.
     So the first window opens where the model first spoke, and the CLI spawn,
     provider resolution and time to first token before it are the head.
 
-    `_build_claude_query` is NOT in the head: it runs at `communicate`'s
-    `:1095`, before `AgentStartEvent` is emitted at `:1106`, so it precedes the
-    head's own start stamp. It used to sit inside msg0's generation window
-    (`last_event_wall` was stamped at state construction, ahead of the build);
-    it now sits inside `duration_seconds` but outside all four buckets, as
-    unexplained residual. That is why the budget below still matters and why it
-    is not the same guard it was: at 0.03-0.10 ms the residual is noise, and
-    the two tests keep it that way.
+    `_build_claude_query` is NOT in the head: `communicate` runs it before it
+    opens the turn's emitter, so it precedes the `AgentStartEvent` stamp and the
+    turn's `duration_seconds` alike. It used to sit inside msg0's generation
+    window (`last_event_wall` was stamped ahead of the build). It is now
+    unmeasured wall time between turns; at 0.03-0.10 ms that is noise, and the
+    two tests keep it that way.
 
     It used to be `0.0`, and that was a CLAMPED NEGATIVE rather than a
     measurement: both marks were stamped before `AgentStartEvent` was emitted,
@@ -1307,12 +1305,8 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
     spawns the `claude` CLI over `anyio.open_process` and `_pump_messages`
     calls `query()` once per `communicate()`, a fresh CLI per turn.
 
-    The two budget tests below survive the rewrite with their meaning INVERTED.
-    `_build_claude_query`'s cost now lands in the head rather than inside msg0's
-    generation, so they no longer guard "the build is cheap enough to leave
-    hidden by the clamp" — they guard "our own setup is a negligible part of a
-    head that is now published", which is what makes the head readable as the
-    harness's latency rather than as ours.
+    The two budget tests below guard that our own setup stays negligible, so the
+    published head reads as the harness's latency rather than as ours.
     """
 
     # Measured at 0.03 ms bare and 0.10 ms with plugins. The bound is
@@ -1335,7 +1329,7 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
         samples = []
         for _ in range(5):
             started = time.perf_counter()
-            agent._build_claude_query("hi", 60, lambda _line: None)
+            agent._build_claude_query("hi", 1, 60, lambda _line: None)
             samples.append((time.perf_counter() - started) * 1000.0)
         return min(samples)
 
@@ -1343,10 +1337,9 @@ class TestClaudeHeadIsMeasuredAtFirstOutput:
         elapsed = self._build_ms()
         assert elapsed < self.BUDGET_MS, (
             f"_build_claude_query took {elapsed:.2f} ms, over the {self.BUDGET_MS} ms budget. It runs "
-            "BEFORE the AgentStartEvent, so it is inside the turn's duration_seconds but outside "
-            "all four buckets — unexplained residual that no bucket accounts for. At a few hundred "
-            "microseconds that is noise; at this size the four buckets would visibly stop summing "
-            "to the turn and the gap would be ours, not the harness's."
+            "BEFORE the AgentStartEvent, so no bucket and no turn duration accounts for it. At a few "
+            "hundred microseconds that is noise; at this size the unmeasured gap between turns "
+            "would be ours, not the harness's."
         )
 
     def test_a_staged_plugin_root_does_not_change_that(self, tmp_path):
@@ -1365,74 +1358,57 @@ class TestClaudeTurnTokensAreDeltas:
     generation would latch a budget on usage the agent never spent.
     """
 
-    def test_interleaved_message_ids_never_report_the_same_tokens_twice(self, monkeypatch):
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
+    def test_interleaved_message_ids_never_report_the_same_tokens_twice(self):
         from coder_eval.streaming.events import AgentEndStatus, TurnEndEvent
 
-        clock, state = TestClaudeFirstWindowReseed()._state(monkeypatch)
-        ends: list[TurnEndEvent] = []
-
-        class _Sink:
-            def on_event(self, event):
-                if isinstance(event, TurnEndEvent):
-                    ends.append(event)
-
-        state.emit = CompositeStreamCallback([state.collector, _Sink()])
+        clock, decoder, events = TestClaudeFirstWindowReseed()._decoder()
         for mid in ("x", "y", "x", "y"):
             clock.at_ms += 100
-            state.on_assistant_message(TestClaudeFirstWindowReseed._assistant(mid))
-        state.finalize(AgentEndStatus.COMPLETED, crashed=False, crash_reason=None)
+            decoder.on_assistant_message(TestClaudeFirstWindowReseed._assistant(mid))
+        decoder.end(AgentEndStatus.COMPLETED)
 
+        ends = [e for e in events if isinstance(e, TurnEndEvent)]
         reported = sum((end.tokens.output_tokens for end in ends if end.tokens is not None), 0)
-        recorded = sum(rec.output_tokens for records in state.emissions_by_id.values() for rec in records)
+        recorded = sum(rec.output_tokens for records in decoder.emissions_by_id.values() for rec in records)
         assert reported == recorded
 
 
 class TestClaudeFirstWindowReseed:
     """The first `message_start` moves the window mark; a later one must not.
 
-    Driven at `_ClaudeTurnState` with both clocks moved off one counter. The
-    window's BOUNDS come from the turn's `TurnClock`, which is INJECTED — a
-    derived stamp escapes a monkeypatched module `datetime` entirely, so these
-    tests would measure the real clock and still pass. Its DURATION side still
-    reads `time.monotonic()` for `turn_start_time` and the deadline, so that
-    global is patched off the same counter; leaving it real would straddle a
-    scripted clock and a live one.
+    Driven at `_ClaudeDecoder` over a real `TurnEmitter` on a clock the test moves
+    by hand. Every window bound and the turn bracket come from that one clock.
     """
 
     BASE = datetime(2026, 9, 11, 9, 0, 0)
 
     class _Stepped:
-        """A `TurnClock` stand-in the test moves by hand, in ms from `BASE`."""
+        """A clock the test moves by hand, in ms from `BASE`."""
 
         at_ms = 0.0
 
         def now(self):
             return TestClaudeFirstWindowReseed.BASE + timedelta(milliseconds=self.at_ms)
 
-    def _state(self, monkeypatch):
-        from coder_eval.agents import claude_code_agent as claude_module
-        from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeTurnState
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
-        from coder_eval.streaming.collector import EventCollector
+    def _decoder(self):
+        from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeDecoder
+        from coder_eval.models import TimingBasis
+        from coder_eval.streaming.emitter import TurnEmitter
 
         stepped = self._Stepped()
-        monkeypatch.setattr(claude_module, "time", SimpleNamespace(monotonic=lambda: stepped.at_ms / 1000.0))
-
-        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
-        collector = EventCollector()
-        return stepped, _ClaudeTurnState(
-            agent,
-            emit=CompositeStreamCallback([collector]),
-            collector=collector,
+        events: list[Any] = []
+        emitter = TurnEmitter(
             task_id="t",
-            user_input="go",
             iteration=1,
-            log=agent._log,
-            turn_start_time=0.0,
-            deadline=None,
+            prompt="go",
+            model="mock-model",
+            basis=TimingBasis.TURN_CLOCK,
             clock=stepped,
+            sinks=[SimpleNamespace(on_event=events.append)],
         )
+        emitter.begin()
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+        return stepped, _ClaudeDecoder(agent, emitter, effective_model="mock-model"), events
 
     @staticmethod
     def _assistant(mid: str):
@@ -1440,110 +1416,93 @@ class TestClaudeFirstWindowReseed:
 
         return SdkAssistantMessage([], usage={"input_tokens": 10, "output_tokens": 5}, message_id=mid)
 
-    def test_cli_boot_before_the_first_message_start_is_not_msg0_generation(self, monkeypatch):
+    def test_cli_boot_before_the_first_message_start_is_not_msg0_generation(self):
         """The interval the CLI spent booting is head, not model time.
 
         Before the re-seed the window opened when the turn state was built, so
         this whole interval was published as msg0's `generation_duration_ms` —
         ~3.6 s per turn on the measured corpus.
         """
-        clock, state = self._state(monkeypatch)
+        clock, decoder, _ = self._decoder()
         clock.at_ms = 800  # CLI spawn + provider resolution + TTFT
-        state.on_stream_event(_message_start("m1"))
+        decoder.on_stream_event(_message_start("m1"))
         clock.at_ms = 1000
-        state.on_assistant_message(self._assistant("m1"))
+        decoder.on_assistant_message(self._assistant("m1"))
 
-        message = state.sdk_messages[0]
+        message = decoder.transcript[0]
         assert message.started_at == self.BASE + timedelta(milliseconds=800)
         assert message.generation_duration_ms == pytest.approx(200.0)
 
-    def test_only_the_first_message_start_reseeds_so_the_windows_still_tile(self, monkeypatch):
+    def test_only_the_first_message_start_reseeds_so_the_windows_still_tile(self):
         """A second re-seed would drop the gap before the next emission.
 
         That gap — a tool result landing, then the next request going out — is
         real model time, and falling into no bucket at all is the defect pi
         shipped with.
         """
-        clock, state = self._state(monkeypatch)
+        clock, decoder, _ = self._decoder()
         clock.at_ms = 800
-        state.on_stream_event(_message_start("m1"))
+        decoder.on_stream_event(_message_start("m1"))
         clock.at_ms = 1000
-        state.on_assistant_message(self._assistant("m1"))
+        decoder.on_assistant_message(self._assistant("m1"))
         clock.at_ms = 1500
-        state.on_stream_event(_message_start("m2"))
+        decoder.on_stream_event(_message_start("m2"))
         clock.at_ms = 2000
-        state.on_assistant_message(self._assistant("m2"))
+        decoder.on_assistant_message(self._assistant("m2"))
 
-        first, second = state.sdk_messages[0], state.sdk_messages[1]
+        first, second = decoder.transcript[0], decoder.transcript[1]
         assert second.started_at == first.completed_at, "the second window must tile from the first"
         assert second.generation_duration_ms == pytest.approx(1000.0)
 
-    def test_seeding_twice_by_hand_is_a_no_op_the_second_time(self, monkeypatch):
+    def test_seeding_twice_by_hand_is_a_no_op_the_second_time(self):
         """The once-per-turn guard, stated outright rather than inferred.
 
         The sibling test above would also fail if the guard were removed, but
         only via the tiling it implies. This says the property directly, so a
         reviewer does not have to reproduce a mutation to see it.
         """
-        clock, state = self._state(monkeypatch)
+        clock, decoder, _ = self._decoder()
         clock.at_ms = 800
-        state._seed_first_generation_window()
-        seeded_wall = state.last_event_wall
+        decoder._seed_first_generation_window()
+        seeded_wall = decoder.last_event_wall
 
         clock.at_ms = 5000
-        state._seed_first_generation_window()
+        decoder._seed_first_generation_window()
 
-        assert state.last_event_wall == seeded_wall
+        assert decoder.last_event_wall == seeded_wall
 
-    def test_a_stream_with_no_message_start_still_clamps_to_zero(self, monkeypatch):
+    def test_a_stream_with_no_message_start_keeps_the_turn_entry_mark(self):
         """Partial streaming off, a mocked query(), or a crash before the first event.
 
-        The re-seed never fires, the turn-entry mark stands, and the head
-        clamps exactly as it did before. That is the correct degradation, and
-        asserting it is what keeps it from becoming an untested branch.
+        The re-seed never fires and the turn-entry mark stands, so the first
+        window opens where the turn opened and the head is zero.
         """
-        clock, state = self._state(monkeypatch)
+        from coder_eval.streaming.events import AgentEndStatus
+
+        clock, decoder, _ = self._decoder()
         clock.at_ms = 1000
-        state.on_assistant_message(self._assistant("m1"))
+        decoder.on_assistant_message(self._assistant("m1"))
 
-        assert state.first_output_seen is False, "nothing latched, so the turn-entry mark stands"
-        # The window still opens at turn entry, which PRECEDES the
-        # AgentStartEvent — so the head is a negative that decompose_turn
-        # clamps, exactly as it did before this phase. Asserted on the mark
-        # rather than by re-deriving `max(elapsed, 0.0)` from hand-built
-        # arguments, which would restate the implementation and could not fail.
-        assert state.sdk_messages[0].started_at == self.BASE
+        assert decoder.first_output_seen is False, "nothing latched, so the turn-entry mark stands"
+        assert decoder.transcript[0].started_at == self.BASE
+        assert decoder.end(AgentEndStatus.COMPLETED).record.harness_startup_ms == pytest.approx(0.0)
 
-    def test_the_four_buckets_account_for_a_tool_free_turn(self, monkeypatch):
+    def test_the_four_buckets_account_for_a_tool_free_turn(self):
         """head + generation + tail == the turn, with the head read DIRECTLY.
 
         The sibling tests assert the window's `started_at`, which pins the mark
-        but never the published `harness_startup_ms` itself — so nothing here
-        read the field this phase exists to change. With no tool calls the tool
-        bucket is empty and the other three must tile the turn exactly.
+        but never the published `harness_startup_ms` itself. With no tool calls
+        the tool bucket is empty and the other three must tile the turn exactly.
         """
-        from coder_eval.models import TokenUsage
-        from coder_eval.streaming.collector import EventCollector
-        from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, AgentStartEvent
+        from coder_eval.streaming.events import AgentEndStatus
 
-        clock, state = self._state(monkeypatch)
+        clock, decoder, _ = self._decoder()
         clock.at_ms = 800
-        state.on_stream_event(_message_start("m1"))
+        decoder.on_stream_event(_message_start("m1"))
         clock.at_ms = 1000
-        state.on_assistant_message(self._assistant("m1"))
-
-        collector = EventCollector()
-        collector.on_event(AgentStartEvent(task_id="t", prompt="go", iteration=1, timestamp=self.BASE))
-        collector.on_event(
-            AgentEndEvent(
-                task_id="t",
-                status=AgentEndStatus.COMPLETED,
-                messages=list(state.sdk_messages),
-                usage=TokenUsage(),
-                timestamp=self.BASE + timedelta(milliseconds=1500),
-            )
-        )
-        record = collector.build_turn_record()
+        decoder.on_assistant_message(self._assistant("m1"))
+        clock.at_ms = 1500
+        record = decoder.end(AgentEndStatus.COMPLETED).record
 
         assert record.harness_startup_ms == pytest.approx(800.0), "the CLI boot is the head, published"
         assert record.harness_teardown_ms == pytest.approx(500.0)
@@ -1574,7 +1533,7 @@ class TestTheTurnBracketComesFromTheTurnClock:
             yield assistant_msg
             yield result_message_cls()
 
-        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr("coder_eval.agent.TurnClock", AnchoredClock)
         monkeypatch.setattr(agent_module, "query", mock_query)
 
         agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
@@ -1596,7 +1555,7 @@ class TestTheTurnBracketComesFromTheTurnClock:
             yield assistant_msg
             yield result_message_cls()
 
-        monkeypatch.setattr(agent_module, "TurnClock", AnchoredClock)
+        monkeypatch.setattr("coder_eval.agent.TurnClock", AnchoredClock)
         monkeypatch.setattr(agent_module, "query", mock_query)
 
         agent = agent_module.ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
@@ -1604,3 +1563,129 @@ class TestTheTurnBracketComesFromTheTurnClock:
         record = (await agent.communicate("go", iteration=1)).record
 
         assert_overhead_is_measured(record)
+
+
+def _claude_replay(stream: list[Any]):
+    """Replay ``stream`` through a real ``_ClaudeDecoder`` on a ``ScriptedClock``, ending COMPLETED."""
+    from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeDecoder
+    from coder_eval.streaming.events import AgentEndStatus
+    from coder_eval.testing import ScriptedClock, replay
+
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, model="claude-sonnet-4-5"))
+    return replay(
+        stream,
+        lambda emitter: _ClaudeDecoder(agent, emitter, effective_model="claude-sonnet-4-5"),
+        clock=ScriptedClock(datetime(2026, 9, 16, 12, 0, 0)),
+        model="claude-sonnet-4-5",
+        end=lambda decoder: decoder.end(AgentEndStatus.COMPLETED),
+    )
+
+
+class TestClaudeSubAgentScope:
+    """A sub-agent message (``parent_tool_use_id`` set) is nested under its spawning tool call.
+
+    Its turn, tools and model stay off the main thread, so the tool-call cap and the
+    reported model see the main agent only, while ``TurnRecord.commands`` keeps every call.
+    """
+
+    MAIN_MODEL = "claude-sonnet-4-5"
+    SUB_MODEL = "claude-haiku-4-5"
+
+    def _stream(self) -> list[Any]:
+        from coder_eval.testing import Tick
+        from tests._fixtures.golden_streams.claude_fixtures import (
+            AssistantMessage as SdkAssistantMessage,
+        )
+        from tests._fixtures.golden_streams.claude_fixtures import (
+            ResultMessage,
+            ToolUseBlock,
+            UserMessage,
+        )
+
+        return [
+            Tick(100),
+            SdkAssistantMessage(
+                [ToolUseBlock("task_1", "Task", {"prompt": "count"})], message_id="m1", model=self.MAIN_MODEL
+            ),
+            Tick(300),
+            SdkAssistantMessage(
+                [ToolUseBlock("sub_bash", "Bash", {"command": "seq 100"})],
+                message_id="s1",
+                parent_tool_use_id="task_1",
+                model=self.SUB_MODEL,
+            ),
+            Tick(450),
+            UserMessage("sub_bash", False, "1..100"),
+            Tick(900),
+            UserMessage("task_1", False, "5050", agent_id="agent-1", usage={"output_tokens": 7}),
+            Tick(1000),
+            SdkAssistantMessage(
+                [ToolUseBlock("write_1", "Write", {"file_path": "answer.txt"})], message_id="m2", model=self.MAIN_MODEL
+            ),
+            Tick(1200),
+            UserMessage("write_1", False, "ok"),
+            Tick(1300),
+            ResultMessage(num_turns=2),
+        ]
+
+    def test_sub_agent_events_are_nested_and_its_tool_is_recorded(self):
+        from coder_eval.streaming.events import AgentEndEvent, ToolEndEvent, ToolStartEvent, TurnStartEvent
+        from coder_eval.testing import assert_stream_balanced
+
+        result = _claude_replay(self._stream())
+
+        assert_stream_balanced(result.events)
+        starts = {e.turn_id: e for e in result.events if isinstance(e, TurnStartEvent)}
+        assert starts["s1"].parent_thread_id == "task_1"
+        assert starts["s1"].model == self.SUB_MODEL
+        assert starts["m1"].parent_thread_id is None and starts["m2"].parent_thread_id is None
+        for kind in (ToolStartEvent, ToolEndEvent):
+            by_id = {e.tool.tool_id: e for e in result.events if isinstance(e, kind)}
+            assert by_id["sub_bash"].parent_thread_id == "task_1"
+            assert by_id["task_1"].parent_thread_id is None
+            assert by_id["write_1"].parent_thread_id is None
+        (end,) = [e for e in result.events if isinstance(e, AgentEndEvent)]
+        assert end.model_used == self.MAIN_MODEL
+        assert sorted(c.tool_id for c in result.record.commands) == ["sub_bash", "task_1", "write_1"]
+
+    def test_the_turn_monitor_counts_only_main_thread_calls(self):
+        from coder_eval.models import FileExistsCriterion, RunLimits, SandboxConfig, TaskDefinition
+        from coder_eval.orchestration.turn_monitor import TurnMonitor
+
+        task = TaskDefinition(
+            task_id="subagent-cap",
+            description="d",
+            initial_prompt="go",
+            agent=parse_agent_config(type=AgentKind.CLAUDE_CODE),
+            sandbox=SandboxConfig(driver="tempdir"),
+            success_criteria=[FileExistsCriterion(path="answer.txt", description="answer")],
+            run_limits=RunLimits(max_tool_calls=3),
+        )
+        monitor = TurnMonitor.for_task(task, arm=True)
+
+        for event in _claude_replay(self._stream()).events:
+            monitor.on_event(event)
+
+        assert monitor.tool_calls == 2, "Task + Write on the main thread; the sub-agent's Bash is not counted"
+        assert monitor.should_stop() is None
+
+    def test_a_tool_duration_is_the_clock_gap_from_tool_use_to_result(self):
+        from coder_eval.testing import Tick
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage as SdkAssistantMessage
+        from tests._fixtures.golden_streams.claude_fixtures import ToolUseBlock, UserMessage
+
+        result = _claude_replay(
+            [
+                Tick(1000),
+                SdkAssistantMessage([ToolUseBlock("t1", "Bash", {"command": "sleep 1"})], message_id="m1"),
+                Tick(1750),
+                UserMessage("t1", False, "done"),
+                Tick(2000),
+            ]
+        )
+
+        (cmd,) = result.record.commands
+        base = datetime(2026, 9, 16, 12, 0, 0)
+        assert cmd.execution_started_at == base + timedelta(milliseconds=1000)
+        assert cmd.execution_completed_at == base + timedelta(milliseconds=1750)
+        assert cmd.duration_ms == pytest.approx(750.0)

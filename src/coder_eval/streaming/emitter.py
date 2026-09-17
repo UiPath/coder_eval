@@ -350,14 +350,15 @@ class TurnEmitter:
         agent_output: str | None = None,
         model_used: str | None = None,
         assistant_turn_count: int | None = None,
-        num_turns: int | None = None,
+        num_turns: int | None = _UNSET,
         result_summary: ResultSummary | None = _UNSET,
     ) -> TurnOutcome:
         """End a clean turn; a second call returns the first outcome and emits nothing.
 
         ``usage`` defaults to the sum of ``end_inner_turn`` tokens. ``result_summary``
         defaults to the final reply: the text that follows the last tool call in the
-        last main-thread message.
+        last main-thread message. ``num_turns`` defaults to the main-thread inner turns;
+        an explicit ``None`` records that the harness reported none.
 
         Raises:
             ValueError: ``status`` is ``CRASHED`` or ``TIMEOUT`` (use ``fail``).
@@ -390,8 +391,9 @@ class TurnEmitter:
         *,
         usage: TokenUsage | None = None,
         agent_output: str | None = None,
+        model_used: str | None = None,
         assistant_turn_count: int | None = None,
-        num_turns: int | None = None,
+        num_turns: int | None = _UNSET,
     ) -> TurnOutcome:
         """End a failed turn with the full ``reason``; a second call returns the first outcome.
 
@@ -411,7 +413,7 @@ class TurnEmitter:
             reason=reason,
             usage=usage,
             agent_output=agent_output,
-            model_used=None,
+            model_used=model_used,
             assistant_turn_count=assistant_turn_count,
             num_turns=num_turns,
             result_summary=None,
@@ -565,7 +567,7 @@ class TurnEmitter:
                 model_used=model_used if model_used is not None else self._model,
                 assistant_turn_count=assistant_turn_count if assistant_turn_count is not None else self._main_turns,
                 messages=list(self._messages),
-                num_turns=num_turns if num_turns is not None else self._main_turns,
+                num_turns=self._main_turns if num_turns is _UNSET else num_turns,
                 result_summary=result_summary,
                 crashed=crashed,
                 crash_reason=truncate_crash_message(reason) if reason is not None else None,

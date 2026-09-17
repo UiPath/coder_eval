@@ -2,7 +2,6 @@
 
 import logging
 import tempfile
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +10,6 @@ from claude_agent_sdk import ClaudeAgentOptions, ProcessError
 
 from coder_eval.agent import AgentState
 from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.models import AgentKind, parse_agent_config
 from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus, StopReason
 
@@ -31,31 +29,29 @@ def test_claude_agent_initialization():
     assert agent.get_state() == AgentState.WORKING
 
 
-def test_pending_turn_defaults_to_none():
-    """Fresh agent has pending_turn = None (slot is empty at rest)."""
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
-    agent = ClaudeCodeAgent(config)
-    assert agent.pending_turn is None
+def test_the_deleted_turn_side_channel_is_gone_from_the_agent_base():
+    """The outcome replaced the base's per-turn side channel; none of its names survive.
 
+    Built from parts so a repo grep for the deleted names does not match this test.
+    """
+    import coder_eval.agent as agent_module
+    from coder_eval.agent import Agent
 
-@pytest.mark.asyncio
-async def test_stop_clears_pending_turn():
-    """stop() clears pending_turn so stale partials don't leak between runs."""
-    import tempfile
-
-    from coder_eval.models import TurnRecord
-
-    config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
-    agent = ClaudeCodeAgent(config)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        await agent.start(tmpdir)
-        partial = TurnRecord(iteration=1, user_input="p", agent_output="<partial>", crashed=True)
-        agent.pending_turn = partial
-
-        await agent.stop()
-
-    assert agent.pending_turn is None
+    deleted = [
+        "pending" + "_turn",
+        "_legacy" + "_outcome",
+        "discard_pending" + "_turn",
+        "_iteration_was" + "_incremented",
+        "_capture_partial" + "_turn",
+        "_finalize_and" + "_raise_timeout",
+        "_finalize_and" + "_raise_crash",
+        "_finalize_external" + "_cancel",
+        "_begin" + "_turn",
+        "_end_turn" + "_ok",
+        "_iter" + "ation",
+    ]
+    assert [name for name in deleted if hasattr(Agent, name)] == []
+    assert not hasattr(agent_module, "_Finalize" + "Fn")
 
 
 @pytest.mark.asyncio
@@ -152,7 +148,7 @@ async def test_sdk_options_max_turns_reaches_claude_agent_options():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
-        options, _transport, _model = agent._build_claude_query("hello", None, lambda _line: None)
+        options, _transport, _model = agent._build_claude_query("hello", 1, None, lambda _line: None)
 
     assert options.max_turns == 3
 
@@ -926,6 +922,110 @@ async def test_claude_agent_process_error_includes_stderr():
         assert agent.get_state() == AgentState.ERROR
 
 
+class TestClaudeCommunicateOutcomes:
+    """A failed or interrupted turn is a ``TurnOutcome`` (or one end, then a re-raised cancel)."""
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.events: list = []
+
+        def on_event(self, event) -> None:
+            self.events.append(event)
+
+    async def test_a_watchdog_timeout_returns_timeout_and_leaves_the_caller_uncancelled(self):
+        """The real watchdog cancels the pump's child task, never the task awaiting ``communicate``."""
+        import asyncio
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+
+        async def blocking_query(prompt, options, transport=None):
+            await asyncio.sleep(30)
+            yield None  # pragma: no cover
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            await agent.start(tmpdir)
+            with patch("coder_eval.agents.claude_code_agent.query", blocking_query):
+                outcome = await agent.communicate("go", iteration=1, timeout=0.2)
+
+        assert outcome.status is AgentEndStatus.TIMEOUT
+        assert outcome.record.crashed is True
+        assert outcome.error is not None and "timed out" in outcome.error
+        assert agent.get_state() == AgentState.ERROR
+        caller = asyncio.current_task()
+        assert caller is not None and caller.cancelling() == 0
+        await asyncio.sleep(0)  # a stray cancel would land on this await
+
+    async def test_a_process_error_returns_crashed_with_the_captured_stderr(self):
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+
+        async def failing_query(prompt, options, transport=None):
+            options.stderr("fatal: invalid API key")
+            raise ProcessError("Command failed", exit_code=1, stderr="Check stderr output for details")
+            yield None  # pragma: no cover
+
+        recorder = self._Recorder()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            await agent.start(tmpdir)
+            with patch("coder_eval.agents.claude_code_agent.query", failing_query):
+                outcome = await agent.communicate("go", iteration=1, stream_callback=recorder)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.error == "CLI process failed (exit code 1): fatal: invalid API key"
+        assert outcome.record.crashed is True
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [(e.status, e.crash_reason) for e in ends] == [(AgentEndStatus.CRASHED, outcome.error)]
+
+    async def test_an_external_cancel_ends_the_turn_once_then_propagates(self):
+        import asyncio
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+        streaming = asyncio.Event()
+
+        class _Assistant:
+            content = "working"
+            model = "mock-model"
+
+        async def slow_query(prompt, options, transport=None):
+            yield _Assistant()
+            streaming.set()
+            await asyncio.sleep(30)
+
+        recorder = self._Recorder()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            await agent.start(tmpdir)
+            with patch("coder_eval.agents.claude_code_agent.query", slow_query):
+                task = asyncio.ensure_future(agent.communicate("go", iteration=1, stream_callback=recorder))
+                await streaming.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        ends = [e for e in recorder.events if isinstance(e, AgentEndEvent)]
+        assert [(e.status, e.crash_reason) for e in ends] == [(AgentEndStatus.CRASHED, "turn cancelled")]
+        assert recorder.events[-1] is ends[0]
+        assert agent.get_state() == AgentState.ERROR
+
+    async def test_a_cancel_raised_inside_the_sdk_is_a_crash_outcome(self):
+        import asyncio
+
+        agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
+
+        async def cancelling_query(prompt, options, transport=None):
+            raise asyncio.CancelledError()
+            yield None  # pragma: no cover
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            await agent.start(tmpdir)
+            with patch("coder_eval.agents.claude_code_agent.query", cancelling_query):
+                outcome = await agent.communicate("go", iteration=1)
+
+        assert outcome.status is AgentEndStatus.CRASHED
+        assert outcome.record.crashed is True
+        assert agent.get_state() == AgentState.ERROR
+        caller = asyncio.current_task()
+        assert caller is not None and caller.cancelling() == 0
+
+
 @pytest.mark.asyncio
 async def test_claude_agent_process_error_no_stderr_at_all():
     """Test that ProcessError with no stderr and no stderr_lines shows sentinel message."""
@@ -1338,8 +1438,7 @@ async def test_claude_agent_crash_preserves_partial_turn_record():
     """When communicate() fails mid-turn, the CRASHED outcome carries a partial
     TurnRecord populated with tool calls captured before the crash.
 
-    This is the whole point of the pending_turn slot + outcome plumbing: typed
-    criteria like skill_triggered must still be able to observe a Skill
+    Typed criteria like skill_triggered must still be able to observe a Skill
     invocation that happened before the crash.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
@@ -1378,11 +1477,8 @@ async def test_claude_agent_crash_preserves_partial_turn_record():
         assert len(partial.commands) == 1
         assert partial.commands[0].tool_name == "Skill"
         assert partial.commands[0].parameters == {"skill": "my_skill"}
-        # Iteration contract: partial carries the bumped iteration number.
+        # The record carries the caller's iteration.
         assert partial.iteration == 1
-        assert agent._iteration == 1
-        # The pending_turn side-channel is always cleared once communicate() returns.
-        assert agent.pending_turn is None
 
 
 @pytest.mark.asyncio
@@ -1449,11 +1545,8 @@ async def test_claude_agent_repeated_crashes_keep_iteration_stable():
     """Consecutive crashes for the same caller-supplied iteration all carry that
     same iteration number.
 
-    Retries of one logical turn pass the same ``iteration`` on every attempt;
-    ``_legacy_outcome`` resets ``_iteration`` to ``iteration - 1`` on each call, so
-    repeated failures for that iteration all stamp the same number on their
-    partial records. A subsequent clean call at ``iteration + 1`` then advances
-    the counter by one.
+    Retries of one logical turn pass the same ``iteration`` on every attempt, and
+    the record stamps the number it was given: the agent keeps no counter.
     """
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits")
     agent = ClaudeCodeAgent(config)
@@ -1502,7 +1595,6 @@ async def test_claude_agent_repeated_crashes_keep_iteration_stable():
         turn_record = outcome.record
         assert turn_record.iteration == 1
         assert turn_record.crashed is False
-        assert agent._iteration == 1
 
 
 @pytest.mark.asyncio
@@ -1551,10 +1643,7 @@ async def test_claude_agent_timeout_preserves_partial_turn_record():
         assert partial.crashed is True
         assert len(partial.commands) == 1
         assert partial.commands[0].tool_name == "Bash"
-        # The outcome carries the bumped iteration.
         assert partial.iteration == 1
-        assert agent._iteration == 1
-        assert agent.pending_turn is None
 
 
 @pytest.mark.asyncio
@@ -1613,8 +1702,6 @@ async def test_claude_agent_error_max_turns_is_clean_completion_not_crash():
         assert turn_record.crashed is False
         assert turn_record.tool_calls_exhausted is False
         assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.COMPLETED]
-        # Iteration counter advances normally on a clean turn (no rollback).
-        assert agent._iteration == 1
         # The ResultMessage details are still captured for diagnostics.
         assert turn_record.result_summary is not None
         assert turn_record.result_summary.subtype == "error_max_turns"
@@ -1671,7 +1758,6 @@ async def test_claude_agent_error_max_turns_clean_completion_via_exception_path(
         assert turn_record.crashed is False
         assert turn_record.tool_calls_exhausted is False
         assert [e.status for e in recorder.events if isinstance(e, AgentEndEvent)] == [AgentEndStatus.COMPLETED]
-        assert agent._iteration == 1
         assert turn_record.result_summary is not None
         assert turn_record.result_summary.subtype == "error_max_turns"
 
@@ -1763,18 +1849,21 @@ def test_setting_sources_custom_list():
     assert agent.config.setting_sources == ["project", "user"]
 
 
-class TestClaudeTurnState:
-    """Unit tests for the per-turn state object extracted from communicate().
+class TestClaudeDecoder:
+    """Unit tests for the per-turn decoder, driven over a real ``TurnEmitter``.
 
     Driving its handler methods directly gives independent coverage of the
     stream-dispatch logic without standing up a full communicate() turn.
     """
 
     @staticmethod
-    def _state(agent):
-        from coder_eval.agents.claude_code_agent import _ClaudeTurnState
-        from coder_eval.streaming.callbacks import CompositeStreamCallback
-        from coder_eval.streaming.collector import EventCollector
+    def _decoder(agent):
+        from datetime import datetime
+
+        from coder_eval.agents.claude_code_agent import _ClaudeDecoder
+        from coder_eval.models import TimingBasis
+        from coder_eval.streaming.emitter import TurnEmitter
+        from coder_eval.testing import ScriptedClock
 
         events: list = []
 
@@ -1782,145 +1871,67 @@ class TestClaudeTurnState:
             def on_event(self, event):
                 events.append(event)
 
-        collector = EventCollector()
-        emit = CompositeStreamCallback([collector, _Collect()])
-        state = _ClaudeTurnState(
-            agent,
-            emit=emit,
-            collector=collector,
+        emitter = TurnEmitter(
             task_id="claude_code",
-            user_input="hi",
             iteration=1,
-            log=agent._log,
-            turn_start_time=time.monotonic(),
-            deadline=None,
+            prompt="hi",
+            model="mock-model",
+            basis=TimingBasis.TURN_CLOCK,
+            clock=ScriptedClock(datetime(2026, 1, 1)),
+            sinks=[_Collect()],
         )
-        return state, events
+        emitter.begin()
+        return _ClaudeDecoder(agent, emitter, effective_model="mock-model"), events
 
     def test_on_assistant_message_records_command_and_emits_tool_start(self):
         from coder_eval.streaming.events import ToolStartEvent
         from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, ToolUseBlock
 
         agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
-        state, events = self._state(agent)
+        decoder, events = self._decoder(agent)
 
         msg = AssistantMessage(
             [ToolUseBlock("t1", "Bash", {"command": "ls"})],
             usage={"input_tokens": 10, "output_tokens": 5},
             message_id="m1",
         )
-        state.on_assistant_message(msg)
+        decoder.on_assistant_message(msg)
 
         # One AssistantMessage telemetry record captured with its per-message tokens.
-        assert len(state.sdk_messages) == 1
-        assert state.sdk_messages[0].input_tokens == 10
-        # The tool_use block registered a pending command + emitted ToolStart.
-        assert "t1" in state.pending_commands
-        assert state.pending_commands["t1"]["telemetry"].tool_name == "Bash"
+        assert len(decoder.transcript) == 1
+        assert decoder.transcript[0].input_tokens == 10
+        # The tool_use block opened the tool and emitted ToolStart.
+        assert decoder.opened_tools == {"t1": "Bash"}
         tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
         assert len(tool_starts) == 1
         assert tool_starts[0].tool.tool_id == "t1"
+        assert tool_starts[0].tool.tool_name == "Bash"
 
-    def test_on_user_message_resolves_pending_command(self):
-        from coder_eval.streaming.events import ToolEndEvent, ToolEndStatus
+    def test_on_user_message_resolves_the_open_tool(self):
+        from coder_eval.streaming.events import AgentEndStatus, ToolEndEvent, ToolEndStatus
         from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, ToolUseBlock, UserMessage
 
         agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
-        state, events = self._state(agent)
+        decoder, events = self._decoder(agent)
 
-        state.on_assistant_message(AssistantMessage([ToolUseBlock("t1", "Bash", {"command": "ls"})], message_id="m1"))
-        state.on_user_message(UserMessage("t1", False, "file1.py\nfile2.py"))
+        decoder.on_assistant_message(AssistantMessage([ToolUseBlock("t1", "Bash", {"command": "ls"})], message_id="m1"))
+        decoder.on_user_message(UserMessage("t1", False, "file1.py\nfile2.py"))
 
-        cmd = state.pending_commands["t1"]["telemetry"]
-        assert cmd.result_status == "success"
-        assert cmd.result_summary == "file1.py\nfile2.py"
+        assert decoder.processed_results == {"t1"}
         tool_ends = [e for e in events if isinstance(e, ToolEndEvent)]
         assert len(tool_ends) == 1
         assert tool_ends[0].status == ToolEndStatus.OK
-
-
-class TestAgentBaseHelpers:
-    """Unit tests for the shared mid-turn failure kernels on the Agent base."""
-
-    @staticmethod
-    def _agent():
-        return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
-
-    def test_finalize_and_raise_timeout(self):
-        from coder_eval.errors.agent import format_timeout_reason
-        from coder_eval.streaming.events import AgentEndStatus
-
-        agent = self._agent()
-        agent._iteration = 3
-        calls: list = []
-
-        def fake_finalize(status, *, crashed, crash_reason):
-            # Asserting here locks the ORDER: _state must already be ERROR by the
-            # time finalize runs (i.e. _state=ERROR precedes finalize precedes raise).
-            assert agent._state == AgentState.ERROR
-            calls.append((status, crashed, crash_reason))
-
-        with pytest.raises(TurnTimeoutError) as exc:
-            agent._finalize_and_raise_timeout(fake_finalize, 30.0)
-
-        # _state=ERROR -> finalize(TIMEOUT, crashed=True, reason) -> raise, in order.
-        assert agent._state == AgentState.ERROR
-        assert calls == [(AgentEndStatus.TIMEOUT, True, format_timeout_reason(30.0))]
-        assert exc.value.timeout_seconds == 30.0
-        assert exc.value.iteration == 3
-
-    def test_finalize_and_raise_crash_truncates_reason_but_raises_full(self):
-        from coder_eval.errors.agent import truncate_crash_message
-        from coder_eval.streaming.events import AgentEndStatus
-
-        agent = self._agent()
-        calls: list = []
-
-        def fake_finalize(status, *, crashed, crash_reason):
-            assert agent._state == AgentState.ERROR  # order: _state precedes finalize
-            calls.append((status, crashed, crash_reason))
-
-        long_message = "x" * 300
-        with pytest.raises(AgentCrashError) as exc:
-            agent._finalize_and_raise_crash(fake_finalize, long_message)
-
-        assert agent._state == AgentState.ERROR
-        assert calls[0][0] == AgentEndStatus.CRASHED
-        assert calls[0][1] is True
-        # crash_reason is truncated for storage...
-        assert calls[0][2] == truncate_crash_message(long_message)
-        assert len(calls[0][2]) < len(long_message)
-        # ...but the raised AgentCrashError carries the message as passed.
-        assert str(exc.value) == long_message
-
-    def test_capture_partial_turn_sets_pending_from_collector(self):
-        from coder_eval.streaming.collector import EventCollector
-
-        agent = self._agent()
-        agent._capture_partial_turn(EventCollector())
-        assert agent.pending_turn is not None
-
-    def test_capture_partial_turn_falls_back_to_none_on_build_error(self):
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-        # Pre-seed a stale partial to prove it gets cleared on a build failure.
-        agent.pending_turn = TurnRecord(iteration=1, user_input="p", agent_output="stale", crashed=True)
-
-        class _BadCollector:
-            def build_turn_record(self):
-                raise RuntimeError("cannot build")
-
-        agent._capture_partial_turn(_BadCollector())
-        assert agent.pending_turn is None
+        (cmd,) = decoder.end(AgentEndStatus.COMPLETED).record.commands
+        assert cmd.result_status == "success"
+        assert cmd.result_summary == "file1.py\nfile2.py"
 
 
 @pytest.mark.asyncio
 async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
-    """A turn's watchdog on_timeout closure must capture its OWN transport
-    (``watchdog_target``), never ``self._active_transport``.
+    """A turn's watchdog on_timeout closure must capture its OWN transport,
+    never ``self._active_transport``.
 
-    Regression guard for the Phase-2 state-object extraction: a stale turn-1
+    A stale turn-1
     watchdog firing after turn 2 has started (and turn 1's transport reference
     cleared from ``self._active_transport``) must still kill turn 1's subprocess
     and never touch turn 2's. This cross-turn property is invisible to the
@@ -1931,6 +1942,8 @@ async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
     captured_callbacks: list = []
 
     class _FakeWatchdog:
+        fired = False
+
         def __init__(self, *, timeout_seconds=None, on_timeout=None, asyncio_task_to_cancel=None, label=""):
             captured_callbacks.append(on_timeout)
 
@@ -1957,7 +1970,7 @@ async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
         with (
-            patch("coder_eval.agents.claude_code_agent.ThreadedWatchdog", _FakeWatchdog),
+            patch("coder_eval.agents.watchdog.ThreadedWatchdog", _FakeWatchdog),
             patch(
                 "coder_eval.agents.claude_code_agent.SubprocessCLITransport",
                 side_effect=[transport_a, transport_b],
@@ -1974,221 +1987,3 @@ async def test_watchdog_callback_targets_its_own_turn_transport_across_calls():
     captured_callbacks[0]()
     transport_a._process.kill.assert_called_once()
     transport_b._process.kill.assert_not_called()
-
-
-class TestLegacyOutcome:
-    """Unit tests for ``Agent._legacy_outcome``, the adapter that wraps a
-    not-yet-ported raise-and-park ``communicate`` body onto the ``TurnOutcome``
-    contract. Drives it with a tiny fake body, not a real harness.
-    """
-
-    @staticmethod
-    def _agent():
-        return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits"))
-
-    @pytest.mark.asyncio
-    async def test_sets_iteration_so_the_body_sees_the_caller_iteration(self):
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-        agent._iteration = 99
-        seen: list[int] = []
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            agent._begin_turn()
-            seen.append(agent._iteration)
-            return TurnRecord(iteration=agent._iteration, user_input=user_input, agent_output="ok")
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=5, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert seen == [5]
-        assert outcome.record.iteration == 5
-
-    @pytest.mark.asyncio
-    async def test_returned_record_maps_to_the_recorded_end_status(self):
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-        record = TurnRecord(iteration=1, user_input="hi", agent_output="done")
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.STOPPED_EARLY))
-            return record
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.STOPPED_EARLY
-        assert outcome.record is record
-        assert outcome.error is None
-
-    @pytest.mark.asyncio
-    async def test_returned_record_falls_back_to_completed_with_no_recorded_end_event(self):
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-        record = TurnRecord(iteration=1, user_input="hi", agent_output="done")
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            return record
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.COMPLETED
-        assert outcome.record is record
-        assert outcome.error is None
-
-    @pytest.mark.asyncio
-    async def test_crash_uses_pending_turn_when_present(self):
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-        pending = TurnRecord(iteration=3, user_input="hi", agent_output="", crashed=True, crash_reason="boom")
-        agent.pending_turn = pending
-        agent._iteration_was_incremented = True
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            raise AgentCrashError("boom")
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=3, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.CRASHED
-        assert outcome.record is pending
-        assert outcome.error == "boom"
-        assert agent.pending_turn is None
-        assert agent._iteration_was_incremented is False
-
-    @pytest.mark.asyncio
-    async def test_crash_without_pending_turn_builds_an_empty_crashed_record(self):
-        from coder_eval.errors.agent import truncate_crash_message
-
-        agent = self._agent()
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            raise AgentCrashError("kaboom")
-
-        outcome = await agent._legacy_outcome(
-            body, "hi there", iteration=2, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.CRASHED
-        record = outcome.record
-        assert record.iteration == 2
-        assert record.user_input == "hi there"
-        assert record.agent_output == ""
-        assert record.crashed is True
-        assert record.crash_reason == truncate_crash_message("kaboom")
-        assert outcome.error == "kaboom"
-        assert agent.pending_turn is None
-
-    @pytest.mark.asyncio
-    async def test_timeout_without_pending_turn_falls_back_to_timeout_status(self):
-        agent = self._agent()
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            raise TurnTimeoutError(30.0)
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=1, stream_callback=None, timeout=30.0, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.TIMEOUT
-        assert outcome.record.crashed is True
-        assert outcome.error == "Agent turn timed out after 30s"
-
-    @pytest.mark.asyncio
-    async def test_a_recorded_failed_status_wins_over_the_exception_type_fallback(self):
-        agent = self._agent()
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.TIMEOUT))
-            raise AgentCrashError("late failure")
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.TIMEOUT
-        assert outcome.error == "late failure"
-
-    @pytest.mark.asyncio
-    async def test_a_recorded_clean_status_never_labels_a_raised_crash(self):
-        agent = self._agent()
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.COMPLETED))
-            raise AgentCrashError("record build failed after a clean finalize")
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.CRASHED
-        assert outcome.record.crashed is True
-
-    @pytest.mark.asyncio
-    async def test_forwards_events_to_the_given_callback(self):
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-        received: list = []
-
-        class _Recorder:
-            def on_event(self, event):
-                received.append(event)
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.COMPLETED))
-            return TurnRecord(iteration=1, user_input=user_input, agent_output="ok")
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=1, stream_callback=_Recorder(), timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.COMPLETED
-        assert len(received) == 1
-        assert received[0].status is AgentEndStatus.COMPLETED
-
-    @pytest.mark.asyncio
-    async def test_works_with_stream_callback_none(self):
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            # No external sink was given; the internal status tracker is still fed.
-            stream_callback.on_event(AgentEndEvent(task_id="t", status=AgentEndStatus.COMPLETED))
-            return TurnRecord(iteration=1, user_input=user_input, agent_output="ok")
-
-        outcome = await agent._legacy_outcome(
-            body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None
-        )
-
-        assert outcome.status is AgentEndStatus.COMPLETED
-
-    @pytest.mark.asyncio
-    async def test_cancelled_error_propagates_untouched(self):
-        import asyncio
-
-        from coder_eval.models import TurnRecord
-
-        agent = self._agent()
-        pending = TurnRecord(iteration=1, user_input="hi", agent_output="", crashed=True)
-        agent.pending_turn = pending
-
-        async def body(user_input, *, stream_callback, timeout, should_stop):
-            raise asyncio.CancelledError()
-
-        with pytest.raises(asyncio.CancelledError):
-            await agent._legacy_outcome(body, "hi", iteration=1, stream_callback=None, timeout=None, should_stop=None)
-
-        # The body already finalized the turn on cancellation; _legacy_outcome
-        # does not touch pending_turn on this path.
-        assert agent.pending_turn is pending

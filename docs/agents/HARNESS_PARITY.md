@@ -39,6 +39,10 @@ A capped run is an ordinary end of run, never `ERROR` and never retried:
 - Calls of the round that reached the cap can still resolve after it. A call in flight
   is recorded with `result_status: unknown`, and a Codex sub-agent's recovered calls still
   reach the record.
+- Only main-thread calls count. A sub-agent's calls (Claude's `Task` sub-agent, Codex's
+  recovered sub-agent calls) are nested under the call that spawned them: they reach
+  `TurnRecord.commands` but never the cap, and a sub-agent's model never becomes
+  `model_used`. `tasks/run_limits/subagent_cap.yaml` is the live check.
 
 ## Agent-field contract
 
@@ -105,8 +109,8 @@ wall clock its numbers account for.
 | what the **first** window covers | the first `message_start`, so CLI boot + TTFT are OUTSIDE it | the first SDK item's own start, so CLI boot + TTFT are OUTSIDE it | the first MODEL-source `Step`, so dispatch + TTFT are OUTSIDE it | the first `step_start`, so CLI boot + TTFT are OUTSIDE it | the first `turn_start`, so CLI boot + TTFT are OUTSIDE it |
 | `harness_startup_ms` (turn head) | ~3.6 s — CLI boot fused with TTFT | ~3.1 s — CLI boot fused with TTFT | ~4.7 s — dispatch fused with TTFT (its harness process is spawned once at startup, not per turn) | ~2.5 s — CLI boot fused with TTFT | ~0.23 s — CLI boot fused with TTFT |
 | `harness_teardown_ms` (turn tail) | ~1.3 s | ~13 ms | ~7 ms | ~26 ms | ~19 ms |
-| tool `duration_ms` source | measured around the tool result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | CLI `state.time.end − state.time.start` | measured around the tool event |
-| `execution_started_at` / `execution_completed_at` | derived from the measured duration | SDK stamps (both, or neither) | measured at ACTIVE / DONE | CLI `state.time` stamps (none when absent) | measured |
+| tool `duration_ms` source | measured on the turn clock: `tool_use` arrival → result | SDK `completed_at_ms − started_at_ms`; the item's own `duration_ms` only as a fallback | measured ACTIVE → DONE | CLI `state.time.end − state.time.start` | measured around the tool event |
+| `execution_started_at` / `execution_completed_at` | measured on the turn clock | SDK stamps (both, or neither) | measured at ACTIVE / DONE | CLI `state.time` stamps (none when absent) | measured |
 | `generation_completed_at` | set | `None` — see below | `None` | `None` | `None` |
 | `message_id` source | SDK `message_id`; `None` when the stream carries none; `subagent-<tool_use_id>` for a synthesized sub-agent terminal | synthetic `turn_id-msg-N`, shared across the sub-messages of one generation; `turn_id-subagent-N` for recovered sub-agent generations | synthetic `turn_id-msg-N`, one per generation | CLI `messageID`; `None` when absent | CLI `responseId`; `None` when absent |
 | `Σ generation + ∪ tool + head + tail ≈ turn duration` | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] | yes [^identity] |
@@ -242,12 +246,11 @@ and OpenCode have no `TurnClock`, so the rule does not see them and their raw
 `datetime.now()` bracket stays — which is *consistent* with their own CLI-epoch
 bounds rather than a gap.
 
-claude-code has exactly one raw `datetime.now()` left, on the synthesized
-sub-agent terminal message. Those bounds are an admitted placeholder for a
-generation that arrives as a tool result and is never streamed
-(`generation_duration_ms is None`, `parent_tool_use_id` set), which is what
-excludes the message from `subtract_tool_time` and from the head/tail bracket.
-A stamp no bucket reads has no basis to share.
+The synthesized claude-code sub-agent terminal message has equal placeholder
+bounds from the emitter's clock, for a generation that arrives as a tool result
+and is never streamed (`generation_duration_ms is None`, `parent_tool_use_id`
+set), which is what excludes the message from `subtract_tool_time` and from the
+head/tail bracket. No bucket reads those stamps.
 
 Codex and OpenCode are **not** converted to a `TurnClock`: both are single-basis on the
 CLI's own clock (`timing_basis` `cli_epoch_ms`). Codex takes its window bounds and tool
@@ -290,15 +293,12 @@ those WALL bounds. A monotonic-measured duration would have had the two
 disagreeing inside one subtraction, which is the defect that let Antigravity's
 window go negative. Sharing raw `datetime.now()` fixed the disagreement and
 left both sides naive-local; deriving both from the turn's monotonic anchor
-removes that too. The clock is INJECTED into `_ClaudeTurnState` rather than
-read from a module global, because a derived stamp escapes a monkeypatched
-`datetime` — a test that patched one would quietly measure the real clock and
-pass. `_resolve_pending_command` takes the reading as an argument for the same
-reason: it stamps the tool span that is clipped against those bounds, so a
-second basis at that one call site would put two clocks inside one subtraction.
-`turn_start_time` stays raw monotonic and is untouched: `duration_seconds` and
-the turn deadline read it, and a deadline must not move when the wall clock
-steps.
+removes that too. The tool span is now the emitter's own `open_tool` /
+`close_tool` stamps on that same clock, so no duration is measured on a second
+basis at all. The clock is the emitter's, injected per turn, because a derived
+stamp escapes a monkeypatched `datetime` — a test that patched one would quietly
+measure the real clock and pass. The turn deadline stays raw monotonic: it must
+not move when the wall clock steps.
 
 **The head and tail are measured, not normalized.** Generation and tool are
 only two of the four buckets. The turn's **head** (turn start → first
@@ -343,7 +343,7 @@ interval is removed centrally by `subtract_tool_time`, exactly as pi does with
 Why it survived so long is the more useful half. A tool-heavy shape cannot see
 it — three concurrent `sleep 3` calls make the tool union absorb the interval
 and the residual reads 0.05%. Neither can a single-tool-result fixture:
-claude-code reconstructs `execution_started_at` by subtracting the measured
+claude-code then reconstructed `execution_started_at` by subtracting the measured
 duration from the resolve instant, so with one message the discarded interval
 and the tool's own span are the SAME milliseconds and the identity closes
 either way. It takes a FAST tool plus a SECOND user message carrying no tool

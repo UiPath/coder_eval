@@ -237,10 +237,11 @@ event to the task log.
   advances on clean (non-error) turns.
 - **Timeouts** are enforced by a `ThreadedWatchdog` (an OS-thread timer immune to
   event-loop stalls) plus an in-loop wall-clock guard; on breach it SIGKILLs the CLI
-  subprocess and raises `TurnTimeoutError` with a partial `TurnRecord` preserved.
-- **Crashes** raise `AgentCrashError` with assembled stderr; the orchestrator drains
-  the partial turn and rolls back. Cost is backfilled from the rate card when a run
-  is killed before a terminal result message arrives.
+  subprocess and `communicate` returns a `TIMEOUT` outcome whose record is the
+  `crashed=True` partial turn.
+- **Crashes** return a `CRASHED` outcome with assembled stderr as the reason; the
+  orchestrator appends the partial record and retries. Cost is backfilled from the rate
+  card when a run is killed before a terminal result message arrives.
 
 ## References
 

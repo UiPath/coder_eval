@@ -10,7 +10,7 @@ import pytest
 
 from coder_eval.errors import AgentCrashError, TurnTimeoutError
 from coder_eval.errors.agent import CRASH_REASON_MAX_CHARS
-from coder_eval.models import ContentBlock, ResultSummary, TimingBasis, TokenUsage
+from coder_eval.models import ContentBlock, ResultSummary, TimingBasis, TokenUsage, TurnRecord
 from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
 from coder_eval.streaming.events import (
     AgentEndEvent,
@@ -559,6 +559,24 @@ class TestTheEnd:
             4,
             5,
         )
+
+    @pytest.mark.parametrize("end", ["finalize", "fail"])
+    def test_an_explicit_none_num_turns_is_recorded_and_omitted_counts_main_turns(self, end: str) -> None:
+        def _end(emitter: TurnEmitter, **kwargs: Any) -> TurnRecord:
+            if end == "finalize":
+                return emitter.finalize(AgentEndStatus.COMPLETED, **kwargs).record
+            return emitter.fail(AgentEndStatus.CRASHED, "boom", **kwargs).record
+
+        counted, _, _ = _emitter()
+        counted.begin_inner_turn("a")
+        explicit, _, _ = _emitter()
+        explicit.begin_inner_turn("a")
+        assert _end(counted).num_turns == 1
+        assert _end(explicit, num_turns=None).num_turns is None
+
+    def test_a_failed_turn_takes_an_explicit_model_used(self) -> None:
+        emitter, _, _ = _emitter()
+        assert emitter.fail(AgentEndStatus.TIMEOUT, "late", model_used="observed").record.model_used == "observed"
 
 
 def _outcome(status: AgentEndStatus, error: str | None = None) -> TurnOutcome:

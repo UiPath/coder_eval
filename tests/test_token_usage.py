@@ -1050,15 +1050,15 @@ class TestReportTokenUsageSection:
         assert "## Token Usage" not in report_md
 
 
-# --- _synthesize_subagent_terminal_message tests ---
+# --- sub-agent terminal generation tests ---
 
 
-class TestSynthesizeSubagentTerminalMessage:
-    """Tests for ClaudeCodeAgent._synthesize_subagent_terminal_message.
+class TestSubagentTerminalGeneration:
+    """A sub-agent's terminal generation, delivered as the Agent tool result and never streamed.
 
-    Materializes a sub-agent's terminal generation (delivered as the Agent tool
-    result, never streamed) as a ``parent_tool_use_id``-tagged AssistantMessage,
-    so per-sub-agent usage is recoverable by grouping messages on that id.
+    ``ClaudeCodeAgent._subagent_terminal_part`` extracts it; the decoder adds it as an
+    unmeasured generation parented to the spawning Agent call, so per-sub-agent usage is
+    recoverable by grouping messages on that id.
     """
 
     def _make_msg(
@@ -1072,6 +1072,30 @@ class TestSynthesizeSubagentTerminalMessage:
         block.content = result_content
         msg.content = [block]
         return msg
+
+    @staticmethod
+    def _decode(msg: MagicMock, model: str | None):
+        from datetime import datetime
+
+        from coder_eval.agents.claude_code_agent import _ClaudeDecoder
+        from coder_eval.models import TimingBasis
+        from coder_eval.streaming.emitter import TurnEmitter
+        from coder_eval.testing import ScriptedClock
+
+        emitter = TurnEmitter(
+            task_id="t",
+            iteration=1,
+            prompt="go",
+            model=model,
+            basis=TimingBasis.TURN_CLOCK,
+            clock=ScriptedClock(datetime(2026, 1, 1)),
+            sinks=[],
+        )
+        emitter.begin()
+        decoder = _ClaudeDecoder(_make_agent(), emitter, effective_model=model)
+        decoder.sdk_model_used = model
+        decoder.on_user_message(msg)
+        return decoder.transcript
 
     def test_builds_message_with_full_breakdown(self):
         msg = self._make_msg(
@@ -1087,8 +1111,7 @@ class TestSynthesizeSubagentTerminalMessage:
             },
             result_content="answer: 5050",
         )
-        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, "claude-x")
-        assert result is not None
+        (result,) = self._decode(msg, "claude-x")
         assert result.input_tokens == 10
         assert result.output_tokens == 50
         assert result.cache_creation_tokens == 200
@@ -1099,6 +1122,41 @@ class TestSynthesizeSubagentTerminalMessage:
         # The sub-agent's returned text becomes a text content block.
         assert result.content_blocks and result.content_blocks[0].text == "answer: 5050"
 
+    def test_takes_the_model_the_sub_agent_streamed_not_the_main_thread_model(self):
+        from datetime import datetime
+
+        from coder_eval.agents.claude_code_agent import _ClaudeDecoder
+        from coder_eval.models import TimingBasis
+        from coder_eval.streaming.emitter import TurnEmitter
+        from coder_eval.testing import ScriptedClock
+        from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, TextBlock
+
+        emitter = TurnEmitter(
+            task_id="t",
+            iteration=1,
+            prompt="go",
+            model="main-model",
+            basis=TimingBasis.TURN_CLOCK,
+            clock=ScriptedClock(datetime(2026, 1, 1)),
+            sinks=[],
+        )
+        emitter.begin()
+        decoder = _ClaudeDecoder(_make_agent(), emitter, effective_model="main-model")
+        decoder(AssistantMessage([TextBlock("go")], message_id="m1", model="main-model"))
+        decoder(
+            AssistantMessage(
+                [TextBlock("thinking")], message_id="s1", model="sub-model", parent_tool_use_id="toolu_123"
+            )
+        )
+        decoder.on_user_message(
+            self._make_msg(
+                {"agentId": "agent-abc", "usage": {"input_tokens": 1, "output_tokens": 2}}, result_content="done"
+            )
+        )
+        assert decoder.transcript[-1].message_id == "subagent-toolu_123"
+        assert decoder.transcript[-1].model == "sub-model"
+        assert decoder.sdk_model_used == "main-model"
+
     def test_records_no_generation_window(self):
         # This generation arrives as a tool result and is never streamed, so
         # there is no window to measure. None says that; 0.0 would claim the
@@ -1107,37 +1165,38 @@ class TestSynthesizeSubagentTerminalMessage:
             {"agentId": "agent-abc", "usage": {"input_tokens": 1, "output_tokens": 2}},
             result_content="done",
         )
-        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, "claude-x")
-        assert result is not None
+        (result,) = self._decode(msg, "claude-x")
         assert result.generation_duration_ms is None
 
     def test_returns_none_for_non_agent_tool(self):
         # Bash/Read/Write results have no agentId
         msg = self._make_msg({"status": "completed", "output": "hello"})
-        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
+        assert ClaudeCodeAgent._subagent_terminal_part(msg) is None
+        assert self._decode(msg, None) == []
 
     def test_returns_none_when_tool_use_result_missing(self):
         msg = MagicMock()
         msg.tool_use_result = None
-        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
+        assert ClaudeCodeAgent._subagent_terminal_part(msg) is None
 
     def test_returns_none_when_usage_missing(self):
         msg = self._make_msg({"agentId": "agent-abc"})  # no usage key
-        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
+        assert ClaudeCodeAgent._subagent_terminal_part(msg) is None
 
     def test_returns_none_without_tool_use_id(self):
         # No ToolResultBlock → no Agent tool_use_id to parent under → cannot attribute.
         msg = MagicMock()
         msg.tool_use_result = {"agentId": "agent-abc", "usage": {"output_tokens": 5}}
         msg.content = []
-        assert ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None) is None
+        assert ClaudeCodeAgent._subagent_terminal_part(msg) is None
 
     def test_coerces_missing_token_fields_to_zero(self):
         msg = self._make_msg({"agentId": "agent-abc", "usage": {}, "status": "completed"})
-        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None)
+        result = ClaudeCodeAgent._subagent_terminal_part(msg)
         assert result is not None
-        assert (result.input_tokens, result.output_tokens) == (0, 0)
-        assert (result.cache_creation_tokens, result.cache_read_tokens) == (0, 0)
+        tokens = result[1].tokens
+        assert (tokens.uncached_input_tokens, tokens.output_tokens) == (0, 0)
+        assert (tokens.cache_creation_input_tokens, tokens.cache_read_input_tokens) == (0, 0)
 
     def test_coerces_none_token_fields_to_zero(self):
         msg = self._make_msg(
@@ -1151,17 +1210,19 @@ class TestSynthesizeSubagentTerminalMessage:
                 },
             }
         )
-        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None)
+        result = ClaudeCodeAgent._subagent_terminal_part(msg)
         assert result is not None
-        assert result.input_tokens == 0 and result.output_tokens == 0
+        assert result[1].tokens.uncached_input_tokens == 0 and result[1].tokens.output_tokens == 0
 
     def test_no_text_block_when_result_empty(self):
         # Tokens are still captured; an empty returned text yields no content block.
         msg = self._make_msg({"agentId": "agent-abc", "usage": {"output_tokens": 5}})
-        result = ClaudeCodeAgent._synthesize_subagent_terminal_message(msg, None)
+        result = ClaudeCodeAgent._subagent_terminal_part(msg)
         assert result is not None
-        assert result.output_tokens == 5
-        assert result.content_blocks == []
+        tool_use_id, part = result
+        assert tool_use_id == "toolu_123"
+        assert part.tokens.output_tokens == 5
+        assert part.blocks == []
 
 
 # --- log_raw_sdk_event env-gate tests (shared by both agents) ---

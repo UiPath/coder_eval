@@ -10,7 +10,7 @@
   on that id (the evalboard's `aggregateSubAgentUsage` does exactly this). Claude
   bubbles its sub-agent's intermediate generations into the parent stream natively, and
   the **terminal** generation (delivered as the Agent tool result, never streamed) is
-  synthesized into one via `_synthesize_subagent_terminal_message` from
+  synthesized into one via `_subagent_terminal_part` from
   `tool_use_result.usage`. Codex reconstructs all child generations from the child
   rollout; both harnesses' turn totals already include sub-agent cost.
   `CommandTelemetry.result_summary` is stored **untruncated** (no 200-char cap) so
@@ -94,10 +94,6 @@ last tool call in the last main-thread message. After, not "a message with no to
 a live Antigravity turn writes its closing text in the same generation as its last tool
 call, and Pi writes text BEFORE a tool call it then makes, which is not a reply. A failed
 turn carries no summary; its failure is `crash_reason`.
-
-Until an adapter is ported onto `TurnEmitter` it keeps its old body as
-`_communicate_legacy`, and `Agent._legacy_outcome` maps its record or raised exception
-to an outcome.
 
 Three exit paths converge on `finalize`, and it is idempotent on all of them, because the
 protocol allows EXACTLY ONE `AgentEndEvent` per `communicate()`: the clean return, the
@@ -484,7 +480,7 @@ instant the sweep runs is not a completion. Stamping it manufactures both an
 a measured span that the central subtraction takes back out of a generation window it
 never occupied. `execution_started_at` IS kept: the harness really did emit that start,
 and one bound alone forms no span. Unknown status and unknown duration are one fact
-(CE058) — claude-code's `_finalize_commands` leaves the same field `None` for the same
+(CE058) — the emitter's sweep leaves the same field `None` on every harness for the same
 reason, rather than coercing it to `0.0`, which put an invented measurement on both sides
 of `avg_command_time_ms`.
 
@@ -771,6 +767,31 @@ lets a plugin register a brand-new kind that is not an enum member. Its imports 
 one-way — the plugin loader and the models layer import the registry, never the reverse.
 `create_agent` deliberately does not import `coder_eval.plugins` itself for the same
 reason; callers reach a config through `parse_agent_config`, which loads them.
+
+## Transport bases
+
+There is ONE transport base, `SubprocessJsonlAgent`, under Pi and OpenCode: both spawn a
+CLI per turn and read nd-JSON from its stdout, so the spawn, settle, crash, timeout,
+process-group sweep and reap are the same code.
+
+Decided 2026-09-16, after the Antigravity, Codex and Claude Code ports: there is no second
+base (`HostAgent`). The three hold different lifecycles — a harness process spawned in
+`start()` and held across turns (Antigravity), an app-server client held across turns with
+rollout recovery (Codex), and an in-process SDK async iterator whose transport a threaded
+watchdog kills (Claude Code). After the ports, what they still share is the bracket around
+the turn body: open the emitter, run the body under `run_with_watchdog`, map
+`WatchdogFired` and a late `timeout_hit` to `TIMEOUT`, map an SDK-raised `CancelledError`
+(caller `cancelling() == 0`) to `CRASHED`, end an external cancel then re-raise, and pick
+the clean status from the stop reason. That is about 30 lines per adapter (`communicate`
+is 68, 85 and 96 lines), and the lines between the shared ones differ per harness: the
+exception classification (Claude's `ProcessError` and max-turns short circuit, Codex's
+post-stop exception), the values a clean return commits, and the kill target. A base
+would have to take each of those as a hook, which moves the same lines rather than
+removing them. The kernel (`TurnEmitter`, `run_with_watchdog`) already holds what is
+genuinely common.
+
+Revisit when a fourth host-style adapter (Delegate, out of tree) is ported: four copies of
+the same bracket with the same hooks is the point where a base pays for itself.
 
 ## Why the watchdog cancels a child task
 

@@ -584,6 +584,21 @@ class TestBuildSdkEnvCustom:
         with pytest.raises(ValueError, match="single-line ASCII"):
             ClaudeCodeAgent._build_sdk_env(route, cost_log_tags={"x-ce-task-id": "ok\nAuthorization: Bearer forged"})
 
+    def test_the_query_stamps_the_caller_iteration_header(self, tmp_path):
+        """The ``x-ce-iteration`` header is the ``iteration`` passed to the turn, not agent state."""
+        from pathlib import Path
+
+        agent = ClaudeCodeAgent(
+            parse_agent_config(type=AgentKind.CLAUDE_CODE, model="m"),
+            route=LiteLLMRoute(model="m"),
+            cost_log_tags={"x-ce-run-id": "r"},
+        )
+        agent.working_directory = Path(tmp_path)
+
+        options, _transport, _model = agent._build_claude_query("hi", 7, None, lambda _line: None)
+
+        assert options.env["ANTHROPIC_CUSTOM_HEADERS"] == "x-ce-run-id: r\nx-ce-iteration: 7"
+
 
 class TestResolveEffectiveModelCustom:
     """_resolve_effective_model() on the LiteLLM route — no prefixing."""
@@ -672,25 +687,31 @@ class TestRepriceWiring:
     and disable the max_usd gate — the static-only tests above wouldn't catch it."""
 
     def _usage_after_finalize(self, effective_model: str | None) -> TokenUsage:
-        from types import SimpleNamespace
+        from datetime import datetime
 
-        from coder_eval.agents.claude_code_agent import _ClaudeTurnState
+        from coder_eval.agents.claude_code_agent import _ClaudeDecoder
+        from coder_eval.models import TimingBasis
+        from coder_eval.streaming.emitter import TurnEmitter
+        from coder_eval.testing import ScriptedClock
 
         agent = _make_agent(
             LiteLLMRoute(model="zai.glm-5"),
             config_model="zai.glm-5",
         )
-        stub = SimpleNamespace(
-            _agent=agent,
-            sdk_messages=[],
-            sdk_result_usage=None,
-            sdk_result_cost=None,
-            # model_usage carries the SDK's Claude-priced estimate (3.68); the
-            # reprice must override it from the litellm rate table.
-            sdk_result_model_usage={"m": {"inputTokens": 1_000_000, "outputTokens": 1_000_000, "costUSD": 3.68}},
-            effective_model=effective_model,
+        emitter = TurnEmitter(
+            task_id="t",
+            iteration=1,
+            prompt="go",
+            model=effective_model,
+            basis=TimingBasis.TURN_CLOCK,
+            clock=ScriptedClock(datetime(2026, 1, 1)),
+            sinks=[],
         )
-        return _ClaudeTurnState._finalize_token_usage(stub)  # type: ignore[arg-type]
+        decoder = _ClaudeDecoder(agent, emitter, effective_model=effective_model)
+        # model_usage carries the SDK's Claude-priced estimate (3.68); the
+        # reprice must override it from the litellm rate table.
+        decoder.sdk_result_model_usage = {"m": {"inputTokens": 1_000_000, "outputTokens": 1_000_000, "costUSD": 3.68}}
+        return decoder._finalize_token_usage()
 
     def test_finalize_reprices_priced_litellm_model(self):
         usage = self._usage_after_finalize("zai.glm-5")

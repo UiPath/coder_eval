@@ -89,13 +89,11 @@ async def test_orphaned_result_message_marks_unknown(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_result_message_last_wins(tmp_path, caplog):
-    """Test that duplicate ResultMessages use last-wins strategy.
+async def test_duplicate_result_message_first_stands(tmp_path, caplog):
+    """A second result for the same tool id is ignored: the first result stands.
 
-    Hypothesis: SDK may send multiple results for same tool_id.
-    Expected: Last result overwrites, debug log emitted.
-
-    Context: Lines 162-167 in claude_code_agent.py log duplicates.
+    The emitter closed the tool at the first result, so the duplicate gets a debug
+    log and no second ``ToolEndEvent``.
     """
     tool_use_block_cls, assistant_message_cls, result_message_cls = create_mock_sdk_messages()
 
@@ -105,7 +103,7 @@ async def test_duplicate_result_message_last_wins(tmp_path, caplog):
     # First result: success
     result_1 = result_message_cls("tool_456", False, "File read successfully")
 
-    # Second result: error (should overwrite)
+    # Second result: error (ignored)
     result_2 = result_message_cls("tool_456", True, "File not found")
 
     config = parse_agent_config(type="claude-code")
@@ -127,11 +125,11 @@ async def test_duplicate_result_message_last_wins(tmp_path, caplog):
         with caplog.at_level(logging.DEBUG):
             turn_record = (await agent.communicate("test prompt", iteration=1)).record
 
-        # Verify last result wins
         assert len(turn_record.commands) == 1
         cmd = turn_record.commands[0]
-        assert cmd.result_status == "error"  # Last result
-        assert cmd.error_message == "File not found"
+        assert cmd.result_status == "success"
+        assert cmd.result_summary == "File read successfully"
+        assert cmd.error_message is None
 
         # Verify debug log for duplicate
         assert any("Multiple results" in record.message for record in caplog.records)
@@ -142,13 +140,7 @@ async def test_duplicate_result_message_last_wins(tmp_path, caplog):
 
 @pytest.mark.asyncio
 async def test_pending_command_without_result_finalizes_unknown(tmp_path, caplog):
-    """Test clean finalization of commands left pending after stream interruption.
-
-    Hypothesis: Stream interruption leaves commands in pending state.
-    Expected: Commands finalized with 'unknown' status, warning logged.
-
-    Context: Lines 187-197 handle pending command cleanup.
-    """
+    """Tools left open when the stream ends are swept UNRESOLVED, with one warning naming them."""
     tool_use_block_cls, assistant_message_cls, result_message_cls = create_mock_sdk_messages()
 
     # Create multiple tool uses, only some get results
@@ -193,10 +185,16 @@ async def test_pending_command_without_result_finalizes_unknown(tmp_path, caplog
         assert turn_record.commands[2].tool_name == "Read"
         assert turn_record.commands[2].result_status == "unknown"
 
-        # Verify warning logged for unknown status
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any("completed without tool result" in r.message for r in warnings)
-        assert any("Status set to 'unknown'" in r.message for r in warnings)
+        for cmd in turn_record.commands[1:]:
+            assert cmd.execution_started_at is not None
+            assert cmd.execution_completed_at is None
+            assert cmd.duration_ms is None
+
+        warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        unresolved = [m for m in warnings if "without a result" in m]
+        assert len(unresolved) == 1
+        assert "tool_002" in unresolved[0] and "tool_003" in unresolved[0]
+        assert "tool_001" not in unresolved[0]
 
     finally:
         agent_module.query = original_query

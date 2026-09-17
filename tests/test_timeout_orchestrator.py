@@ -781,8 +781,7 @@ async def test_wait_for_backstop_appends_nothing_when_agent_never_ended(tmp_path
 @pytest.mark.asyncio
 async def test_task_timeout_recovers_in_flight_turn_via_attempt_collector(tmp_path) -> None:
     """A real task-timeout cancellation, hitting the agent mid-``communicate``,
-    is recovered through ``orchestrator._attempt_collector`` (not
-    ``agent.pending_turn``) by ``_drain_killed_turn``.
+    is recovered through ``orchestrator._attempt_collector`` by ``_drain_killed_turn``.
     """
     task = _make_task(task_timeout=0.1)
     run_dir = tmp_path / "run" / "drain_killed_turn"

@@ -283,14 +283,21 @@ class _MockAssistantMessage:
 
 
 @pytest.mark.asyncio
-async def test_external_cancel_parks_the_turn_it_interrupted():
-    """A turn cancelled from outside must leave its telemetry on ``pending_turn``.
+async def test_external_cancel_reports_the_spend_of_the_turn_it_interrupted():
+    """A turn cancelled from outside ends with one CRASHED ``AgentEndEvent`` carrying its usage.
 
-    The task-timeout kill path: the turn never returns a record and the frame that
-    held one unwinds, so the pending slot is the only place its spend can survive.
+    The task-timeout kill path: the turn never returns an outcome, so the event the
+    stream callback received is the only place its spend can survive.
     """
+    from coder_eval.streaming.events import AgentEndEvent, AgentEndStatus
+
     config = parse_agent_config(type=AgentKind.CLAUDE_CODE, permission_mode="acceptEdits", model="claude-sonnet-5")
     agent = ClaudeCodeAgent(config)
+    events: list = []
+
+    class _Sink:
+        def on_event(self, event):
+            events.append(event)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         await agent.start(tmpdir)
@@ -305,16 +312,19 @@ async def test_external_cancel_parks_the_turn_it_interrupted():
             await asyncio.sleep(30)
 
         with patch("coder_eval.agents.claude_code_agent.query", mock_query):
-            turn = asyncio.create_task(agent.communicate("prompt", iteration=1))
+            turn = asyncio.create_task(agent.communicate("prompt", iteration=1, stream_callback=_Sink()))
             await streaming.wait()
             turn.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(turn, timeout=5)
 
-    partial = agent.pending_turn
-    assert partial is not None, "the interrupted turn's record was discarded"
-    assert partial.crashed is True
-    usage = partial.token_usage
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1, "the interrupted turn must end exactly once"
+    end = ends[0]
+    assert end.status is AgentEndStatus.CRASHED
+    assert end.crashed is True
+    assert end.crash_reason == "turn cancelled"
+    usage = end.usage
     assert usage is not None
     assert usage.output_tokens == 2_000
     # No ResultMessage means the backend never priced this turn, so the cost is

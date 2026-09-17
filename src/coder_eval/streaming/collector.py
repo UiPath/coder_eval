@@ -54,7 +54,7 @@ class EventCollector:
         self._turn_starts: int = 0
         # Stamped by AgentStartEvent; the head is measured from it.
         self._agent_start_at: datetime | None = None
-        # tool_id -> finalized telemetry (last ToolEnd wins, mirroring last-result-wins).
+        # tool_id -> finalized telemetry (the last ToolEnd for an id wins).
         self._commands: dict[str, CommandTelemetry] = {}
         self._agent_end: AgentEndEvent | None = None
 

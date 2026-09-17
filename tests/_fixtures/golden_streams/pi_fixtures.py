@@ -278,7 +278,7 @@ def _build_catalogue() -> list[PiScenario]:
     # the pair then read as a measured span that the collector subtracted from
     # a generation window the tool never occupied. One bound alone forms no
     # span (`main_thread_tool_spans` requires both), so the window is left
-    # whole. Same rule as claude-code's `_finalize_commands`: unknown status
+    # whole. The emitter's sweep applies it on every harness: unknown status
     # and unknown duration are one fact (CE058).
     scenarios.append(
         PiScenario(

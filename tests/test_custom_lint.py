@@ -4987,8 +4987,8 @@ class TestCE058NoTimingLiteral:
         assert not self._run("cfg = TurnRecord(tool_union_ms_limit=0)")
 
     # Form 6 — the PLAIN assignment. Form 4 without the `is None` guard, or
-    # under a guard that tests something else. The live `_finalize_commands`
-    # defect was caught by form 4 only because it happened to spell its guard
+    # under a guard that tests something else. The live defect in the
+    # Claude adapter's former command finalizer was caught by form 4 only because it happened to spell its guard
     # `if cmd.duration_ms is None:`; written under the enclosing
     # `if cmd.result_status is None:` instead — which reads just as naturally
     # and books the identical lie — it was invisible to forms 1-5.

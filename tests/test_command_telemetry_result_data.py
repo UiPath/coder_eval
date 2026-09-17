@@ -2,31 +2,35 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime
 from typing import Any
 
-from coder_eval.agents.claude_code_agent import ClaudeCodeAgent
-from coder_eval.models import AgentKind, CommandTelemetry, parse_agent_config
+from coder_eval.agents.claude_code_agent import ClaudeCodeAgent, _ClaudeDecoder
+from coder_eval.models import AgentKind, CommandTelemetry, TimingBasis, parse_agent_config
+from coder_eval.streaming.emitter import TurnEmitter
+from coder_eval.streaming.events import AgentEndStatus
+from coder_eval.testing import ScriptedClock
+from tests._fixtures.golden_streams.claude_fixtures import AssistantMessage, ToolUseBlock, UserMessage
 
 
-def _agent() -> ClaudeCodeAgent:
-    """Build a minimal ClaudeCodeAgent instance just to reach _resolve_pending_command."""
-    return ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
-
-
-def _make_pending(tool_id: str, tool_name: str = "Bash") -> dict[str, dict[str, Any]]:
-    """Build a pending_commands dict matching the agent's internal shape."""
-    telemetry = CommandTelemetry(
-        tool_name=tool_name,
-        tool_id=tool_id,
-        timestamp=datetime.now(),
-        parameters={},
-        sequence_number=0,
-        result_status=None,
-        duration_ms=None,
+def _resolve(tool_id: str, content: Any, tool_name: str = "Bash") -> CommandTelemetry:
+    """Open one tool through the Claude decoder, resolve it with ``content``, and return its record."""
+    emitter = TurnEmitter(
+        task_id="t",
+        iteration=1,
+        prompt="go",
+        model="m",
+        basis=TimingBasis.TURN_CLOCK,
+        clock=ScriptedClock(datetime(2026, 1, 1)),
+        sinks=[],
     )
-    return {tool_id: {"telemetry": telemetry, "command_start_time": time.monotonic()}}
+    emitter.begin()
+    agent = ClaudeCodeAgent(parse_agent_config(type=AgentKind.CLAUDE_CODE))
+    decoder = _ClaudeDecoder(agent, emitter, effective_model="m")
+    decoder(AssistantMessage([ToolUseBlock(tool_id, tool_name, {})], message_id="m1"))
+    decoder(UserMessage(tool_id, False, content))
+    (cmd,) = decoder.end(AgentEndStatus.COMPLETED).record.commands
+    return cmd
 
 
 def test_command_telemetry_result_data_defaults_to_none() -> None:
@@ -83,179 +87,90 @@ def test_try_parse_json_value_tolerates_leading_whitespace_for_array() -> None:
     assert ClaudeCodeAgent._try_parse_json_value("   [1,2]") == [1, 2]
 
 
-def test_resolve_pending_command_populates_result_data_for_json_object() -> None:
+def test_tool_result_populates_result_data_for_json_object() -> None:
     tool_id = "toolu_json_obj"
-    pending = _make_pending(tool_id)
     content = '{"a":1,"b":"x"}'
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, content)
     assert cmd.result_data == {"a": 1, "b": "x"}
     assert cmd.result_summary == content
 
 
-def test_resolve_pending_command_does_not_truncate_long_result_summary() -> None:
+def test_tool_result_does_not_truncate_long_result_summary() -> None:
     tool_id = "toolu_long"
-    pending = _make_pending(tool_id)
     content = "x" * 5000  # well past the old 200-char cap
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, content)
     assert cmd.result_summary == content
     assert len(cmd.result_summary) == 5000
 
 
-def test_resolve_pending_command_populates_result_data_for_json_array() -> None:
+def test_tool_result_populates_result_data_for_json_array() -> None:
     tool_id = "toolu_json_arr"
-    pending = _make_pending(tool_id)
     content = '[{"a":1}]'
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, content)
     assert cmd.result_data == [{"a": 1}]
 
 
-def test_resolve_pending_command_leaves_result_data_none_for_plain_text() -> None:
+def test_tool_result_leaves_result_data_none_for_plain_text() -> None:
     tool_id = "toolu_plain"
-    pending = _make_pending(tool_id)
     content = "hello world"
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, content)
     assert cmd.result_data is None
     assert cmd.result_summary == "hello world"
 
 
-def test_resolve_pending_command_populates_result_data_for_flow_debug_fixture() -> None:
+def test_tool_result_populates_result_data_for_flow_debug_fixture() -> None:
     tool_id = "toolu_flow_debug"
-    pending = _make_pending(tool_id, tool_name="mcp__maestro__run_flow")
     content = (
         '{"Code":"FlowDebug","Data":{"finalStatus":"Completed",'
         '"elementExecutions":[{"elementId":"e1","status":"Completed"}]}}'
     )
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, content, tool_name="mcp__maestro__run_flow")
     assert cmd.result_data is not None
     assert isinstance(cmd.result_data, dict)
     assert cmd.result_data["Code"] == "FlowDebug"
     assert cmd.result_data["Data"]["elementExecutions"][0]["elementId"] == "e1"
 
 
-def test_resolve_pending_command_handles_sdk_list_content_shape() -> None:
+def test_tool_result_handles_sdk_list_content_shape() -> None:
     """MCP tool results arrive as list[{'type': 'text', 'text': '...'}]; extract and parse."""
     tool_id = "toolu_mcp_flow_debug"
-    pending = _make_pending(tool_id, tool_name="mcp__maestro__run_flow")
     content = [
         {"type": "text", "text": '{"Code":"FlowDebug","Data":{"finalStatus":"Completed"}}'},
     ]
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, content, tool_name="mcp__maestro__run_flow")
     assert cmd.result_data == {"Code": "FlowDebug", "Data": {"finalStatus": "Completed"}}
 
 
-def test_resolve_pending_command_concatenates_multiple_text_blocks() -> None:
+def test_tool_result_concatenates_multiple_text_blocks() -> None:
     tool_id = "toolu_mcp_multi_text"
-    pending = _make_pending(tool_id)
     content = [
         {"type": "text", "text": '{"a":'},
         {"type": "text", "text": '1,"b":2}'},
     ]
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, content)
     assert cmd.result_data == {"a": 1, "b": 2}
 
 
-def test_resolve_pending_command_list_without_text_blocks_yields_none() -> None:
+def test_tool_result_list_without_text_blocks_yields_none() -> None:
     """An SDK list of only non-text blocks (e.g., images) produces no JSON."""
     tool_id = "toolu_mcp_image"
-    pending = _make_pending(tool_id)
     content = [{"type": "image", "source": {"data": "..."}}]
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        content,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    assert pending[tool_id]["telemetry"].result_data is None
+    cmd = _resolve(tool_id, content)
+    assert cmd.result_data is None
 
 
-def test_resolve_pending_command_none_content_yields_none() -> None:
+def test_tool_result_none_content_yields_none() -> None:
     tool_id = "toolu_none"
-    pending = _make_pending(tool_id)
 
-    _agent()._resolve_pending_command(
-        tool_id,
-        False,
-        None,
-        pending,
-        set(),
-        now=datetime.now(),
-    )
-
-    cmd = pending[tool_id]["telemetry"]
+    cmd = _resolve(tool_id, None)
     assert cmd.result_data is None
     assert cmd.result_summary is None
 

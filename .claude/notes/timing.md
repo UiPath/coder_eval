@@ -250,7 +250,7 @@ A message whose `generation_duration_ms` is `None` is skipped. That field is the
 codebase's own marker for "no window was measurable here", and every producer of one
 stamps `started_at == completed_at == datetime.now()` at *append* time as an admitted
 placeholder — Codex's rollout rebuild (`_messages_from_items`), both Codex sub-agent
-recovery builders, and Claude's `_synthesize_subagent_terminal_message`. Reading those
+recovery builders, and Claude's synthesized sub-agent terminal (`_subagent_terminal_part`). Reading those
 stamps as window bounds turns a placeholder into a measurement: a Codex turn rebuilt from
 its rollout stamps every message at turn END, which would book the entire turn as harness
 startup. It is the same exemption CE059 makes for the same reason.
