@@ -267,6 +267,11 @@ mode grades **in place**, because copying filters build output — `node_modules
 `dist`, `build`, `.venv`, `.git` are all on the default ignore list, so a
 criterion like `test -f dist/bundle.js` would fail as a *copying artifact*
 rather than as a verdict. Override either default with `--in-place` / `--copy`.
+Grading in place can still need network and install time: if the workspace is
+missing `.venv`/`node_modules` (the ignore list above stripped them, or the run
+was captured across a container boundary) and the task declares
+`sandbox.python`/`sandbox.node` `env_packages`, grading re-provisions them before
+the criteria run, and can fail the grade outright if that install fails.
 
 | Flag | Description |
 | --- | --- |

@@ -10,7 +10,13 @@ description: >
 agent:
   type: "claude-code"
   permission_mode: "acceptEdits"
-  allowed_tools: ["Read", "Write", "Bash"]
+  # Bash only -- no Read/Write/Edit -- so there is no alternative tool the
+  # agent could use to create done.txt instead of running `touch`. A prior
+  # version of this fixture allowed Write and asked for file *content*, which
+  # gave the agent a reason to prefer Write over the shell command this
+  # scenario exists to exercise; file_exists below never checks content, so
+  # nothing was gained by asking for it.
+  allowed_tools: ["Bash"]
 
 sandbox:
   driver: docker
@@ -18,8 +24,8 @@ sandbox:
     image: coder-eval-agent:latest
 
 initial_prompt: >
-  Create a file named done.txt containing the single word "done", then run
-  `touch done.txt` again to confirm it exists.
+  Run the shell command `touch done.txt` to create an empty file named
+  done.txt.
 
 success_criteria:
   - type: "file_exists"
@@ -27,6 +33,11 @@ success_criteria:
     description: "The file done.txt must be created."
   - type: "command_executed"
     tool_name: "Bash"
-    command_pattern: "touch\\s+done\\.txt"
+    # An optional path prefix (not a bare literal) because the agent legitimately
+    # runs `touch /work/done.txt` -- its own absolute cwd, not the bare relative
+    # name -- and real CI reproduced exactly that both times this fixture ran.
+    # The prefix must end in `/`, so `touch notdone.txt`/`touch xdone.txt` do
+    # not also match -- only a path ending in exactly `done.txt`.
+    command_pattern: "touch\\s+(\\S*/)?done\\.txt"
     min_count: 1
     description: "The agent must have run touch done.txt (requires trajectory hydration to grade)."

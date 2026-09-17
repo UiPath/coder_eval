@@ -338,6 +338,14 @@ def _find_workdir(dockerfile: Path) -> str | None:
 def _write_verifier_task_yaml(task: TaskDefinition, out_dir: Path) -> None:
     """``tests/task.yaml`` — the criteria, as authored. It must not set a ``none`` agent type.
 
+    Carries ``sandbox.python``/``sandbox.node`` (``env_packages`` only) so
+    ``Sandbox.adopt`` sees the same package list the agent phase installed: the
+    verifier grades the agent's workspace in place, and if ``docker-compose``'s
+    ``WORKDIR`` alignment or ``capture_to`` stripped ``.venv``/``node_modules``
+    from it, ``adopt`` re-provisions ONLY when it knows what was there.
+    Everything else in ``sandbox`` (``driver``, ``docker``, ``template_sources``,
+    ``mock_path_dirs``) is an agent-phase-only concern and stays out.
+
     Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
     """
     payload: dict[str, object] = {
@@ -347,6 +355,13 @@ def _write_verifier_task_yaml(task: TaskDefinition, out_dir: Path) -> None:
         "initial_prompt": _VERIFIER_PLACEHOLDER_PROMPT,
         "success_criteria": [c.model_dump(mode="json", exclude_none=True) for c in task.success_criteria],
     }
+    sandbox_env: dict[str, object] = {}
+    if task.sandbox.python is not None and task.sandbox.python.env_packages:
+        sandbox_env["python"] = {"env_packages": list(task.sandbox.python.env_packages)}
+    if task.sandbox.node is not None and task.sandbox.node.env_packages:
+        sandbox_env["node"] = {"env_packages": list(task.sandbox.node.env_packages)}
+    if sandbox_env:
+        payload["sandbox"] = sandbox_env
     if task.reference is not None:
         payload["reference"] = {"directory": "reference"}
     if task.run_limits is not None:

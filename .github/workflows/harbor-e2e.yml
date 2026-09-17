@@ -1,17 +1,19 @@
 name: Harbor E2E
 
-# Deliberately NOT triggered on pull_request: this exercises real Docker
-# builds, a real `harbor` install, and (for the llm_judge scenario) a real
-# model call, so it is informational rather than a required PR check for now
-# (see .github/scripts/harbor_e2e.py's module docstring). workflow_dispatch
-# lets a maintainer run it on demand; the nightly schedule catches drift
-# between coder-eval's own release and Harbor's own upstream releases without
-# blocking anyone's PR.
+# Required on every PR: exercises real Docker builds, a real `harbor` install,
+# and (for the llm_judge scenario) a real model call, so it is the one gate
+# that actually round-trips a task through Harbor's own export/agent/verifier
+# contract rather than coder-eval's in-process tests. workflow_dispatch lets a
+# maintainer run it on demand; the nightly schedule catches drift between
+# coder-eval's own release and Harbor's own upstream releases even when no PR
+# touched anything.
 on:
   workflow_dispatch:
   schedule:
     - cron: "17 5 * * *" # nightly, off the hour to avoid GitHub's peak-load pile-up
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
 
 concurrency:
@@ -27,13 +29,16 @@ env:
   # Anthropic-credit spend off this path; DirectRoute is exercised elsewhere.
   API_BACKEND: "bedrock"
   CLAUDE_CODE_USE_BEDROCK: "1"
-  AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
 
 jobs:
   harbor-e2e:
     name: Harbor export + CoderEvalAgent round trip
+    # A fork PR's own workflow, scripts, uv.lock and Dockerfiles all run for a
+    # `pull_request` event -- and this job does two `docker build`s plus a real
+    # Bedrock model call. Fork PRs get no secrets (below) so the job cannot pass
+    # for one anyway; skip rather than run untrusted code on the shared pool and
+    # leave a required check permanently red for every external contributor.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: uipath-ubuntu-latest
     timeout-minutes: 20
 
@@ -88,4 +93,25 @@ jobs:
         run: docker build -t byod-custom-image:0.1.0 templates/byod_smoke_test/
 
       - name: Run Harbor E2E scenarios
+        # Bedrock credentials are scoped to this one step, not the workflow-level
+        # env: above (where earlier revisions left them) -- so npm/pip/docker build
+        # steps that fetch third-party code never see them in their environment.
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          BEDROCK_MODEL: ${{ secrets.BEDROCK_MODEL }}
         run: python .github/scripts/harbor_e2e.py
+
+      - name: Upload failing scenario artifacts
+        # A failing scenario's full export/ + jobs/ tree (docker/agent logs,
+        # every task.json/trajectory.json, artifacts/ workspaces) zipped by the
+        # script above -- so a failure can be inspected after the fact instead
+        # of guessed at from stdout. Empty on a fully green run; `if: failure()`
+        # still uploads whatever any failing scenario left behind.
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: harbor-e2e-failure-artifacts
+          path: tmp/harbor_e2e_failures/
+          retention-days: 14
+          if-no-files-found: ignore

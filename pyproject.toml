@@ -326,7 +326,7 @@ line-ending = "auto"
 
 [tool.pyright]
 pythonVersion = "3.13"
-include = ["src/coder_eval"]
+include = ["src/coder_eval", ".github/scripts"]
 exclude = [
     "data",
     "tmp",

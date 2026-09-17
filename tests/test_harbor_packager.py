@@ -600,6 +600,46 @@ class TestTemplateSourcesCopy:
         assert emitted["sandbox"]["python"]["env_packages"] == ["pytest"]
         assert "docker" not in emitted["sandbox"]
 
+    def test_verifier_phase_carries_env_packages_for_adopt_reprovisioning(self, tmp_path: Path) -> None:
+        """The verifier's tests/task.yaml must name the same env_packages the
+        agent phase installed, so Sandbox.adopt can re-provision a workspace
+        whose .venv/node_modules were stripped by capture_to or WORKDIR
+        alignment -- see .claude/notes/isolation.md § Why the venv gets system
+        site packages."""
+        task_file = _write_task(
+            tmp_path,
+            {
+                "sandbox": {
+                    "driver": "docker",
+                    "docker": {"image": "byod-custom-image:0.1.0", "network": "none"},
+                    "python": {"env_packages": ["pytest"]},
+                    "node": {"env_packages": ["left-pad"]},
+                    "template_sources": [{"type": "template_dir", "path": str(tmp_path / "starter")}],
+                }
+            },
+        )
+        (tmp_path / "starter").mkdir()
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "tests" / "task.yaml").read_text(encoding="utf-8"))
+        assert emitted["sandbox"]["python"]["env_packages"] == ["pytest"]
+        assert emitted["sandbox"]["node"]["env_packages"] == ["left-pad"]
+        # Agent-phase-only concerns stay out of the verifier's sandbox block.
+        assert "driver" not in emitted["sandbox"]
+        assert "docker" not in emitted["sandbox"]
+        assert "template_sources" not in emitted["sandbox"]
+
+    def test_verifier_phase_omits_sandbox_when_no_env_packages_are_declared(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path)
+        out_dir = tmp_path / "out"
+
+        export_task(task_file, out_dir)
+
+        emitted = yaml.safe_load((out_dir / "tests" / "task.yaml").read_text(encoding="utf-8"))
+        assert "sandbox" not in emitted
+
     def test_no_templates_dir_or_mount_when_the_task_has_no_template_sources(self, tmp_path: Path) -> None:
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"

@@ -274,7 +274,9 @@ run's stale `aws_region`.
 
 ### Why pre_run and post_run each run exactly once
 
-`adopt()` guarantees it materializes nothing into the workspace, but that guarantee is
+`adopt()` never re-runs `pre_run`/`post_run` itself and never stages a template into the
+workspace (its own writes are confined to re-provisioning a missing `.venv`/`node_modules`
+from `env_packages`, see § Why the venv gets system site packages), but that restraint is
 only as strong as its weakest caller: `run()` invokes the hooks unconditionally, with
 `cwd = sandbox_dir`. Several in-tree tasks stage fixtures there (`cp -a /app/[!.]* "$PWD/"`),
 so re-running `pre_run` during a detached grade would overwrite the agent's deliverables
@@ -370,11 +372,23 @@ and derived through the same function `run_evaluation` uses (`_gate_scope_for_gr
 second copy of the rule keeps answering the old question the moment the default moves: the
 lever shipped beside an `include_setup_phase` every caller passed as its exact complement,
 and a caller setting one and forgetting the other would silently drop half of a SECURITY
-gate. In place, the grade may dispatch a
-CONTAINER built from the recorded sandbox block, a wider capability than any recorded shell
-string; on `--copy` instead, `pre_run` and the sandbox's own installers, neither of which an
-adopted workspace reaches. `post_run` is in NEITHER set — it belongs to the grading phase
-and runs on both paths, so it is scanned unconditionally.
+gate. In place, the grade may dispatch a CONTAINER built from the recorded sandbox block, a
+wider capability than any recorded shell string; on `--copy` instead, `pre_run` and a
+`template_sources` repo's `git clone`, neither of which an adopted workspace reaches.
+`env_packages` installs are scanned on BOTH paths — `Sandbox.adopt` can now run them too
+(see the bullet below) — and `post_run` is likewise scanned unconditionally, because it
+belongs to the grading phase and runs on both paths. See `orchestration.md` § What the gate
+covers, and why each part is in scope for the full derivation.
+
+- **`adopt()`'s `env_packages` re-provisioning is the one place it writes FILES.** Every
+  other step `adopt` takes is discovery: an existing venv is picked up, never rebuilt, and a
+  bare `config.python` with empty `env_packages` is a pure no-op. The exception is a
+  captured or WORKDIR-aligned workspace missing `.venv`/`node_modules` while `env_packages`
+  is non-empty (see § Why the venv gets system site packages) — `adopt` then runs the same
+  `_setup_virtualenv`/`_install_packages`/`_install_node_packages` `setup()` uses, and on a
+  failed install removes exactly what it just created (never the caller's own tree) and
+  re-raises, so a half-built venv never latches into the workspace being graded and the next
+  adopt silently discovers it as complete.
 
 ## Grading a docker row inside a container
 
@@ -854,6 +868,31 @@ shape this host got is logged rather than left to be inferred.
 `VIRTUAL_ENV`/PATH the agent had, and it is gated on `config.python` for the same reason
 `setup` is: discovering a venv a task never asked for grades it under a PATH it never ran
 under, and would let an agent shadow binaries by writing `.venv/bin/` into its own workspace.
+
+Discovery alone was not the whole story: `Sandbox.capture_to` (the docker-WORKDIR-alignment
+path — Harbor's `CoderEvalAgent`, any `--workspace-dir` execute) excludes `.venv` /
+`node_modules` / `.npm-prefix` from the copy-out as noise (`_WORKSPACE_CAPTURE_IGNORE`), so a
+workspace adopted from a captured WORKDIR never has one to discover — even though the execute
+phase installed `env_packages` into it. Confirmed live: a Harbor E2E scenario's `run_command`
+criterion failed `No module named pytest` against a workspace whose agent phase had run
+`pytest` successfully moments earlier. `adopt` now falls back to `_setup_virtualenv` +
+`_install_packages` (or `_install_node_packages`) whenever the expected directory is missing
+AND `env_packages` is non-empty. Reaching this on the Harbor verifier path needed a second,
+parallel fix: `_write_verifier_task_yaml` (`harbor/packager.py`) built `tests/task.yaml` with
+no `sandbox` key at all, so the verifier graded with `env_packages == []` and this branch was
+dead on exactly the scenario above — it now carries `sandbox.python`/`sandbox.node`'s
+`env_packages` (nothing else in `sandbox`, which is an agent-phase-only concern there).
+
+The `env_packages` gate is NOT parity with `setup`, which is worth stating precisely because
+it looks like it should be: `setup` (`sandbox.py`) creates a venv for bare `config.python`
+unconditionally and gates only the INSTALL on `env_packages`, so `python: {env_packages: []}`
+still gets an empty venv (and a populated `VIRTUAL_ENV`/PATH) on the `--copy` path. `adopt`
+gates venv creation itself on `env_packages`, so the same config stays a true no-op in place —
+deliberately: there is nothing to install, and re-provisioning an empty venv into a workspace
+that already ran without one would only shadow the interpreter for no benefit. The two paths
+therefore diverge for that one config shape; this is accepted, not accidental. A venv that
+already exists (the ordinary `preserve_to` / non-captured path) is still only discovered,
+never rebuilt.
 
 The unit test in `tests/test_sandbox.py` reads `pyvenv.cfg`. That proves the flag is set,
 not that the result is correct. Every task image installs packages globally: the

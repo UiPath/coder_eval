@@ -130,10 +130,14 @@ def _gate_scope_for_grade(task: TaskDefinition, *, grade_in_place: bool, allow_h
     Both answers follow from ``grade_in_place``, which is why this is one
     function rather than two arguments threaded past each other:
 
-    * ``include_setup_phase`` is ``not grade_in_place``. ``pre_run`` and the
-      sandbox's own provisioning exist only on the ``--copy`` path; ``adopt``
-      runs no installer and the orchestrator skips ``pre_run``, so in place they
-      are not a capability the run dir has.
+    * ``include_setup_phase`` is ``not grade_in_place``. ``pre_run`` and
+      ``template_sources`` (a ``git clone``) exist only on the ``--copy`` path;
+      the orchestrator skips ``pre_run`` in place and ``adopt`` never stages a
+      template, so in place neither is a capability the run dir has.
+      ``env_packages`` installs are NOT part of this flag -- ``adopt`` can now
+      re-provision them too (a captured workspace missing ``.venv`` /
+      ``node_modules``), so :func:`embedded_commands` discloses them
+      unconditionally regardless of ``grade_in_place``.
     * ``include_container_dispatch`` needs ``grade_in_place`` too, since ``--copy``
       is refused by ``grading_sandbox_config`` before it could dispatch anything
       -- naming the image there would be a refusal for something that never runs.
@@ -186,20 +190,18 @@ def embedded_commands(
 ) -> list[str]:
     """Every shell command a rebuilt task definition would run on this host.
 
-    ``include_setup_phase`` covers the two families that exist only on the
-    ``--copy`` path: ``pre_run`` and the sandbox's own provisioning.
-
-    ``post_run`` and ``include_container_dispatch`` are deliberately NOT behind
-    that flag — both are capabilities of the IN-PLACE path, which is the DEFAULT
-    for a run directory. ``post_run`` is filtered against the operator's own
-    baseline, because a refusal that fires on every run directory is read as a
-    formality and waved through.
+    ``include_setup_phase`` covers only ``pre_run`` and a ``template_sources``
+    repo's ``git clone`` -- the two families that exist solely on the ``--copy``
+    path. ``env_packages`` installs, ``post_run`` and
+    ``include_container_dispatch`` are disclosed regardless of it: all three are
+    capabilities of the IN-PLACE path too, which is the DEFAULT for a run
+    directory.
 
     ``isinstance`` narrowing, never ``getattr(c, "command", None)``: an untyped
     probe over a discriminated union is invisible to pyright, so a renamed field
     would silently degrade the only guard on this path to a no-op.
 
-    Rationale: .claude/notes/orchestration.md § Embedded commands
+    Rationale: .claude/notes/orchestration.md § What the gate covers, and why each part is in scope
     """
     from coder_eval.models import (
         AgentJudgeCriterion,
@@ -229,13 +231,13 @@ def embedded_commands(
     # Minus the operator's own universal baseline, which the record did not choose.
     baseline = _operator_baseline_post_run()
     commands += [c.command for c in task.post_run if c.command not in baseline]
+    sandbox = task.sandbox
+    if sandbox.python is not None and sandbox.python.env_packages:
+        commands.append(f"uv pip install {' '.join(sandbox.python.env_packages)}")
+    if sandbox.node is not None and sandbox.node.env_packages:
+        commands.append(f"npm install {' '.join(sandbox.node.env_packages)}")
     if include_setup_phase:
         commands += [c.command for c in task.pre_run]
-        sandbox = task.sandbox
-        if sandbox.python is not None and sandbox.python.env_packages:
-            commands.append(f"uv pip install {' '.join(sandbox.python.env_packages)}")
-        if sandbox.node is not None and sandbox.node.env_packages:
-            commands.append(f"npm install {' '.join(sandbox.node.env_packages)}")
         for source in sandbox.template_sources or []:
             if isinstance(source, RepoSource):
                 commands.append(f"git clone -- {source.url}")
@@ -796,7 +798,10 @@ async def _grade_in_container(
     GRADING pass's fresh directory) at the standard output location, and
     ``workspace`` (the ORIGINAL run's output) at ``CONTAINER_GRADE_WORKSPACE``.
     The grade writes its ``task.json`` into the former, which the caller folds back
-    into the row; the latter is adopted and never written over.
+    into the row; the latter is adopted, and criteria may still mutate it -- and
+    ``Sandbox.adopt`` itself may write a re-provisioned ``.venv``/``node_modules``
+    into it when the workspace is missing one -- but the write is confined to
+    exactly that: this is not a template copy, and no unrelated file is replaced.
 
     ``task_file`` is required and must EXIST here — testing only for ``None`` was
     not enough, and failed on exactly the rows this guard was written for.

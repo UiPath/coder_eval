@@ -10,7 +10,9 @@ content. So each assertion below pins one thing staying untouched.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -86,6 +88,114 @@ def test_adopt_leaves_venv_unset_when_there_is_none(tmp_path: Path) -> None:
     sandbox = _sandbox(python={"env_packages": []})
     sandbox.adopt(_workspace(tmp_path))
     assert sandbox.venv_dir is None
+
+
+@pytest.mark.live
+def test_adopt_reprovisions_env_packages_missing_from_a_captured_workspace(tmp_path: Path) -> None:
+    """`Sandbox.capture_to` (docker-WORKDIR / Harbor `--workspace-dir` grading)
+    excludes `.venv` as noise (`_WORKSPACE_CAPTURE_IGNORE`), so a workspace
+    adopted from a captured WORKDIR never has one -- even though the execute
+    phase installed `env_packages` into it. Without re-provisioning here, a
+    `run_command` criterion silently grades against a bare interpreter missing
+    everything `env_packages` asked for. This is the regression: no `.venv`
+    directory is planted up front (unlike the discovery test above), only
+    `env_packages` is declared, so adopt must build one from scratch.
+
+    A real `uv venv` + PyPI install, so marked `live` (excluded from `make
+    test`): `test_adopt_calls_the_installers_for_a_missing_venv_or_node_modules`
+    below pins the same regression hermetically via mocks.
+    """
+    ws = _workspace(tmp_path)
+    sandbox = _sandbox(python={"env_packages": ["requests"]})
+    sandbox.adopt(ws)
+    assert sandbox.venv_dir == ws.resolve() / ".venv"
+    exit_code, stdout, stderr = sandbox.run_command('python -c "import requests; print(requests.__version__)"')
+    assert exit_code == 0, f"stderr: {stderr}"
+    assert len(stdout.strip()) > 0
+
+
+def test_adopt_calls_the_installers_for_a_missing_venv_or_node_modules(tmp_path: Path) -> None:
+    """Hermetic pin of the same regression as the `live` test above: `requests`
+    is importable in the project env regardless (`--system-site-packages`), so
+    that test would still pass with `_install_packages` deleted from `adopt`.
+    Asserting the installer was CALLED catches that mutation directly."""
+    ws = _workspace(tmp_path)
+    shutil.rmtree(ws / "node_modules")
+    sandbox = _sandbox(python={"env_packages": ["requests"]}, node={"env_packages": ["left-pad"]})
+    with (
+        patch.object(sandbox, "_setup_virtualenv") as mock_venv,
+        patch.object(sandbox, "_install_packages") as mock_pip,
+        patch.object(sandbox, "_install_node_packages") as mock_npm,
+    ):
+        sandbox.adopt(ws)
+    mock_venv.assert_called_once()
+    mock_pip.assert_called_once()
+    mock_npm.assert_called_once()
+
+
+def test_adopt_does_not_reinstall_node_packages_when_node_modules_exists(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)  # _workspace already plants node_modules/pkg
+    sandbox = _sandbox(node={"env_packages": ["left-pad"]})
+    with patch.object(sandbox, "_install_node_packages") as mock_npm:
+        sandbox.adopt(ws)
+    mock_npm.assert_not_called()
+
+
+def test_adopt_does_not_rebuild_an_existing_venv_even_with_env_packages(tmp_path: Path) -> None:
+    """The inverse of the reprovisioning regression: an existing `.venv` is
+    DISCOVERED, never rebuilt, even when `env_packages` is non-empty -- a
+    future edit collapsing `elif self.config.python.env_packages:` (adopt's
+    gate) into an unconditional reprovision would rebuild a graded workspace's
+    venv with no other failing test."""
+    ws = _workspace(tmp_path)
+    (ws / ".venv" / "bin").mkdir(parents=True)
+    sandbox = _sandbox(python={"env_packages": ["requests"]})
+    with (
+        patch.object(sandbox, "_setup_virtualenv") as mock_venv,
+        patch.object(sandbox, "_install_packages") as mock_pip,
+    ):
+        sandbox.adopt(ws)
+    mock_venv.assert_not_called()
+    mock_pip.assert_not_called()
+    assert sandbox.venv_dir == ws.resolve() / ".venv"
+
+
+def test_adopt_removes_a_half_built_venv_when_install_fails(tmp_path: Path) -> None:
+    """A failed install must not latch a half-provisioned `.venv` into the
+    graded tree: the next adopt would silently DISCOVER it and grade against a
+    venv missing some or all of `env_packages`."""
+    ws = _workspace(tmp_path)
+    sandbox = _sandbox(python={"env_packages": ["requests"]})
+
+    def _fake_setup_virtualenv() -> None:
+        sandbox.venv_dir = ws.resolve() / ".venv"
+        sandbox.venv_dir.mkdir(parents=True)
+
+    with (
+        patch.object(sandbox, "_setup_virtualenv", side_effect=_fake_setup_virtualenv),
+        patch.object(sandbox, "_install_packages", side_effect=RuntimeError("network down")),
+        pytest.raises(RuntimeError, match="network down"),
+    ):
+        sandbox.adopt(ws)
+    assert not (ws / ".venv").exists()
+    assert sandbox.venv_dir is None
+
+
+def test_adopt_removes_a_half_built_node_modules_when_install_fails(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)
+    shutil.rmtree(ws / "node_modules")
+    sandbox = _sandbox(node={"env_packages": ["left-pad"]})
+
+    def _fake_install_node_packages() -> None:
+        (ws / "node_modules").mkdir()
+        raise RuntimeError("registry unreachable")
+
+    with (
+        patch.object(sandbox, "_install_node_packages", side_effect=_fake_install_node_packages),
+        pytest.raises(RuntimeError, match="registry unreachable"),
+    ):
+        sandbox.adopt(ws)
+    assert not (ws / "node_modules").exists()
 
 
 def test_adopt_ignores_a_venv_when_python_is_null(tmp_path: Path) -> None:
