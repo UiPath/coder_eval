@@ -28,6 +28,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORK_DIR = REPO_ROOT / "tmp" / "harbor_e2e"
 AGENT_IMPORT_PATH = "coder_eval.harbor.agent:CoderEvalAgent"
+# Where a failing scenario's full export/ + jobs/ tree gets zipped for upload --
+# a print-statement diagnostic only shows what this script thought to ask for
+# (and dies with the runner). A zip preserves everything: docker/agent logs,
+# every task.json/trajectory.json, artifacts/ workspaces -- so a failure can be
+# inspected after the fact instead of guessed at from stdout.
+FAILURE_ARTIFACTS_DIR = REPO_ROOT / "tmp" / "harbor_e2e_failures"
 
 
 @dataclass(frozen=True)
@@ -193,6 +199,24 @@ def assert_scenario_artifacts(scenario: Scenario, trial_dir: Path) -> None:
     )
 
 
+def _zip_scenario_dir(scenario: Scenario) -> Path | None:
+    """Zip a failed scenario's whole ``export/`` + ``jobs/`` tree for upload.
+
+    Best-effort: a zip failure must never mask the real scenario failure it was
+    trying to preserve evidence for.
+    """
+    scenario_dir = WORK_DIR / scenario.name
+    if not scenario_dir.is_dir():
+        return None
+    FAILURE_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        archive = shutil.make_archive(str(FAILURE_ARTIFACTS_DIR / scenario.name), "zip", root_dir=str(scenario_dir))
+    except OSError as exc:
+        print(f"[{scenario.name}] could not zip {scenario_dir} for upload: {exc}", file=sys.stderr)
+        return None
+    return Path(archive)
+
+
 def main() -> int:
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     failures: list[str] = []
@@ -207,6 +231,9 @@ def main() -> int:
         except Exception as exc:
             print(f"[{scenario.name}] FAILED: {exc}", file=sys.stderr)
             failures.append(scenario.name)
+            archive = _zip_scenario_dir(scenario)
+            if archive is not None:
+                print(f"[{scenario.name}] full export/+jobs/ tree zipped to {archive} for upload", file=sys.stderr)
 
     print("\n=== Summary ===")
     for scenario in SCENARIOS:

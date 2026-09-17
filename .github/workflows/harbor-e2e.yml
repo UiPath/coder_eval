@@ -91,3 +91,17 @@ jobs:
 
       - name: Run Harbor E2E scenarios
         run: python .github/scripts/harbor_e2e.py
+
+      - name: Upload failing scenario artifacts
+        # A failing scenario's full export/ + jobs/ tree (docker/agent logs,
+        # every task.json/trajectory.json, artifacts/ workspaces) zipped by the
+        # script above -- so a failure can be inspected after the fact instead
+        # of guessed at from stdout. Empty on a fully green run; `if: failure()`
+        # still uploads whatever any failing scenario left behind.
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: harbor-e2e-failure-artifacts
+          path: tmp/harbor_e2e_failures/
+          retention-days: 14
+          if-no-files-found: ignore
