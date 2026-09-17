@@ -698,9 +698,10 @@ cannot disagree with what was sent.
 
 ## Skills, per harness
 
-`orchestration/plugin_staging.py` stages every `plugins:` entry into one canonical root,
-`<run_dir>/plugin_root`, before `Agent.start`. Each harness then receives the SAME layout:
-`.claude-plugin/plugin.json` and `skills/<name>` links. The staging exists because each
+`orchestration/plugin_staging.py` stages every `plugins:` entry into one root,
+`<run_dir>/plugin_root`, before `Agent.start`. Each harness receives the SAME layout:
+`skills/<name>` links (read by every harness) and `plugins/<plugin>` (each entry whole,
+read by Claude Code). The staging exists because each
 adapter used to scan the authored path its own way. claude-code loaded nothing from a bare
 skills directory, with no error, so an activation suite scored recall 0.0 and read exactly
 like a skill that never triggers.
@@ -714,11 +715,29 @@ like a skill that never triggers.
   skill that loads. Confirmed by the plugins reference ("Adds to the default: `skills`")
   and a CLI 2.1.273 spike on 2026-09-16; the moved reader had treated the manifest as a
   REPLACEMENT, which dropped the default `skills/` of any plugin that declared extras.
-- **Only skills are staged.** A plugin's agents, hooks, commands and MCP servers are
-  dropped on every harness, claude-code included. That also removes a confound: a project
-  subagent beside `skills/` can no longer answer the request the skill should answer.
-- **The staged manifest is `{"name": "coder-eval-plugins"}` and nothing else.** A
-  2026-09-17 spike with `claude -p --plugin-dir` showed a staged root whose manifest declared
+- **Claude Code loads each entry as a whole plugin.** On `main` each `plugins:` path went
+  to the SDK as its own plugin, so its agents, commands, hooks, MCP servers and
+  `${CLAUDE_PLUGIN_ROOT}` files loaded under the plugin's own name. Staging once reduced
+  every entry to its skills under one merged manifest name, which dropped
+  all of that and renamed the skills. It was restored on 2026-09-16: the author chooses the
+  scope by choosing the path, so a suite that must not load project agents points `path`
+  at the skills directory. That reverses the earlier "removes a confound" argument.
+  Codex, OpenCode, Pi and Antigravity still receive skills only, as on `main`.
+- **What Claude Code loads from a `--plugin-dir` (CLI 2.1.274 spike, 2026-09-16).** The
+  manifest `name` wins over the directory name; with no manifest the directory name is the
+  plugin name; a symlinked plugin root loads whole; a bare skills directory loads nothing;
+  a manifest plugin whose skills sit only at `<root>/<name>/SKILL.md` loads nothing; a
+  manifest `skills` path outside the root loads nothing. So staging links a plugin root
+  whole under `plugins/<name>`, wraps a root Claude Code would load no skill from (a bare
+  skills directory, or that manifest layout, which then loads skills only) in
+  `plugins/<name>/.claude-plugin/plugin.json` plus a `skills` link, and refuses an
+  out-of-root manifest path and two entries with one plugin name at resolution. Plugin and
+  skill names become directory entries, so both must be one path segment and are compared
+  ignoring case: on a case-folding filesystem a second `Foo` link failed with EEXIST and the
+  copy fallback wrote plugin B into plugin A's source (review, 2026-09-16). The fallback now
+  runs only when symlinks cannot be created at all, and copies symlinks as links.
+- **The wrapper manifest is `{"name": "<plugin>"}` and nothing else.** A 2026-09-17 spike
+  with `claude -p --plugin-dir` showed a staged root whose manifest declared
   `"skills": ["skills"]` load no skill; a 2026-09-16 spike on CLI 2.1.273 loaded a real
   `["./skills"]` fine. The name-only manifest loads the `skills/` default either way.
 - **Refusal is at resolution.** `validate_plugins` runs in `validate_resolved_task`, so a
@@ -734,7 +753,8 @@ like a skill that never triggers.
 
 Delivery, per harness:
 
-- **Claude Code** takes the root as an SDK `{"type": "local", "path": plugin_root}` plugin.
+- **Claude Code** takes one SDK `{"type": "local", "path": ...}` plugin per
+  `staged_plugin_dirs(plugin_root)`, never the staged root itself.
 - **OpenCode** appends `<plugin_root>/skills` to `skills.paths` via
   `OPENCODE_CONFIG_CONTENT`, which the CLI merges as a final local-scope layer. That was
   chosen over writing `<sandbox>/.opencode/skills/` because it writes nothing into the

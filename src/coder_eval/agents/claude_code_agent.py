@@ -63,6 +63,7 @@ from coder_eval.models import (
 from coder_eval.models import (
     AssistantMessage as AssistantMessageTelemetry,
 )
+from coder_eval.orchestration.plugin_staging import staged_plugin_dirs
 from coder_eval.pricing import price_turn
 from coder_eval.streaming.callbacks import StreamCallback
 from coder_eval.streaming.emitter import Generation, TurnEmitter, TurnOutcome
@@ -668,7 +669,7 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
                 subprocess (typically the resolved ``SandboxConfig.mock_path_dirs``).
             plugin_tools_dir: Canonical ``node_modules/@uipath`` to export as
                 ``PLUGIN_TOOLS_DIR``. An external env-var pin still wins.
-            plugin_root: The staged plugin root, loaded as one local plugin.
+            plugin_root: The staged plugin root; each ``plugins/<name>`` is loaded as one local plugin.
         """
         self.working_directory = Path(working_directory)
         self._env_path_prepend = list(env_path_prepend or [])
@@ -974,7 +975,9 @@ class ClaudeCodeAgent(Agent[ClaudeCodeAgentConfig]):
         assert self.working_directory is not None  # guaranteed by communicate's guard above
 
         plugins: list[SdkPluginConfig] = (
-            [{"type": "local", "path": str(self._plugin_root)}] if self._plugin_root is not None else []
+            [{"type": "local", "path": str(d)} for d in staged_plugin_dirs(self._plugin_root)]
+            if self._plugin_root is not None
+            else []
         )
 
         # Per-turn cost-correlation headers (LiteLLM only): the run/task tag plus

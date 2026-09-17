@@ -1,12 +1,13 @@
-"""Stage every ``agent.plugins`` entry into one canonical plugin root each harness receives.
+"""Stage every ``agent.plugins`` entry into one plugin root each harness receives.
 
-The canonical root is ``<root>/.claude-plugin/plugin.json`` plus
-``<root>/skills/<name>`` (a symlink to the authored skill directory, or a copy where
-symlinks fail). A plugin root is read the way Claude Code reads it: the default
-``skills/`` plus every manifest-declared path, where a path may parent skills or be one
-skill, and a root holding ``SKILL.md`` is a single-skill plugin. A bare skills
-directory is accepted too. A skill's name is its ``SKILL.md`` frontmatter ``name``,
-else its directory name.
+The root holds ``<root>/skills/<name>``, a skills index every harness reads (a symlink
+to the authored skill directory, or a copy where symlinks fail), and
+``<root>/plugins/<plugin>``, each authored plugin whole for a harness that loads full
+plugins (a bare skills directory gets a name-only manifest wrapper). A plugin root is
+read the way Claude Code reads it: the default ``skills/`` plus every manifest-declared
+path inside the root, where a path may parent skills or be one skill, and a root holding
+``SKILL.md`` is a single-skill plugin. A bare skills directory is accepted too. A
+skill's name is its ``SKILL.md`` frontmatter ``name``, else its directory name.
 
 Rationale: .claude/notes/agents.md § Skills, per harness
 """
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,23 +32,22 @@ if TYPE_CHECKING:
     from coder_eval.models import LocalPluginConfig, TaskDefinition
 
 
-STAGED_MANIFEST: dict[str, str] = {"name": "coder-eval-plugins"}
-
 _MANIFEST_RELPATH = (".claude-plugin", "plugin.json")
 _DEFAULT_SKILLS_SUBDIR = "skills"
+_PLUGINS_SUBDIR = "plugins"
 _SKILL_FILE = "SKILL.md"
 
 
 @dataclass(frozen=True)
 class StagedPlugins:
-    """The staged root handed to ``Agent.start`` and the skill names it offers."""
+    """The staged root handed to ``Agent.start`` (``skills/`` and ``plugins/``) and the skill names it offers."""
 
     root: Path
     skills_offered: tuple[str, ...]
 
 
 class PluginStagingError(TaskResolutionError):
-    """A plugins: entry that yields no skill, a duplicate skill name, or an unresolvable path."""
+    """A plugins: entry that yields no skill, a duplicate skill or plugin name, or an unresolvable path."""
 
 
 def resolve_plugin_path(raw: str) -> Path:
@@ -66,21 +66,42 @@ def resolve_plugin_path(raw: str) -> Path:
     return root
 
 
-def _declared_skill_paths(root: Path) -> list[Path]:
+def _read_manifest(root: Path) -> dict[str, Any]:
+    """The parsed ``.claude-plugin/plugin.json``, or ``{}`` when it is absent, unreadable or not an object."""
     manifest = root.joinpath(*_MANIFEST_RELPATH)
-    declared: list[str] = []
-    if manifest.is_file():
-        try:
-            data: Any = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            data = None
-        if isinstance(data, dict):
-            value = data.get("skills")
-            if isinstance(value, str):
-                declared = [value]
-            elif isinstance(value, list):
-                declared = [entry for entry in value if isinstance(entry, str)]
-    return [(root / relative).resolve() for relative in declared]
+    if not manifest.is_file():
+        return {}
+    try:
+        data: Any = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _declared_skill_paths(root: Path) -> list[Path]:
+    value = _read_manifest(root).get("skills")
+    if isinstance(value, str):
+        declared = [value]
+    elif isinstance(value, list):
+        declared = [entry for entry in value if isinstance(entry, str)]
+    else:
+        declared = []
+    paths: list[Path] = []
+    for relative in declared:
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root):
+            raise PluginStagingError(
+                f"agent.plugins {root}: manifest skills path {relative!r} leaves the plugin root; "
+                + "Claude Code loads no skill from it"
+            )
+        paths.append(path)
+    return paths
+
+
+def _plugin_name(root: Path) -> str:
+    """The manifest ``name`` when it is a non-empty string, else the directory name: Claude Code's rule."""
+    name = _read_manifest(root).get("name")
+    return name if isinstance(name, str) and name else root.name
 
 
 def _skill_name(skill_dir: Path) -> str:
@@ -97,8 +118,8 @@ def _skill_name(skill_dir: Path) -> str:
     return skill_dir.name
 
 
-def _skill_dirs(root: Path) -> list[Path]:
-    """Every skill directory one ``plugins:`` root offers, in Claude Code's reading order."""
+def _plugin_skill_dirs(root: Path) -> list[Path]:
+    """The skill directories Claude Code itself loads from ``root`` given as a plugin, in its reading order."""
     candidates = [root / _DEFAULT_SKILLS_SUBDIR, *_declared_skill_paths(root)]
     found: list[Path] = []
     for candidate in candidates:
@@ -108,26 +129,40 @@ def _skill_dirs(root: Path) -> list[Path]:
             found += [skill_file.parent for skill_file in sorted(candidate.glob(f"*/{_SKILL_FILE}"))]
     if found:
         return found
-    if (root / _SKILL_FILE).is_file():
-        return [root]
-    return [skill_file.parent for skill_file in sorted(root.glob(f"*/{_SKILL_FILE}"))]
+    return [root] if (root / _SKILL_FILE).is_file() else []
+
+
+def _skill_dirs(root: Path) -> list[Path]:
+    """Every skill directory one ``plugins:`` root offers: the plugin reading, else a bare skills directory."""
+    return _plugin_skill_dirs(root) or [skill_file.parent for skill_file in sorted(root.glob(f"*/{_SKILL_FILE}"))]
+
+
+def _claim_name(kind: str, name: str, source: Path, taken: Mapping[str, Path], hint: str) -> None:
+    """Refuse a staged name that is not one path segment, or that another source took (ignoring case).
+
+    Case is ignored because the staged names are directory entries on a filesystem that may fold case.
+    """
+    if name in {"", ".", ".."} or any(char in name for char in "/\\\x00"):
+        raise PluginStagingError(f"agent.plugins {source}: {kind} name {name!r} is not one path segment; {hint}")
+    for other, previous in taken.items():
+        if other.casefold() == name.casefold() and previous != source:
+            raise PluginStagingError(
+                f"ambiguous {kind} name {name!r}: agent.plugins offers it from both {previous} and {source}; {hint}"
+            )
 
 
 def scan_plugin_skills(plugins: Sequence[LocalPluginConfig]) -> dict[str, Path]:
     """Skill name -> its directory, over every entry and every accepted layout.
 
     Raises:
-        PluginStagingError: an unresolvable path, a skill name from two sources, or no skill at all.
+        PluginStagingError: an unresolvable path, a skill name that is not one path segment, a skill
+            name from two sources, or no skill at all.
     """
     skills: dict[str, Path] = {}
     for plugin in plugins:
         for skill_dir in _skill_dirs(resolve_plugin_path(plugin["path"])):
             name, source = _skill_name(skill_dir), skill_dir.resolve()
-            previous = skills.get(name)
-            if previous is not None and previous != source:
-                raise PluginStagingError(
-                    f"ambiguous skill name {name!r}: agent.plugins offers it from both {previous} and {source}"
-                )
+            _claim_name("skill", name, source, skills, "rename it in its SKILL.md frontmatter")
             skills[name] = source
     if not skills:
         paths = [plugin["path"] for plugin in plugins]
@@ -138,6 +173,27 @@ def scan_plugin_skills(plugins: Sequence[LocalPluginConfig]) -> dict[str, Path]:
     return skills
 
 
+def scan_plugin_roots(plugins: Sequence[LocalPluginConfig]) -> dict[str, tuple[Path, bool]]:
+    """Plugin name -> (resolved root, wrapped), where a wrapped root is a bare skills directory.
+
+    A root is wrapped when Claude Code would load no skill from it as a plugin but it
+    holds ``<name>/SKILL.md`` skills. Every other root, including one with no skill, is
+    linked whole.
+
+    Raises:
+        PluginStagingError: an unresolvable path, a plugin name that is not one path segment,
+            or one plugin name from two roots.
+    """
+    roots: dict[str, tuple[Path, bool]] = {}
+    for plugin in plugins:
+        root = resolve_plugin_path(plugin["path"])
+        name = _plugin_name(root)
+        taken = {other: previous for other, (previous, _wrapped) in roots.items()}
+        _claim_name("plugin", name, root, taken, "set a distinct name in its .claude-plugin/plugin.json")
+        roots[name] = (root, not _plugin_skill_dirs(root) and bool(_skill_dirs(root)))
+    return roots
+
+
 def validate_plugins(task: TaskDefinition) -> None:
     """Resolution-time refusal; no-op when plugins is unset or empty.
 
@@ -146,12 +202,14 @@ def validate_plugins(task: TaskDefinition) -> None:
     placeholder is checked on its expanded row instead.
 
     Raises:
-        PluginStagingError: see ``scan_plugin_skills``, or a ``skill_triggered`` target not offered.
+        PluginStagingError: see ``scan_plugin_skills`` and ``scan_plugin_roots``, or a ``skill_triggered``
+            target not offered.
     """
     plugins = task.agent.plugins if task.agent is not None else None
     if not plugins:
         return
     offered = scan_plugin_skills(plugins)
+    scan_plugin_roots(plugins)
     targets = {c.skill_name for c in task.success_criteria if isinstance(c, SkillTriggeredCriterion)}
     missing = sorted(name for name in targets if "${" not in name and name not in offered)
     if missing:
@@ -163,33 +221,63 @@ def validate_plugins(task: TaskDefinition) -> None:
 
 
 def link_or_copy(source: Path, target: Path) -> None:
-    """Symlink ``target`` to ``source``, or copy the tree where symlinks are unavailable."""
+    """Symlink ``target`` to ``source``, or copy the tree where symlinks are unavailable.
+
+    Only a failure to create symlinks at all falls back: an existing or unreachable ``target`` raises. The copy
+    keeps symlinks as links and skips ``target`` and its ancestors, so a source that contains the target is not
+    copied into itself.
+    """
     try:
         target.symlink_to(source, target_is_directory=True)
+    except (FileExistsError, FileNotFoundError):
+        raise
     except (OSError, NotImplementedError):
-        shutil.copytree(source, target, dirs_exist_ok=True)
+        resolved = target.resolve()
+        shutil.copytree(
+            source,
+            target,
+            symlinks=True,
+            dirs_exist_ok=True,
+            ignore=lambda directory, names: [name for name in names if resolved.is_relative_to(Path(directory) / name)],
+        )
 
 
 def stage_plugins(plugins: Sequence[LocalPluginConfig], staging_dir: Path) -> StagedPlugins:
-    """Write ``<staging_dir>/.claude-plugin/plugin.json`` and ``<staging_dir>/skills/<name>``.
+    """Write ``<staging_dir>/skills/<name>`` per skill and ``<staging_dir>/plugins/<plugin>`` per entry.
 
-    The returned root is absolute: every harness runs with the sandbox as its cwd. An
-    existing ``staging_dir`` is removed first, so a re-executed row starts clean.
+    A plugin entry is linked whole; a bare skills directory becomes
+    ``plugins/<plugin>/.claude-plugin/plugin.json`` (name only) plus a ``skills`` link. The
+    returned root is absolute: every harness runs with the sandbox as its cwd. An existing
+    ``staging_dir`` is removed first, so a re-executed row starts clean.
 
     Raises:
-        PluginStagingError: see ``scan_plugin_skills``.
+        PluginStagingError: see ``scan_plugin_skills`` and ``scan_plugin_roots``.
     """
     skills = scan_plugin_skills(plugins)
+    roots = scan_plugin_roots(plugins)
     staging_dir = staging_dir.absolute()
     if staging_dir.is_symlink() or staging_dir.is_file():
         staging_dir.unlink()
     elif staging_dir.exists():
         shutil.rmtree(staging_dir)
-    manifest = staging_dir.joinpath(*_MANIFEST_RELPATH)
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps(STAGED_MANIFEST), encoding="utf-8")
     skills_dir = staging_dir / _DEFAULT_SKILLS_SUBDIR
-    skills_dir.mkdir()
+    skills_dir.mkdir(parents=True)
     for name, source in sorted(skills.items()):
         link_or_copy(source, skills_dir / name)
+    plugins_dir = staging_dir / _PLUGINS_SUBDIR
+    plugins_dir.mkdir()
+    for name, (root, wrapped) in sorted(roots.items()):
+        if wrapped:
+            manifest = plugins_dir.joinpath(name, *_MANIFEST_RELPATH)
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({"name": name}), encoding="utf-8")
+            link_or_copy(root, plugins_dir / name / _DEFAULT_SKILLS_SUBDIR)
+        else:
+            link_or_copy(root, plugins_dir / name)
     return StagedPlugins(root=staging_dir, skills_offered=tuple(sorted(skills)))
+
+
+def staged_plugin_dirs(root: Path) -> list[Path]:
+    """Each ``<root>/plugins/<plugin>`` a staged root holds, in name order; empty without a ``plugins/``."""
+    plugins_dir = root / _PLUGINS_SUBDIR
+    return sorted(plugins_dir.iterdir()) if plugins_dir.is_dir() else []

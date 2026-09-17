@@ -112,7 +112,7 @@ async def _probe_claude_system_prompt(tmp_path: Path, _mp: pytest.MonkeyPatch) -
 async def _probe_claude_plugins(tmp_path: Path, _mp: pytest.MonkeyPatch) -> None:
     root = _plugin_root(tmp_path)
     options, _ = await _claude(tmp_path, plugin_root=root)
-    assert options.plugins == [{"type": "local", "path": str(root)}]
+    assert options.plugins == [{"type": "local", "path": str(root / "plugins" / "plugin")}]
 
 
 async def test_claude_loads_no_plugin_without_a_plugin_root(tmp_path: Path) -> None:

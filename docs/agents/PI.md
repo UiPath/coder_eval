@@ -231,8 +231,8 @@ docker` whenever the task prompt or workspace is not fully trusted.
   directory both work. Pi therefore **can run activation suites**:
   `skill_triggered` detects Pi's engagement agent-agnostically (the agent `read`s
   the full `SKILL.md`, a `read`→`Read` call whose `path` matches `skills/<name>/`).
-  Only skills are staged; a plugin's agents, hooks, commands and MCP servers are not
-  wired. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
+  Only skills reach Pi; a plugin's agents, hooks, commands and MCP servers are loaded
+  on Claude Code only. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
 - **`system_prompt_file` is not read by the adapter.** Use `system_prompt` (inline)
   instead — it is enforced via `--append-system-prompt`.
 - **`max_tool_calls` counts resolved tool calls, not Pi turns.** The adapter counts

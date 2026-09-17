@@ -16,7 +16,7 @@ runs/<run_id>/<variant_id>/<task_id>/<NN>/{task.json, task.log, artifacts/}
 - `task.json.graded` — present only after `coder-eval execute --driver docker` refused a container's verdict: the runtime image predated `execute` and graded anyway, so the runner quarantines the graded record here rather than leaving it readable as `task.json`, where a later `--resume` / `aggregate` would fold in exactly the row it declined to publish. Diagnostic-only; `rglob("task.json")` consumers do not match it.
 - `grade.log` — present only after a DETACHED grade over this directory (`coder-eval run --resume`). The grading pass's own log. It is a separate file because the log handler truncates whatever file it opens, so writing to `task.log` would destroy the agent trajectory log the run already paid for.
 - `task.log` — the human-readable task log; `artifacts/` — files the agent produced.
-- `plugin_root/` — the staged plugin root the agent was handed; symlinks into the authored plugin; present only when the task sets `agent.plugins`.
+- `plugin_root/` — the staged plugin root the agent was handed: `skills/<name>` links into the authored skills and `plugins/<name>` (each authored plugin whole); present only when the task sets `agent.plugins`.
 
 **Scope-marker files** (used to detect what a given path represents):
 

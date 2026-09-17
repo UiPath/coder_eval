@@ -10,12 +10,14 @@ tags: [activation]
 
 # REPLACE: the skill under test must be REACHABLE by the sandboxed agent. `path` names a
 # plugin root (`<path>/skills/<skill-name>/SKILL.md`) or a bare skills directory
-# (`<path>/<skill-name>/SKILL.md`); both are staged. Only skills are staged. For
-# `.claude/skills/my-skill/SKILL.md`, `.claude` works and `.claude/skills` works too.
-# Supply it through an environment variable so the committed suite stays portable
-# across machines and CI:
+# (`<path>/<skill-name>/SKILL.md`); both are staged. Claude Code loads the whole plugin
+# (agents, commands, hooks); other harnesses get its skills. To measure the skill alone,
+# point `path` at the skills directory: for `.claude/skills/my-skill/SKILL.md`, use
+# `.claude/skills`. `.claude` also works, but on Claude Code it also loads the project's
+# agents and commands. Supply it through an environment variable so the committed suite
+# stays portable across machines and CI:
 #
-#   export SKILL_SOURCE_PATH=/abs/path/to/.claude
+#   export SKILL_SOURCE_PATH=/abs/path/to/.claude/skills
 #
 # An unset variable, or a path with no skill, fails `coder-eval plan` with a config error.
 agent:

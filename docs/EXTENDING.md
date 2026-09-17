@@ -157,8 +157,9 @@ Implement these three abstract methods:
 - [ ] `async def communicate(self, user_input, *, iteration: int, stream_callback=None, timeout=None, should_stop: Callable[[], StopReason | None] | None = None) -> TurnOutcome`
 - [ ] `async def stop(self) -> None`
 
-`plugin_root` is the staged plugin root (`<root>/skills/<name>/SKILL.md`), or `None` when
-the task sets no plugins. Deliver it the harness's native way; do not scan for skills.
+`plugin_root` is the staged plugin root, or `None` when the task sets no plugins. It holds
+`<root>/skills/<name>/SKILL.md` (every harness) and `<root>/plugins/<name>` (each authored
+plugin whole, for a harness that loads full plugins). Deliver it the harness's native way; do not scan for skills.
 
 `should_stop` is the run's single stop poll. The `TurnMonitor` owns it: it reads your
 event stream and decides every stop (armed criteria, the tool-call cap, the token and USD

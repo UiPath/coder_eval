@@ -1323,7 +1323,7 @@ class DockerRunner:
         """Each plugin path as authored, plus each skill source outside every plugin root.
 
         Staging links a skill to its RESOLVED source, which can sit outside the root
-        (a symlinked skill, a manifest ``skills: ../x``), so that source is mounted too.
+        (a symlinked skill), so that source is mounted too.
         """
         plugins = (self.rt.task.agent.plugins if self.rt.task.agent else None) or []
         paths = [plugin["path"] for plugin in plugins]

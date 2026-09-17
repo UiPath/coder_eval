@@ -82,8 +82,10 @@ class Agent[ConfigT: BaseAgentConfig](ABC):
                 instead of walking up from CWD. An external ``PLUGIN_TOOLS_DIR`` in
                 the process environment still wins. Implementations that don't shell
                 out may ignore this argument.
-            plugin_root: The staged canonical plugin root (``<root>/skills/<name>/SKILL.md``),
-                or None when the task sets no plugins. Deliver it the harness's native way.
+            plugin_root: The staged plugin root, or None when the task sets no plugins. It holds
+                ``<root>/skills/<name>/SKILL.md`` (every harness) and ``<root>/plugins/<name>`` (each
+                authored plugin whole, for a harness that loads full plugins). Deliver it the
+                harness's native way.
         """
         pass
 

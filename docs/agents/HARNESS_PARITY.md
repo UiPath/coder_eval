@@ -666,14 +666,21 @@ Each `agent.plugins[].path` names a plugin root or a bare skills directory
 declared path may be one skill), or the root itself when it holds `SKILL.md`. A skill's name
 is its `SKILL.md` frontmatter `name`, else its directory name. Every layout works on every
 harness. Before the
-agent starts, coder-eval stages the skills into one root, `<run_dir>/plugin_root`: a
-`.claude-plugin/plugin.json` that names `coder-eval-plugins`, and one `skills/<name>` symlink
-per skill. Each harness receives that root in its native way. Only skills are staged: a
-plugin's `agents/`, `commands/`, `hooks/` and `.mcp.json` do not reach any harness, Claude Code
-included. Claude Code names staged skills `coder-eval-plugins:<skill>`, not `<plugin>:<skill>`.
-Files beside the skills also stay behind: a skill that reads `${CLAUDE_PLUGIN_ROOT}/scripts/`
-or a shared `references/` directory at the plugin root cannot find it. Keep a skill's files
-inside its own `<name>/` directory.
+agent starts, coder-eval stages every entry into `<run_dir>/plugin_root`: one
+`skills/<name>` symlink per skill, and one `plugins/<plugin>` per entry.
+
+Claude Code loads each entry as a whole plugin under its own name (`<plugin>:<skill>`):
+its agents, commands, hooks, MCP servers and the files beside its skills load too, so
+`${CLAUDE_PLUGIN_ROOT}` works. The plugin name is the manifest `name`, else the directory
+name. A bare skills directory becomes a plugin named after the directory that holds its
+skills only. Codex, OpenCode, Pi and Antigravity receive the skills only.
+
+Pointing `path` at a project `.claude` directory also loads its agents and commands on
+Claude Code. To load the skills alone, point `path` at the skills directory itself. Two
+entries with the same plugin name, or a manifest `skills` path outside its plugin root,
+fail `coder-eval plan`. Under `driver: docker` the authored plugin roots are mounted
+read-only, so a hook or MCP server that writes into its plugin root, or needs a binary the
+image does not have, fails.
 A path that offers no skill, two paths that offer the same skill name, or a `skill_triggered`
 criterion whose `skill_name` the plugins do not offer fail `coder-eval plan`, before the run is
 paid for. `environment_info.skills_offered` records the staged skill names; re-grading a

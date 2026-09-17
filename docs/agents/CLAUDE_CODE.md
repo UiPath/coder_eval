@@ -194,9 +194,11 @@ simulator force `[]` for the same reason.)
 - **Plugins** are supplied as `plugins: [{type: local, path: …}]`. Point `path` at a
   plugin root (`<path>/skills/<name>/SKILL.md`) or at a bare skills directory
   (`<path>/<name>/SKILL.md`). coder-eval stages both into `<run_dir>/plugin_root` and
-  hands that root to the SDK. A path with no skill fails `plan`. Only skills are
-  staged: a plugin's `agents/`, `commands/` and `hooks/` do not reach the evaluated
-  agent. See [Plugin staging](HARNESS_PARITY.md#plugin-staging).
+  hands the SDK one local plugin per entry. A plugin root loads whole under its own name
+  (`<plugin>:<skill>`), with its agents, commands, hooks and MCP servers; a bare skills
+  directory loads its skills only. A path with no skill fails `plan`. To measure a skill
+  alone, point `path` at the skills directory. See
+  [Plugin staging](HARNESS_PARITY.md#plugin-staging).
 - **`PLUGIN_TOOLS_DIR`** pins the canonical `node_modules/@uipath` directory for
   UiPath CLI plugin discovery; when unset the sandbox derives it from the resolved
   `uip` binary. See [User Guide → Environment Variables](../USER_GUIDE.md#environment-variables).
