@@ -125,6 +125,38 @@ walk silently finds nothing: `atif_emit.emit_trajectories_for_run` (which would 
 trajectory, leaving Harbor's token/cost totals empty) and
 `logging_config.aggregate_task_logs` (which would write an empty `experiment.log`).
 
+### A static template is single-task only
+
+A placeholder-free template is the identity function, so every task in a multi-task
+`run`/`execute` would resolve `--logging-dir`/`--artifacts-dir` to the SAME directory and
+overwrite each other's `task.json`/artifacts. `run_batch` refuses this loud
+(`ValueError`) when `len(resolved_tasks) > 1` and either template has no `${...}`
+placeholders (`path_utils.dir_template_is_static`), mirroring the pre-existing
+`--workspace-dir` + multi-task rejection. Static paths exist for exactly the single-task
+case below.
+
+### A flat run_dir needs no special case in run_batch
+
+Harbor's single-task, static-template mode writes `task.json`/`task.html`/`task.log`/
+artifacts flat at the top-level `run_dir` instead of the usual
+`<variant>/<task_id>/<NN>` nesting -- the multi-task guard above already guarantees
+exactly one resolved task here, so that nesting only exists to disambiguate siblings that
+can't occur. A flat `run_dir` also means `trajectory.json` (`emit_trajectories_for_run`'s
+sibling write) lands at a fixed, predictable path instead of requiring a recursive glob.
+`run_batch`'s `run_single` needs no `workspace_dir` special case for this: `rt.run_dir` IS
+the resolved `logging_dir_template`, so "flat" is simply what a static template resolves
+to, not a mode this seam has to detect.
+
+### CoderEvalAgent passes both templates as static paths
+
+`harbor/agent.py`'s `CoderEvalAgent.run()` passes `--logging-dir`/`--artifacts-dir` as two
+STATIC paths (Harbor's own agent logs dir, and the container's WORKDIR via `$(pwd)`) rather
+than templates with placeholders — the case the identity-function property above exists for.
+Because artifacts are no longer a child of the logging dir, nothing lands twice; because the
+artifacts destination IS the workspace, `capture_as`'s self-referential guard makes the copy
+a no-op. `--run-dir` still points at `_THROWAWAY_RUN_DIR` (`/tmp/coder-eval-run`), never
+substituted into either template, for the reason in "What run_dir still owns" above.
+
 ## Judge persistence
 
 A judge transcript — tool calls, raw verdict, rendered prompt, system prompt — runs 10-100

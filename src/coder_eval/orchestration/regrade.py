@@ -392,23 +392,11 @@ def _fall_back_to_source(
 def default_workspace(run_dir: Path, prior: EvaluationResult, *, artifacts_dir: Path | None = None) -> Path:
     """Locate the workspace a finished run left behind.
 
-    ``sandbox_path`` is authoritative when it still exists; otherwise the
-    preserved artifacts tree, where preservation nests the workspace under the
-    task id.
-
-    RAISES rather than guessing when neither is conclusive — grading the WRONG
-    directory makes every path-relative criterion fail as a locating artifact and
-    reports that as an ordinary score.
-
-    ``artifacts_dir`` is the caller's own resolved ``artifacts_dir_template`` for
-    this task (the FINAL directory). Since that template may place artifacts
-    outside ``run_dir`` entirely, it is added as a second TRUSTED ROOT and
-    preferred as the candidate. Widening the roots — never relaxing the check —
-    is what keeps the security property below intact: roots are always
-    operator-supplied, candidates always come from the untrusted record.
-
-    **Every** return goes through ``_contained``, checked against ``run_dir`` and
-    ``artifacts_dir``.
+    Precedence: ``artifacts_dir`` (the caller's resolved ``artifacts_dir_template``, an
+    operator-supplied second TRUSTED ROOT), then the recorded ``sandbox_path``, then the
+    preserved artifacts tree. RAISES rather than guessing when none is conclusive, and
+    every return is contained within ``run_dir``/``artifacts_dir`` — never relaxed, only
+    widened.
 
     Rationale: .claude/notes/orchestration.md § Locating the workspace a finished run left behind
     """

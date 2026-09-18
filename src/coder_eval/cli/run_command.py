@@ -29,12 +29,7 @@ from ..models import (
     TaskResult,
 )
 from ..orchestration.config import BatchRunConfig
-from ..path_utils import (
-    DEFAULT_LOGGING_DIR_TEMPLATE,
-    create_latest_symlink,
-    format_task_log_id,
-    resolve_dir_template,
-)
+from ..path_utils import create_latest_symlink, format_task_log_id
 from ..streaming.callbacks import CompositeStreamCallback
 from ..streaming.renderers import LoggingStreamRenderer, RichStreamRenderer
 from .console import console
@@ -705,46 +700,30 @@ async def _run_all_tasks(
         )
 
         # Aggregate task logs into run.log
-        from ..logging_config import aggregate_task_logs
 
         # Over the resolved logging dirs, not a run_dir walk: an overridden
         # logging_dir_template need not live under run_dir, and the walk would
         # silently aggregate nothing (empty experiment.log, no error).
-        aggregate_task_logs(
-            run_dir,
-            task_dirs=[
-                config.resolve_logging_dir(
-                    row.get("variant_id") or "default",
-                    row["task_id"],
-                    row.get("replicate_index") or 0,
-                )
-                for row in summary.task_results
-                if row.get("task_id")
-            ],
-        )
+        # summary.task_results rows are plain dicts (RunSummary persists them
+        # that way), carrying the same variant/task/replicate the logging dir was
+        # built from.
+        task_dirs = [
+            config.resolve_logging_dir(
+                row.get("variant_id") or "default",
+                row["task_id"],
+                row.get("replicate_index") or 0,
+            )
+            for row in summary.task_results
+            if row.get("task_id")
+        ]
+
+        from ..logging_config import aggregate_task_logs
+
+        aggregate_task_logs(run_dir, task_dirs=task_dirs)
 
         if format == "harbor":
             from ..harbor.atif_emit import emit_trajectories_for_run
 
-            # Resolved from the SAME template the run wrote task.json with, rather
-            # than globbing run_dir: an overridden logging dir need not live under
-            # run_dir at all (Harbor points it at its own agent logs dir), so the
-            # walk would translate nothing.
-            logging_template = logging_dir if logging_dir is not None else DEFAULT_LOGGING_DIR_TEMPLATE
-            # summary.task_results rows are plain dicts (RunSummary persists them
-            # that way), carrying the same variant/task/replicate the logging dir was
-            # built from.
-            task_dirs = [
-                resolve_dir_template(
-                    logging_template,
-                    run_dir=run_dir,
-                    variant_id=row.get("variant_id") or "default",
-                    task_id=row["task_id"],
-                    replicate_index=row.get("replicate_index") or 0,
-                )
-                for row in summary.task_results
-                if row.get("task_id")
-            ]
             written = emit_trajectories_for_run(task_dirs)
             console.print(f"[dim]Wrote {len(written)} trajectory.json (ATIF) file(s)[/dim]")
 

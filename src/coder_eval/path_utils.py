@@ -177,28 +177,11 @@ def replicate_subdir_name(replicate_index: int) -> str:
 
 
 # The run's on-disk layout, as data rather than as path joins spread across the
-# orchestrator. Both are resolved LATE -- at the moment a specific task needs the
-# directory, which is the only point where variant/task/repeat exist at all.
-#
-# A caller that overrides one of these needs no special-casing anywhere: template
-# substitution over a string containing no placeholders is the identity function,
-# so a static override like "/work/output" resolves to itself down the exact same
-# code path as the default. That is what lets Harbor put its two directories in
-# unrelated parts of the filesystem (`--logging-dir /logs/agent --artifacts-dir
-# <the container's WORKDIR>`) with no copy afterward: `run_dir` is merely a value
-# the DEFAULT template happens to reference, not a structural parent. Artifacts
-# nesting under the logging dir stops being a law and becomes a default.
-#
-# These two are deliberately spelled out in full rather than the artifacts one
-# being defined relative to the logging one -- under Harbor they are not
-# relatives, so there is no shared prefix to factor out.
+# orchestrator, resolved LATE per task. Both spelled out in full (not artifacts
+# relative to logging) since under Harbor they live in unrelated parts of the
+# filesystem, with no shared prefix to factor out.
+# Rationale: .claude/notes/persistence.md § The run layout as two directory templates
 DEFAULT_LOGGING_DIR_TEMPLATE = "${run_dir}/${variant}/${task}/${repeat}"
-# Resolves to the FINAL artifacts directory, not its parent -- so a caller that
-# overrides it gets exactly the directory it named. ${task} appears twice on
-# purpose: that IS today's on-disk layout (the per-task run dir carries it, and
-# preserve_to/capture_to/DIRECT_WRITE each append it again), so this default is
-# byte-identical to current behaviour. It is also the wart the template makes
-# cheap to fix later -- one string, not five call sites.
 DEFAULT_ARTIFACTS_DIR_TEMPLATE = "${run_dir}/${variant}/${task}/${repeat}/artifacts/${task}"
 
 _DIR_TEMPLATE_PLACEHOLDERS = ("run_dir", "variant", "task", "repeat")
@@ -248,6 +231,13 @@ def resolve_dir_template(
     # Path() normalizes the mixed separators a Windows run_dir produces
     # ("C:\\runs\\x" + "/default/...") into a single native form.
     return Path(resolved)
+
+
+def dir_template_is_static(template: str) -> bool:
+    """True when ``template`` has no ``${...}`` placeholders, so every task resolves it
+    to the identical path -- fine for a single task (Harbor's use case), a collision for
+    more than one."""
+    return not Template(template).get_identifiers()
 
 
 def build_task_run_dir(

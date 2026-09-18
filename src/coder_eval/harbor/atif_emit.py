@@ -390,24 +390,19 @@ def emit_trajectories_for_run(task_dirs: Iterable[Path]) -> list[Path]:
     """Write a ``trajectory.json`` sibling for every ``task.json`` in ``task_dirs``.
 
     ``task_dirs`` are the per-task logging directories, resolved from the same
-    ``logging_dir_template`` the run wrote ``task.json`` with. Taking them as an
-    argument rather than discovering them by walking a run directory is not just
-    tidier -- it is required: an overridden logging dir need not live under
-    ``run_dir`` at all (Harbor points it at its own agent logs dir), so a walk
-    would find nothing to translate.
-
-    The ``--format harbor`` post-pass for ``coder-eval execute``: ATIF emission
-    is opt-in (unlike the old always-on design this module's predecessor
-    shipped), so a plain ``run``/``execute`` never gains a new output file.
-    Reads the ``task.json`` files a run already wrote rather than hooking the
-    orchestrator's finalize path, keeping this package's "translate coder-eval's
-    own artifacts" scope (see ``coder_eval.harbor``'s module docstring) — it
-    needs no access to orchestrator internals. Per-task failures are logged and skipped (see
+    ``logging_dir_template`` the run wrote ``task.json`` with -- taken as an argument
+    rather than discovered by walking a run directory, since an overridden logging dir
+    need not live under ``run_dir`` at all. The ``--format harbor`` post-pass for
+    ``coder-eval execute``; opt-in, so a plain ``run``/``execute`` never gains a new
+    output file. Per-task failures are logged and skipped (see
     :func:`write_trajectory_json`), never aborting the rest of the run's export.
+
+    Rationale: .claude/notes/persistence.md § What run_dir still owns
     """
     written: list[Path] = []
     for task_json in sorted({d / TASK_JSON_FILENAME for d in task_dirs}):
         if not task_json.is_file():
+            logger.warning("No %s at %s — skipping ATIF emission", TASK_JSON_FILENAME, task_json)
             continue
         try:
             result = EvaluationResult.model_validate_json(task_json.read_text(encoding="utf-8"))

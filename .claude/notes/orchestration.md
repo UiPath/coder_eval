@@ -767,6 +767,17 @@ containment check, fell through to a `run_dir/artifacts` that did not exist, and
 `RegradeError`. An artifacts dir that exists outranks the recorded `sandbox_path`, which is
 merely what the run claimed.
 
+Only `--resume` (`run_command.py`'s `_grade_resumed_tasks`) passes the resolved
+`artifacts_dir` — it has the run's own `BatchRunConfig` in hand, so `resolve_artifacts_dir`
+needs no new state. Detached `coder-eval evaluate <run_dir>` does not: it has no
+`BatchRunConfig` to resolve a template from, only the untrusted `task.json` it's grading, and
+trusting THAT to widen its own containment root would defeat the check the widening exists
+to keep intact. A run made with a non-default `artifacts_dir_template` therefore still needs
+`--workspace` passed explicitly to `evaluate` — the same escape hatch `RegradeError` already
+names. Not a regression: `evaluate` never auto-located such a workspace before this template
+existed either, and the alternative (trusting the recorded path) reopens the class of bug the
+previous paragraph describes.
+
 **Every return goes through the containment check, rooted at the RUN DIRECTORY.** Both
 `sandbox_path` and `task_id` are unvalidated strings out of the run's own `task.json`, so
 `"../../../../home/victim"` joins to a real directory `is_dir()` happily confirms. The

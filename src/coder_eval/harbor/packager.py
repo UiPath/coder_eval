@@ -628,27 +628,7 @@ def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str | None
         doc["verifier"] = verifier_section
     if task.run_limits is not None and task.run_limits.task_timeout is not None:
         doc["agent"] = {"timeout_sec": float(task.run_limits.task_timeout)}
-    # Harbor's own artifact collection (SingleStepTrial._collect_artifacts, run
-    # after the agent phase but BEFORE the verifier and before the container is
-    # torn down) snapshots this path to
-    # <trial>/artifacts/<source stripped of its leading slash>/ on the host.
-    # CoderEvalAgent's `--workspace-dir "$(pwd)" --no-capture-workspace` runs
-    # the agent in-place at the container's WORKDIR and skips its own copy (see
-    # orchestrator.py's cleanup) -- so without this entry nothing the agent
-    # produced would ever be visible on the host.
-    #
-    # Defaults to CONTAINER_WORK_DIR rather than requiring every task/experiment
-    # to restate it: /work is the WORKDIR coder-eval's OWN image bakes
-    # (docker/Dockerfile), and a Harbor package exported by coder-eval needs
-    # coder-eval installed in the image -- which in practice means derived from
-    # coder-eval-agent (a mismatch already warns, see _MISSING_CODER_EVAL_WARNING).
-    # Unlike `[environment].workdir` above -- deliberately left unset so the
-    # container's own WORKDIR decides `docker exec -w` -- guessing wrong here is
-    # not fatal: a nonexistent source is a best-effort collection miss recorded
-    # in the artifact manifest, not an exit 127.
-    #
-    # Declared as a plain string (not an ArtifactConfig table): Harbor normalizes
-    # `artifacts = ["/x"]` to `ArtifactConfig(source="/x")`.
+    # Rationale: .claude/notes/reporting.md § The artifacts default is CONTAINER_WORK_DIR, not a required field
     doc["artifacts"] = [workdir or CONTAINER_WORK_DIR]
     (out_dir / "task.toml").write_bytes(tomli_w.dumps(doc).encode("utf-8"))
 

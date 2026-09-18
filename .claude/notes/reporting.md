@@ -453,6 +453,25 @@ container, never where the verifier looks. Confirmed live — the agent's output
 every criterion scored 0 as "file does not exist". `$(pwd)` is resolved by the container's
 shell at exec time and equals the WORKDIR because the exec is given no explicit cwd.
 
+### The artifacts default is CONTAINER_WORK_DIR, not a required field
+
+Harbor's own artifact collection runs after the agent phase but before the verifier and
+container teardown, snapshotting `task.toml`'s `artifacts` source to
+`<trial>/artifacts/<source stripped of its leading slash>/` on the host.
+`CoderEvalAgent`'s `--workspace-dir "$(pwd)"` runs the agent in-place at the container's
+WORKDIR and skips coder-eval's own copy-out, so without an `artifacts` entry nothing the
+agent produced would ever be visible on the host.
+
+Defaults to `CONTAINER_WORK_DIR` (`/work`, coder-eval's own image WORKDIR) rather than
+requiring every task/experiment to restate it — a package exported by coder-eval needs
+coder-eval installed in the image, which in practice means derived from
+`coder-eval-agent` (a mismatch already warns; see `_MISSING_CODER_EVAL_WARNING`). Unlike
+`[environment].workdir` above — deliberately left unset so the container's own WORKDIR
+decides `docker exec -w` — guessing wrong here is not fatal: a nonexistent source is a
+best-effort collection miss recorded in the artifact manifest, not an exit 127. Declared
+as a plain string, not an `ArtifactConfig` table, because Harbor normalizes
+`artifacts = ["/x"]` to `ArtifactConfig(source="/x")` itself.
+
 ### What the export carries, and what it refuses to carry
 
 No Dockerfile is written unless the task sets `sandbox.docker.dockerfile_path` — only

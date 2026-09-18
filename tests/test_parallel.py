@@ -194,6 +194,42 @@ async def test_artifacts_dir_template_resolved_and_threaded_into_orchestrator(tm
 
 
 @pytest.mark.asyncio
+async def test_artifacts_dir_template_rejected_for_docker_driver(tmp_path):
+    """A non-default artifacts_dir_template is a no-op for driver: docker (the in-container
+    Orchestrator has no way to receive it) -- run_batch refuses it loud rather than silently
+    ignoring the override, mirroring --workspace-dir's existing docker rejection."""
+    task = TaskDefinition(
+        task_id="test_docker_artifacts",
+        description="Test artifacts_dir_template + docker rejection",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "docker", "docker": {"image": "coder-eval-agent"}},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / "test_task.yaml"
+    task_file.write_text("task_id: test_docker_artifacts\n")
+
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        preservation_mode=PreservationMode.NONE,
+        artifacts_dir_template="/work/output",
+    )
+
+    resolved_task = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir / "default" / "test_docker_artifacts" / "default",
+        variant_id="default",
+        original_task_id="test_docker_artifacts",
+    )
+
+    with pytest.raises(ValueError, match=r"--artifacts-dir is not for sandbox\.driver: docker"):
+        await run_batch([resolved_task], config)
+
+
+@pytest.mark.asyncio
 async def test_dir_templates_default_to_todays_layout(tmp_path):
     """The defaults must reproduce the historical layout exactly, so an unspecified run
     writes to byte-identical paths."""

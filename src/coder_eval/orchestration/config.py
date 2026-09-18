@@ -117,13 +117,12 @@ class BatchRunConfig(BaseModel):
         default=None,
         description=(
             "Run the agent in-place at this absolute path instead of the standard "
-            "run_dir/artifacts workspace, copying it out to run_dir/artifacts/<task> at "
+            "artifacts workspace named by artifacts_dir_template, copying it out there at "
             "cleanup. For a single task only. Not for sandbox.driver: docker tasks — "
             "the docker driver already aligns automatically via sandbox.docker.working_dir."
         ),
     )
 
-    # Sibling to workspace_dir: where finished artifacts land instead of the
     # The run's on-disk layout, as two independent templates resolved LATE (per
     # task, where ${variant}/${task}/${repeat} first exist). Defaults reproduce
     # today's layout byte-for-byte; a static override needs no special-casing
