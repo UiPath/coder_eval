@@ -122,10 +122,11 @@ class TestEmittedDirectoryStructure:
 
     def test_test_sh_is_executable_and_grades_the_run_directory(self, tmp_path: Path) -> None:
         """test.sh must be workdir-agnostic: it grades `/logs/agent` as a run
-        directory (its own recorded sandbox_path locates the workspace), not a
-        `$(pwd)` guess baked in at export time -- so it works regardless of
-        whether the task pinned a workdir or left it to the image's own default
-        (see packager.py's `_write_environment`)."""
+        directory with `--workspace "$(pwd)"` naming the actual workspace --
+        CoderEvalAgent's `--no-capture-workspace` leaves it in-place at the
+        image's own WORKDIR (never copied under /logs/agent/artifacts/), so
+        `--workspace` must point there explicitly (see packager.py's
+        `_write_environment`)."""
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"
 
@@ -135,7 +136,11 @@ class TestEmittedDirectoryStructure:
         if os.name != "nt":  # NTFS has no chmod executable bit
             assert test_sh.stat().st_mode & 0o111, "test.sh must be executable"
         content = test_sh.read_text(encoding="utf-8")
-        assert "coder-eval evaluate /tests/task.yaml /logs/agent --in-place --run-dir /logs/verifier" in content
+        assert (
+            'coder-eval evaluate /tests/task.yaml /logs/agent --workspace "$(pwd)" --in-place '
+            + "--run-dir /logs/verifier"
+            in content
+        )
         assert "coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json" in content
 
     def test_task_toml_parses_and_carries_the_mapped_fields(self, tmp_path: Path) -> None:
@@ -321,6 +326,11 @@ class TestDockerfileWorkdirResolution:
         assert not any("declared no WORKDIR" in w for w in result.warnings)
         doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
         assert "workdir" not in doc["environment"]
+        # `[environment].workdir` stays unset (the image's own WORKDIR drives
+        # `docker exec -w`), but the artifacts source still falls back to /work
+        # so Harbor has something to snapshot -- a wrong source there is only a
+        # best-effort collection miss, never an exit 127.
+        assert doc["artifacts"] == ["/work"]
 
     def test_dockerfile_with_an_existing_workdir_is_respected_and_not_touched(self, tmp_path: Path) -> None:
         env_dir = tmp_path / "environment"
@@ -355,6 +365,12 @@ class TestDockerfileWorkdirResolution:
         )
         doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
         assert doc["environment"]["workdir"] == "/workspace"
+        # Declared as a top-level Harbor artifact so its own collection pass
+        # (SingleStepTrial._collect_artifacts, before the verifier runs and
+        # before the container is torn down) snapshots the agent's in-place
+        # workspace to <trial>/artifacts/workspace/ on the host -- otherwise
+        # nothing the agent wrote is ever visible once the container is gone.
+        assert doc["artifacts"] == ["/workspace"]
 
     def test_docker_working_dir_override_wins_over_the_dockerfile(self, tmp_path: Path) -> None:
         env_dir = tmp_path / "environment"
@@ -480,6 +496,42 @@ class TestPrebuiltImageWorkdir:
         assert result.workdir == "/explicit"
         doc = tomllib.loads((tmp_path / "out" / "task.toml").read_text(encoding="utf-8"))
         assert doc["environment"]["workdir"] == "/explicit"
+
+    def test_working_dir_may_be_the_images_own_work_dir(self, tmp_path: Path) -> None:
+        """/work is coder-eval-agent:latest's own declared WORKDIR, so working_dir
+        must accept it -- only the bind-mount targets under it (/work/input, ...)
+        and / are reserved."""
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"working_dir": "/work"}}})
+
+        result = export_task(task_file, tmp_path / "out")
+
+        assert result.workdir == "/work"
+        doc = tomllib.loads((tmp_path / "out" / "task.toml").read_text(encoding="utf-8"))
+        assert doc["environment"]["workdir"] == "/work"
+        assert doc["artifacts"] == ["/work"]
+
+    def test_artifacts_defaults_to_container_work_dir(self, tmp_path: Path) -> None:
+        """No task should have to restate /work: it is the WORKDIR coder-eval's own
+        image bakes, so the artifacts source defaults to it. `[environment].workdir`
+        stays UNSET though -- that one drives `docker exec -w` and a wrong guess is
+        a hard exit 127, whereas a wrong artifacts source is only a collection miss."""
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {}}})
+
+        result = export_task(task_file, tmp_path / "out")
+
+        assert result.workdir is None
+        doc = tomllib.loads((tmp_path / "out" / "task.toml").read_text(encoding="utf-8"))
+        assert doc["artifacts"] == ["/work"]
+        assert "workdir" not in doc["environment"]
+
+    def test_working_dir_overrides_the_default_artifacts_source(self, tmp_path: Path) -> None:
+        task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"working_dir": "/app"}}})
+
+        out_dir = export_task(task_file, tmp_path / "out").out_dir
+        doc = tomllib.loads((out_dir / "task.toml").read_text(encoding="utf-8"))
+
+        assert doc["artifacts"] == ["/app"]
+        assert doc["environment"]["workdir"] == "/app"
 
 
 class TestEnvPassthroughSections:

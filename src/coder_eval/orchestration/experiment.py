@@ -38,7 +38,7 @@ from ..models import (
     VariantResult,
     apply_prompt_mutations,
 )
-from ..path_utils import build_task_run_dir
+from ..path_utils import resolve_dir_template
 from .config import BatchRunConfig
 from .config_merge import ConfigSource, Layer, merge_layers, resolve_root
 from .task_loader import (
@@ -682,10 +682,11 @@ def resolve_all_tasks(
                             ResolvedTask(
                                 task=resolved_task,
                                 task_file=task_file,
-                                run_dir=build_task_run_dir(
-                                    config.run_dir,
-                                    variant.variant_id,
-                                    resolved_task.task_id,
+                                run_dir=resolve_dir_template(
+                                    config.logging_dir_template,
+                                    run_dir=config.run_dir,
+                                    variant_id=variant.variant_id,
+                                    task_id=resolved_task.task_id,
                                     replicate_index=rep,
                                 ),
                                 variant_id=variant.variant_id,

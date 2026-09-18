@@ -292,10 +292,15 @@ class DockerDriverConfig(BaseModel):
         if not v.startswith("/"):
             raise ValueError(f"working_dir {v!r} must be an absolute path or the sentinel 'auto'.")
         norm = v.rstrip("/") or "/"
-        if norm in RESERVED_CONTAINER_DIRS or norm.startswith(CONTAINER_WORK_DIR + "/"):
+        # /work itself is NOT rejected: it is coder-eval-agent:latest's own
+        # declared WORKDIR (docker/Dockerfile), so refusing it would refuse the
+        # shipped image's real working directory. The bind mounts land at
+        # /work/<sub>, so an agent running AT /work is fine -- what must never
+        # happen is a WORKDIR that IS one of those mount targets, or /.
+        if norm in RESERVED_CONTAINER_DIRS - {CONTAINER_WORK_DIR} or norm.startswith(CONTAINER_WORK_DIR + "/"):
             raise ValueError(
                 f"working_dir {v!r} collides with a framework-reserved container path "
-                + "(/, /work, /work/*). Choose the task image's own WORKDIR (e.g. /root, /app)."
+                + "(/, /work/*). Choose /work or the task image's own WORKDIR (e.g. /root, /app)."
             )
         return v
 

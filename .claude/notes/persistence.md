@@ -69,6 +69,62 @@ trajectory log the run had already paid for. `grade.docker.log` exists for the s
 one layer down: on the `run --resume` path `docker.log` is already the executed
 container's log.
 
+## The run layout as two directory templates
+
+`logging_dir_template` and `artifacts_dir_template` (`BatchRunConfig`, resolved by
+`path_utils.resolve_dir_template`) describe where a task's bookkeeping and its artifacts
+go. They are resolved LATE — per task, which is the only point where `${variant}`,
+`${task}` and `${repeat}` exist at all — and they are INDEPENDENT: artifacts nesting under
+the logging dir is a default, not a law.
+
+That independence is the point. Harbor puts logs in its own agent logs dir and artifacts at
+the container's WORKDIR, two unrelated parts of the filesystem, and because artifacts were
+never a child of the logging dir there is nothing to copy and nothing lands twice. The
+previous design reached the same end state with a `--workspace-dir`/`--artifacts-dir` pair
+that had to be passed the SAME path so an equality check could infer "don't copy"; a
+coincidence standing in for an intention.
+
+An override needs no special-casing anywhere, because substituting a template that contains
+no placeholders is the identity function: `/work/output` in, `/work/output` out, down the
+same code path as the default. The defaults spell out the historical layout, so an
+unspecified run writes byte-identical paths — asserted in `test_path_utils.py` against the
+literal old layout rather than against `build_task_run_dir`, which now calls the resolver
+and would make the test vacuous.
+
+Two implementation constraints, both load-bearing:
+
+- **`string.Template`, never `re.sub`.** `re.sub` interprets backslashes in the
+  REPLACEMENT, so a Windows `run_dir` of `C:\runs\2026` comes out mangled.
+- **`${task}` may contain a separator.** A dataset-expanded `task_id` is
+  `"<task>/<row>"` (`expand_dataset`, whose row ids are validated precisely because they
+  become directories), so it nests — on Windows too, where `pathlib` splits on both
+  separators.
+
+`${task}` appears twice in the artifacts default (`.../${task}/${repeat}/artifacts/${task}`)
+because that IS the layout on disk: the per-task run dir carries it, and
+`preserve_to`/`capture_to`/DIRECT_WRITE each appended it again. Kept for compatibility, and
+now one string to change rather than five call sites. The `*_as` variants
+(`preserve_as`/`capture_as`) exist so a caller-supplied artifacts dir is used as the FINAL
+path instead of having `task_id` appended to it a second time; `preserve_to`/`capture_to`
+remain as the parent-relative wrappers.
+
+### What run_dir still owns
+
+`${run_dir}` is only a placeholder VALUE. But run-LEVEL files — `run.json`, `run.md`,
+`experiment.*`, `resume_fingerprint.json` — still follow `--run-dir`, and its default is
+CWD-RELATIVE (`runs/<timestamp>`, `config.py`). Omitting `--run-dir` therefore does not
+leave those files harmlessly uncollected; when cwd is the agent's WORKDIR it writes them
+INSIDE the workspace, polluting the very directory `artifacts_dir_template` names.
+Confirmed live: `artifacts/work/runs/<timestamp>/run.json` in a collected Harbor trial.
+Harbor consequently passes `--run-dir /tmp/coder-eval-run`, a throwaway path outside the
+workspace.
+
+Anything that used to DISCOVER per-task files by walking `run_dir` had to be given the
+resolved logging dirs instead, because they need not live under `run_dir` at all and the
+walk silently finds nothing: `atif_emit.emit_trajectories_for_run` (which would emit no
+trajectory, leaving Harbor's token/cost totals empty) and
+`logging_config.aggregate_task_logs` (which would write an empty `experiment.log`).
+
 ## Judge persistence
 
 A judge transcript — tool calls, raw verdict, rendered prompt, system prompt — runs 10-100

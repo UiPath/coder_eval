@@ -31,7 +31,7 @@ import yaml
 from coder_eval.harbor.agent_paths import AGENT_TASK_YAML_PATH
 from coder_eval.harbor.portability import PortabilityIssue, audit_criteria
 from coder_eval.isolation.docker_runner import _validate_extra_mount
-from coder_eval.models import TaskDefinition, TemplateDirSource
+from coder_eval.models import CONTAINER_WORK_DIR, TaskDefinition, TemplateDirSource
 from coder_eval.orchestration.task_loader import load_task
 from coder_eval.path_utils import REFERENCE_COPY_IGNORE, ignore_patterns_and_symlinks
 
@@ -63,20 +63,24 @@ set -u
 
 # `/tests/task.yaml /logs/agent` -- an explicit task file over a RUN DIRECTORY,
 # not a plain workdir. CoderEvalAgent's `coder-eval execute --run-dir /logs/agent
-# ...` always finishes with `/logs/agent/task.json` (this task's own recorded
-# trajectory) and `/logs/agent/artifacts/<task_id>/` (the workspace it produced),
-# so `coder-eval evaluate` recognizes /logs/agent as a run directory and grades
-# against it directly -- no `$(pwd)` guess of the agent's WORKDIR needed (the
-# workspace is located from task.json's own recorded sandbox_path instead), and
-# no ATIF trajectory.json round-trip either (task.json already carries the same
-# trajectory natively). Passing the task file explicitly (rather than the bare
-# run directory alone) makes coder-eval grade with THIS file -- the exported
-# contract -- instead of rebuilding the task from the run's own recorded config,
-# which is also what keeps this off the untrusted-recorded-config path: that
-# path exists for a shared run directory whose config is not to be trusted
-# without --allow-recorded-commands, and does not apply once an explicit,
-# operator-supplied task file is in hand.
-coder-eval evaluate /tests/task.yaml /logs/agent --in-place --run-dir /logs/verifier || true
+# --workspace-dir "$(pwd)" --no-capture-workspace` always finishes with
+# `/logs/agent/task.json` (this task's own recorded trajectory) and the agent's
+# workspace left in-place at the container's own WORKDIR ($(pwd) here too --
+# Harbor's verifier phase reuses the same image/WORKDIR) -- NOT copied into
+# `/logs/agent/artifacts/<task_id>/`, since --no-capture-workspace skips that
+# copy (Harbor collects the WORKDIR itself). `--workspace "$(pwd)"` is therefore load-bearing:
+# without it, `coder-eval evaluate` resolves the workspace from task.json's
+# recorded sandbox_path via `default_workspace`, which requires it to resolve
+# INSIDE /logs/agent and refuses otherwise -- exactly this WORKDIR case, which
+# is legitimately outside /logs/agent. No ATIF trajectory.json round-trip either
+# (task.json already carries the same trajectory natively). Passing the task
+# file explicitly (rather than the bare run directory alone) makes coder-eval
+# grade with THIS file -- the exported contract -- instead of rebuilding the
+# task from the run's own recorded config, which is also what keeps this off
+# the untrusted-recorded-config path: that path exists for a shared run
+# directory whose config is not to be trusted without --allow-recorded-commands,
+# and does not apply once an explicit, operator-supplied task file is in hand.
+coder-eval evaluate /tests/task.yaml /logs/agent --workspace "$(pwd)" --in-place --run-dir /logs/verifier || true
 coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json
 """
 
@@ -624,6 +628,28 @@ def _write_task_toml(task: TaskDefinition, out_dir: Path, *, workdir: str | None
         doc["verifier"] = verifier_section
     if task.run_limits is not None and task.run_limits.task_timeout is not None:
         doc["agent"] = {"timeout_sec": float(task.run_limits.task_timeout)}
+    # Harbor's own artifact collection (SingleStepTrial._collect_artifacts, run
+    # after the agent phase but BEFORE the verifier and before the container is
+    # torn down) snapshots this path to
+    # <trial>/artifacts/<source stripped of its leading slash>/ on the host.
+    # CoderEvalAgent's `--workspace-dir "$(pwd)" --no-capture-workspace` runs
+    # the agent in-place at the container's WORKDIR and skips its own copy (see
+    # orchestrator.py's cleanup) -- so without this entry nothing the agent
+    # produced would ever be visible on the host.
+    #
+    # Defaults to CONTAINER_WORK_DIR rather than requiring every task/experiment
+    # to restate it: /work is the WORKDIR coder-eval's OWN image bakes
+    # (docker/Dockerfile), and a Harbor package exported by coder-eval needs
+    # coder-eval installed in the image -- which in practice means derived from
+    # coder-eval-agent (a mismatch already warns, see _MISSING_CODER_EVAL_WARNING).
+    # Unlike `[environment].workdir` above -- deliberately left unset so the
+    # container's own WORKDIR decides `docker exec -w` -- guessing wrong here is
+    # not fatal: a nonexistent source is a best-effort collection miss recorded
+    # in the artifact manifest, not an exit 127.
+    #
+    # Declared as a plain string (not an ArtifactConfig table): Harbor normalizes
+    # `artifacts = ["/x"]` to `ArtifactConfig(source="/x")`.
+    doc["artifacts"] = [workdir or CONTAINER_WORK_DIR]
     (out_dir / "task.toml").write_bytes(tomli_w.dumps(doc).encode("utf-8"))
 
 

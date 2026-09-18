@@ -1,4 +1,7 @@
 schema_version = "1.4"
+artifacts = [
+    "/work",
+]
 
 [task]
 name = "coder-eval/golden_export_example"

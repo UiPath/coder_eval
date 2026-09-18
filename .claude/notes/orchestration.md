@@ -759,6 +759,14 @@ It RAISES rather than guessing when neither is conclusive. Guessing is worse tha
 grading the wrong directory makes every path-relative criterion fail as a locating
 artifact rather than as a verdict, and reports that as an ordinary score.
 
+A resolved `artifacts_dir_template` is passed in as a SECOND TRUSTED ROOT and preferred as
+the candidate, since that template may place artifacts outside `run_dir` entirely. Note the
+direction: the roots were WIDENED, never the check relaxed — roots stay operator-supplied,
+candidates stay untrusted. Without it, `--resume` over a decoupled layout failed the
+containment check, fell through to a `run_dir/artifacts` that did not exist, and raised
+`RegradeError`. An artifacts dir that exists outranks the recorded `sandbox_path`, which is
+merely what the run claimed.
+
 **Every return goes through the containment check, rooted at the RUN DIRECTORY.** Both
 `sandbox_path` and `task_id` are unvalidated strings out of the run's own `task.json`, so
 `"../../../../home/victim"` joins to a real directory `is_dir()` happily confirms. The

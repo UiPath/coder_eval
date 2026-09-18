@@ -63,7 +63,7 @@ async def test_preserve_failure_does_not_skip_cleanup(tmp_path) -> None:
     orchestrator = _make_orchestrator(tmp_path)
     orchestrator.preservation_mode = PreservationMode.MOVE_ON_WRITE
     mock_sandbox = MagicMock()
-    mock_sandbox.preserve_to = MagicMock(side_effect=OSError("No space left on device"))
+    mock_sandbox.preserve_as = MagicMock(side_effect=OSError("No space left on device"))
     orchestrator.sandbox = mock_sandbox
 
     await orchestrator._cleanup()
@@ -78,7 +78,7 @@ async def test_preserve_success_sets_path_and_cleanup_runs(tmp_path) -> None:
     orchestrator.preservation_mode = PreservationMode.MOVE_ON_WRITE
     preserved = tmp_path / "run" / "cleanup_guard_test" / "artifacts"
     mock_sandbox = MagicMock()
-    mock_sandbox.preserve_to = MagicMock(return_value=preserved)
+    mock_sandbox.preserve_as = MagicMock(return_value=preserved)
     orchestrator.sandbox = mock_sandbox
 
     await orchestrator._cleanup()
@@ -159,17 +159,17 @@ async def test_workspace_dir_captures_out_even_with_preservation_none(tmp_path) 
     orchestrator.workspace_dir = Path("/root")
     captured = tmp_path / "run" / "cleanup_guard_test" / "artifacts" / "cleanup_guard_test"
     mock_sandbox = MagicMock()
-    mock_sandbox.capture_to = MagicMock(return_value=captured)
+    mock_sandbox.capture_as = MagicMock(return_value=captured)
     orchestrator.sandbox = mock_sandbox
 
     await orchestrator._cleanup()
 
     # workspace_dir wins: capture_to is invoked with the artifacts dir and its
     # returned path is recorded (NONE would otherwise have nulled sandbox_path).
-    mock_sandbox.capture_to.assert_called_once_with(orchestrator.run_dir / "artifacts")
+    mock_sandbox.capture_as.assert_called_once_with(orchestrator.run_dir / "artifacts" / "cleanup_guard_test")
     assert orchestrator.result.sandbox_path == str(captured)
     # The NONE / MOVE_ON_WRITE arms must not run when workspace_dir is set.
-    mock_sandbox.preserve_to.assert_not_called()
+    mock_sandbox.preserve_as.assert_not_called()
     mock_sandbox.cleanup.assert_called_once_with(preserve=False)
 
 
@@ -181,14 +181,62 @@ async def test_workspace_capture_failure_with_none_does_not_skip_cleanup(tmp_pat
     orchestrator.preservation_mode = PreservationMode.NONE
     orchestrator.workspace_dir = Path("/root")
     mock_sandbox = MagicMock()
-    mock_sandbox.capture_to = MagicMock(side_effect=OSError("No space left on device"))
+    mock_sandbox.capture_as = MagicMock(side_effect=OSError("No space left on device"))
     orchestrator.sandbox = mock_sandbox
 
     await orchestrator._cleanup()  # must not raise
 
-    mock_sandbox.capture_to.assert_called_once_with(orchestrator.run_dir / "artifacts")
+    mock_sandbox.capture_as.assert_called_once_with(orchestrator.run_dir / "artifacts" / "cleanup_guard_test")
     # capture_to raised before assigning the path, so it stays at its default (None).
     assert orchestrator.result.sandbox_path is None
+    mock_sandbox.cleanup.assert_called_once_with(preserve=False)
+
+
+@pytest.mark.asyncio
+async def test_artifacts_dir_overrides_the_capture_destination(tmp_path) -> None:
+    """A caller-supplied artifacts dir (resolved from a directory template) IS the
+    final destination -- capture_as receives it verbatim, with no run_dir nesting and
+    no task_id appended.
+
+    This is the Harbor case: it points the artifacts template at the container's own
+    WORKDIR, which is also where the agent ran. No "should I copy?" flag is involved
+    -- when destination == workspace, Sandbox.capture_as's self-referential guard
+    (covered in test_sandbox.py) turns the copy into a no-op."""
+    orchestrator = _make_orchestrator(tmp_path)
+    workspace = tmp_path / "workdir"
+    workspace.mkdir()
+    orchestrator.workspace_dir = workspace
+    orchestrator.artifacts_dir = workspace
+    mock_sandbox = MagicMock()
+    mock_sandbox.capture_as = MagicMock(return_value=workspace)
+    orchestrator.sandbox = mock_sandbox
+
+    await orchestrator._cleanup()
+
+    mock_sandbox.capture_as.assert_called_once_with(workspace)
+    assert orchestrator.result.sandbox_path == str(workspace)
+    mock_sandbox.cleanup.assert_called_once_with(preserve=False)
+
+
+@pytest.mark.asyncio
+async def test_no_artifacts_dir_keeps_the_builtin_layout(tmp_path) -> None:
+    """artifacts_dir=None (the in-container docker WORKDIR-alignment path, which
+    passes no template) must resolve to the historical run_dir/artifacts/<task_id>
+    -- byte-identical to what preserve_to/capture_to appended before."""
+    orchestrator = _make_orchestrator(tmp_path)
+    orchestrator.workspace_dir = Path("/root")
+    orchestrator.artifacts_dir = None
+    captured = orchestrator.run_dir / "artifacts" / "cleanup_guard_test"
+    mock_sandbox = MagicMock()
+    mock_sandbox.capture_as = MagicMock(return_value=captured)
+    orchestrator.sandbox = mock_sandbox
+
+    await orchestrator._cleanup()
+
+    mock_sandbox.capture_as.assert_called_once_with(captured)
+    assert orchestrator.result.sandbox_path == str(captured)
+    # The NONE / MOVE_ON_WRITE arms must not run when workspace_dir is set.
+    mock_sandbox.preserve_as.assert_not_called()
     mock_sandbox.cleanup.assert_called_once_with(preserve=False)
 
 
@@ -209,7 +257,7 @@ async def test_none_without_workspace_dir_discards_path(tmp_path) -> None:
 
     await orchestrator._cleanup()
 
-    mock_sandbox.capture_to.assert_not_called()
-    mock_sandbox.preserve_to.assert_not_called()
+    mock_sandbox.capture_as.assert_not_called()
+    mock_sandbox.preserve_as.assert_not_called()
     assert orchestrator.result.sandbox_path is None
     mock_sandbox.cleanup.assert_called_once_with(preserve=False)

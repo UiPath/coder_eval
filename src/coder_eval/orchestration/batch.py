@@ -156,7 +156,10 @@ async def run_batch(
                 # and a flat run_dir means trajectory.json (written by
                 # emit_trajectories_for_run as task.json's sibling) lands at a fixed,
                 # predictable path instead of requiring a recursive glob to find it.
-                effective_run_dir = config.run_dir if config.workspace_dir is not None else rt.run_dir
+                # No workspace_dir special case: rt.run_dir IS the resolved
+                # logging_dir_template, so "flat" is simply what a static template
+                # resolves to rather than a mode this seam has to detect.
+                effective_run_dir = rt.run_dir
                 effective_run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
                 sandbox_cfg = rt.task.sandbox
                 # HERE, where the original driver is still visible: the
@@ -206,6 +209,7 @@ async def run_batch(
                         replicate_index=rt.replicate_index,
                         grade=config.grade,
                         workspace_dir=config.workspace_dir,
+                        artifacts_dir=config.resolve_artifacts_dir(rt.variant_id, rt.task.task_id, rt.replicate_index),
                     )
                     result = await orchestrator.run()
                 tr = TaskResult(
@@ -418,8 +422,11 @@ def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = Tr
     return ResumePartition(to_run, to_grade, prior_results, prior_resolved)
 
 
-def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
-    """Remove stale ``artifacts/<task_id>`` dirs for tasks about to re-run under --resume.
+def clear_rerun_artifacts(to_run: list[ResolvedTask], *, config: BatchRunConfig) -> int:
+    """Remove stale artifacts dirs for tasks about to re-run under --resume.
+
+    ``config`` supplies ``resolve_artifacts_dir``, so this clears the SAME path the
+    run will write to even when ``artifacts_dir_template`` was overridden.
 
     A task in ``to_run`` is non-finalized (``partition_for_resume`` excluded every
     finalized task), so it re-executes from scratch and any leftover artifacts are
@@ -432,7 +439,11 @@ def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
     """
     cleared = 0
     for rt in to_run:
-        artifacts = rt.run_dir / "artifacts" / rt.task.task_id
+        # Through the config chokepoint, NOT a hand-built run_dir/artifacts/<task_id>:
+        # an overridden template puts artifacts somewhere else entirely, and clearing
+        # the wrong path would leave a partial run's output in place for a file-based
+        # criterion to pass on.
+        artifacts = config.resolve_artifacts_dir(rt.variant_id, rt.task.task_id, rt.replicate_index)
         if artifacts.exists():
             shutil.rmtree(artifacts, ignore_errors=True)
             cleared += 1

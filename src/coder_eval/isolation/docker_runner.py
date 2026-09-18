@@ -380,10 +380,11 @@ def _assert_workspace_not_reserved(path: str) -> None:
     argv) has not been -- so re-check here before it reaches ``docker run -w``.
     """
     norm = path.rstrip("/") or "/"
-    if norm in RESERVED_CONTAINER_DIRS or norm.startswith(CONTAINER_WORK_DIR + "/"):
-        raise DockerRunError(
-            f"working_dir {path!r} collides with a framework-reserved container path (/, /work, /work/*)."
-        )
+    # /work is exempt for the same reason as in the model validator: it is the
+    # shipped image's own WORKDIR, and the bind mounts occupy /work/<sub>, not
+    # /work itself.
+    if norm in RESERVED_CONTAINER_DIRS - {CONTAINER_WORK_DIR} or norm.startswith(CONTAINER_WORK_DIR + "/"):
+        raise DockerRunError(f"working_dir {path!r} collides with a framework-reserved container path (/, /work/*).")
 
 
 def _resolve_workspace_dir(cfg_working_dir: str | None, image: str) -> str | None:

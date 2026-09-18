@@ -196,6 +196,25 @@ def execute_command(
             "container's own WORKDIR, where Harbor's verifier phase looks for them."
         ),
     ),
+    logging_dir: str | None = typer.Option(
+        None,
+        "--logging-dir",
+        help=(
+            "Where task.json/task.log go, as a path template. Placeholders: ${run_dir}, "
+            "${variant}, ${task}, ${repeat}. A static path (e.g. /logs/agent) resolves to "
+            "itself. Default reproduces <run_dir>/<variant>/<task>/<NN>."
+        ),
+    ),
+    artifacts_dir: str | None = typer.Option(
+        None,
+        "--artifacts-dir",
+        help=(
+            "Where the agent's artifacts go -- the FINAL directory, same placeholders as "
+            "--logging-dir, and independent of it (Harbor puts logs at /logs/agent and "
+            "artifacts at the container's WORKDIR). When it already holds the workspace "
+            "there is nothing to copy."
+        ),
+    ),
 ) -> None:
     """Run evaluation tasks WITHOUT checking their success criteria.
 
@@ -250,4 +269,6 @@ def execute_command(
         set_overrides=set_overrides,
         format=format,
         workspace_dir=workspace_dir,
+        logging_dir=logging_dir,
+        artifacts_dir=artifacts_dir,
     )

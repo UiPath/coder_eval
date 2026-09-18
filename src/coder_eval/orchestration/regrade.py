@@ -389,7 +389,7 @@ def _fall_back_to_source(
     return task, source_yaml
 
 
-def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
+def default_workspace(run_dir: Path, prior: EvaluationResult, *, artifacts_dir: Path | None = None) -> Path:
     """Locate the workspace a finished run left behind.
 
     ``sandbox_path`` is authoritative when it still exists; otherwise the
@@ -400,20 +400,37 @@ def default_workspace(run_dir: Path, prior: EvaluationResult) -> Path:
     directory makes every path-relative criterion fail as a locating artifact and
     reports that as an ordinary score.
 
-    **Every** return goes through ``_contained``, checked against ``run_dir``.
+    ``artifacts_dir`` is the caller's own resolved ``artifacts_dir_template`` for
+    this task (the FINAL directory). Since that template may place artifacts
+    outside ``run_dir`` entirely, it is added as a second TRUSTED ROOT and
+    preferred as the candidate. Widening the roots — never relaxing the check —
+    is what keeps the security property below intact: roots are always
+    operator-supplied, candidates always come from the untrusted record.
+
+    **Every** return goes through ``_contained``, checked against ``run_dir`` and
+    ``artifacts_dir``.
 
     Rationale: .claude/notes/orchestration.md § Locating the workspace a finished run left behind
     """
+    roots = [run_dir] if artifacts_dir is None else [run_dir, artifacts_dir]
 
     def _contained(candidate: Path, description: str) -> Path:
-        # One chokepoint, one root. `run_dir` is the operator-supplied path; a
-        # candidate is only ever derived from the untrusted record.
-        if not _is_within(candidate, run_dir):
+        # One chokepoint. Roots are operator-supplied paths; a candidate is only
+        # ever derived from the untrusted record.
+        if not any(_is_within(candidate, root) for root in roots):
             raise RegradeError(
-                f"{description} resolves outside the run directory ({run_dir}). "
-                + "Pass --workspace explicitly to grade a directory outside the run."
+                f"{description} resolves outside the run directory ({run_dir})"
+                + (f" and the artifacts directory ({artifacts_dir})" if artifacts_dir else "")
+                + ". Pass --workspace explicitly to grade a directory outside the run "
+                + "(needed when the run used a logging/artifacts dir template that "
+                + "placed the workspace outside run_dir)."
             )
         return candidate
+
+    if artifacts_dir is not None and artifacts_dir.is_dir():
+        # Already the final path -- NOT nested by task_id the way the run_dir
+        # fallback below is, because the template resolved that in.
+        return _contained(artifacts_dir, f"The resolved artifacts_dir ({artifacts_dir})")
 
     if prior.sandbox_path:
         recorded = Path(prior.sandbox_path)

@@ -45,6 +45,13 @@ except ImportError:  # pragma: no cover - defensive; coder_eval always defines t
     __version__ = "0.0.0"
 
 
+# Run-level bookkeeping goes here and is discarded with the container. Anywhere
+# outside the WORKDIR would do; /tmp is the one path guaranteed writable in every
+# task image. NOT a bare "/tmp": a dedicated subdirectory keeps run.json/run.md/
+# experiment.* from littering a directory tasks themselves use.
+_THROWAWAY_RUN_DIR = "/tmp/coder-eval-run"
+
+
 class CoderEvalAgent(BaseInstalledAgent):
     """Runs coder-eval's own agent loop as a Harbor agent.
 
@@ -76,20 +83,47 @@ class CoderEvalAgent(BaseInstalledAgent):
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         """Run ``coder-eval execute --format harbor`` inside the environment.
 
-        ``instruction`` is NOT forwarded: the agent-phase task.yaml already carries
-        the identical resolved prompt. Token and cost totals are filled in afterward
-        by ``populate_context_post_run``.
+                ``instruction`` is NOT forwarded: the agent-phase task.yaml already carries
+                the identical resolved prompt. Token and cost totals are filled in afterward
+                by ``populate_context_post_run``.
 
-        ``--workspace-dir "$(pwd)"`` is load-bearing — without it the tempdir sandbox
-        writes the agent's workspace somewhere Harbor's verifier never looks.
+                ``--workspace-dir "$(pwd)"`` is load-bearing — without it the tempdir sandbox
+                writes the agent's workspace somewhere Harbor's verifier never looks.
 
-        Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
+        ``--run-dir`` must be passed even though ``${run_dir}`` is never substituted
+                (both templates below are static), because run-level bookkeeping -- run.json,
+                run.md, experiment.* -- still follows it and its DEFAULT is CWD-RELATIVE
+                (``runs/<timestamp>``). Omitting it does NOT leave those files harmlessly
+                uncollected: cwd is the WORKDIR, so they land INSIDE the agent's own
+                workspace, polluting the very directory ``--artifacts-dir`` names and that
+                Harbor snapshots. Confirmed live -- ``artifacts/work/runs/<timestamp>/run.json``
+                appeared in a collected trial.
+
+                It points at a throwaway tmp path rather than the agent logs dir on purpose:
+                Harbor does its own trial-level reporting, so run-level files are of no
+                interest to it and would only clutter what it syncs back. The per-task files
+                that DO matter -- task.json/task.log/task.html and the promoted
+                trajectory.json this class reads back -- all follow ``--logging-dir``.
+
+                The two directory templates are passed as STATIC paths, which is the whole
+                reason no copy happens: ``--logging-dir`` puts task.json/task.log flat in
+                Harbor's agent logs dir, and ``--artifacts-dir`` names the container's own
+                WORKDIR -- the directory the agent already ran in, and the one Harbor itself
+                snapshots (task.toml's ``artifacts``) before teardown. Because artifacts are
+                no longer a child of the logging dir, nothing lands twice; and because the
+                artifacts destination IS the workspace, the capture self-cancels. A static
+                template needs no special-casing anywhere -- substituting a string with no
+                placeholders is the identity function.
+
+                Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
         """
         del instruction, context  # nothing to forward; context is populated post-run
         run_dir = self.environment_logs_dir.as_posix()
         command = (
             f"coder-eval execute {shlex.quote(AGENT_TASK_YAML_PATH)} --format harbor "
-            f'--run-dir {shlex.quote(run_dir)} --workspace-dir "$(pwd)"'
+            f"--run-dir {_THROWAWAY_RUN_DIR} "
+            f'--workspace-dir "$(pwd)" '
+            f'--logging-dir {shlex.quote(run_dir)} --artifacts-dir "$(pwd)"'
         )
         await self._exec(environment, command)
 

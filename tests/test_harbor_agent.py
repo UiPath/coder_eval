@@ -62,11 +62,17 @@ def _make_agent(module, *, logs_dir: Path):
 
 
 class TestRunCommandConstruction:
-    async def test_run_shells_out_to_execute_with_workspace_dir_and_run_dir(self, coder_eval_agent_module, tmp_path):
+    async def test_run_shells_out_to_execute_with_static_dir_templates(self, coder_eval_agent_module, tmp_path):
         """`--workspace-dir "$(pwd)"` is Gap 2's real fix: without it the agent's
         tempdir sandbox writes outside the container's WORKDIR, where Harbor's
-        verifier phase looks. `--run-dir` must point at `environment_logs_dir`
-        (bind-mounted from Harbor's `self.logs_dir` on the host)."""
+        verifier phase looks.
+
+        `--logging-dir` must point at `environment_logs_dir` (bind-mounted from
+        Harbor's `self.logs_dir` on the host) -- that is where task.json/task.log and
+        the promoted trajectory.json this class reads back land. `--artifacts-dir`
+        names the WORKDIR, so artifacts are NOT a child of the logging dir and
+        nothing is copied. There is deliberately no `--run-dir`: both templates are
+        static, so `${run_dir}` is never substituted."""
         agent = _make_agent(coder_eval_agent_module, logs_dir=tmp_path)
 
         captured: dict[str, object] = {}
@@ -85,8 +91,17 @@ class TestRunCommandConstruction:
         assert isinstance(command, str)
         assert command.startswith("coder-eval execute ")
         assert "--format harbor" in command
-        assert f"--run-dir {tmp_path.as_posix()}" in command
+        assert f"--logging-dir {tmp_path.as_posix()}" in command
+        assert '--artifacts-dir "$(pwd)"' in command
         assert '--workspace-dir "$(pwd)"' in command
+        # --run-dir must be passed even though the templates are static: run-level
+        # bookkeeping follows it and its default is CWD-relative, so omitting it
+        # writes runs/<timestamp>/ into the agent's workspace (cwd == WORKDIR) and
+        # pollutes the collected artifacts. Regression-pinned from a live trial.
+        # It points at a throwaway tmp dir, NOT the logs dir: Harbor has its own
+        # trial reporting, so run-level files would only clutter what it syncs back.
+        assert "--run-dir /tmp/coder-eval-run" in command
+        assert f"--run-dir {tmp_path.as_posix()}" not in command
 
 
 class TestPopulateContextPostRun:

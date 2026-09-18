@@ -104,9 +104,15 @@ def test_the_container_has_no_preservation_mode_fallback():
 
 
 def test_clear_rerun_artifacts_removes_only_existing(tmp_path):
-    """clear_rerun_artifacts wipes a stale artifacts/<task_id> for each re-run task."""
+    """clear_rerun_artifacts wipes a stale artifacts dir for each re-run task.
+
+    Paths come from BatchRunConfig's own resolver, so this also pins that clearing
+    targets the SAME directory the run writes to -- a hand-built
+    run_dir/artifacts/<task_id> would silently miss an overridden template.
+    """
     from coder_eval.models import ResolvedTask, TaskDefinition
     from coder_eval.orchestration.batch import clear_rerun_artifacts
+    from coder_eval.orchestration.config import BatchRunConfig
 
     def _rt(task_id: str) -> ResolvedTask:
         task = TaskDefinition(
@@ -120,20 +126,22 @@ def test_clear_rerun_artifacts_removes_only_existing(tmp_path):
         return ResolvedTask(
             task=task,
             task_file=tmp_path / "t.yaml",
-            run_dir=tmp_path / task_id / "00",
+            run_dir=tmp_path / "default" / task_id / "00",
             variant_id="default",
             original_task_id=task_id,
         )
 
+    config = BatchRunConfig(run_dir=tmp_path)
     stale = _rt("stale")
-    (stale.run_dir / "artifacts" / "stale").mkdir(parents=True)
-    (stale.run_dir / "artifacts" / "stale" / "leftover.txt").write_text("from killed run")
+    stale_artifacts = config.resolve_artifacts_dir("default", "stale")
+    stale_artifacts.mkdir(parents=True)
+    (stale_artifacts / "leftover.txt").write_text("from killed run")
     fresh = _rt("fresh")  # no artifacts dir
 
-    cleared = clear_rerun_artifacts([stale, fresh])
+    cleared = clear_rerun_artifacts([stale, fresh], config=config)
 
     assert cleared == 1
-    assert not (stale.run_dir / "artifacts" / "stale").exists()
+    assert not stale_artifacts.exists()
 
 
 @pytest.mark.asyncio
