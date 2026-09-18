@@ -189,7 +189,7 @@ def execute_command(
         "--workspace-dir",
         help=(
             "Run the single resolved task's agent in-place at this absolute path instead of the "
-            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "standard artifacts workspace named by --artifacts-dir (copied out there at "
             "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
             "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
             "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
@@ -201,8 +201,10 @@ def execute_command(
         "--logging-dir",
         help=(
             "Where task.json/task.log go, as a path template. Placeholders: ${run_dir}, "
-            "${variant}, ${task}, ${repeat}. A static path (e.g. /logs/agent) resolves to "
-            "itself. Default reproduces <run_dir>/<variant>/<task>/<NN>."
+            "${variant}, ${task}, ${repeat}. Default reproduces <run_dir>/<variant>/<task>/<NN>. "
+            "A static path (e.g. /logs/agent) resolves every task to itself, so it is only for a "
+            "single-task run (e.g. Harbor); refused for sandbox.driver: docker and for more than "
+            "one resolved task."
         ),
     ),
     artifacts_dir: str | None = typer.Option(
@@ -212,7 +214,11 @@ def execute_command(
             "Where the agent's artifacts go -- the FINAL directory, same placeholders as "
             "--logging-dir, and independent of it (Harbor puts logs at /logs/agent and "
             "artifacts at the container's WORKDIR). When it already holds the workspace "
-            "there is nothing to copy."
+            "there is nothing to copy. Default reproduces <run_dir>/<variant>/<task>/<NN>/"
+            "artifacts/<task>. A static path is only for a single-task run; refused for "
+            "sandbox.driver: docker (the in-container Orchestrator has no way to receive it) "
+            "and for more than one resolved task, and refused together with --resume (it would "
+            "clear an operator-supplied tree the harness did not create)."
         ),
     ),
 ) -> None:

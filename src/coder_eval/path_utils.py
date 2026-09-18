@@ -233,13 +233,6 @@ def resolve_dir_template(
     return Path(resolved)
 
 
-def dir_template_is_static(template: str) -> bool:
-    """True when ``template`` has no ``${...}`` placeholders, so every task resolves it
-    to the identical path -- fine for a single task (Harbor's use case), a collision for
-    more than one."""
-    return not Template(template).get_identifiers()
-
-
 def build_task_run_dir(
     run_dir: Path,
     variant_id: str,

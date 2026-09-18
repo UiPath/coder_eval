@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -365,7 +364,7 @@ def run_command(
         "--workspace-dir",
         help=(
             "Run the single resolved task's agent in-place at this absolute path instead of the "
-            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "standard artifacts workspace named by --artifacts-dir (copied out there at "
             "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
             "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
             "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
@@ -377,8 +376,10 @@ def run_command(
         "--logging-dir",
         help=(
             "Where task.json/task.log go, as a path template. Placeholders: ${run_dir}, "
-            "${variant}, ${task}, ${repeat}. A static path (e.g. /logs/agent) resolves to "
-            "itself. Default reproduces <run_dir>/<variant>/<task>/<NN>."
+            "${variant}, ${task}, ${repeat}. Default reproduces <run_dir>/<variant>/<task>/<NN>. "
+            "A static path (e.g. /logs/agent) resolves every task to itself, so it is only for a "
+            "single-task run (e.g. Harbor); refused for sandbox.driver: docker and for more than "
+            "one resolved task."
         ),
     ),
     artifacts_dir: str | None = typer.Option(
@@ -388,7 +389,11 @@ def run_command(
             "Where the agent's artifacts go -- the FINAL directory, same placeholders as "
             "--logging-dir, and independent of it (Harbor puts logs at /logs/agent and "
             "artifacts at the container's WORKDIR). When it already holds the workspace "
-            "there is nothing to copy."
+            "there is nothing to copy. Default reproduces <run_dir>/<variant>/<task>/<NN>/"
+            "artifacts/<task>. A static path is only for a single-task run; refused for "
+            "sandbox.driver: docker (the in-container Orchestrator has no way to receive it) "
+            "and for more than one resolved task, and refused together with --resume (it would "
+            "clear an operator-supplied tree the harness did not create)."
         ),
     ),
 ) -> None:
@@ -511,6 +516,16 @@ def run_pipeline(
     # resumed workspace-dir run would never recognize its own prior result.
     if resume and workspace_dir is not None:
         raise typer.BadParameter("--resume is not supported together with --workspace-dir.")
+    # clear_rerun_artifacts rmtree's whatever artifacts_dir_template resolves to for a
+    # re-running task. The default template is always a directory the harness itself
+    # created (run_dir/.../artifacts/<task>), which is what makes that safe -- an
+    # operator-supplied --artifacts-dir points at a pre-existing tree the harness did
+    # not create and has no way to prove it owns.
+    if resume and artifacts_dir is not None:
+        raise typer.BadParameter(
+            "--resume is not supported together with --artifacts-dir -- clearing a re-running "
+            + "task's stale artifacts would rmtree an operator-supplied tree the harness didn't create."
+        )
     # Without --resume this flag parsed, was accepted, and did nothing at all. Its
     # sibling mode-scoped flag (`evaluate --workspace`) hard-errors on exactly this.
     if allow_host_grading and not resume:
@@ -726,17 +741,6 @@ async def _run_all_tasks(
 
             written = emit_trajectories_for_run(task_dirs)
             console.print(f"[dim]Wrote {len(written)} trajectory.json (ATIF) file(s)[/dim]")
-
-            # Promoted into the single task's LOGGING dir, not run_dir: this is that
-            # task's own bookkeeping, and the logging dir is by definition where it
-            # goes. That is also where Harbor's CoderEvalAgent reads it from
-            # (`self.logs_dir / "trajectory.json"`, to fill token/cost totals), so
-            # keying it to run_dir left those totals silently empty whenever the two
-            # directories differed.
-            flat_trajectory_path = (task_dirs[0] if task_dirs else run_dir) / "trajectory.json"
-            if len(written) == 1 and written[0] != flat_trajectory_path:
-                await asyncio.to_thread(shutil.copy2, written[0], flat_trajectory_path)
-                console.print(f"[dim]Copied the single trajectory to {flat_trajectory_path}[/dim]")
 
         # Print execution summary
         print_execution_summary(run_dir, summary)

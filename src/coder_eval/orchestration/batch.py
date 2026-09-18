@@ -30,8 +30,8 @@ from ..models import (
 )
 from ..path_utils import (
     DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+    DEFAULT_LOGGING_DIR_TEMPLATE,
     TASK_JSON_FILENAME,
-    dir_template_is_static,
     format_task_log_id,
     write_text_atomic,
 )
@@ -145,16 +145,26 @@ async def run_batch(
             + "is always what gets captured back."
         )
 
+    if config.logging_dir_template != DEFAULT_LOGGING_DIR_TEMPLATE and any(
+        rt.task.sandbox.driver == "docker" for rt in resolved_tasks
+    ):
+        raise ValueError(
+            "--logging-dir is not for sandbox.driver: docker tasks -- the container's artifacts land under "
+            + "the resolved logging dir (DockerRunner mounts it as the container's /work/output), so "
+            + "clear_rerun_artifacts and --artifacts-dir's default template -- both anchored on config.run_dir "
+            + "-- would target a different directory than the one the container actually wrote to."
+        )
+
     if len(resolved_tasks) > 1:
-        for flag, template in (
-            ("--logging-dir", config.logging_dir_template),
-            ("--artifacts-dir", config.artifacts_dir_template),
+        for flag, resolver in (
+            ("--logging-dir", config.resolve_logging_dir),
+            ("--artifacts-dir", config.resolve_artifacts_dir),
         ):
-            if dir_template_is_static(template):
+            resolved_dirs = [resolver(rt.variant_id, rt.task.task_id, rt.replicate_index) for rt in resolved_tasks]
+            if len(set(resolved_dirs)) != len(resolved_dirs):
                 raise ValueError(
-                    f"{flag} {template!r} has no placeholders, so every one of this run's "
-                    + f"{len(resolved_tasks)} tasks would resolve to the identical directory and "
-                    + "collide. A static path is only for a single-task run (e.g. Harbor); use "
+                    f"{flag}'s template resolves two or more of this run's {len(resolved_tasks)} tasks to "
+                    + "the same directory, so they would overwrite each other's task.json/artifacts. Use "
                     + "${variant}/${task}/${repeat} to keep multiple tasks apart."
                 )
 

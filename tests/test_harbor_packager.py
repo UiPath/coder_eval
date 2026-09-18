@@ -123,10 +123,10 @@ class TestEmittedDirectoryStructure:
     def test_test_sh_is_executable_and_grades_the_run_directory(self, tmp_path: Path) -> None:
         """test.sh must be workdir-agnostic: it grades `/logs/agent` as a run
         directory with `--workspace "$(pwd)"` naming the actual workspace --
-        CoderEvalAgent's `--no-capture-workspace` leaves it in-place at the
-        image's own WORKDIR (never copied under /logs/agent/artifacts/), so
-        `--workspace` must point there explicitly (see packager.py's
-        `_write_environment`)."""
+        CoderEvalAgent's `--artifacts-dir "$(pwd)"` (harbor/agent.py) makes the
+        workspace IS the artifacts dir, so capture_as's self-referential guard
+        never copies it under /logs/agent/artifacts/, so `--workspace` must
+        point there explicitly (see packager.py's `_write_environment`)."""
         task_file = _write_task(tmp_path)
         out_dir = tmp_path / "out"
 
@@ -497,18 +497,14 @@ class TestPrebuiltImageWorkdir:
         doc = tomllib.loads((tmp_path / "out" / "task.toml").read_text(encoding="utf-8"))
         assert doc["environment"]["workdir"] == "/explicit"
 
-    def test_working_dir_may_be_the_images_own_work_dir(self, tmp_path: Path) -> None:
-        """/work is coder-eval-agent:latest's own declared WORKDIR, so working_dir
-        must accept it -- only the bind-mount targets under it (/work/input, ...)
-        and / are reserved."""
+    def test_working_dir_rejects_the_mount_root(self, tmp_path: Path) -> None:
+        """/work is the framework's mount ROOT (input/output/references/task_dir all
+        live under it) -- it stays reserved even though it's also
+        coder-eval-agent:latest's declared image WORKDIR, so a task can't put the
+        agent's graded workspace there and inherit the reference solution."""
         task_file = _write_task(tmp_path, {"sandbox": {"driver": "docker", "docker": {"working_dir": "/work"}}})
-
-        result = export_task(task_file, tmp_path / "out")
-
-        assert result.workdir == "/work"
-        doc = tomllib.loads((tmp_path / "out" / "task.toml").read_text(encoding="utf-8"))
-        assert doc["environment"]["workdir"] == "/work"
-        assert doc["artifacts"] == ["/work"]
+        with pytest.raises(ValueError, match="framework-reserved container path"):
+            export_task(task_file, tmp_path / "out")
 
     def test_artifacts_defaults_to_container_work_dir(self, tmp_path: Path) -> None:
         """No task should have to restate /work: it is the WORKDIR coder-eval's own

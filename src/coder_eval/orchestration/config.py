@@ -1,9 +1,10 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
+from string import Template
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from coder_eval.models import PreservationMode
 from coder_eval.path_utils import (
@@ -11,6 +12,23 @@ from coder_eval.path_utils import (
     DEFAULT_LOGGING_DIR_TEMPLATE,
     resolve_dir_template,
 )
+
+
+_VALID_DIR_TEMPLATE_PLACEHOLDERS = frozenset({"run_dir", "variant", "task", "repeat"})
+
+
+def _check_dir_template(v: str) -> str:
+    """Reject an unknown ``${...}`` placeholder at config-construction time.
+
+    ``resolve_dir_template`` catches this too, but only when a task is actually
+    resolved against it -- late enough that a typo becomes N mislabelled ERROR
+    rows instead of one clean ``typer.BadParameter`` at CLI parse time.
+    """
+    unknown = set(Template(v).get_identifiers()) - _VALID_DIR_TEMPLATE_PLACEHOLDERS
+    if unknown:
+        valid = ", ".join(f"${{{p}}}" for p in sorted(_VALID_DIR_TEMPLATE_PLACEHOLDERS))
+        raise ValueError(f"{v!r} references unknown placeholder(s) {sorted(unknown)}. Valid placeholders: {valid}.")
+    return v
 
 
 def resolve_preservation_mode(explicit: PreservationMode | None, driver: str) -> PreservationMode:
@@ -144,6 +162,11 @@ class BatchRunConfig(BaseModel):
             "to copy."
         ),
     )
+
+    @field_validator("logging_dir_template", "artifacts_dir_template")
+    @classmethod
+    def _validate_dir_template(cls, v: str) -> str:
+        return _check_dir_template(v)
 
     def resolve_logging_dir(self, variant_id: str, task_id: str, replicate_index: int = 0) -> Path:
         """This task's logging directory, per ``logging_dir_template``."""

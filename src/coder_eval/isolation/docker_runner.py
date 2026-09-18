@@ -380,8 +380,7 @@ def _assert_workspace_not_reserved(path: str) -> None:
     argv) has not been -- so re-check here before it reaches ``docker run -w``.
     """
     norm = path.rstrip("/") or "/"
-    # /work is exempt, same reason as the model validator: it's the shipped image's own WORKDIR.
-    if norm in RESERVED_CONTAINER_DIRS - {CONTAINER_WORK_DIR} or norm.startswith(CONTAINER_WORK_DIR + "/"):
+    if norm in RESERVED_CONTAINER_DIRS or norm.startswith(CONTAINER_WORK_DIR + "/"):
         raise DockerRunError(f"working_dir {path!r} collides with a framework-reserved container path (/, /work/*).")
 
 

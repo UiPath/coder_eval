@@ -230,6 +230,97 @@ async def test_artifacts_dir_template_rejected_for_docker_driver(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_logging_dir_template_rejected_for_docker_driver(tmp_path):
+    """A non-default logging_dir_template is rejected for driver: docker, mirroring
+    --artifacts-dir's rejection -- the container's real artifacts land under the
+    resolved logging dir (DockerRunner's output_dir), so an override desyncs it from
+    the artifacts_dir_template default that clear_rerun_artifacts/--resume rely on."""
+    task = TaskDefinition(
+        task_id="test_docker_logging",
+        description="Test logging_dir_template + docker rejection",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "docker", "docker": {"image": "coder-eval-agent"}},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / "test_task.yaml"
+    task_file.write_text("task_id: test_docker_logging\n")
+
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        preservation_mode=PreservationMode.NONE,
+        logging_dir_template="${run_dir}/flat/${task}",
+    )
+
+    resolved_task = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir / "flat" / "test_docker_logging",
+        variant_id="default",
+        original_task_id="test_docker_logging",
+    )
+
+    with pytest.raises(ValueError, match=r"--logging-dir is not for sandbox\.driver: docker"):
+        await run_batch([resolved_task], config)
+
+
+def _make_resolved_task(tmp_path: Path, task_id: str, run_dir: Path) -> ResolvedTask:
+    task = TaskDefinition(
+        task_id=task_id,
+        description="Test multi-task collision",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "tempdir"},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / f"{task_id}.yaml"
+    task_file.write_text(f"task_id: {task_id}\n")
+    return ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir,
+        variant_id="default",
+        original_task_id=task_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_static_logging_template_rejected_for_multiple_tasks(tmp_path):
+    """A logging_dir_template that resolves every task to the SAME directory is refused
+    for a multi-task run -- each task's task.json/task.log would overwrite the last."""
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(run_dir=run_dir, max_parallel=1, logging_dir_template="${run_dir}/flat")
+    tasks = [
+        _make_resolved_task(tmp_path, "task_a", run_dir / "flat"),
+        _make_resolved_task(tmp_path, "task_b", run_dir / "flat"),
+    ]
+
+    with pytest.raises(ValueError, match=r"--logging-dir's template resolves two or more"):
+        await run_batch(tasks, config)
+
+
+@pytest.mark.asyncio
+async def test_static_artifacts_template_rejected_for_multiple_tasks(tmp_path):
+    """Same collision guard, for --artifacts-dir: distinct logging dirs but a shared
+    artifacts_dir_template still collides on the artifacts side."""
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        artifacts_dir_template="${run_dir}/shared-artifacts",
+    )
+    tasks = [
+        _make_resolved_task(tmp_path, "task_a", run_dir / "default" / "task_a" / "00"),
+        _make_resolved_task(tmp_path, "task_b", run_dir / "default" / "task_b" / "00"),
+    ]
+
+    with pytest.raises(ValueError, match=r"--artifacts-dir's template resolves two or more"):
+        await run_batch(tasks, config)
+
+
+@pytest.mark.asyncio
 async def test_dir_templates_default_to_todays_layout(tmp_path):
     """The defaults must reproduce the historical layout exactly, so an unspecified run
     writes to byte-identical paths."""

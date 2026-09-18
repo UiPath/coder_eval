@@ -563,10 +563,7 @@ class TestDockerWorkingDir:
 
         assert DockerDriverConfig().working_dir is None
 
-    # /work IS accepted: it is coder-eval-agent:latest's own declared WORKDIR
-    # (docker/Dockerfile), and the driver's bind mounts occupy /work/<sub>, not
-    # /work itself -- so an agent running AT /work collides with nothing.
-    @pytest.mark.parametrize("value", [None, "auto", "/root", "/app", "/app/workspace", "/root/", "/work", "/work/"])
+    @pytest.mark.parametrize("value", [None, "auto", "/root", "/app", "/app/workspace", "/root/"])
     def test_accepts_valid(self, value):
         from coder_eval.models import DockerDriverConfig
 
@@ -575,7 +572,10 @@ class TestDockerWorkingDir:
         assert cfg.docker.working_dir == value
         assert DockerDriverConfig(working_dir=value).working_dir == value
 
-    @pytest.mark.parametrize("value", ["/", "/work/output", "/work/input", "/work/task_dir"])
+    # /work is REJECTED, not just its children: it is the mount ROOT (input/output/
+    # references/task_dir/workspace all live under it), so an agent running AT /work
+    # would have the reference solution and the run's own task.json in its workspace.
+    @pytest.mark.parametrize("value", ["/", "/work", "/work/", "/work/output", "/work/input", "/work/task_dir"])
     def test_rejects_reserved(self, value):
         from pydantic import ValidationError
 
