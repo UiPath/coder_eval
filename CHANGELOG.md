@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.12.4 (2026-09-18)
+
+### Bug Fixes
+
+- **ci**: Silence bandit B108 on the throwaway Harbor run-dir path
+  ([#189](https://github.com/UiPath/coder_eval/pull/189),
+  [`db7f27c`](https://github.com/UiPath/coder_eval/commit/db7f27c7137fdb173c71948af8ec0389becd84e9))
+
+- **orchestration**: Close blockers from the dir-template review round 2
+  ([#189](https://github.com/UiPath/coder_eval/pull/189),
+  [`db7f27c`](https://github.com/UiPath/coder_eval/commit/db7f27c7137fdb173c71948af8ec0389becd84e9))
+
+- **orchestration**: Close code-review gaps in the dir-template split
+  ([#189](https://github.com/UiPath/coder_eval/pull/189),
+  [`db7f27c`](https://github.com/UiPath/coder_eval/commit/db7f27c7137fdb173c71948af8ec0389becd84e9))
+
+### Features
+
+- **orchestration**: Describe the run layout as two independent directory templates
+  ([#189](https://github.com/UiPath/coder_eval/pull/189),
+  [`db7f27c`](https://github.com/UiPath/coder_eval/commit/db7f27c7137fdb173c71948af8ec0389becd84e9))
+
+
 ## v0.12.3 (2026-09-17)
 
 ### Bug Fixes
