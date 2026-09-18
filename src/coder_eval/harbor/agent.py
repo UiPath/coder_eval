@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - defensive; coder_eval always defines t
 # outside the WORKDIR would do; /tmp is the one path guaranteed writable in every
 # task image. NOT a bare "/tmp": a dedicated subdirectory keeps run.json/run.md/
 # experiment.* from littering a directory tasks themselves use.
-_THROWAWAY_RUN_DIR = "/tmp/coder-eval-run"
+_THROWAWAY_RUN_DIR = "/tmp/coder-eval-run"  # nosec B108 -- static, no attacker-influenced content (see comment above)
 
 
 class CoderEvalAgent(BaseInstalledAgent):
