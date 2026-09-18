@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -80,15 +81,16 @@ success_criteria:
 
 
 @pytest.mark.asyncio
-async def test_workspace_dir_constructs_orchestrator_with_flat_run_dir(tmp_path):
-    """--workspace-dir mode must pass config.run_dir (flat) to Orchestrator, not the
-    nested <variant>/<task_id>/<NN> path a ResolvedTask normally carries.
+async def test_orchestrator_run_dir_is_the_resolved_logging_dir(tmp_path):
+    """Orchestrator's run_dir is whatever logging_dir_template resolved to for this
+    task -- ResolvedTask.run_dir, verbatim.
 
-    Exercises the effective_run_dir branch in run_batch's run_single -- the exact
-    code path the real Harbor CoderEvalAgent drives via `coder-eval execute
-    --format harbor --workspace-dir "$(pwd)"`. Patches Orchestrator itself (rather
-    than driving a full run) so the assertion is directly on the value this branch
-    computes, independent of what a real run happens to persist to disk.
+    There is deliberately NO workspace_dir special case here any more. "Flat" used to
+    be a mode this seam detected (effective_run_dir = config.run_dir when
+    workspace_dir was set, so Harbor's task.json landed at a predictable path); it is
+    now simply what a static logging template resolves to, which the companion test
+    below pins. Patches Orchestrator itself (rather than driving a full run) so the
+    assertion is on the value this seam computes.
     """
     task = TaskDefinition(
         task_id="test_workspace_dir",
@@ -128,9 +130,203 @@ async def test_workspace_dir_constructs_orchestrator_with_flat_run_dir(tmp_path)
         await run_batch([resolved_task], config)
 
     assert mock_orchestrator_cls.call_count == 1
-    assert mock_orchestrator_cls.call_args.kwargs["run_dir"] == run_dir, (
-        "workspace_dir mode must construct Orchestrator with the flat config.run_dir, not the nested per-task run_dir"
+    assert mock_orchestrator_cls.call_args.kwargs["run_dir"] == nested_run_dir, (
+        "Orchestrator's run_dir must be the task's resolved logging dir, not config.run_dir"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_static_logging_template_makes_the_run_dir_flat(tmp_path):
+    """The replacement for the deleted effective_run_dir special case: Harbor gets a
+    flat task.json path by RESOLVING a static logging template to it, not by the
+    orchestration seam noticing workspace_dir and substituting config.run_dir."""
+    from coder_eval.path_utils import resolve_dir_template
+
+    assert resolve_dir_template(
+        "/logs/agent", run_dir=tmp_path / "run", variant_id="default", task_id="t", replicate_index=0
+    ) == Path("/logs/agent")
+
+
+@pytest.mark.asyncio
+async def test_artifacts_dir_template_resolved_and_threaded_into_orchestrator(tmp_path):
+    """--artifacts-dir reaches Orchestrator already RESOLVED to a concrete path.
+
+    A static template (no placeholders) resolves to itself -- the identity case that
+    lets Harbor pass a literal container path with no special-casing anywhere."""
+    task = TaskDefinition(
+        task_id="test_capture_workspace",
+        description="Test capture_workspace threading",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "tempdir"},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / "test_task.yaml"
+    task_file.write_text("task_id: test_capture_workspace\n")
+
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        preservation_mode=PreservationMode.NONE,
+        workspace_dir=workspace_dir,
+        artifacts_dir_template="/work/output",
+    )
+
+    resolved_task = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir / "default" / "test_capture_workspace" / "default",
+        variant_id="default",
+        original_task_id="test_capture_workspace",
+    )
+
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.run = AsyncMock(return_value=MagicMock(duration_seconds=0.0))
+    mock_orchestrator_cls = MagicMock(return_value=mock_orchestrator)
+
+    with patch("coder_eval.orchestrator.Orchestrator", mock_orchestrator_cls):
+        await run_batch([resolved_task], config)
+
+    assert mock_orchestrator_cls.call_args.kwargs["artifacts_dir"] == Path("/work/output")
+
+
+@pytest.mark.asyncio
+async def test_artifacts_dir_template_rejected_for_docker_driver(tmp_path):
+    """A non-default artifacts_dir_template is a no-op for driver: docker (the in-container
+    Orchestrator has no way to receive it) -- run_batch refuses it loud rather than silently
+    ignoring the override, mirroring --workspace-dir's existing docker rejection."""
+    task = TaskDefinition(
+        task_id="test_docker_artifacts",
+        description="Test artifacts_dir_template + docker rejection",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "docker", "docker": {"image": "coder-eval-agent"}},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / "test_task.yaml"
+    task_file.write_text("task_id: test_docker_artifacts\n")
+
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        preservation_mode=PreservationMode.NONE,
+        artifacts_dir_template="/work/output",
+    )
+
+    resolved_task = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir / "default" / "test_docker_artifacts" / "default",
+        variant_id="default",
+        original_task_id="test_docker_artifacts",
+    )
+
+    with pytest.raises(ValueError, match=r"--artifacts-dir is not for sandbox\.driver: docker"):
+        await run_batch([resolved_task], config)
+
+
+@pytest.mark.asyncio
+async def test_logging_dir_template_rejected_for_docker_driver(tmp_path):
+    """A non-default logging_dir_template is rejected for driver: docker, mirroring
+    --artifacts-dir's rejection -- the container's real artifacts land under the
+    resolved logging dir (DockerRunner's output_dir), so an override desyncs it from
+    the artifacts_dir_template default that clear_rerun_artifacts/--resume rely on."""
+    task = TaskDefinition(
+        task_id="test_docker_logging",
+        description="Test logging_dir_template + docker rejection",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "docker", "docker": {"image": "coder-eval-agent"}},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / "test_task.yaml"
+    task_file.write_text("task_id: test_docker_logging\n")
+
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        preservation_mode=PreservationMode.NONE,
+        logging_dir_template="${run_dir}/flat/${task}",
+    )
+
+    resolved_task = ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir / "flat" / "test_docker_logging",
+        variant_id="default",
+        original_task_id="test_docker_logging",
+    )
+
+    with pytest.raises(ValueError, match=r"--logging-dir is not for sandbox\.driver: docker"):
+        await run_batch([resolved_task], config)
+
+
+def _make_resolved_task(tmp_path: Path, task_id: str, run_dir: Path) -> ResolvedTask:
+    task = TaskDefinition(
+        task_id=task_id,
+        description="Test multi-task collision",
+        initial_prompt="Test prompt",
+        agent={"type": "claude-code"},
+        sandbox={"driver": "tempdir"},
+        success_criteria=[{"type": "file_exists", "path": "test.txt", "description": "Check for test.txt"}],
+    )
+    task_file = tmp_path / f"{task_id}.yaml"
+    task_file.write_text(f"task_id: {task_id}\n")
+    return ResolvedTask(
+        task=task,
+        task_file=task_file,
+        run_dir=run_dir,
+        variant_id="default",
+        original_task_id=task_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_static_logging_template_rejected_for_multiple_tasks(tmp_path):
+    """A logging_dir_template that resolves every task to the SAME directory is refused
+    for a multi-task run -- each task's task.json/task.log would overwrite the last."""
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(run_dir=run_dir, max_parallel=1, logging_dir_template="${run_dir}/flat")
+    tasks = [
+        _make_resolved_task(tmp_path, "task_a", run_dir / "flat"),
+        _make_resolved_task(tmp_path, "task_b", run_dir / "flat"),
+    ]
+
+    with pytest.raises(ValueError, match=r"--logging-dir's template resolves two or more"):
+        await run_batch(tasks, config)
+
+
+@pytest.mark.asyncio
+async def test_static_artifacts_template_rejected_for_multiple_tasks(tmp_path):
+    """Same collision guard, for --artifacts-dir: distinct logging dirs but a shared
+    artifacts_dir_template still collides on the artifacts side."""
+    run_dir = tmp_path / "run"
+    config = BatchRunConfig(
+        run_dir=run_dir,
+        max_parallel=1,
+        artifacts_dir_template="${run_dir}/shared-artifacts",
+    )
+    tasks = [
+        _make_resolved_task(tmp_path, "task_a", run_dir / "default" / "task_a" / "00"),
+        _make_resolved_task(tmp_path, "task_b", run_dir / "default" / "task_b" / "00"),
+    ]
+
+    with pytest.raises(ValueError, match=r"--artifacts-dir's template resolves two or more"):
+        await run_batch(tasks, config)
+
+
+@pytest.mark.asyncio
+async def test_dir_templates_default_to_todays_layout(tmp_path):
+    """The defaults must reproduce the historical layout exactly, so an unspecified run
+    writes to byte-identical paths."""
+    cfg = BatchRunConfig(run_dir=tmp_path / "run")
+    assert cfg.logging_dir_template == "${run_dir}/${variant}/${task}/${repeat}"
+    assert cfg.artifacts_dir_template == "${run_dir}/${variant}/${task}/${repeat}/artifacts/${task}"
 
 
 @pytest.mark.asyncio

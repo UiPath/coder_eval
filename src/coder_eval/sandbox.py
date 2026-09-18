@@ -1469,11 +1469,21 @@ class Sandbox:
         Raises:
             RuntimeError: If sandbox is not set up.
         """
+        return self.preserve_as(artifact_dir / self.task_id)
+
+    def preserve_as(self, preserve_path: Path) -> Path:
+        """``preserve_to``, but naming the FINAL directory rather than its parent.
+
+        Exists because a caller-supplied artifacts directory (resolved from a
+        directory template) IS the final path -- appending ``task_id`` to it
+        again would re-nest a directory the caller deliberately placed.
+        ``preserve_to`` is the parent-relative wrapper for everyone who wants the
+        default layout.
+        """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox not set up")
 
         # task_id may contain "/" (dataset row tasks); ensure the parent exists.
-        preserve_path = artifact_dir / self.task_id
         preserve_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Guard against self-referential move (sandbox already at target).
@@ -1524,11 +1534,19 @@ class Sandbox:
 
         Rationale: .claude/notes/isolation.md § preserve_to, capture_to, and the capture denylist
         """
+        return self.capture_as(artifact_dir / self.task_id)
+
+    def capture_as(self, preserve_path: Path) -> Path:
+        """``capture_to``, but naming the FINAL directory rather than its parent.
+
+        Same rationale as :meth:`preserve_as`. The self-referential guard below
+        is what makes a caller-supplied artifacts directory that ALREADY holds
+        the workspace a no-op rather than a duplicating copy.
+        """
         if not self.sandbox_dir:
             raise RuntimeError("Sandbox not set up")
 
         # task_id may contain "/" (dataset row tasks); ensure the parent exists.
-        preserve_path = artifact_dir / self.task_id
         preserve_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Guard against a self-referential copy (workspace already at target).

@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -365,11 +364,36 @@ def run_command(
         "--workspace-dir",
         help=(
             "Run the single resolved task's agent in-place at this absolute path instead of the "
-            "standard run_dir/artifacts workspace (copied out to run_dir/artifacts/<task> at "
+            "standard artifacts workspace named by --artifacts-dir (copied out there at "
             "cleanup). Requires exactly one resolved task; refused for sandbox.driver: docker "
             "(the docker driver already aligns automatically via sandbox.docker.working_dir). "
             "Meant for a Harbor `CoderEvalAgent` invocation, so the agent's writes land at the "
             "container's own WORKDIR, where Harbor's verifier phase looks for them."
+        ),
+    ),
+    logging_dir: str | None = typer.Option(
+        None,
+        "--logging-dir",
+        help=(
+            "Where task.json/task.log go, as a path template. Placeholders: ${run_dir}, "
+            "${variant}, ${task}, ${repeat}. Default reproduces <run_dir>/<variant>/<task>/<NN>. "
+            "A static path (e.g. /logs/agent) resolves every task to itself, so it is only for a "
+            "single-task run (e.g. Harbor); refused for sandbox.driver: docker and for more than "
+            "one resolved task."
+        ),
+    ),
+    artifacts_dir: str | None = typer.Option(
+        None,
+        "--artifacts-dir",
+        help=(
+            "Where the agent's artifacts go -- the FINAL directory, same placeholders as "
+            "--logging-dir, and independent of it (Harbor puts logs at /logs/agent and "
+            "artifacts at the container's WORKDIR). When it already holds the workspace "
+            "there is nothing to copy. Default reproduces <run_dir>/<variant>/<task>/<NN>/"
+            "artifacts/<task>. A static path is only for a single-task run; refused for "
+            "sandbox.driver: docker (the in-container Orchestrator has no way to receive it) "
+            "and for more than one resolved task, and refused together with --resume (it would "
+            "clear an operator-supplied tree the harness did not create)."
         ),
     ),
 ) -> None:
@@ -424,7 +448,23 @@ def run_command(
         set_overrides=set_overrides,
         format=format,
         workspace_dir=workspace_dir,
+        logging_dir=logging_dir,
+        artifacts_dir=artifacts_dir,
     )
+
+
+def _dir_template_overrides(logging_dir: str | None, artifacts_dir: str | None) -> dict[str, str]:
+    """Map the two CLI flags onto BatchRunConfig's template fields.
+
+    ``None`` is omitted rather than forwarded, so an unpassed flag leaves the
+    model default (today's layout) authoritative in exactly one place.
+    """
+    overrides: dict[str, str] = {}
+    if logging_dir is not None:
+        overrides["logging_dir_template"] = logging_dir
+    if artifacts_dir is not None:
+        overrides["artifacts_dir_template"] = artifacts_dir
+    return overrides
 
 
 def run_pipeline(
@@ -454,6 +494,8 @@ def run_pipeline(
     set_overrides: list[str],
     format: str | None = None,
     workspace_dir: Path | None = None,
+    logging_dir: str | None = None,
+    artifacts_dir: str | None = None,
 ) -> None:
     """The shared body of ``coder-eval run`` and ``coder-eval execute``.
 
@@ -474,6 +516,16 @@ def run_pipeline(
     # resumed workspace-dir run would never recognize its own prior result.
     if resume and workspace_dir is not None:
         raise typer.BadParameter("--resume is not supported together with --workspace-dir.")
+    # clear_rerun_artifacts rmtree's whatever artifacts_dir_template resolves to for a
+    # re-running task. The default template is always a directory the harness itself
+    # created (run_dir/.../artifacts/<task>), which is what makes that safe -- an
+    # operator-supplied --artifacts-dir points at a pre-existing tree the harness did
+    # not create and has no way to prove it owns.
+    if resume and artifacts_dir is not None:
+        raise typer.BadParameter(
+            "--resume is not supported together with --artifacts-dir -- clearing a re-running "
+            + "task's stale artifacts would rmtree an operator-supplied tree the harness didn't create."
+        )
     # Without --resume this flag parsed, was accepted, and did nothing at all. Its
     # sibling mode-scoped flag (`evaluate --workspace`) hard-errors on exactly this.
     if allow_host_grading and not resume:
@@ -539,6 +591,8 @@ def run_pipeline(
                 grade=grade,
                 format=format,
                 workspace_dir=workspace_dir,
+                logging_dir=logging_dir,
+                artifacts_dir=artifacts_dir,
             )
         )
     except KeyboardInterrupt:
@@ -568,6 +622,8 @@ async def _run_all_tasks(
     grade: bool = True,
     format: str | None = None,
     workspace_dir: Path | None = None,
+    logging_dir: str | None = None,
+    artifacts_dir: str | None = None,
 ) -> None:
     """Async entry point for running all tasks (optionally in parallel).
 
@@ -590,6 +646,7 @@ async def _run_all_tasks(
             promotes it to `<run_dir>/trajectory.json` when the run wrote exactly one
             (a multi-task run is left nested; there is nothing to promote)
         workspace_dir: Run the agent here instead of run_dir/artifacts
+        logging_dir / artifacts_dir: path templates for the run layout (see run_command options)
     """
     # Prepare run directory
     run_dir = prepare_run_directory(run_dir)
@@ -617,6 +674,7 @@ async def _run_all_tasks(
         include_skipped=include_skipped,
         grade=grade,
         workspace_dir=workspace_dir,
+        **_dir_template_overrides(logging_dir, artifacts_dir),
     )
 
     from ..telemetry import flush_telemetry, track_event
@@ -657,20 +715,32 @@ async def _run_all_tasks(
         )
 
         # Aggregate task logs into run.log
+
+        # Over the resolved logging dirs, not a run_dir walk: an overridden
+        # logging_dir_template need not live under run_dir, and the walk would
+        # silently aggregate nothing (empty experiment.log, no error).
+        # summary.task_results rows are plain dicts (RunSummary persists them
+        # that way), carrying the same variant/task/replicate the logging dir was
+        # built from.
+        task_dirs = [
+            config.resolve_logging_dir(
+                row.get("variant_id") or "default",
+                row["task_id"],
+                row.get("replicate_index") or 0,
+            )
+            for row in summary.task_results
+            if row.get("task_id")
+        ]
+
         from ..logging_config import aggregate_task_logs
 
-        aggregate_task_logs(run_dir)
+        aggregate_task_logs(run_dir, task_dirs=task_dirs)
 
         if format == "harbor":
             from ..harbor.atif_emit import emit_trajectories_for_run
 
-            written = emit_trajectories_for_run(run_dir)
-            console.print(f"[dim]Wrote {len(written)} trajectory.json (ATIF) file(s) under {run_dir}[/dim]")
-
-            flat_trajectory_path = run_dir / "trajectory.json"
-            if len(written) == 1 and written[0] != flat_trajectory_path:
-                await asyncio.to_thread(shutil.copy2, written[0], flat_trajectory_path)
-                console.print(f"[dim]Copied the single trajectory to {flat_trajectory_path}[/dim]")
+            written = emit_trajectories_for_run(task_dirs)
+            console.print(f"[dim]Wrote {len(written)} trajectory.json (ATIF) file(s)[/dim]")
 
         # Print execution summary
         print_execution_summary(run_dir, summary)
@@ -764,7 +834,7 @@ def _unreadable_row_placeholder(rt: ResolvedTask, error: Exception) -> Evaluatio
 
 
 async def _grade_resumed_tasks(
-    to_grade: list[ResolvedTask], *, allow_host_grading: bool = False
+    to_grade: list[ResolvedTask], *, config: BatchRunConfig, allow_host_grading: bool = False
 ) -> list[tuple[ResolvedTask, TaskResult]]:
     """Grade the rows ``coder-eval execute`` left NOT_GRADED, in place.
 
@@ -799,7 +869,15 @@ async def _grade_resumed_tasks(
             prior = load_prior_result(rt.run_dir)
             # The reference check lives inside regrade_in_place, so a caller
             # cannot forget it.
-            workspace = default_workspace(rt.run_dir, prior)
+            # The same template the run wrote with, so a workspace the template
+            # placed OUTSIDE run_dir is a trusted root rather than a containment
+            # failure -- which is what previously made --resume unusable alongside
+            # an overridden artifacts dir.
+            workspace = default_workspace(
+                rt.run_dir,
+                prior,
+                artifacts_dir=config.resolve_artifacts_dir(rt.variant_id, rt.task.task_id, rt.replicate_index),
+            )
             # Preserve the ungraded record BEFORE the orchestrator overwrites
             # task.json in this same directory.
             back_up_pre_grade_record(rt.run_dir)
@@ -860,7 +938,7 @@ async def _grade_resumed_tasks(
 
 
 async def _apply_resume(
-    resolved: list[ResolvedTask], *, grade: bool, allow_host_grading: bool
+    resolved: list[ResolvedTask], *, config: BatchRunConfig, grade: bool, allow_host_grading: bool
 ) -> tuple[list[ResolvedTask], list[TaskResult], list[ResolvedTask]]:
     """Split a resumed run into what still needs running, and what is carried in.
 
@@ -879,7 +957,7 @@ async def _apply_resume(
     # Leftover artifacts from a partial run could let a file-based criterion pass on
     # the old output. to_grade is deliberately NOT cleared: its artifacts are what is
     # being graded.
-    cleared = clear_rerun_artifacts(part.to_run)
+    cleared = clear_rerun_artifacts(part.to_run, config=config)
     # Checked explicitly rather than left to regrade_in_place's own per-row guard,
     # so the whole batch is refused up front instead of one row at a time.
     # Rationale: .claude/notes/orchestration.md § Refusing a criteria-free task under grade
@@ -892,7 +970,7 @@ async def _apply_resume(
     )
     # Reusing the trajectory and workspace already on disk rather than paying for
     # the agent twice. Folded in as prior_results so the summary covers them.
-    for rt, tr in await _grade_resumed_tasks(part.to_grade, allow_host_grading=allow_host_grading):
+    for rt, tr in await _grade_resumed_tasks(part.to_grade, config=config, allow_host_grading=allow_host_grading):
         prior_results.append(tr)
         prior_resolved.append(rt)
     return part.to_run, prior_results, prior_resolved
@@ -1051,7 +1129,7 @@ async def _run_with_experiment(
     prior_resolved: list[ResolvedTask] = []
     if resume:
         to_run, prior_results, prior_resolved = await _apply_resume(
-            resolved, grade=grade, allow_host_grading=allow_host_grading
+            resolved, config=config, grade=grade, allow_host_grading=allow_host_grading
         )
 
     # Against `to_run`, not `resolved`: an already-finalized row is never re-graded,

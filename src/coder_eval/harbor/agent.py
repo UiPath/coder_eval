@@ -45,6 +45,13 @@ except ImportError:  # pragma: no cover - defensive; coder_eval always defines t
     __version__ = "0.0.0"
 
 
+# Run-level bookkeeping goes here and is discarded with the container. Anywhere
+# outside the WORKDIR would do; /tmp is the one path guaranteed writable in every
+# task image. NOT a bare "/tmp": a dedicated subdirectory keeps run.json/run.md/
+# experiment.* from littering a directory tasks themselves use.
+_THROWAWAY_RUN_DIR = "/tmp/coder-eval-run"  # nosec B108 -- predictable path is fine: single-use, single-tenant container, no other process/user shares /tmp to race or symlink-plant it
+
+
 class CoderEvalAgent(BaseInstalledAgent):
     """Runs coder-eval's own agent loop as a Harbor agent.
 
@@ -76,20 +83,22 @@ class CoderEvalAgent(BaseInstalledAgent):
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         """Run ``coder-eval execute --format harbor`` inside the environment.
 
-        ``instruction`` is NOT forwarded: the agent-phase task.yaml already carries
-        the identical resolved prompt. Token and cost totals are filled in afterward
-        by ``populate_context_post_run``.
+        ``instruction`` is NOT forwarded: the agent-phase task.yaml already carries the
+        identical resolved prompt. Token and cost totals are filled in afterward by
+        ``populate_context_post_run``. ``--workspace-dir "$(pwd)"`` is load-bearing --
+        without it the tempdir sandbox writes the agent's workspace somewhere Harbor's
+        verifier never looks. ``--logging-dir``/``--artifacts-dir`` are static paths, not
+        templates; ``--run-dir`` is a throwaway path outside the workspace.
 
-        ``--workspace-dir "$(pwd)"`` is load-bearing — without it the tempdir sandbox
-        writes the agent's workspace somewhere Harbor's verifier never looks.
-
-        Rationale: .claude/notes/reporting.md § The non-obvious constraint in the emitted task.yaml
+        Rationale: .claude/notes/persistence.md § CoderEvalAgent passes both templates as static paths
         """
         del instruction, context  # nothing to forward; context is populated post-run
         run_dir = self.environment_logs_dir.as_posix()
         command = (
             f"coder-eval execute {shlex.quote(AGENT_TASK_YAML_PATH)} --format harbor "
-            f'--run-dir {shlex.quote(run_dir)} --workspace-dir "$(pwd)"'
+            f"--run-dir {_THROWAWAY_RUN_DIR} "
+            f'--workspace-dir "$(pwd)" '
+            f'--logging-dir {shlex.quote(run_dir)} --artifacts-dir "$(pwd)"'
         )
         await self._exec(environment, command)
 

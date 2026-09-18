@@ -1,11 +1,34 @@
 """Configuration models for orchestration."""
 
 from pathlib import Path
+from string import Template
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from coder_eval.models import PreservationMode
+from coder_eval.path_utils import (
+    DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+    DEFAULT_LOGGING_DIR_TEMPLATE,
+    resolve_dir_template,
+)
+
+
+_VALID_DIR_TEMPLATE_PLACEHOLDERS = frozenset({"run_dir", "variant", "task", "repeat"})
+
+
+def _check_dir_template(v: str) -> str:
+    """Reject an unknown ``${...}`` placeholder at config-construction time.
+
+    ``resolve_dir_template`` catches this too, but only when a task is actually
+    resolved against it -- late enough that a typo becomes N mislabelled ERROR
+    rows instead of one clean ``typer.BadParameter`` at CLI parse time.
+    """
+    unknown = set(Template(v).get_identifiers()) - _VALID_DIR_TEMPLATE_PLACEHOLDERS
+    if unknown:
+        valid = ", ".join(f"${{{p}}}" for p in sorted(_VALID_DIR_TEMPLATE_PLACEHOLDERS))
+        raise ValueError(f"{v!r} references unknown placeholder(s) {sorted(unknown)}. Valid placeholders: {valid}.")
+    return v
 
 
 def resolve_preservation_mode(explicit: PreservationMode | None, driver: str) -> PreservationMode:
@@ -112,11 +135,63 @@ class BatchRunConfig(BaseModel):
         default=None,
         description=(
             "Run the agent in-place at this absolute path instead of the standard "
-            "run_dir/artifacts workspace, copying it out to run_dir/artifacts/<task> at "
+            "artifacts workspace named by artifacts_dir_template, copying it out there at "
             "cleanup. For a single task only. Not for sandbox.driver: docker tasks — "
             "the docker driver already aligns automatically via sandbox.docker.working_dir."
         ),
     )
+
+    # The run's on-disk layout, as two independent templates resolved LATE (per
+    # task, where ${variant}/${task}/${repeat} first exist). Defaults reproduce
+    # today's layout byte-for-byte; a static override needs no special-casing
+    # because substituting a string with no placeholders is the identity function.
+    logging_dir_template: str = Field(
+        default=DEFAULT_LOGGING_DIR_TEMPLATE,
+        description=(
+            "Where task.json/task.log go. Placeholders: ${run_dir}, ${variant}, ${task}, "
+            "${repeat}. A static path (e.g. /logs/agent) resolves to itself."
+        ),
+    )
+    artifacts_dir_template: str = Field(
+        default=DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+        description=(
+            "Where the agent's artifacts go -- the FINAL directory, not a parent. Same "
+            "placeholders as logging_dir_template, and independent of it: the two may live in "
+            "unrelated parts of the filesystem (Harbor puts logs at /logs/agent and artifacts "
+            "at the container's WORKDIR). When it already holds the workspace there is nothing "
+            "to copy."
+        ),
+    )
+
+    @field_validator("logging_dir_template", "artifacts_dir_template")
+    @classmethod
+    def _validate_dir_template(cls, v: str) -> str:
+        return _check_dir_template(v)
+
+    def resolve_logging_dir(self, variant_id: str, task_id: str, replicate_index: int = 0) -> Path:
+        """This task's logging directory, per ``logging_dir_template``."""
+        return resolve_dir_template(
+            self.logging_dir_template,
+            run_dir=self.run_dir,
+            variant_id=variant_id,
+            task_id=task_id,
+            replicate_index=replicate_index,
+        )
+
+    def resolve_artifacts_dir(self, variant_id: str, task_id: str, replicate_index: int = 0) -> Path:
+        """This task's FINAL artifacts directory, per ``artifacts_dir_template``.
+
+        One chokepoint for every consumer -- the orchestrator's capture/direct-write
+        target, ``--resume``'s stale-artifact clearing, and the regrade workspace
+        lookup -- so they cannot disagree about where a task's artifacts live.
+        """
+        return resolve_dir_template(
+            self.artifacts_dir_template,
+            run_dir=self.run_dir,
+            variant_id=variant_id,
+            task_id=task_id,
+            replicate_index=replicate_index,
+        )
 
     # TODO(container-death-diagnostics): containers run uncapped today, so at a
     # high --max-parallel one runaway task can pressure the host. An opt-in

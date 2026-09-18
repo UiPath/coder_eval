@@ -10,6 +10,7 @@ import shutil
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from string import Template
 
 
 logger = logging.getLogger(__name__)
@@ -175,14 +176,82 @@ def replicate_subdir_name(replicate_index: int) -> str:
     return f"{replicate_index:02d}"
 
 
+# The run's on-disk layout, as data rather than as path joins spread across the
+# orchestrator, resolved LATE per task. Both spelled out in full (not artifacts
+# relative to logging) since under Harbor they live in unrelated parts of the
+# filesystem, with no shared prefix to factor out.
+# Rationale: .claude/notes/persistence.md § The run layout as two directory templates
+DEFAULT_LOGGING_DIR_TEMPLATE = "${run_dir}/${variant}/${task}/${repeat}"
+DEFAULT_ARTIFACTS_DIR_TEMPLATE = "${run_dir}/${variant}/${task}/${repeat}/artifacts/${task}"
+
+_DIR_TEMPLATE_PLACEHOLDERS = ("run_dir", "variant", "task", "repeat")
+
+
+def resolve_dir_template(
+    template: str,
+    *,
+    run_dir: Path,
+    variant_id: str,
+    task_id: str,
+    replicate_index: int = 0,
+) -> Path:
+    """Resolve a logging/artifacts directory template for ONE task.
+
+    ``${task}`` may legitimately expand to a value CONTAINING a separator: a
+    dataset-expanded task_id is ``"<original_task_id>/<row_id>"`` (see
+    ``task_loader.expand_dataset``, whose row ids are validated as safe directory
+    names precisely because they become directories). That nests, which is the
+    pre-existing behaviour and works on Windows too -- ``pathlib`` splits on both
+    separators there, so a forward slash inside a substituted value is a
+    separator, not a literal character in a filename.
+
+    Windows also dictates HOW the substitution happens: ``string.Template``
+    inserts values verbatim, whereas ``re.sub`` would interpret backslashes in
+    the REPLACEMENT as escapes -- turning a ``run_dir`` of ``C:\\runs\\2026`` into
+    mangled output. Never swap this for a regex.
+
+    Raises:
+        ValueError: the template references an unknown placeholder.
+    """
+    mapping = {
+        "run_dir": str(run_dir),
+        "variant": variant_id,
+        "task": task_id,
+        "repeat": replicate_subdir_name(replicate_index),
+    }
+    try:
+        resolved = Template(template).substitute(mapping)
+    except KeyError as e:
+        raise ValueError(
+            f"Directory template {template!r} references unknown placeholder {e.args[0]!r}. "
+            + f"Valid placeholders: {', '.join('${' + p + '}' for p in _DIR_TEMPLATE_PLACEHOLDERS)}."
+        ) from e
+    except ValueError as e:
+        raise ValueError(f"Directory template {template!r} is malformed: {e}") from e
+    # Path() normalizes the mixed separators a Windows run_dir produces
+    # ("C:\\runs\\x" + "/default/...") into a single native form.
+    return Path(resolved)
+
+
 def build_task_run_dir(
     run_dir: Path,
     variant_id: str,
     task_id: str,
     replicate_index: int = 0,
 ) -> Path:
-    """Build the per-task run dir: ``<run_dir>/<variant_id>/<task_id>/<NN>/``."""
-    return run_dir / variant_id / task_id / replicate_subdir_name(replicate_index)
+    """Build the per-task run dir: ``<run_dir>/<variant_id>/<task_id>/<NN>/``.
+
+    Thin wrapper over ``resolve_dir_template`` with the default logging template,
+    kept so the many existing callers that want the standard layout need not
+    restate it. The two agree by construction.
+    """
+    return resolve_dir_template(
+        DEFAULT_LOGGING_DIR_TEMPLATE,
+        run_dir=run_dir,
+        variant_id=variant_id,
+        task_id=task_id,
+        replicate_index=replicate_index,
+    )
 
 
 def format_task_log_id(variant_id: str, task_id: str, replicate_index: int = 0) -> str:

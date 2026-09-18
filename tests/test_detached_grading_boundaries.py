@@ -479,6 +479,7 @@ class TestGradingCrashLeavesTheRowRegradeable:
         """The arm a real grading crash takes: `regrade_in_place` RETURNS an
         ERROR result instead of raising."""
         from coder_eval.cli.run_command import _grade_resumed_tasks
+        from coder_eval.orchestration.config import BatchRunConfig
 
         # task.json starts UNGRADED, as `execute` left it. The ERROR lands on
         # disk during the grade, exactly as _finalize_result writes it before
@@ -503,7 +504,7 @@ class TestGradingCrashLeavesTheRowRegradeable:
             patch("coder_eval.orchestration.regrade.default_workspace", return_value=tmp_path),
             patch("coder_eval.orchestration.regrade.regrade_in_place", new=_crash),
         ):
-            graded = await _grade_resumed_tasks([rt])
+            graded = await _grade_resumed_tasks([rt], config=BatchRunConfig(run_dir=tmp_path))
 
         assert len(graded) == 1
         folded = graded[0][1].result
@@ -520,6 +521,7 @@ class TestGradingCrashLeavesTheRowRegradeable:
         which is the counter the exit gate reads — so a resume whose rows were
         all unreadable reported success."""
         from coder_eval.cli.run_command import _grade_resumed_tasks
+        from coder_eval.orchestration.config import BatchRunConfig
 
         run_dir = tmp_path / "00"
         run_dir.mkdir(parents=True)
@@ -532,7 +534,7 @@ class TestGradingCrashLeavesTheRowRegradeable:
             original_task_id="t",
         )
 
-        graded = await _grade_resumed_tasks([rt])
+        graded = await _grade_resumed_tasks([rt], config=BatchRunConfig(run_dir=tmp_path))
 
         assert len(graded) == 1
         assert graded[0][1].result.final_status is FinalStatus.NOT_GRADED

@@ -368,6 +368,7 @@ class Orchestrator:
         config_lineage: dict[str, ConfigLineageEntry] | None = None,
         replicate_index: int = 0,
         workspace_dir: Path | None = None,
+        artifacts_dir: Path | None = None,
         grade: bool = True,
         prior_result: EvaluationResult | None = None,
         recorded_task: TaskDefinition | None = None,
@@ -391,6 +392,11 @@ class Orchestrator:
             workspace_dir: Docker WORKDIR alignment — the agent runs in-place
                 there and the workspace is copied out at cleanup. Takes
                 precedence over ``preservation_mode``.
+            artifacts_dir: The FINAL directory this task's artifacts belong in,
+                already resolved from a directory template by the caller (see
+                ``path_utils.resolve_dir_template``). ``None`` keeps the built-in
+                ``run_dir/artifacts/<task_id>`` layout. When it already holds the
+                workspace, the copy self-cancels -- no flag needed.
             grade: False is ``coder-eval execute``. Deliberately NOT a task-config
                 field — a task YAML must never declare itself ungraded.
             prior_result: A completed run's result to re-grade.
@@ -410,6 +416,7 @@ class Orchestrator:
         self._cost_attempt_nonce = uuid.uuid4().hex
         self.preservation_mode = preservation_mode
         self.workspace_dir = workspace_dir
+        self.artifacts_dir = artifacts_dir
         self.task_file = task_file
         self.stream_callback = stream_callback
         self.sandbox = sandbox
@@ -1460,6 +1467,18 @@ class Orchestrator:
             + "the full trajectory is the deliverable."
         )
 
+    def _final_artifacts_dir(self) -> Path:
+        """This task's FINAL artifacts directory.
+
+        ``artifacts_dir`` when the caller resolved one from a directory template,
+        otherwise the built-in ``run_dir/artifacts/<task_id>`` layout -- which is
+        exactly what ``DEFAULT_ARTIFACTS_DIR_TEMPLATE`` resolves to, so the two
+        agree by construction.
+        """
+        if self.artifacts_dir is not None:
+            return self.artifacts_dir
+        return self.run_dir / "artifacts" / self.task.task_id
+
     def _restore_recorded_command_path(self) -> None:
         """Re-apply the graded run's own PATH before its criteria run.
 
@@ -1531,7 +1550,7 @@ class Orchestrator:
                 )
             direct_target = self.workspace_dir
         elif self.preservation_mode == PreservationMode.DIRECT_WRITE:
-            direct_target = self.run_dir / "artifacts" / self.task.task_id
+            direct_target = self._final_artifacts_dir()
         else:
             direct_target = None
         # DIRECT_WRITE deliberately does NOT clear the target, so a reused
@@ -3026,17 +3045,20 @@ class Orchestrator:
         if self.sandbox:
             try:
                 if self.workspace_dir is not None and self.result:
-                    # Docker WORKDIR alignment: the agent ran in-place at the
-                    # image WORKDIR, so copy that workspace out. Takes precedence
-                    # over preservation_mode.
-                    artifacts_dir = self.run_dir / "artifacts"
-                    preserved_path = await asyncio.to_thread(self.sandbox.capture_to, artifacts_dir)
+                    # Docker WORKDIR alignment: the agent ran in-place at the image
+                    # WORKDIR, which is NOT where artifacts belong -- so copy it to
+                    # the resolved artifacts dir. Takes precedence over
+                    # preservation_mode. If that directory IS the workspace (a
+                    # caller-supplied artifacts template pointing at the WORKDIR, as
+                    # Harbor does), capture_as's self-referential guard makes this a
+                    # no-op instead of a duplicating copy -- which is why no
+                    # "should I copy?" flag exists.
+                    preserved_path = await asyncio.to_thread(self.sandbox.capture_as, self._final_artifacts_dir())
                     self.result.sandbox_path = str(preserved_path)
                     logger.info("Workspace captured out: %s -> %s", self.workspace_dir, preserved_path)
                 elif self.preservation_mode == PreservationMode.MOVE_ON_WRITE and self.result:
-                    # Sandbox ran in a tempdir — move it into run_dir/artifacts.
-                    artifacts_dir = self.run_dir / "artifacts"
-                    preserved_path = await asyncio.to_thread(self.sandbox.preserve_to, artifacts_dir)
+                    # Sandbox ran in a tempdir — move it to the resolved artifacts dir.
+                    preserved_path = await asyncio.to_thread(self.sandbox.preserve_as, self._final_artifacts_dir())
                     self.result.sandbox_path = str(preserved_path)
                     logger.info(f"Sandbox preserved to: {preserved_path}")
                 elif self.preservation_mode == PreservationMode.DIRECT_WRITE and self.result:

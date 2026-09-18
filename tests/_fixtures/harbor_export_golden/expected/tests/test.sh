@@ -14,19 +14,24 @@
 set -u
 
 # `/tests/task.yaml /logs/agent` -- an explicit task file over a RUN DIRECTORY,
-# not a plain workdir. CoderEvalAgent's `coder-eval execute --run-dir /logs/agent
-# ...` always finishes with `/logs/agent/task.json` (this task's own recorded
-# trajectory) and `/logs/agent/artifacts/<task_id>/` (the workspace it produced),
-# so `coder-eval evaluate` recognizes /logs/agent as a run directory and grades
-# against it directly -- no `$(pwd)` guess of the agent's WORKDIR needed (the
-# workspace is located from task.json's own recorded sandbox_path instead), and
-# no ATIF trajectory.json round-trip either (task.json already carries the same
-# trajectory natively). Passing the task file explicitly (rather than the bare
-# run directory alone) makes coder-eval grade with THIS file -- the exported
-# contract -- instead of rebuilding the task from the run's own recorded config,
-# which is also what keeps this off the untrusted-recorded-config path: that
-# path exists for a shared run directory whose config is not to be trusted
-# without --allow-recorded-commands, and does not apply once an explicit,
-# operator-supplied task file is in hand.
-coder-eval evaluate /tests/task.yaml /logs/agent --in-place --run-dir /logs/verifier || true
+# not a plain workdir. CoderEvalAgent's `coder-eval execute --logging-dir
+# /logs/agent --workspace-dir "$(pwd)" --artifacts-dir "$(pwd)"` (see
+# harbor/agent.py) always finishes with `/logs/agent/task.json` (this task's
+# own recorded trajectory) and the agent's workspace left in-place at the
+# container's own WORKDIR ($(pwd) here too -- Harbor's verifier phase reuses
+# the same image/WORKDIR) -- artifacts_dir IS the workspace here, so
+# capture_as's self-referential guard makes the would-be copy a no-op.
+# `--workspace "$(pwd)"` is therefore load-bearing: without it, `coder-eval
+# evaluate` resolves the workspace from task.json's recorded sandbox_path via
+# `default_workspace`, which requires it to resolve INSIDE /logs/agent and
+# refuses otherwise -- exactly this WORKDIR case, which is legitimately
+# outside /logs/agent. No ATIF trajectory.json round-trip either (task.json
+# already carries the same trajectory natively). Passing the task file
+# explicitly (rather than the bare run directory alone) makes coder-eval grade
+# with THIS file -- the exported contract -- instead of rebuilding the task
+# from the run's own recorded config, which is also what keeps this off the
+# untrusted-recorded-config path: that path exists for a shared run directory
+# whose config is not to be trusted without --allow-recorded-commands, and
+# does not apply once an explicit, operator-supplied task file is in hand.
+coder-eval evaluate /tests/task.yaml /logs/agent --workspace "$(pwd)" --in-place --run-dir /logs/verifier || true
 coder-eval harbor reward /logs/verifier --out /logs/verifier/reward.json

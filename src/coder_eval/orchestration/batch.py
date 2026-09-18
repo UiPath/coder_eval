@@ -28,7 +28,13 @@ from ..models import (
     TaskDefinition,
     TaskResult,
 )
-from ..path_utils import TASK_JSON_FILENAME, format_task_log_id, write_text_atomic
+from ..path_utils import (
+    DEFAULT_ARTIFACTS_DIR_TEMPLATE,
+    DEFAULT_LOGGING_DIR_TEMPLATE,
+    TASK_JSON_FILENAME,
+    format_task_log_id,
+    write_text_atomic,
+)
 from ..pricing import unpriced_models
 from ..run_record import eval_result_to_task_dict
 from ..streaming.callbacks import StreamCallback
@@ -130,6 +136,38 @@ async def run_batch(
                 + "aligns automatically via sandbox.docker.working_dir (see DockerRunner)."
             )
 
+    if config.artifacts_dir_template != DEFAULT_ARTIFACTS_DIR_TEMPLATE and any(
+        rt.task.sandbox.driver == "docker" for rt in resolved_tasks
+    ):
+        raise ValueError(
+            "--artifacts-dir is not for sandbox.driver: docker tasks -- the in-container Orchestrator "
+            + "has no way to receive it (see models/container_context.py); the container's own WORKDIR "
+            + "is always what gets captured back."
+        )
+
+    if config.logging_dir_template != DEFAULT_LOGGING_DIR_TEMPLATE and any(
+        rt.task.sandbox.driver == "docker" for rt in resolved_tasks
+    ):
+        raise ValueError(
+            "--logging-dir is not for sandbox.driver: docker tasks -- the container's artifacts land under "
+            + "the resolved logging dir (DockerRunner mounts it as the container's /work/output), so "
+            + "clear_rerun_artifacts and --artifacts-dir's default template -- both anchored on config.run_dir "
+            + "-- would target a different directory than the one the container actually wrote to."
+        )
+
+    if len(resolved_tasks) > 1:
+        for flag, resolver in (
+            ("--logging-dir", config.resolve_logging_dir),
+            ("--artifacts-dir", config.resolve_artifacts_dir),
+        ):
+            resolved_dirs = [resolver(rt.variant_id, rt.task.task_id, rt.replicate_index) for rt in resolved_tasks]
+            if len(set(resolved_dirs)) != len(resolved_dirs):
+                raise ValueError(
+                    f"{flag}'s template resolves two or more of this run's {len(resolved_tasks)} tasks to "
+                    + "the same directory, so they would overwrite each other's task.json/artifacts. Use "
+                    + "${variant}/${task}/${repeat} to keep multiple tasks apart."
+                )
+
     check_pricing_coverage(resolved_tasks)
 
     if on_batch_start is not None:
@@ -148,15 +186,8 @@ async def run_batch(
         task_callback = stream_callback_factory(stream_label) if stream_callback_factory else None
         async with semaphore:
             try:
-                # --workspace-dir mode (Harbor CoderEvalAgent, single task): write
-                # task.json/task.html/task.log/artifacts flat at the top-level run_dir
-                # instead of the usual <variant>/<task_id>/<NN> nesting. The guard above
-                # already guarantees exactly one resolved task here, so that nesting only
-                # exists to disambiguate sibling tasks that can never occur in this mode —
-                # and a flat run_dir means trajectory.json (written by
-                # emit_trajectories_for_run as task.json's sibling) lands at a fixed,
-                # predictable path instead of requiring a recursive glob to find it.
-                effective_run_dir = config.run_dir if config.workspace_dir is not None else rt.run_dir
+                # Rationale: .claude/notes/persistence.md § A flat run_dir needs no special case in run_batch
+                effective_run_dir = rt.run_dir
                 effective_run_dir.mkdir(parents=True, exist_ok=True)  # noqa: CE002 — mkdir on local FS is nanoseconds
                 sandbox_cfg = rt.task.sandbox
                 # HERE, where the original driver is still visible: the
@@ -206,6 +237,7 @@ async def run_batch(
                         replicate_index=rt.replicate_index,
                         grade=config.grade,
                         workspace_dir=config.workspace_dir,
+                        artifacts_dir=config.resolve_artifacts_dir(rt.variant_id, rt.task.task_id, rt.replicate_index),
                     )
                     result = await orchestrator.run()
                 tr = TaskResult(
@@ -418,8 +450,11 @@ def partition_for_resume(resolved_tasks: list[ResolvedTask], *, grade: bool = Tr
     return ResumePartition(to_run, to_grade, prior_results, prior_resolved)
 
 
-def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
-    """Remove stale ``artifacts/<task_id>`` dirs for tasks about to re-run under --resume.
+def clear_rerun_artifacts(to_run: list[ResolvedTask], *, config: BatchRunConfig) -> int:
+    """Remove stale artifacts dirs for tasks about to re-run under --resume.
+
+    ``config`` supplies ``resolve_artifacts_dir``, so this clears the SAME path the
+    run will write to even when ``artifacts_dir_template`` was overridden.
 
     A task in ``to_run`` is non-finalized (``partition_for_resume`` excluded every
     finalized task), so it re-executes from scratch and any leftover artifacts are
@@ -432,7 +467,11 @@ def clear_rerun_artifacts(to_run: list[ResolvedTask]) -> int:
     """
     cleared = 0
     for rt in to_run:
-        artifacts = rt.run_dir / "artifacts" / rt.task.task_id
+        # Through the config chokepoint, NOT a hand-built run_dir/artifacts/<task_id>:
+        # an overridden template puts artifacts somewhere else entirely, and clearing
+        # the wrong path would leave a partial run's output in place for a file-based
+        # criterion to pass on.
+        artifacts = config.resolve_artifacts_dir(rt.variant_id, rt.task.task_id, rt.replicate_index)
         if artifacts.exists():
             shutil.rmtree(artifacts, ignore_errors=True)
             cleared += 1

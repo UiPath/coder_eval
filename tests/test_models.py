@@ -572,6 +572,9 @@ class TestDockerWorkingDir:
         assert cfg.docker.working_dir == value
         assert DockerDriverConfig(working_dir=value).working_dir == value
 
+    # /work is REJECTED, not just its children: it is the mount ROOT (input/output/
+    # references/task_dir/workspace all live under it), so an agent running AT /work
+    # would have the reference solution and the run's own task.json in its workspace.
     @pytest.mark.parametrize("value", ["/", "/work", "/work/", "/work/output", "/work/input", "/work/task_dir"])
     def test_rejects_reserved(self, value):
         from pydantic import ValidationError

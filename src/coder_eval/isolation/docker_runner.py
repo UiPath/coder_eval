@@ -381,9 +381,7 @@ def _assert_workspace_not_reserved(path: str) -> None:
     """
     norm = path.rstrip("/") or "/"
     if norm in RESERVED_CONTAINER_DIRS or norm.startswith(CONTAINER_WORK_DIR + "/"):
-        raise DockerRunError(
-            f"working_dir {path!r} collides with a framework-reserved container path (/, /work, /work/*)."
-        )
+        raise DockerRunError(f"working_dir {path!r} collides with a framework-reserved container path (/, /work/*).")
 
 
 def _resolve_workspace_dir(cfg_working_dir: str | None, image: str) -> str | None:
