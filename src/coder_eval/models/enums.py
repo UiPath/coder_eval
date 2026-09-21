@@ -150,6 +150,7 @@ class AgentKind(StrEnum):
     ANTIGRAVITY = "antigravity"
     OPENCODE = "opencode"
     PI = "pi"
+    DELEGATE = "delegate"
     NONE = "none"  # Agentless / system task — no coding agent runs; success criteria do all the work.
     UNKNOWN = "unknown"  # Used when agent type cannot be determined (e.g., task loading failure)
 

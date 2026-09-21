@@ -7,6 +7,16 @@ on:
   push:
     branches: [main, develop]
   workflow_dispatch:
+    inputs:
+      delegate_uipath_env:
+        description: "UiPath cloud environment to ROPC-login the Delegate live job against"
+        required: false
+        type: choice
+        default: "alpha"
+        options:
+          - "alpha"
+          - "staging"
+          - "production"
 
 # Cancel outdated runs when new commits are pushed
 concurrency:
@@ -1127,4 +1137,205 @@ jobs:
         with:
           name: action-dogfood-runs
           path: tasks/runs/ci-action-dogfood/
+          retention-days: 7
+
+  delegate-live-tests:
+    # Live Delegate e2e: spawns the real Node host (agents/delegate/delegate_host.mjs)
+    # wrapping the public @uipath/delegate-sdk against a real UiPath backend. Runs on
+    # every PR/push like the other live-test jobs (codex-live-tests, byoa-live-tests)
+    # now that the DELEGATE_ROPC_* secrets are provisioned; the presence-check gate
+    # below stays as a safety net so an accidental secret removal skips cleanly
+    # instead of failing a required check. Auth is minted fresh each run via the
+    # OAuth2 Resource Owner Password Credentials (ROPC) grant — the same
+    # `grant_type=password` flow documented in coder_eval_uipath/eval_runner/CI_DESIGN.md
+    # and implemented in coder_eval_uipath/eval_runner/scripts/ci/refresh-auth.sh —
+    # rather than a long-lived AUTH_TOKEN secret, since a minted token's ~1h TTL
+    # would make a static secret stale between runs. A dedicated bot user's
+    # username/password is the durable credential; the Delegate SDK reads the
+    # minted token straight from AUTH_TOKEN/TENANT_ID/ORG_ID (see
+    # docs/agents/DELEGATE.md), so no sdk-auth.json or client-secret refresh chain
+    # is needed here.
+    name: Delegate Live E2E (ROPC)
+    runs-on: uipath-ubuntu-24.04
+    timeout-minutes: 15
+    # Skip on fork PRs where secrets aren't available (matches e2e-smoke).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Check Delegate ROPC secrets present
+        id: gate
+        env:
+          DELEGATE_ROPC_CLIENT_ID: ${{ secrets.DELEGATE_ROPC_CLIENT_ID }}
+          DELEGATE_ROPC_CLIENT_SECRET: ${{ secrets.DELEGATE_ROPC_CLIENT_SECRET }}
+          DELEGATE_ROPC_USERNAME: ${{ secrets.DELEGATE_ROPC_USERNAME }}
+          DELEGATE_ROPC_PASSWORD: ${{ secrets.DELEGATE_ROPC_PASSWORD }}
+          DELEGATE_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          DELEGATE_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          DELEGATE_ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          DELEGATE_TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+        run: |
+          if [ -z "$DELEGATE_ROPC_CLIENT_ID" ] || [ -z "$DELEGATE_ROPC_CLIENT_SECRET" ] || \
+             [ -z "$DELEGATE_ROPC_USERNAME" ] || [ -z "$DELEGATE_ROPC_PASSWORD" ] || \
+             [ -z "$DELEGATE_ORG_ID" ] || [ -z "$DELEGATE_TENANT_ID" ] || \
+             [ -z "$DELEGATE_ORG_SLUG" ] || [ -z "$DELEGATE_TENANT_SLUG" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Delegate ROPC secrets not configured — skipping the live run."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python 3.13
+        if: steps.gate.outputs.present == 'true'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js 20
+        if: steps.gate.outputs.present == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install uv
+        if: steps.gate.outputs.present == 'true'
+        run: |
+          python -m pip install --upgrade "pip>=26.2"  # PYSEC-2026-3721 fix floor
+          pip install uv
+
+      - name: Install project dependencies (hash-verified from uv.lock)
+        if: steps.gate.outputs.present == 'true'
+        run: uv sync --frozen --extra dev
+
+      - name: Install @uipath/delegate-sdk (public npm, no token needed)
+        if: steps.gate.outputs.present == 'true'
+        working-directory: src/coder_eval/agents/delegate
+        # --safe-chain-skip-minimum-package-age (not a growing exclusion-list entry
+        # per platform-specific optionalDependency name): the SDK's per-platform
+        # native runtime packages (@uipath/delegate-runtime-*) publish at the same
+        # instant as the SDK itself, so a name-list exclusion just needing another
+        # entry for each new one is the wrong shape for a first-party UiPath package
+        # already trusted at the SDK-name level.
+        run: npm install --safe-chain-skip-minimum-package-age
+
+      - name: ROPC login — mint a fresh Delegate access token
+        if: steps.gate.outputs.present == 'true'
+        id: ropc
+        env:
+          DELEGATE_UIPATH_ENV: ${{ github.event.inputs.delegate_uipath_env || 'alpha' }}
+          CLIENT_ID: ${{ secrets.DELEGATE_ROPC_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.DELEGATE_ROPC_CLIENT_SECRET }}
+          CE_USERNAME: ${{ secrets.DELEGATE_ROPC_USERNAME }}
+          CE_PASSWORD: ${{ secrets.DELEGATE_ROPC_PASSWORD }}
+          ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+        run: |
+          set -euo pipefail
+          # The mint destination is resolved from a fixed allowlist, never from
+          # the raw workflow_dispatch input string directly — CLIENT_SECRET and
+          # CE_PASSWORD travel in this request's body, so accepting an arbitrary
+          # attacker-supplied URL here would be a credential-exfiltration path
+          # open to anyone who can trigger workflow_dispatch, not just admins.
+          case "${DELEGATE_UIPATH_ENV}" in
+            alpha) UIPATH_URL="https://alpha.uipath.com" ;;
+            staging) UIPATH_URL="https://staging.uipath.com" ;;
+            production) UIPATH_URL="https://cloud.uipath.com" ;;
+            *) echo "Unknown delegate_uipath_env: ${DELEGATE_UIPATH_ENV}" >&2; exit 1 ;;
+          esac
+
+          # Same grant as coder_eval_uipath/eval_runner/scripts/ci/refresh-auth.sh:
+          # a bot user's username/password against the identity server, scoped
+          # to the org via acr_values (the ROPC client carries no scope of its
+          # own narrower than the org). ConversationalAgents is the scope the
+          # Delegate backend itself checks; the rest matches refresh-auth.sh's
+          # alpha scope list so this mint is provably not narrower than the one
+          # already validated there.
+          SCOPES="openid profile email offline_access ConversationalAgents AutopilotForEveryone Orchestrator OrchestratorApiUserAccess StudioWebBackend"
+          response=$(curl -sS -L --connect-timeout 15 --max-time 60 -X POST "${UIPATH_URL}/identity_/connect/token" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              -H "x-uipath-internal-accountid: ${ORG_ID}" \
+              --data-urlencode "grant_type=password" \
+              --data-urlencode "client_id=${CLIENT_ID}" \
+              --data-urlencode "client_secret=${CLIENT_SECRET}" \
+              --data-urlencode "username=${CE_USERNAME}" \
+              --data-urlencode "password=${CE_PASSWORD}" \
+              --data-urlencode "acr_values=tenant:${ORG_ID}" \
+              --data-urlencode "scope=${SCOPES}")
+
+          if err=$(echo "$response" | jq -e -r '.error // empty') && [ -n "$err" ]; then
+              echo "ROPC token request failed: $(echo "$response" | jq -r '.error_description // .error')" >&2
+              exit 1
+          fi
+
+          access_token=$(echo "$response" | jq -r '.access_token')
+          if [ -z "$access_token" ] || [ "$access_token" = "null" ]; then
+              echo "ROPC token response did not contain an access_token" >&2
+              exit 1
+          fi
+
+          echo "::add-mask::$access_token"
+          echo "access_token=$access_token" >> "$GITHUB_OUTPUT"
+
+      - name: Diagnose minted token's org/account claims
+        # Prints ONLY non-secret JWT claims (never the token itself) to check
+        # whether the ROPC-minted token's own account/org actually matches the
+        # DELEGATE_ORG_ID/DELEGATE_ORG_SLUG secrets used to build the backend
+        # URL -- a mismatch here (not a coder_eval bug) is what a live run's
+        # "Account id does not match" 401 from the connections_ API points at.
+        if: steps.gate.outputs.present == 'true'
+        env:
+          ACCESS_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          EXPECTED_ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          EXPECTED_TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+          payload="$(echo "$ACCESS_TOKEN" | cut -d. -f2)"
+          # Explicit MATCH/NO MATCH verdicts, not a side-by-side print: a secret's
+          # exact value is auto-masked to *** everywhere in logs, including inside
+          # an unrelated claims dump, so printing both for a human to eyeball is
+          # unreliable -- the comparison has to happen here, not in the reader's head.
+          python3 .github/scripts/diagnose_delegate_token_claims.py "$payload"
+          echo "A 'NO MATCH' above means the secret points at a different org/tenant than"
+          echo "the one this bot user's token actually belongs to -- that mismatch, not this"
+          echo "agent's code, is the root cause of a downstream 'Account id does not match' 401."
+
+      - name: Run fizzbuzz delegate task (assert PASS)
+        if: steps.gate.outputs.present == 'true'
+        env:
+          DELEGATE_SDK_NODE_MODULES: ${{ github.workspace }}/src/coder_eval/agents/delegate
+          DELEGATE_ENV: alpha
+          AUTH_TOKEN: ${{ steps.ropc.outputs.access_token }}
+          TENANT_ID: ${{ secrets.DELEGATE_TENANT_ID }}
+          ORG_ID: ${{ secrets.DELEGATE_ORG_ID }}
+          # The SDK's --env resolution needs human-readable slugs alongside the
+          # GUIDs above (a bare AUTH_TOKEN/TENANT_ID/ORG_ID triple isn't enough
+          # for `environment: "alpha"` to resolve a backend URL) — these are
+          # read straight from process.env by the SDK itself, not plumbed
+          # through DelegateAgent's init options.
+          ORG_SLUG: ${{ secrets.DELEGATE_ORG_SLUG }}
+          TENANT_SLUG: ${{ secrets.DELEGATE_TENANT_SLUG }}
+        run: .venv/bin/coder-eval run tasks/delegate/fizzbuzz_delegate.yaml --run-dir runs/delegate-live
+
+      - name: Verify Delegate live run PASSED
+        if: steps.gate.outputs.present == 'true'
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          results = list(Path("runs/delegate-live").rglob("task.json"))
+          assert results, "no task.json written"
+          data = json.loads(results[0].read_text())
+          status = str(data.get("final_status", "")).lower()
+          assert "success" in status or "pass" in status, f"expected PASS, got final_status={data.get('final_status')}"
+          print("Live Delegate run PASSED:", data.get("final_status"))
+          PY
+
+      - name: Upload Delegate live-test artifacts on failure
+        if: failure() && steps.gate.outputs.present == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: delegate-live-output
+          path: runs/delegate-live/
           retention-days: 7

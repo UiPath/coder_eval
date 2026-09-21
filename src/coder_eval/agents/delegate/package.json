@@ -1,0 +1,9 @@
+{
+  "name": "coder-eval-delegate-host",
+  "private": true,
+  "description": "npm install target for the delegate agent's Node prerequisite (@uipath/delegate-sdk). Installing here, or in any ancestor directory, lets coder_eval's ancestor-walk resolver find it with zero configuration.",
+  "type": "module",
+  "dependencies": {
+    "@uipath/delegate-sdk": "^0.1.12"
+  }
+}

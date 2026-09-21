@@ -742,3 +742,111 @@ drop per-message accounting.
 The classification is kept from failing open as the SDK grows: a test asserts EVERY field on
 the SDK's options type is classified, either typed-mirrored or framework-owned, so a new SDK
 release adding an unclassified field fails loudly instead of silently passing through.
+
+## Delegate agent
+
+`DelegateAgent` drives UiPath Autopilot's Delegate agent — reasoning in the UiPath backend,
+tools executing locally through the SDK's bundled interop process. Unlike every other CLI-driven
+agent in this file, there is no vendor-provided stdio protocol host to spawn: `@uipath/delegate-stdio`,
+the internal package a UiPath-only sibling plugin (`coder_eval_uipath`) drives, is not public. Only
+`@uipath/delegate-sdk` (a programmatic library exposing a `DelegateAgent` class with
+`initialize()`/`onEvent()`/`sendMessage()`/`destroy()`) and `@uipath/delegate-cli` (a terminal wrapper
+around it) are. So this agent ships its own first-party Node host, `agents/delegate/delegate_host.mjs`,
+which wraps the SDK class in a newline-JSON stdio protocol this framework designed, not one it had to
+reverse-engineer — verified live against a real `@uipath/delegate-sdk@0.1.12` install with no token,
+confirming both the plain-public-install story and that the SDK's own event vocabulary
+(`session_start`/`thinking`/`message`/`tool_call`/`tool_result`/`error`/`done`/`step`) substantially
+matches the internal sibling's protocol.
+
+**No multi-generation transcript splitting.** The internal sibling reconstructs one `AssistantMessage`
+per backend round-trip from an `isStepStart` flag and a `turnUsages` array on the host's terminal
+message. Neither is present on `DelegateAgent.onEvent`'s payloads (confirmed absent by grepping the
+installed SDK bundle's string literals), so there is no reliable per-round-trip boundary signal at this
+API layer. `DelegateAgent` builds exactly ONE `AssistantMessage` per `communicate()` call instead — a
+deliberate simplification, not an oversight; richer segmentation can be added once a real boundary
+signal is confirmed against a live backend. `timing.close_window` still opens that one window from the
+turn's own start (there is nothing to tile from), so the head and tail both measure ~0.
+
+**Deferred, not ported speculatively.** The internal sibling's module docstring documents several
+hard-won failure-signature-specific recoveries: a Cloudflare WAF-block-page rewrite, an SSE-connect-
+timeout rewrite, session-conflict fresh-host recovery, and first-response stall-timeout+resend. None
+are ported here — porting a marker tuned to the internal sibling's own observed failures risks matching
+nothing (or the wrong thing) against the public SDK/backend's actual error surface. A crash still ends
+the turn correctly as a retryable `AgentCrashError`; it is just not specially diagnosed. Port these once
+the same failures are actually observed running this agent for real.
+
+**The process handle must be cleared on every path that leaves the host dead or dying** — EOF, a host
+`fatal` message, a timeout (both the top-of-loop pre-check AND a timeout elapsing while blocked inside
+`asyncio.wait_for`), cooperative stop, and `max_turns` exhaustion. A real bug shipped once during this
+agent's own development: a timeout elapsing mid-read fell through to the generic crash path instead of
+`TurnTimeoutError`, and left the process handle set, so the NEXT `communicate()` call reused a host with
+a `"send"` still nominally in flight instead of respawning — risking a stale response being consumed as
+the new turn's. `tests/test_delegate_agent.py`'s `test_timeout_elapsing_mid_read_still_raises_turn_timeout_error`
+pins the fix.
+
+**Skills mapping is deliberately NOT the shared `agents/_skills.py` resolver.** That resolver enumerates
+individual skill directories for a repeated `--skill <dir>`-style CLI argument (OpenCode/Pi's shape).
+The Delegate SDK's `bundledSkillsPath` wants exactly ONE parent directory whose children are skill
+folders — a genuinely different shape — so `_resolve_bundled_skills_path` mirrors the internal sibling's
+own mapping (`<plugin.path>/skills`, first plugin wins) instead of force-fitting the shared helper.
+
+**Registered unconditionally**, exactly like `codex`/`antigravity` — there is no conditional-registration
+gate keyed on an optional-dependency extra anywhere in this codebase; `opencode`/`pi` declare an EMPTY
+extra purely as packaging-metadata documentation, and `delegate` follows that same shape (no new pip
+package — Node/`@uipath/delegate-sdk` is the real prerequisite, resolved lazily in `start()`).
+
+**`environment` resolution needs org/tenant SLUGS, not just IDs — confirmed by reading the installed
+SDK's own bundle, not by guessing from its error message.** When `DELEGATE_BACKEND_URL` is absent and
+`DELEGATE_ENV` (-> `environment` init option) is used instead, the SDK resolves the backend URL from
+`organizationName`/`orgLogicalName` and `tenantName` fields on the `auth` object passed to
+`initialize()` — NOT from `ORG_SLUG`/`TENANT_SLUG` read off `process.env` directly, despite that being
+exactly what the SDK's own thrown error suggests ("set ORG_SLUG and TENANT_SLUG env vars alongside
+ORG_ID/TENANT_ID"). That advice describes the separate `@uipath/delegate-cli`/`delegate-stdio` wrapper's
+own env-var-driven bootstrapping, not the `DelegateAgent` class itself, which we drive directly. So
+`_build_init_options` forwards `ORG_SLUG`/`TENANT_SLUG` (when set) into `auth.organizationName`/
+`auth.tenantName` itself — confirmed against `node_modules/@uipath/delegate-sdk/dist/index.mjs`'s own
+`yie()` resolver function live in CI (`pyright`/tests can't catch this class of bug; it only surfaces
+against a real backend). `tests/test_delegate_agent.py::TestStart::test_org_and_tenant_slug_forwarded_into_auth`
+pins it. Passing `DELEGATE_BACKEND_URL` directly instead of `DELEGATE_ENV` skips this whole path.
+
+### Delegate agent pricing
+
+Delegate-served models are keyed under the SDK's own hyphenated ids (e.g. `gpt-5-6-terra`) in
+`pricing.py`'s `_PRICING` — DISTINCT keys from the dotted ids (`gpt-5.6-terra`) the claude-code/codex
+harnesses use for the same physical models, because the Delegate backend echoes underscored ids
+(`_` -> `-` only, never `.` -> `-`) and nothing normalizes one id family to the other. A model reachable
+only through Delegate needs its own row here or `total_cost_usd` silently reports `None`. Several of
+these models implicitly cache prefixes (no separate cache-write fee), so their `cache_write_per_mtok` is
+`0.0` rather than mirroring input like most rows above them. Rates copied from the UiPath-only sibling
+plugin's own `pricing.py`, whose own module docstring documents the same rationale.
+
+Two things in `_DELEGATE_PRICING` look like copy errors on a skim and are not — a code review flagged
+both before this line existed to point at.
+
+`gpt-5-4` / `gpt-5-5` set `cache_write_per_mtok` equal to their OUTPUT rate (15.0 / 30.0), not a fraction
+of input like every other row in the block. That is a real, documented OpenAI billing fact for these two
+generations — cache writes billed at the full output rate — and their dotted twins in the main `_PRICING`
+table (`gpt-5.4`, `gpt-5.5`) use the identical convention, so this is internally consistent; the numbers
+are simply large. Only `gpt-5-6` introduced the cheaper 1.25x-input write convention this file's other
+`gpt-5-6-*` rows use.
+
+`gpt-5-6-sol` (5.0/30.0 here) genuinely differs from its dotted twin `gpt-5.6-sol` (4.0/20.0 in the main
+table): a 2026-07-30 price cut was applied to the framework's dotted table for `terra`/`luna` and never
+mirrored back into this hyphenated one (the UiPath-only sibling's own `pricing.py` carries the identical
+un-mirrored gap, with the same caveat comment). The two tables can price the SAME physical model
+differently until someone reconciles them — a known, pre-existing state, not something this port
+introduced or should silently "fix" by picking one number over the other.
+
+### Delegate agent golden-master and timing-identity coverage
+
+`AgentKind.DELEGATE` is excluded from `tests/test_agent_golden_master.py`'s `_NO_GOLDEN_COVERAGE`
+allowlist rather than given fixture scenarios: a golden snapshot pins a byte-identical `TurnRecord`
+for a scripted event stream, and every event field name below the confirmed `type`/`content`/
+`toolName`/`sessionId`/`model`/`usage` set is a guess (see this file's own "Delegate agent" section
+above and `delegate_agent.py`'s module docstring). Snapshotting a guess would make it look verified.
+Add real scenarios once the fields are confirmed against a live backend.
+
+This does NOT extend to `tests/test_timing_identity_contract.py::test_delegate_buckets_tile_the_turn`,
+which IS a real, unexempted case: the ms-exact four-bucket identity depends only on this agent's own
+`close_window`/`_finalize_turn` code (a single window per turn, opened at `_TurnState.__init__` and
+closed at finalize), never on the SDK's field names, so there is nothing unverified for it to guess at.

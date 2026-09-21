@@ -47,6 +47,7 @@ AGENT_DISPLAY_NAMES: dict[str, tuple[str, ...]] = {
     "antigravity": ("Antigravity", "Gemini"),
     "opencode": ("OpenCode",),
     "pi": ("Pi",),
+    "delegate": ("Delegate",),
 }
 
 

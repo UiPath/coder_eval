@@ -239,6 +239,42 @@ class _SteppedDatetime(datetime):
         return at(_SteppedDatetime.at_ms)
 
 
+def _delegate_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
+    """One tiled window covering the whole turn (the delegate agent builds no
+    per-round-trip segments — see ``.claude/notes/agents.md`` § Delegate agent),
+    with a real head (dispatch before ``_TurnState`` is constructed) and tail
+    (published after the last flush)."""
+    from coder_eval.agents import delegate_agent as delegate_module
+    from coder_eval.agents.delegate_agent import DelegateAgent, _TurnState
+    from coder_eval.models import DelegateAgentConfig
+
+    monkeypatch.setattr(delegate_module, "datetime", _SteppedDatetime)
+    agent = DelegateAgent(DelegateAgentConfig(type=AgentKind.DELEGATE), task_id="t")
+    commands: list[CommandTelemetry] = []
+    messages: list[TranscriptMessage] = []
+
+    def emit(e: Any) -> None:
+        if isinstance(e, ToolEndEvent):
+            commands.append(e.tool)
+        elif isinstance(e, AgentEndEvent):
+            messages.extend(e.messages)
+
+    _SteppedDatetime.at_ms = 500  # dispatch before the turn state exists: head
+    state = _TurnState(task_id="t", iteration=1, user_input="go", model="m")
+
+    _SteppedDatetime.at_ms = 700
+    agent._handle_tool_call({"type": "tool_call", "toolId": "c1", "toolName": "bash", "input": {}}, state, emit)
+    _SteppedDatetime.at_ms = 1200
+    agent._handle_tool_result({"type": "tool_result", "toolId": "c1", "output": "ok"}, state, emit)
+    _SteppedDatetime.at_ms = 1800
+    agent._handle_event({"type": "message", "content": "done"}, state, emit)
+
+    _SteppedDatetime.at_ms = 2000  # last flush: the single window closes here
+    agent._finalize_turn(state, AgentEndStatus.COMPLETED, emit)
+
+    return Turn(started_ms=0.0, ended_ms=2200.0, messages=messages, commands=commands)
+
+
 def _opencode_turn(monkeypatch: pytest.MonkeyPatch) -> Turn:
     """The same two-window shape, driven through OpenCode's step stream."""
     from coder_eval.agents import opencode_agent as opencode_module
@@ -570,6 +606,10 @@ def test_pi_buckets_tile_the_turn():
 
 def test_opencode_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
     assert_identity_closes(_opencode_turn(monkeypatch))
+
+
+def test_delegate_buckets_tile_the_turn(monkeypatch: pytest.MonkeyPatch):
+    assert_identity_closes(_delegate_turn(monkeypatch))
 
 
 def test_antigravity_buckets_tile_the_turn():

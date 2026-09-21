@@ -35,6 +35,30 @@ class ModelPricing:
     per_request_billing: bool = False
 
 
+# Models the Delegate agent serves, under the SDK's own hyphenated ids -- a
+# dict of its own (not inlined into _PRICING) so DELEGATE_MODEL_IDS below can
+# be derived rather than hand-copied. gpt-5-4/5-5/5-6-sol's rates are NOT typos
+# -- see .claude/notes/agents.md § Delegate agent pricing before "fixing" them.
+_DELEGATE_PRICING: dict[str, ModelPricing] = {
+    "virtuoso-1-5": ModelPricing(0.95, 4.0, 0.0, 0.16),
+    "virtuoso-2-0": ModelPricing(0.95, 4.0, 0.0, 0.19),
+    "gemini-3-5-flash": ModelPricing(1.50, 9.0, 0.0, 0.15),
+    "gemini-3-6-flash": ModelPricing(1.50, 7.50, 0.0, 0.15),
+    "gemini-3-1-pro-preview": ModelPricing(2.0, 12.0, 0.0, 0.20),
+    "gpt-5-4": ModelPricing(2.50, 15.0, 15.0, 0.25),
+    "gpt-5-5": ModelPricing(5.0, 30.0, 30.0, 0.50),
+    "gpt-5-6-sol": ModelPricing(5.0, 30.0, 6.25, 0.50),
+    "gpt-5-6-terra": ModelPricing(2.0, 12.0, 2.50, 0.20),
+    "gpt-5-6-luna": ModelPricing(0.20, 1.20, 0.25, 0.02),
+    "kimi-k2-7-code": ModelPricing(0.95, 4.0, 0.0, 0.19),
+    "glm-5-3-flash": ModelPricing(0.15, 0.50, 0.0, 0.03),
+}
+
+DELEGATE_MODEL_IDS: frozenset[str] = frozenset(_DELEGATE_PRICING)
+"""Model ids the Delegate agent serves, for a test/doc that needs the real set
+rather than a second hand-copied literal that could drift from ``_DELEGATE_PRICING``."""
+
+
 _PRICING: dict[str, ModelPricing] = {
     # Fable 5.1 (and Mythos 5.1) price cache hits at 0.025x input, not the 0.1x
     # every other Claude model uses. Fable 5 pays $1 on the identical $10 base.
@@ -123,6 +147,7 @@ _PRICING: dict[str, ModelPricing] = {
     "moonshotai/kimi-k3": ModelPricing(3.0, 15.0, 3.0, 0.30, per_request_billing=True),
     "z-ai/glm-5.2": ModelPricing(0.966, 3.036, 0.966, 0.1932, per_request_billing=True),
     "deepseek/deepseek-v4-pro": ModelPricing(1.030776, 2.061552, 1.030776, 0.085898, per_request_billing=True),
+    **_DELEGATE_PRICING,
 }
 
 

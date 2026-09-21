@@ -4546,13 +4546,13 @@ class TestCE047AgentRosterParity:
         # The exact historical gap: a surface listing three of the four harnesses.
         from tests.lint.agent_roster_parity import missing_agents_in
 
-        three_of_four = "runs Claude Code, Codex, Antigravity (Gemini), or Pi in a sandbox"
+        three_of_four = "runs Claude Code, Codex, Antigravity (Gemini), Pi, or Delegate in a sandbox"
         assert missing_agents_in(three_of_four) == ["opencode"]
 
     def test_model_name_counts_as_naming_the_antigravity_row(self):
         from tests.lint.agent_roster_parity import missing_agents_in
 
-        assert missing_agents_in("Claude Code, Codex, Gemini, OpenCode, and Pi") == []
+        assert missing_agents_in("Claude Code, Codex, Gemini, OpenCode, Pi, and Delegate") == []
 
     def test_short_name_is_not_satisfied_by_a_substring(self):
         # The matcher is word-boundary anchored, so the 2-char "Pi" row is NOT

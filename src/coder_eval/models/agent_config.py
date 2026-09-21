@@ -393,6 +393,62 @@ class PiAgentConfig(BaseAgentConfig):
     )
 
 
+class DelegateAgentConfig(BaseAgentConfig):
+    """Delegate agent configuration (UiPath Autopilot's Delegate agent).
+
+    Drives a Node host subprocess this framework ships (``agents/delegate/delegate_host.mjs``)
+    that wraps the public ``@uipath/delegate-sdk`` npm package's ``DelegateAgent`` class in a
+    stdio JSON-Lines protocol. The SDK's reasoning runs in the UiPath backend; its tools
+    (shell, file, Office, PDF) execute locally through a bundled interop process, so file-based
+    success criteria work as usual. See ``docs/agents/DELEGATE.md``.
+
+    ``allowed_tools`` / ``disallowed_tools`` / ``system_prompt`` / ``system_prompt_file``
+    have no Delegate SDK equivalent and are warned about, not enforced, at ``start()``.
+    ``setting_sources`` is not inherited at all (it is Claude-Code-only, declared on
+    ``ClaudeCodeAgentConfig``, not ``BaseAgentConfig``), so setting it here is a plain
+    validation error rather than a silent no-op. ``permission_mode`` is silently ignored
+    (the SDK has no permission-prompt concept). ``plugins`` skills ARE injected (first
+    plugin's ``<path>/skills`` wins).
+    """
+
+    type: Literal[AgentKind.DELEGATE]  # type: ignore[assignment]
+
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Reasoning-effort tier forwarded to the backend as-is (documented values: "
+            "low/medium/high/xhigh/max). Not validated against a closed set here — the SDK "
+            "itself ignores a value it does not recognize, and a strict Literal would reject a "
+            "tier a future SDK release adds."
+        ),
+    )
+    project_id: str = Field(
+        default="",
+        description=(
+            "Client-side wiki-routing key (never sent to the backend). Empty means session-scoped "
+            "wiki state under a server-assigned session id instead of a stable project directory."
+        ),
+    )
+    session_id: str = Field(
+        default="",
+        description=(
+            "Pins the Delegate SDK session id used when a turn omits one, for deterministic "
+            "wiki-path routing. Unlike project_id this IS a backend entity: a pinned id skips "
+            "session creation, so it must be one the backend accepts. project_id takes precedence."
+        ),
+    )
+    enable_computer_use: bool = Field(
+        default=False,
+        description=(
+            "Forwarded as the SDK's enableComputerUse. False (the default, and NOT the SDK's own "
+            "default of True) drops screenshots/window-list/focused-element/UI-automation tools "
+            "only — file, shell, Office and PDF tools are unaffected. Kept off by default because "
+            "this is a headless eval harness: True requires macOS Accessibility/Screen-Recording "
+            "grants that a CI runner does not have, and throws unconditionally on Linux."
+        ),
+    )
+
+
 class NoneAgentConfig(BaseAgentConfig):
     """No-op ("agentless") agent configuration.
 
@@ -421,6 +477,7 @@ type AgentConfig = Annotated[
     | AntigravityAgentConfig
     | OpenCodeAgentConfig
     | PiAgentConfig
+    | DelegateAgentConfig
     | NoneAgentConfig,
     Field(discriminator="type"),
 ]
